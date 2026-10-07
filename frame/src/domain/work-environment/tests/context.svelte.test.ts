@@ -5,6 +5,7 @@ const native = vi.hoisted(() => ({
   resources: vi.fn(),
   notes: vi.fn(),
   activity: vi.fn(),
+  changed: null as null | ((event: { payload: { profile: string; work: string } }) => void),
 }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
@@ -17,7 +18,12 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 vi.mock("$shared/ipc/native-events", () => ({
   events: {
-    workChanged: { listen: async () => () => {} },
+    workChanged: {
+      listen: async (handler: NonNullable<typeof native.changed>) => {
+        native.changed = handler;
+        return () => {};
+      },
+    },
     resourceChanged: { listen: async () => () => {} },
     notesChanged: { listen: async () => () => {} },
   },
@@ -234,5 +240,83 @@ test("an opening's reads are published together, and a lone read at once", async
   await vi.waitFor(() => expect(resolvers).toHaveLength(4));
   resolvers[3]!();
   await vi.waitFor(() => expect(context.objectives.has("d")).toBe(true));
+  context.dispose();
+});
+
+test("a work read again at the revision it shows keeps its projection, and a new frame only its pages", async () => {
+  const { WorkEnvironmentContext } = await import("../context.svelte");
+  const projection = {
+    version: 1,
+    interrupted: [],
+    executions: [
+      {
+        id: "execution",
+        approved_revision: "1",
+        status: "running",
+        attempts: [],
+        spec: { plan_revision: "1", limits, nodes: [] },
+        artifacts: [],
+        user_artifacts: [],
+      },
+    ],
+    work: {
+      schema_version: 2,
+      profile,
+      id: "objective",
+      revision: "3",
+      lifecycle: "active",
+      objective: "Compare quiet keyboards",
+      objective_revision: "1",
+      context_revision: "1",
+      objective_author: "user",
+      questions: [],
+      status: "plan_ready",
+      plan: null,
+    },
+  };
+  const page = (generation: number) => ({
+    execution: "execution",
+    attempt: "attempt",
+    step: "read",
+    url: "https://a.example/one",
+    live: true,
+    frame: { generation, width: 640, height: 400 },
+  });
+  let generation = 1;
+  native.call.mockReset();
+  native.call.mockImplementation(async () => ({
+    version: 1,
+    profile,
+    reply: { kind: "projection", projection: structuredClone(projection) },
+  }));
+  native.activity.mockReset();
+  native.activity.mockImplementation(async () => ({
+    version: 1,
+    profile,
+    work: "objective",
+    signals: [],
+    pages: [page(generation)],
+    error: null,
+  }));
+  const context = new WorkEnvironmentContext(profile);
+  context.update({
+    ...snapshot,
+    elements: [
+      { id: "element", area: null, reference: { kind: "objective", objective: "objective" } },
+    ],
+  });
+  await context.start();
+  await vi.waitFor(() => expect(context.pages.get("objective")).toHaveLength(1));
+  const shown = context.objectives.get("objective");
+  const pages = context.pages.get("objective");
+  native.changed!({ payload: { profile, work: "objective" } });
+  await vi.waitFor(() => expect(native.activity).toHaveBeenCalledTimes(2));
+  await new Promise((done) => setTimeout(done, 300));
+  expect(context.objectives.get("objective")).toBe(shown);
+  expect(context.pages.get("objective")).toBe(pages);
+  generation = 2;
+  native.changed!({ payload: { profile, work: "objective" } });
+  await vi.waitFor(() => expect(context.pages.get("objective")?.[0]?.frame?.generation).toBe(2));
+  expect(context.objectives.get("objective")).toBe(shown);
   context.dispose();
 });

@@ -7,6 +7,6 @@ export type {
   WorkSignalV1,
   WorkEvidenceLink,
 } from "$shared/ipc/bindings";
-export { commandId, validRevision, AGENT_GRANT, AGENT_LIMITS } from "./work-model";
+export { commandId, sameProjection, validRevision, AGENT_GRANT, AGENT_LIMITS } from "./work-model";
 
 export { currentActivity } from "./work-activity";
