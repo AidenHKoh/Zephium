@@ -21,9 +21,9 @@ describe("the picker's list", () => {
       "openai/gpt-6-sol",
       "openai/gpt-6-astra",
     ]);
-    // A refused key reads as needing one, not as broken; OpenRouter and a
-    // custom server are optional and never ask.
-    expect(needsKey).toEqual(["google", "deep_seek"]);
+    // A refused key reads as needing one, not as broken; only the best-known
+    // providers ask, and the rest wait in Settings.
+    expect(needsKey).toEqual(["google"]);
     // Signed out, hosted models are neither offered nor listed as needing a key.
     const signedOut = pickerGroups({ ...view, cloud: { signed_in: false, plan: null } }, "lead");
     expect(signedOut.ready.map((group) => group.provider)).toEqual(["anthropic", "open_ai"]);

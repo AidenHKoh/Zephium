@@ -12,6 +12,10 @@ const WIRE = {
   google: "gemini",
   deep_seek: "chat_completions",
   open_router: "chat_completions",
+  xai: "open_ai_responses",
+  mistral: "chat_completions",
+  groq: "chat_completions",
+  cerebras: "chat_completions",
   compatible: "chat_completions",
   cloud: "anthropic_messages",
 } as const;
@@ -22,6 +26,10 @@ const SLUG = {
   google: "google",
   deep_seek: "deepseek",
   open_router: "openrouter",
+  xai: "xai",
+  mistral: "mistral",
+  groq: "groq",
+  cerebras: "cerebras",
   compatible: "compatible",
   cloud: "zephium",
 } as const;
@@ -85,7 +93,18 @@ export function models(options: {
     chosen: { lead: options.chosen ?? null, page: null, light: null },
     effective: { lead: options.lead ?? null, page: null, light: null },
     providers: (
-      ["anthropic", "open_ai", "google", "deep_seek", "open_router", "compatible"] as const
+      [
+        "anthropic",
+        "open_ai",
+        "google",
+        "xai",
+        "mistral",
+        "deep_seek",
+        "groq",
+        "cerebras",
+        "open_router",
+        "compatible",
+      ] as const
     ).map((provider) => ({
       provider,
       key: options.keys?.[provider] ?? "missing",

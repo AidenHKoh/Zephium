@@ -50,7 +50,7 @@ test("the trigger names the running model, and the menu changes it", async () =>
   await expect
     .element(page.getByRole("button", { name: "Claude Opus 5.5", exact: true }))
     .toHaveAttribute("aria-current", "true");
-  // Google and DeepSeek have no key: they read as needing one.
+  // Google has no key: it reads as needing one.
   await expect.element(page.getByRole("button", { name: /Google.*Needs a key/u })).toBeVisible();
 
   await page.getByRole("button", { name: "GPT-6 Sol", exact: true }).click();

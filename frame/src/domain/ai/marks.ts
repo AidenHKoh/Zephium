@@ -6,6 +6,10 @@ import ClaudeIcon from "@hugeicons/core-free-icons/ClaudeIcon";
 import DeepseekIcon from "@hugeicons/core-free-icons/DeepseekIcon";
 import GoogleGeminiIcon from "@hugeicons/core-free-icons/GoogleGeminiIcon";
 import ServerStack01Icon from "@hugeicons/core-free-icons/ServerStack01Icon";
+import GrokIcon from "@hugeicons/core-free-icons/GrokIcon";
+import MistralIcon from "@hugeicons/core-free-icons/MistralIcon";
+import FlashIcon from "@hugeicons/core-free-icons/FlashIcon";
+import CpuIcon from "@hugeicons/core-free-icons/CpuIcon";
 
 /** OpenRouter has no Hugeicons glyph: one route forking into two, drawn to its grid. */
 const OpenRouterMark: IconSvgElement = [
@@ -44,6 +48,10 @@ const marks: Record<WorkModelProvider, IconSvgElement> = {
   google: GoogleGeminiIcon,
   deep_seek: DeepseekIcon,
   open_router: OpenRouterMark,
+  xai: GrokIcon,
+  mistral: MistralIcon,
+  groq: FlashIcon,
+  cerebras: CpuIcon,
   compatible: ServerStack01Icon,
   cloud: ZephiumMark,
 };

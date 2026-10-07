@@ -11,7 +11,11 @@ export const keyedProviders: readonly WorkModelProvider[] = [
   "anthropic",
   "open_ai",
   "google",
+  "xai",
+  "mistral",
   "deep_seek",
+  "groq",
+  "cerebras",
   "open_router",
   "compatible",
 ];
@@ -22,6 +26,10 @@ const names: Record<WorkModelProvider, string> = {
   google: "Google",
   deep_seek: "DeepSeek",
   open_router: "OpenRouter",
+  xai: "xAI",
+  mistral: "Mistral",
+  groq: "Groq",
+  cerebras: "Cerebras",
   compatible: "Custom",
   cloud: "Zephium",
 };
@@ -61,11 +69,14 @@ export function usable(models: WorkModelsV1 | null, provider: WorkModelProvider)
 
 type ModelGroup = { provider: WorkModelProvider; entries: WorkModelEntry[] };
 
+/** Without a key, only these appear in the picker; Settings → AI offers every provider. */
+const suggested: readonly WorkModelProvider[] = ["anthropic", "open_ai", "google"];
+
 /**
  * The picker's list for a role: every curated model of usable providers,
  * recommended first, grouped by provider, the signed-in account's hosted
  * models first. The person's own server adds the models it serves.
- * Providers without a key are listed apart, as needing one.
+ * The best-known providers without a key are listed apart, as needing one.
  */
 export function pickerGroups(
   models: WorkModelsV1 | null,
@@ -92,7 +103,7 @@ export function pickerGroups(
       .sort((a, b) => Number(b.recommended) - Number(a.recommended));
     if (usable(models, provider)) {
       if (offered.length) ready.push({ provider, entries: offered });
-    } else if (provider !== "cloud" && provider !== "compatible" && provider !== "open_router") {
+    } else if (suggested.includes(provider)) {
       needsKey.push(provider);
     }
   }

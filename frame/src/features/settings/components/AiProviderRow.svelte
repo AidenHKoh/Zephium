@@ -24,6 +24,10 @@
     google: "https://aistudio.google.com/apikey",
     deep_seek: "https://platform.deepseek.com/api_keys",
     open_router: "https://openrouter.ai/settings/keys",
+    xai: "https://console.x.ai",
+    mistral: "https://console.mistral.ai/api-keys",
+    groq: "https://console.groq.com/keys",
+    cerebras: "https://cloud.cerebras.ai",
   };
   const keyUrl = $derived(keyUrls[provider]);
   const configured = $derived(custom ? !!base : key !== "missing");
@@ -34,6 +38,10 @@
       google: m.ai_provider_google,
       deep_seek: m.ai_provider_deep_seek,
       open_router: m.ai_provider_open_router,
+      xai: m.ai_provider_xai,
+      mistral: m.ai_provider_mistral,
+      groq: m.ai_provider_groq,
+      cerebras: m.ai_provider_cerebras,
       compatible: m.ai_provider_compatible,
       cloud: m.ai_provider_compatible,
     }[provider](),
