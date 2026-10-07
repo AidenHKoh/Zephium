@@ -4602,8 +4602,7 @@ pub(in crate::agent_provider) fn encode_openai_continuation_body(
     let input_items = transcript.turns().try_fold(
         2 + usize::from(transcript.navigation_checkpoint().is_some())
             + usize::from(transcript.inspection_checkpoint().is_some())
-            + usize::from(transcript.inspection_recall().is_some())
-            + usize::from(transcript.action_progress().is_some()),
+            + usize::from(transcript.inspection_recall().is_some()),
         |total, turn| {
             total
                 .checked_add(openai_turn_input_items(turn.correlation())?)
@@ -4642,12 +4641,6 @@ pub(in crate::agent_provider) fn encode_openai_continuation_body(
         input.push(OpenAiContinuationInputWire::Message(openai_text_message(
             "developer",
             checkpoint,
-        )));
-    }
-    if let Some(progress) = transcript.action_progress() {
-        input.push(OpenAiContinuationInputWire::Message(openai_text_message(
-            "developer",
-            progress,
         )));
     }
     if let Some(recall) = transcript.inspection_recall() {
@@ -4692,10 +4685,15 @@ pub(in crate::agent_provider) fn encode_openai_continuation_body(
         store: config.stores_response(),
         metadata: openai_inspectable_probe_metadata(config),
     };
-    append_act_targets(
-        encode_bounded_provider_body(&wire)?,
-        config,
-        transcript.action_targets(),
+    // Verified-action history changes with every action, so it trails the
+    // turns: earlier turns then stay a byte-identical, cacheable prefix.
+    encode_action_progress(
+        append_act_targets(
+            encode_bounded_provider_body(&wire)?,
+            config,
+            transcript.action_targets(),
+        )?,
+        transcript.action_progress(),
     )
 }
 
@@ -4771,8 +4769,7 @@ fn encode_openai_screenshot_continuation_body(
     }
     let prior_input_items = transcript.turns().iter().try_fold(
         2 + usize::from(transcript.inspection_checkpoint().is_some())
-            + usize::from(transcript.inspection_recall().is_some())
-            + usize::from(transcript.action_progress().is_some()),
+            + usize::from(transcript.inspection_recall().is_some()),
         |total, turn| {
             total
                 .checked_add(openai_turn_input_items(turn.correlation())?)
@@ -4808,12 +4805,6 @@ fn encode_openai_screenshot_continuation_body(
         input.push(OpenAiContinuationInputWire::Message(openai_text_message(
             "developer",
             checkpoint,
-        )));
-    }
-    if let Some(progress) = transcript.action_progress() {
-        input.push(OpenAiContinuationInputWire::Message(openai_text_message(
-            "developer",
-            progress,
         )));
     }
     if let Some(recall) = transcript.inspection_recall() {
@@ -4872,10 +4863,15 @@ fn encode_openai_screenshot_continuation_body(
         store: config.stores_response(),
         metadata: openai_inspectable_probe_metadata(config),
     };
-    append_act_targets(
-        encode_bounded_provider_body(&wire)?,
-        config,
-        transcript.action_targets(),
+    // Verified-action history changes with every action, so it trails the
+    // turns: earlier turns then stay a byte-identical, cacheable prefix.
+    encode_action_progress(
+        append_act_targets(
+            encode_bounded_provider_body(&wire)?,
+            config,
+            transcript.action_targets(),
+        )?,
+        transcript.action_progress(),
     )
 }
 
