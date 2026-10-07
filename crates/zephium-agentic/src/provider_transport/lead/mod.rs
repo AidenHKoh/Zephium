@@ -413,6 +413,11 @@ impl LeadClient {
             headers.insert("accept-encoding", HeaderValue::from_static("identity"));
             self.target.authorize(&mut headers, &secret)?;
             drop(secret);
+            if self.target.cloud {
+                // Cloud refuses a reused key without replaying it, so every
+                // attempt, retries included, is its own logical call.
+                headers.insert("idempotency-key", idempotency_key()?);
+            }
             let failure = match client
                 .post(url.clone())
                 .headers(headers)
@@ -428,7 +433,7 @@ impl LeadClient {
                         Err(StreamFailure::BeforeOutput(error)) => Failure::retryable(error),
                     }
                 }
-                Ok(response) => Failure::from_response(response).await,
+                Ok(response) => Failure::from_response(response, self.target.cloud).await,
             };
             if failure.error == WorkModelError::Unauthorized {
                 self.credential.rejected();
@@ -542,11 +547,15 @@ impl Failure {
         })
     }
 
-    async fn from_response(response: reqwest::Response) -> Self {
+    async fn from_response(response: reqwest::Response, cloud: bool) -> Self {
         let status = response.status();
         let retry_after = retry_after(response.headers());
         let body = bounded_body(response).await;
-        let error = classify(status, &body);
+        let error = if cloud {
+            classify_cloud(status, &body)
+        } else {
+            classify(status, &body)
+        };
         let error = match error {
             WorkModelError::RateLimited { .. } => WorkModelError::RateLimited {
                 retry_after_ms: retry_after.map(|wait| wait.as_millis() as u64),
@@ -650,6 +659,46 @@ fn classify(status: StatusCode, body: &[u8]) -> WorkModelError {
         400..=499 => WorkModelError::BadRequest,
         _ => WorkModelError::Protocol,
     }
+}
+
+/// Zephium Cloud's own refusals come before the provider's: only a 401 means
+/// the session is over, and a model outside the plan is not a bad bearer.
+fn classify_cloud(status: StatusCode, body: &[u8]) -> WorkModelError {
+    let json: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    let code = json
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match (status.as_u16(), code) {
+        (401, _) => WorkModelError::Unauthorized,
+        (402, _) | (403, "billing_review_required") => WorkModelError::OverBudget,
+        (403, _) | (409, _) => WorkModelError::BadRequest,
+        (_, "insufficient_credits" | "daily_limit_reached") => WorkModelError::OverBudget,
+        (_, "input_limit_exceeded" | "body_too_large" | "request_structure_limit") => {
+            WorkModelError::ContextTooLong
+        }
+        (503, "cloud_disabled" | "cloud_policy_changed") => WorkModelError::Overloaded,
+        _ => classify(status, body),
+    }
+}
+
+/// A random UUID v4, as Cloud requires for `Idempotency-Key`.
+fn idempotency_key() -> Result<HeaderValue, WorkModelError> {
+    let mut bits = u128::from(ulid::Ulid::new());
+    bits ^= u128::from(ulid::Ulid::new()).rotate_left(48);
+    bits = (bits & !(0xF << 76)) | (0x4 << 76);
+    bits = (bits & !(0x3 << 62)) | (0x2 << 62);
+    let hex = format!("{bits:032x}");
+    let text = format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    );
+    HeaderValue::from_str(&text).map_err(|_| WorkModelError::Protocol)
 }
 
 /// Closed mapping of in-stream error codes shared by the wires.

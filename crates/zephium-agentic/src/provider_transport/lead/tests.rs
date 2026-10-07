@@ -549,3 +549,94 @@ async fn an_unauthorized_call_fails_closed_without_retrying() {
     assert_eq!(error, Some(WorkModelError::Unauthorized));
     assert_eq!(seen.lock().unwrap().len(), 1);
 }
+
+#[test]
+fn cloud_refusals_never_read_as_a_bad_session_unless_they_are() {
+    let refused = |status: u16, code: &str| {
+        let body = format!("{{\"error\":{{\"code\":\"{code}\"}},\"request_id\":\"r\"}}");
+        classify_cloud(StatusCode::from_u16(status).unwrap(), body.as_bytes())
+    };
+    assert_eq!(refused(401, "unauthorized"), WorkModelError::Unauthorized);
+    assert_eq!(
+        refused(403, "model_not_allowed"),
+        WorkModelError::BadRequest
+    );
+    assert_eq!(
+        refused(403, "billing_review_required"),
+        WorkModelError::OverBudget
+    );
+    assert_eq!(
+        refused(402, "insufficient_credits"),
+        WorkModelError::OverBudget
+    );
+    assert_eq!(
+        refused(402, "daily_limit_reached"),
+        WorkModelError::OverBudget
+    );
+    assert_eq!(
+        refused(409, "request_already_recorded"),
+        WorkModelError::BadRequest
+    );
+    assert_eq!(
+        refused(400, "input_limit_exceeded"),
+        WorkModelError::ContextTooLong
+    );
+    assert_eq!(refused(503, "cloud_disabled"), WorkModelError::Overloaded);
+    assert!(matches!(
+        refused(429, "concurrency_limited"),
+        WorkModelError::RateLimited { .. }
+    ));
+}
+
+#[tokio::test]
+async fn cloud_calls_send_the_bearer_and_a_fresh_idempotency_key_per_attempt() {
+    let stream = sse(&[(
+        "response.completed",
+        json!({"type": "response.completed", "response": {"usage": {
+        "input_tokens": 10, "output_tokens": 1}}}),
+    )]);
+    let (base, seen) = serve(vec![
+        http_reply(
+            "429 Too Many Requests",
+            "retry-after: 0\r\n",
+            "{\"error\":{\"code\":\"concurrency_limited\"}}",
+        ),
+        http_reply("200 OK", "content-type: text/event-stream\r\n", &stream),
+    ]);
+    let root = base.trim_end_matches("/v1");
+    let target = LeadTarget::cloud(root, WorkModelProvider::OpenAi).unwrap();
+    let client = LeadClient::new(
+        target,
+        Arc::new(LeadStaticCredential::new(
+            LeadSecret::new("session-token".into()).unwrap(),
+        )),
+        None,
+    );
+    client
+        .call(
+            request(WorkModelWire::OpenAiResponses, "gpt-6-luna"),
+            &|_| {},
+        )
+        .await
+        .unwrap();
+    let seen = seen.lock().unwrap();
+    let keys: Vec<String> = seen
+        .iter()
+        .map(|request| {
+            let request = request.to_ascii_lowercase();
+            assert!(request.starts_with("post /openai/v1/responses "));
+            assert!(request.contains("authorization: bearer session-token"));
+            let line = request
+                .lines()
+                .find_map(|line| line.strip_prefix("idempotency-key: "))
+                .unwrap()
+                .to_owned();
+            assert_eq!(line.len(), 36);
+            assert_eq!(&line[14..15], "4");
+            assert!(matches!(&line[19..20], "8" | "9" | "a" | "b"));
+            line
+        })
+        .collect();
+    assert_eq!(keys.len(), 2);
+    assert_ne!(keys[0], keys[1]);
+}
