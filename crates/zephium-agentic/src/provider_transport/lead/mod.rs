@@ -26,7 +26,10 @@ use serde_json::Value;
 use zephium_core::work::model::*;
 use zeroize::Zeroizing;
 
-pub use listing::{check_key, fetch_cloud_catalog, list_models, LeadKeyCheck};
+pub use listing::{
+    check_key, detect_local_servers, fetch_cloud_catalog, list_models, LeadKeyCheck, LocalServer,
+    LocalServerKind,
+};
 
 const OPENAI_BASE: &str = "https://api.openai.com/v1";
 const ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1";

@@ -484,6 +484,48 @@ pub(crate) async fn work_more_models(
     refused(WorkModelsFaultV1::Unavailable)
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, specta::Type, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WorkLocalServerKindV1 {
+    Ollama,
+    LmStudio,
+}
+
+/// A model server found running on this Mac.
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
+pub(crate) struct WorkLocalServerV1 {
+    pub(crate) kind: WorkLocalServerKindV1,
+    pub(crate) base: String,
+    pub(crate) models: u32,
+}
+
+/// Ollama and LM Studio on their default ports, for one-click setup.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_local_servers(caller: WebviewWindow) -> Vec<WorkLocalServerV1> {
+    if !authorize(&caller, CallerPolicy::Main, "work_local_servers") {
+        return Vec::new();
+    }
+    #[cfg(feature = "work-product")]
+    {
+        use zephium_agentic::lead::{detect_local_servers, LocalServerKind};
+        detect_local_servers()
+            .await
+            .into_iter()
+            .map(|server| WorkLocalServerV1 {
+                kind: match server.kind {
+                    LocalServerKind::Ollama => WorkLocalServerKindV1::Ollama,
+                    LocalServerKind::LmStudio => WorkLocalServerKindV1::LmStudio,
+                },
+                base: server.base.to_owned(),
+                models: u32::try_from(server.models).unwrap_or(u32::MAX),
+            })
+            .collect()
+    }
+    #[cfg(not(feature = "work-product"))]
+    Vec::new()
+}
+
 #[cfg(test)]
 mod release_tests {
     use super::*;

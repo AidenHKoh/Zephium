@@ -115,6 +115,73 @@ pub async fn check_key(target: &LeadTarget, secret: &LeadSecret) -> LeadKeyCheck
     }
 }
 
+/// A model server running on this Mac that speaks Chat Completions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalServer {
+    /// Which server answered.
+    pub kind: LocalServerKind,
+    /// The base to configure, such as `http://localhost:11434/v1`.
+    pub base: &'static str,
+    /// Models it serves now.
+    pub models: usize,
+}
+
+/// The local model servers Zephium recognises.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalServerKind {
+    /// Ollama, on port 11434.
+    Ollama,
+    /// LM Studio's server, on port 1234.
+    LmStudio,
+}
+
+/// Looks for Ollama and LM Studio on their default ports, briefly, without
+/// a key. A server that does not answer like itself is not reported.
+pub async fn detect_local_servers() -> Vec<LocalServer> {
+    const PROBES: [(LocalServerKind, &str); 2] = [
+        (LocalServerKind::Ollama, "http://127.0.0.1:11434/v1"),
+        (LocalServerKind::LmStudio, "http://127.0.0.1:1234/v1"),
+    ];
+    let probe = |kind: LocalServerKind, base: &'static str| async move {
+        let client = super::http(true).ok()?;
+        let url = format!("{base}/models");
+        let response = client
+            .get(url)
+            .timeout(std::time::Duration::from_millis(900))
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.ok()?;
+            if body.len() + chunk.len() > MAX_LIST_BYTES {
+                return None;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let body: Value = serde_json::from_slice(&body).ok()?;
+        let models = body.get("data")?.as_array()?.len();
+        Some(LocalServer {
+            kind,
+            base: match kind {
+                LocalServerKind::Ollama => "http://localhost:11434/v1",
+                LocalServerKind::LmStudio => "http://localhost:1234/v1",
+            },
+            models,
+        })
+    };
+    let (ollama, lm_studio) = futures_util::future::join(
+        probe(PROBES[0].0, PROBES[0].1),
+        probe(PROBES[1].0, PROBES[1].1),
+    )
+    .await;
+    [ollama, lm_studio].into_iter().flatten().collect()
+}
+
 /// Lists the chat models the provider offers to this key, as catalog entries.
 pub async fn list_models(
     target: &LeadTarget,

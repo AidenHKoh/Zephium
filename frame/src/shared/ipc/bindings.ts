@@ -72,6 +72,8 @@ export const commands = {
 	workClearProviderKey: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_clear_provider_key", { expectedProfile, provider }),
 	workSetModelEndpoint: (expectedProfile: string, base: string | null) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_set_model_endpoint", { expectedProfile, base }),
 	workMoreModels: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkMoreModelsV1_Serialize>("work_more_models", { expectedProfile, provider }),
+	/**  Ollama and LM Studio on their default ports, for one-click setup. */
+	workLocalServers: () => __TAURI_INVOKE<WorkLocalServerV1[]>("work_local_servers"),
 	/**  The account now, refreshing what is stale in the background. */
 	accountGet: () => __TAURI_INVOKE<AccountReplyV1>("account_get"),
 	accountSendCode: (email: string) => __TAURI_INVOKE<AccountReplyV1>("account_send_code", { email }),
@@ -4111,6 +4113,15 @@ export type WorkListItemV1_Serialize = {
 export type WorkListPriorityV1 = "high";
 
 export type WorkListStyleV1 = "todo" | "messages" | "reading" | "requirements";
+
+export type WorkLocalServerKindV1 = "ollama" | "lm_studio";
+
+/**  A model server found running on this Mac. */
+export type WorkLocalServerV1 = {
+	kind: WorkLocalServerKindV1,
+	base: string,
+	models: number,
+};
 
 export type WorkLocalStepV1 = WorkLocalStepV1_Serialize | WorkLocalStepV1_Deserialize;
 
