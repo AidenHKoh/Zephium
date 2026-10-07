@@ -10,6 +10,8 @@
 mod anthropic;
 mod continuation;
 mod extraction;
+#[cfg(feature = "provider-transport")]
+mod model_client;
 #[cfg(any(test, feature = "provider-transport"))]
 mod openai;
 mod pricing;
@@ -67,6 +69,10 @@ use crate::{
     SemanticTokenizerRevision, MAX_AGENT_RUN_MODEL_TOKENS,
 };
 
+#[cfg(feature = "provider-transport")]
+pub(crate) use model_client::translate as translate_model_client_call;
+#[cfg(feature = "provider-transport")]
+pub use model_client::AgentProviderModelReplyFacts;
 #[cfg(feature = "provider-transport")]
 pub(crate) use request::AgentCommittedProviderRequest;
 pub use request::{

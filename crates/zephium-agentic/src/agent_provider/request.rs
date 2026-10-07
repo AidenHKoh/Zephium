@@ -4301,7 +4301,7 @@ fn openai_text_message<'a>(role: &'static str, text: &'a str) -> OpenAiInputMess
     }
 }
 
-fn encode_openai_body(
+pub(in crate::agent_provider) fn encode_openai_body(
     config: &AgentProviderCallConfig,
     objective: &str,
     semantic: &str,
@@ -4685,7 +4685,7 @@ fn encode_openai_extraction_body(
     )
 }
 
-fn encode_openai_extraction_payload(
+pub(in crate::agent_provider) fn encode_openai_extraction_payload(
     config: &AgentProviderCallConfig,
     objective: &str,
     payload: &str,
@@ -5194,6 +5194,27 @@ fn encode_anthropic_screenshot_continuation_body(
         stream: true,
     };
     encode_bounded_provider_body(&wire)
+}
+
+/// The screenshot encoder's own tool-result item, for translation tests.
+#[cfg(test)]
+pub(in crate::agent_provider) fn screenshot_result_item_for_test(
+    call_id: &str,
+    png: &[u8],
+) -> Value {
+    let image_url = encode_png_data_url(png).expect("png data url");
+    serde_json::to_value(OpenAiContinuationInputWire::FunctionCallImageOutput(
+        OpenAiFunctionCallImageOutputWire {
+            r#type: "function_call_output",
+            call_id,
+            output: [OpenAiInputImageWire {
+                r#type: "input_image",
+                image_url: &image_url,
+                detail: "high",
+            }],
+        },
+    ))
+    .expect("screenshot item")
 }
 
 fn encode_png_data_url(png: &[u8]) -> Result<String, AgentProviderRequestError> {

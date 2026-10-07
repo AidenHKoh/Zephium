@@ -1,0 +1,334 @@
+//! The person's chosen model behind the page agent.
+//!
+//! Admission, disclosure commit, cancellation, the deadline and settlement are
+//! the fixed-endpoint transport's own. Only the generation drive differs: the
+//! admitted body is translated into one provider-neutral call, and its reply
+//! is decoded through the closed browser-tool contract.
+
+use std::fmt;
+use std::sync::Arc;
+
+use sha2::{Digest as _, Sha256};
+use zephium_core::work::model::{
+    WorkModelClient, WorkModelEntry, WorkModelError, WorkModelEvent, WorkModelPrice, WorkModelRef,
+};
+
+use super::*;
+use crate::{
+    translate_model_client_call, AgentProviderContractError, AgentProviderModelRevision,
+    AgentProviderPricingProfile, AgentProviderPricingRevision, AgentProviderPricingSchedule,
+    AgentProviderReasoningEffort, AgentProviderResponseRoute, AgentProviderStreamBudget,
+    AgentProviderTokenRates, SemanticTokenizerRevision,
+};
+
+/// Per-million rates for a model the catalog does not price, in micro-USD:
+/// the same conservative table the lead charges such a model.
+const UNPRICED: WorkModelPrice = WorkModelPrice {
+    input: 15_000_000,
+    cached_input: 1_500_000,
+    output: 60_000_000,
+};
+/// Pricing revisions that tell a catalog price from the fallback above.
+const CATALOG_PRICE_REVISION: u64 = 1;
+const FALLBACK_PRICE_REVISION: u64 = 2;
+/// Below every supported provider's long-context price tier.
+const MAX_MODEL_INPUT_TOKENS: u64 = 200_000;
+const MAX_LABEL_BYTES: usize = 80;
+
+/// One chosen model and its client, bound to a pricing schedule built from
+/// the person's catalog entry. Cloning shares the client.
+#[derive(Clone)]
+pub struct AgentProviderModelClient {
+    model: WorkModelRef,
+    vision: bool,
+    max_output_tokens: u32,
+    priced: bool,
+    rates: AgentProviderTokenRates,
+    schedule: Arc<AgentProviderPricingSchedule>,
+    client: Arc<dyn WorkModelClient>,
+}
+
+impl AgentProviderModelClient {
+    /// Binds `client` to `entry`. A model that cannot call tools cannot drive
+    /// a page and is refused.
+    pub fn try_new(
+        entry: &WorkModelEntry,
+        client: Arc<dyn WorkModelClient>,
+    ) -> Result<Self, AgentProviderContractError> {
+        if !entry.supports.tools || entry.max_output == 0 || entry.context_window == 0 {
+            return Err(AgentProviderContractError::InputAccountingMode);
+        }
+        let label = label(&entry.id);
+        let model = AgentProviderModelRevision::try_new(label.clone())?;
+        let tokenizer = SemanticTokenizerRevision::try_new(format!("reported:{label}"))
+            .map_err(|_| AgentProviderContractError::TokenizerRevision)?;
+        let (price, revision) = match &entry.price {
+            Some(price) => (price, CATALOG_PRICE_REVISION),
+            None => (&UNPRICED, FALLBACK_PRICE_REVISION),
+        };
+        let rate = |value: u64| value.max(1);
+        let rates = AgentProviderTokenRates::try_new(
+            rate(price.input),
+            rate(price.cached_input),
+            rate(price.input.saturating_mul(5).div_ceil(4)),
+            rate(price.output),
+        )
+        .map_err(|_| AgentProviderContractError::InputAccountingMode)?;
+        let profile = AgentProviderPricingProfile::try_new(
+            AgentProviderPricingRevision::new(revision)
+                .ok_or(AgentProviderContractError::InputAccountingMode)?,
+            u64::from(entry.context_window).min(MAX_MODEL_INPUT_TOKENS),
+        )
+        .map_err(|_| AgentProviderContractError::InputAccountingMode)?;
+        let schedule = AgentProviderPricingSchedule::try_new(
+            AgentProviderKind::OpenAiResponses,
+            model.clone(),
+            vec![model],
+            AgentProviderResponseRoute::ModelReported,
+            if entry.supports.reasoning {
+                AgentProviderReasoningEffort::Low
+            } else {
+                AgentProviderReasoningEffort::None
+            },
+            tokenizer,
+            profile,
+            rates,
+        )
+        .map_err(|_| AgentProviderContractError::InputAccountingMode)?;
+        Ok(Self {
+            model: entry.model.clone(),
+            vision: entry.supports.vision,
+            max_output_tokens: entry.max_output,
+            priced: entry.price.is_some(),
+            rates,
+            schedule: Arc::new(schedule),
+            client,
+        })
+    }
+
+    /// A call configuration settled on this model's reported usage. The
+    /// output ceiling never exceeds the model's own.
+    pub fn try_call_config(
+        &self,
+        max_output_tokens: u32,
+    ) -> Result<AgentProviderCallConfig, AgentProviderContractError> {
+        self.schedule.try_provider_reported_call_config(
+            max_output_tokens.min(self.max_output_tokens),
+            AgentProviderStreamBudget::STANDARD,
+        )
+    }
+
+    /// The schedule every settlement of this model's calls must use.
+    pub fn schedule(&self) -> &AgentProviderPricingSchedule {
+        &self.schedule
+    }
+
+    /// Whether the person's catalog prices this model; otherwise calls are
+    /// priced at the conservative fallback rates.
+    pub const fn is_priced(&self) -> bool {
+        self.priced
+    }
+
+    /// Whether the model accepts images.
+    pub const fn supports_vision(&self) -> bool {
+        self.vision
+    }
+
+    /// Largest input one call may reserve.
+    pub fn max_input_tokens(&self) -> u64 {
+        self.schedule_profile().max_input_tokens()
+    }
+
+    /// Strict cost ceiling for `input` and `output` tokens, every input token
+    /// at the highest input rate, rounded up once.
+    pub fn reservation_cost_micro_usd(&self, input: u64, output: u64) -> Option<u64> {
+        let input_rate = self
+            .rates
+            .uncached_input()
+            .max(self.rates.cached_input())
+            .max(self.rates.cache_write_input());
+        let numerator = u128::from(input)
+            .checked_mul(u128::from(input_rate))?
+            .checked_add(u128::from(output).checked_mul(u128::from(self.rates.output()))?)?;
+        u64::try_from(numerator.div_ceil(1_000_000)).ok()
+    }
+
+    pub(super) fn binds(&self, config: &AgentProviderCallConfig) -> bool {
+        config.accounting_guard() == self.schedule.accounting_guard()
+    }
+
+    pub(super) const fn model(&self) -> &WorkModelRef {
+        &self.model
+    }
+
+    fn schedule_profile(&self) -> AgentProviderPricingProfile {
+        self.schedule.profile()
+    }
+}
+
+impl fmt::Debug for AgentProviderModelClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderModelClient")
+            .field("wire", &self.model.wire)
+            .field("vision", &self.vision)
+            .field("priced", &self.priced)
+            .field("model", &"[redacted]")
+            .finish()
+    }
+}
+
+/// A catalog id as a closed model label: its safe bytes, or a digest when it
+/// has none or too many.
+fn label(id: &str) -> String {
+    let safe: String = id
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+                char::from(byte)
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if !safe.is_empty() && safe.len() <= MAX_LABEL_BYTES {
+        return safe;
+    }
+    let digest = Sha256::digest(id.as_bytes());
+    let hex: String = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("model-{hex}")
+}
+
+const fn failure_for(error: WorkModelError) -> AgentProviderFailure {
+    let class = match error {
+        WorkModelError::MissingKey | WorkModelError::Unauthorized => {
+            AgentProviderFailureClass::Authentication
+        }
+        WorkModelError::RateLimited { .. } => AgentProviderFailureClass::RateLimited,
+        WorkModelError::Overloaded => AgentProviderFailureClass::Overloaded,
+        WorkModelError::ContextTooLong | WorkModelError::BadRequest => {
+            AgentProviderFailureClass::InvalidRequest
+        }
+        WorkModelError::Network => AgentProviderFailureClass::Transport,
+        WorkModelError::Protocol => AgentProviderFailureClass::Protocol,
+        WorkModelError::Cancelled => AgentProviderFailureClass::Cancelled,
+        WorkModelError::OverBudget => AgentProviderFailureClass::Provider,
+    };
+    AgentProviderFailure::new(class)
+}
+
+impl AgentProviderAttempt {
+    /// Drives one turn on the chosen model this attempt was admitted for,
+    /// retaining every terminal authority exactly as the fixed-endpoint
+    /// drives do. Usage above the committed reservation is never priced: the
+    /// call fails and is charged its reservation.
+    pub async fn execute_model_client<F>(
+        &mut self,
+        mut consume: F,
+    ) -> Result<AgentProviderTransportResult, AgentProviderAttemptStateError>
+    where
+        F: FnMut(AgentProviderStreamBatch) -> AgentProviderBatchDisposition,
+    {
+        if matches!(
+            self.phase,
+            AgentProviderAttemptPhase::CountDriving
+                | AgentProviderAttemptPhase::GenerationDriving
+                | AgentProviderAttemptPhase::Terminal
+        ) {
+            return Err(self.state_error());
+        }
+        let Some(model) = self.model.clone() else {
+            return self.finish_terminal(protocol_failure());
+        };
+        let (call, config, endpoint, body) = self.begin_generation_drive()?;
+        let reserved = match self.core.as_ref() {
+            Some(AgentProviderAttemptCore::Generation(terminal)) => {
+                terminal.input.input_token_limit()
+            }
+            _ => return self.finish_terminal(protocol_failure()),
+        };
+        if !self.generation_matches(call)
+            || endpoint != AgentProviderEndpoint::OpenAiResponses
+            || !model.binds(&config)
+        {
+            return self.finish_terminal(protocol_failure());
+        }
+        if Instant::now() >= self.deadline {
+            return self.finish_terminal(timeout_failure());
+        }
+        if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
+            return self.finish_terminal(cancelled_failure());
+        }
+        let (request, contract) = match translate_model_client_call(
+            &config,
+            model.model(),
+            model.supports_vision(),
+            &body,
+        ) {
+            Ok(translated) => translated,
+            Err(error) => return self.finish_terminal(protocol_decoder_failure(error, None)),
+        };
+        drop(body);
+        if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
+            return self.finish_terminal(cancelled_failure());
+        }
+        // This is immediately before the client can first send anything.
+        self.mark_model_may_have_dispatched();
+        let deadline = tokio::time::sleep_until(tokio::time::Instant::from_std(self.deadline));
+        tokio::pin!(deadline);
+        // Streamed events are not trusted before the call ends; the outcome
+        // alone is decoded.
+        let events = |_: WorkModelEvent| {};
+        let outcome = tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => return self.finish_terminal(cancelled_failure()),
+            () = self.shutdown.cancelled() => return self.finish_terminal(cancelled_failure()),
+            () = &mut deadline => return self.finish_terminal(timeout_failure()),
+            outcome = model.client.call(request, &events) => outcome,
+        };
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return self.finish_terminal(AgentProviderTransportOutcomeOwned::Failed(
+                    failure_for(error),
+                ))
+            }
+        };
+        if outcome.usage.input_tokens > reserved
+            || outcome.usage.output_tokens > u64::from(config.max_output_tokens())
+        {
+            return self.finish_terminal(protocol_decoder_failure(
+                crate::AgentProviderProtocolError::Usage,
+                None,
+            ));
+        }
+        let reply = match contract.finish(call, &config, outcome) {
+            Ok(reply) => reply,
+            Err(error) => return self.finish_terminal(protocol_decoder_failure(error, None)),
+        };
+        self.model_reply = Some(reply.facts);
+        if let Some(text) = reply.text {
+            let batch = AgentProviderStreamBatch::new(call, vec![text]);
+            let disposition =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| consume(batch))) {
+                    Ok(disposition) => disposition,
+                    Err(_) => {
+                        self.fail_stop();
+                        return self.finish_terminal(integration_failure());
+                    }
+                };
+            if disposition == AgentProviderBatchDisposition::Cancel {
+                return self.finish_terminal(cancelled_failure());
+            }
+        }
+        self.finish_terminal(AgentProviderTransportOutcomeOwned::Stream(Box::new(
+            reply.finished,
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -219,8 +219,15 @@ pub use agent_progress_metrics::{
 };
 #[cfg(test)]
 pub(crate) use agent_provider::AgentBrowserToolCall;
+#[cfg(feature = "provider-transport")]
+pub use agent_provider::AgentProviderModelReplyFacts;
 pub use agent_provider::AgentProviderNavigationRefusalReason;
 pub(crate) use agent_provider::AgentProviderPricedUsage;
+#[cfg(feature = "provider-transport")]
+pub(crate) use agent_provider::{
+    translate_model_client_call, AgentCommittedProviderRequest, AgentProviderContinuationSeed,
+    AgentProviderFinishedStream, AgentProviderStreamDecoder,
+};
 pub use agent_provider::{
     AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,
     AgentBrowserSemanticQuery, AgentBrowserToolCallId, AgentBrowserToolContractError,
@@ -273,11 +280,6 @@ pub use agent_provider::{
     MAX_AGENT_PROVIDER_STREAM_EVENTS, MAX_AGENT_PROVIDER_STREAM_WIRE_BYTES,
     MAX_AGENT_PROVIDER_TOOL_ARGUMENT_BYTES, MAX_AGENT_PROVIDER_TOOL_CALLS,
     MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES, MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS,
-};
-#[cfg(feature = "provider-transport")]
-pub(crate) use agent_provider::{
-    AgentCommittedProviderRequest, AgentProviderContinuationSeed, AgentProviderFinishedStream,
-    AgentProviderStreamDecoder,
 };
 pub use agent_supervisor::{
     AgentDelegationNode, AgentDelegationSpec, AgentDelegationTopology, AgentNodeExecution,
@@ -673,6 +675,8 @@ pub use provider_transport::planning::{OpenAiWorkPlanner, WorkPlanningConfig};
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::synthesis::OpenAiWorkSynthesizer;
 
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::model_client::AgentProviderModelClient;
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::model_search::ModelNativeSearch;
 #[cfg(feature = "provider-transport")]
