@@ -37,12 +37,7 @@
   The rail's own lightweight menu rather than the page-wide one: this loads
   with Work into the chrome, which pays for every dependency at launch.
 -->
-<Disclosure
-  label={m.account_menu()}
-  menu
-  triggerClass="account-trigger"
-  panelClass="account-panel"
->
+<Disclosure label={m.account_menu()} menu triggerClass="account-trigger" panelClass="account-panel">
   {#snippet trigger()}<span class="avatar" data-signed-in={signedIn} aria-hidden="true"
       >{#if letters}{letters}{:else}<Icon icon={UserIcon} size={15} strokeWidth={1.7} />{/if}</span
     >{/snippet}

@@ -91,7 +91,11 @@
       />
       <span class="top">
         <span class="tile"
-          ><Icon icon={option.icon} size={18} strokeWidth={option.id === "zephium" ? 1.5 : 1.7} /></span
+          ><Icon
+            icon={option.icon}
+            size={18}
+            strokeWidth={option.id === "zephium" ? 1.5 : 1.7}
+          /></span
         >
         {#if option.found}<span class="found">{option.found}</span>{/if}
       </span>

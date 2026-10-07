@@ -3,7 +3,16 @@ import { neighbour, position, STEPS } from "../lib/flow";
 
 describe("flow", () => {
   it("walks welcome, then seven steps, ending ready", () => {
-    expect(STEPS).toEqual(["welcome", "you", "import", "essentials", "launcher", "work", "ai", "ready"]);
+    expect(STEPS).toEqual([
+      "welcome",
+      "you",
+      "import",
+      "essentials",
+      "launcher",
+      "work",
+      "ai",
+      "ready",
+    ]);
   });
 
   it("counts from the first real step, welcome being the door", () => {

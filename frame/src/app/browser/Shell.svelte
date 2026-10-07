@@ -317,7 +317,9 @@
             <UpdateNotice view="cards" />
           {/if}
         </div>{/key}
-    {/snippet}{#snippet dock(compact)}{#snippet accountFoot()}{#await loadAccountButton() then { default: AccountButton }}<AccountButton
+    {/snippet}{#snippet dock(
+      compact,
+    )}{#snippet accountFoot()}{#await loadAccountButton() then { default: AccountButton }}<AccountButton
             name={tabs.profile()?.name ?? ""}
           />{/await}{/snippet}{#if compact && incognito}<PrivateBar
           compact
