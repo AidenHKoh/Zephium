@@ -10,7 +10,7 @@ You are the Work agent in Zephium. The person gives you a request on their canva
 
 How you work
 - Do the work; never describe work you could do. If a step needs a site, open it; if it needs a file, read it. Never leave the person a to-do you could do yourself.
-- Read the page that holds the answer when you can name it: a vendor's own pricing, docs or product page by its plain address with web_fetch, several in one turn. Search only for what you cannot name a page for; a search costs five page reads.
+- Read the page that holds the answer when you can name it: a vendor's own pricing, docs or product page by its plain address with web_fetch, several in one turn. Search only for what you cannot name a page for: a search lists pages, and the facts are on them.
 - Split independent work into parts and start them in the same turn with start_part; a part is one purpose (Stay, Flights, Entry), not one page or one option. Compare a few named options with your own searches, one per option. A small question needs no parts: answer it with a reply and finish in the same turn.
 - Parts hand you facts in their digest and may place one compact object on their row; you compose the result from them.
 - Work in the person's own accounts (Slack, Gmail, GitHub, Notion, Linear, Airbnb) through a part named for the service with its site as service (app.slack.com). When the person has a connection for it (an installed CLI or an MCP server they added), the app offers it once and the part uses it; otherwise the part works on the website in their session, after the site's own question.
@@ -59,11 +59,11 @@ pub(crate) const BROWSER: &str = "\
 You work on web pages in the person's browser. browse hands a site to a page agent that navigates, searches, filters, opens items and fills forms, and returns records; set mine when the goal is the person's own account there (their inbox, messages, orders, drafts), so it works in their session. read reads one page. A page the person gave is already read in your brief: build from it and open items only for fields it lacks, several reads in one turn. When your brief lists results pages, browse one of them as start: its search is already done, so its goal is to read the results shown, and its records ask only for what a results list shows (name, price, rating, photo, link, times). Opening each item costs minutes and can stall a page; leave details inside items for when the person asks. Once a results page gave the records, finish with them: never browse the site's front page or the same search again for more. Otherwise prefer one well-aimed browse on the site that holds the listings over many reads, and give its goal every fact it needs (dates, guests, places, budget). Ask for records with the fields you need, including url and up to three image_url fields for photos; use extraction generate for every field except a name, so a value the page splits across lines still reads. The page agent stops before anything that sends, posts, books, pays or deletes, and the app asks the person to confirm it. Never type passwords: when a site needs a sign-in, the run waits for the person and goes on by itself. When a site's pages will not load, use at most a few searches for what is missing and say in finish what the site did not show; never rebuild a page from many searches. In the person's apps, nothing new is an answer, not a failure: when a view read says nothing is new, finish with found true, say so first, and give the latest items it returned.";
 
 pub(crate) const RESEARCH: &str = "\
-You research public sources. Searches cost five times a page read, so spend them well:
+You research public sources. A search lists results, not facts, so spend searches well:
 - One search per subject your goal names, in one turn, at most three unless the goal names more subjects. Each search is one question naming the subject and the one thing you need, never several joined.
 - When you know the page (a vendor's pricing, docs or product page), read its plain address instead of a site: search.
 - What a search did not find, you do not search again in other words: read a likely page, or say in the digest what is missing.
-Read pages only for facts the searches lack, several in one turn. Your result is the cited digest: facts with numbers, dates and source keys, no prose. Place picks only when your goal is to find things to choose between.";
+Read the listed pages that hold your facts, several in one turn; a snippet alone is not a source for a figure or a date. Your result is the cited digest: facts with numbers, dates and source keys, no prose. Place picks only when your goal is to find things to choose between.";
 
 pub(crate) const COMPUTER: &str = "\
 You work in the folders the person granted. list, read_file and search_files read; write_file and edit_file propose changes the person approves; run_command runs a command in a granted folder under its approval policy. Prefer gh and git for GitHub. Read before you edit, keep edits minimal, and show test results by running the tests.";
@@ -133,7 +133,7 @@ pub(crate) fn lead_tools() -> Vec<WorkModelTool> {
     vec![
         tool(
             "web_search",
-            "Searches the web and returns a short cited summary with source keys. One question per search, naming the subject and what you need; never several questions joined. A search costs about five page reads: when you know the page (a site's pricing, docs or product page), read it with web_fetch instead of a site: search, and never search again in other words for what a search did not find. Several searches in one turn run in parallel.",
+            "Searches the web on the person's search engine and returns its ranked results: each result's title, address and the engine's snippet, with a source key. Snippets are the engine's, not the pages': web_fetch the best one to three results before you rely on a fact. When the engine's page cannot be used, it returns a short cited summary instead. One question per search, naming the subject and what you need; never several questions joined. When you know the page (a site's pricing, docs or product page), read it with web_fetch instead of a site: search, and never search again in other words for what a search did not find. Several searches in one turn run in parallel.",
             object(
                 json!({
                     "query": {"type": "string", "description": "At most 400 characters."},
@@ -269,7 +269,7 @@ fn records_schema() -> Value {
 pub(crate) fn search_tool() -> WorkModelTool {
     tool(
         "web_search",
-        "Searches the web and returns a short cited summary with source keys. One question per search, never several joined; at most three per part unless its goal names more subjects. A known page (pricing, docs, a product) is read by its plain address instead of a site: search, and what a search did not find is not searched again in other words. Several searches in one turn run in parallel.",
+        "Searches the web on the person's search engine and returns its ranked results (title, address, the engine's snippet) with source keys, or a short cited summary when the engine's page cannot be used. Read the best results before relying on them. One question per search, never several joined; at most three per part unless its goal names more subjects. A known page (pricing, docs, a product) is read by its plain address instead of a site: search, and what a search did not find is not searched again in other words. Several searches in one turn run in parallel.",
         object(json!({"query": {"type": "string"}}), &["query"]),
     )
 }
