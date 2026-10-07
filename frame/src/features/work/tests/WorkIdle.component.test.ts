@@ -70,7 +70,6 @@ test.each([
       tabFixture({ id: `tab-${index}`, title: `Tab ${index}` }),
     ),
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: false,
     onopen: vi.fn(),
     onnewtab: vi.fn(),
