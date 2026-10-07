@@ -70,6 +70,67 @@ pub(crate) async fn models(profile: ProfileId) -> Option<WorkLeadModels> {
     Some(WorkLeadModels { lead, page, light })
 }
 
+/// Search runs on the chosen models' own provider search when one of them
+/// has it, the light model first since searches are many and short. Without
+/// one, the person's OpenAI key keeps the fixed public search; without that
+/// either, searching is unavailable and says so.
+async fn search_backend(
+    profile: ProfileId,
+    models: &WorkLeadModels,
+) -> Result<Box<dyn zephium_core::work::search::WorkPublicSearchProvider>, WorkError> {
+    use zephium_agentic::{AgentProviderTransport, AgentProviderTransportConfig};
+    for model in [&models.light, &models.lead, &models.page] {
+        if let Ok(search) =
+            zephium_agentic::ModelNativeSearch::try_new(model.entry.clone(), model.client.clone())
+        {
+            record_diagnostic(format_args!(
+                "work: phase=lead state=search backend=native model={}",
+                model.entry.id
+            ));
+            return Ok(Box::new(search));
+        }
+    }
+    let Ok(credential) = credential().await else {
+        record_diagnostic(format_args!("work: phase=lead state=search backend=none"));
+        return Ok(Box::new(NoSearch));
+    };
+    let transport = AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
+        .map_err(|_| WorkError::Unavailable)?;
+    let config = zephium_agentic::OpenAiPublicSearchConfig::try_new(
+        zephium_agent_model_catalog::try_public_search_provider_exact_call_config(
+            zephium_core::work::search::PUBLIC_SEARCH_MODEL,
+            4096,
+        )
+        .map_err(|_| WorkError::Unavailable)?,
+    )?;
+    let search =
+        zephium_agentic::OpenAiPublicSearch::try_new(transport.clone(), credential, config)?;
+    record_diagnostic(format_args!("work: phase=lead state=search backend=openai"));
+    Ok(Box::new(
+        configure_search_ranking(search, profile, transport).await?,
+    ))
+}
+
+/// No search backend: every search is refused before anything is sent.
+struct NoSearch;
+
+impl zephium_core::work::search::WorkPublicSearchProvider for NoSearch {
+    fn search<'a>(
+        &'a self,
+        _scope: &'a zephium_core::work::search::WorkPublicSearchScope,
+        _context: &'a [zephium_core::work::context::WorkContextBody],
+        _limits: zephium_core::work::runtime::WorkExecutionLimits,
+    ) -> zephium_core::work::search::WorkPublicSearchFuture<'a> {
+        Box::pin(async {
+            Err(
+                zephium_core::work::search::WorkPublicSearchError::NotDispatched(
+                    WorkError::Unavailable,
+                ),
+            )
+        })
+    }
+}
+
 impl WorkProviders {
     pub(super) async fn lead(
         &self,
@@ -79,12 +140,13 @@ impl WorkProviders {
         context: Option<zephium_core::work::context::WorkContextSelectionV1>,
         models: WorkLeadModels,
     ) -> Result<WorkOperationStateV1, WorkError> {
-        use zephium_agentic::{AgentProviderTransport, AgentProviderTransportConfig};
-        let zephium_core::work::runtime::WorkRuntimeIntent::BeginAgent { grant, .. } =
-            &command.intent
-        else {
+        use zephium_agentic::AgentProviderTransportConfig;
+        if !matches!(
+            command.intent,
+            zephium_core::work::runtime::WorkRuntimeIntent::BeginAgent { .. }
+        ) {
             return Err(WorkError::Invalid);
-        };
+        }
         let binding_request = shell.work_profile_binding();
         let binding = tokio::time::timeout(std::time::Duration::from_secs(8), async move {
             loop {
@@ -102,22 +164,7 @@ impl WorkProviders {
         if binding.profile() != profile {
             return Err(WorkError::ProfileUnavailable);
         }
-        let search_transport =
-            AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
-                .map_err(|_| WorkError::Unavailable)?;
-        let search_config = zephium_agentic::OpenAiPublicSearchConfig::try_new(
-            zephium_agent_model_catalog::try_public_search_provider_exact_call_config(
-                &grant.model,
-                4096,
-            )
-            .map_err(|_| WorkError::Unavailable)?,
-        )?;
-        let search = zephium_agentic::OpenAiPublicSearch::try_new(
-            search_transport.clone(),
-            credential().await?,
-            search_config,
-        )?;
-        let search = configure_search_ranking(search, profile, search_transport).await?;
+        let search = search_backend(profile, &models).await?;
         record_diagnostic(format_args!(
             "work: phase=lead state=models lead={} page={} light={}",
             models.lead.entry.id, models.page.entry.id, models.light.entry.id
@@ -134,7 +181,7 @@ impl WorkProviders {
                 command,
                 context,
                 models,
-                &search,
+                search.as_ref(),
                 |probe, request| {
                     let callback = &callback;
                     async move {

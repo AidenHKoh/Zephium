@@ -272,8 +272,14 @@ impl WorkModelClient for Script {
     }
 }
 
+/// The chosen model's own search, as most runs now use it.
+const SEARCH_MODEL: &str = "anthropic/claude-haiku-4-5-20251001";
 struct Search;
 impl WorkPublicSearchProvider for Search {
+    fn grant(&self) -> Option<(WorkSearchProvider, String)> {
+        Some((WorkSearchProvider::Native, SEARCH_MODEL.into()))
+    }
+
     fn search<'a>(
         &'a self,
         scope: &'a WorkPublicSearchScope,
@@ -282,14 +288,16 @@ impl WorkPublicSearchProvider for Search {
     ) -> WorkPublicSearchFuture<'a> {
         Box::pin(async move {
             assert!(scope.query.contains("ESTA"));
+            assert_eq!(scope.provider, WorkSearchProvider::Native);
+            assert_eq!(scope.model, SEARCH_MODEL);
             Ok(WorkPublicSearchResult {
                 evidence: WorkProviderSearchEvidenceV1 {
                     version: 1,
-                    provider: WorkSearchProvider::OpenAi,
-                    model: PUBLIC_SEARCH_MODEL.into(),
-                    response_model: PUBLIC_SEARCH_MODEL.into(),
-                    response_id: "resp_entry".into(),
-                    search_call_id: "ws_entry".into(),
+                    provider: WorkSearchProvider::Native,
+                    model: SEARCH_MODEL.into(),
+                    response_model: SEARCH_MODEL.into(),
+                    response_id: "zr_entry".into(),
+                    search_call_id: "zs_entry".into(),
                     answer: "Polish citizens travel on ESTA [1].".into(),
                     citations: vec![WorkProviderSearchCitation {
                         url: "https://esta.cbp.dhs.gov/".into(),

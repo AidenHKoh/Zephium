@@ -148,6 +148,10 @@ impl WorkLeadService {
             return Err(WorkError::Invalid);
         }
         grant.lead = Some(models.lead.entry.model.clone());
+        if let Some((provider, model)) = search.grant() {
+            grant.provider = provider;
+            grant.model = model;
+        }
         grant.max_turns = u8::MAX;
         grant.max_steps = u8::MAX;
         grant.validate()?;

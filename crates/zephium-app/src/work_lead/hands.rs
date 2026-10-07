@@ -931,6 +931,10 @@ struct SearchLane<'a> {
     permits: &'a tokio::sync::Semaphore,
 }
 impl WorkPublicSearchProvider for SearchLane<'_> {
+    fn grant(&self) -> Option<(zephium_core::work::search::WorkSearchProvider, String)> {
+        self.inner.grant()
+    }
+
     fn reuse<'a>(
         &'a self,
         scope: &'a WorkPublicSearchScope,
