@@ -141,6 +141,7 @@ const nativeInputEvent = globalThis.InputEvent;
 const nativeEvent = globalThis.Event;
 const nativeFocusEvent = globalThis.FocusEvent;
 const nativeMutationObserver = globalThis.MutationObserver;
+const dateNow = Date.now;
 const nativePerformanceObserver = globalThis.PerformanceObserver;
 const fixedDispatchEvent = EventTarget.prototype.dispatchEvent;
 const inputValueSetter = setter(HTMLInputElement.prototype, "value");
@@ -673,10 +674,19 @@ state.completeness = completeness;
 }
 if (stop) state.stopped = true;
 }
+const MAX_TRAVERSAL_MILLIS = 2000;
 function visit(state) {
 if (state.visited >= state.request.b.x) {
 mark(state, "inspection_limit");
 return false;
+}
+if ((state.visited & 63) === 0) {
+const now = apply(dateNow, Date, []);
+if (state.startedAt === undefined) state.startedAt = now;
+else if (now - state.startedAt > MAX_TRAVERSAL_MILLIS) {
+mark(state, "inspection_limit");
+return false;
+}
 }
 state.visited += 1;
 return true;

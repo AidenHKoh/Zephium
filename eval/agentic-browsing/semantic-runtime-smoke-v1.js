@@ -672,7 +672,12 @@ if (negativeControl) {
   assert((source.match(guard) || []).length === 1, "negative-control guard is not unique");
   source = source.replace(guard, "true &&");
 }
+// The runtime reads its clock once per 64 visited nodes; tests advance it.
+const realDateNow = Date.now;
+let clockStep = 0, clockNow = 0;
+Date.now = () => (clockStep === 0 ? realDateNow() : (clockNow += clockStep));
 vm.runInThisContext(source, { filename: sourcePath });
+Date.now = realDateNow;
 Object.defineProperty(document, "nodeType", { value: 1 });
 Object.defineProperty(document, "tagName", { value: "SELECT" });
 globalThis.getComputedStyle = () => { throw new Error("late global poisoning"); };
@@ -2622,6 +2627,21 @@ async function finish() {
     assert(runtime.invoke(JSON.stringify(scroll)) === "E1:invalid_request", "a scroll accepted a settle ceiling");
   }
 
+  {
+    // A look that would outlast the host's budget stops early and says so.
+    const root = new Element("main");
+    for (let index = 0; index < 400; index += 1) {
+      root.append(new Element("p")).append(new CharacterData(`Row ${index}`));
+    }
+    document._root = root; root._parent = document; setOwner(root, document); document._active = null;
+    const whole = JSON.parse(invoke(996, 996, { k: "initial" }, { n: 512, x: 4096 }));
+    clockNow = 0; clockStep = 1000;
+    const slow = JSON.parse(invoke(997, 997, { k: "initial" }, { n: 512, x: 4096 }));
+    clockStep = 0;
+    assert(whole.c === "complete" && slow.c === "inspection_limit" && slow.n.length > 0 &&
+      slow.n.length < whole.n.length, `a slow look was not cut short truthfully: ${slow.c} ${slow.n.length}/${whole.n.length}`);
+  }
+
   process.stdout.write(`${JSON.stringify({
     independent_scroll_samples: true,
     empty_contenteditable_roundtrip: true,
@@ -2662,6 +2682,7 @@ async function finish() {
     typed_field_fill: true,
     rerendered_target_rebound: true,
     bounded_settle_quiet: true,
+    bounded_look_time: true,
     document_parent_option_brand_guard: true,
     select_rewrite_nonretryable: true,
     fill_native_primitives_captured: true,
