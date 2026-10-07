@@ -376,15 +376,9 @@ pub fn load_macos_development_typesafe_credential(
 }
 
 /// One Keychain call at a time across the process: concurrent reads of the
-/// login keychain fail transiently, so every caller takes a turn.
-#[cfg(target_os = "macos")]
-pub(crate) fn keychain_turn() -> std::sync::MutexGuard<'static, ()> {
-    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    TURN.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-#[cfg(target_os = "windows")]
+/// login keychain fail transiently, so every caller, including the account
+/// session, takes the same turn.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) fn keychain_turn() -> std::sync::MutexGuard<'static, ()> {
     zephium_credentials::turn()
 }

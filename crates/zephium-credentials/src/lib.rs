@@ -1,4 +1,5 @@
-//! Safe, bounded Windows Credential Manager operations for native secret owners.
+//! Safe, bounded OS vault operations for native secret owners: Windows
+//! Credential Manager, and generic passwords in the macOS login Keychain.
 #![deny(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]
 #![deny(missing_docs)]
 
@@ -26,3 +27,8 @@ pub fn turn() -> std::sync::MutexGuard<'static, ()> {
 mod windows;
 #[cfg(windows)]
 pub use windows::{delete, list, present, read, write};
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::{delete, present, read, write};
