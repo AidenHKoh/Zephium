@@ -15,6 +15,7 @@ use zephium_core::work::model::{
     WorkModelToolChoice, WorkModelToolResult,
 };
 
+use super::request::MODEL_TURN_ITEM;
 use super::tool::{OpenAiResponseReplay, OpenAiResponseReplayItem};
 use super::{
     AgentBrowserToolCall, AgentBrowserToolKind, AgentProviderCallConfig, AgentProviderCallIdentity,
@@ -82,29 +83,57 @@ pub(crate) fn translate(
         .ok_or_else(invalid)?;
     let mut messages = Vec::new();
     let mut images = 0_usize;
+    // The model's own turn precedes its call and lends the call its identity.
+    let mut turn: Option<(String, Vec<WorkModelPart>)> = None;
+    let mut provider_ids: Vec<(String, String)> = Vec::new();
     for item in wire
         .get("input")
         .and_then(Value::as_array)
         .ok_or_else(invalid)?
     {
-        match item.get("type").and_then(Value::as_str) {
+        let kind = item.get("type").and_then(Value::as_str);
+        if turn.is_some() && kind != Some("function_call") {
+            return Err(invalid());
+        }
+        match kind {
             Some("reasoning") => {}
+            Some(MODEL_TURN_ITEM) => {
+                let parts = item
+                    .get("parts")
+                    .and_then(Value::as_array)
+                    .ok_or_else(invalid)?
+                    .iter()
+                    .cloned()
+                    .map(WorkModelPart::Replay)
+                    .collect();
+                turn = Some((string(item, "call_id")?, parts));
+            }
             Some("function_call") => {
                 let arguments = item
                     .get("arguments")
                     .and_then(Value::as_str)
                     .ok_or_else(invalid)?;
-                push(
-                    &mut messages,
-                    WorkModelMessage::Assistant(vec![WorkModelPart::ToolCall(WorkModelToolCall {
-                        id: string(item, "call_id")?,
-                        name: string(item, "name")?,
-                        arguments: serde_json::from_str(arguments).map_err(|_| invalid())?,
-                    })]),
-                );
+                let call_id = string(item, "call_id")?;
+                let (id, mut parts) = match turn.take() {
+                    Some((provider, parts)) => {
+                        provider_ids.push((call_id, provider.clone()));
+                        (provider, parts)
+                    }
+                    None => (call_id, Vec::new()),
+                };
+                parts.push(WorkModelPart::ToolCall(WorkModelToolCall {
+                    id,
+                    name: string(item, "name")?,
+                    arguments: serde_json::from_str(arguments).map_err(|_| invalid())?,
+                }));
+                push(&mut messages, WorkModelMessage::Assistant(parts));
             }
             Some("function_call_output") => {
                 let call = string(item, "call_id")?;
+                let call = provider_ids
+                    .iter()
+                    .find(|(ours, _)| *ours == call)
+                    .map_or(call, |(_, provider)| provider.clone());
                 match item.get("output") {
                     Some(Value::String(output)) => push(
                         &mut messages,
@@ -166,6 +195,9 @@ pub(crate) fn translate(
             }
             Some(_) => return Err(invalid()),
         }
+    }
+    if turn.is_some() {
+        return Err(invalid());
     }
     let structured = wire.pointer("/text/format").map(|format| {
         (format.get("type").and_then(Value::as_str) == Some("json_schema"))
@@ -338,6 +370,7 @@ impl ModelClientReplyContract {
         )?;
         let mut text = String::new();
         let mut calls = Vec::new();
+        let mut replays = Vec::new();
         for part in outcome.assistant {
             match part {
                 WorkModelPart::Text(piece) => {
@@ -352,7 +385,7 @@ impl ModelClientReplyContract {
                 WorkModelPart::Image { .. } => {
                     return Err(AgentProviderProtocolError::UnsupportedOutput)
                 }
-                WorkModelPart::Replay(_) => {}
+                WorkModelPart::Replay(value) => replays.push(value),
             }
         }
         let mut facts = AgentProviderModelReplyFacts {
@@ -418,12 +451,26 @@ impl ModelClientReplyContract {
                 let arguments = serde_json::to_string(&tool.arguments)
                     .map_err(|_| AgentProviderProtocolError::ToolCall)?;
                 let argument_bytes = bounded(arguments.len(), budget.max_tool_argument_bytes())?;
-                // Tool-call identities are Zephium's, one per model call; the
-                // provider's own id never reaches a later request.
+                // Tool-call identities are Zephium's, one per model call. The
+                // provider's id and own parts ride along only to be given back
+                // to its wire, and only when its one call was kept whole.
                 let ordinal = call.call().get();
-                let replay =
+                let function_call = || {
                     OpenAiResponseReplay::try_new(vec![OpenAiResponseReplayItem::FunctionCall])
-                        .ok_or(AgentProviderProtocolError::Sequence)?;
+                        .ok_or(AgentProviderProtocolError::Sequence)
+                };
+                let replay = if facts.dropped_tool_calls == 0 {
+                    OpenAiResponseReplay::try_new(vec![
+                        OpenAiResponseReplayItem::ModelTurn {
+                            call_id: tool.id,
+                            parts: replays,
+                        },
+                        OpenAiResponseReplayItem::FunctionCall,
+                    ])
+                    .map_or_else(function_call, Ok)?
+                } else {
+                    function_call()?
+                };
                 let decoded = AgentBrowserToolCall::decode_openai_with_replay(
                     call,
                     format!("fc_zephium_{ordinal}"),

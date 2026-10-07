@@ -1242,7 +1242,10 @@ never writes refuses the call before dispatch. The reply crosses back through
 the closed browser-tool decoder and stream ceilings: only the first tool call
 is decoded, it must be a tool the request offered, it receives Zephium's own
 call identity, and further calls and narration are dropped and counted
-without conferring anything. Typed decisions the primary backend leaves open
+without conferring anything. When its one call was kept whole, the model's
+own parts around it (thinking blocks, signatures, reasoning items) and the
+call identity it gave are retained, bounded and opaque, only to be given back
+to its wire with that call on the next turn. Typed decisions the primary backend leaves open
 are answered by the person's light model through one forced tool whose schema
 is the request's own answer schema, under the same validator, reservation and
 deadline as the OpenAI emulation.

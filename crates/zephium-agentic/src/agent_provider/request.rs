@@ -3961,9 +3961,21 @@ struct OpenAiExtractionFormatWire<'a> {
 enum OpenAiContinuationInputWire<'a> {
     Message(OpenAiInputMessageWire<'a>),
     Reasoning(OpenAiReasoningReplayWire<'a>),
+    ModelTurn(ModelTurnReplayWire<'a>),
     FunctionCall(OpenAiFunctionCallWire<'a>),
     FunctionCallOutput(OpenAiFunctionCallOutputWire<'a>),
     FunctionCallImageOutput(OpenAiFunctionCallImageOutputWire<'a>),
+}
+
+/// Input item of a chosen model's own turn; only its translator reads it.
+pub(super) const MODEL_TURN_ITEM: &str = "zephium_model_turn";
+
+/// A chosen model's own turn, read back only by the chosen-model translator.
+#[derive(Serialize)]
+struct ModelTurnReplayWire<'a> {
+    r#type: &'static str,
+    call_id: &'a str,
+    parts: &'a [Value],
 }
 
 #[derive(Serialize)]
@@ -4198,6 +4210,13 @@ fn push_openai_replay_items<'a>(
                     encrypted_content,
                 },
             )),
+            OpenAiResponseReplayItem::ModelTurn { call_id, parts } => input.push(
+                OpenAiContinuationInputWire::ModelTurn(ModelTurnReplayWire {
+                    r#type: MODEL_TURN_ITEM,
+                    call_id,
+                    parts,
+                }),
+            ),
             OpenAiResponseReplayItem::FunctionCall => {
                 input.push(OpenAiContinuationInputWire::FunctionCall(
                     OpenAiFunctionCallWire {

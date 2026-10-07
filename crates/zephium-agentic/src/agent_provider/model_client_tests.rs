@@ -522,3 +522,83 @@ fn a_structured_answer_becomes_the_mapper_output_text() {
         Some(AgentProviderProtocolError::ToolCall)
     );
 }
+
+/// Decodes `assistant` and translates the continuation built on its tool turn.
+fn continued(assistant: Vec<WorkModelPart>) -> WorkModelRequest {
+    let (config, contract) = contract();
+    let reply = contract
+        .finish(
+            identity(),
+            &config,
+            reply(WorkModelStop::ToolUse, assistant),
+        )
+        .expect("reply");
+    let (_, tool) = reply.finished.into_parts();
+    let (correlation, _) = tool.expect("tool").into_continuation_parts();
+    let transcript =
+        AgentProviderTranscript::try_initial(Arc::from(OBJECTIVE), OBSERVATION.to_owned())
+            .expect("transcript")
+            .try_bind_for_test(correlation, "ZLOC1\n@a1 button".to_owned())
+            .expect("bound transcript");
+    let body = encode_openai_continuation_body(&config, &transcript).expect("body");
+    translate(&config, &model(), false, &body)
+        .expect("translated")
+        .0
+}
+
+#[test]
+fn a_model_s_own_turn_returns_to_its_wire_under_its_own_identity() {
+    let thinking = json!({"wire": "anthropic", "value": {"type": "thinking", "thinking": "Find the button.", "signature": "EqQBsig"}});
+    let request = continued(vec![
+        WorkModelPart::Replay(thinking.clone()),
+        WorkModelPart::Text("Looking.".to_owned()),
+        call(
+            "locate",
+            json!({"semantic_query":"Buy","scope":{"kind":"initial"}}),
+        ),
+    ]);
+    let [_, WorkModelMessage::Assistant(turn), WorkModelMessage::ToolResults(results)] =
+        request.messages.as_slice()
+    else {
+        panic!("user, assistant, tool results");
+    };
+    let [WorkModelPart::Replay(replayed), WorkModelPart::ToolCall(tool)] = turn.as_slice() else {
+        panic!("the model's own part, then its call");
+    };
+    assert_eq!(replayed, &thinking);
+    assert_eq!(tool.id, "provider id with spaces");
+    assert_eq!(results[0].call, "provider id with spaces");
+}
+
+#[test]
+fn a_trimmed_reply_returns_only_zephium_s_call() {
+    let request = continued(vec![
+        WorkModelPart::Replay(json!({"wire": "gemini", "value": [{"functionCall": {}}]})),
+        call(
+            "locate",
+            json!({"semantic_query":"Buy","scope":{"kind":"initial"}}),
+        ),
+        call("act", json!({})),
+    ]);
+    let [_, WorkModelMessage::Assistant(turn), WorkModelMessage::ToolResults(results)] =
+        request.messages.as_slice()
+    else {
+        panic!("user, assistant, tool results");
+    };
+    let [WorkModelPart::ToolCall(tool)] = turn.as_slice() else {
+        panic!("only Zephium's call");
+    };
+    assert_eq!(tool.id, "call_zephium_7");
+    assert_eq!(results[0].call, "call_zephium_7");
+}
+
+#[test]
+fn a_model_turn_without_its_call_is_refused() {
+    let config = config();
+    let mut body = observation_body(&config);
+    body["input"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type": "zephium_model_turn", "call_id": "toolu_1", "parts": []}));
+    assert!(translate(&config, &model(), false, &bytes(&body)).is_err());
+}
