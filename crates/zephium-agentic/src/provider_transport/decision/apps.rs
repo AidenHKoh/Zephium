@@ -522,6 +522,58 @@ pub fn read_app_view<'a>(
     if rows.is_empty() && last {
         rows.extend(empty_view(observation));
     }
+    located_rows(observation, account, captured_at, projection, &rows)
+}
+
+/// Rows a host chose on the page, each the nodes it is cited to, read as a
+/// findings list with no provider call. None when the task reads into
+/// columns or no row has words.
+pub fn read_cited_rows<'a>(
+    observation: &'a SemanticObservation,
+    account: AgentContextAccountBinding,
+    captured_at: SemanticCaptureInstant,
+    schema: &SemanticExtractionSchema,
+    cited: &[Vec<SemanticReferenceId>],
+) -> Option<DecisionLocatedRead<'a>> {
+    let projection = ReadProjection::for_schema(schema)?;
+    let [field] = projection.columns.as_slice() else {
+        return None;
+    };
+    if projection.row.is_some()
+        || field.kind() != SemanticExtractionValueKind::TextList
+        || field.verbatim_text()
+    {
+        return None;
+    }
+    let nodes = observation.frames().first()?.nodes();
+    let rows: Vec<Row> = cited
+        .iter()
+        .map(|references| Row {
+            nodes: references
+                .iter()
+                .filter_map(|reference| {
+                    let node = nodes.iter().find(|node| node.reference() == *reference)?;
+                    Some((*reference, copied_text(node)?.to_owned()))
+                })
+                .collect(),
+            timed: false,
+            keyed: false,
+        })
+        .filter(|row| !row.nodes.is_empty())
+        .collect();
+    located_rows(observation, account, captured_at, projection, &rows)
+}
+
+fn located_rows<'a>(
+    observation: &'a SemanticObservation,
+    account: AgentContextAccountBinding,
+    captured_at: SemanticCaptureInstant,
+    projection: ReadProjection,
+    rows: &[Row],
+) -> Option<DecisionLocatedRead<'a>> {
+    let [field] = projection.columns.as_slice() else {
+        return None;
+    };
     if rows.is_empty() {
         return None;
     }
