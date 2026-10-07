@@ -308,6 +308,7 @@ impl LeadRun {
         part: Option<WorkPartId>,
     ) -> WorkStepFact {
         WorkStepFact {
+            model_fault: None,
             id: WorkStepId::generate(),
             turn: self.turn(),
             kind,

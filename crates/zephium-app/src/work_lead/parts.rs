@@ -530,8 +530,14 @@ where
                     )
                 }
                 Err(failure) => {
-                    self.record_turn(Some(part), WorkStepStatus::Failed, None, failure)
-                        .await;
+                    self.record_turn(
+                        Some(part),
+                        WorkStepStatus::Failed,
+                        None,
+                        failure,
+                        model.entry.model.provider,
+                    )
+                    .await;
                     let mut report = PartReport::ended(
                         WorkPartStateV1::Failed,
                         "The helper's model could not be reached.",
@@ -1276,6 +1282,7 @@ pub(crate) fn step_request(
         }
     }
     let probe = WorkStepFact {
+        model_fault: None,
         id: WorkStepId::from(1),
         turn: 1,
         kind: kind.clone(),

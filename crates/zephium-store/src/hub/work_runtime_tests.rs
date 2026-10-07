@@ -854,6 +854,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         )
     };
     let step = |id: u128, turn, kind, status| WorkStepFact {
+        model_fault: None,
         part: None,
         id: id.into(),
         turn,
@@ -1521,6 +1522,7 @@ fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
         )
     };
     let step = |id: u128, kind, status, part: Option<WorkPartId>| WorkStepFact {
+        model_fault: None,
         id: id.into(),
         turn: 1,
         kind,

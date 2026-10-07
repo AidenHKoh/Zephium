@@ -582,6 +582,7 @@ impl WorkAgentTurnDisclosure {
                 },
             };
             let probe = WorkStepFact {
+                model_fault: None,
                 part: None,
                 id: WorkStepId::from(1),
                 turn: 1,
@@ -618,6 +619,7 @@ impl WorkAgentTurnDisclosure {
                 options.push(option);
             }
             let probe = WorkStepFact {
+                model_fault: None,
                 part: None,
                 id: WorkStepId::from(1),
                 turn: 1,

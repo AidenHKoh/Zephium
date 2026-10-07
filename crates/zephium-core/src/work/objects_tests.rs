@@ -398,6 +398,7 @@ fn parts_and_inputs_are_lead_facts_that_steps_and_objects_name() {
         reference: Some("trip-planning".into()),
     });
     let step = WorkStepFact {
+        model_fault: None,
         id: 1.into(),
         turn: 1,
         kind: WorkStepKindV1::Search {
@@ -474,6 +475,7 @@ fn a_revision_names_one_earlier_object_once() {
         part: None,
     };
     let publish = |id: u128, artifacts: Vec<u128>| WorkStepFact {
+        model_fault: None,
         id: id.into(),
         turn: 1,
         kind: WorkStepKindV1::Publish,
@@ -526,6 +528,7 @@ fn saved_artifacts_without_the_new_fields_still_load() {
 #[test]
 fn a_connection_call_is_a_settled_step_with_closed_fields() {
     let call = |url: Option<&str>| WorkStepFact {
+        model_fault: None,
         id: 1.into(),
         turn: 1,
         kind: WorkStepKindV1::Call {
@@ -670,6 +673,7 @@ fn a_part_needs_something_only_once_it_cannot_go_on() {
 #[test]
 fn a_folder_question_names_its_folder() {
     let ask = |local: Option<WorkLocalStepV1>| WorkStepFact {
+        model_fault: None,
         id: 1.into(),
         turn: 1,
         kind: WorkStepKindV1::Ask {
@@ -711,6 +715,7 @@ fn a_folder_question_names_its_folder() {
 fn a_first_run_names_its_work_from_its_finish() {
     let (plan, mut fact, revision) = lead_execution();
     let finish = |title: Option<&str>| WorkStepFact {
+        model_fault: None,
         id: 9.into(),
         turn: 2,
         kind: WorkStepKindV1::Finish {

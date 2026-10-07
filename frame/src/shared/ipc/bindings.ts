@@ -74,7 +74,10 @@ export const commands = {
 	workMoreModels: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkMoreModelsV1_Serialize>("work_more_models", { expectedProfile, provider }),
 	/**  Ollama and LM Studio on their default ports, for one-click setup. */
 	workLocalServers: () => __TAURI_INVOKE<WorkLocalServerV1[]>("work_local_servers"),
-	/**  The account now, refreshing what is stale in the background. */
+	/**
+	 *  The account now, refreshing what is stale in the background. Asks no
+	 *  server unless the person is signed in or chose one.
+	 */
 	accountGet: () => __TAURI_INVOKE<AccountReplyV1>("account_get"),
 	accountSendCode: (email: string) => __TAURI_INVOKE<AccountReplyV1>("account_send_code", { email }),
 	accountVerify: (code: string) => __TAURI_INVOKE<AccountReplyV1>("account_verify", { code }),
@@ -4279,6 +4282,19 @@ export type WorkModelEntry_Serialize = {
 	price?: WorkModelPrice | null,
 };
 
+/**  What stopped a model turn, as the person can fix it. */
+export type WorkModelFaultV1 = 
+/**  No key is set for the chosen model. */
+"missing_key" | 
+/**  The provider refused the person's key. */
+"key_refused" | 
+/**  The person's own provider account is out of credit. */
+"provider_credit" | 
+/**  The account's included Zephium AI usage, and any extra, is spent. */
+"hosted_usage" | 
+/**  The Zephium account's session ended. */
+"signed_out" | "rate_limited" | "provider_down" | "unreachable" | "too_large";
+
 /**  Per million tokens, in millionths of a US dollar. */
 export type WorkModelPrice = {
 	input: number,
@@ -5702,6 +5718,8 @@ export type WorkStepFact_Deserialize = {
 	account?: WorkPageAccountV1 | null,
 	/**  The part of a lead run this step works for. */
 	part?: WorkPartId | null,
+	/**  Why a model turn failed, in closed words the person can act on. */
+	model_fault?: WorkModelFaultV1 | null,
 };
 
 export type WorkStepFact_Serialize = {
@@ -5723,6 +5741,8 @@ export type WorkStepFact_Serialize = {
 	account?: WorkPageAccountV1 | null,
 	/**  The part of a lead run this step works for. */
 	part?: WorkPartId | null,
+	/**  Why a model turn failed, in closed words the person can act on. */
+	model_fault?: WorkModelFaultV1 | null,
 };
 
 /** One admitted agent operation inside an execution. */

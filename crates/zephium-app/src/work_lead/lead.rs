@@ -277,6 +277,7 @@ where
                         WorkStepStatus::Failed,
                         None,
                         CallFailure::Refused(error),
+                        self.models.lead.entry.model.provider,
                     )
                     .await;
                     let fatal = matches!(
@@ -1151,11 +1152,23 @@ where
         status: WorkStepStatus,
         usage: Option<WorkUsage>,
         failure: CallFailure,
+        provider: WorkModelProvider,
     ) {
         let mut step = self.run.step(WorkStepKindV1::Turn, status, part);
         step.usage = Some(usage.unwrap_or_default());
+        let hosted = provider == WorkModelProvider::Cloud;
+        step.model_fault = match failure {
+            CallFailure::Refused(error) => model_fault(error, hosted),
+            _ => None,
+        };
         step.note = Some(
             match failure {
+                CallFailure::Refused(WorkModelError::OverBudget) if hosted => {
+                    "Zephium AI's included usage is spent; upgrade, buy extra usage or use your own key"
+                }
+                CallFailure::Refused(WorkModelError::Unauthorized) if hosted => {
+                    "The Zephium account's session ended; sign in again in Settings → Account"
+                }
                 CallFailure::Refused(WorkModelError::MissingKey) => {
                     "No key is set for the chosen model; add one in Settings → AI"
                 }
@@ -1517,6 +1530,23 @@ const STUB: &str = "[Used; dropped to keep the conversation small.";
 /// turn: large tool results the model has moved past are replaced together
 /// by a stub with their source keys, and past the hard budget the older
 /// results are shortened too. The canvas keeps everything.
+/// A refused model call in the words the person acts on.
+fn model_fault(error: WorkModelError, hosted: bool) -> Option<WorkModelFaultV1> {
+    Some(match error {
+        WorkModelError::MissingKey if hosted => WorkModelFaultV1::SignedOut,
+        WorkModelError::MissingKey => WorkModelFaultV1::MissingKey,
+        WorkModelError::Unauthorized if hosted => WorkModelFaultV1::SignedOut,
+        WorkModelError::Unauthorized => WorkModelFaultV1::KeyRefused,
+        WorkModelError::OverBudget if hosted => WorkModelFaultV1::HostedUsage,
+        WorkModelError::OverBudget => WorkModelFaultV1::ProviderCredit,
+        WorkModelError::RateLimited { .. } => WorkModelFaultV1::RateLimited,
+        WorkModelError::Overloaded => WorkModelFaultV1::ProviderDown,
+        WorkModelError::Network => WorkModelFaultV1::Unreachable,
+        WorkModelError::ContextTooLong => WorkModelFaultV1::TooLarge,
+        _ => return None,
+    })
+}
+
 /// How much conversation the model's context can carry beside the prompt,
 /// tools and answer: two characters a token keeps it under the window for
 /// dense text, and large windows keep the usual ceiling.
@@ -1656,6 +1686,28 @@ mod compact_tests {
                 is_error: false,
             }]),
         ]
+    }
+
+    #[test]
+    fn hosted_refusals_name_the_account_not_a_provider_key() {
+        let fault = |error, hosted| model_fault(error, hosted);
+        assert_eq!(
+            fault(WorkModelError::OverBudget, true),
+            Some(WorkModelFaultV1::HostedUsage)
+        );
+        assert_eq!(
+            fault(WorkModelError::OverBudget, false),
+            Some(WorkModelFaultV1::ProviderCredit)
+        );
+        assert_eq!(
+            fault(WorkModelError::Unauthorized, true),
+            Some(WorkModelFaultV1::SignedOut)
+        );
+        assert_eq!(
+            fault(WorkModelError::Unauthorized, false),
+            Some(WorkModelFaultV1::KeyRefused)
+        );
+        assert_eq!(fault(WorkModelError::Cancelled, false), None);
     }
 
     #[test]

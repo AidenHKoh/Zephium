@@ -1516,6 +1516,30 @@ pub struct WorkStepFact {
     /// The part of a lead run this step works for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part: Option<WorkPartId>,
+    /// Why a model turn failed, in closed words the person can act on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_fault: Option<WorkModelFaultV1>,
+}
+
+/// What stopped a model turn, as the person can fix it.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkModelFaultV1 {
+    /// No key is set for the chosen model.
+    MissingKey,
+    /// The provider refused the person's key.
+    KeyRefused,
+    /// The person's own provider account is out of credit.
+    ProviderCredit,
+    /// The account's included Zephium AI usage, and any extra, is spent.
+    HostedUsage,
+    /// The Zephium account's session ended.
+    SignedOut,
+    RateLimited,
+    ProviderDown,
+    Unreachable,
+    TooLarge,
 }
 impl WorkStepKindV1 {
     fn validate(&self) -> Result<(), WorkError> {

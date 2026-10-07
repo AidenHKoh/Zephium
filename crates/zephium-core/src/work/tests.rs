@@ -703,6 +703,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
     });
     fact.status = WorkExecutionStatus::Running;
     let step = |id: u128, turn, kind, status| WorkStepFact {
+        model_fault: None,
         part: None,
         id: id.into(),
         turn,
@@ -1248,6 +1249,7 @@ fn agent_citations_round_trip_source_keys_without_model_renumbering() {
 fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
     use super::{agent::*, runtime::*};
     let step = |kind, status| WorkStepFact {
+        model_fault: None,
         part: None,
         id: 9.into(),
         turn: 2,
@@ -1328,6 +1330,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         ],
     };
     let file = |kind, status| WorkStepFact {
+        model_fault: None,
         part: None,
         id: 10.into(),
         turn: 2,
@@ -1568,6 +1571,7 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
         general_knowledge: true,
     };
     let publish = WorkStepFact {
+        model_fault: None,
         part: None,
         id: 3.into(),
         turn: 1,
@@ -2101,6 +2105,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
     );
     fact.validate(&plan, revision).unwrap();
     let read = |id: u128, url: &str, host: Option<&str>| WorkStepFact {
+        model_fault: None,
         part: None,
         id: id.into(),
         turn: 1,
@@ -2363,6 +2368,7 @@ fn a_held_site_step_round_trips_and_its_decision_matches_its_status() {
         decision: None,
     };
     let mut step = WorkStepFact {
+        model_fault: None,
         part: None,
         id: 8u128.into(),
         turn: 1,

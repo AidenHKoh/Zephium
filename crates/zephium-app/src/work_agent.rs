@@ -647,6 +647,7 @@ impl Driver {
     }
     fn step(&self, kind: WorkStepKindV1, status: WorkStepStatus) -> WorkStepFact {
         WorkStepFact {
+            model_fault: None,
             part: self.part,
             id: WorkStepId::generate(),
             turn: self.turn.max(1),
@@ -2860,6 +2861,7 @@ mod tests {
             goal: None,
         };
         let mut step = WorkStepFact {
+            model_fault: None,
             part: None,
             id: 1.into(),
             turn: 1,

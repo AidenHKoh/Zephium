@@ -547,6 +547,7 @@ pub(super) fn command(
             }
             let turn = row.fact.steps.last().map_or(1, |step| step.turn);
             row.fact.steps.push(WorkStepFact {
+                model_fault: None,
                 part: None,
                 id: WorkStepId::generate(),
                 turn,
