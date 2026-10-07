@@ -85,6 +85,24 @@ impl PublicReadWorkInvocation {
         }
     }
 
+    /// A browser search's results page, read by Rust with no model call
+    /// and nothing pressed.
+    #[cfg(feature = "durable-runtime")]
+    pub(crate) fn with_results_page(
+        self,
+        reader: Arc<results_page::ResultsReader>,
+    ) -> PublicLocalActionWorkInvocation {
+        PublicLocalActionWorkInvocation {
+            read: self,
+            actions: LocalActions {
+                policy: Box::new(results_page::ResultsPagePolicy { reader }),
+                max_actions: 1,
+                read_only: true,
+                commits: Vec::new(),
+            },
+        }
+    }
+
     /// A page in the person's session is read: scrolled, tabs and details
     /// revealed, never changed.
     #[cfg(feature = "durable-runtime")]
@@ -488,5 +506,7 @@ mod tests;
 mod consent;
 #[cfg(feature = "durable-runtime")]
 mod read_interactions;
+#[cfg(feature = "durable-runtime")]
+pub(crate) mod results_page;
 #[cfg(feature = "durable-runtime")]
 pub(crate) mod site_work;

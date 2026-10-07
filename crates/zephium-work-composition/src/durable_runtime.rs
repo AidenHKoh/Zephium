@@ -386,6 +386,11 @@ impl NativeWorkComposition {
         request: WorkAgentBrowseRequest,
         settings: WorkBrowserAdapterSettings,
     ) -> Result<WorkBrowserOutcome, WorkError> {
+        if let Some(page) = request.results.clone() {
+            return self
+                .run_results_step(shell, probe, request, settings, page)
+                .await;
+        }
         let collection = match &request.step {
             WorkStepKindV1::Read { collection, .. }
             | WorkStepKindV1::Discover { collection, .. } => collection
@@ -397,6 +402,99 @@ impl NativeWorkComposition {
         };
         self.run_agent_step_inner(shell, probe, request, settings, collection)
             .await
+    }
+
+    /// A browser search's results page, opened in a fresh store of its own
+    /// and read by Rust from its first look: no model call, nothing pressed.
+    async fn run_results_step(
+        &self,
+        shell: &CallbackHandle,
+        probe: &WorkAttemptProbe,
+        mut request: WorkAgentBrowseRequest,
+        mut settings: WorkBrowserAdapterSettings,
+        page: zephium_core::work::search::WorkResultsPage,
+    ) -> Result<WorkBrowserOutcome, WorkError> {
+        if !matches!(request.step, WorkStepKindV1::Search { .. }) {
+            return Err(refused(&settings, "step", WorkError::Invalid));
+        }
+        if !probe.browser_session().is_current() || probe.cancellation_requested().await? {
+            return Ok(WorkBrowserOutcome {
+                status: WorkStepStatus::Cancelled,
+                usage: Some(WorkUsage::default()),
+                artifacts: vec![],
+                intervention: None,
+                note: None,
+                measurements: None,
+                helped: false,
+                held_back: false,
+                rerun: false,
+                search: None,
+            });
+        }
+        settings.decisions = WorkDecisionPreference::Disabled;
+        settings.decision_model = None;
+        let diagnostics = Diagnostics::from(&settings);
+        let limits = request.limits;
+        let outputs = vec![request.output.clone()];
+        let url = page.url.to_string();
+        let own = (page.engine == zephium_core::search::SearchEngine::Custom)
+            .then(|| page.url.host_str().map(str::to_owned))
+            .flatten();
+        let reader = std::sync::Arc::new(crate::open_objective::results_page::ResultsReader::new(
+            page.engine,
+            own,
+        ));
+        let id = request.id;
+        request.step = WorkStepKindV1::Read {
+            url: url.clone(),
+            goal: None,
+            collection: None,
+        };
+        let admission = probe.admit_read_page(id).await?;
+        let invocation = compile_page_step(
+            probe,
+            request,
+            settings,
+            None,
+            None,
+            None,
+            Some(reader.clone()),
+        )?
+        .with_page_admission(admission);
+        let run = self
+            .run_retained(
+                shell,
+                probe,
+                invocation,
+                None,
+                limits,
+                &outputs,
+                None,
+                Some((id, url)),
+                diagnostics,
+                WorkDecisionPreference::Disabled,
+                None,
+                None,
+            )
+            .await?;
+        let search = reader.take();
+        Ok(WorkBrowserOutcome {
+            status: match (&search, run.status) {
+                (Some(_), _) => WorkStepStatus::Succeeded,
+                (None, WorkAttemptStatus::Cancelled) => WorkStepStatus::Cancelled,
+                (None, WorkAttemptStatus::OutcomeUnknown) => WorkStepStatus::OutcomeUnknown,
+                (None, _) => WorkStepStatus::Failed,
+            },
+            usage: run.usage,
+            artifacts: vec![],
+            intervention: None,
+            note: run.note,
+            measurements: Some(run.measurements),
+            helped: false,
+            held_back: false,
+            rerun: false,
+            search,
+        })
     }
 
     /// Extracts cited records directly into a comparison artifact on the same admitted read step.
@@ -2637,7 +2735,7 @@ fn compile_step(
     gate: Option<std::sync::Arc<crate::open_objective::site_work::SiteGate>>,
 ) -> Result<crate::TrustedWorkRequest, WorkError> {
     let decision_model = settings.decision_model.take();
-    compile_page_step(probe, request, settings, collection, resume, gate)
+    compile_page_step(probe, request, settings, collection, resume, gate, None)
         .map(|request| with_decision_model(request, decision_model))
 }
 
@@ -2658,6 +2756,7 @@ fn compile_page_step(
     collection: Option<&WorkBrowseCollectionSchema>,
     resume: Option<ResumeCompile>,
     gate: Option<std::sync::Arc<crate::open_objective::site_work::SiteGate>>,
+    results: Option<std::sync::Arc<crate::open_objective::results_page::ResultsReader>>,
 ) -> Result<crate::TrustedWorkRequest, WorkError> {
     if settings.profile.profile() != probe.profile() {
         return Err(refused(&settings, "profile", WorkError::ProfileUnavailable));
@@ -2829,7 +2928,10 @@ fn compile_page_step(
         settings.access,
     )
     .with_persistent_result();
-    let invocation = if task {
+    let reads_results = results.is_some();
+    let invocation = if let Some(reader) = results {
+        invocation.with_results_page(reader)
+    } else if task {
         invocation.with_site_work(gate.unwrap_or_default(), asks, PAGE_TASK_ACTIONS)
     } else if signed_in.is_some() {
         invocation.with_session_reading()
@@ -2870,8 +2972,13 @@ fn compile_page_step(
         return Ok(request);
     }
     let mut request = request;
-    if continuing || loopback || task {
+    if continuing || loopback || task || reads_results {
         request.input = request.input.with_isolated_website_data();
+    }
+    // A results page keeps nothing from the run's other pages: without the
+    // run's session it opens in a fresh store of its own.
+    if reads_results {
+        return Ok(request);
     }
     Ok(request.with_anonymous_session(probe.browser_session().clone()))
 }
