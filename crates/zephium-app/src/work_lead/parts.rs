@@ -10,7 +10,7 @@ use serde_json::Value;
 use zephium_core::work::{artifact::public_host, model::*, parts::*, runtime::*, *};
 use zephium_ipc::work::WorkActivityV1;
 
-use super::call::{self, clip, CallFailure};
+use super::call::{self, clip, CallFailure, LeadModel};
 use super::hands::{self, Hands, Request};
 use super::lead::Lead;
 use super::objects;
@@ -34,6 +34,8 @@ const PART_TURNS: u8 = 10;
 /// reservation and one page task's cost.
 const PART_MIN_TOKENS: u32 = zephium_core::work::search::PUBLIC_SEARCH_TOKEN_RESERVATION + 16_384;
 const PART_MIN_COST: u32 = 150_000;
+/// Replies a part's ceiling allows for: forty calls of a usual tool turn.
+const PART_REPLY_TOKENS: u64 = 40 * 2_048;
 /// The note a page step ends with when its page asked to sign in.
 const SIGN_IN_NOTE: &str = "The page asked to sign in";
 /// Searches one part may run; past them it reports what it has.
@@ -307,7 +309,7 @@ where
             ),
         };
         let model = self.models.for_role(role);
-        let share = self.part_share();
+        let share = self.part_share(model);
         let objective = format!("{}\n\nThe person's request: {}", spec.goal, self.objective);
         let hands = Hands::new(
             self.run,
@@ -1067,8 +1069,9 @@ where
 
     /// A share of what the run has left, so parts that start together can
     /// all finish and the lead keeps room to build the result.
-    fn part_share(&self) -> WorkExecutionLimits {
+    fn part_share(&self, model: &LeadModel) -> WorkExecutionLimits {
         let left = self.run.remaining();
+        let (ceiling, floor) = part_money(&model.entry, &self.models.page.entry);
         // Parts past the run's parallel slots wait: they do not share now.
         let ways = (self.parts_running().min(PARALLEL_PARTS) as u32 + 1).max(2);
         WorkExecutionLimits {
@@ -1078,14 +1081,34 @@ where
                 .clamp(1, PART_MAX.model_tokens)
                 .min(left.model_tokens),
             cost_micro_usd: (left.cost_micro_usd / ways)
-                .max(PART_MIN_COST)
-                .clamp(1, PART_MAX.cost_micro_usd)
+                .max(floor)
+                .clamp(1, ceiling)
                 .min(left.cost_micro_usd),
             operations: (left.operations / ways).clamp(1, PART_MAX.operations),
             timeout_seconds: left.timeout_seconds,
             max_workers: PART_MAX.max_workers.min(left.max_workers).max(1),
         }
     }
+}
+
+/// A part's money ceiling and floor in its dearest model's prices: its own
+/// or the page model its pages run on. The fixed sums fit the cheap models; a
+/// pricier one gets the same tokens and calls, so it is not stopped early.
+fn part_money(own: &WorkModelEntry, page: &WorkModelEntry) -> (u32, u32) {
+    let dearest = |pick: fn(&WorkModelPrice) -> u64| {
+        [own, page]
+            .iter()
+            .filter_map(|entry| entry.price.as_ref().map(pick))
+            .max()
+            .unwrap_or(0)
+    };
+    let cost = u64::from(PART_MAX.model_tokens) * dearest(|price| price.input)
+        + PART_REPLY_TOKENS * dearest(|price| price.output);
+    let ceiling = u32::try_from(cost / 1_000_000)
+        .unwrap_or(u32::MAX)
+        .max(PART_MAX.cost_micro_usd);
+    let floor = u64::from(PART_MIN_COST) * u64::from(ceiling) / u64::from(PART_MAX.cost_micro_usd);
+    (ceiling, u32::try_from(floor).unwrap_or(u32::MAX))
 }
 
 fn add(a: WorkUsage, b: WorkUsage) -> WorkUsage {
@@ -1569,6 +1592,51 @@ fn note_reason(note: Option<&str>, search: bool) -> Option<WorkPartReasonV1> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_part_gets_the_same_calls_on_a_pricier_model() {
+        let entry = |input: u64, output: u64| WorkModelEntry {
+            id: "m".into(),
+            model: WorkModelRef {
+                provider: WorkModelProvider::Anthropic,
+                wire: WorkModelWire::AnthropicMessages,
+                model: "m".into(),
+            },
+            display_name: "m".into(),
+            roles: vec![WorkModelRole::Page],
+            recommended: false,
+            context_window: 200_000,
+            max_output: 32_000,
+            supports: WorkModelSupports {
+                tools: true,
+                vision: true,
+                prompt_cache: true,
+                reasoning: true,
+                native_search: false,
+            },
+            price: Some(WorkModelPrice {
+                input,
+                cached_input: input / 10,
+                output,
+            }),
+        };
+        // Micro-USD per million tokens.
+        let luna = entry(100_000, 500_000);
+        let opus = entry(5_000_000, 25_000_000);
+        assert_eq!(
+            part_money(&luna, &luna),
+            (PART_MAX.cost_micro_usd, PART_MIN_COST)
+        );
+        let (ceiling, floor) = part_money(&luna, &opus);
+        assert_eq!(ceiling, 4_298_000);
+        assert!(floor > PART_MIN_COST && floor < ceiling);
+        assert_eq!(part_money(&opus, &luna), (ceiling, floor));
+        let unpriced = WorkModelEntry {
+            price: None,
+            ..luna.clone()
+        };
+        assert_eq!(part_money(&unpriced, &unpriced).0, PART_MAX.cost_micro_usd);
+    }
 
     #[test]
     fn a_page_the_person_gave_is_read_as_given_by_the_part_for_its_site() {
