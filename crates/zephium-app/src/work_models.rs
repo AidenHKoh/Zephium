@@ -424,10 +424,11 @@ fn entries(state: &State) -> Vec<WorkModelEntry> {
             .get(&entry.model.provider)
             .is_none_or(|listed| listed.iter().any(|item| item.id == entry.id))
     }));
+    let local = compatible_base().is_some_and(|base| is_local(&base));
     for provider in [P::Compatible] {
         for entry in state.listed.get(&provider).into_iter().flatten() {
             if !all.iter().any(|known| known.id == entry.id) {
-                all.push(entry.clone());
+                all.push(priced_locally(entry.clone(), local));
             }
         }
     }
@@ -444,13 +445,38 @@ fn stored_choice(state: &State, profile: ProfileId, role: WorkModelRole) -> Opti
         None => state.choices.get(&key).cloned()?,
     };
     // Keep an explicit choice even if it disappeared; never silently replace it.
-    Some(
+    let local = compatible_base().is_some_and(|base| is_local(&base));
+    Some(priced_locally(
         entries(state)
             .into_iter()
             .chain(state.listed.values().flatten().cloned())
             .find(|entry| entry.id == stored.id)
             .unwrap_or(stored),
-    )
+        local,
+    ))
+}
+
+/// A server on this computer, such as Ollama or LM Studio.
+fn is_local(base: &str) -> bool {
+    ["http://localhost", "http://127.0.0.1", "http://[::1]"]
+        .iter()
+        .any(|origin| {
+            base.strip_prefix(origin)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with([':', '/']))
+        })
+}
+
+/// A model on this computer costs nothing per token. Unpriced, it would be
+/// charged the conservative fallback and stop a run on money never spent.
+fn priced_locally(mut entry: WorkModelEntry, local: bool) -> WorkModelEntry {
+    if local && entry.model.provider == P::Compatible && entry.price.is_none() {
+        entry.price = Some(WorkModelPrice {
+            input: 0,
+            cached_input: 0,
+            output: 0,
+        });
+    }
+    entry
 }
 
 fn family_entry(
@@ -1013,6 +1039,30 @@ pub fn static_credential(secret: LeadSecret) -> Arc<dyn LeadCredential> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_on_this_computer_costs_nothing_and_a_remote_one_stays_unpriced() {
+        assert!(is_local("http://localhost:11434/v1"));
+        assert!(is_local("http://127.0.0.1:1234/v1"));
+        assert!(is_local("http://[::1]:11434"));
+        assert!(!is_local("http://localhost.example.com/v1"));
+        assert!(!is_local("https://llm.example.com/v1"));
+        let entry = models::builtin()
+            .into_iter()
+            .next()
+            .map(|entry| WorkModelEntry {
+                model: WorkModelRef {
+                    provider: P::Compatible,
+                    ..entry.model.clone()
+                },
+                price: None,
+                ..entry
+            })
+            .unwrap();
+        let free = priced_locally(entry.clone(), true).price.unwrap();
+        assert_eq!((free.input, free.cached_input, free.output), (0, 0, 0));
+        assert!(priced_locally(entry, false).price.is_none());
+    }
 
     #[derive(Default)]
     pub(super) struct MemoryVault(Mutex<HashMap<P, Arc<LeadSecret>>>);
