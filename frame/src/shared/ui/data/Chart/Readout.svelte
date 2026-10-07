@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import type { ChartEvidence } from "./chart";
-  import type { Readout } from "./layer";
+  import type { Readout } from "./plan";
 
   /** The tooltip's card, shadcn-svelte's: the point, a row per series with its indicator, and the sources behind it. */
   let {

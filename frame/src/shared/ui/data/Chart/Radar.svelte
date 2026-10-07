@@ -2,7 +2,7 @@
   import type { Snippet } from "svelte";
   import Readout from "./Readout.svelte";
   import type { ChartEvidence, ChartSpec } from "./chart";
-  import { radar, readout, type Plan } from "./layer";
+  import { radar, readout, type Plan } from "./plan";
   let {
     spec,
     shape,

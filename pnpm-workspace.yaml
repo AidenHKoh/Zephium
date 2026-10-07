@@ -16,4 +16,3 @@ overrides:
 
 patchedDependencies:
   braces@3.0.3: patches/braces@3.0.3.patch
-  layerchart@2.5.0: patches/layerchart@2.5.0.patch

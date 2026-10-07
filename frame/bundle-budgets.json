@@ -1,16 +1,12 @@
 {
   "browser-panel": {
     "browser": {
-      "js": 385993,
+      "js": 383800,
       "css": 107064
     },
     "lazy:app/browser/WorkWorkspace.svelte": {
       "js": 37473,
       "css": 366
-    },
-    "lazy:dependency/d3-quadtree/src/index.js": {
-      "js": 4911,
-      "css": 0
     },
     "lazy:domain/notes/index.ts": {
       "js": 14747,
@@ -357,19 +353,19 @@
       "css": 0
     },
     "lazy:shared/ui/data/Artifact/WorkChart.svelte": {
-      "js": 379558,
-      "css": 14907
+      "js": 50100,
+      "css": 10500
     },
     "lazy:shared/ui/data/Chart/Chart.svelte": {
-      "js": 377480,
-      "css": 14907
+      "js": 48100,
+      "css": 10500
     },
     "lazy:shared/ui/data/Code/CodeBlock.svelte": {
       "js": 13446,
       "css": 2750
     },
     "panel": {
-      "js": 113655,
+      "js": 111400,
       "css": 35642
     }
   },

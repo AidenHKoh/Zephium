@@ -13,22 +13,16 @@ import {
   type ChartY,
 } from "./chart";
 
-/** The spec as LayerChart reads it: one row per category, one accessor per series. */
+/** One category or moment: where it stands on x, and each series' point there. */
 export type Row = {
   index: number;
   key: string;
-  /** What the x scale takes: the key on a band, a Date on a time axis, a number on a linear one. */
-  x: string | number | Date;
+  /** Its place on a continuous axis: the index on a band or index axis, epoch ms on time, the number on linear. */
+  at: number;
   label: string;
   points: (ChartPoint | undefined)[];
 };
-type Value = number | null;
-export type PlanSeries = {
-  key: string;
-  label: string;
-  color: string;
-  value: ((row: Row) => Value) | [(row: Row) => Value, (row: Row) => Value];
-};
+type PlanSeries = { key: string; label: string; color: string };
 export type Part = {
   index: number;
   label: string;
@@ -36,7 +30,7 @@ export type Part = {
   color: string;
   points: ChartPoint[];
 };
-export type Cell = {
+type Cell = {
   index: number;
   key: string;
   /** The series, as a band on y. */
@@ -55,7 +49,10 @@ export type Plan = {
   /** Bars lying down: categories on y, values on x. */
   horizontal: boolean;
   scale: "band" | "time" | "linear" | "index";
-  layout: "group" | "stack" | "stackDiverging" | "overlap";
+  /** Bars side by side, parts piled into a total, or trends drawn over each other. */
+  layout: "group" | "stack" | "overlap";
+  /** Each series' span at each row, [from, to], when parts pile up; empty otherwise. */
+  stacks: [number, number][][];
   /** The value axis: round ticks, and the domain they span. */
   ticks: number[];
   domain: [number, number];
@@ -162,13 +159,34 @@ function stackedExtent(rows: Row[]): number[] {
   });
 }
 
-function rowX(key: string, kind: NonNullable<ChartSpec["x"]>["kind"]): Row["x"] {
-  if (kind === "time") return new Date(parseTime(key));
-  if (kind === "linear") return Number(key);
-  return key;
+function rowAt(key: string, kind: NonNullable<ChartSpec["x"]>["kind"]): number {
+  return kind === "time" ? parseTime(key) : Number(key);
 }
 
-/** Everything LayerChart needs to draw the spec, computed once per spec. */
+/**
+ * Where each part sits when parts pile up. Bars diverge: positives climb from
+ * zero, negatives fall below it. Areas add in series order.
+ */
+function stackSpans(rows: readonly Row[], count: number, diverging: boolean): [number, number][][] {
+  const spans = Array.from({ length: count }, () => new Array<[number, number]>(rows.length));
+  rows.forEach((row, index) => {
+    let up = 0;
+    let down = 0;
+    for (let order = 0; order < count; order++) {
+      const value = row.points[order]?.y ?? 0;
+      if (diverging && value < 0) {
+        spans[order]![index] = [down, down + value];
+        down += value;
+      } else {
+        spans[order]![index] = [up, up + value];
+        up += value;
+      }
+    }
+  });
+  return spans;
+}
+
+/** Everything the marks need to draw the spec, computed once per spec. */
 export function plan(spec: ChartSpec, other = "Other"): Plan {
   const keys = categoryKeys(spec);
   const trend = spec.kind === "line" || spec.kind === "area" || spec.kind === "spark";
@@ -182,23 +200,16 @@ export function plan(spec: ChartSpec, other = "Other"): Plan {
   const rows: Row[] = keys.map((key, index) => ({
     index,
     key,
-    x: scale === "band" ? key : scale === "index" ? index : rowX(key, spec.x?.kind),
+    at: scale === "band" || scale === "index" ? index : rowAt(key, spec.x?.kind),
     label: xText(key, spec.x?.kind),
     points: spec.series.map((series) => series.points.find((point) => String(point.x) === key)),
   }));
   const stacked = spec.kind === "stacked" || (spec.kind === "area" && !!spec.stack);
-  const series: PlanSeries[] = spec.series.map((entry, order) => {
-    const y = (row: Row) => row.points[order]?.y ?? (stacked ? 0 : null);
-    return {
-      key: `s${order}`,
-      label: entry.name,
-      color: seriesColor(order),
-      value:
-        spec.kind === "range"
-          ? [y, (row: Row) => row.points[order]?.y2 ?? row.points[order]?.y ?? null]
-          : y,
-    };
-  });
+  const series: PlanSeries[] = spec.series.map((entry, order) => ({
+    key: `s${order}`,
+    label: entry.name,
+    color: seriesColor(order),
+  }));
   const values = stacked
     ? stackedExtent(rows)
     : rows.flatMap((row) =>
@@ -216,7 +227,8 @@ export function plan(spec: ChartSpec, other = "Other"): Plan {
     series,
     horizontal: horizontal(spec, keys),
     scale,
-    layout: stacked ? (trend ? "stack" : "stackDiverging") : trend ? "overlap" : "group",
+    layout: stacked ? "stack" : trend ? "overlap" : "group",
+    stacks: stacked ? stackSpans(rows, spec.series.length, !trend) : [],
     ticks,
     domain: [ticks[0] ?? 0, ticks.at(-1) ?? 1],
     parts,
