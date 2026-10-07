@@ -1619,7 +1619,7 @@ pub(super) fn assert_outcome(
             .iter()
             .any(|event| event.kind() == AgentWorkEventKind::Terminal));
         if let Some(session) = &recovery.state.session {
-            assert!(session.credential.is_none());
+            assert!(session.access.is_none());
             assert_eq!(session.policy.pending_effects(), 0);
             assert_eq!(session.policy.pending_model_calls(), 0);
             if matches!(

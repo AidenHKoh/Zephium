@@ -684,3 +684,6 @@ pub use provider_transport::search::{
     OpenAiPublicSearch, OpenAiPublicSearchCitation, OpenAiPublicSearchConfig,
     OpenAiPublicSearchResult,
 };
+/// The provider-neutral model vocabulary a chosen-model client speaks.
+#[cfg(feature = "provider-transport")]
+pub use zephium_core::work::model as work_model;

@@ -451,6 +451,9 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_agentic_no_direct_logging_calls(PROVIDER_TRANSPORT_ROOT, &provider_transport_root)?;
     validate_provider_secret_diagnostic_contract(&provider_transport_root)?;
     validate_provider_revocation_before_secret_materialization(&provider_transport_root)?;
+    validate_chosen_model_drive_contract(&read(
+        repository.join("crates/zephium-agentic/src/provider_transport/model_client.rs"),
+    )?)?;
     validate_engine_manifest(&read(repository.join(ENGINE_MANIFEST))?)?;
     validate_engine_root(&read(repository.join(ENGINE_ROOT))?)?;
     for path in ENGINE_AGENTIC_PRODUCTION_MODULES {
@@ -6614,6 +6617,66 @@ fn validate_provider_revocation_before_secret_materialization(source: &str) -> R
             "agent provider cancellation must precede secret materialization and be rechecked before dispatch"
                 .to_owned(),
         );
+    }
+    Ok(())
+}
+
+/// A chosen model's drive keeps the fixed-endpoint ordering: it moves the
+/// body out of the retained owner, checks sticky cancellation twice, then
+/// publishes possible dispatch before the client can first be polled. It
+/// holds no key and reaches no network of its own.
+fn validate_chosen_model_drive_contract(source: &str) -> Result<(), String> {
+    let production = source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(source, |(production, _)| production);
+    let source = compact(
+        &production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<String>(),
+    );
+    for forbidden in ["reqwest", "credential", "sensitive_header", "count_openai"] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "chosen-model drive acquired fixed-endpoint authority {forbidden}"
+            ));
+        }
+    }
+    let drive_start = source
+        .find("pubasyncfnexecute_model_client<F>(&mutself,")
+        .ok_or_else(|| "chosen-model drive is missing or consuming".to_owned())?;
+    let drive = &source[drive_start..];
+    let begin = drive
+        .find("=self.begin_generation_drive()?")
+        .ok_or_else(|| "chosen-model drive no longer moves its body first".to_owned())?;
+    let cancellation =
+        "ifself.cancellation.is_cancelled()||self.shutdown.is_cancelled(){returnself.finish_terminal(cancelled_failure());}";
+    let checks = drive
+        .match_indices(cancellation)
+        .map(|(offset, _)| offset)
+        .collect::<Vec<_>>();
+    let dispatch = drive
+        .find("self.mark_model_may_have_dispatched();")
+        .ok_or_else(|| "chosen-model drive no longer publishes dispatch".to_owned())?;
+    let call = drive
+        .find("outcome=model.client.call(request,&events)=>outcome")
+        .ok_or_else(|| "chosen-model drive call boundary is missing".to_owned())?;
+    if checks.len() != 2 || !(begin < checks[0] && checks[1] < dispatch && dispatch < call) {
+        return Err(
+            "chosen-model drive must move authority, recheck cancellation and publish dispatch before its call"
+                .to_owned(),
+        );
+    }
+    for required in [
+        "outcome.usage.input_tokens>reserved",
+        "contract.finish(call,&config,outcome)",
+        "Err(_)=>{self.fail_stop();returnself.finish_terminal(integration_failure());}",
+    ] {
+        if !drive.contains(required) {
+            return Err(format!(
+                "chosen-model drive lost required settlement rule {required}"
+            ));
+        }
     }
     Ok(())
 }

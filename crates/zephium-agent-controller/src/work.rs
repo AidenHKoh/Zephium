@@ -5,9 +5,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use zephium_agent_provider_transport::{
-    AgentProviderCredential, AgentProviderTransport, AgentProviderTransportConfig,
-};
+use zephium_agent_provider_transport::{AgentProviderTransport, AgentProviderTransportConfig};
 use zephium_agent_runtime::{
     AgentRuntimeBrowser, AgentRuntimeController, AgentRuntimeControllerFuture,
     AgentRuntimeControllerTerminalClass, AgentRuntimeControllerTerminalRefusal, AgentRuntimeEvent,
@@ -1127,7 +1125,7 @@ impl AgentWorkController {
     pub fn try_new(
         input: AgentWorkRunInput,
         transport: AgentProviderTransportConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<super::AgentBrowserModelAccess>,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<(Self, AgentWorkHandle), AgentWorkFailure> {
@@ -1136,7 +1134,7 @@ impl AgentWorkController {
         Self::with_transport(
             input,
             transport,
-            credential,
+            access.into(),
             audit,
             task,
             AgentBrowserRetention::Stateless,
@@ -1151,7 +1149,7 @@ impl AgentWorkController {
     pub fn try_new_for_probe(
         input: AgentWorkRunInput,
         transport: AgentProviderTransport,
-        credential: AgentProviderCredential,
+        access: impl Into<super::AgentBrowserModelAccess>,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
         retention: AgentBrowserRetention,
@@ -1162,13 +1160,21 @@ impl AgentWorkController {
         if snapshot.is_sealed() || !snapshot.is_idle() {
             return Err(AgentWorkFailure::Contract);
         }
-        Self::with_transport(input, transport, credential, audit, task, retention, None)
+        Self::with_transport(
+            input,
+            transport,
+            access.into(),
+            audit,
+            task,
+            retention,
+            None,
+        )
     }
 
     fn with_transport(
         input: AgentWorkRunInput,
         transport: AgentProviderTransport,
-        credential: AgentProviderCredential,
+        access: super::AgentBrowserModelAccess,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
         retention: AgentBrowserRetention,
@@ -1301,7 +1307,7 @@ impl AgentWorkController {
                     drained: None,
                     journal: Some(journal),
                     native,
-                    credential: Some(credential),
+                    access: Some(access),
                     transport: Some(super::BrowserSessionTransport(transport)),
                     retention,
                     audit,
@@ -1365,7 +1371,7 @@ struct WorkState {
     drained: Option<WorkDrained>,
     journal: Option<WorkJournal>,
     native: WorkNative,
-    credential: Option<AgentProviderCredential>,
+    access: Option<super::AgentBrowserModelAccess>,
     transport: Option<super::BrowserSessionTransport>,
     retention: AgentBrowserRetention,
     audit: Arc<dyn AgentAuditPort>,
@@ -2142,7 +2148,7 @@ impl AgentWorkController {
         let mut session = AgentBrowserSession::try_new_with_transport(
             run,
             state.transport.take().ok_or(AgentWorkFailure::Contract)?,
-            state.credential.take().ok_or(AgentWorkFailure::Contract)?,
+            state.access.take().ok_or(AgentWorkFailure::Contract)?,
             input.settings.model,
             state.retention,
         )
@@ -2196,7 +2202,7 @@ impl AgentWorkController {
         if state.progressive_observation {
             session.config = session.config.with_progressive_observation();
         }
-        if state.viewport_screenshot {
+        if state.viewport_screenshot && session.supports_vision() {
             session.config = session.config.with_viewport_screenshot();
         }
         if state.standalone_wait {
@@ -4965,7 +4971,7 @@ impl Drop for AgentWorkController {
         let Some(mut state) = self.state.take() else {
             return;
         };
-        state.credential.take();
+        state.access.take();
         // Dropping undispatched objective data is not dropping runtime debt.
         if let Some(input) = state.input.as_mut() {
             input.objective.take();
@@ -5135,6 +5141,14 @@ pub enum AgentWorkEventKind {
         dialogs: u8,
         /// Whether the top frame was captured completely.
         complete: bool,
+    },
+    /// A chosen model's reply was cut to its first tool call. What was cut
+    /// was never decoded and conferred nothing.
+    ModelReplyTrimmed {
+        /// Tool calls after the first.
+        dropped_tool_calls: u16,
+        /// Narration that came beside a tool call.
+        dropped_text_bytes: u32,
     },
     /// The model proposed a bounded typed tool.
     ToolProposed(AgentBrowserToolKind),

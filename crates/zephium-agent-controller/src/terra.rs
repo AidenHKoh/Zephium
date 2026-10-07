@@ -154,6 +154,31 @@ impl AgentBrowserModel {
     }
 }
 
+/// How a browser session reaches its page model.
+pub enum AgentBrowserModelAccess {
+    /// The session's pinned catalog model through Zephium's fixed endpoint,
+    /// authenticated with this key.
+    Exact(AgentProviderCredential),
+    /// The person's chosen model through its own client. The session's
+    /// catalog model selection is then unused.
+    Chosen(zephium_agentic::AgentProviderModelClient),
+}
+
+impl From<AgentProviderCredential> for AgentBrowserModelAccess {
+    fn from(credential: AgentProviderCredential) -> Self {
+        Self::Exact(credential)
+    }
+}
+
+impl fmt::Debug for AgentBrowserModelAccess {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exact(_) => formatter.write_str("Exact([redacted])"),
+            Self::Chosen(model) => formatter.debug_tuple("Chosen").field(model).finish(),
+        }
+    }
+}
+
 /// Provider retention policy; release graphs expose only the stateless variant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentBrowserRetention {
@@ -1964,7 +1989,10 @@ pub struct AgentBrowserSession {
     journal_receipts: usize,
     policy: AgentRunPolicy,
     transport: BrowserSessionTransport,
-    credential: Option<AgentProviderCredential>,
+    access: Option<AgentBrowserModelAccess>,
+    /// The chosen model's pricing identity; kept past `access` so a call
+    /// aborted at close still settles under its own schedule.
+    chosen: Option<zephium_agentic::AgentProviderModelClient>,
     attempt: Option<AgentProviderAttempt>,
     retained_terminal: Option<BrowserUnsettledTerminal>,
     extraction_output: Option<zephium_agentic::AgentProviderExtractionOutputCollector>,
@@ -2080,13 +2108,13 @@ impl AgentBrowserSession {
     pub async fn start(
         input: TerraControllerRunInput,
         transport_config: AgentProviderTransportConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         observation: &zephium_agentic::SemanticObservation,
     ) -> Result<(Self, AgentBrowserProviderTurn), AgentBrowserProviderError> {
         Self::start_with_model(
             input,
             transport_config,
-            credential,
+            access,
             observation,
             AgentBrowserModel::Terra,
             AgentBrowserRetention::Stateless,
@@ -2099,12 +2127,12 @@ impl AgentBrowserSession {
     pub async fn start_with_model(
         input: TerraControllerRunInput,
         transport_config: AgentProviderTransportConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         observation: &zephium_agentic::SemanticObservation,
         model: AgentBrowserModel,
         retention: AgentBrowserRetention,
     ) -> Result<(Self, AgentBrowserProviderTurn), AgentBrowserProviderError> {
-        let mut session = Self::try_new(input, transport_config, credential, model, retention)?;
+        let mut session = Self::try_new(input, transport_config, access, model, retention)?;
         let turn = match session.start_initial(observation).await {
             Ok(turn) => turn,
             Err(error) => {
@@ -2119,7 +2147,7 @@ impl AgentBrowserSession {
     pub fn try_new(
         input: TerraControllerRunInput,
         transport_config: AgentProviderTransportConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         model: AgentBrowserModel,
         retention: AgentBrowserRetention,
     ) -> Result<Self, AgentBrowserProviderError> {
@@ -2128,7 +2156,7 @@ impl AgentBrowserSession {
         Self::try_new_with_transport(
             input,
             BrowserSessionTransport(transport),
-            credential,
+            access.into(),
             model,
             retention,
         )
@@ -2137,7 +2165,7 @@ impl AgentBrowserSession {
     fn try_new_with_transport(
         input: TerraControllerRunInput,
         transport: BrowserSessionTransport,
-        credential: AgentProviderCredential,
+        access: AgentBrowserModelAccess,
         model: AgentBrowserModel,
         retention: AgentBrowserRetention,
     ) -> Result<Self, AgentBrowserProviderError> {
@@ -2157,19 +2185,34 @@ impl AgentBrowserSession {
             return Err(AgentBrowserProviderError::Deadline);
         }
         let now = clock.now().map_err(|_| AgentBrowserProviderError::Clock)?;
-        let config = match model {
-            AgentBrowserModel::Terra => {
+        let chosen = match &access {
+            AgentBrowserModelAccess::Chosen(chosen) => Some(chosen.clone()),
+            AgentBrowserModelAccess::Exact(_) => None,
+        };
+        let config = match (&chosen, model) {
+            (Some(chosen), _) => chosen
+                .try_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
+                .map_err(|_| AgentBrowserProviderError::Catalog)?,
+            (None, AgentBrowserModel::Terra) => {
                 try_terra_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
                     .map_err(|_| AgentBrowserProviderError::Catalog)?
             }
-            AgentBrowserModel::Luna => {
+            (None, AgentBrowserModel::Luna) => {
                 try_luna_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
                     .map_err(|_| AgentBrowserProviderError::Catalog)?
             }
-            AgentBrowserModel::Gpt6Luna => {
+            (None, AgentBrowserModel::Gpt6Luna) => {
                 try_gpt6_luna_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
                     .map_err(|_| AgentBrowserProviderError::Catalog)?
             }
+        };
+        // The objective was admitted as a byte bound; a chosen model counts
+        // it under its own label.
+        let objective = match &chosen {
+            Some(_) => objective
+                .try_relabel_conservative(config.tokenizer())
+                .map_err(|_| AgentBrowserProviderError::Catalog)?,
+            None => objective,
         };
         let config = config.restrict_to_locate_and_act();
         let config = match retention {
@@ -2199,7 +2242,8 @@ impl AgentBrowserSession {
             journal: None,
             journal_receipts: 0,
             transport,
-            credential: Some(credential),
+            access: Some(access),
+            chosen,
             attempt: None,
             retained_terminal: None,
             extraction_output: None,
@@ -2454,7 +2498,23 @@ impl AgentBrowserSession {
     fn next_model_call_request(
         &mut self,
     ) -> Result<AgentModelCallRequest, AgentBrowserProviderError> {
-        self.next_model_call_request_with_budget(browser_call_budget(self.model)?)
+        let budget = match &self.chosen {
+            Some(chosen) => chosen_call_budget(
+                chosen,
+                &self.policy,
+                self.lease.lease(),
+                self.config.max_output_tokens(),
+            )?,
+            None => browser_call_budget(self.model)?,
+        };
+        self.next_model_call_request_with_budget(budget)
+    }
+
+    /// Whether the page model accepts screenshots.
+    pub(crate) fn supports_vision(&self) -> bool {
+        self.chosen
+            .as_ref()
+            .is_none_or(zephium_agentic::AgentProviderModelClient::supports_vision)
     }
 
     fn next_model_call_request_with_budget(
@@ -2877,7 +2937,7 @@ impl AgentBrowserSession {
             let _ = input.cancel(&mut self.policy);
             return Err(AgentBrowserProviderError::Transport);
         }
-        let Some(credential) = self.credential.as_ref() else {
+        let Some(access) = self.access.as_ref() else {
             let _ = input.cancel(&mut self.policy);
             return Err(AgentBrowserProviderError::Cancelled);
         };
@@ -2885,10 +2945,19 @@ impl AgentBrowserSession {
             .turns
             .checked_add(1)
             .ok_or(AgentBrowserProviderError::TurnLimit)?;
+        let chosen = matches!(access, AgentBrowserModelAccess::Chosen(_));
         self.attempt = Some(
-            self.transport
-                .try_admit(input, &mut self.policy, credential, cancellation)
-                .map_err(|_| AgentBrowserProviderError::Transport)?,
+            match access {
+                AgentBrowserModelAccess::Exact(credential) => {
+                    self.transport
+                        .try_admit(input, &mut self.policy, credential, cancellation)
+                }
+                AgentBrowserModelAccess::Chosen(model) => {
+                    self.transport
+                        .try_admit_model(input, &mut self.policy, model, cancellation)
+                }
+            }
+            .map_err(|_| AgentBrowserProviderError::Transport)?,
         );
         if let Some(output) = output {
             let evidence = self
@@ -2912,6 +2981,71 @@ impl AgentBrowserSession {
                 .model_active(call)
                 .map_err(|_| AgentBrowserProviderError::Journal)?;
         }
+        let result = if chosen {
+            match tokio::time::timeout_at(
+                tokio::time::Instant::from_std(self.deadline),
+                self.attempt
+                    .as_mut()
+                    .ok_or(AgentBrowserProviderError::Transport)?
+                    .execute_model_client(|batch| {
+                        if self
+                            .extraction_output
+                            .as_mut()
+                            .is_some_and(|output| output.push_batch(batch).is_err())
+                        {
+                            AgentProviderBatchDisposition::Cancel
+                        } else {
+                            AgentProviderBatchDisposition::Continue
+                        }
+                    }),
+            )
+            .await
+            {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) | Err(_) => self
+                    .attempt
+                    .take()
+                    .ok_or(AgentBrowserProviderError::Transport)?
+                    .abort(AgentProviderAbortReason::HostDeadline)
+                    .map_err(|_| AgentBrowserProviderError::Transport)?,
+            }
+        } else {
+            self.drive_exact_attempt().await?
+        };
+        drop(self.attempt.take());
+        if let Some(facts) = result
+            .model_reply()
+            .filter(|facts| facts.dropped_tool_calls() != 0 || facts.dropped_text_bytes() != 0)
+        {
+            if let Some(journal) = &self.journal {
+                journal
+                    .emit(work::AgentWorkEventKind::ModelReplyTrimmed {
+                        dropped_tool_calls: facts.dropped_tool_calls(),
+                        dropped_text_bytes: facts.dropped_text_bytes(),
+                    })
+                    .map_err(|_| AgentBrowserProviderError::Journal)?;
+            }
+        }
+        let input = result.input_metric_receipt();
+        let disclosure = result.disclosure_stage();
+        let terminal = settle_browser_terminal(
+            result,
+            disclosure,
+            input,
+            self.model,
+            self.chosen.as_ref(),
+            &mut self.policy,
+            &mut self.retained_terminal,
+            &mut self.model_receipts,
+        );
+        self.record_model_receipts()?;
+        Ok((terminal?, input, provider_started.elapsed()))
+    }
+
+    /// Counts then drives one fixed-endpoint OpenAI attempt.
+    async fn drive_exact_attempt(
+        &mut self,
+    ) -> Result<AgentProviderTransportResult, AgentBrowserProviderError> {
         let counted = tokio::time::timeout_at(
             tokio::time::Instant::from_std(self.deadline),
             self.attempt
@@ -2965,20 +3099,7 @@ impl AgentBrowserSession {
                 .abort(AgentProviderAbortReason::HostDeadline)
                 .map_err(|_| AgentBrowserProviderError::Transport)?,
         };
-        drop(self.attempt.take());
-        let input = result.input_metric_receipt();
-        let disclosure = result.disclosure_stage();
-        let terminal = settle_browser_terminal(
-            result,
-            disclosure,
-            input,
-            self.model,
-            &mut self.policy,
-            &mut self.retained_terminal,
-            &mut self.model_receipts,
-        );
-        self.record_model_receipts()?;
-        Ok((terminal?, input, provider_started.elapsed()))
+        Ok(result)
     }
 
     /// Seals admission and returns all run owners, even when drain refuses.
@@ -3011,7 +3132,7 @@ impl AgentBrowserSession {
         self.cancellation.cancel();
         self.action_executions.seal();
         self.action_settlements.seal();
-        drop(self.credential.take());
+        drop(self.access.take());
         self.decisions.take();
         drop(self.objective.take());
         let mut close_failure = None;
@@ -3025,6 +3146,7 @@ impl AgentBrowserSession {
                         disclosure,
                         input,
                         self.model,
+                        self.chosen.as_ref(),
                         &mut self.policy,
                         &mut self.retained_terminal,
                         &mut self.model_receipts,
@@ -3786,6 +3908,7 @@ enum BrowserUnsettledTerminal {
     Immediate(AgentProviderImmediateSettlement),
     Terra(TerraProviderTerminalOwner),
     Luna(zephium_agent_model_catalog::LunaProviderTerminalOwner),
+    Chosen(Box<zephium_agentic::AgentProviderPricingSettlement>),
 }
 
 impl BrowserUnsettledTerminal {
@@ -3794,6 +3917,7 @@ impl BrowserUnsettledTerminal {
             Self::Immediate(value) => std::mem::size_of_val(value),
             Self::Terra(value) => std::mem::size_of_val(value),
             Self::Luna(value) => std::mem::size_of_val(value),
+            Self::Chosen(value) => std::mem::size_of_val(value.as_ref()),
         }
     }
 }
@@ -3891,11 +4015,60 @@ fn browser_call_budget(
     .map_err(|_| AgentBrowserProviderError::Catalog)
 }
 
+/// The largest call the lease can still afford on a chosen model: every input
+/// token at the highest input rate, the full output ceiling, and no more input
+/// than the model's pricing range.
+fn chosen_call_budget(
+    chosen: &zephium_agentic::AgentProviderModelClient,
+    policy: &AgentRunPolicy,
+    lease: zephium_agentic::AgentPlanLeaseId,
+    output: u32,
+) -> Result<AgentModelCallBudget, AgentBrowserProviderError> {
+    let cost = policy
+        .remaining_cost_micro_usd(lease)
+        .map_err(AgentBrowserProviderError::RequestPolicy)?;
+    let tokens = policy
+        .remaining_model_tokens(lease)
+        .map_err(AgentBrowserProviderError::RequestPolicy)?;
+    let affordable = |input: u64| {
+        chosen
+            .reservation_cost_micro_usd(input, u64::from(output))
+            .is_some_and(|reserved| reserved <= cost)
+    };
+    let (mut low, mut high) = (
+        0,
+        chosen
+            .max_input_tokens()
+            .min(tokens.saturating_sub(u64::from(output))),
+    );
+    if !affordable(low) {
+        return Err(AgentBrowserProviderError::RequestPolicy(
+            zephium_agentic::AgentPolicyError::Budget,
+        ));
+    }
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if affordable(middle) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    let reserved = chosen
+        .reservation_cost_micro_usd(low, u64::from(output))
+        .ok_or(AgentBrowserProviderError::Catalog)?;
+    let input = u32::try_from(low).map_err(|_| AgentBrowserProviderError::Catalog)?;
+    AgentModelCallBudget::try_new(input, output, reserved)
+        .map_err(AgentBrowserProviderError::RequestPolicy)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn settle_browser_result(
     result: AgentProviderTransportResult,
     disclosure: AgentProviderDisclosureStage,
     input: zephium_agentic::AgentProviderInputMetricReceipt,
     model: AgentBrowserModel,
+    chosen: Option<&zephium_agentic::AgentProviderModelClient>,
     policy: &mut AgentRunPolicy,
     retained: &mut Option<BrowserUnsettledTerminal>,
     receipts: &mut Vec<(
@@ -3903,8 +4076,9 @@ fn settle_browser_result(
         zephium_agentic::AgentProviderInputMetricReceipt,
     )>,
 ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
-    let terminal =
-        settle_browser_terminal(result, disclosure, input, model, policy, retained, receipts)?;
+    let terminal = settle_browser_terminal(
+        result, disclosure, input, model, chosen, policy, retained, receipts,
+    )?;
     let receipt = terminal.receipt();
     let turn = terminal
         .into_tool_turn()
@@ -3917,11 +4091,13 @@ fn settle_browser_result(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn settle_browser_terminal(
     result: AgentProviderTransportResult,
     disclosure: AgentProviderDisclosureStage,
     input: zephium_agentic::AgentProviderInputMetricReceipt,
     model: AgentBrowserModel,
+    chosen: Option<&zephium_agentic::AgentProviderModelClient>,
     policy: &mut AgentRunPolicy,
     retained: &mut Option<BrowserUnsettledTerminal>,
     receipts: &mut Vec<(
@@ -3969,8 +4145,19 @@ fn settle_browser_terminal(
             })
         }
         AgentProviderPolicySettlement::PricingRequired(settlement) => {
-            let terminal = match model {
-                AgentBrowserModel::Terra => {
+            let terminal = match (chosen, model) {
+                (Some(chosen), _) => match settle_chosen_terminal(*settlement, chosen, policy) {
+                    Ok(Ok(terminal)) => Box::new(terminal),
+                    Ok(Err(receipt)) => {
+                        receipts.push((receipt, input));
+                        return Err(AgentBrowserProviderError::Settlement);
+                    }
+                    Err(unsettled) => {
+                        *retained = unsettled.map(BrowserUnsettledTerminal::Chosen);
+                        return Err(AgentBrowserProviderError::Settlement);
+                    }
+                },
+                (None, AgentBrowserModel::Terra) => {
                     match settle_terra_provider_terminal(*settlement, policy).map_err(|error| {
                         *retained = error.into_retained().map(BrowserUnsettledTerminal::Terra);
                         AgentBrowserProviderError::Settlement
@@ -3982,7 +4169,7 @@ fn settle_browser_terminal(
                         }
                     }
                 }
-                AgentBrowserModel::Luna | AgentBrowserModel::Gpt6Luna => {
+                (None, AgentBrowserModel::Luna | AgentBrowserModel::Gpt6Luna) => {
                     let settle = if model == AgentBrowserModel::Luna {
                         settle_luna_provider_terminal
                     } else {
@@ -4004,6 +4191,30 @@ fn settle_browser_terminal(
             receipts.push((receipt, input));
             Ok(*terminal)
         }
+    }
+}
+
+/// Prices a chosen model's terminal on its own schedule. Usage that schedule
+/// cannot price is charged the reservation; a refused policy keeps the owner.
+#[allow(clippy::type_complexity)]
+fn settle_chosen_terminal(
+    settlement: zephium_agentic::AgentProviderPricingSettlement,
+    chosen: &zephium_agentic::AgentProviderModelClient,
+    policy: &mut AgentRunPolicy,
+) -> Result<
+    Result<zephium_agentic::AgentProviderSettledTerminal, AgentModelCallReceipt>,
+    Option<Box<zephium_agentic::AgentProviderPricingSettlement>>,
+> {
+    use zephium_agentic::AgentProviderPricingSettlementError as Refusal;
+    match settlement.settle(policy, chosen.schedule()) {
+        Ok(terminal) => Ok(Ok(terminal)),
+        Err(Refusal::Schedule { unsettled } | Refusal::TerminalPricing { unsettled, .. }) => {
+            unsettled
+                .settle_at_reservation_ceiling(policy)
+                .map(Err)
+                .map_err(|error| error.into_unsettled().map(Box::new))
+        }
+        Err(error) => Err(error.into_unsettled().map(Box::new)),
     }
 }
 
@@ -4395,7 +4606,7 @@ mod tests {
         let session = AgentBrowserSession::try_new_with_transport(
             input,
             BrowserSessionTransport(transport),
-            credential,
+            credential.into(),
             AgentBrowserModel::Luna,
             AgentBrowserRetention::Stateless,
         )
@@ -4481,7 +4692,7 @@ mod tests {
     async fn decision_turns_do_not_impersonate_or_replay_the_initial_openai_turn() {
         let (mut session, observation) = browser_fixture();
         session.turns = 2;
-        session.credential.take();
+        session.access.take();
         assert_eq!(
             session.start_initial(&observation).await.err(),
             Some(AgentBrowserProviderError::Cancelled)
@@ -4782,7 +4993,7 @@ mod tests {
         assert_eq!(session.policy.pending_model_calls(), 0);
         assert!(!format!("{session:?}").contains("Prepare a fixture"));
         let terminal = session.try_finish().expect("drained");
-        assert!(terminal.session.credential.is_none());
+        assert!(terminal.session.access.is_none());
         assert_eq!(terminal.accounting().reserved_model_tokens(), 0);
     }
 
@@ -4811,7 +5022,7 @@ mod tests {
                     AgentBrowserProviderError::Deadline
                 }
                 _ => {
-                    session.credential.take();
+                    session.access.take();
                     AgentBrowserProviderError::Cancelled
                 }
             };

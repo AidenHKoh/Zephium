@@ -236,7 +236,8 @@ impl AgentBrowserSession {
         let fallback = projection
             .route(primary)
             .map_err(|_| AgentBrowserProviderError::Authority)?;
-        let can_emulate = self.has_decision_capacity()?;
+        let can_emulate = self.has_decision_capacity()?
+            && matches!(self.access, Some(AgentBrowserModelAccess::Exact(_)));
         if fallback.projection().is_some() {
             if let Some(journal) = &self.journal {
                 journal
@@ -254,10 +255,9 @@ impl AgentBrowserSession {
                 .decisions
                 .as_ref()
                 .ok_or(AgentBrowserProviderError::Authority)?;
-            let credential = self
-                .credential
-                .as_ref()
-                .ok_or(AgentBrowserProviderError::Cancelled)?;
+            let Some(AgentBrowserModelAccess::Exact(credential)) = self.access.as_ref() else {
+                return Err(AgentBrowserProviderError::Cancelled);
+            };
             let client =
                 OpenAiDecisionCall::try_new(&self.transport, credential, &decisions.emulation)
                     .map_err(|_| AgentBrowserProviderError::Catalog)?;
@@ -269,10 +269,9 @@ impl AgentBrowserSession {
                 .decisions
                 .as_ref()
                 .ok_or(AgentBrowserProviderError::Authority)?;
-            let credential = self
-                .credential
-                .as_ref()
-                .ok_or(AgentBrowserProviderError::Cancelled)?;
+            let Some(AgentBrowserModelAccess::Exact(credential)) = self.access.as_ref() else {
+                return Err(AgentBrowserProviderError::Cancelled);
+            };
             let client =
                 OpenAiDecisionCall::try_new(&self.transport, credential, &decisions.emulation)
                     .map_err(|_| AgentBrowserProviderError::Catalog)?;
