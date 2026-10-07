@@ -352,6 +352,16 @@ pub trait AgentWorkTask: Send {
     fn app_view(&self, _: &SemanticObservation) -> Option<SemanticReferenceId> {
         None
     }
+    /// A search engine's results page is read by the task from its whole
+    /// first look and ends there: no model ever sees it.
+    fn reads_results_page(&self) -> bool {
+        false
+    }
+    /// The nodes each result the task read is cited to, or the one node
+    /// that stood in the way of results.
+    fn results_page(&self, _: &SemanticObservation) -> Vec<Vec<SemanticReferenceId>> {
+        Vec::new()
+    }
     /// Supplies independently sourced current account facts for this exact
     /// context. Called at startup and before each provider/effect admission,
     /// including nonterminal inspection and extraction mapping. It must be
@@ -2763,6 +2773,10 @@ impl AgentWorkController {
         } else {
             Self::fit_model_observation(observation)?
         };
+        // The task reads its own walls: a challenge is not waited out here.
+        if state.task.reads_results_page() {
+            return Box::pin(Self::read_results_page(state, worker, browser, observation)).await;
+        }
         let (mut observation, challenged) =
             Self::settle_human_challenge(state, worker, browser, observation).await?;
         if challenged {
@@ -3559,6 +3573,47 @@ impl AgentWorkController {
             look = Box::pin(Self::observe(state, worker, browser)).await?;
         }
         Ok(None)
+    }
+
+    /// A results page read as the task cites it: its results, or what stood
+    /// in their way, as a findings list with no model call.
+    async fn read_results_page(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        look: SemanticObservation,
+    ) -> Result<(), AgentWorkFailure> {
+        let schema = state
+            .extraction_schema
+            .clone()
+            .ok_or(AgentWorkFailure::Contract)?;
+        let cited = state.task.results_page(&look);
+        state.refresh_account(worker, browser)?;
+        let captured_at = SemanticCaptureInstant::from_millis(
+            state
+                .journal_mut()?
+                .clock
+                .now()
+                .map_err(|_| AgentWorkFailure::Contract)?
+                .millis(),
+        );
+        let account = state
+            .session
+            .as_ref()
+            .ok_or(AgentWorkFailure::Contract)?
+            .account;
+        let located =
+            zephium_agentic::read_cited_rows(&look, account, captured_at, &schema, &cited)
+                .ok_or(AgentWorkFailure::Contract)?;
+        state.task_progress(&look)?;
+        state.journal_mut()?.emit(AgentWorkEventKind::RowRead {
+            found: u8::try_from(located.rows_read()).unwrap_or(u8::MAX),
+            cells: false,
+            refused: None,
+        })?;
+        Box::pin(Self::finish_located_read(state, worker, browser, located)).await?;
+        state.observation = Some(look);
+        Ok(())
     }
 
     /// Presses a view's control as a read and waits for its list: a view

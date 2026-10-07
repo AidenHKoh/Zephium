@@ -82,6 +82,16 @@ pub trait AgentWorkLocalActionPolicy: Send {
         None
     }
 
+    /// A search engine's results page is read by this policy from the
+    /// whole first look, with no model call.
+    fn reads_results_page(&self) -> bool {
+        false
+    }
+    /// The nodes each result is cited to, or the node that stood in the way.
+    fn results_page(&self, _: &SemanticObservation) -> Vec<Vec<SemanticReferenceId>> {
+        Vec::new()
+    }
+
     /// Narrows the model effect vocabulary when the assignment has one effect.
     fn model_action_effect(&self) -> Option<SemanticEffectClass> {
         None
@@ -232,6 +242,17 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         self.local_actions
             .as_ref()
             .and_then(|policy| policy.app_view(observation))
+    }
+    fn reads_results_page(&self) -> bool {
+        self.local_actions
+            .as_ref()
+            .is_some_and(|policy| policy.reads_results_page())
+    }
+    fn results_page(&self, observation: &SemanticObservation) -> Vec<Vec<SemanticReferenceId>> {
+        self.local_actions
+            .as_ref()
+            .map(|policy| policy.results_page(observation))
+            .unwrap_or_default()
     }
 
     fn allows_baseline_read(&self) -> bool {
