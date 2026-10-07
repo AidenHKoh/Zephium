@@ -143,6 +143,7 @@
   const fixedTimeout = globalThis.setTimeout;
   const fixedClearTimeout = globalThis.clearTimeout;
   const nativeInputEvent = globalThis.InputEvent;
+  const nativeEvent = globalThis.Event;
   const fixedDispatchEvent = EventTarget.prototype.dispatchEvent;
   const inputValueSetter = setter(HTMLInputElement.prototype, "value");
   const textareaValueSetter = setter(HTMLTextAreaElement.prototype, "value");
@@ -3370,14 +3371,15 @@
     }
     try {
       write(selectIndexSetter, target, desired);
+      if (read(selectIndexGetter, target) !== desired) return "applied_unverified";
+      // A person's choice fires input then change; sort and filter menus act
+      // on them, and a write alone leaves the page's own state unchanged.
+      apply(fixedDispatchEvent, target, [new nativeEvent("input", { bubbles: true, composed: true })]);
+      apply(fixedDispatchEvent, target, [new nativeEvent("change", { bubbles: true })]);
     } catch (_) {
       return "applied_unverified";
     }
-    try {
-      return read(selectIndexGetter, target) === desired ? "ok" : "applied_unverified";
-    } catch (_) {
-      return "applied_unverified";
-    }
+    return "ok";
   }
 
   function encodeActionEvidence(request, backend, readiness, geometry, viewport, point, delta) {

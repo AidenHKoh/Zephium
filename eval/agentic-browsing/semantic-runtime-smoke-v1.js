@@ -1180,6 +1180,11 @@ async function finish() {
     of: descriptorFor(germanNode)
   });
   document._hit = languageSelect;
+  const selectEvents = [];
+  for (const type of ["input", "change"]) {
+    languageSelect.addEventListener(type, (event) => selectEvents.push(
+      `${event.type}:${event.bubbles}:${event.isTrusted}`));
+  }
   const selectSuccess = JSON.parse(runtime.invoke(selectRequest(29)));
   assert(
     selectSuccess.a === 29 && selectSuccess.d === 1 &&
@@ -1187,11 +1192,16 @@ async function finish() {
       germanOption.selected,
     "fixed native-select execution evidence mismatch"
   );
+  assert(
+    JSON.stringify(selectEvents) === '["input:true:false","change:true:false"]',
+    "native selection did not tell the page as a person's choice does"
+  );
+  selectEvents.length = 0;
   languageSelect._selectedIndex = 0;
   languageSelect._rewriteAfterSet = true;
   assert(
     runtime.invoke(selectRequest(30)) === "E2:applied_unverified" &&
-      languageSelect._selectedIndex === 0,
+      languageSelect._selectedIndex === 0 && selectEvents.length === 0,
     "page-rewritten native selection remained retryable"
   );
   languageSelect._rewriteAfterSet = false;
@@ -2506,6 +2516,7 @@ async function finish() {
     fixed_action_execution: true,
     fixed_fill_execution: true,
     fixed_select_execution: true,
+    select_change_events: true,
     document_parent_option_brand_guard: true,
     select_rewrite_nonretryable: true,
     fill_native_primitives_captured: true,
