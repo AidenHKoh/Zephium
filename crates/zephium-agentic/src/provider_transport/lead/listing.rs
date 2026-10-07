@@ -311,7 +311,7 @@ fn row_entry(
     })
 }
 
-// Official deprecation notices, checked 2026-09-30. Aliases and snapshots
+// Official deprecation notices, checked 2026-10-07. Aliases and snapshots
 // sharing a retired family are hidden from the full listing as well.
 fn deprecated(provider: WorkModelProvider, id: &str) -> bool {
     let (provider, id) = if provider == WorkModelProvider::OpenRouter {
@@ -341,16 +341,29 @@ fn deprecated(provider: WorkModelProvider, id: &str) -> bool {
                 "o3-2025",
                 "o3-pro",
                 "gpt-5.4-cyber",
+                "gpt-5-chat",
+                "gpt-5.1-chat",
+                "gpt-5.1-2",
+                "gpt-5.4-nano",
+                "o1-",
+                "o3-mini",
+                "o4-mini",
             ]
             .iter()
             .any(|prefix| id.starts_with(prefix))
-                || matches!(id, "gpt-4" | "gpt-5" | "o3")
+                || matches!(id, "gpt-4" | "gpt-5" | "gpt-5.1" | "o1" | "o3")
         }
         // https://platform.claude.com/docs/en/about-claude/model-deprecations
         WorkModelProvider::Anthropic => {
-            ["claude-1.", "claude-2.", "claude-instant-", "claude-3-"]
-                .iter()
-                .any(|prefix| id.starts_with(prefix))
+            [
+                "claude-1.",
+                "claude-2.",
+                "claude-instant-",
+                "claude-3-",
+                "claude-sonnet-4-5",
+            ]
+            .iter()
+            .any(|prefix| id.starts_with(prefix))
                 || matches!(
                     id,
                     "claude-mythos-preview"
@@ -366,6 +379,9 @@ fn deprecated(provider: WorkModelProvider, id: &str) -> bool {
                     id,
                     "gemini-2.0-flash"
                         | "gemini-2.0-flash-001"
+                        | "gemini-2.0-flash-lite"
+                        | "gemini-2.0-flash-lite-001"
+                        | "gemini-3.1-flash-lite"
                         | "gemini-3-pro-preview"
                         | "gemini-3.1-flash-lite-preview"
                         | "gemini-3.1-flash-image-preview"
@@ -433,10 +449,23 @@ mod tests {
             (P::OpenAi, "gpt-3.5-turbo"),
             (P::Anthropic, "claude-opus-4-1-20250805"),
             (P::Google, "gemini-3-pro-preview"),
+            (P::OpenAi, "o4-mini-2025-04-16"),
+            (P::OpenAi, "o1"),
+            (P::OpenAi, "gpt-5.1"),
+            (P::Anthropic, "claude-sonnet-4-5-20250929"),
+            (P::Google, "gemini-3.1-flash-lite"),
+            (P::OpenRouter, "openai/o3-mini"),
         ] {
-            assert!(super::deprecated(provider, id));
+            assert!(super::deprecated(provider, id), "{id}");
         }
-        assert!(!super::deprecated(P::Google, "gemini-2.5-pro"));
+        for (provider, id) in [
+            (P::Google, "gemini-2.5-pro"),
+            (P::OpenAi, "gpt-5.1-codex"),
+            (P::OpenAi, "gpt-4.1-mini"),
+            (P::Anthropic, "claude-opus-4-5-20251101"),
+        ] {
+            assert!(!super::deprecated(provider, id), "{id}");
+        }
     }
 
     use super::*;

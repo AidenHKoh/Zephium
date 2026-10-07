@@ -1059,7 +1059,7 @@ mod tests {
                 .unwrap()
                 .model
                 .model,
-            "deepseek-v4-pro"
+            "deepseek-flash"
         );
         assert!(ready(other).await);
         with_keys(&[P::OpenRouter]);
