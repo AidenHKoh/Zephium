@@ -66,6 +66,7 @@ pub use work::{
 };
 
 mod about;
+mod account;
 mod blocker_service;
 mod browser_credentials;
 mod browser_import;
@@ -1538,6 +1539,19 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_models::work_clear_provider_key,
             work_models::work_set_model_endpoint,
             work_models::work_more_models,
+            account::account_get,
+            account::account_send_code,
+            account::account_verify,
+            account::account_cancel_code,
+            account::account_sign_out,
+            account::account_refresh,
+            account::account_buy,
+            account::account_manage,
+            account::account_sessions,
+            account::account_revoke_session,
+            account::account_set_server,
+            account::account_deletion_code,
+            account::account_delete,
             work_sites::work_sites,
             work_sites::work_set_site,
             work_connections::work_connections,
@@ -1675,6 +1689,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             WorkHumanChanged,
             WorkDecisionPreferenceChanged,
             work_models::WorkModelsChanged,
+            account::AccountChanged,
             ItemsChanged,
             FaviconsChanged,
             ResourceChanged,
@@ -5490,6 +5505,7 @@ pub fn run() {
                 })?;
                 updates::schedule_native_checks(app.handle());
                 work_models::install(app.handle());
+                account::install(app.handle());
 
                 #[cfg(target_os = "windows")]
                 let privileged_runtime = prepare_privileged_runtime_directories(&data_dir)?;

@@ -72,6 +72,26 @@ export const commands = {
 	workClearProviderKey: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_clear_provider_key", { expectedProfile, provider }),
 	workSetModelEndpoint: (expectedProfile: string, base: string | null) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_set_model_endpoint", { expectedProfile, base }),
 	workMoreModels: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkMoreModelsV1_Serialize>("work_more_models", { expectedProfile, provider }),
+	/**  The account now, refreshing what is stale in the background. */
+	accountGet: () => __TAURI_INVOKE<AccountReplyV1>("account_get"),
+	accountSendCode: (email: string) => __TAURI_INVOKE<AccountReplyV1>("account_send_code", { email }),
+	accountVerify: (code: string) => __TAURI_INVOKE<AccountReplyV1>("account_verify", { code }),
+	accountCancelCode: () => __TAURI_INVOKE<AccountReplyV1>("account_cancel_code"),
+	accountSignOut: () => __TAURI_INVOKE<AccountReplyV1>("account_sign_out"),
+	accountRefresh: () => __TAURI_INVOKE<AccountReplyV1>("account_refresh"),
+	/**
+	 *  Opens the billing provider's checkout in a new tab and watches for the
+	 *  purchase to land, so the plan updates without the person coming back.
+	 */
+	accountBuy: (purchase: AccountPurchaseV1) => typedError<AccountReplyV1, null>(__TAURI_INVOKE("account_buy", { purchase })),
+	/**  Opens the billing provider's portal, where the subscription is managed. */
+	accountManage: () => typedError<AccountReplyV1, null>(__TAURI_INVOKE("account_manage")),
+	accountSessions: () => __TAURI_INVOKE<AccountSessionsV1>("account_sessions"),
+	accountRevokeSession: (id: string) => __TAURI_INVOKE<AccountReplyV1>("account_revoke_session", { id }),
+	/**  Points accounts at another server, or back at Zephium's with null. */
+	accountSetServer: (server: string | null) => __TAURI_INVOKE<AccountReplyV1>("account_set_server", { server }),
+	accountDeletionCode: () => __TAURI_INVOKE<AccountReplyV1>("account_deletion_code"),
+	accountDelete: (code: string) => __TAURI_INVOKE<AccountReplyV1>("account_delete", { code }),
 	workSites: (expectedProfile: string) => __TAURI_INVOKE<WorkSiteAccessResponseV1>("work_sites", { expectedProfile }),
 	workSetSite: (expectedProfile: string, change: WorkSiteChangeV1) => __TAURI_INVOKE<WorkSiteAccessResponseV1>("work_set_site", { expectedProfile, change }),
 	/**  The tools found on this Mac and the servers this profile added. */
@@ -424,6 +444,7 @@ export const events = {
 	webExtensionAccessRequested: makeEvent<WebExtensionAccessRequested>("web-extension-access-requested"),
 	workChanged: makeEvent<WorkChanged>("work-changed"),
 	workEnvironmentChanged: makeEvent<WorkEnvironmentChanged>("work-environment-changed"),
+	zephiumAccountChanged: makeEvent<AccountChanged>("zephium:account-changed"),
 	zephiumImportProgress: makeEvent<ImportJobView>("zephium:import-progress"),
 	zephiumKeymapChanged: makeEvent<KeymapChanged>("zephium:keymap-changed"),
 	zephiumWorkDecisionPreferenceChanged: makeEvent<WorkDecisionPreferenceChanged>("zephium:work-decision-preference-changed"),
@@ -437,6 +458,99 @@ export type AboutInfo = {
 	/**  Product name and version, such as "macOS 26.1.0". */
 	os: string,
 	arch: string,
+};
+
+/**  The account changed; read it again. */
+export type AccountChanged = {
+	version: number,
+};
+
+export type AccountFaultV1 = "offline" | 
+/**  The session ended; sign in again. */
+"signed_out" | "rate_limited" | "invalid_code" | "signup_closed" | 
+/**  The service, or the part asked for, is off. */
+"unavailable" | 
+/**  Nothing has been bought, so there is nothing to manage. */
+"no_billing_account" | "server" | 
+/**  The Keychain or Credential Manager refused. */
+"vault" | "invalid";
+
+export type AccountNoticeV1 = {
+	id: string,
+	text: string,
+	warning: boolean,
+};
+
+export type AccountOfferV1 = { kind: "plan"; plan: string; interval: string; name: string | null; price: AccountPriceV1 | null; features: string[] } | { kind: "top_up"; id: string; price: AccountPriceV1 | null; expires_days: number | null };
+
+export type AccountPriceV1 = {
+	/**  In the currency's minor unit, as the billing provider states it. */
+	amount_minor: number,
+	currency: string,
+};
+
+export type AccountPurchaseV1 = { kind: "plan"; plan: string; interval: string } | { kind: "top_up"; id: string };
+
+export type AccountReplyV1 = {
+	account: AccountV1,
+	fault: AccountFaultV1 | null,
+	/**  Seconds to wait before trying again, with `rate_limited`. */
+	retry_after: number | null,
+};
+
+export type AccountSessionV1 = {
+	id: string,
+	device: string | null,
+	created_at: string | null,
+	last_used_at: string | null,
+	current: boolean,
+};
+
+export type AccountSessionsV1 = {
+	sessions: AccountSessionV1[],
+	fault: AccountFaultV1 | null,
+};
+
+export type AccountSubscriptionV1 = {
+	/**  `active`, `inactive` or `unknown`. */
+	status: string,
+	interval: string | null,
+	paid_until: string | null,
+	cancel_at_period_end: boolean,
+};
+
+export type AccountUsageV1 = {
+	/**  Share of the plan's allowance used, 0–100; null without an allowance. */
+	used_percent: number | null,
+	/**  When the allowance renews, as the server states it (ISO 8601). */
+	resets_at: string | null,
+	/**  Bought usage remains beyond the plan's allowance. */
+	extra: boolean,
+};
+
+export type AccountV1 = {
+	version: number,
+	/**  Accounts work on this platform and build. */
+	available: boolean,
+	server: string,
+	custom_server: boolean,
+	/**  What the server offers; null until it has answered once. */
+	hosted_models: boolean | null,
+	billing: boolean | null,
+	signup_open: boolean | null,
+	signed_in: boolean,
+	/**  The address a sign-in code was sent to, while waiting for it. */
+	pending_email: string | null,
+	resend_in: number | null,
+	email: string | null,
+	name: string | null,
+	plan: string | null,
+	usage: AccountUsageV1 | null,
+	subscription: AccountSubscriptionV1 | null,
+	offers: AccountOfferV1[],
+	/**  A checkout was opened and is being watched for completion. */
+	checkout_open: boolean,
+	notice: AccountNoticeV1 | null,
 };
 
 /**

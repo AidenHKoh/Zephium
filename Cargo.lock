@@ -7490,6 +7490,7 @@ dependencies = [
  "x11rb",
  "xkeysym",
  "zbus",
+ "zephium-account",
  "zephium-agent-controller",
  "zephium-agent-model-catalog",
  "zephium-agent-provider-transport",
