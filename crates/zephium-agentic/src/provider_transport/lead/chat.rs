@@ -154,7 +154,12 @@ pub(super) fn body(
             body.insert("parallel_tool_calls".into(), json!(false));
         }
     }
-    match (upstream, request.reasoning) {
+    // DeepSeek's thinking mode does not take a forced tool.
+    let forced = !request.tools.is_empty() && request.tool_choice != WorkModelToolChoice::Auto;
+    let reasoning = request
+        .reasoning
+        .filter(|_| !(forced && upstream == WorkModelProvider::DeepSeek));
+    match (upstream, reasoning) {
         (WorkModelProvider::DeepSeek, None) => {
             body.insert("thinking".into(), json!({"type": "disabled"}));
         }

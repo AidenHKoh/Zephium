@@ -629,6 +629,9 @@ fn every_wire_forces_the_tool_it_is_told_to() {
         body["tool_choice"],
         json!({"type": "function", "function": {"name": "web_fetch"}})
     );
+    // DeepSeek's thinking mode does not take a forced tool.
+    assert_eq!(body["thinking"], json!({"type": "disabled"}));
+    assert!(body.get("reasoning_effort").is_none());
 
     let mut required = request(WorkModelWire::AnthropicMessages, "claude-sonnet-5-5");
     required.tool_choice = WorkModelToolChoice::Required;
