@@ -11,9 +11,20 @@ const WIRE: &str = "anthropic";
 const MAX_BREAKPOINTS: usize = 4;
 const SEARCH_MAX_USES: u32 = 8;
 
-/// Models before adaptive thinking take a token budget instead of effort.
+/// Models before adaptive thinking take a token budget instead of effort;
+/// they refuse `adaptive`, and every newer model refuses a budget.
 fn budget_thinking(model: &str) -> bool {
-    model.starts_with("claude-haiku-4") || model.starts_with("claude-3")
+    [
+        "claude-3",
+        "claude-haiku-4",
+        "claude-opus-4-5",
+        "claude-sonnet-4-5",
+        "claude-opus-4-1",
+        "claude-opus-4-2025",
+        "claude-sonnet-4-2025",
+    ]
+    .iter()
+    .any(|prefix| model.starts_with(prefix))
 }
 
 /// Dynamic-filtering search needs a current model; others keep the basic tool.

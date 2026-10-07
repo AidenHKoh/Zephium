@@ -279,6 +279,18 @@ fn anthropic_streams_thinking_search_and_parallel_tool_use() {
         json!({"type": "enabled", "budget_tokens": 3_072})
     );
     assert_eq!(haiku["tools"][1]["type"], "web_search_20250305");
+
+    // Listed 4.5 models refuse adaptive thinking; 4.6 and later refuse a budget.
+    for (model, budget) in [
+        ("claude-sonnet-4-5-20250929", true),
+        ("claude-opus-4-5-20251101", true),
+        ("claude-opus-4-6", false),
+        ("claude-sonnet-5-5", false),
+    ] {
+        let body =
+            anthropic::body(&request(WorkModelWire::AnthropicMessages, model), &target).unwrap();
+        assert_eq!(body["thinking"]["type"] == "enabled", budget, "{model}");
+    }
 }
 
 #[test]
