@@ -20,9 +20,10 @@ const run = (lines: string[]): Block =>
 function steps(line: string): string[] {
   if (!/^\s*1[.)]\s/u.test(line)) return [line];
   const parts = line.split(/\s+(?=\d{1,3}[.)]\s)/u);
-  return parts.length > 1 && parts.every((part, index) => part.startsWith(`${index + 1}`))
-    ? parts
-    : [line];
+  const counted = parts.every((part, index) => part.startsWith(`${index + 1}`));
+  // Each step but the last ends its sentence, so "costs 2. dollars" stays a sentence.
+  const ended = parts.slice(0, -1).every((part) => /[.!?;:)]$/u.test(part.trimEnd()));
+  return parts.length > 1 && counted && ended ? parts : [line];
 }
 
 export function blocks(markdown: string): Block[] {
