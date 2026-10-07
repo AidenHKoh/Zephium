@@ -179,7 +179,40 @@ impl Shell {
         self.project_blocker_status();
         if let Some(snapshot) = self.items_snapshot() {
             self.publish_icons();
+            if self.items_already_offered(&snapshot) {
+                return;
+            }
             (self.emit)(Projection::Items(snapshot));
+        }
+    }
+
+    /// Every committed action used to resend the whole sidebar, though many
+    /// change nothing in it. Only the revision differs between equal
+    /// snapshots; a tab's own changes in between arrived as its deltas, and
+    /// the snapshot after one differs from the last offered.
+    fn items_already_offered(&self, snapshot: &ItemsState) -> bool {
+        let Ok(mut last) = self.presentation.last_items.try_borrow_mut() else {
+            return false;
+        };
+        let same = last.as_ref().is_some_and(|offered| {
+            offered.profile == snapshot.profile
+                && offered.spaces == snapshot.spaces
+                && offered.active_space_id == snapshot.active_space_id
+                && offered.nodes == snapshot.nodes
+                && offered.tabs == snapshot.tabs
+                && offered.active == snapshot.active
+                && offered.split_group == snapshot.split_group
+        });
+        if !same {
+            *last = Some(snapshot.clone());
+        }
+        same
+    }
+
+    /// Chrome lost what it held (its document reloaded): the next snapshot goes out whole.
+    pub(super) fn forget_offered_items(&self) {
+        if let Ok(mut last) = self.presentation.last_items.try_borrow_mut() {
+            *last = None;
         }
     }
 

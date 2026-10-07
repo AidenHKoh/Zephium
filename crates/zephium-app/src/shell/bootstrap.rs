@@ -22,6 +22,7 @@ impl Shell {
         if self.windows.focused().is_some() {
             let _ = self.relayout();
             self.forget_delivered_icons(zephium_ipc::IconSurface::Chrome);
+            self.forget_offered_items();
             self.project_items();
             self.project_browser_page();
             self.resume_focus();

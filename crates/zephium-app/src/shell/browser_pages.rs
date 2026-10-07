@@ -260,6 +260,8 @@ impl Shell {
         let Some(items) = self.items_snapshot() else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         };
+        // Chrome is handed this snapshot outside the ordinary projection.
+        self.forget_offered_items();
         let Some((window, splits)) = self.windows.focused().map(|w| (w.id, w.splits.clone()))
         else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
