@@ -7,6 +7,11 @@ page-world fill shim. This path neither synthesizes trusted OS input nor grants
 page activation. Select writes the native index through the captured setter, checks it,
 then dispatches untrusted bubbling `input` and `change` events, as a person's
 choice does: sort and filter menus act on those events, never on the write.
+A custom listbox (ARIA `listbox` with `option` children) is chosen as a person
+chooses: the visible, enabled option inside it is hit-tested and clicked, and
+the choice counts only when that option then reads as selected. A list that
+closes as it is chosen ends `applied_unverified`; the site prompt steers such
+dropdowns to a click on the option with `page_changed` verification.
 Fill on a text field ends as a person's edit does: `input`, then `change`,
 then (for a plain text box that does not hold focus) `blur` and `focusout`;
 a combobox or search box keeps its suggestions open. Typed fields are filled

@@ -1143,7 +1143,7 @@ async function finish() {
   button._children = savedButtonChildren;
   assert(runtime.invoke(`{"padding":"${"x".repeat(17800)}"}`) === "E1:invalid_request", "oversize action request accepted");
 
-  const roleCodes = Object.freeze({textbox: 8, searchbox: 10, combobox: 13, option: 15, spinbutton: 16});
+  const roleCodes = Object.freeze({textbox: 8, searchbox: 10, combobox: 13, listbox: 14, option: 15, spinbutton: 16});
   const descriptorFor = (node) => ({
     r: roleCodes[node.r],
     o: node.o || 0,
@@ -2627,6 +2627,41 @@ async function finish() {
     assert(runtime.invoke(JSON.stringify(scroll)) === "E1:invalid_request", "a scroll accepted a settle ceiling");
   }
 
+  for (const mode of ["stays", "closes"]) {
+    // A custom listbox is chosen by its option, which must read as selected.
+    const root = new Element("main");
+    const list = root.append(new Element("div", { role: "listbox", "aria-label": "Sort by" }));
+    const options = ["Relevance", "Price"].map((name, index) => {
+      const option = list.append(new Element("div", { role: "option", "aria-selected": index === 0 ? "true" : "false" }));
+      option.append(new CharacterData(name));
+      option.rect = { x: 10, y: 10 + index * 40, width: 160, height: 32 };
+      option._onClick = () => {
+        if (mode === "closes") { root._children.values = []; setOwner(list, null); return; }
+        for (const other of options) other.attributes["aria-selected"] = other === option ? "true" : "false";
+      };
+      return option;
+    });
+    list.rect = { x: 10, y: 10, width: 160, height: 72 };
+    document._root = root; root._parent = document; setOwner(root, document); document._active = null;
+    const generation = 980 + (mode === "closes" ? 2 : 0);
+    const look = JSON.parse(invoke(generation, generation, { k: "initial" }));
+    const listNode = look.n.find(node => node.r === "listbox");
+    const priceNode = look.n.find(node => node.r === "option" && (node.n === "Price" || node.t === "Price"));
+    assert(listNode && (listNode.o & 4) && priceNode, "custom listbox or its option missing");
+    document._hit = options[1];
+    const request = JSON.stringify({ v: 1, o: "action_execute", a: generation, i: generation, g: generation,
+      t: listNode.k, r: "listbox", k: "select", e: { x: 10, y: 10, w: 160, h: 72 }, p: priceNode.k, z: null,
+      f: descriptorFor(listNode), of: descriptorFor(priceNode) });
+    const result = runtime.invoke(request);
+    if (mode === "stays") {
+      assert(!result.startsWith("E") && options[1]._fixedClickCount === 1 &&
+        options[1].attributes["aria-selected"] === "true", `custom listbox choice failed: ${result}`);
+    } else {
+      assert(result === "E2:applied_unverified" && options[1]._fixedClickCount === 1,
+        `a closing listbox claimed a verified choice: ${result}`);
+    }
+  }
+
   {
     // A look that would outlast the host's budget stops early and says so.
     const root = new Element("main");
@@ -2683,6 +2718,7 @@ async function finish() {
     rerendered_target_rebound: true,
     bounded_settle_quiet: true,
     bounded_look_time: true,
+    custom_listbox_choice: true,
     document_parent_option_brand_guard: true,
     select_rewrite_nonretryable: true,
     fill_native_primitives_captured: true,

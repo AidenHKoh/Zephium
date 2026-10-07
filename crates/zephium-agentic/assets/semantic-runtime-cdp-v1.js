@@ -3312,7 +3312,9 @@ const optionDescriptor = runtimeDescriptor(option, request.g);
 if (!descriptorMatches(request.of, optionDescriptor)) {
 return actionFault("target_changed");
 }
-const computed = selectDelta(target, option);
+const computed = tagName(target) === "select" ? selectDelta(target, option)
+: classify(option)?.role === "option" && option !== target && composedContains(target, option) &&
+!disabledState(option, false) && elementRect(option) !== null ? 0 : null;
 if (computed === null) return actionFault("target_changed");
 delta = computed;
 }
@@ -3449,6 +3451,21 @@ return finishFill(result);
 return actionFault("applied_unverified_postcondition");
 }
 } else if (request.k === "select") {
+if (tagName(target) !== "select") {
+const optionRect = elementRect(selectedOption);
+const optionPoint = optionRect === null ? null : actionPoint(selectedOption, optionRect, viewport);
+if (optionPoint === null) return actionFault("target_occluded");
+try {
+pointerDown(selectedOption, optionPoint);
+apply(htmlElementClick, selectedOption, []);
+} catch (_) {
+return actionFault("applied_unverified");
+}
+const chosen = resolveKeyAtGeneration(request.p, request.g) === selectedOption
+? runtimeDescriptor(selectedOption, request.g) : null;
+if (!descriptorMatchesSelectedOption(request.of, chosen)) return actionFault("applied_unverified");
+return encodeActionEvidence(request, "fixed_semantic_recipe", readiness, geometry, viewport, point, delta);
+}
 const desired = read(optionIndexGetter, selectedOption);
 const result = runFixedSelect(target, desired);
 if (result !== "ok") return actionFault(result);
