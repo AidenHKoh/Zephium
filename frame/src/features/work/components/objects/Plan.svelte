@@ -14,7 +14,16 @@
     Tick02Icon,
   } from "./icons";
   /** Steps in time along one spine: when, what, what it costs, and the pick it stands on. */
-  let { object, actions = {} }: { object: PlanView; actions?: ObjectActions } = $props();
+  let {
+    object,
+    actions = {},
+    centre = false,
+  }: {
+    object: PlanView;
+    actions?: ObjectActions;
+    /** Opened in the centre, where the header makes the tasks. */
+    centre?: boolean;
+  } = $props();
   const GLYPH = {
     travel: AirplaneTakeOff01Icon,
     stay: BedDoubleIcon,
@@ -88,7 +97,7 @@
         >
       </p>
     {/if}
-    {#if object.checkable}<footer><MakeTasks id={object.id} /></footer>{/if}
+    {#if object.checkable && !centre}<footer><MakeTasks id={object.id} /></footer>{/if}
   </div>
 </section>
 

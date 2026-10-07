@@ -11,31 +11,19 @@
   import { runTimeline, type TimelineGlyph } from "../../lib/run-timeline";
   import type { TrailIcon, TrailLine } from "../../lib/board/trail";
   import type { ObjectKind } from "../../lib/board/types";
+  import { objectIcon } from "../../lib/object-kind";
   import {
     AccountSetting01Icon,
     Alert02Icon,
     ArrowRight01Icon,
     BrowserIcon,
-    ChartColumnIcon,
-    CheckListIcon,
     Clock01Icon,
     ComputerTerminal01Icon,
-    CubeIcon,
-    Doc01Icon,
     File01Icon,
-    Folder01Icon,
-    GitCompareIcon,
     HelpCircleIcon,
-    Image01Icon,
-    LayoutGridIcon,
     Message01Icon,
-    Note01Icon,
-    PencilEdit02Icon,
     Search01Icon,
-    SourceCodeIcon,
     SparklesIcon,
-    StickyNote03Icon,
-    Table01Icon,
     Tick02Icon,
     UserIcon,
   } from "../../lib/icons";
@@ -79,24 +67,6 @@
     command: ComputerTerminal01Icon,
     ask: HelpCircleIcon,
     done: Tick02Icon,
-  };
-  const KIND: Partial<Record<ObjectKind, IconSvgElement>> = {
-    reply: Message01Icon,
-    plot: ChartColumnIcon,
-    sheet: Table01Icon,
-    picks: LayoutGridIcon,
-    plan: CheckListIcon,
-    list: CheckListIcon,
-    diagram: CubeIcon,
-    code: SourceCodeIcon,
-    diff: GitCompareIcon,
-    document: Doc01Icon,
-    draft: PencilEdit02Icon,
-    media: Image01Icon,
-    page: BrowserIcon,
-    note: StickyNote03Icon,
-    file: File01Icon,
-    folder: Folder01Icon,
   };
 
   const steps = $derived(
@@ -150,7 +120,7 @@
             title={object.title}
             onclick={() => onmade(object.id)}
           >
-            {#snippet leading()}<Icon icon={KIND[object.kind] ?? Note01Icon} size={16} />{/snippet}
+            {#snippet leading()}<Icon icon={objectIcon(object.kind)} size={16} />{/snippet}
           </LiftRow>{/each}
       </LiftSection>{/if}
     {#if sources.length}<LiftSection title={m.work_sources()} count={sources.length}>

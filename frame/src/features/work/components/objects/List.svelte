@@ -10,7 +10,16 @@
    * Things to do, answer or read, each with where it came from: the app's mark,
    * who and when, the words themselves in a quieter voice, and the way back.
    */
-  let { object, actions = {} }: { object: ListView; actions?: ObjectActions } = $props();
+  let {
+    object,
+    actions = {},
+    centre = false,
+  }: {
+    object: ListView;
+    actions?: ObjectActions;
+    /** Opened in the centre, where the header makes the tasks. */
+    centre?: boolean;
+  } = $props();
   const todo = $derived(object.style === "todo");
   const open = (url: string) => (event: MouseEvent) => {
     if (!actions.link) return;
@@ -64,7 +73,7 @@
       </li>
     {/each}
   </ul>
-  {#if todo}<footer><MakeTasks id={object.id} /></footer>{/if}
+  {#if todo && !centre}<footer><MakeTasks id={object.id} /></footer>{/if}
 </section>
 
 <style>

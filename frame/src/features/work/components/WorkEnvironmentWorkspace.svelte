@@ -72,6 +72,7 @@
   } from "../lib/project-environment-board";
   import type { BoardActions } from "../lib/canvas-context";
   import type { ObjectActions, ObjectView } from "../lib/board/types";
+  import { objectIcon, objectLabel } from "../lib/object-kind";
   import HostGlyph from "./cards/HostGlyph.svelte";
   import { clipText, defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
@@ -1414,6 +1415,13 @@
   const liftedPictures = $derived(
     liftedElement?.reference.kind === "subject" ? picturesOf(liftedElement.id) : [],
   );
+  /** An opened object's line beside its kind: how many sources it rests on, when it changed. */
+  function objectMeta(view: ObjectView) {
+    const sources = Object.keys(view.sources ?? {}).length;
+    return [sources ? m.work_env_sources_count({ count: sources }) : "", view.updated ?? ""]
+      .filter(Boolean)
+      .join(" · ");
+  }
   /** The one meta line of a media lift: what it is, how large, where it came from. */
   function mediaMeta(asset: NonNullable<CanvasItem["media"]>["asset"]) {
     const origin = asset.origin.kind === "fetched" ? host(asset.origin.url) : "";
@@ -2483,16 +2491,29 @@
           }}
         />
       {:else if liftedObject && !(liftedItem && results.references.has(liftedItem.id) && !agentBlock(liftedItem.id))}
-        <LazyView
-          loader={loadCentre}
-          loadingLabel={m.surface_loading()}
-          failureLabel={m.surface_render_failed()}
-          retryLabel={m.surface_retry()}
-          >{#snippet children(Centre)}<Centre
-              object={liftedObject!}
-              actions={centreActions}
-            />{/snippet}</LazyView
-        >
+        {@const named = liftedObject.kind === "reply" ? liftedObject.headline : liftedObject.title}
+        <div class="lift-body">
+          <LiftHeader
+            kind={objectLabel(liftedObject.kind)}
+            meta={objectMeta(liftedObject)}
+            icon={objectIcon(liftedObject.kind)}
+            primary={liftedItem ? resultAction(liftedItem.id) : undefined}
+          >
+            {#snippet actions()}{#if named}<Button size="compact" onclick={() => askAbout(named)}
+                  >{m.work_lift_ask()}</Button
+                >{/if}{/snippet}
+          </LiftHeader>
+          <LazyView
+            loader={loadCentre}
+            loadingLabel={m.surface_loading()}
+            failureLabel={m.surface_render_failed()}
+            retryLabel={m.surface_retry()}
+            >{#snippet children(Centre)}<Centre
+                object={liftedObject!}
+                actions={centreActions}
+              />{/snippet}</LazyView
+          >
+        </div>
       {:else if liftedItem?.artifact}
         <div class="lift-result">
           {#if results.references.get(liftedItem.id) && objectiveSession}
