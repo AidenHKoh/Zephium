@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from "$shared/ui/Icon";
+  import { stillWhenUnseen } from "$shared/lib/still";
   import { Alert02Icon, MinusSignIcon, Tick02Icon } from "./icons";
 
   /** A decided question, kept where it stood as one quiet line of history. */
@@ -21,7 +22,7 @@
 
 <p class="receipt {tone}" role="status">
   <span class="glyph" aria-hidden="true">
-    {#if tone === "working"}<span class="dot"></span>
+    {#if tone === "working"}<span class="dot" use:stillWhenUnseen></span>
     {:else}<Icon
         icon={tone === "done" ? Tick02Icon : tone === "failed" ? Alert02Icon : MinusSignIcon}
         size={13}
@@ -67,6 +68,10 @@
     border-radius: var(--radius-capsule);
     background: var(--color-muted);
     animation: breathe 1.6s var(--ease-in-out) infinite;
+  }
+
+  .dot:global([data-still]) {
+    animation-play-state: paused;
   }
 
   .words {

@@ -14,7 +14,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { characterMask, leadLookHere, type CharacterKind, type LeadLook } from "./shapes";
-  import { watchStill } from "./still";
+  import { watchStill } from "$shared/lib/still";
 
   let {
     kind = "lead",

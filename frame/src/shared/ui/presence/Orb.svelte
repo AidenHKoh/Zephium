@@ -1,6 +1,6 @@
 <script lang="ts">
   import { orbKeyframes, orbStrip } from "./orb";
-  import { watchStill } from "./still";
+  import { watchStill } from "$shared/lib/still";
 
   let {
     size = 16,

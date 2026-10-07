@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getContext } from "svelte";
+  import { stillWhenUnseen } from "$shared/lib/still";
   import type { WorkRuntimeProjection } from "$shared/ipc/bindings";
   import { serviceMark } from "$domain/connections";
   import Icon from "$shared/ui/Icon";
@@ -110,7 +111,7 @@
 </script>
 
 {#snippet status(state: ComputerCommand["state"] | ComputerFile["state"], calm = false)}
-  <span class="status" data-state={calm ? "quiet" : state} aria-hidden="true"
+  <span class="status" data-state={calm ? "quiet" : state} aria-hidden="true" use:stillWhenUnseen
     >{#if state === "passed" || state === "done"}<Icon
         icon={Tick02Icon}
         size={12}
@@ -410,6 +411,10 @@
   .status[data-state="running"] i {
     background: var(--color-accent);
     animation: breathe 1.6s var(--ease-in-out) infinite;
+  }
+
+  .status:global([data-still]) i {
+    animation-play-state: paused;
   }
 
   .status[data-state="asking"] i {
