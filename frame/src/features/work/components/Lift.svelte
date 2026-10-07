@@ -201,6 +201,8 @@
     });
   }
 
+  /** Where focus was when the lift opened; it goes back there when the lift is gone. */
+  const returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   onMount(() => {
     let gone = false;
     void measured().then(() => {
@@ -209,8 +211,27 @@
     return () => {
       gone = true;
       release();
+      const lost = !document.activeElement || document.activeElement === document.body;
+      if (lost && returnTo?.isConnected) returnTo.focus({ preventScroll: true });
     };
   });
+
+  const FOCUSABLE =
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
+  /** The lift is modal: Tab walks round what it holds and never onto the canvas behind. */
+  function contain(event: KeyboardEvent) {
+    if (event.key !== "Tab" || !panel) return;
+    const stops = [...panel.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
+      (element) => element.offsetParent !== null,
+    );
+    event.preventDefault();
+    if (!stops.length) return;
+    // WebKit's own Tab skips buttons unless keyboard navigation is on; the lift walks them all.
+    const at = stops.indexOf(document.activeElement as HTMLElement);
+    const step = event.shiftKey ? -1 : 1;
+    const next = at < 0 ? (event.shiftKey ? stops.length - 1 : 0) : at + step;
+    stops[(next + stops.length) % stops.length]!.focus();
+  }
 
   /** Back into the card, wherever it sits now. */
   export function close() {
@@ -321,6 +342,7 @@
   role="dialog"
   aria-modal="true"
   aria-label={title}
+  onkeydown={contain}
   style:left={`${left}px`}
   style:top={`${top}px`}
   style:inline-size={`${width}px`}
