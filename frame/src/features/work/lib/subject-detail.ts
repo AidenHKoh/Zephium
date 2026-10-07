@@ -4,7 +4,7 @@ import { artifactView } from "./project-work";
 import { compareModel, type CompareModel } from "./compare";
 import { restatesSubject, subjectKey, subjectMatrixRows } from "./subjects";
 
-type Subject = { name: string };
+type Subject = { name: string; homepage?: string | null };
 type Fact = {
   key: string;
   label: string;
@@ -67,13 +67,21 @@ export function subjectDetail(execution: WorkExecutionFact, subject: Subject): S
   }
   // Pages a search cited for this subject, or a finding about it, belong in
   // the list even when no single cell used them; a finding lends its sentence.
+  // A page the search cited for no subject in particular belongs to this one
+  // only when it is on the subject's own site, or when nothing else is known.
+  const site = subject.homepage ? siteOf(subject.homepage) : "";
+  const loose: EvidenceReference[] = [];
   for (const artifact of execution.artifacts) {
     const view = artifactView(artifact, execution);
     const content = view.content;
     if (content.kind === "sources") {
       for (const entry of content.entries)
-        if (entry.subject === undefined || content.subjects[entry.subject]?.name === subject.name)
-          cite(entry.evidence);
+        if (content.subjects[entry.subject ?? -1]?.name === subject.name) cite(entry.evidence);
+        else if (entry.subject === undefined) {
+          const own = !!site && !!entry.evidence.url && siteOf(entry.evidence.url) === site;
+          if (own) cite(entry.evidence);
+          else loose.push(entry.evidence);
+        }
     } else if (content.kind === "findings") {
       for (const item of content.items) {
         const about = item.subject === undefined ? undefined : content.subjects[item.subject];
@@ -85,7 +93,17 @@ export function subjectDetail(execution: WorkExecutionFact, subject: Subject): S
       }
     }
   }
+  if (!sources.length) for (const source of loose) cite(source);
   return { facts, sources, quotes, ...(price ? { price } : {}) };
+}
+
+/** A site as its pages share it: the host without `www.`. */
+function siteOf(url: string): string {
+  try {
+    return new URL(url).host.replace(/^www\./u, "");
+  } catch {
+    return "";
+  }
 }
 
 const bare = (url: string) => {
