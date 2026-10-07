@@ -1522,6 +1522,8 @@
   "work_env_status_failed": "Failed",
   "work_provider_citation": "Citation supplied by {provider} · {model}",
   "work_provider_citation_history": "Provider-reported source; not a captured browser-page excerpt.",
+  "work_provider_web_search": "{provider} web search",
+  "work_provider_model": "the model's provider",
   "work_open_source_browse": "Open source in Browse",
   "work_env_focus_result": "Focus result",
   "work_env_send": "Send",
