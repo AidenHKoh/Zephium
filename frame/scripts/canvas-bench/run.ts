@@ -162,6 +162,7 @@ try {
       const pinch = await host.evaluate("return await window.bench.pinch();");
       const pinchCpu = pinchBusy();
       await host.evaluate("window.bench.css(''); return true;");
+      const lift = await host.evaluate("return await window.bench.lift();");
       const swept = await host.evaluate("return await window.bench.sweep();");
       const sweptMemory = memory();
       const back = await host.evaluate("return await window.bench.back();");
@@ -180,6 +181,7 @@ try {
           idle,
           pan: { ...(pan as object), cpuMs: panCpu },
           pinch: { ...(pinch as object), cpuMs: pinchCpu },
+          lift,
           swept,
           back,
           memoryMB: {

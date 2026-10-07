@@ -3,7 +3,8 @@
  * native side; `run.ts` drives it through `window.bench` in the system WebKit.
  */
 import "$styles/global.css";
-import { flushSync, mount, unmount } from "svelte";
+import { createRawSnippet, flushSync, mount, unmount } from "svelte";
+import Lift from "../../src/features/work/components/Lift.svelte";
 import WorkCanvas from "../../src/features/work/components/WorkCanvas.svelte";
 import { wakeupCounter } from "../../src/shared/testing/idle";
 import {
@@ -80,6 +81,55 @@ const bench = {
     center("item-0");
     await settle(host);
     return drawn(host);
+  },
+  /** A card in view opened centred and closed again: each frame's interval while it grows and returns. */
+  async lift() {
+    const bounds = host.getBoundingClientRect();
+    const card = [...host.querySelectorAll<HTMLElement>("[data-card-id]")].find((candidate) => {
+      const rect = candidate.getBoundingClientRect();
+      return (
+        rect.left > 0 && rect.top > 0 && rect.right < bounds.right && rect.bottom < bounds.bottom
+      );
+    });
+    if (!card) return null;
+    const frames = async (ms: number) => {
+      const intervals: number[] = [];
+      const start = performance.now();
+      let last = start;
+      while (last - start < ms) {
+        await new Promise((done) => requestAnimationFrame(done));
+        const now = performance.now();
+        intervals.push(now - last);
+        last = now;
+      }
+      return {
+        frames: intervals.length,
+        max: Math.round(Math.max(...intervals)),
+        over25: intervals.filter((interval) => interval > 25).length,
+      };
+    };
+    let closed = false;
+    const layer = document.createElement("div");
+    document.body.append(layer);
+    const lifted = mount(Lift, {
+      target: layer,
+      props: {
+        origin: card.getBoundingClientRect(),
+        source: card.dataset.cardId ?? null,
+        bounds,
+        title: "Lifted",
+        onclose: () => (closed = true),
+        children: createRawSnippet(() => ({
+          render: () => `<div style="block-size: 420px">Lifted</div>`,
+        })),
+      },
+    }) as { close: () => void };
+    const open = await frames(900);
+    lifted.close();
+    const close = await frames(900);
+    void unmount(lifted);
+    layer.remove();
+    return { open, close, closed };
   },
   close() {
     if (screen) void unmount(screen);
