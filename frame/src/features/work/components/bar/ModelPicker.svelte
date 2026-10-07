@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Popover } from "bits-ui";
-  import { tick } from "svelte";
+  import { onMount, tick } from "svelte";
+  import { accountSession } from "$domain/account";
   import type { WorkModelEntry, WorkModelProvider } from "$shared/ipc/bindings";
   import { commands } from "$shared/ipc/bindings";
   import {
@@ -13,7 +14,7 @@
     shortName,
     usable,
   } from "$domain/ai";
-  import Icon from "$shared/ui/Icon";
+  import Icon, { ZephiumMark } from "$shared/ui/Icon";
   import { ArrowDown01Icon, Key01Icon, Tick02Icon } from "../../lib/icons";
   import * as m from "$shared/i18n/messages";
   import "$shared/ui/Menu/popover.css";
@@ -34,6 +35,16 @@
     void owner.start();
     return () => owner.dispose();
   });
+
+  onMount(() => {
+    void accountSession.retain();
+    return () => accountSession.release();
+  });
+  const account = $derived(accountSession.account());
+  /** Hosted models this server offers to someone not yet signed in. */
+  const hostedOffer = $derived(
+    !!account?.available && !account.signed_in && account.hosted_models === true,
+  );
 
   let open = $state(false);
   let list = $state<HTMLElement>();
@@ -82,6 +93,11 @@
   function settings() {
     open = false;
     onsettings();
+  }
+
+  function signIn() {
+    open = false;
+    void commands.runCommand("settings.account");
   }
 
   function rows() {
@@ -133,7 +149,9 @@
 {#if keyless}
   <button type="button" class="model-trigger add-key" onclick={settings}>
     <span class="trigger-mark" aria-hidden="true"><Icon icon={Key01Icon} size={14} /></span>
-    <span class="trigger-name">{m.work_model_add_model_key()}</span>
+    <span class="trigger-name"
+      >{hostedOffer ? m.work_model_start() : m.work_model_add_model_key()}</span
+    >
   </button>
 {:else}<Popover.Root {open} onOpenChange={(next) => void opened(next)}>
     <Popover.Trigger
@@ -166,6 +184,20 @@
         onkeydown={move}
       >
         <div class="pane" bind:this={list}>
+          {#if hostedOffer}
+            <ul aria-label={m.ai_cloud_title()}>
+              <li>
+                <button type="button" class="ui-menu-item keyless" data-model-row onclick={signIn}>
+                  <span class="ui-menu-icon" aria-hidden="true"
+                    ><Icon icon={ZephiumMark} size={15} strokeWidth={1.6} /></span
+                  >
+                  <span class="name">{m.ai_cloud_title()}</span>
+                  <span class="hint">{m.work_model_sign_in()}</span>
+                </button>
+              </li>
+            </ul>
+            <div class="ui-menu-separator" role="presentation"></div>
+          {/if}
           {#each groups.ready as group (group.provider)}
             <section class="group" aria-label={providerName(group.provider)}>
               {@render heading(group.provider)}

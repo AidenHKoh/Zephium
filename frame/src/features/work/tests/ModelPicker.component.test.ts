@@ -10,6 +10,8 @@ const native = vi.hoisted(() => ({
   read: vi.fn(),
   choose: vi.fn(),
   more: vi.fn(),
+  account: vi.fn(),
+  command: vi.fn(async () => ({ operation_id: "op", accepted: true })),
   ready: vi.fn(async (profile: string): Promise<WorkModelsReadyV1> => ({
     version: 1,
     profile,
@@ -25,6 +27,8 @@ vi.mock("$shared/ipc/bindings", async () => {
     workChooseModel: native.choose,
     workMoreModels: native.more,
     workModelsReady: native.ready,
+    accountGet: native.account,
+    runCommand: native.command,
   });
 });
 
@@ -94,4 +98,50 @@ test("without any key the control is one calm way to add a key, straight to Sett
   await screen.getByRole("button", { name: "Add a model key" }).click();
   expect(onsettings).toHaveBeenCalledTimes(1);
   expect(page.getByRole("button", { name: /Needs a key/u }).query()).toBeNull();
+});
+
+test("signed out where hosted models exist, Zephium AI is one sign-in away", async () => {
+  await page.viewport(1200, 800);
+  native.read.mockResolvedValue(view("anthropic/claude-opus-5-5"));
+  native.account.mockResolvedValue({
+    account: {
+      version: 1,
+      available: true,
+      server: "https://api.zephium.app",
+      custom_server: false,
+      hosted_models: true,
+      billing: true,
+      signup_open: true,
+      signed_in: false,
+      pending_email: null,
+      resend_in: null,
+      email: null,
+      name: null,
+      plan: null,
+      usage: null,
+      subscription: null,
+      offers: [],
+      checkout_open: false,
+      notice: null,
+    },
+    fault: null,
+    retry_after: null,
+  });
+  const ready = (value: boolean) => async (profile: string) => ({
+    version: 1,
+    profile,
+    ready: value,
+    missing_roles: value ? [] : (["lead"] as const).slice(),
+    fault: null,
+  });
+  native.ready.mockImplementation(ready(false));
+  const keyless = await render(ModelPicker, { profile: PROFILE });
+  await expect.element(keyless.getByRole("button", { name: "Sign in or add a key" })).toBeVisible();
+  await keyless.unmount();
+
+  native.ready.mockImplementation(ready(true));
+  const screen = await render(ModelPicker, { profile: PROFILE });
+  await screen.getByRole("button", { name: "Model: Claude Opus 5.5" }).click();
+  await page.getByRole("button", { name: /Zephium AI.*Sign in/u }).click();
+  expect(native.command).toHaveBeenCalledWith("settings.account");
 });
