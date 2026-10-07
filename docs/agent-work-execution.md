@@ -186,13 +186,29 @@ A run works on a site in the person's own browser session. The lead's
 `browse { start, goal, records }` becomes a page task: one Work-owned page on
 the start URL's site (its registrable domain), driven by the page agent
 (`AgentWorkDiscoveryTask` with the site-session scope and `SiteWorkPolicy`,
-at most 60 actions, 40 model calls and 8 minutes of its own time; time held
-for the person does not count). The document gate follows the site's own
+at most 60 actions, 40 model calls, 600k model tokens and 9 minutes, 8 of its
+own working time after a hold; time held for the person does not count). Its
+money is the token ceiling at the page model's highest input rate plus a
+2k-token reply per call, never under $0.60 and always inside the run's
+remaining share: about $0.60 on GPT-6 Luna, $1.16 on Haiku 4.5 and $4.64 on
+Opus 5.5 before the run and part ceilings. A decision whose money covers only
+itself and one more call of its size becomes the last one, narrowed to
+extract, so the terminal mapping call can still be reserved. The document gate follows the site's own
 redirects and same-document routes and cancels page-initiated and cross-site
 loads without losing the page. A same-site load a step starts (a search or
 filter form, a script navigation) is cancelled and followed as the page
 agent's own navigation; a same-site form POST passes only for an approved
-commitment.
+commitment. A clicked link whose click changes nothing (a new-window link, a
+covered or script-only one) is followed to its observed destination the same
+way. After any navigation the arrival gets up to four bounded looks (4 s) to
+fill in a loading shell before the next model call.
+
+Page-agent requests keep an append-only prefix for provider prompt caches:
+instructions, tools, objective and the first observation, then the turns;
+the per-call host facts (act targets, verified-action history, decision and
+action budgets) trail the newest turn. Past 48 KiB of transcript the oldest
+captures retire to a stub in one batch down to 24 KiB, so the prefix stays
+stable for several calls instead of changing on each.
 
 Before a run first works on a site where the profile holds cookies (a
 presence fact, never their contents), Rust reads the whole start page before
