@@ -2296,6 +2296,7 @@
       source={lifted.id || null}
       bounds={cardBounds}
       preferred={liftSize(liftedItem)}
+      hug={!lifted.proposal && !liftFile && liftedElement?.reference.kind !== "resource"}
       title={lifted.proposal ? m.work_line_review() : (liftedItem?.title ?? "")}
       onclose={() => {
         const closing = lifted?.id;
