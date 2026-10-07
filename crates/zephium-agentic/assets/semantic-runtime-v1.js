@@ -1278,6 +1278,22 @@
     return viewport === null ? null : {x: 0, y: 0, width: viewport.width, height: viewport.height};
   }
 
+  // Rows, cells and list items a page made clickable itself (mail threads,
+  // app lists) carry no interactive role. A click handler attribute, a tab
+  // stop or a pointer cursor set on the item, not inherited, says so.
+  function clickableItem(element) {
+    if (has(element, "onclick") || attribute(element, "tabindex", 8) === "0" ||
+        lower(attribute(element, "jsaction", 1024) || "").includes("click")) return true;
+    try {
+      const cursor = apply(getComputedStyleFixed, globalThis, [element]).cursor;
+      const parent = read(nodeParentGetter, element);
+      return cursor === "pointer" && !(parent !== null && nodeType(parent) === 1 &&
+        apply(getComputedStyleFixed, globalThis, [parent]).cursor === "pointer");
+    } catch (_) {
+      return false;
+    }
+  }
+
   function operationBits(descriptor, disabled, readonly, element) {
     if (disabled || descriptor.noOperations === true) return 0;
     switch (descriptor.role) {
@@ -1309,6 +1325,10 @@
           fillControlKind(descriptor, "") !== 0 ? 1 | 2 | 8 : 1 | 8;
       case "listbox":
         return 4 | 8 | (scrollElement(element) === null ? 0 : 16);
+      case "row":
+      case "cell":
+      case "list_item":
+        return clickableItem(element) ? 1 : 0;
       case "group":
       case "document":
       case "landmark":

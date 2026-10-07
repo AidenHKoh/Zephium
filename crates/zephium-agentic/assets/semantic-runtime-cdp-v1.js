@@ -1186,6 +1186,18 @@ function documentRect() {
 const viewport = boundedViewport();
 return viewport === null ? null : {x: 0, y: 0, width: viewport.width, height: viewport.height};
 }
+function clickableItem(element) {
+if (has(element, "onclick") || attribute(element, "tabindex", 8) === "0" ||
+lower(attribute(element, "jsaction", 1024) || "").includes("click")) return true;
+try {
+const cursor = apply(getComputedStyleFixed, globalThis, [element]).cursor;
+const parent = read(nodeParentGetter, element);
+return cursor === "pointer" && !(parent !== null && nodeType(parent) === 1 &&
+apply(getComputedStyleFixed, globalThis, [parent]).cursor === "pointer");
+} catch (_) {
+return false;
+}
+}
 function operationBits(descriptor, disabled, readonly, element) {
 if (disabled || descriptor.noOperations === true) return 0;
 switch (descriptor.role) {
@@ -1216,6 +1228,10 @@ return readonly ? 1 | 8 : descriptor.tag === "select" ? 1 | 4 | 8 :
 fillControlKind(descriptor, "") !== 0 ? 1 | 2 | 8 : 1 | 8;
 case "listbox":
 return 4 | 8 | (scrollElement(element) === null ? 0 : 16);
+case "row":
+case "cell":
+case "list_item":
+return clickableItem(element) ? 1 : 0;
 case "group":
 case "document":
 case "landmark":
