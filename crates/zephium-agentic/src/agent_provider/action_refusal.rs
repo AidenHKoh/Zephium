@@ -301,6 +301,10 @@ impl AgentProviderActionRefusal {
                 "outcome_already_satisfied",
                 "The proposed postcondition already holds in the supplied observation. Choose a meaningfully different operation or input with a verifiable change, request a genuinely fresh observation if state may have changed, or extract the result if the objective is complete. Do not repeat this exact proposal.",
             ),
+            SemanticActionBindingError::ValueUnobserved => (
+                "value_unobserved",
+                "Nothing executed. This field's current value is private or too long to observe here, so a fill of it cannot be verified. Do not retry it or look again for it: fill the other fields, and report this one as left for the person.",
+            ),
             SemanticActionBindingError::TargetIncomplete => (
                 "target_incomplete",
                 "Nothing executed. The supplied observation omits fields needed to prepare this target. Capture snapshot(subtree) of the target or its containing dialog or section, then use the fresh refs and advertised operations. Repeating the action against this unchanged observation cannot succeed. You can also read or extract the available evidence without acting.",

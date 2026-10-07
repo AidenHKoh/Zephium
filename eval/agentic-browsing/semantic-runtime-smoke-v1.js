@@ -539,6 +539,7 @@ const closedHost = new Element("div");
 closedHost._closedInternal = new Element("button", { "aria-label": "Closed shadow secret" });
 
 const fillEvents = new Map();
+const fillChanges = new Map();
 for (const target of [textInput, searchInput, textarea, contentEditable, editableCombobox, editableComboboxHost]) {
   const events = [];
   fillEvents.set(target, events);
@@ -554,7 +555,8 @@ for (const target of [textInput, searchInput, textarea, contentEditable, editabl
     if (target._repurposeAfterInput) target.attributes["aria-label"] = "Password replacement";
     if (target._throwAfterInput) target._postconditionThrows = true;
   });
-  target.addEventListener("change", (event) => events.push(event));
+  target.addEventListener("change", (event) => fillChanges.set(target, [...(fillChanges.get(target) || []), event]));
+  target.addEventListener("blur", (event) => fillChanges.set(target, [...(fillChanges.get(target) || []), event]));
 }
 
 const relayReady = "data-zephium-fill-relay-ready-v1";
@@ -1136,7 +1138,7 @@ async function finish() {
   button._children = savedButtonChildren;
   assert(runtime.invoke(`{"padding":"${"x".repeat(17800)}"}`) === "E1:invalid_request", "oversize action request accepted");
 
-  const roleCodes = Object.freeze({textbox: 8, searchbox: 10, combobox: 13, option: 15});
+  const roleCodes = Object.freeze({textbox: 8, searchbox: 10, combobox: 13, option: 15, spinbutton: 16});
   const descriptorFor = (node) => ({
     r: roleCodes[node.r],
     o: node.o || 0,
@@ -1221,6 +1223,12 @@ async function finish() {
         events[1].isComposing === false,
       "fill input event contract drifted"
     );
+    // A person's edit ends in change, then leaving a plain text field.
+    const after = fillChanges.get(target) || [];
+    assert(after.length >= 1 && after[0].type === "change" && after[0].bubbles === true &&
+      after.every(event => event.isTrusted === false && ["change", "blur"].includes(event.type)),
+      "fill did not finish with change as a person's edit does");
+    fillChanges.set(target, []);
   };
 
   const textNode = actionNode("Account name");
@@ -2118,7 +2126,7 @@ async function finish() {
     if (reason === 9) host._nativeEditableThrows = true;
     if (reason === 10) host.attributes["aria-readonly"] = "true";
     if (reason === 11) host.attributes["aria-disabled"] = "true";
-    if (reason === 12) host.attributes.type = "email";
+    if (reason === 12) host.attributes.type = "week";
     main._children = new NodeList();
     if (reason === 5) {
       const parent = new Element("div", { role: "group", contenteditable: "true" });
@@ -2171,6 +2179,41 @@ async function finish() {
       ops("list_item", "Inert item") === 0, "list items' own clickability was misread");
     assert(ops("row", null) === 1 && ops("cell", "Thread subject") === 0,
       "a pointer row was not clickable or its inheriting cell was");
+  }
+
+  {
+    // Typed fields take a value the browser stores unchanged and verify it;
+    // any other value is refused before anything is dispatched.
+    let generation = 600;
+    for (const [type, role, good, bad] of [
+      ["email", "textbox", "person@example.test", "person @example.test"],
+      ["tel", "textbox", "+1 555 0100", "line\nbreak"],
+      ["url", "textbox", "https://example.test/a", " https://example.test/a"],
+      ["number", "spinbutton", "12.5", "1,000"],
+      ["date", "textbox", "2026-10-07", "October 7"],
+    ]) {
+      generation += 2;
+      main._children = new NodeList();
+      const field = main.append(new HTMLInputElement({ type, "aria-label": `Typed ${type}` }));
+      document._hit = field;
+      const look = () => JSON.parse(invoke(generation, generation, { k: "initial" }))
+        .n.find(node => node.n === `Typed ${type}`);
+      let node = look();
+      assert(node?.r === role && (node.o & 2) && node.v?.k === "text" && node.v.value === "",
+        `typed ${type} field lost Fill or its observed empty value`);
+      const request = (value) => {
+        const parsed = JSON.parse(fillRequest(node, value, generation));
+        parsed.i = parsed.g = generation;
+        return JSON.stringify(parsed);
+      };
+      assert(await runtime.invoke(request(bad)) === "E2:unsupported_interaction" && field._value === "",
+        `typed ${type} field accepted a value the browser would rewrite`);
+      const result = JSON.parse(await runtime.invoke(request(good)));
+      assert(result.r === "form" && field._value === good, `typed ${type} field fill failed`);
+      generation += 1;
+      node = look();
+      assert(node?.v?.k === "text" && node.v.value === good, `typed ${type} value not observed back`);
+    }
   }
 
   // A nested leaf never inherits write authority over its editor. A fresh
@@ -2307,7 +2350,9 @@ async function finish() {
     const capture = () => JSON.parse(invoke(++emptyGeneration, emptyGeneration, { k: "initial" }, mode === "partial" ? { n: 3, x: 3 } : {}));
     let observed = capture();
     let node = observed.n.find(node => node.k !== observed.n[0].k && node.n === host.attributes["aria-label"]);
-    const supported = ["no-children", "empty-text", "combobox"].includes(mode);
+    // A private field's emptiness discloses nothing and is what its fill is
+    // verified against; its value was already reported once typed.
+    const supported = ["no-children", "empty-text", "combobox", "private"].includes(mode);
     if (!supported) {
       assert(node && (mode === "credential" ? node.v?.k === "redacted" : node.v === undefined),
         `unproven/private empty host became observed empty: ${mode}`);
@@ -2544,6 +2589,8 @@ async function finish() {
     fixed_select_execution: true,
     select_change_events: true,
     clickable_items: true,
+    fill_change_events: true,
+    typed_field_fill: true,
     document_parent_option_brand_guard: true,
     select_rewrite_nonretryable: true,
     fill_native_primitives_captured: true,

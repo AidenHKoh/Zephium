@@ -1214,15 +1214,6 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
         ]
         .into_iter()
         .filter(|operation| node.operations().contains(*operation))
-        // The page advertises Fill on number fields, which neither the fixed
-        // recipe nor its value proof accepts: offering it only buys a refusal.
-        .filter(|operation| {
-            *operation != SemanticOperationClass::Fill
-                || matches!(
-                    node.role(),
-                    SemanticRole::Textbox | SemanticRole::Searchbox | SemanticRole::Combobox
-                )
-        })
         .filter(|operation| {
             !credential(node)
                 || matches!(
@@ -2095,28 +2086,6 @@ mod tests {
         // reCAPTCHA's score badge shares the title and stands on many pages.
         assert_eq!(policy.human_wall(&challenge("reCAPTCHA", 256)), None);
         assert_eq!(policy.human_wall(&challenge("Embedded video", 640)), None);
-    }
-
-    #[test]
-    fn only_fields_the_fill_recipe_accepts_are_offered_for_fill() {
-        let policy = SiteWorkPolicy {
-            gate: Arc::new(SiteGate::new("shop.test".into(), false, false)),
-            asks: true,
-        };
-        let at = json!({"x":10,"y":50,"w":200,"h":30});
-        let form = page(vec![
-            json!({"k":1,"r":"document","o":16}),
-            json!({"k":2,"p":0,"r":"spinbutton","n":"Quantity","o":11,"b":at}),
-            json!({"k":3,"p":0,"r":"textbox","n":"Gift note","o":11,"b":at}),
-        ]);
-        let offered = |key: usize| {
-            policy
-                .model_action_operations(&form.frames()[0].nodes()[key], &form)
-                .unwrap()
-        };
-        assert!(!offered(1).contains(SemanticOperationClass::Fill));
-        assert!(offered(1).contains(SemanticOperationClass::Click));
-        assert!(offered(2).contains(SemanticOperationClass::Fill));
     }
 
     #[test]

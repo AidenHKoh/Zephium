@@ -6,7 +6,18 @@ These reuse the immutable isolated runtime and the separately attested fixed
 page-world fill shim. This path neither synthesizes trusted OS input nor grants
 page activation. Select writes the native index through the captured setter, checks it,
 then dispatches untrusted bubbling `input` and `change` events, as a person's
-choice does: sort and filter menus act on those events, never on the write. Click
+choice does: sort and filter menus act on those events, never on the write.
+Fill on a text field ends as a person's edit does: `input`, then `change`,
+then (for a plain text box that does not hold focus) `blur` and `focusout`;
+a combobox or search box keeps its suggestions open. Typed fields are filled
+only with a value the browser stores unchanged, so the exact-value proof
+holds: email and URLs without surrounding spaces, telephone numbers on one
+line, number fields with a plain decimal, `date` as YYYY-MM-DD, `month`,
+`time` as HH:MM and `datetime-local`; any other value is refused before
+dispatch. An empty private field (autocomplete email, phone, address) reports
+its emptiness, which discloses nothing. A field whose value was not observed
+is refused at binding as `value_unobserved`, never typed into and left
+unverified. Click
 also reaches a row, cell or list item the page made clickable itself (a click
 handler attribute, a tab stop, or a pointer cursor set on the item and not
 inherited from its parent), such as a mail client's thread rows; the decoder

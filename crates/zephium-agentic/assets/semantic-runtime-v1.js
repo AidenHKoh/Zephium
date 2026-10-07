@@ -144,6 +144,7 @@
   const fixedClearTimeout = globalThis.clearTimeout;
   const nativeInputEvent = globalThis.InputEvent;
   const nativeEvent = globalThis.Event;
+  const nativeFocusEvent = globalThis.FocusEvent;
   const fixedDispatchEvent = EventTarget.prototype.dispatchEvent;
   const inputValueSetter = setter(HTMLInputElement.prototype, "value");
   const textareaValueSetter = setter(HTMLTextAreaElement.prototype, "value");
@@ -1317,8 +1318,9 @@
       case "searchbox":
         return readonly || fillControlKind(descriptor, "") === 0 ? 1 | 8 : 1 | 2 | 8;
       case "password":
-      case "spinbutton":
         return readonly ? 1 | 8 : 1 | 2 | 8;
+      case "spinbutton":
+        return readonly || fillControlKind(descriptor, "") === 0 ? 1 | 8 : 1 | 2 | 8;
       case "combobox":
         // Role alone grants neither Fill nor Select.
         return readonly ? 1 | 8 : descriptor.tag === "select" ? 1 | 4 | 8 :
@@ -1741,7 +1743,8 @@
   function addValue(record, raw, state) {
     const field = consumeValueField(raw, state);
     // Preserve proven public emptiness, never infer it from missing/clipped data.
-    const observedEmpty = raw === "" && record.sensitivity === "public" && (record.wire.o & 2) !== 0;
+    // Emptiness discloses nothing private, and a fill is verified against it.
+    const observedEmpty = raw === "" && record.sensitivity !== "secret" && (record.wire.o & 2) !== 0;
     if (field.value !== "" || observedEmpty) record.wire.v = { k: field.secret ? "redacted" : "text", value: field.value };
     if (field.secret) {
       record.wire.v = { k: "redacted" };
@@ -3054,15 +3057,23 @@
     return role === "textbox" || role === "searchbox" || role === "combobox";
   }
 
+  // Typed inputs take only a value the browser stores unchanged, so the
+  // exact-value proof holds; any other value is refused before dispatch.
+  const FILL_FORMATS = {
+    text: /^[^\t\n\r]*$/u, search: /^[^\t\n\r]*$/u, tel: /^[^\t\n\r]*$/u,
+    email: /^\S*$/u, url: /^(\S(.*\S)?)?$/u,
+    number: /^(-?(\d+|\d*\.\d+)([eE][-+]?\d+)?)?$/u,
+    date: /^(\d{4}-\d{2}-\d{2})?$/u, month: /^(\d{4}-\d{2})?$/u,
+    time: /^(\d{2}:\d{2})?$/u, "datetime-local": /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})?$/u
+  };
+
   function fillControlKind(descriptor, value) {
-    if (!textFillRole(descriptor.role)) return 0;
+    if (descriptor.tag === "input" && descriptor.role === "spinbutton" ? descriptor.inputType !== "number"
+      : !textFillRole(descriptor.role)) return 0;
     if (descriptor.tag === "input") {
-      if (descriptor.inputType !== "text" && descriptor.inputType !== "search") return 0;
-      for (const character of value) {
-        const point = character.codePointAt(0);
-        if (point === 0x09 || point === 0x0a || point === 0x0d) return 0;
-      }
-      return 1;
+      const format = objectHasOwn(FILL_FORMATS, descriptor.inputType) &&
+        (descriptor.inputType === "number") === (descriptor.role === "spinbutton") ? FILL_FORMATS[descriptor.inputType] : null;
+      return format !== null && format.test(value) ? 1 : 0;
     }
     if (descriptor.tag === "textarea" && descriptor.role !== "searchbox") return 2;
     if (descriptor.contentEditable === true && descriptor.plainTextEditable === true) return 3;
@@ -3374,6 +3385,14 @@
     try {
       write(valueSetter, target, value);
       apply(fixedDispatchEvent, target, [input]);
+      // A person's edit ends in change and leaving the field: forms validate
+      // and save on those. A combobox or search box keeps its suggestions.
+      apply(fixedDispatchEvent, target, [new nativeEvent("change", { bubbles: true })]);
+      if (descriptor.role === "textbox" && typeof nativeFocusEvent === "function" &&
+          read(documentActiveGetter, document) !== target) {
+        apply(fixedDispatchEvent, target, [new nativeFocusEvent("blur")]);
+        apply(fixedDispatchEvent, target, [new nativeFocusEvent("focusout", { bubbles: true, composed: true })]);
+      }
     } catch (_) { return "applied_unverified_mutation"; }
     try {
       if (kind === 3) {

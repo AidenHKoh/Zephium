@@ -1215,19 +1215,13 @@ impl SemanticPreparedAction {
         current: &'snapshot SemanticSnapshot,
     ) -> Result<(&'action str, &'snapshot str), SemanticActionRevalidationError> {
         if self.kind() != SemanticActionKind::Fill
-            || !matches!(
-                self.bound_action().target_role(),
-                SemanticRole::Textbox | SemanticRole::Searchbox | SemanticRole::Combobox
-            )
+            || !fill_role(self.bound_action().target_role())
             || self.target_sensitivity() == SemanticSensitivity::Secret
         {
             return Err(SemanticActionRevalidationError::OperationDenied);
         }
         let (_, target) = self.verification_target(current)?;
-        if !matches!(
-            target.role(),
-            SemanticRole::Textbox | SemanticRole::Searchbox | SemanticRole::Combobox
-        ) || !target.operations().contains(SemanticOperationClass::Fill)
+        if !fill_role(target.role()) || !target.operations().contains(SemanticOperationClass::Fill)
         {
             return Err(SemanticActionRevalidationError::OperationDenied);
         }
@@ -1257,6 +1251,18 @@ impl SemanticPreparedAction {
     pub(crate) const fn verification_guard(&self) -> [u8; 32] {
         self.guard
     }
+}
+
+/// Roles whose fill the exact-value proof can verify; a number field's
+/// value reads back as the text that was set.
+const fn fill_role(role: SemanticRole) -> bool {
+    matches!(
+        role,
+        SemanticRole::Textbox
+            | SemanticRole::Searchbox
+            | SemanticRole::Combobox
+            | SemanticRole::Spinbutton
+    )
 }
 
 fn exact_fill_value(
@@ -1636,6 +1642,15 @@ fn bind_intent(
                 || target.sensitivity == SemanticSensitivity::Secret
             {
                 return Err(SemanticActionBindingError::CredentialBoundary);
+            }
+            // The exact-value proof compares against the observed value. A
+            // field whose value was not observed is refused before anything
+            // is typed, not left applied and unverified after.
+            if !fill_role(target.role) {
+                return Err(SemanticActionBindingError::OutcomeContract);
+            }
+            if !matches!(target.value, Some(crate::SemanticValueSummary::Text(_))) {
+                return Err(SemanticActionBindingError::ValueUnobserved);
             }
             *text_bytes = text_bytes
                 .checked_add(value.len())
@@ -2308,6 +2323,10 @@ pub enum SemanticActionBindingError {
     /// Select target/option role, frame, snapshot, or ancestry was incompatible.
     #[error("semantic selection target is invalid")]
     SelectionTarget,
+    /// The fill target's current value was not observed (private or
+    /// clipped), so no fill of it could be verified; nothing ran.
+    #[error("semantic fill target value was not observed")]
+    ValueUnobserved,
     /// The exact declared postcondition already held before any effect.
     #[error("semantic action outcome is already satisfied")]
     OutcomeAlreadySatisfied,
@@ -2815,9 +2834,15 @@ mod tests {
 
     #[test]
     fn absent_fill_value_never_proves_an_already_satisfied_empty_input() {
+        for role in ["textbox", "spinbutton"] {
+            absent_fill_value_for_role(role);
+        }
+    }
+
+    fn absent_fill_value_for_role(role: &str) {
         let template = observation();
         let nodes = |value: Option<&str>| {
-            let mut field = json!({"k": 3,"p":0,"r":"textbox","n":"Title","o":11,
+            let mut field = json!({"k": 3,"p":0,"r":role,"n":"Title","o":11,
                 "b":{"x":10,"y":50,"w":200,"h":30}});
             if let Some(value) = value {
                 field["v"] = json!({"k":"text","value":value});
@@ -2854,36 +2879,25 @@ mod tests {
                 )],
             )
         };
-        let batch = bind_value(&unknown, "").expect("missing value is unknown, not already empty");
         assert_eq!(
-            batch.actions()[0].prepare(&unknown.frames()[0]),
-            Err(SemanticActionPreparationError::Revalidation(
-                SemanticActionRevalidationError::TargetChanged
-            )),
+            bind_value(&unknown, "").unwrap_err(),
+            SemanticActionBindingError::ValueUnobserved,
             "unknown starting value refuses before native mutation, without claiming it is empty"
         );
         assert_eq!(
             bind_value(&empty, "").unwrap_err(),
             SemanticActionBindingError::OutcomeAlreadySatisfied
         );
-        let observed_empty = current_snapshot(&unknown, 9, 11, nodes(Some("")));
         assert_eq!(
-            batch.actions()[0].prepare(&observed_empty),
-            Err(SemanticActionPreparationError::OutcomeAlreadySatisfied)
+            bind_value(&unknown, "replacement").unwrap_err(),
+            SemanticActionBindingError::ValueUnobserved
         );
-        let from_unknown = bind_value(&unknown, "replacement").unwrap();
-        assert!(matches!(
-            from_unknown.actions()[0].prepare(&unknown.frames()[0]),
-            Err(SemanticActionPreparationError::Revalidation(
-                SemanticActionRevalidationError::TargetChanged
-            ))
-        ));
-        let from_empty = bind_value(&empty, "replacement").unwrap();
+        let from_empty = bind_value(&empty, "12").unwrap();
         let prepared = from_empty.actions()[0].prepare(&empty.frames()[0]).unwrap();
-        let filled = current_snapshot(&empty, 9, 11, nodes(Some("replacement")));
+        let filled = current_snapshot(&empty, 9, 11, nodes(Some("12")));
         assert_eq!(
             prepared.verification_fill_values(&filled).unwrap(),
-            ("", "replacement"),
+            ("", "12"),
             "explicitly observed empty values must support exact fill transitions"
         );
     }
