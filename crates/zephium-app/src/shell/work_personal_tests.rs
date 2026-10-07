@@ -165,6 +165,7 @@ fn begin(work: WorkId, expected: WorkRevision) -> WorkCommandV1 {
                 private: false,
                 lead: None,
                 skill: None,
+                search_fallback: None,
             },
             limits: WorkExecutionLimits {
                 model_tokens: 1_000_000,

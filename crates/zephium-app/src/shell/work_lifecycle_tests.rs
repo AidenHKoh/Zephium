@@ -22,6 +22,7 @@ const GRANT: WorkAgentGrantV1 = WorkAgentGrantV1 {
     accounts: Vec::new(),
     private: false,
     skill: None,
+    search_fallback: None,
 };
 
 fn begin(work: WorkId, expected: WorkRevision, timeout_seconds: u32) -> WorkCommandV1 {
@@ -196,6 +197,7 @@ impl WorkPublicSearchProvider for Sources {
                             title: format!("Source {index}"),
                             start_index: 10 + index * 200,
                             end_index: 40 + index * 200,
+                            snippet: None,
                         })
                         .collect(),
                     answer,

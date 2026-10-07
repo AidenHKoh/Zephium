@@ -660,9 +660,33 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         accounts: Vec::new(),
         private: false,
         skill: None,
+        search_fallback: None,
     };
     assert!(WorkAgentGrantV1 {
         max_turns: 0,
+        ..grant.clone()
+    }
+    .validate()
+    .is_err());
+    // Only a browser search names a fallback, whose evidence then belongs too.
+    let fallback = WorkSearchFallbackV1 {
+        provider: WorkSearchProvider::Native,
+        model: "anthropic/claude-haiku-4-5-20251001".into(),
+    };
+    let browser = WorkAgentGrantV1 {
+        provider: WorkSearchProvider::Browser,
+        model: "bing".into(),
+        search_fallback: Some(fallback.clone()),
+        ..grant.clone()
+    };
+    assert!(browser.validate().is_ok());
+    assert!(browser.admits_search(WorkSearchProvider::Browser, "bing"));
+    assert!(browser.admits_search(WorkSearchProvider::Native, &fallback.model));
+    assert!(!browser.admits_search(WorkSearchProvider::Browser, "google"));
+    assert!(!browser.admits_search(WorkSearchProvider::OpenAi, PUBLIC_SEARCH_MODEL));
+    assert!(!grant.admits_search(WorkSearchProvider::Native, &fallback.model));
+    assert!(WorkAgentGrantV1 {
+        search_fallback: Some(fallback),
         ..grant.clone()
     }
     .validate()
@@ -755,6 +779,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
                 title: "Svelte Flow".into(),
                 start_index: 0,
                 end_index: 11,
+                snippet: None,
             }],
             actual_input_tokens: 1000,
             actual_output_tokens: 200,
@@ -1393,6 +1418,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         accounts: Vec::new(),
         private: false,
         skill: None,
+        search_fallback: None,
     };
     assert!(grant(vec!["/Users/me/Documents/project"])
         .validate()
@@ -2045,6 +2071,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
         accounts: vec![mail.clone()],
         private: false,
         skill: None,
+        search_fallback: None,
     };
     grant.validate().unwrap();
     for accounts in [

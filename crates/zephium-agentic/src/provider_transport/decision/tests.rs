@@ -2698,6 +2698,7 @@ fn search_ranking_fixture(
                 title: format!("Source {index}"),
                 start_index: 0,
                 end_index: 6,
+                snippet: None,
             })
             .collect(),
         actual_input_tokens: 100,

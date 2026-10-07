@@ -1013,6 +1013,7 @@ impl Context<'_> {
                                 accounts: vec![],
                                 private,
                                 skill: None,
+                                search_fallback: None,
                             },
                             limits: WorkExecutionLimits {
                                 model_tokens: 1_000_000,
@@ -1153,6 +1154,7 @@ impl Context<'_> {
                                 accounts: vec![],
                                 private: false,
                                 skill: None,
+                                search_fallback: None,
                             },
                             limits: WorkExecutionLimits {
                                 model_tokens: 1_000_000,

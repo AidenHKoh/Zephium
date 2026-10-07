@@ -786,6 +786,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                         accounts: Vec::new(),
                         private: false,
                         skill: None,
+                        search_fallback: None,
                     },
                     limits: WorkExecutionLimits {
                         model_tokens: 100_000,
@@ -918,6 +919,7 @@ async fn a_run_that_runs_out_of_time_says_so() {
                         accounts: Vec::new(),
                         private: false,
                         skill: None,
+                        search_fallback: None,
                     },
                     limits: WorkExecutionLimits {
                         model_tokens: 100_000,

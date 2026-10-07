@@ -794,6 +794,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         accounts: Vec::new(),
         private: false,
         skill: None,
+        search_fallback: None,
     };
     let limits = WorkExecutionLimits {
         model_tokens: 600_000,
@@ -990,6 +991,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
                 title: "Svelte Flow".into(),
                 start_index: 0,
                 end_index: 11,
+                snippet: None,
             }],
             actual_input_tokens: 1000,
             actual_output_tokens: 200,
@@ -1496,6 +1498,7 @@ fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
             model: "gpt-6".into(),
         }),
         skill: None,
+        search_fallback: None,
     };
     let limits = WorkExecutionLimits {
         model_tokens: 1_000_000,

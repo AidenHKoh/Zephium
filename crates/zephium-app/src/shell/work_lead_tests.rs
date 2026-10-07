@@ -305,6 +305,7 @@ impl WorkPublicSearchProvider for Search {
                         title: "Official ESTA Application".into(),
                         start_index: 0,
                         end_index: 10,
+                        snippet: None,
                     }],
                     actual_input_tokens: 200,
                     actual_output_tokens: 100,
@@ -369,6 +370,7 @@ fn command(work: WorkId, expected: WorkRevision) -> WorkCommandV1 {
                 private: false,
                 lead: None,
                 skill: None,
+                search_fallback: None,
             },
             limits: WorkExecutionLimits {
                 model_tokens: 1_000_000,

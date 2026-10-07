@@ -324,8 +324,20 @@ pub struct WorkAgentGrantV1 {
     /// this skill loaded. A name it does not know is ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill: Option<String>,
+    /// What a browser search falls back to when a results page cannot be
+    /// used; only a browser search grant names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_fallback: Option<super::search::WorkSearchFallbackV1>,
 }
 impl WorkAgentGrantV1 {
+    /// Whether search evidence from this provider and model belongs to the run.
+    pub fn admits_search(&self, provider: super::search::WorkSearchProvider, model: &str) -> bool {
+        (provider == self.provider && model == self.model)
+            || self
+                .search_fallback
+                .as_ref()
+                .is_some_and(|fallback| fallback.provider == provider && fallback.model == model)
+    }
     pub fn validate(&self) -> Result<(), WorkError> {
         let mut origins = BTreeSet::new();
         if self.accounts.len() > MAX_WORK_ACCOUNT_GRANTS
@@ -357,6 +369,12 @@ impl WorkAgentGrantV1 {
         if let Some(lead) = &self.lead {
             validate_text(&lead.model, 128)?;
             if lead.model.chars().any(char::is_whitespace) {
+                return Err(WorkError::Invalid);
+            }
+        }
+        if let Some(fallback) = &self.search_fallback {
+            fallback.validate()?;
+            if self.provider != super::search::WorkSearchProvider::Browser {
                 return Err(WorkError::Invalid);
             }
         }
@@ -2584,8 +2602,7 @@ impl WorkExecutionFact {
             let fact = attempt.ok_or(WorkError::Invalid)?;
             if source.attempt != fact.id
                 || source.node != node.node
-                || source.evidence.provider != grant.provider
-                || source.evidence.model != grant.model
+                || !grant.admits_search(source.evidence.provider, &source.evidence.model)
                 || !sources.insert(source.id)
                 || artifacts.contains(&source.id)
             {
@@ -2893,6 +2910,7 @@ mod search_ranking_tests {
                     title: "Source".into(),
                     start_index: 0,
                     end_index: 6,
+                    snippet: None,
                 }],
                 actual_input_tokens: 100,
                 actual_output_tokens: 10,

@@ -2322,6 +2322,7 @@ async fn agent_workflow(
         accounts: Vec::new(),
         private: false,
         skill: None,
+        search_fallback: None,
     };
     let search = OpenAiPublicSearch::try_new(
         transport.clone(),

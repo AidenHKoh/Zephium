@@ -99,6 +99,7 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
                                 accounts: Vec::new(),
                                 private: false,
                                 skill: None,
+                                search_fallback: None,
                             },
                             limits: WorkExecutionLimits {
                                 model_tokens: 100_000,
@@ -433,6 +434,7 @@ async fn work_parallel_searches_share_and_recalculate_the_remaining_grant() {
                                 accounts: Vec::new(),
                                 private: false,
                                 skill: None,
+                                search_fallback: None,
                             },
                             limits: WorkExecutionLimits {
                                 model_tokens: 100_000,
@@ -514,6 +516,7 @@ impl WorkPublicSearchProvider for RankedSearch {
                             title: id.to_string(),
                             start_index: id * 2,
                             end_index: id * 2 + 1,
+                            snippet: None,
                         })
                         .collect(),
                     actual_input_tokens: 100,
@@ -654,6 +657,7 @@ async fn work_search_ranking_preserves_sources_and_accounts_for_refused_or_unkno
                                 accounts: Vec::new(),
                                 private: false,
                                 skill: None,
+                                search_fallback: None,
                             },
                             limits: WorkExecutionLimits {
                                 model_tokens: 100_000,

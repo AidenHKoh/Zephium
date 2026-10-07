@@ -828,6 +828,7 @@ impl WorkPublicSearchProvider for OpenAiPublicSearch {
                         title: c.title,
                         start_index: c.start_index,
                         end_index: c.end_index,
+                        snippet: None,
                     })
                     .collect(),
                 actual_input_tokens: result.actual_input_tokens,

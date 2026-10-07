@@ -332,6 +332,7 @@ fn lead_execution() -> (WorkPlanRevision, WorkExecutionFact, WorkRevision) {
             model: "claude-sonnet-5".into(),
         }),
         skill: None,
+        search_fallback: None,
     };
     grant.validate().unwrap();
     assert!(WorkAgentGrantV1 {
