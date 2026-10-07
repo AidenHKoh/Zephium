@@ -1,5 +1,8 @@
 //! The lead's run: its models per role, its search backend and the page
-//! machinery, all on the models the person chose.
+//! machinery, all on the models the person chose. Searches open the
+//! person's own search engine's results page in the agent browser and read
+//! it with no model; the chosen models' own search, or the OpenAI public
+//! search, answers only when that page cannot be used, a few times a run.
 use super::*;
 use zephium_app::work_lead::{LeadModel, WorkLeadModels, WorkLeadService};
 use zephium_core::work::model::WorkModelRole;
@@ -23,29 +26,99 @@ pub(crate) async fn models(profile: ProfileId) -> Option<WorkLeadModels> {
     Some(WorkLeadModels { lead, page, light })
 }
 
-/// Search runs on the chosen models' own provider search when one of them
-/// has it, the light model first since searches are many and short. Without
-/// one, the person's OpenAI key keeps the fixed public search; without that
-/// either, searching is unavailable and says so.
+/// Search opens the person's own search engine's results page in the agent
+/// browser, as if they typed the query in the address bar, and Rust reads
+/// the results off it: no model call. A page that cannot be used falls back
+/// to a provider's search a few times per run. A lead run always has the
+/// agent browser, so a browser search leads unless the person's custom
+/// engine has no usable address; then the provider search stands alone.
 async fn search_backend(
     profile: ProfileId,
     models: &WorkLeadModels,
 ) -> Result<Box<dyn zephium_core::work::search::WorkPublicSearchProvider>, WorkError> {
+    let fallback = provider_search(profile, models).await?;
+    let (engine, template) = search_engine().await;
+    let Ok(browser) = zephium_agentic::BrowserSearch::try_new(engine, &template) else {
+        return Ok(match fallback {
+            Some((search, _)) => search,
+            None => {
+                record_diagnostic(format_args!("work: phase=lead state=search backend=none"));
+                Box::new(NoSearch)
+            }
+        });
+    };
+    record_diagnostic(format_args!(
+        "work: phase=lead state=search backend=browser engine={} fallback={}",
+        engine.id(),
+        fallback.as_ref().map_or("none", |(_, grant)| match grant.provider {
+            zephium_core::work::search::WorkSearchProvider::Native => "native",
+            zephium_core::work::search::WorkSearchProvider::OpenAi => "openai",
+            zephium_core::work::search::WorkSearchProvider::Browser => "browser",
+        })
+    ));
+    Ok(match fallback {
+        Some((search, grant)) => Box::new(browser.with_fallback(search, grant)?),
+        None => Box::new(browser),
+    })
+}
+
+/// The engine the person searches with in the address bar, and their
+/// custom engine's address.
+async fn search_engine() -> (zephium_core::search::SearchEngine, String) {
+    use zephium_core::ports::store::Store;
+    tauri::async_runtime::spawn_blocking(|| {
+        let store = crate::APP_STORE.get()?;
+        Some((
+            store
+                .app_setting("search.engine")
+                .as_deref()
+                .and_then(zephium_core::search::SearchEngine::from_id)
+                .unwrap_or_default(),
+            store.app_setting("search.custom-url").unwrap_or_default(),
+        ))
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default()
+}
+
+/// The provider search a browser search falls back to: the chosen models'
+/// own search, the light model first since searches are many and short;
+/// else the person's OpenAI key's fixed public search; else none.
+async fn provider_search(
+    profile: ProfileId,
+    models: &WorkLeadModels,
+) -> Result<
+    Option<(
+        Box<dyn zephium_core::work::search::WorkPublicSearchProvider>,
+        zephium_core::work::search::WorkSearchFallbackV1,
+    )>,
+    WorkError,
+> {
     use zephium_agentic::{AgentProviderTransport, AgentProviderTransportConfig};
+    use zephium_core::work::search::{WorkSearchFallbackV1, WorkSearchProvider};
     for model in [&models.light, &models.lead, &models.page] {
         if let Ok(search) =
             zephium_agentic::ModelNativeSearch::try_new(model.entry.clone(), model.client.clone())
         {
             record_diagnostic(format_args!(
-                "work: phase=lead state=search backend=native model={}",
+                "work: phase=lead state=search provider=native model={}",
                 model.entry.id
             ));
-            return Ok(Box::new(search));
+            let search: Box<dyn zephium_core::work::search::WorkPublicSearchProvider> =
+                Box::new(search);
+            return Ok(Some((
+                search,
+                WorkSearchFallbackV1 {
+                    provider: WorkSearchProvider::Native,
+                    model: model.entry.id.clone(),
+                },
+            )));
         }
     }
     let Ok(credential) = credential().await else {
-        record_diagnostic(format_args!("work: phase=lead state=search backend=none"));
-        return Ok(Box::new(NoSearch));
+        return Ok(None);
     };
     let transport = AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
         .map_err(|_| WorkError::Unavailable)?;
@@ -58,10 +131,16 @@ async fn search_backend(
     )?;
     let search =
         zephium_agentic::OpenAiPublicSearch::try_new(transport.clone(), credential, config)?;
-    record_diagnostic(format_args!("work: phase=lead state=search backend=openai"));
-    Ok(Box::new(
-        configure_search_ranking(search, profile, transport).await?,
-    ))
+    record_diagnostic(format_args!("work: phase=lead state=search provider=openai"));
+    let search: Box<dyn zephium_core::work::search::WorkPublicSearchProvider> =
+        Box::new(configure_search_ranking(search, profile, transport).await?);
+    Ok(Some((
+        search,
+        WorkSearchFallbackV1 {
+            provider: WorkSearchProvider::OpenAi,
+            model: zephium_core::work::search::PUBLIC_SEARCH_MODEL.into(),
+        },
+    )))
 }
 
 /// The page agent runs on the page model the person chose; a page model that
