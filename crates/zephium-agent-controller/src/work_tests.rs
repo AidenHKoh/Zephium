@@ -917,6 +917,8 @@ enum Fault {
     SuspendObservation,
     RevokeObservation,
     Readiness,
+    TimedOutLook,
+    TimedOutLooks,
     RendererObservation,
     MailboxPressure,
 }
@@ -1237,6 +1239,11 @@ impl AgentBrowserPort for Port {
                     && lock(&self.calls).iter().filter(|call| **call == 3).count() < 3
                 {
                     Err(SemanticRuntimePortFailure::NotReady)
+                } else if (self.fault == Fault::TimedOutLook
+                    && lock(&self.calls).iter().filter(|call| **call == 3).count() < 2)
+                    || self.fault == Fault::TimedOutLooks
+                {
+                    Err(SemanticRuntimePortFailure::TimedOut)
                 } else {
                     Ok(snapshot)
                 },
@@ -1527,6 +1534,27 @@ fn drive_with_schedule(
     let calls = lock(&port.calls).clone();
     events.extend(std::iter::from_fn(|| handle.take_event()));
     (outcome, shutdown, calls, events)
+}
+
+#[test]
+fn a_look_a_busy_page_timed_out_is_taken_once_more_and_no_more() {
+    let _guard = lock(&SERIAL);
+    let (outcome, shutdown, calls, _) = run(Fault::TimedOutLook);
+    assert!(
+        matches!(outcome, AgentWorkOutcome::Succeeded(_)),
+        "{outcome:?}"
+    );
+    assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+    assert_eq!(calls, [1, 2, 3, 3, 4, 5, 6]);
+    let (outcome, _, calls, _) = run(Fault::TimedOutLooks);
+    let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+        panic!("a page that keeps timing out must close: {outcome:?}");
+    };
+    assert_eq!(
+        closed.failure(),
+        AgentWorkFailure::Observation(SemanticRuntimePortFailure::TimedOut)
+    );
+    assert_eq!(calls.iter().filter(|call| **call == 3).count(), 2);
 }
 
 #[test]

@@ -510,6 +510,20 @@ impl SemanticRuntimeChannelState {
         {
             return (ChannelActions::default(), false);
         }
+        // A look the page never pulled (its main thread was busy) ran nothing
+        // in the page: it ends timed out and the document stays usable, so a
+        // later look can still be read. One the page took may still answer
+        // late, and only a fresh document can rejoin that channel.
+        if !self.awaiting_result {
+            let mut actions = ChannelActions::default();
+            if let Some(PendingInvocation::Observation { completion, .. }) = self.pending.take() {
+                actions.completion = Some(CompletionAction::Observation {
+                    completion,
+                    outcome: Err(RuntimeChannelFailure::TimedOut.observation()),
+                });
+            }
+            return (actions, false);
+        }
         let actions = self.invalidate_current(RuntimeChannelFailure::TimedOut);
         if self.phase != DocumentPhase::Retired {
             self.phase = DocumentPhase::Failed;
@@ -2576,7 +2590,7 @@ mod tests {
     }
 
     #[test]
-    fn timeout_is_invocation_exact_and_permanently_stops_the_document_channel() {
+    fn timeout_is_invocation_exact_and_stops_the_channel_only_after_page_handoff() {
         let mut state = SemanticRuntimeChannelState {
             expected_view: Some(23),
             active_world: Some(24),
@@ -2596,7 +2610,30 @@ mod tests {
         assert!(actions.completion.is_none());
         assert!(state.pending.is_some());
 
+        // Never pulled by a busy page: timed out, and the document stays usable.
         let (actions, matched) = state.timeout(invocation_id);
+        assert!(!matched);
+        assert!(matches!(
+            actions
+                .completion
+                .expect("timeout completion")
+                .observation_outcome(),
+            Err(AgentSemanticRuntimeFailure::TimedOut)
+        ));
+        assert_eq!(state.phase, DocumentPhase::Ready);
+        assert!(state.pending.is_none());
+        let handed = SemanticInvocationId::new(23).expect("invocation");
+        state
+            .dispatch_observation(
+                invocation(23, SemanticSnapshotGeneration::INITIAL),
+                Box::new(|_| {}),
+            )
+            .unwrap_or_else(|_| panic!("a look after an unpulled timeout is admitted"));
+        // Pulled by the page: it may still answer late, so the channel closes.
+        let mut pulled = state.on_message(SEMANTIC_RUNTIME_CHANNEL_PULL, reply());
+        assert!(pulled.first_reply.take().is_some());
+        assert!(state.awaiting_result);
+        let (actions, matched) = state.timeout(handed);
         assert!(matched);
         assert!(matches!(
             actions
@@ -2609,7 +2646,7 @@ mod tests {
         assert!(state.pending.is_none());
         assert!(state
             .dispatch_observation(
-                invocation(23, SemanticSnapshotGeneration::INITIAL),
+                invocation(24, SemanticSnapshotGeneration::INITIAL),
                 Box::new(|_| {}),
             )
             .is_err());

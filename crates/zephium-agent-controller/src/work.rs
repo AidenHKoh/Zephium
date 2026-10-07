@@ -2410,8 +2410,22 @@ impl AgentWorkController {
         // second and more apart: each look shows the page, and one that never
         // settles (a sign-in redirect) is better reported than watched.
         let mut parsing = 0u32;
+        // A look a busy page never took timed out without running: the page
+        // keeps its channel, and one more look is read-only.
+        let mut timed_out = false;
         while started.elapsed() < NOT_READY_PATIENCE {
             let result = Self::observe_once(state, worker, browser).await;
+            if !timed_out
+                && matches!(
+                    result,
+                    Err(AgentWorkFailure::Observation(
+                        SemanticRuntimePortFailure::TimedOut
+                    ))
+                )
+            {
+                timed_out = true;
+                continue;
+            }
             let still_parsing = matches!(
                 result,
                 Err(AgentWorkFailure::Observation(

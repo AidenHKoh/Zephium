@@ -36,7 +36,15 @@ animation) do not hold it; sockets, polling and timers are bounded by the
 ceiling instead of waited out. The observer exists only while that action is
 pending, reads no content and is disconnected on either ending, so the page
 controls only how long the bounded wait lasts, never an effect. A scroll keeps
-its own rendering sample. Rust's settle and page-change looks still follow. Click
+its own rendering sample. Rust's settle and page-change looks still follow.
+
+A look stops its traversal after 2 s and reports `inspection_limit`, so a
+huge or slow DOM yields a truthful partial look inside the 5 s observation
+budget instead of a timeout. A look the page never pulled, because its main
+thread stayed busy past the budget, ran nothing in the page: it ends timed
+out, the document keeps its semantic channel, and the controller takes one
+more look. A look the page did take may still answer late, so a timeout
+there closes the channel as before. Click
 also reaches a row, cell or list item the page made clickable itself (a click
 handler attribute, a tab stop, or a pointer cursor set on the item and not
 inherited from its parent), such as a mail client's thread rows; the decoder
