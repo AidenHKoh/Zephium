@@ -133,8 +133,11 @@ export const commands = {
 	profileRename: (name: string) => __TAURI_INVOKE<OperationAdmission>("profile_rename", { name }),
 	/**  Onboarding's intro sound, played natively; chrome keeps `autoplay=()`. */
 	onboardingPlayIntro: () => __TAURI_INVOKE<boolean>("onboarding_play_intro"),
-	/**  Finishes onboarding: records it, then opens the browser in its place. */
-	onboardingFinish: () => __TAURI_INVOKE<boolean>("onboarding_finish"),
+	/**
+	 *  Finishes onboarding: records it, then opens the browser in its place and,
+	 *  once it is shown, the setup chosen there.
+	 */
+	onboardingFinish: (then: "account" | "models" | null) => __TAURI_INVOKE<boolean>("onboarding_finish", { then }),
 	tabsNavigate: (id: string, input: string) => __TAURI_INVOKE<OperationAdmission>("tabs_navigate", { id, input }),
 	tabsReload: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_reload", { id }),
 	tabsAnswerPageRequest: (id: string, answer: PageRequestAnswer) => __TAURI_INVOKE<OperationAdmission>("tabs_answer_page_request", { id, answer }),
@@ -1421,6 +1424,12 @@ export type NoteTarget = {
 };
 
 export type NotesChanged = NoteChanges;
+
+/**
+ *  Where onboarding sends the person once the browser is up: the setup
+ *  they chose there and could not finish inside it.
+ */
+export type OnboardingNextV1 = "account" | "models";
 
 /**
  *  Immediate result returned by a privileged IPC command. `accepted` with an

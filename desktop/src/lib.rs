@@ -388,6 +388,17 @@ struct UiStartupGate {
     visible: Arc<AtomicBool>,
     handed_over: Arc<AtomicBool>,
     browser_revealed: Arc<AtomicBool>,
+    /// What onboarding asked to open once the browser has appeared.
+    then: Arc<Mutex<Option<OnboardingNextV1>>>,
+}
+
+/// Where onboarding sends the person once the browser is up: the setup
+/// they chose there and could not finish inside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+enum OnboardingNextV1 {
+    Account,
+    Models,
 }
 
 #[derive(Clone)]
@@ -406,6 +417,7 @@ impl UiStartupGate {
             visible: Arc::new(AtomicBool::new(false)),
             handed_over: Arc::new(AtomicBool::new(false)),
             browser_revealed: Arc::new(AtomicBool::new(false)),
+            then: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -570,6 +582,19 @@ impl UiStartupGate {
                 window.app_handle(),
                 "could not show the browser after onboarding",
             );
+            return;
+        }
+        let then = self
+            .then
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(next) = then {
+            let id = match next {
+                OnboardingNextV1::Account => "settings.account",
+                OnboardingNextV1::Models => "settings.ai",
+            };
+            execute_command(window.app_handle(), id);
         }
     }
 
@@ -4461,13 +4486,22 @@ fn onboarding_play_intro(caller: WebviewWindow, app: tauri::AppHandle) -> bool {
     true
 }
 
-/// Finishes onboarding: records it, then opens the browser in its place.
+/// Finishes onboarding: records it, then opens the browser in its place and,
+/// once it is shown, the setup chosen there.
 #[tauri::command]
 #[specta::specta]
-fn onboarding_finish(caller: WebviewWindow, gate: State<'_, UiStartupGate>) -> bool {
+fn onboarding_finish(
+    caller: WebviewWindow,
+    gate: State<'_, UiStartupGate>,
+    then: Option<OnboardingNextV1>,
+) -> bool {
     if !authorize_onboarding(&caller, "onboarding_finish") {
         return false;
     }
+    *gate
+        .then
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = then;
     // Opening the browser matters more than the record: if it is lost,
     // onboarding simply shows once more on the next launch.
     if !APP_STORE
