@@ -29,4 +29,11 @@
   .centre :global(:is(.plot, .sheet, .code, .diff)) {
     box-shadow: none;
   }
+
+  /* A table or a chart stands on the lift itself, its edges level with the header's. */
+  .centre :global(:is(.plot, .sheet)) {
+    padding: 0;
+    border-radius: 0;
+    background: none;
+  }
 </style>
