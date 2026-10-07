@@ -115,15 +115,18 @@
 
   onMount(() => {
     void refresh();
-    // Permission is granted in System Settings, which tells nobody; look
-    // again while this page is waiting for it, and only then.
-    const poll = setInterval(() => {
-      if (waiting && document.visibilityState === "visible") void refresh();
-    }, 1500);
     return () => {
-      clearInterval(poll);
       if (recording) void commands.launcherRecordShortcut(false).catch(() => {});
     };
+  });
+  // Permission is granted in System Settings, which tells nobody; look
+  // again while this page is waiting for it, and only then.
+  $effect(() => {
+    if (!waiting) return;
+    const poll = setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 1500);
+    return () => clearInterval(poll);
   });
 </script>
 
