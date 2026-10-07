@@ -591,3 +591,83 @@ fn replay_from_another_wire_is_dropped() {
         json!([{"type": "text", "text": "Hi", "cache_control": {"type": "ephemeral"}}])
     );
 }
+
+#[test]
+fn every_wire_forces_the_tool_it_is_told_to() {
+    let named = |wire| {
+        let mut request = request(wire, "model-1");
+        request.tool_choice = WorkModelToolChoice::Named("web_fetch".into());
+        request
+    };
+    let openai = LeadTarget::direct(WorkModelProvider::OpenAi).unwrap();
+    let body = openai::body(&named(WorkModelWire::OpenAiResponses), &openai).unwrap();
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type": "function", "name": "web_fetch"})
+    );
+
+    let anthropic = LeadTarget::direct(WorkModelProvider::Anthropic).unwrap();
+    let body = anthropic::body(&named(WorkModelWire::AnthropicMessages), &anthropic).unwrap();
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type": "tool", "name": "web_fetch", "disable_parallel_tool_use": false})
+    );
+    // Anthropic refuses a forced tool with thinking on.
+    assert!(body.get("thinking").is_none());
+    assert!(body.get("output_config").is_none());
+
+    let body = gemini::body(&named(WorkModelWire::Gemini)).unwrap();
+    assert_eq!(
+        body["toolConfig"]["functionCallingConfig"],
+        json!({"mode": "ANY", "allowedFunctionNames": ["web_fetch"]})
+    );
+    assert!(body["generationConfig"].get("thinkingConfig").is_some());
+
+    let chat = LeadTarget::direct(WorkModelProvider::DeepSeek).unwrap();
+    let body = chat::body(&named(WorkModelWire::ChatCompletions), &chat).unwrap();
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type": "function", "function": {"name": "web_fetch"}})
+    );
+
+    let mut required = request(WorkModelWire::AnthropicMessages, "claude-sonnet-5-5");
+    required.tool_choice = WorkModelToolChoice::Required;
+    let body = anthropic::body(&required, &anthropic).unwrap();
+    assert_eq!(body["tool_choice"]["type"], "any");
+    assert!(body.get("thinking").is_none());
+    required.model.wire = WorkModelWire::OpenAiResponses;
+    assert_eq!(
+        openai::body(&required, &openai).unwrap()["tool_choice"],
+        "required"
+    );
+    required.model.wire = WorkModelWire::Gemini;
+    assert_eq!(
+        gemini::body(&required).unwrap()["toolConfig"]["functionCallingConfig"],
+        json!({"mode": "ANY"})
+    );
+    required.model.wire = WorkModelWire::ChatCompletions;
+    assert_eq!(
+        chat::body(&required, &chat).unwrap()["tool_choice"],
+        "required"
+    );
+}
+
+#[test]
+fn a_forced_tool_the_request_does_not_offer_is_refused() {
+    let mut request = request(WorkModelWire::OpenAiResponses, "model-1");
+    request.tool_choice = WorkModelToolChoice::Named("navigate".into());
+    let openai = LeadTarget::direct(WorkModelProvider::OpenAi).unwrap();
+    assert_eq!(
+        openai::body(&request, &openai).err(),
+        Some(WorkModelError::BadRequest)
+    );
+    request.tools.clear();
+    request.tool_choice = WorkModelToolChoice::Required;
+    assert_eq!(
+        tool_choice(&request).err(),
+        Some(WorkModelError::BadRequest)
+    );
+    request.tool_choice = WorkModelToolChoice::Auto;
+    let anthropic = LeadTarget::direct(WorkModelProvider::Anthropic).unwrap();
+    assert!(anthropic::body(&request, &anthropic).is_ok());
+}

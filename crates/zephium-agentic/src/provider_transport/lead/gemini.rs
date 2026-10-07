@@ -118,9 +118,16 @@ pub(super) fn body(request: &WorkModelRequest) -> Result<Value, WorkModelError> 
         body.insert("tools".into(), Value::Array(tools));
     }
     if !request.tools.is_empty() {
+        let config = match tool_choice(request)? {
+            WorkModelToolChoice::Auto => json!({"mode": "AUTO"}),
+            WorkModelToolChoice::Required => json!({"mode": "ANY"}),
+            WorkModelToolChoice::Named(name) => {
+                json!({"mode": "ANY", "allowedFunctionNames": [name]})
+            }
+        };
         body.insert(
             "toolConfig".into(),
-            json!({"functionCallingConfig": {"mode": "AUTO"}}),
+            json!({"functionCallingConfig": config}),
         );
     }
     body.insert("generationConfig".into(), generation);

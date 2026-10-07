@@ -114,8 +114,13 @@ pub(super) fn body(
         body.insert("reasoning".into(), json!({"effort": effort}));
     }
     if !tools.is_empty() {
+        let choice = match tool_choice(request)? {
+            WorkModelToolChoice::Auto => json!("auto"),
+            WorkModelToolChoice::Required => json!("required"),
+            WorkModelToolChoice::Named(name) => json!({"type": "function", "name": name}),
+        };
         body.insert("tools".into(), Value::Array(tools));
-        body.insert("tool_choice".into(), json!("auto"));
+        body.insert("tool_choice".into(), choice);
         body.insert("parallel_tool_calls".into(), json!(request.parallel_tools));
     }
     Ok(Value::Object(body))

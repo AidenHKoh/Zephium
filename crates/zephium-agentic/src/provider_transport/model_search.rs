@@ -98,6 +98,7 @@ impl ModelNativeSearch {
                 .then_some(WorkModelReasoning::Low),
             native_search: true,
             parallel_tools: false,
+            tool_choice: WorkModelToolChoice::Auto,
         }
     }
 

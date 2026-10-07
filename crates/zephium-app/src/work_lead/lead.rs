@@ -256,6 +256,7 @@ where
                 }),
                 native_search: false,
                 parallel_tools: true,
+                tool_choice: WorkModelToolChoice::Auto,
             };
             let (outcome, usage) = match call::call(self.run, model, request).await {
                 Ok(done) => done,

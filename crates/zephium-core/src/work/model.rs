@@ -116,6 +116,19 @@ pub enum WorkModelMessage {
     ToolResults(Vec<WorkModelToolResult>),
 }
 
+/// Whether the model must call a tool, and which.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum WorkModelToolChoice {
+    /// Text or any offered tool.
+    #[default]
+    Auto,
+    /// One of the offered tools.
+    Required,
+    /// This offered tool. A wire that would refuse it with reasoning on sends
+    /// the call without reasoning.
+    Named(String),
+}
+
 #[derive(Clone)]
 pub struct WorkModelRequest {
     pub model: WorkModelRef,
@@ -127,6 +140,7 @@ pub struct WorkModelRequest {
     /// Offer the provider's own web search tool when it has one.
     pub native_search: bool,
     pub parallel_tools: bool,
+    pub tool_choice: WorkModelToolChoice,
 }
 
 #[derive(Clone)]
@@ -160,6 +174,8 @@ pub enum WorkModelStop {
 pub struct WorkModelUsage {
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
+    /// Of `input_tokens`, those written to the provider's prompt cache.
+    pub cache_write_input_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_tokens: u64,
     /// Cost in millionths of a US dollar, including provider tool fees, when

@@ -141,8 +141,15 @@ pub(super) fn body(
                 }})
             })
             .collect();
+        let choice = match tool_choice(request)? {
+            WorkModelToolChoice::Auto => json!("auto"),
+            WorkModelToolChoice::Required => json!("required"),
+            WorkModelToolChoice::Named(name) => {
+                json!({"type": "function", "function": {"name": name}})
+            }
+        };
         body.insert("tools".into(), Value::Array(tools));
-        body.insert("tool_choice".into(), json!("auto"));
+        body.insert("tool_choice".into(), choice);
         if !request.parallel_tools {
             body.insert("parallel_tool_calls".into(), json!(false));
         }
