@@ -116,3 +116,39 @@ no timer, worker, provider request or action payload from this implementation.
 This is the native integration contract. Passing deterministic tests or a Rust
 build does not constitute a bundled real-site action witness; that qualification
 must exercise the complete app, controller, policy and native path.
+
+## Trusted input on macOS
+
+Retained actions dispatch untrusted DOM events from the isolated world:
+`isTrusted` is false and no user activation is granted. A click first sends
+pointer and mouse `over`, `enter` and `move`, so menus that open on script
+hover open; CSS `:hover`, key defaults (Tab, arrows, Page Down, typing into a
+canvas editor such as Google Docs), popups, clipboard and file pickers still
+need trusted input.
+
+The only route WebKit exposes for that is AppKit itself: an `NSEvent`
+synthesized with `mouseEventWithType:` or `keyEventWithType:` and delivered by
+`-[NSWindow sendEvent:]` to the window holding the `WKWebView`, with the view
+as that window's first responder for keys. WebKit's UI process turns it into
+a trusted web event with user activation. The release-excluded
+`macos-agentic-input-probe` already implements this backend
+(`macos_app_kit_event`, plus `macos_accessibility`) and its owned-surface
+variant refuses a moved frame or a changed responder; only the fixed DOM
+recipe is qualified (hidden, 14 cases, zero trusted effects).
+
+Shipping it is not small:
+
+- the retained page's surface is non-key, non-main and ignores the mouse, so
+  every trusted key or click needs a responder change confined to that window
+  and proof that the person's window, focus and pointer never change;
+- trusted input grants transient and sticky user activation, so popups,
+  clipboard, fullscreen and downloads become reachable; the activation must be
+  tracked as its own axis (agentic-browsing §8.3) and new gates added for each;
+- queued native input cannot be withdrawn on cancel or takeover, so it needs
+  native drain debt joined to the existing action and human-input fences;
+- mouse-move tracking areas and IME composition differ between visible,
+  occluded and hidden views and must be qualified per presentation state.
+
+Until that qualification exists on named devices, the production answer for
+controls that need trusted input stays a typed refusal and, where a person can
+finish the step, a handoff.

@@ -89,8 +89,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0xb9, 0xbf, 0xdb, 0xf7, 0xb6, 0x8c, 0xdf, 0x4d, 0x53, 0x94, 0x2c, 0x17, 0x64, 0x3f, 0xa3, 0x40,
-    0x83, 0xb1, 0x51, 0x6d, 0x5c, 0xef, 0xde, 0x10, 0xd4, 0x85, 0xe4, 0xfb, 0xf9, 0xf8, 0x2c, 0xd3,
+    0x67, 0x1a, 0x2d, 0x25, 0x28, 0x1c, 0x1e, 0xcd, 0xde, 0x18, 0xd2, 0xfa, 0x69, 0x93, 0x6d, 0xb2,
+    0xf5, 0x8e, 0xe2, 0x67, 0x51, 0xf9, 0x2b, 0xf0, 0xe1, 0x88, 0xc8, 0x97, 0xec, 0x2f, 0x9d, 0x0b,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -1736,6 +1736,19 @@ mod tests {
         let debug = format!("{SEMANTIC_RUNTIME_PROGRAM:?}");
         assert!(debug.contains("[redacted]"));
         assert!(!debug.contains("WeakMap"));
+    }
+
+    #[test]
+    fn a_click_lets_the_pointer_arrive_before_it_presses() {
+        let source = SEMANTIC_RUNTIME_PROGRAM.source();
+        let (_, recipe) = source
+            .split_once("function pointerDown(target, point) {")
+            .expect("pointer recipe");
+        let recipe = recipe.split_once("\n  }\n").expect("recipe end").0;
+        let hover = recipe.find("[\"over\", true], [\"enter\", false], [\"move\", true]");
+        let press = recipe.find("\"pointerdown\"");
+        assert!(hover.is_some() && press.is_some() && hover < press);
+        assert!(recipe.contains("`mouse${type}`") && recipe.contains("`pointer${type}`"));
     }
 
     #[test]

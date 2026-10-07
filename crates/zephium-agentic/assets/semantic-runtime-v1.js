@@ -3853,6 +3853,13 @@
       button: 0, buttons: 1, view: globalThis };
     const pointer = typeof nativePointerEvent === "function";
     const pointerInit = { ...init, pointerId: 1, pointerType: "mouse", isPrimary: true };
+    // A person's pointer arrives before it presses: menus that open on
+    // script hover see it. CSS :hover needs real input and stays closed.
+    const over = { ...init, buttons: 0 };
+    for (const [type, bubbles] of [["over", true], ["enter", false], ["move", true]]) {
+      if (pointer) apply(fixedDispatchEvent, target, [new nativePointerEvent(`pointer${type}`, { ...pointerInit, ...over, bubbles })]);
+      apply(fixedDispatchEvent, target, [new nativeMouseEvent(`mouse${type}`, { ...over, bubbles })]);
+    }
     if (pointer) apply(fixedDispatchEvent, target, [new nativePointerEvent("pointerdown", pointerInit)]);
     apply(fixedDispatchEvent, target, [new nativeMouseEvent("mousedown", init)]);
     if (typeof htmlElementFocus === "function" && read(nodeConnectedGetter, target) === true) {
