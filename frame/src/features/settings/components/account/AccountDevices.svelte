@@ -40,9 +40,11 @@
 </script>
 
 <SettingsGroup title={m.account_devices_group()}>
-  {#if !shown}<div class="show">
-      <Button size="compact" onclick={() => void load()}>{m.account_devices_show()}</Button>
-    </div>
+  {#if !shown}<SettingsRow
+      title={m.account_devices_row()}
+      description={m.account_devices_row_desc()}
+      ><Button onclick={() => void load()}>{m.account_devices_show()}</Button></SettingsRow
+    >
   {:else if loading && !devices.length}<p class="empty">{m.account_usage_loading()}</p>
   {:else if failure}<p class="empty" role="alert">{explainAccountFault(failure, null)}</p>
   {:else}
@@ -67,10 +69,6 @@
 </SettingsGroup>
 
 <style>
-  .show {
-    padding: 12px 14px;
-  }
-
   .empty {
     margin: 0;
     padding: 14px 18px;

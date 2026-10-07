@@ -40,7 +40,7 @@
       sent = false;
       code = "";
       open = true;
-    }}>{m.account_delete_confirm()}</Button
+    }}>{m.account_delete_open()}</Button
   >
 </SettingsRow>
 

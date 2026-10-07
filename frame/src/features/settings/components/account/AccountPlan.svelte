@@ -77,7 +77,7 @@
   });
 
   const planLine = $derived.by(() => {
-    if (!subscription || subscription.status === "inactive") return m.account_plan_free();
+    if (!subscription || subscription.status === "inactive") return undefined;
     if (subscription.status === "unknown") return m.account_plan_unknown();
     const date = shortDate(subscription.paid_until);
     if (!date) return m.account_plan_active();
@@ -139,20 +139,18 @@
             onclick={() => void session.manage()}>{m.account_billing_manage()}</Button
           >{/if}
       </SettingsRow>
-      {#if upgrades.length && intervals.length > 1}<div class="intervals">
-          <SegmentedControl
-            label={m.account_plan_group()}
-            size="compact"
-            options={intervals.map((value) => ({ value, label: intervalName(value) }))}
-            bind:value={interval}
-          />
-        </div>{/if}
       {#each upgrades as id (id)}
         {@const offer = offerFor(id)}
         {#if offer}<SettingsRow
             title={offer.name ?? planName(id) ?? id}
             description={[priced(offer), ...offer.features].filter(Boolean).join(" · ")}
           >
+            {#if intervals.length > 1}<SegmentedControl
+                label={m.account_plan_group()}
+                size="compact"
+                options={intervals.map((value) => ({ value, label: intervalName(value) }))}
+                bind:value={interval}
+              />{/if}
             <Button
               variant="primary"
               pending={buying === offerKey(offer)}
@@ -228,10 +226,6 @@
 
   .meter[data-tone="full"] span {
     background: var(--color-danger);
-  }
-
-  .intervals {
-    padding: 4px 18px 6px;
   }
 
   .note {

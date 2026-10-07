@@ -2,7 +2,7 @@
   import { accountSession as session } from "$domain/account";
   import { commands } from "$shared/ipc/bindings";
   import * as m from "$shared/i18n/messages";
-    import Icon, { ZephiumMark } from "$shared/ui/Icon";
+  import Icon, { ZephiumMark } from "$shared/ui/Icon";
   import Button from "$shared/ui/Button";
   import Field from "$shared/ui/Field";
   import {

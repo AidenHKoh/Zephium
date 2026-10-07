@@ -23,6 +23,13 @@
   const ended = $derived(
     fault?.fault === "signed_out" ? explainAccountFault("signed_out", null) : null,
   );
+  const subtitle = $derived.by(() => {
+    if (!account) return "";
+    const plan = planName(account.plan);
+    return [account.name ? account.email : null, plan ? m.account_plan_line({ plan }) : null]
+      .filter(Boolean)
+      .join(" · ");
+  });
   const signOutFault = $derived(
     fault?.action === "sign_out" ? explainAccountFault(fault.fault, fault.retryAfter) : null,
   );
@@ -38,13 +45,7 @@
       <span class="avatar" aria-hidden="true">{initials(account.email, account.name)}</span>
       <div class="who">
         <h2>{account.name ?? account.email}</h2>
-        <p>
-          {#if account.name}{account.email}{/if}{#if account.name && account.plan}
-            ·
-          {/if}{#if account.plan}{m.account_plan_line({
-              plan: planName(account.plan) ?? account.plan,
-            })}{/if}
-        </p>
+        {#if subtitle}<p>{subtitle}</p>{/if}
       </div>
     </div>
     {#if account.notice}<p class="note" data-tone={account.notice.warning ? "warning" : undefined}>
@@ -53,7 +54,7 @@
     <AccountPlan />
     <AccountDevices />
     <SettingsGroup title={m.section_account()}>
-      <SettingsRow title={m.account_sign_out()} description={m.account_sign_out_desc()}>
+      <SettingsRow title={m.account_sign_out_title()} description={m.account_sign_out_desc()}>
         <Button
           pending={busy === "sign_out"}
           disabled={!!busy && busy !== "sign_out"}
