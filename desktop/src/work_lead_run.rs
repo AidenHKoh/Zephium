@@ -50,11 +50,13 @@ async fn search_backend(
     record_diagnostic(format_args!(
         "work: phase=lead state=search backend=browser engine={} fallback={}",
         engine.id(),
-        fallback.as_ref().map_or("none", |(_, grant)| match grant.provider {
-            zephium_core::work::search::WorkSearchProvider::Native => "native",
-            zephium_core::work::search::WorkSearchProvider::OpenAi => "openai",
-            zephium_core::work::search::WorkSearchProvider::Browser => "browser",
-        })
+        fallback
+            .as_ref()
+            .map_or("none", |(_, grant)| match grant.provider {
+                zephium_core::work::search::WorkSearchProvider::Native => "native",
+                zephium_core::work::search::WorkSearchProvider::OpenAi => "openai",
+                zephium_core::work::search::WorkSearchProvider::Browser => "browser",
+            })
     ));
     Ok(match fallback {
         Some((search, grant)) => Box::new(browser.with_fallback(search, grant)?),
@@ -131,7 +133,9 @@ async fn provider_search(
     )?;
     let search =
         zephium_agentic::OpenAiPublicSearch::try_new(transport.clone(), credential, config)?;
-    record_diagnostic(format_args!("work: phase=lead state=search provider=openai"));
+    record_diagnostic(format_args!(
+        "work: phase=lead state=search provider=openai"
+    ));
     let search: Box<dyn zephium_core::work::search::WorkPublicSearchProvider> =
         Box::new(configure_search_ranking(search, profile, transport).await?);
     Ok(Some((
