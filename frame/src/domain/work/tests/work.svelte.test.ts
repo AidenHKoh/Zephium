@@ -162,6 +162,23 @@ test("does not roll back a precision-safe projection when a stale read arrives",
   session.dispose();
 });
 
+test("a read of the revision already shown keeps the projection it has", async () => {
+  const { WorkSession } = await import("../work.svelte");
+  let revision = "4";
+  native.call.mockImplementation((_profile: string, call: WorkCallV1) => reads(call, revision));
+  const session = new WorkSession(profile);
+  await session.start();
+  await session.open(work);
+  const shown = session.projection;
+  expect(await session.open(work)).toBe(true);
+  expect(session.projection).toBe(shown);
+  revision = "5";
+  await session.open(work);
+  expect(session.projection).not.toBe(shown);
+  expect(session.projection?.work.revision).toBe("5");
+  session.dispose();
+});
+
 test("a home session with unsent words in its composer cannot be evicted", async () => {
   const { WorkSession } = await import("../work.svelte");
   native.call.mockImplementation((_profile: string, call: WorkCallV1) => reads(call));

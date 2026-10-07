@@ -4,7 +4,6 @@
   put between the two, so starting reads as the dial coming alive.
 -->
 <script lang="ts">
-  import { onMount } from "svelte";
   import { ArrowDown01Icon } from "@hugeicons/core-free-icons";
   import type { IconRef } from "$shared/ipc/bindings";
   import * as m from "$shared/i18n/messages";
@@ -78,15 +77,23 @@
         : m.focus_shut_count({ count: shut }),
   );
 
-  onMount(() => {
-    const tick = () => {
-      if (document.visibilityState === "visible") now = Date.now();
+  const running = $derived(session !== null);
+  // The dial only moves during a session, and only someone looking needs it to.
+  $effect(() => {
+    if (!running) return;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const pace = () => {
+      clearInterval(timer);
+      timer = undefined;
+      if (document.visibilityState !== "visible") return;
+      now = Date.now();
+      timer = setInterval(() => (now = Date.now()), 1000);
     };
-    const timer = setInterval(tick, 1000);
-    document.addEventListener("visibilitychange", tick);
+    pace();
+    document.addEventListener("visibilitychange", pace);
     return () => {
       clearInterval(timer);
-      document.removeEventListener("visibilitychange", tick);
+      document.removeEventListener("visibilitychange", pace);
     };
   });
 

@@ -10,10 +10,12 @@ import type {
 import { events } from "$shared/ipc/native-events";
 import { observe } from "$shared/lib/observe";
 import { listenAll } from "$shared/lib/lifecycle";
-import { validRevision } from "$domain/work";
+import { sameProjection, validRevision } from "$domain/work";
 
 /** How long the first read of an opening may wait for the others. */
 const PUBLISH_WITHIN = 250;
+const samePages = (current: readonly WorkPageV1[] | undefined, next: readonly WorkPageV1[]) =>
+  !!current && current.length === next.length && JSON.stringify(current) === JSON.stringify(next);
 
 /** Read-only joins for visible Work resources. No model or operation supervisor is started. */
 export class WorkEnvironmentContext {
@@ -200,9 +202,12 @@ export class WorkEnvironmentContext {
     this.arrived = {};
     for (const [id, read] of Object.entries(arrived)) {
       if (!this.wanted.includes(id)) continue;
-      this.objectives.set(id, read.projection);
+      // A new frame of a page re-reads its work: what did not change keeps its
+      // object, so the canvas redraws the page and not every lane around it.
+      if (!sameProjection(this.objectives.get(id) ?? null, read.projection))
+        this.objectives.set(id, read.projection);
       this.unavailable.delete(id);
-      if (read.pages) this.pages.set(id, read.pages);
+      if (read.pages && !samePages(this.pages.get(id), read.pages)) this.pages.set(id, read.pages);
     }
   }
   /** The frames one work recorded, so its page cards are pictures on arrival. */

@@ -4,6 +4,7 @@ import { playwright } from "@vitest/browser-playwright";
 import tailwindcss from "@tailwindcss/vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { alias } from "./aliases";
+import { benchPhotos, webkitFootprint } from "./vitest.bench-commands";
 
 export default defineConfig({
   test: {
@@ -82,6 +83,7 @@ export default defineConfig({
             enabled: true,
             headless: true,
             screenshotFailures: false,
+            commands: { benchPhotos, webkitFootprint },
             // Retina is the display this chrome is drawn for, and the one
             // where a radius or a hairline can actually be judged.
             provider: playwright({ contextOptions: { deviceScaleFactor: 2 } }),
