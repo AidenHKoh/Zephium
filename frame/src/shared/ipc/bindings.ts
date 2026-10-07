@@ -5368,7 +5368,9 @@ export type WorkRuntimeProjection_Serialize = {
 /** Store incarnation; never serialized as execution authority. */
 export type WorkRuntimeSessionId = string;
 
-export type WorkSearchProvider = "open_ai";
+export type WorkSearchProvider = "open_ai" | 
+/**  The web search built into the chosen model's own provider. */
+"native";
 
 export type WorkServerAuthV1 = "none" | 
 /**  A token the person pasted, sent as `Authorization: Bearer`. */

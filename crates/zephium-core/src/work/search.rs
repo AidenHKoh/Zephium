@@ -44,8 +44,24 @@ pub fn validate_direct_public_read(
     Ok(())
 }
 
+/// OpenAI's fixed public search profiles.
 pub fn supported_public_search_model(model: &str) -> bool {
     matches!(model, "gpt-4.1-mini" | "gpt-5.6-luna" | "gpt-6-luna")
+}
+
+/// A model the provider may search with: a fixed OpenAI profile, or for a
+/// chosen model's own search, its catalog id.
+pub fn supported_search_model(provider: WorkSearchProvider, model: &str) -> bool {
+    match provider {
+        WorkSearchProvider::OpenAi => supported_public_search_model(model),
+        WorkSearchProvider::Native => {
+            !model.is_empty()
+                && model.len() <= 160
+                && model
+                    .bytes()
+                    .all(|b| b.is_ascii_graphic() && !matches!(b, b'"' | b'\\'))
+        }
+    }
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -53,6 +69,8 @@ pub fn supported_public_search_model(model: &str) -> bool {
 #[serde(rename_all = "snake_case")]
 pub enum WorkSearchProvider {
     OpenAi,
+    /// The web search built into the chosen model's own provider.
+    Native,
 }
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -64,7 +82,7 @@ pub struct WorkPublicSearchScope {
 }
 impl WorkPublicSearchScope {
     pub fn validate(&self) -> Result<(), WorkError> {
-        if !supported_public_search_model(&self.model) {
+        if !supported_search_model(self.provider, &self.model) {
             return Err(WorkError::Invalid);
         }
         validate_public_search_query(&self.query)
@@ -133,19 +151,28 @@ impl WorkProviderSearchEvidenceV1 {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_')
         }
-        let model_matches = match self.model.as_str() {
-            "gpt-4.1-mini" => matches!(
+        let model_matches = match (self.provider, self.model.as_str()) {
+            (WorkSearchProvider::OpenAi, "gpt-4.1-mini") => matches!(
                 self.response_model.as_str(),
                 "gpt-4.1-mini" | "gpt-4.1-mini-2025-04-14"
             ),
-            "gpt-5.6-luna" => self.response_model == "gpt-5.6-luna",
-            "gpt-6-luna" => self.response_model == "gpt-6-luna",
-            _ => false,
+            (WorkSearchProvider::OpenAi, "gpt-5.6-luna") => self.response_model == "gpt-5.6-luna",
+            (WorkSearchProvider::OpenAi, "gpt-6-luna") => self.response_model == "gpt-6-luna",
+            (WorkSearchProvider::OpenAi, _) => false,
+            (WorkSearchProvider::Native, model) => {
+                supported_search_model(self.provider, model) && self.response_model == model
+            }
+        };
+        // Native search has no provider response identity to keep; Rust mints
+        // correlation ids for it, which never claim to be provider receipts.
+        let (response, call) = match self.provider {
+            WorkSearchProvider::OpenAi => ("resp_", "ws_"),
+            WorkSearchProvider::Native => ("zr_", "zs_"),
         };
         if !model_matches
             || self.version != 1
-            || !identity(&self.response_id, "resp_")
-            || !identity(&self.search_call_id, "ws_")
+            || !identity(&self.response_id, response)
+            || !identity(&self.search_call_id, call)
             || self.answer.trim().is_empty()
             || self.answer.len() > 32768
             || self
@@ -232,6 +259,12 @@ pub type WorkPublicSearchRankingFuture<'a> = Pin<
 >;
 
 pub trait WorkPublicSearchProvider: Send + Sync {
+    /// The provider and model a run's grant records for this backend's
+    /// searches; `None` keeps what the grant already names.
+    fn grant(&self) -> Option<(WorkSearchProvider, String)> {
+        None
+    }
+
     /// Pure scheduling hint, with no dispatch or disclosure. Unknown providers
     /// may omit it; every search still enforces its supplied limits independently.
     fn minimum_reservation(
@@ -378,5 +411,48 @@ mod tests {
         assert!(excerpt.contains("source"));
         assert_eq!(excerpt.chars().count(), 768);
         assert!(excerpt.len() < evidence.answer.len());
+    }
+    #[test]
+    fn native_search_binds_the_chosen_model_and_rust_minted_ids() {
+        let scope = WorkPublicSearchScope {
+            provider: WorkSearchProvider::Native,
+            model: "anthropic/claude-haiku-4-5-20251001".into(),
+            query: "public query".into(),
+        };
+        assert!(scope.validate().is_ok());
+        for model in ["", "has space", "quote\"d"] {
+            assert!(!supported_search_model(WorkSearchProvider::Native, model));
+        }
+        assert!(!supported_search_model(
+            WorkSearchProvider::OpenAi,
+            "anthropic/claude"
+        ));
+        let mut evidence = WorkProviderSearchEvidenceV1 {
+            version: 1,
+            provider: WorkSearchProvider::Native,
+            model: scope.model.clone(),
+            response_model: scope.model.clone(),
+            response_id: "zr_01J".into(),
+            search_call_id: "zs_01J".into(),
+            answer: "A source".into(),
+            citations: vec![WorkProviderSearchCitation {
+                url: "https://example.com".into(),
+                title: "Source".into(),
+                start_index: 0,
+                end_index: 8,
+            }],
+            actual_input_tokens: 100,
+            actual_output_tokens: 10,
+        };
+        assert!(evidence.validate().is_ok());
+        // Native evidence never passes as an OpenAI receipt, nor the reverse.
+        evidence.response_id = "resp_01J".into();
+        assert!(evidence.validate().is_err());
+        evidence.response_id = "zr_01J".into();
+        evidence.response_model = "zephium/other".into();
+        assert!(evidence.validate().is_err());
+        evidence.response_model = scope.model.clone();
+        evidence.provider = WorkSearchProvider::OpenAi;
+        assert!(evidence.validate().is_err());
     }
 }

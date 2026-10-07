@@ -361,7 +361,7 @@ impl WorkAgentGrantV1 {
             }
         }
         let max_turns = if self.lead.is_some() { u8::MAX } else { 16 };
-        if !super::search::supported_public_search_model(&self.model)
+        if !super::search::supported_search_model(self.provider, &self.model)
             || self.max_turns == 0
             || self.max_turns > max_turns
             || self.max_steps == 0
