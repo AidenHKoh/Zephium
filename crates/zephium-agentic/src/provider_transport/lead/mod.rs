@@ -192,6 +192,17 @@ impl LeadTarget {
         self.upstream
     }
 
+    /// Who produced a provider item: the upstream, and whether through Cloud,
+    /// whose account is not the person's own.
+    fn origin(&self) -> String {
+        let slug = models::provider_slug(self.upstream);
+        if self.cloud {
+            format!("{slug}@zephium")
+        } else {
+            slug.to_owned()
+        }
+    }
+
     fn call_url(&self, model: &str) -> Result<Url, WorkModelError> {
         match self.wire {
             WorkModelWire::OpenAiResponses => join(&self.base, "responses"),
@@ -339,6 +350,8 @@ impl LeadClient {
         if request.model.wire != self.target.wire {
             return Err(WorkModelError::BadRequest);
         }
+        let origin = self.target.origin();
+        strip_foreign_replays(&mut request, &origin);
         let mut total = Decoded::default();
         for continuation in 0..=MAX_PAUSE_CONTINUATIONS {
             let body = self.body(&request)?;
@@ -362,10 +375,16 @@ impl LeadClient {
             DecodedStop::Open => return Err(WorkModelError::Protocol),
         };
         let usage = self.usage(&total);
+        let mut assistant = total.assistant;
+        for part in &mut assistant {
+            if let WorkModelPart::Replay(Value::Object(item)) = part {
+                item.insert("origin".into(), Value::String(origin.clone()));
+            }
+        }
         Ok(WorkModelOutcome {
             stop,
             usage,
-            assistant: total.assistant,
+            assistant,
         })
     }
 
@@ -873,6 +892,24 @@ pub(crate) fn media_type_ok(media_type: &str) -> Result<(), WorkModelError> {
 
 /// Replay items are tagged with the wire that produced them; another wire
 /// drops them, so switching models mid-work stays valid.
+/// Drops provider items another provider produced. Wires are shared (DeepSeek
+/// and Groq both speak Chat Completions, OpenAI and xAI both Responses), but
+/// reasoning items and signatures only make sense to the provider that made
+/// them. Items from before origins were recorded stay.
+fn strip_foreign_replays(request: &mut WorkModelRequest, origin: &str) {
+    for message in &mut request.messages {
+        if let WorkModelMessage::Assistant(parts) = message {
+            parts.retain(|part| match part {
+                WorkModelPart::Replay(value) => value
+                    .get("origin")
+                    .and_then(Value::as_str)
+                    .is_none_or(|from| from == origin),
+                _ => true,
+            });
+        }
+    }
+}
+
 pub(crate) fn replay(wire: &str, value: Value) -> WorkModelPart {
     WorkModelPart::Replay(serde_json::json!({ "wire": wire, "value": value }))
 }

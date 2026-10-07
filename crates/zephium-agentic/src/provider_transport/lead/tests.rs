@@ -640,3 +640,35 @@ async fn cloud_calls_send_the_bearer_and_a_fresh_idempotency_key_per_attempt() {
     assert_eq!(keys.len(), 2);
     assert_ne!(keys[0], keys[1]);
 }
+
+#[test]
+fn another_providers_reasoning_is_never_replayed() {
+    let mut request = request(WorkModelWire::ChatCompletions, "deepseek-flash");
+    let from = |origin: Option<&str>| {
+        let mut part = json!({"wire": "chat", "value": {"reasoning_content": "thought"}});
+        if let Some(origin) = origin {
+            part["origin"] = json!(origin);
+        }
+        WorkModelPart::Replay(part)
+    };
+    request.messages.push(WorkModelMessage::Assistant(vec![
+        from(Some("deepseek")),
+        from(Some("groq")),
+        from(Some("deepseek@zephium")),
+        from(None),
+        WorkModelPart::Text("answer".into()),
+    ]));
+    strip_foreign_replays(&mut request, "deepseek");
+    let Some(WorkModelMessage::Assistant(parts)) = request.messages.last() else {
+        panic!("assistant turn kept");
+    };
+    let origins: Vec<Option<&str>> = parts
+        .iter()
+        .filter_map(|part| match part {
+            WorkModelPart::Replay(value) => Some(value.get("origin").and_then(Value::as_str)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(origins, vec![Some("deepseek"), None]);
+    assert_eq!(parts.len(), 3);
+}
