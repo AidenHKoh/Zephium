@@ -2242,6 +2242,7 @@
   "work_model_manage": "Models and keys…",
   "work_model_failed": "The model couldn’t be changed",
   "work_model_sign_in": "Sign in",
+  "work_model_no_search": "Web search is off: these models can’t search. Choose a Claude, GPT, Gemini or Grok model, or add an OpenAI key.",
   "ai_cloud_group": "Zephium AI",
   "ai_cloud_title": "Zephium AI",
   "ai_cloud_signed_in": "Signed in",

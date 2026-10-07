@@ -59,16 +59,23 @@
    * again whenever the models change, so a key added in Settings lands here.
    */
   let leadMissing = $state(false);
+  /** No chosen model can search and no OpenAI key stands in: runs work without the web. */
+  let searchOff = $state(false);
   $effect(() => {
     void models;
     let current = true;
     void Promise.resolve()
       .then(() => commands.workModelsReady(profile))
       .then((readiness) => {
-        if (current) leadMissing = !readiness.ready && readiness.missing_roles.includes("lead");
+        if (!current) return;
+        leadMissing = !readiness.ready && readiness.missing_roles.includes("lead");
+        searchOff = readiness.ready && readiness.search === "unavailable";
       })
       .catch(() => {
-        if (current) leadMissing = false;
+        if (current) {
+          leadMissing = false;
+          searchOff = false;
+        }
       });
     return () => (current = false);
   });
@@ -237,6 +244,7 @@
             <span class="name">{allKeyed ? m.work_model_manage() : m.work_model_add_key()}</span>
           </button>
         </div>
+        {#if searchOff}<p class="note">{m.work_model_no_search()}</p>{/if}
         {#if session?.fault?.action === "choose:lead"}<p class="note failure" role="alert">
             {m.work_model_failed()}
           </p>{/if}

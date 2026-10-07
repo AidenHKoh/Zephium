@@ -145,3 +145,21 @@ test("signed out where hosted models exist, Zephium AI is one sign-in away", asy
   await page.getByRole("button", { name: /Zephium AI.*Sign in/u }).click();
   expect(native.command).toHaveBeenCalledWith("settings.account");
 });
+
+test("the menu says so when no chosen model can search the web", async () => {
+  await page.viewport(1200, 800);
+  native.read.mockResolvedValue(
+    models({ keys: { deep_seek: "valid" }, lead: "deepseek/deepseek-v4-pro" }),
+  );
+  native.ready.mockImplementation(async (profile: string) => ({
+    version: 1,
+    profile,
+    ready: true,
+    missing_roles: [],
+    search: "unavailable",
+    fault: null,
+  }));
+  const screen = await render(ModelPicker, { profile: PROFILE });
+  await screen.getByRole("button", { name: "Model: DeepSeek V4 Pro" }).click();
+  await expect.element(page.getByText("Web search is off", { exact: false })).toBeVisible();
+});
