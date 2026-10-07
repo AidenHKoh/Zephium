@@ -6,6 +6,7 @@
   import * as m from "$shared/i18n/messages";
   import { hostOf, matchRange, timeLabel, toRows, visitedAt } from "../lib/history-model";
   import { createVirtualWindow } from "$shared/lib/virtual-window.svelte";
+  import { everyWhileVisible } from "$shared/lib/visible-interval";
   import type { HistorySession } from "../lib/history-session.svelte";
 
   let {
@@ -34,13 +35,12 @@
   let visible = $derived(rows.slice(slice.first, slice.last));
 
   // A day boundary while the page is open must not leave "Today" on yesterday.
-  $effect(() => {
-    const timer = setInterval(() => {
+  $effect(() =>
+    everyWhileVisible(60_000, () => {
       const now = new Date();
       if (now.getDate() !== today.getDate()) today = now;
-    }, 60_000);
-    return () => clearInterval(timer);
-  });
+    }),
+  );
 
   function onscroll(event: Event & { currentTarget: HTMLElement }) {
     const { scrollTop, scrollHeight, clientHeight } = event.currentTarget;

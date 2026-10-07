@@ -7,6 +7,7 @@ import type {
 } from "$shared/ipc/bindings";
 import { commands } from "$shared/ipc/bindings";
 import { observe } from "$shared/lib/observe";
+import { everyWhileVisible } from "$shared/lib/visible-interval";
 import { currentPeriod, reportCall, shiftPeriod, type Period, type Span } from "./time-model";
 
 const RESPONSE_DEADLINE_MS = 8000;
@@ -39,10 +40,7 @@ export class TimeSession {
   failed = $state(false);
 
   private request = 0;
-  private timer: ReturnType<typeof setInterval> | undefined;
-  private onVisible = () => {
-    if (document.visibilityState === "visible") void this.refresh();
-  };
+  private stopTimer: (() => void) | undefined;
 
   constructor(profile: string, span: Span = "day") {
     this.profile = profile;
@@ -57,16 +55,14 @@ export class TimeSession {
 
   start() {
     void this.refresh();
-    this.timer = setInterval(() => {
-      if (document.visibilityState === "visible") void this.refresh();
-    }, REFRESH_MS);
-    document.addEventListener("visibilitychange", this.onVisible);
+    this.stopTimer?.();
+    this.stopTimer = everyWhileVisible(REFRESH_MS, () => void this.refresh());
   }
 
   stop() {
     this.request += 1;
-    clearInterval(this.timer);
-    document.removeEventListener("visibilitychange", this.onVisible);
+    this.stopTimer?.();
+    this.stopTimer = undefined;
   }
 
   show(span: Span) {
