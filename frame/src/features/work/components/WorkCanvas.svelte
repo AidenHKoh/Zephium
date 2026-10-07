@@ -855,6 +855,7 @@
         const current = node.parentId ? node.parentId.slice("area:".length) : null;
         if (area !== current) onareachange?.(node.id, area);
       }}
+      onmove={() => layers?.engage()}
       onmoveend={publishView}
       oninit={() => requestAnimationFrame(() => requestAnimationFrame(() => (fitted = true)))}
       onmovestart={(event) => {
