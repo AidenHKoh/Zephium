@@ -43,6 +43,8 @@ pub struct WorkAgentBrowseRequest {
     pub entry: bool,
     /// A page task that only reads what a daily app's view lists.
     pub view: bool,
+    /// A search step's results page: Rust reads its results, no model.
+    pub results: Option<WorkResultsPage>,
 }
 
 /// A step a page task holds for the person, as the site policy read it
@@ -184,6 +186,8 @@ pub struct WorkBrowserOutcome {
     /// finished a sign-in in a tab while it waited, or saving a cookie
     /// refusal replaced the page. The site counts as allowed for the rerun.
     pub rerun: bool,
+    /// What a search step's results page showed, as Rust read it.
+    pub search: Option<WorkSearchPage>,
 }
 pub struct WorkAgentProviders<'a> {
     pub turn: &'a dyn WorkAgentTurnProvider,
@@ -1328,18 +1332,34 @@ impl Driver {
                     limits,
                 ));
             }
+            let mut pages = self.open_results_pages(search, browser, &running).await;
             let futures: Vec<Pin<Box<dyn Future<Output = Fetched> + Send + '_>>> = running
                 .into_iter()
-                .map(|(id, scope, limits)| {
+                .zip(pages.drain(..))
+                .map(|((id, scope, limits), opened)| {
                     let probe = self.probe.clone();
                     Box::pin(async move {
-                        let outcome = probe.run_search(search, &scope, &[], limits).await;
+                        let (outcome, page_usage) = match opened {
+                            Some((page, usage)) => (
+                                probe.run_search_on_page(search, &scope, page, limits).await,
+                                usage,
+                            ),
+                            None => (
+                                probe.run_search(search, &scope, &[], limits).await,
+                                WorkUsage::default(),
+                            ),
+                        };
                         Fetched::Search(
                             id,
                             match outcome {
                                 Ok(outcome) => WorkSearchOutcomeOwned {
                                     status: outcome.status,
-                                    usage: outcome.usage,
+                                    // The page itself is charged with its
+                                    // search; it calls no model.
+                                    usage: outcome.usage.map(|usage| WorkUsage {
+                                        operations: usage.operations,
+                                        ..crate::work_search::add(usage, page_usage)
+                                    }),
                                     note: outcome.note,
                                     record: outcome.record,
                                     error: None,
@@ -1380,6 +1400,75 @@ impl Driver {
             }
         }
         self.fetch_browses(attempt, browser, browses).await
+    }
+
+    /// Opens each browser search's results page together, in the run's own
+    /// storage, before its search reads it; what Rust read there and what
+    /// the page cost. Searches a provider runs itself get `None`.
+    async fn open_results_pages<B, Fut>(
+        &self,
+        search: &dyn WorkPublicSearchProvider,
+        browser: &mut B,
+        running: &[(WorkStepId, WorkPublicSearchScope, WorkExecutionLimits)],
+    ) -> Vec<Option<(Option<WorkSearchPage>, WorkUsage)>>
+    where
+        B: FnMut(WorkAttemptProbe, WorkAgentBrowseRequest) -> Fut,
+        Fut: Future<Output = Result<WorkBrowserOutcome, WorkError>>,
+    {
+        let mut opened: Vec<Option<(Option<WorkSearchPage>, WorkUsage)>> =
+            running.iter().map(|_| None).collect();
+        let mut at = Vec::new();
+        let mut reads = Vec::new();
+        for (index, (id, scope, limits)) in running.iter().enumerate() {
+            let Some(page) = search.results_page(scope) else {
+                continue;
+            };
+            at.push(index);
+            reads.push(Box::pin(browser(
+                self.probe.clone(),
+                WorkAgentBrowseRequest {
+                    construction_attempt: Default::default(),
+                    id: *id,
+                    step: WorkStepKindV1::Search {
+                        query: scope.query.clone(),
+                    },
+                    hops: 1,
+                    objective: self.objective.clone(),
+                    output: self.output.clone(),
+                    limits: *limits,
+                    session: crate::work_sites::SiteSession::Private,
+                    confirm: None,
+                    allow_edits: false,
+                    hold_typing: false,
+                    entry: false,
+                    view: false,
+                    results: Some(page),
+                },
+            )));
+        }
+        if reads.is_empty() {
+            return opened;
+        }
+        self.probe.record_activity(WorkActivityV1::Searching);
+        for (index, outcome) in at.into_iter().zip(join_all(reads).await) {
+            let (page, usage) = match outcome {
+                Ok(outcome) => (outcome.search, outcome.usage.unwrap_or_default()),
+                Err(_) => (None, WorkUsage::default()),
+            };
+            crate::work_trace::record(format_args!(
+                "work: phase=search page={}",
+                match &page {
+                    Some(WorkSearchPage::Results(_)) => "results",
+                    Some(WorkSearchPage::Wall(WorkSearchWall::Challenge)) => "challenge",
+                    Some(WorkSearchPage::Wall(WorkSearchWall::Consent)) => "consent",
+                    Some(WorkSearchPage::Wall(WorkSearchWall::NoResults)) => "no_results",
+                    Some(WorkSearchPage::Wall(WorkSearchWall::Unreadable)) => "unreadable",
+                    None => "unopened",
+                }
+            ));
+            opened[index] = Some((page, usage));
+        }
+        opened
     }
 
     /// One step on the person's files. Reads settle at once with a record
@@ -2766,8 +2855,8 @@ pub fn query_discloses(query: &str, private: &[String]) -> bool {
 
 /// Bounded fan-out without a futures dependency: polls every pending future
 /// each wake and returns once all have settled.
-async fn join_all<T>(mut futures: Vec<Pin<Box<dyn Future<Output = T> + Send + '_>>>) -> Vec<T> {
-    let mut results: Vec<Option<T>> = futures.iter().map(|_| None).collect();
+async fn join_all<F: Future + ?Sized>(mut futures: Vec<Pin<Box<F>>>) -> Vec<F::Output> {
+    let mut results: Vec<Option<F::Output>> = futures.iter().map(|_| None).collect();
     std::future::poll_fn(|cx: &mut Context<'_>| {
         let mut pending = false;
         for (index, future) in futures.iter_mut().enumerate() {

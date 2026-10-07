@@ -680,6 +680,10 @@ where
                     .evidence
                     .and_then(|id| execution.provider_evidence.iter().find(|r| r.id == id))
                 {
+                    if record.evidence.provider == WorkSearchProvider::Browser {
+                        out.push_str(&self.results(record));
+                        return (out, failed);
+                    }
                     let answer: String = record
                         .evidence
                         .answer
@@ -792,6 +796,43 @@ where
             out.push_str(if failed { "Failed" } else { "Done" });
         }
         (out, failed)
+    }
+
+    /// A results page's results in the engine's order, each with its source
+    /// key, address and the engine's own snippet. No answer: the model reads
+    /// the pages it picks.
+    fn results(&self, record: &WorkProviderSearchRecordV1) -> String {
+        let engine = zephium_core::search::SearchEngine::from_id(&record.evidence.model)
+            .map_or("the search engine", |engine| engine.name());
+        let mut out = format!(
+            "Results from {engine}, in its order. Snippets are the engine's, not the pages': web_fetch the best pages before you rely on them.\n"
+        );
+        for (index, result) in record
+            .evidence
+            .citations
+            .iter()
+            .enumerate()
+            .take(SEARCH_SOURCES)
+        {
+            let key = self.run.cite(
+                WorkEvidenceLink {
+                    extraction_id: record.id,
+                    source_id: (index + 1) as u16,
+                },
+                &result.title,
+                Some(&result.url),
+            );
+            out.push_str(&format!(
+                "{}. [{key}] {} — {}\n",
+                index + 1,
+                clip(&result.title, 120),
+                result.url
+            ));
+            if let Some(snippet) = &result.snippet {
+                out.push_str(&format!("   {}\n", clip(snippet, 300)));
+            }
+        }
+        out
     }
 
     /// A page's records as lines the model can build objects from: names,
@@ -933,6 +974,23 @@ struct SearchLane<'a> {
 impl WorkPublicSearchProvider for SearchLane<'_> {
     fn grant(&self) -> Option<(zephium_core::work::search::WorkSearchProvider, String)> {
         self.inner.grant()
+    }
+    fn fallback(&self) -> Option<WorkSearchFallbackV1> {
+        self.inner.fallback()
+    }
+    fn results_page(&self, scope: &WorkPublicSearchScope) -> Option<WorkResultsPage> {
+        self.inner.results_page(scope)
+    }
+    fn search_page<'a>(
+        &'a self,
+        scope: &'a WorkPublicSearchScope,
+        page: Option<WorkSearchPage>,
+        limits: WorkExecutionLimits,
+    ) -> WorkPublicSearchFuture<'a> {
+        Box::pin(async move {
+            let _permit = self.permits.acquire().await;
+            self.inner.search_page(scope, page, limits).await
+        })
     }
 
     fn reuse<'a>(

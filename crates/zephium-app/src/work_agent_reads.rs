@@ -190,6 +190,7 @@ impl Driver {
                     hold_typing: task
                         && crate::work_sites::site_of(url)
                             .is_some_and(|site| self.typing_held.contains(&site)),
+                    results: None,
                 };
                 let future = Box::pin(browser(self.probe.clone(), request.clone()));
                 pending.push(PendingRead {
@@ -979,6 +980,7 @@ mod tests {
                 helped: false,
                 held_back: false,
                 rerun: false,
+                search: None,
             };
             assert!(matches!(
                 checked_outcome(Ok(outcome), limits),

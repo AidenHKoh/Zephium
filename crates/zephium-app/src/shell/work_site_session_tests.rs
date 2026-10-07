@@ -76,6 +76,7 @@ async fn open(
                 helped: false,
                 held_back: false,
                 rerun: false,
+                search: None,
             });
         }
     }

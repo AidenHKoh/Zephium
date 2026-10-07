@@ -816,7 +816,10 @@ impl WorkAttemptProbe {
             || !execution.steps.iter().any(|fact| {
                 fact.id == step
                     && fact.status == WorkStepStatus::Running
-                    && matches!(fact.kind, WorkStepKindV1::Read { .. })
+                    && matches!(
+                        fact.kind,
+                        WorkStepKindV1::Read { .. } | WorkStepKindV1::Search { .. }
+                    )
             })
         {
             return Err(WorkError::Invalid);

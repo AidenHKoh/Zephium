@@ -443,6 +443,7 @@ impl NativeWorkComposition {
                 helped: false,
                 held_back: false,
                 rerun: false,
+                search: None,
             });
         }
         let diagnostics = Diagnostics::from(&settings);
@@ -607,6 +608,7 @@ impl NativeWorkComposition {
             helped: run.helped,
             held_back: gate.held_back(),
             rerun,
+            search: None,
         })
     }
 

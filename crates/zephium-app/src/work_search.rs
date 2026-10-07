@@ -28,6 +28,31 @@ impl WorkAttemptProbe {
         context: &[context::WorkContextBody],
         limits: WorkExecutionLimits,
     ) -> Result<WorkSearchOutcome, WorkError> {
+        self.run_search_from(provider, scope, context, Dispatch::Provider, limits)
+            .await
+    }
+
+    /// A browser search over what its results page showed, `None` when the
+    /// page could not be opened; reused and settled as any other search.
+    pub(crate) async fn run_search_on_page(
+        &self,
+        provider: &dyn WorkPublicSearchProvider,
+        scope: &WorkPublicSearchScope,
+        page: Option<WorkSearchPage>,
+        limits: WorkExecutionLimits,
+    ) -> Result<WorkSearchOutcome, WorkError> {
+        self.run_search_from(provider, scope, &[], Dispatch::Page(page), limits)
+            .await
+    }
+
+    async fn run_search_from(
+        &self,
+        provider: &dyn WorkPublicSearchProvider,
+        scope: &WorkPublicSearchScope,
+        context: &[context::WorkContextBody],
+        dispatch: Dispatch,
+        limits: WorkExecutionLimits,
+    ) -> Result<WorkSearchOutcome, WorkError> {
         // Several questions joined with ";" get one search's worth of answer
         // for the first of them: each is searched on its own instead.
         if scope
@@ -50,7 +75,9 @@ impl WorkAttemptProbe {
             || self.cancelled().await?
             || Instant::now() >= self.deadline()
         {
-            return self.run_search_once(provider, scope, context, limits).await;
+            return self
+                .run_search_once(provider, scope, context, dispatch, limits)
+                .await;
         }
         let started = Instant::now();
         let key = (self.profile(), self.work());
@@ -59,7 +86,9 @@ impl WorkAttemptProbe {
         let mut waited = false;
         let slot = loop {
             if Instant::now() >= self.deadline() {
-                return self.run_search_once(provider, scope, context, limits).await;
+                return self
+                    .run_search_once(provider, scope, context, dispatch, limits)
+                    .await;
             }
             match shared::next(key, scope, &terms, &checked, checked.len() < REUSE_CHECKS) {
                 shared::Next::Wait(mut running) => {
@@ -122,7 +151,9 @@ impl WorkAttemptProbe {
                 record: None,
             });
         };
-        let mut outcome = self.run_search_once(provider, scope, context, left).await?;
+        let mut outcome = self
+            .run_search_once(provider, scope, context, dispatch, left)
+            .await?;
         if let (Some(slot), Some(record)) = (slot, &outcome.record) {
             slot.known(record.evidence.clone());
         }
@@ -205,6 +236,7 @@ impl WorkAttemptProbe {
         provider: &dyn WorkPublicSearchProvider,
         scope: &WorkPublicSearchScope,
         context: &[context::WorkContextBody],
+        dispatch: Dispatch,
         limits: WorkExecutionLimits,
     ) -> Result<WorkSearchOutcome, WorkError> {
         if self.cancelled().await? || Instant::now() >= self.deadline() {
@@ -216,9 +248,16 @@ impl WorkAttemptProbe {
             });
         }
         self.record_activity(zephium_ipc::work::WorkActivityV1::Searching);
-        let result = self
-            .bounded_search(provider.search(scope, context, limits))
-            .await;
+        let result = match dispatch {
+            Dispatch::Provider => {
+                self.bounded_search(provider.search(scope, context, limits))
+                    .await
+            }
+            Dispatch::Page(page) => {
+                self.bounded_search(provider.search_page(scope, page, limits))
+                    .await
+            }
+        };
         // A response that arrived is a known outcome: what it lacks is a
         // failed step with a reason. Only a lost outcome stays unknown.
         let failed = |usage: WorkUsage, note: &'static str| WorkSearchOutcome {
@@ -233,8 +272,12 @@ impl WorkAttemptProbe {
                     Some("The search exceeded the step budget")
                 } else if result.evidence.validate().is_err() {
                     Some("The search results could not be admitted")
-                } else if result.evidence.provider != scope.provider
-                    || result.evidence.model != scope.model
+                } else if (result.evidence.provider, result.evidence.model.as_str())
+                    != (scope.provider, scope.model.as_str())
+                    && provider.fallback().is_none_or(|fallback| {
+                        (fallback.provider, fallback.model.as_str())
+                            != (result.evidence.provider, result.evidence.model.as_str())
+                    })
                 {
                     Some("The search came from another provider")
                 } else if u64::from(result.usage.model_tokens)
@@ -375,10 +418,17 @@ impl WorkAttemptProbe {
     }
 }
 
+/// How a search is answered: by its provider, or from a results page the
+/// run opened for it.
+enum Dispatch {
+    Provider,
+    Page(Option<WorkSearchPage>),
+}
+
 /// At most this many earlier searches are ranked against one new query.
 const REUSE_CHECKS: usize = 2;
 
-fn add(a: WorkUsage, b: WorkUsage) -> WorkUsage {
+pub(crate) fn add(a: WorkUsage, b: WorkUsage) -> WorkUsage {
     WorkUsage {
         model_tokens: a.model_tokens.saturating_add(b.model_tokens),
         cost_micro_usd: a.cost_micro_usd.saturating_add(b.cost_micro_usd),
@@ -605,7 +655,7 @@ impl WorkNodeAttempt {
         let limits = self.specification().limits;
         let outcome = self
             .probe()
-            .run_search_once(provider, scope, context, limits)
+            .run_search_once(provider, scope, context, Dispatch::Provider, limits)
             .await?;
         let Some(record) = outcome.record else {
             return self

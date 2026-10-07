@@ -436,6 +436,7 @@ async fn page(request: WorkAgentBrowseRequest) -> Result<WorkBrowserOutcome, Wor
         helped: false,
         held_back: false,
         rerun: false,
+        search: None,
     })
 }
 
@@ -1083,4 +1084,288 @@ async fn a_run_that_stops_moving_closes_with_what_it_has() {
         run.steps.last().unwrap().kind,
         WorkStepKindV1::Finish { .. }
     ));
+}
+
+/// A lead run over the person's engine: `browse` answers every page the
+/// run opens, results pages included.
+async fn scripted_search(
+    objective: &str,
+    turns: fn(usize, &str) -> Vec<WorkModelPart>,
+    search: &dyn WorkPublicSearchProvider,
+    browse: fn(WorkAgentBrowseRequest) -> WorkBrowserOutcome,
+) -> WorkExecutionFact {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: objective.into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let lead = LeadModel {
+        client: Arc::new(Turns(turns)),
+        ..model(Arc::new(Script {
+            calls: Mutex::new(Vec::new()),
+        }))
+    };
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let done = drive(
+        &mut shell,
+        &queue,
+        WorkLeadService::new(handle.clone()).run(
+            profile,
+            command(work, WorkRevision::INITIAL),
+            None,
+            models,
+            search,
+            |_, request| async move { Ok(browse(request)) },
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    done.executions[0].clone()
+}
+
+fn outcome(
+    search: Option<WorkSearchPage>,
+    artifacts: Vec<WorkArtifactDraft>,
+) -> WorkBrowserOutcome {
+    WorkBrowserOutcome {
+        status: WorkStepStatus::Succeeded,
+        usage: Some(WorkUsage {
+            model_tokens: 0,
+            cost_micro_usd: 0,
+            operations: 1,
+            accounting: WorkUsageAccounting::Exact,
+        }),
+        artifacts,
+        intervention: None,
+        note: None,
+        measurements: None,
+        helped: false,
+        held_back: false,
+        rerun: false,
+        search,
+    }
+}
+
+/// The search a browser search falls back to, counting what it is asked.
+struct Fallback(Arc<std::sync::atomic::AtomicUsize>);
+impl WorkPublicSearchProvider for Fallback {
+    fn search<'a>(
+        &'a self,
+        scope: &'a WorkPublicSearchScope,
+        _: &'a [zephium_core::work::context::WorkContextBody],
+        limits: WorkExecutionLimits,
+    ) -> WorkPublicSearchFuture<'a> {
+        Box::pin(async move {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(scope.provider, WorkSearchProvider::Native);
+            let asked = WorkPublicSearchScope {
+                query: format!("{} ESTA", scope.query),
+                ..scope.clone()
+            };
+            Search.search(&asked, &[], limits).await
+        })
+    }
+}
+
+fn browser_search(asked: &Arc<std::sync::atomic::AtomicUsize>) -> zephium_agentic::BrowserSearch {
+    zephium_agentic::BrowserSearch::try_new(zephium_core::search::SearchEngine::DuckDuckGo, "")
+        .unwrap()
+        .with_fallback(
+            Box::new(Fallback(asked.clone())),
+            WorkSearchFallbackV1 {
+                provider: WorkSearchProvider::Native,
+                model: SEARCH_MODEL.into(),
+            },
+        )
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_lead_search_reads_the_engines_results_then_the_page_it_picks() {
+    fn turns(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        match turn {
+            0 => vec![call(
+                "s",
+                "web_search",
+                json!({"query": "rust async runtime", "freshness": "week"}),
+            )],
+            1 => {
+                assert!(seen.contains("Results from DuckDuckGo"), "{seen}");
+                assert!(
+                    seen.contains(
+                        "1. [s1] Tokio - An asynchronous Rust runtime — https://tokio.rs/"
+                    ),
+                    "{seen}"
+                );
+                assert!(
+                    seen.contains("   Tokio is an event-driven platform."),
+                    "{seen}"
+                );
+                assert!(
+                    seen.contains("2. [s2] async-std — https://async.rs/"),
+                    "{seen}"
+                );
+                vec![call("f", "web_fetch", json!({"url": "https://tokio.rs/"}))]
+            }
+            2 => {
+                assert!(
+                    seen.contains("Tokio schedules tasks on a work-stealing pool"),
+                    "{seen}"
+                );
+                vec![
+                    call(
+                        "r",
+                        "create",
+                        json!({"kind": "reply", "title": "Tokio", "data": {
+                        "headline": "Use Tokio", "text": "It is the common async runtime."}}),
+                    ),
+                    call(
+                        "d",
+                        "finish",
+                        json!({"say": "Done.", "title": "Rust async runtime"}),
+                    ),
+                ]
+            }
+            _ => panic!("the run finished at turn 2"),
+        }
+    }
+    fn browse(request: WorkAgentBrowseRequest) -> WorkBrowserOutcome {
+        if let Some(page) = &request.results {
+            assert!(
+                matches!(&request.step, WorkStepKindV1::Search { query } if query == "rust async runtime (past week)")
+            );
+            assert!(request.session == crate::work_sites::SiteSession::Private);
+            assert_eq!(
+                page.url.as_str(),
+                "https://duckduckgo.com/?q=rust+async+runtime&df=w"
+            );
+            return outcome(
+                Some(WorkSearchPage::Results(vec![
+                    WorkSearchHit {
+                        title: "Tokio - An asynchronous Rust runtime".into(),
+                        url: "https://tokio.rs/".into(),
+                        snippet: Some("Tokio is an event-driven platform.".into()),
+                    },
+                    WorkSearchHit {
+                        title: "async-std".into(),
+                        url: "https://async.rs/".into(),
+                        snippet: None,
+                    },
+                ])),
+                vec![],
+            );
+        }
+        let WorkStepKindV1::Read {
+            url, goal: None, ..
+        } = &request.step
+        else {
+            panic!("a page read");
+        };
+        assert_eq!(url, "https://tokio.rs/");
+        outcome(
+            None,
+            vec![WorkArtifactDraft {
+                output: request.output,
+                title: "Notes from tokio.rs".into(),
+                data: WorkArtifactDataV1::Findings {
+                    subjects: vec![],
+                    items: vec![WorkFinding {
+                        claim: "Tokio schedules tasks on a work-stealing pool".into(),
+                        subject: None,
+                        evidence: vec![0],
+                        confidence: WorkConfidence::Supported,
+                        detail: None,
+                        general_knowledge: false,
+                    }],
+                },
+                evidence: vec![WorkEvidenceLink {
+                    extraction_id: WorkArtifactId::from(901),
+                    source_id: 1,
+                }],
+            }],
+        )
+    }
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let run = scripted_search(
+        "Which async runtime should I use in Rust?",
+        turns,
+        &browser_search(&asked),
+        browse,
+    )
+    .await;
+    assert_eq!(run.status, WorkExecutionStatus::NeedsReview);
+    let evidence = &run.provider_evidence[0].evidence;
+    assert_eq!(evidence.provider, WorkSearchProvider::Browser);
+    assert_eq!(evidence.model, "duckduckgo");
+    assert!(evidence.answer.is_empty());
+    assert_eq!(evidence.citations.len(), 2);
+    let search = run
+        .steps
+        .iter()
+        .find(|step| matches!(step.kind, WorkStepKindV1::Search { .. }))
+        .unwrap();
+    assert_eq!(search.status, WorkStepStatus::Succeeded);
+    let usage = search.usage.unwrap();
+    assert_eq!((usage.model_tokens, usage.cost_micro_usd), (0, 0));
+    assert!(run.steps.iter().any(|step| matches!(
+        &step.kind,
+        WorkStepKindV1::Read { url, .. } if url == "https://tokio.rs/"
+    )));
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_challenged_results_page_falls_back_to_the_models_own_search() {
+    fn turns(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        match turn {
+            0 => vec![call("s", "web_search", json!({"query": "us entry rules"}))],
+            1 => {
+                assert!(seen.contains("Polish citizens travel on ESTA"), "{seen}");
+                vec![
+                    call(
+                        "r",
+                        "create",
+                        json!({"kind": "reply", "title": "Entry", "data": {
+                        "headline": "ESTA", "text": "Apply for an ESTA."}}),
+                    ),
+                    call(
+                        "d",
+                        "finish",
+                        json!({"say": "Done.", "title": "Rust async runtime"}),
+                    ),
+                ]
+            }
+            _ => panic!("the run finished at turn 1"),
+        }
+    }
+    fn browse(request: WorkAgentBrowseRequest) -> WorkBrowserOutcome {
+        assert!(request.results.is_some(), "only the results page opens");
+        outcome(
+            Some(WorkSearchPage::Wall(WorkSearchWall::Challenge)),
+            vec![],
+        )
+    }
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let run = scripted_search(
+        "What does a Pole need to enter the US?",
+        turns,
+        &browser_search(&asked),
+        browse,
+    )
+    .await;
+    assert_eq!(run.status, WorkExecutionStatus::NeedsReview);
+    // The fallback's evidence belongs to the run under its browser grant.
+    let evidence = &run.provider_evidence[0].evidence;
+    assert_eq!(evidence.provider, WorkSearchProvider::Native);
+    assert_eq!(evidence.model, SEARCH_MODEL);
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
