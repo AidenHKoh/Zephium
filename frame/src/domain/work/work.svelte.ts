@@ -17,7 +17,14 @@ import { events } from "$shared/ipc/native-events";
 import { observe } from "$shared/lib/observe";
 import { registerCloseTask } from "$shared/lib/close";
 import { SvelteMap } from "svelte/reactivity";
-import { admitProjection, commandId, validRevision, AGENT_GRANT, AGENT_LIMITS } from "./work-model";
+import {
+  admitProjection,
+  commandId,
+  sameProjection,
+  validRevision,
+  AGENT_GRANT,
+  AGENT_LIMITS,
+} from "./work-model";
 import { currentActivity } from "./work-activity";
 import { WorkOperations } from "./work-operations.svelte";
 
@@ -179,7 +186,9 @@ export class WorkSession {
       result.kind === "projection" &&
       admitProjection(result.projection, this.profile, work, this.projection)
     ) {
-      this.projection = result.projection;
+      // A live run is read every second; the same revision is the same
+      // projection, and a new object would rebuild everything drawn from it.
+      if (!sameProjection(this.projection, result.projection)) this.projection = result.projection;
       this.activity = currentActivity(result.projection, this.activity);
       // Pages and their frames outlive the run that opened them, and the
       // workspace remounts whenever Work is left: read them on every open,
