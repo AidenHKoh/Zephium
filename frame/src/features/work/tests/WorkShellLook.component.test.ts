@@ -63,7 +63,6 @@ test("the Work screen's own chrome, at rest and in use, in both themes", async (
     session: environment,
     tabs: [],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: true,
     onopen: vi.fn(),
     onnewtab: vi.fn(),

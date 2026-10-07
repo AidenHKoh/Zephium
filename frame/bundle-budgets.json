@@ -363,6 +363,14 @@
     "panel": {
       "js": 111400,
       "css": 35642
+    },
+    "lazy:features/account/components/AccountButton.svelte": {
+      "js": 6698,
+      "css": 1801
+    },
+    "lazy:features/account/index.ts": {
+      "js": 149,
+      "css": 0
     }
   },
   "onboarding": {

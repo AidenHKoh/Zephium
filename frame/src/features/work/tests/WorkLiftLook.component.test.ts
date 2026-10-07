@@ -52,7 +52,6 @@ test.each([["saas", saasScene] as const, ["trip", tripScene] as const])(
       session: environment,
       tabs: [],
       spaceName: "Personal",
-      profileLabel: "Reader",
       aiEnabled: true,
       onopen: vi.fn(),
       onnewtab: vi.fn(),

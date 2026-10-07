@@ -71,7 +71,6 @@ test("a run whose placing is refused is not asked again until the work changes",
     session,
     tabs: [],
     spaceName: "Personal",
-    profileLabel: "Reader",
     onopen: vi.fn(),
     onnewtab: vi.fn(),
   });

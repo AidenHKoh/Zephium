@@ -1,5 +1,11 @@
 <script lang="ts">
   const loadWorkWorkspace = () => import("./WorkWorkspace.svelte");
+  // Loaded on the first visit to Work, the only place it shows.
+  let accountButton: ReturnType<typeof importAccountButton> | null = null;
+  function importAccountButton() {
+    return import("$features/account").then((account) => account.loadAccountButton());
+  }
+  const loadAccountButton = () => (accountButton ??= importAccountButton());
   // Dynamic like the panel's own path to Notes, so the feature's entry is
   // never a startup request.
   const loadNotesPage = () => import("$features/notes").then((notes) => notes.loadNotesPage());
@@ -311,11 +317,17 @@
             <UpdateNotice view="cards" />
           {/if}
         </div>{/key}
-    {/snippet}{#snippet dock(compact)}{#if compact && incognito}<PrivateBar
+    {/snippet}{#snippet dock(compact)}{#snippet accountFoot()}{#await loadAccountButton() then { default: AccountButton }}<AccountButton
+            name={tabs.profile()?.name ?? ""}
+          />{/await}{/snippet}{#if compact && incognito}<PrivateBar
           compact
         />{:else if compact}{#if tabs.profile()?.id && !inWork}<DownloadPulse
             profile={tabs.profile()?.id ?? ""}
-          />{/if}<UpdateNotice view="glyph" onabout={openAbout} /><Dock compact tools={!inWork}>
+          />{/if}<UpdateNotice view="glyph" onabout={openAbout} /><Dock
+          compact
+          tools={!inWork}
+          foot={inWork ? accountFoot : undefined}
+        >
           {#snippet extensions()}<ExtensionActions variant="stack" /><ManageExtensions
               variant="stack"
             />{/snippet}

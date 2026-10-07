@@ -136,7 +136,6 @@ test("a page waiting for a person is taken over in the pane, handed back, and re
     session,
     tabs: [],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: false,
     onopen: vi.fn(),
     onnewtab: vi.fn(),

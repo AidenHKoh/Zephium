@@ -174,7 +174,6 @@ test("every placement a canvas publishes holds to the checkpoint contract", asyn
     session: environment,
     tabs: [],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: false,
     onopen: vi.fn(),
     onnewtab: vi.fn(),

@@ -127,7 +127,6 @@ test("a video link admits its thumbnail as its poster and opens its page", async
     session: environment,
     tabs: [],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: false,
     onopen: vi.fn(),
     onnewtab: vi.fn(),

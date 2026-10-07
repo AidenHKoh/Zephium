@@ -31,7 +31,6 @@ test("the lift grows from the card it was opened on, even with another card on t
     session: environment,
     tabs: [],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: false,
     onopen: vi.fn(),
     onnewtab: vi.fn(),

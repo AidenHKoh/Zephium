@@ -67,7 +67,6 @@ async function mountCanvas() {
       tabFixture({ id: "tab-1", title: "Sprint 42", url: "https://app.notion.com/p/Sprint-42" }),
     ],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: true,
     onopen: vi.fn(),
     onnewtab: vi.fn(),

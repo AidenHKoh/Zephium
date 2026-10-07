@@ -499,7 +499,6 @@ test(
       session,
       tabs: [],
       spaceName: "Personal",
-      profileLabel: "Reader",
       aiEnabled: true,
       onopen: () => {},
       onnewtab: () => {},

@@ -73,7 +73,6 @@ async function workspace(edit?: (state: WorkRuntimeProjection) => void) {
     session: environment,
     tabs: [],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: true,
     onopen: vi.fn(),
     onnewtab: vi.fn(),

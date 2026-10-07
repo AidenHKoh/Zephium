@@ -50,7 +50,6 @@
             session={owner}
             tabs={tabs.tabs()}
             spaceName={tabs.spaces().find((space) => space.id === owner.space)?.name ?? ""}
-            profileLabel={tabs.profile()?.name ?? ""}
             currentTabId={tabs.activeId()}
             aiEnabled={preferences.value("ai.enabled") !== "false"}
             onopen={(id: string) => void browse(id)}

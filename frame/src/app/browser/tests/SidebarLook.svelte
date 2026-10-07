@@ -6,9 +6,10 @@
   import { SidebarBody, TabList, TabRail, sidebarTree } from "$features/tabs";
   import { Dock } from "$features/dock";
   import { ModeTabs } from "$features/sidebar";
+  import { loadAccountButton } from "$features/account";
   import * as m from "$shared/i18n/messages";
 
-  let { compact = false }: { compact?: boolean } = $props();
+  let { compact = false, work = false }: { compact?: boolean; work?: boolean } = $props();
 
   const open = [
     "rust programming language at DuckDuckGo",
@@ -39,9 +40,12 @@
       {#if compact}
         <ModeTabs compact standalone />
         <TabRail entries={open} onSelect={noop} />
-        <Dock compact>
+        <Dock compact tools={!work} foot={work ? account : undefined}>
           {#snippet sites()}<EssentialsRail entries={kept.slice(0, 2)} onSelect={noop} />{/snippet}
         </Dock>
+        {#snippet account()}{#await loadAccountButton() then { default: AccountButton }}<AccountButton
+              name="Personal"
+            />{/await}{/snippet}
       {:else}
         <div class="sidebar-head"><ModeTabs /></div>
         <SidebarBody pinned={tree.pinned} today={tree.today} splitting={false} onSelect={noop} />

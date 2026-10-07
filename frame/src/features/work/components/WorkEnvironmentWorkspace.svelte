@@ -50,7 +50,6 @@
   import NotePanel from "./bar/NotePanel.svelte";
   import TasksPanel from "./bar/TasksPanel.svelte";
   import AttachPanel, { type AttachKind } from "./bar/AttachPanel.svelte";
-  import AccountButton from "./top/AccountButton.svelte";
   import WorksMenu from "./top/WorksMenu.svelte";
   import ContextManifest from "./composer/ContextManifest.svelte";
   import OpenTabsChip from "./composer/OpenTabsChip.svelte";
@@ -119,7 +118,6 @@
     session,
     tabs,
     spaceName,
-    profileLabel,
     currentTabId = null,
     aiEnabled = true,
     onopen,
@@ -128,7 +126,6 @@
     session: WorkEnvironmentSession;
     tabs: readonly TabView[];
     spaceName: string;
-    profileLabel: string;
     /** The Space's current tab, so the picker reads like its tab strip. */
     currentTabId?: string | null;
     aiEnabled?: boolean;
@@ -2290,7 +2287,6 @@
               >{m.work_env_reload()}</Button
             >{/if}
         </div>{/if}
-      <AccountButton name={profileLabel} />
       <!-- The zoom level reads in the top-right corner, a quiet counterpart to the work's name. -->
       <div class="zoom-slot" data-work-zoom-slot></div>
     </div>

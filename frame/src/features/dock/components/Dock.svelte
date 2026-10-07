@@ -8,6 +8,7 @@
     extensions,
     compact = false,
     tools = true,
+    foot,
   }: {
     sites?: Snippet;
     /** Extension buttons stacked into the tool case, at rail width only. */
@@ -17,6 +18,8 @@
     compact?: boolean;
     /** The browser's tool case; Work keeps its own tools on the canvas. */
     tools?: boolean;
+    /** What closes the rail at its very foot, below the kept sites. */
+    foot?: Snippet;
   } = $props();
 </script>
 
@@ -33,6 +36,7 @@
     {#if tools}<ToolShelf {compact} {extensions} />
       <span class="dock-rule" aria-hidden="true"></span>{/if}
     {#if sites}<div class="dock-sites-slot">{@render sites()}</div>{/if}
+    {#if foot}<span class="dock-rule" aria-hidden="true"></span>{@render foot()}{/if}
   </div>
 </footer>
 

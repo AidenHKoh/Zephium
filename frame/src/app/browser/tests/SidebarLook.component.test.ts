@@ -67,3 +67,17 @@ test("the rail at rest", async () => {
     .elementLocator(screen.container)
     .screenshot({ path: "../../../../../target/rail-shelf.png" });
 });
+
+test("in Work the rail ends in the account, where Browse keeps its tools", async () => {
+  const screen = await render(SidebarLook, { props: { compact: true, work: true } });
+  await page.viewport(420, 700);
+  document.documentElement.dataset.theme = "dark";
+  await expect.element(screen.getByRole("button", { name: "Account" })).toBeVisible();
+  expect(screen.container.querySelector(".shelf")).toBeNull();
+  await page
+    .elementLocator(screen.container)
+    .screenshot({ path: "../../../../../target/rail-work-dark.png" });
+  await screen.getByRole("button", { name: "Account" }).click();
+  await expect.element(page.getByRole("menuitem", { name: "Settings" })).toBeVisible();
+  await page.screenshot({ path: "../../../../../target/rail-work-menu.png" });
+});

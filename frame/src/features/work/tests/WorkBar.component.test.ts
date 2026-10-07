@@ -93,7 +93,6 @@ test("the bar is tools and a field at rest, the field alone in use, the agent's 
     session: environment,
     tabs: [tabFixture({ id: "tab-1", title: "Stays in the Mission", url: "https://airbnb.com/" })],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: true,
     onopen: vi.fn(),
     onnewtab: vi.fn(),
