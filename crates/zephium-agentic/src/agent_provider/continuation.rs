@@ -5429,12 +5429,10 @@ mod tests {
             progress = retained.action_progress.take();
         }
         let percent = shared * 100 / total;
-        eprintln!(
-            "cached input prefix over seven follow-up calls: {percent}% ({shared}/{total} bytes)"
-        );
         // Every earlier turn is byte-identical on the next call; only the new
-        // turn and the trailing host facts are fresh.
-        assert!(percent >= 85, "{percent}%");
+        // turn and the trailing host facts are fresh. Measured 86%; 50% while
+        // the action history preceded the turns.
+        assert!(percent >= 85, "{percent}% ({shared}/{total} bytes)");
     }
 
     #[test]
@@ -5469,12 +5467,10 @@ mod tests {
             retained = bound.into_transcript();
         }
         let percent = shared * 100 / total;
-        eprintln!(
-            "long look: cached input prefix {percent}% ({shared}/{total} bytes), {rewrites} rewrites in 15 calls"
-        );
+        // Measured 73% and 2 rewrites; 25% and 9 when every call retired one.
         assert!(retained.retained_bytes <= TRANSCRIPT_WORKING_BYTES + capture.len());
-        assert!(rewrites <= 4, "{rewrites}");
-        assert!(percent >= 70, "{percent}%");
+        assert!(rewrites <= 4, "{rewrites} rewrites in 15 calls");
+        assert!(percent >= 70, "{percent}% ({shared}/{total} bytes)");
     }
 
     #[test]
