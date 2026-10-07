@@ -27,24 +27,10 @@ fn budget_thinking(model: &str) -> bool {
     .any(|prefix| model.starts_with(prefix))
 }
 
-/// Dynamic-filtering search needs a current model; others keep the basic tool.
-fn search_tool(model: &str) -> &'static str {
-    let current = [
-        "claude-opus-5",
-        "claude-sonnet-5",
-        "claude-fable-5",
-        "claude-mythos-5",
-        "claude-opus-4-6",
-        "claude-opus-4-7",
-        "claude-opus-4-8",
-        "claude-sonnet-4-6",
-    ];
-    if current.iter().any(|prefix| model.starts_with(prefix)) {
-        "web_search_20260209"
-    } else {
-        "web_search_20250305"
-    }
-}
+/// Direct search without dynamic filtering. The filtering versions run search
+/// from provisioned code execution, whose blocks a replay must carry exactly,
+/// and Zephium Cloud admits only this version.
+const SEARCH_TOOL: &str = "web_search_20250305";
 
 pub(super) fn body(
     request: &WorkModelRequest,
@@ -146,9 +132,7 @@ pub(super) fn body(
         .collect();
     let model = request.model.model.as_str();
     if request.native_search {
-        tools.push(
-            json!({"type": search_tool(model), "name": "web_search", "max_uses": SEARCH_MAX_USES}),
-        );
+        tools.push(json!({"type": SEARCH_TOOL, "name": "web_search", "max_uses": SEARCH_MAX_USES}));
     }
     let mut body = Map::new();
     body.insert("model".into(), json!(model));

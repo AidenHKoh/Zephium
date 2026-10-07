@@ -263,7 +263,7 @@ fn anthropic_streams_thinking_search_and_parallel_tool_use() {
     assert_eq!(body["messages"][0]["content"][1]["source"]["data"], "AQID");
     assert_eq!(body["thinking"], json!({"type": "adaptive"}));
     assert_eq!(body["output_config"]["effort"], "medium");
-    assert_eq!(body["tools"][1]["type"], "web_search_20260209");
+    assert_eq!(body["tools"][1]["type"], "web_search_20250305");
     assert_eq!(body["tool_choice"]["disable_parallel_tool_use"], false);
 
     let haiku = anthropic::body(
