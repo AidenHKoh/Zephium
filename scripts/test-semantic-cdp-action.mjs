@@ -8,7 +8,7 @@ const espreeRequire = createRequire(eslintRequire.resolve("espree"));
 const { parse } = espreeRequire("acorn");
 
 const source=readFileSync(new URL("../crates/zephium-agentic/assets/semantic-runtime-v1.js",import.meta.url),"utf8");
-assert.ok(Buffer.byteLength(source)<=176*1024,"fixed source respects its declared native install budget");
+assert.ok(Buffer.byteLength(source)<=192*1024,"fixed source respects its declared native install budget");
 const ast=parse(source,{ecmaVersion:"latest"});
 const declarations=ast.body[0].expression.callee.body.body;
 const names=new Set(["cdpKey","startCdpInputs","nextCdpAction","guardedCdpInputs","cdpRichSelectionInside","runRichFill","cdpAncestry"]);

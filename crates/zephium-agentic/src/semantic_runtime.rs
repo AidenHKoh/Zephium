@@ -55,12 +55,13 @@ pub const MAX_SEMANTIC_RUNTIME_VISITED_NODES: u32 = 32 * 1024;
 pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// Maximum immutable production runtime source bytes installed per document.
 ///
-/// The fixed 176 KiB ceiling covers the digest-pinned semantic runtime including
+/// The fixed 192 KiB ceiling covers the digest-pinned semantic runtime including
 /// production Fill, native-select, public links and bounded source-coalesced
 /// windows, keyword discovery, independent page-dialog samples, bounded fill
 /// diagnostics, covered-target centring and the page's structured-data facts,
+/// re-rendered target rebinding, settle quiet and custom listbox choice,
 /// with an explicit installation bound per platform.
-pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 176 * 1024;
+pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 192 * 1024;
 /// Sole fixed isolated-world global installed by the production runtime.
 pub const SEMANTIC_RUNTIME_GLOBAL_NAME: &str = "__zephiumSemanticRuntimeV1";
 /// Sole fixed native message handler visible in the production isolated world.
