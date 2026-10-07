@@ -323,6 +323,18 @@ pub(crate) async fn work_models(caller: WebviewWindow, expected_profile: String)
     respond(caller, expected_profile, Action::Read, "work_models").await
 }
 
+/// How a run would search the web with the models chosen now.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, specta::Type, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WorkSearchReadyV1 {
+    /// A chosen model's own provider search.
+    Native,
+    /// The fixed public search with the person's OpenAI key.
+    OpenAi,
+    #[default]
+    Unavailable,
+}
+
 /// A narrow readiness contract for the Work composer. Only a missing lead blocks.
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
 pub(crate) struct WorkModelsReadyV1 {
@@ -330,6 +342,8 @@ pub(crate) struct WorkModelsReadyV1 {
     pub(crate) profile: String,
     pub(crate) ready: bool,
     pub(crate) missing_roles: Vec<WorkModelRole>,
+    #[serde(default)]
+    pub(crate) search: WorkSearchReadyV1,
     pub(crate) fault: Option<WorkModelsFaultV1>,
 }
 
@@ -341,12 +355,20 @@ pub(crate) async fn work_models_ready(
 ) -> WorkModelsReadyV1 {
     let profile = profile_of(&caller, &expected_profile, "work_models_ready");
     #[cfg(feature = "work-product")]
-    let ready = match profile {
-        Some(profile) => zephium_app::work_models::ready(profile).await,
-        None => false,
+    let (ready, search) = match profile {
+        Some(profile) => {
+            use zephium_app::work_models::{self as models, WorkSearchReadiness};
+            let search = match models::search_readiness(profile).await {
+                WorkSearchReadiness::Native(_) => WorkSearchReadyV1::Native,
+                WorkSearchReadiness::OpenAi => WorkSearchReadyV1::OpenAi,
+                WorkSearchReadiness::Unavailable => WorkSearchReadyV1::Unavailable,
+            };
+            (models::ready(profile).await, search)
+        }
+        None => (false, WorkSearchReadyV1::Unavailable),
     };
     #[cfg(not(feature = "work-product"))]
-    let ready = false;
+    let (ready, search) = (false, WorkSearchReadyV1::Unavailable);
     WorkModelsReadyV1 {
         version: 1,
         profile: expected_profile,
@@ -356,6 +378,7 @@ pub(crate) async fn work_models_ready(
         } else {
             vec![WorkModelRole::Lead]
         },
+        search,
         fault: (profile.is_none() || !cfg!(feature = "work-product"))
             .then_some(WorkModelsFaultV1::Unavailable),
     }
@@ -537,13 +560,14 @@ mod release_tests {
             profile: "profile".into(),
             ready: false,
             missing_roles: vec![WorkModelRole::Lead],
+            search: WorkSearchReadyV1::Unavailable,
             fault: None,
         };
         assert_eq!(
             serde_json::to_value(ready).unwrap(),
             serde_json::json!({
                 "version": 1, "profile": "profile", "ready": false,
-                "missing_roles": ["lead"], "fault": null
+                "missing_roles": ["lead"], "search": "unavailable", "fault": null
             })
         );
         let mut provider = WorkProviderStatusV1 {

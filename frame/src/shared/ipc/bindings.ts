@@ -4342,6 +4342,7 @@ export type WorkModelsReadyV1 = {
 	profile: string,
 	ready: boolean,
 	missing_roles: WorkModelRole[],
+	search?: WorkSearchReadyV1,
 	fault: WorkModelsFaultV1 | null,
 };
 
@@ -5382,6 +5383,13 @@ export type WorkRuntimeSessionId = string;
 export type WorkSearchProvider = "open_ai" | 
 /**  The web search built into the chosen model's own provider. */
 "native";
+
+/**  How a run would search the web with the models chosen now. */
+export type WorkSearchReadyV1 = 
+/**  A chosen model's own provider search. */
+"native" | 
+/**  The fixed public search with the person's OpenAI key. */
+"open_ai" | "unavailable";
 
 export type WorkServerAuthV1 = "none" | 
 /**  A token the person pasted, sent as `Authorization: Bearer`. */

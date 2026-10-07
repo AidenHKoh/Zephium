@@ -879,6 +879,38 @@ pub async fn ready(profile: ProfileId) -> bool {
     effective(&state(), profile, WorkModelRole::Lead).is_some()
 }
 
+/// How a run in `profile` would search the web, in the order a run picks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkSearchReadiness {
+    /// A chosen model's own provider search, light first.
+    Native(WorkModelEntry),
+    /// The fixed public search with the person's OpenAI key.
+    OpenAi,
+    /// No chosen model can search and no OpenAI key is set.
+    Unavailable,
+}
+
+/// Mirrors the run's own choice of search backend.
+pub async fn search_readiness(profile: ProfileId) -> WorkSearchReadiness {
+    ensure_presence().await;
+    let state = state();
+    let Some(lead) = effective(&state, profile, WorkModelRole::Lead) else {
+        return WorkSearchReadiness::Unavailable;
+    };
+    let page = effective(&state, profile, WorkModelRole::Page).unwrap_or_else(|| lead.clone());
+    let light = effective(&state, profile, WorkModelRole::Light).unwrap_or_else(|| page.clone());
+    if let Some(entry) = [light, lead, page]
+        .into_iter()
+        .find(|entry| entry.supports.native_search)
+    {
+        return WorkSearchReadiness::Native(entry);
+    }
+    if usable(&state, P::OpenAi) {
+        return WorkSearchReadiness::OpenAi;
+    }
+    WorkSearchReadiness::Unavailable
+}
+
 /// Removes the key, preserving explicit role choices for the person to replace.
 pub async fn clear_key(provider: WorkModelProvider) -> Result<(), WorkModelError> {
     let _guard = mutations().lock().await;
@@ -1122,6 +1154,22 @@ mod tests {
         assert!(vault().present(P::OpenAi).unwrap());
         vault().clear(P::OpenAi).unwrap();
         assert!(!vault().present(P::OpenAi).unwrap());
+
+        // Search follows the chosen models, then an OpenAI key, else none.
+        with_keys(&[P::DeepSeek]);
+        assert_eq!(
+            search_readiness(other).await,
+            WorkSearchReadiness::Unavailable
+        );
+        with_keys(&[P::DeepSeek, P::OpenAi]);
+        choose(other, WorkModelRole::Lead, Some("deepseek/deepseek-v4-pro")).unwrap();
+        assert_eq!(search_readiness(other).await, WorkSearchReadiness::OpenAi);
+        choose(other, WorkModelRole::Lead, None).unwrap();
+        with_keys(&[P::Anthropic]);
+        assert!(matches!(
+            search_readiness(other).await,
+            WorkSearchReadiness::Native(entry) if entry.model.provider == P::Anthropic
+        ));
 
         // Signed in with no keys, hosted models carry every role.
         struct Session;
