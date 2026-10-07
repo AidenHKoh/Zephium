@@ -453,6 +453,13 @@ impl NativeWorkComposition {
             settings.decisions = WorkDecisionPreference::Disabled;
         }
         let decisions = settings.decisions;
+        let mut request = request;
+        if page_task(&request) {
+            request.limits.cost_micro_usd = request.limits.cost_micro_usd.min(page_task_cost(
+                &settings.access,
+                request.limits.model_tokens,
+            ));
+        }
         let outputs = vec![request.output.clone()];
         let limits = request.limits;
         let host = match &request.step {
@@ -2542,6 +2549,27 @@ fn app_view(request: &WorkAgentBrowseRequest) -> bool {
             .and_then(|target| target.as_url().host_str().and_then(zephium_agentic::DailyApp::of))
             .is_some())
 }
+/// The money a page task was sized for on the cheapest page models.
+const PAGE_TASK_BASE_COST_MICRO_USD: u32 = 600_000;
+/// A page call's usual reply: one tool call and its reasoning.
+const PAGE_TASK_REPLY_TOKENS: u64 = 2_048;
+
+/// A page task's money in its model's own prices: its token ceiling at the
+/// model's highest input rate and a usual reply per call, never under the
+/// base. A fixed sum let a pricier model reserve one or two calls and stop.
+fn page_task_cost(access: &AgentBrowserModelAccess, model_tokens: u32) -> u32 {
+    let AgentBrowserModelAccess::Chosen(model) = access else {
+        return PAGE_TASK_BASE_COST_MICRO_USD;
+    };
+    model
+        .reservation_cost_micro_usd(
+            u64::from(model_tokens),
+            u64::from(PAGE_TASK_CALLS) * PAGE_TASK_REPLY_TOKENS,
+        )
+        .map_or(u32::MAX, |cost| u32::try_from(cost).unwrap_or(u32::MAX))
+        .max(PAGE_TASK_BASE_COST_MICRO_USD)
+}
+
 /// A public page read looks, extracts and ends: a few inspections at most.
 const PUBLIC_READ_CALLS: u8 = 6;
 const PAGE_TASK_ACTIONS: u64 = 60;
@@ -3134,6 +3162,61 @@ mod human_budget_tests {
                 .accounting_guard()
         };
         assert_eq!(guard(&resumed), guard(&model));
+    }
+
+    #[test]
+    fn a_page_task_gets_money_in_its_model_s_own_prices() {
+        use work_model::*;
+        let entry = |id: &str, price: Option<WorkModelPrice>| WorkModelEntry {
+            id: id.to_owned(),
+            model: WorkModelRef {
+                provider: WorkModelProvider::Anthropic,
+                wire: WorkModelWire::AnthropicMessages,
+                model: id.to_owned(),
+            },
+            display_name: id.to_owned(),
+            roles: vec![WorkModelRole::Page],
+            recommended: false,
+            context_window: 200_000,
+            max_output: 32_000,
+            supports: WorkModelSupports {
+                tools: true,
+                vision: false,
+                prompt_cache: true,
+                reasoning: true,
+                native_search: false,
+            },
+            price,
+        };
+        let access = |id: &str, input: u64, cached: u64, output: u64| {
+            AgentBrowserModelAccess::Chosen(
+                AgentProviderModelClient::try_new(
+                    &entry(
+                        id,
+                        Some(WorkModelPrice {
+                            input,
+                            cached_input: cached,
+                            output,
+                        }),
+                    ),
+                    std::sync::Arc::new(Unused),
+                )
+                .expect("chosen model"),
+            )
+        };
+        // Micro-USD per million tokens, as the catalog prices them.
+        let luna = access("openai/gpt-6-luna", 100_000, 10_000, 500_000);
+        let haiku = access("anthropic/claude-haiku", 1_000_000, 100_000, 5_000_000);
+        let opus = access("anthropic/claude-opus", 4_000_000, 200_000, 20_000_000);
+        assert_eq!(
+            page_task_cost(&luna, 600_000),
+            PAGE_TASK_BASE_COST_MICRO_USD
+        );
+        // 600k tokens at 1.25x input plus forty 2k replies.
+        assert_eq!(page_task_cost(&haiku, 600_000), 750_000 + 409_600);
+        assert_eq!(page_task_cost(&opus, 600_000), 3_000_000 + 1_638_400);
+        // A smaller share of tokens gets proportionally less money.
+        assert!(page_task_cost(&opus, 100_000) < page_task_cost(&opus, 600_000));
     }
 
     #[test]

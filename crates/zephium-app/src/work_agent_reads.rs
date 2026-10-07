@@ -618,10 +618,11 @@ impl Driver {
 }
 
 /// A page task's own ceiling inside the run's remaining budget: room for
-/// sixty actions and forty model calls, and the least it starts with.
+/// sixty actions and forty model calls, and the least it starts with. The
+/// browser composition narrows its money to the page model's own prices.
 const PAGE_TASK_MAX: WorkExecutionLimits = WorkExecutionLimits {
     model_tokens: 600_000,
-    cost_micro_usd: 600_000,
+    cost_micro_usd: 5_000_000,
     operations: 160,
     timeout_seconds: 540,
     max_workers: 1,
