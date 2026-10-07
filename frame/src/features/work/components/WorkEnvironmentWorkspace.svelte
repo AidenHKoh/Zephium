@@ -96,9 +96,14 @@
     viewPlacements,
   } from "../lib/project-environment";
   import { canvasOpenTasks, canvasProbe } from "../lib/canvas-context";
-  import { environmentRequests, requestDress, runFolders } from "../lib/project-environment-thread";
+  import {
+    environmentRequests,
+    requestDress,
+    runFolders,
+    stageMade,
+  } from "../lib/project-environment-thread";
   import { artifactView } from "../lib/project-work";
-  import RunView from "./board/RunView.svelte";
+  import RequestLift from "./lift/RequestLift.svelte";
   import { failureLine, humanPage, regionOf, sameRegion } from "../lib/work-human";
   import { openOver, type PaneRect } from "../lib/pane-geometry";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
@@ -2507,15 +2512,14 @@
             />{/snippet}</LazyView
         >
       {:else if liftedStage}
-        <RunView
+        <RequestLift
           request={liftedStage.request}
           trail={liftedStage.trail}
           runs={context.objectives
             .get(liftedStage.objective)
             ?.executions.filter((run) => liftedStage.executions.includes(run.id)) ?? []}
-          made={liftedStage.board.blocks.flatMap((block) =>
-            block.title ? [{ id: block.id, title: block.title }] : [],
-          )}
+          made={stageMade(liftedStage)}
+          oncommand={(record) => boardActions.command(record)}
           onsource={(row) => {
             if (row.file) {
               liftFile = fileEvidence(context.objectives, row.file.record) ?? null;
