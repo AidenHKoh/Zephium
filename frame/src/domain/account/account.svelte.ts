@@ -51,8 +51,8 @@ export const unavailable = () => unreachable || (current !== null && !current.av
 export const pending = () => busy;
 export const fault = () => lastFault;
 
-function adopt(reply: AccountReplyV1) {
-  if (reply.account.version !== 1) {
+function adopt(reply: AccountReplyV1 | undefined) {
+  if (reply?.account?.version !== 1) {
     unreachable = true;
     return;
   }
@@ -81,7 +81,11 @@ async function read() {
  */
 export async function retain() {
   users += 1;
-  if (users > 1) return;
+  if (users > 1) {
+    // A first read that failed is retried by the next user.
+    if (!current) await read();
+    return;
+  }
   const started = ++generation;
   const unlisten = await events.accountChanged.listen(() => void read());
   if (started !== generation || users === 0) {
@@ -115,7 +119,7 @@ async function act(
   const response = await observe(Promise.resolve().then(request), timeout);
   if (started !== generation) return false;
   busy = null;
-  if (response.state !== "received") {
+  if (response.state !== "received" || !response.value?.account) {
     lastFault = { action, fault: "offline", retryAfter: null };
     return false;
   }
