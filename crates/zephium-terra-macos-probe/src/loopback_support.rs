@@ -227,6 +227,7 @@ pub(super) fn browser_settings(
 ) -> WorkBrowserAdapterSettings {
     WorkBrowserAdapterSettings {
         decisions: zephium_work_composition::durable_runtime::WorkDecisionPreference::Recommended,
+        decision_model: None,
         retain_public_responses: true,
         loopback_anonymous: false,
         stage_diagnostic: Some(|stage| {
@@ -260,7 +261,7 @@ pub(super) fn browser_settings(
             zephium_agent_runtime::AgentRuntimeConfig::STANDARD,
             AgentProviderTransportConfig::STANDARD,
         ),
-        credential,
+        access: credential.into(),
     }
 }
 
