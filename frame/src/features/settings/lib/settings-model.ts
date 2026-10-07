@@ -171,7 +171,7 @@ export const showPreviews = import.meta.env.DEV;
 /** Sections that hold nothing but placeholders today. */
 const previewSections = new Set<SettingsSection>(["profiles"]);
 export const sections = allSections.filter(
-  (section) => section.id !== "account" && (showPreviews || !previewSections.has(section.id)),
+  (section) => showPreviews || !previewSections.has(section.id),
 );
 export const groups = [
   { id: "browser", label: m.settings_browser },

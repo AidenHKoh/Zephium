@@ -12,7 +12,6 @@ export function setQuery(value: string) {
   target = null;
 }
 export function select(value: SettingsSection, field: string | null = null) {
-  if (value === "account") value = "ai";
   revision++;
   current = value;
   search = "";
@@ -31,7 +30,7 @@ export function handleNativeSection(id: string) {
   }
   if (
     id.startsWith("settings.section.") &&
-    ["profiles", "newtab", "ai", "focus", "about"].includes(section)
+    ["profiles", "newtab", "ai", "focus", "account", "about"].includes(section)
   )
     select(section as SettingsSection);
 }

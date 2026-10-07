@@ -1,51 +1,128 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { accountSession as session, initials, planName } from "$domain/account";
   import * as m from "$shared/i18n/messages";
-  import * as preview from "../../lib/preview.svelte";
-  import PreviewNotice from "../PreviewNotice.svelte";
-  import PreviewDialog from "../PreviewDialog.svelte";
   import Button from "$shared/ui/Button";
-  import Field from "$shared/ui/Field";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
-  import Icon from "$shared/ui/Icon";
-  import { UserCircleIcon } from "@hugeicons/core-free-icons";
-  let open = $state(false);
-  let email = $state(preview.get("account.email", ""));
+  import AccountDelete from "../account/AccountDelete.svelte";
+  import AccountDevices from "../account/AccountDevices.svelte";
+  import AccountPlan from "../account/AccountPlan.svelte";
+  import AccountServer from "../account/AccountServer.svelte";
+  import AccountSignIn from "../account/AccountSignIn.svelte";
+  import { explainAccountFault } from "../../lib/account";
+
+  onMount(() => {
+    void session.retain();
+    return () => session.release();
+  });
+
+  const account = $derived(session.account());
+  const busy = $derived(session.pending());
+  const fault = $derived(session.fault());
+  const ended = $derived(
+    fault?.fault === "signed_out" ? explainAccountFault("signed_out", null) : null,
+  );
+  const signOutFault = $derived(
+    fault?.action === "sign_out" ? explainAccountFault(fault.fault, fault.retryAfter) : null,
+  );
 </script>
 
-<PreviewNotice />
-{#if !preview.get("account.signedin", false)}<div class="settings-intro">
-    <Icon icon={UserCircleIcon} size={34} />
-    <h2>{m.settings_account_heading()}</h2>
-    <p>{m.settings_account_body()}</p>
-    <Button onclick={() => (open = true)}>{m.preview_account_signin()}</Button>
-  </div>{:else}<div class="identity-card">
-    <div class="identity-avatar"><Icon icon={UserCircleIcon} size={28} /></div>
-    <div>
-      <h2>{preview.get("account.email", "")}</h2>
-      <p>{m.preview_account_signedin()}</p>
+{#if session.unavailable()}<p class="note" role="status">{m.account_unavailable()}</p>
+{:else if account}
+  {#if !account.signed_in}
+    {#if ended}<p class="note" role="status">{ended}</p>{/if}
+    <AccountSignIn />
+  {:else}
+    <div class="identity">
+      <span class="avatar" aria-hidden="true">{initials(account.email, account.name)}</span>
+      <div class="who">
+        <h2>{account.name ?? account.email}</h2>
+        <p>
+          {#if account.name}{account.email}{/if}{#if account.name && account.plan}
+            ·
+          {/if}{#if account.plan}{m.account_plan_line({
+              plan: planName(account.plan) ?? account.plan,
+            })}{/if}
+        </p>
+      </div>
     </div>
-  </div>
-  <SettingsGroup title={m.preview_account_usage()}
-    ><SettingsRow title={m.preview_plan()}>{m.preview_plan_local()}</SettingsRow><SettingsRow
-      title={m.preview_usage()}><span>—</span></SettingsRow
-    ></SettingsGroup
-  ><Button onclick={() => preview.set("account.signedin", false)}>{m.preview_signout()}</Button
-  >{/if}
-<PreviewDialog
-  bind:open
-  title={m.preview_account_signin()}
-  description={m.preview_account_note()}
-  valid={/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email)}
-  onapply={() => {
-    preview.set("account.email", email);
-    preview.set("account.signedin", true);
-  }}
-  ><Field
-    label={m.preview_email()}
-    type="email"
-    bind:value={email}
-    required
-    autocomplete="off"
-  /></PreviewDialog
->
+    {#if account.notice}<p class="note" data-tone={account.notice.warning ? "warning" : undefined}>
+        {account.notice.text}
+      </p>{/if}
+    <AccountPlan />
+    <AccountDevices />
+    <SettingsGroup title={m.section_account()}>
+      <SettingsRow title={m.account_sign_out()} description={m.account_sign_out_desc()}>
+        <Button
+          pending={busy === "sign_out"}
+          disabled={!!busy && busy !== "sign_out"}
+          onclick={() => void session.signOut()}>{m.account_sign_out()}</Button
+        >
+      </SettingsRow>
+      <AccountDelete />
+    </SettingsGroup>
+    {#if signOutFault}<p class="note" data-tone="error" role="alert">{signOutFault}</p>{/if}
+  {/if}
+  <AccountServer />
+{/if}
+
+<style>
+  .identity {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 8px 0 30px;
+  }
+
+  .avatar {
+    display: grid;
+    flex: none;
+    inline-size: 52px;
+    block-size: 52px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-fill-strong);
+    color: var(--color-text);
+    font-size: 19px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    place-items: center;
+    box-shadow: inset 0 0 0 0.5px var(--color-border);
+  }
+
+  .who {
+    min-inline-size: 0;
+  }
+
+  h2 {
+    overflow: hidden;
+    margin: 0;
+    color: var(--color-text);
+    font-size: 18px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .who p {
+    margin: 4px 0 0;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+  }
+
+  .note {
+    margin: 0 18px 24px;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    line-height: 1.5;
+  }
+
+  .note[data-tone="error"] {
+    color: var(--color-danger);
+  }
+
+  .note[data-tone="warning"] {
+    color: var(--color-warning);
+  }
+</style>

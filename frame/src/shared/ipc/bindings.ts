@@ -83,9 +83,9 @@ export const commands = {
 	 *  Opens the billing provider's checkout in a new tab and watches for the
 	 *  purchase to land, so the plan updates without the person coming back.
 	 */
-	accountBuy: (purchase: AccountPurchaseV1) => typedError<AccountReplyV1, null>(__TAURI_INVOKE("account_buy", { purchase })),
+	accountBuy: (purchase: AccountPurchaseV1) => __TAURI_INVOKE<AccountReplyV1>("account_buy", { purchase }),
 	/**  Opens the billing provider's portal, where the subscription is managed. */
-	accountManage: () => typedError<AccountReplyV1, null>(__TAURI_INVOKE("account_manage")),
+	accountManage: () => __TAURI_INVOKE<AccountReplyV1>("account_manage"),
 	accountSessions: () => __TAURI_INVOKE<AccountSessionsV1>("account_sessions"),
 	accountRevokeSession: (id: string) => __TAURI_INVOKE<AccountReplyV1>("account_revoke_session", { id }),
 	/**  Points accounts at another server, or back at Zephium's with null. */

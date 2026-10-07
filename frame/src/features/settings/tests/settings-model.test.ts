@@ -31,10 +31,10 @@ it("finds the reserved agent destinations without exposing unimplemented control
   );
 });
 
-it("hides Account from navigation and search", async () => {
+it("offers Account in navigation and search", async () => {
   const { sections, searchSettings } = await import("../lib/settings-model");
-  expect(sections.some((section) => String(section.id) === "account")).toBe(false);
+  expect(sections.some((section) => String(section.id) === "account")).toBe(true);
   expect(searchSettings("account").some((result) => String(result.section) === "account")).toBe(
-    false,
+    true,
   );
 });

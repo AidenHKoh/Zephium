@@ -432,9 +432,8 @@ pub(crate) async fn account_refresh(caller: WebviewWindow) -> AccountReplyV1 {
 #[specta::specta]
 pub(crate) async fn account_buy(
     caller: WebviewWindow,
-    shell: State<'_, Handle>,
     purchase: AccountPurchaseV1,
-) -> Result<AccountReplyV1, ()> {
+) -> AccountReplyV1 {
     let purchase = match purchase {
         AccountPurchaseV1::Plan { plan, interval } => Purchase::Plan { plan, interval },
         AccountPurchaseV1::TopUp { id } => Purchase::TopUp { id },
@@ -442,7 +441,7 @@ pub(crate) async fn account_buy(
     let result = match admitted(&caller, "account_buy") {
         Ok(service) => match service.checkout(&purchase).await {
             Ok(url) => {
-                open_tab(&caller, &shell, url.as_str());
+                open_tab(&caller, url.as_str());
                 watch_checkout(service);
                 Ok(())
             }
@@ -451,20 +450,17 @@ pub(crate) async fn account_buy(
         Err(error) => Err(error),
     };
     log("buy", &result);
-    Ok(reply(result))
+    reply(result)
 }
 
 /// Opens the billing provider's portal, where the subscription is managed.
 #[tauri::command]
 #[specta::specta]
-pub(crate) async fn account_manage(
-    caller: WebviewWindow,
-    shell: State<'_, Handle>,
-) -> Result<AccountReplyV1, ()> {
+pub(crate) async fn account_manage(caller: WebviewWindow) -> AccountReplyV1 {
     let result = match admitted(&caller, "account_manage") {
         Ok(service) => match service.portal().await {
             Ok(url) => {
-                open_tab(&caller, &shell, url.as_str());
+                open_tab(&caller, url.as_str());
                 Ok(())
             }
             Err(error) => Err(error),
@@ -472,13 +468,15 @@ pub(crate) async fn account_manage(
         Err(error) => Err(error),
     };
     log("manage", &result);
-    Ok(reply(result))
+    reply(result)
 }
 
-fn open_tab(caller: &WebviewWindow, shell: &Handle, url: &str) {
+fn open_tab(caller: &WebviewWindow, url: &str) {
+    let app = caller.app_handle();
+    let shell = app.state::<Handle>();
     let _ = dispatch_operation(
-        caller.app_handle(),
-        shell,
+        app,
+        &shell,
         Command::OpenUrl {
             input: url.to_owned(),
             new_tab: true,
