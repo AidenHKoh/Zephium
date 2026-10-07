@@ -4,10 +4,13 @@ import { WorkSession } from "$domain/work";
 import type { WorkExecutionFact } from "$shared/ipc/bindings";
 import AgentLine from "../components/AgentLine.svelte";
 import { projection } from "./environment-fixtures";
-const native = vi.hoisted(() => ({ operation: vi.fn() }));
+const native = vi.hoisted(() => ({
+  operation: vi.fn(),
+  command: vi.fn(async () => ({ operation_id: "op", accepted: true })),
+}));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ workOperation: native.operation });
+  return mockBindings({ workOperation: native.operation, runCommand: native.command });
 });
 
 function agentRun(status: WorkExecutionFact["status"]): WorkExecutionFact {
@@ -603,6 +606,32 @@ test("a run that ended short says what is missing and offers the one thing that 
   await screen.getByRole("button", { name: "Try again" }).click();
   expect(onact).toHaveBeenCalledOnce();
   expect(screen.container.querySelector(".character.lead.stopped")).not.toBeNull();
+  await screen.unmount();
+  session.dispose();
+});
+
+test("a run stopped by spent Zephium AI usage says so and offers the fix", async () => {
+  const session = new WorkSession("profile");
+  session.selected = "objective";
+  const failed = agentRun("failed");
+  failed.steps = [
+    ...failed.steps!,
+    {
+      id: "turn-2",
+      turn: 2,
+      kind: { kind: "turn" },
+      status: "failed",
+      note: "Zephium AI's included usage is spent",
+      model_fault: "hosted_usage",
+    },
+  ];
+  session.projection = { ...structuredClone(projection), executions: [failed] };
+  const screen = await render(AgentLine, { session });
+  await expect
+    .element(screen.getByText("You’ve used your included Zephium AI usage.", { exact: true }))
+    .toBeVisible();
+  await screen.getByRole("button", { name: "Upgrade or use a key" }).click();
+  expect(native.command).toHaveBeenCalledWith("settings.account");
   await screen.unmount();
   session.dispose();
 });

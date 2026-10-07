@@ -1,9 +1,10 @@
 <script lang="ts">
   import { tick, untrack } from "svelte";
   import type { WorkSession } from "$domain/work";
-  import type { WorkHumanReasonV1 } from "$shared/ipc/bindings";
+  import { commands } from "$shared/ipc/bindings";
+  import type { WorkHumanReasonV1, WorkModelFaultV1 } from "$shared/ipc/bindings";
   import { currentActivity } from "$domain/work";
-  import { agentLine, endingNote, isLive } from "../lib/agent-steps";
+  import { agentLine, endingFault, endingNote, isLive } from "../lib/agent-steps";
   import { cardCountdown, reasonSentence } from "../lib/work-human";
   import type { WorkHumanSession } from "$domain/work-human";
   import RunAsks from "./asks/RunAsks.svelte";
@@ -266,8 +267,33 @@
         return run?.state.kind === "pending" ? m.work_line_thinking() : m.work_line_ready();
     }
   });
+  /** A model refusal the person can fix says so in their words, with the fix. */
+  const fault = $derived(execution && !live ? endingFault(execution) : null);
+  const faultLines: Partial<Record<WorkModelFaultV1, () => string>> = {
+    hosted_usage: m.work_fault_hosted_usage,
+    signed_out: m.work_fault_signed_out,
+    missing_key: m.work_fault_missing_key,
+    key_refused: m.work_fault_key_refused,
+    provider_credit: m.work_fault_provider_credit,
+  };
+  const faultFix = $derived.by(() => {
+    switch (fault) {
+      case "hosted_usage":
+        return { label: m.work_fault_fix_plan(), command: "settings.account" };
+      case "signed_out":
+        return { label: m.work_fault_fix_sign_in(), command: "settings.account" };
+      case "missing_key":
+      case "key_refused":
+      case "provider_credit":
+        return { label: m.work_model_manage(), command: "settings.ai" };
+      default:
+        return null;
+    }
+  });
   /** Why the run ended early, in Rust's closed words: the note its last unfinished step left. */
-  const ending = $derived(execution ? endingNote(execution) : null);
+  const ending = $derived(
+    (fault && faultLines[fault]?.()) ?? (execution ? endingNote(execution) : null),
+  );
   /**
    * A part's need speaks for the run only when the run gave no answer: an
    * answered run says what it found and still offers the part's one remedy.
@@ -286,6 +312,11 @@
   /** A short run's one remedy, or Try again for one that simply stopped. */
   const remedy = $derived.by(() => {
     if (live || !newest || !execution || question) return null;
+    if (faultFix)
+      return {
+        label: faultFix.label,
+        run: () => void commands.runCommand(faultFix.command),
+      };
     if (ended) return { label: ended.action, run: ended.onact };
     if (["failed", "interrupted"].includes(execution.status))
       return {

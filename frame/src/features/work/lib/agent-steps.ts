@@ -1,4 +1,5 @@
 import type { WorkExecutionFact, WorkRuntimeProjection } from "$domain/work";
+import type { WorkModelFaultV1 } from "$shared/ipc/bindings";
 
 /** Whether an execution is still going: not settled and not left by an earlier launch. */
 export function isLive(state: WorkRuntimeProjection, execution: WorkExecutionFact): boolean {
@@ -32,6 +33,17 @@ export function endingNote(execution: WorkExecutionFact): string | null {
     const step = steps[index]!;
     const note = step.note?.trim();
     if (note && step.status !== "succeeded" && step.status !== "running") return note;
+  }
+  return null;
+}
+
+/** What stopped the run's last failed model turn, when the person can fix it. */
+export function endingFault(execution: WorkExecutionFact): WorkModelFaultV1 | null {
+  const steps = execution.steps ?? [];
+  for (let index = steps.length - 1; index >= 0; index--) {
+    const step = steps[index]!;
+    if (step.status === "succeeded" || step.status === "running") continue;
+    if (step.model_fault) return step.model_fault;
   }
   return null;
 }
