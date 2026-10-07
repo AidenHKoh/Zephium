@@ -724,8 +724,6 @@
       return "";
     }
   }
-  /** Accounts arrive after this release: the button waits, and its corner stays clean. */
-  const ACCOUNTS = false;
   const snapshot = $derived(session.snapshot);
   provideLeadLook(() => session.snapshot?.id);
   const baseItems = $derived(
@@ -2318,7 +2316,7 @@
               >{m.work_env_reload()}</Button
             >{/if}
         </div>{/if}
-      {#if ACCOUNTS}<AccountButton name={profileLabel} />{/if}
+      <AccountButton name={profileLabel} />
       <!-- The zoom level reads in the top-right corner, a quiet counterpart to the work's name. -->
       <div class="zoom-slot" data-work-zoom-slot></div>
     </div>
