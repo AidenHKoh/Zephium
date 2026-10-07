@@ -679,6 +679,8 @@ pub use provider_transport::planning::{OpenAiWorkPlanner, WorkPlanningConfig};
 pub use provider_transport::synthesis::OpenAiWorkSynthesizer;
 
 #[cfg(feature = "provider-transport")]
+pub use provider_transport::browser_search::{BrowserSearch, BROWSER_SEARCH_FALLBACKS};
+#[cfg(feature = "provider-transport")]
 pub use provider_transport::model_client::AgentProviderModelClient;
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::model_search::ModelNativeSearch;

@@ -605,7 +605,10 @@ mod tests {
             actual_output_tokens: 0,
         };
         assert!(evidence.validate().is_ok());
-        assert_eq!(evidence.citation_excerpt(0).unwrap(), "The engine's own text");
+        assert_eq!(
+            evidence.citation_excerpt(0).unwrap(),
+            "The engine's own text"
+        );
         assert_eq!(evidence.citation_excerpt(1).unwrap(), "Result");
         let valid = evidence.clone();
         let refused: [fn(&mut WorkProviderSearchEvidenceV1); 9] = [

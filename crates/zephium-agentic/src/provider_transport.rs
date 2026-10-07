@@ -16,6 +16,8 @@
 
 /// Bounded objective/context planning over the shared fixed-endpoint transport.
 pub mod agent;
+/// Public search on the person's own engine's results page, with no model.
+pub mod browser_search;
 /// Typed decisions over admitted, enumerated questions.
 pub mod decision;
 /// General tool-calling transports for the lead agent.
