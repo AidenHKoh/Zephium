@@ -1,58 +1,11 @@
-//! The runtime switch and the lead's run. A profile setting chooses which
-//! agent runs a Work request: the lead, or the earlier runtime kept for one
-//! release. The lead gets its models per role, the existing search path and
-//! the same page machinery the earlier runtime used.
+//! The lead's run: its models per role, its search backend and the page
+//! machinery, all on the models the person chose.
 use super::*;
 use zephium_app::work_lead::{LeadModel, WorkLeadModels, WorkLeadService};
 use zephium_core::work::model::WorkModelRole;
 
-const SETTING_PREFIX: &str = "work.runtime.";
-/// A profile without a choice runs the lead; the earlier runtime stays
-/// reachable for one release through the setting or the environment.
-const DEFAULT: WorkRuntimeChoice = WorkRuntimeChoice::Lead;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WorkRuntimeChoice {
-    Lead,
-    Classic,
-}
-impl WorkRuntimeChoice {
-    fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
-            "lead" => Some(Self::Lead),
-            "classic" => Some(Self::Classic),
-            _ => None,
-        }
-    }
-}
-
-/// The runtime for `profile`: the environment's override for QA, else the
-/// stored choice, else the default.
-pub(crate) async fn runtime(profile: ProfileId) -> WorkRuntimeChoice {
-    if let Some(choice) = std::env::var("ZEPHIUM_WORK_RUNTIME")
-        .ok()
-        .as_deref()
-        .and_then(WorkRuntimeChoice::parse)
-    {
-        return choice;
-    }
-    let key = format!("{SETTING_PREFIX}{profile}");
-    tokio::task::spawn_blocking(move || {
-        use zephium_core::ports::store::Store;
-        crate::APP_STORE
-            .get()
-            .and_then(|store| store.app_setting(&key))
-            .as_deref()
-            .and_then(WorkRuntimeChoice::parse)
-    })
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or(DEFAULT)
-}
-
 /// The models for each role; a helper role without its own model uses the
-/// lead's. `None` when no lead model resolves: the earlier runtime runs.
+/// lead's. `None` when no lead model resolves, and the run is refused.
 pub(crate) async fn models(profile: ProfileId) -> Option<WorkLeadModels> {
     let resolve = |role| async move {
         zephium_app::work_models::resolve_entry(profile, role)
