@@ -464,6 +464,33 @@ mod qa_settings_recovery_tests {
 }
 
 #[cfg(test)]
+mod unchanged_session_tests {
+    use super::*;
+    use zephium_core::session::PersistedProfile;
+
+    #[test]
+    fn an_identical_session_is_not_written_again_and_a_changed_one_is() {
+        let mut hub = Hub::in_memory().unwrap();
+        let mut session = SessionState {
+            profiles: vec![PersistedProfile {
+                id: 1.into(),
+                name: "Personal".into(),
+                kind: ProfileKind::Default,
+            }],
+            ..SessionState::default()
+        };
+        hub.save(&session).unwrap();
+        let written = hub.meta.total_changes();
+        hub.save(&session).unwrap();
+        assert_eq!(hub.meta.total_changes(), written);
+        session.profiles[0].name = "Home".into();
+        hub.save(&session).unwrap();
+        assert!(hub.meta.total_changes() > written);
+        assert_eq!(hub.load().unwrap().unwrap().profiles[0].name, "Home");
+    }
+}
+
+#[cfg(test)]
 mod closed_session_wire_tests {
     use super::*;
 
@@ -505,6 +532,15 @@ impl Hub {
             return Err(invalid_data(
                 "profile removal requires explicit deletion authorization",
             ));
+        }
+        // Most persists follow an action that changed nothing durable (a tab
+        // focused again, a sidebar toggled back); the session already
+        // committed is not written and synced again.
+        if self.legacy_state_purged
+            && prepared.registry == self.registry
+            && self.committed_session.as_deref() == Some(prepared.snapshot.as_str())
+        {
+            return Ok(());
         }
         self.validate_session_transition(&prepared.registry)?;
         self.commit_prepared_session(prepared, None)
@@ -646,6 +682,7 @@ impl Hub {
             params![SESSION_SCHEMA_VERSION, snapshot],
         )?;
         tx.commit()?;
+        self.committed_session = Some(snapshot);
         #[cfg(test)]
         if authorize_deletion.is_some()
             && std::mem::take(&mut self.ambiguous_profile_deletion_commit_once)

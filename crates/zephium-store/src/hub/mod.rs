@@ -103,6 +103,8 @@ pub struct Hub {
     /// cap; the cap's ordered walk runs once per batch of visits, not each.
     visits_since_prune: HashMap<ProfileId, u32>,
     legacy_state_purged: bool,
+    /// The session this Hub last committed, to skip rewriting an identical one.
+    committed_session: Option<String>,
     recovery_required: Option<String>,
     /// One unpredictable token shared by every Hub constructed in this
     /// process. A completed Windows unlink may be reconciled only by a Hub
@@ -194,6 +196,7 @@ impl Hub {
             degraded_profiles: HashSet::new(),
             visits_since_prune: HashMap::new(),
             legacy_state_purged: false,
+            committed_session: None,
             recovery_required,
             deletion_process_generation,
             #[cfg(test)]
@@ -302,6 +305,7 @@ impl Hub {
             degraded_profiles: HashSet::new(),
             visits_since_prune: HashMap::new(),
             legacy_state_purged: false,
+            committed_session: None,
             recovery_required: None,
             deletion_process_generation: deletion_process_generation(),
             #[cfg(test)]
