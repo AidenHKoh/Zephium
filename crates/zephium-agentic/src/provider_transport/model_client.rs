@@ -11,6 +11,7 @@ use std::sync::Arc;
 use sha2::{Digest as _, Sha256};
 use zephium_core::work::model::{
     WorkModelClient, WorkModelEntry, WorkModelError, WorkModelEvent, WorkModelPrice, WorkModelRef,
+    WorkModelUsage,
 };
 
 use super::*;
@@ -151,6 +152,30 @@ impl AgentProviderModelClient {
             .checked_mul(u128::from(input_rate))?
             .checked_add(u128::from(output).checked_mul(u128::from(self.rates.output()))?)?;
         u64::try_from(numerator.div_ceil(1_000_000)).ok()
+    }
+
+    /// What `usage` costs at this model's rates: cached and written input at
+    /// their own rates, the rest of the input and all output at theirs.
+    pub(super) fn usage_cost_micro_usd(&self, usage: &WorkModelUsage) -> Option<u64> {
+        let cached = usage.cached_input_tokens.min(usage.input_tokens);
+        let written = usage
+            .cache_write_input_tokens
+            .min(usage.input_tokens - cached);
+        let fresh = usage.input_tokens - cached - written;
+        let part = |tokens: u64, rate: u64| u128::from(tokens).checked_mul(u128::from(rate));
+        let numerator = part(fresh, self.rates.uncached_input())?
+            .checked_add(part(cached, self.rates.cached_input())?)?
+            .checked_add(part(written, self.rates.cache_write_input())?)?
+            .checked_add(part(usage.output_tokens, self.rates.output())?)?;
+        u64::try_from(numerator.div_ceil(1_000_000)).ok()
+    }
+
+    pub(super) const fn max_output_tokens(&self) -> u32 {
+        self.max_output_tokens
+    }
+
+    pub(super) fn client(&self) -> &dyn WorkModelClient {
+        self.client.as_ref()
     }
 
     pub(super) fn binds(&self, config: &AgentProviderCallConfig) -> bool {
