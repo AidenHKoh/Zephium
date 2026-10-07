@@ -240,7 +240,7 @@ where
             }
             self.run.activity(WorkActivityV1::Planning);
             self.steers(&mut messages).await;
-            compact(&mut messages);
+            compact(&mut messages, conversation_budget(&self.models.lead.entry));
             let sizes = Sections::of(&system, &tools, &messages);
             let model = &self.models.lead;
             let request = WorkModelRequest {
@@ -1516,7 +1516,14 @@ const STUB: &str = "[Used; dropped to keep the conversation small.";
 /// turn: large tool results the model has moved past are replaced together
 /// by a stub with their source keys, and past the hard budget the older
 /// results are shortened too. The canvas keeps everything.
-fn compact(messages: &mut [WorkModelMessage]) {
+/// How much conversation the model's context can carry beside the prompt,
+/// tools and answer: two characters a token keeps it under the window for
+/// dense text, and large windows keep the usual ceiling.
+pub(crate) fn conversation_budget(entry: &WorkModelEntry) -> usize {
+    CONVERSATION_CHARS.min(entry.context_window as usize * 2)
+}
+
+pub(crate) fn compact(messages: &mut [WorkModelMessage], budget: usize) {
     let results: Vec<usize> = messages
         .iter()
         .enumerate()
@@ -1549,17 +1556,18 @@ fn compact(messages: &mut [WorkModelMessage]) {
     let mut total: usize = messages.iter().map(size).sum();
     let keep = messages.len().saturating_sub(6);
     for message in messages[..keep].iter_mut() {
-        if total <= CONVERSATION_CHARS {
+        if total <= budget {
             break;
         }
         if let WorkModelMessage::ToolResults(results) = message {
             for result in results.iter_mut() {
-                if result.content.len() > 400 {
-                    total -= result.content.len() - 400;
-                    result.content = format!(
-                        "{} [shortened; read_canvas or search again if needed]",
-                        clip(&result.content, 380)
-                    );
+                let shortened = format!(
+                    "{} [shortened; read_canvas or search again if needed]",
+                    clip(&result.content, 380)
+                );
+                if shortened.len() < result.content.len() {
+                    total = total.saturating_sub(result.content.len()) + shortened.len();
+                    result.content = shortened;
                 }
             }
         }
@@ -1605,4 +1613,72 @@ async fn join_all<T>(mut futures: Vec<Pin<Box<dyn Future<Output = T> + Send + '_
     })
     .await;
     results.into_iter().flatten().collect()
+}
+
+#[cfg(test)]
+mod compact_tests {
+    use super::*;
+    use zephium_core::work::model::{
+        WorkModelProvider, WorkModelRef, WorkModelSupports, WorkModelWire,
+    };
+
+    fn entry(context_window: u32) -> WorkModelEntry {
+        WorkModelEntry {
+            id: "compatible/local".into(),
+            model: WorkModelRef {
+                provider: WorkModelProvider::Compatible,
+                wire: WorkModelWire::ChatCompletions,
+                model: "local".into(),
+            },
+            display_name: "Local".into(),
+            roles: vec![],
+            recommended: false,
+            context_window,
+            max_output: 4096,
+            supports: WorkModelSupports {
+                tools: true,
+                vision: false,
+                prompt_cache: false,
+                reasoning: false,
+                native_search: false,
+            },
+            price: None,
+        }
+    }
+
+    fn turn(index: usize, size: usize) -> [WorkModelMessage; 2] {
+        [
+            WorkModelMessage::Assistant(vec![WorkModelPart::Text(format!("turn {index}"))]),
+            WorkModelMessage::ToolResults(vec![WorkModelToolResult {
+                call: format!("call_{index}"),
+                content: "x".repeat(size),
+                is_error: false,
+            }]),
+        ]
+    }
+
+    #[test]
+    fn a_small_context_window_shortens_older_results_sooner() {
+        assert_eq!(conversation_budget(&entry(1_000_000)), CONVERSATION_CHARS);
+        assert_eq!(conversation_budget(&entry(32_768)), 65_536);
+        // Results small enough to stay whole until the conversation outgrows its budget.
+        let conversation: Vec<WorkModelMessage> = (0..80).flat_map(|i| turn(i, 1_100)).collect();
+        let total = |messages: &[WorkModelMessage]| messages.iter().map(size).sum::<usize>();
+
+        let mut large = conversation.clone();
+        compact(&mut large, conversation_budget(&entry(1_000_000)));
+        let mut small = conversation;
+        compact(&mut small, conversation_budget(&entry(32_768)));
+        assert_eq!(
+            total(&large),
+            total(&(0..80).flat_map(|i| turn(i, 1_100)).collect::<Vec<_>>())
+        );
+        assert!(total(&small) <= 65_536);
+        assert!(total(&small) < total(&large));
+        // The newest turns stay whole for the model to act on.
+        let Some(WorkModelMessage::ToolResults(last)) = small.last() else {
+            panic!("results last");
+        };
+        assert_eq!(last[0].content.len(), 1_100);
+    }
 }

@@ -499,6 +499,12 @@ where
             } else if over {
                 break;
             }
+            // Long helpers, such as a computer part's forty turns, would
+            // otherwise outgrow their model's context.
+            super::lead::compact(
+                &mut messages,
+                super::lead::conversation_budget(&model.entry),
+            );
             let request = WorkModelRequest {
                 model: model.entry.model.clone(),
                 system: system.clone(),
