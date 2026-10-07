@@ -25,9 +25,11 @@ const BROWSER_SEARCH_USAGE: WorkUsage = WorkUsage {
     accounting: WorkUsageAccounting::Exact,
 };
 
+/// A query parameter an engine reads, and its value.
+type Param = Option<(&'static str, &'static str)>;
 /// The lead's freshness, as it appends it to a query, and each engine's
 /// own parameter for it.
-const FRESHNESS: [(&str, [Option<(&str, &str)>; 4]); 4] = [
+const FRESHNESS: [(&str, [Param; 4]); 4] = [
     (
         " (past day)",
         [

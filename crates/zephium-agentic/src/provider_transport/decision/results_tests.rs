@@ -75,7 +75,7 @@ fn classify(node: &NodeRef) -> Option<Role> {
         }
     }
     match tag.as_str() {
-        "body" | "div" => generic_text(node).then(|| Role {
+        "body" | "div" => generic_text(node).then_some(Role {
             role: "paragraph",
             level: None,
             landmark: Some("generic"),
