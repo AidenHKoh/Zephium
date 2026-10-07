@@ -51,4 +51,6 @@ export default {
   },
   // Loaded by the Inlang JSON configuration and Tailwind's CSS import respectively.
   ignoreDependencies: ["@inlang/plugin-message-format"],
+  // macOS tools the WebKit benches read memory with.
+  ignoreBinaries: ["footprint"],
 } satisfies KnipConfig;
