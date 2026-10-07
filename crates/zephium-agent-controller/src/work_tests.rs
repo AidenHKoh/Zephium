@@ -634,7 +634,7 @@ fn dormant_refusal_retains_original_identity_and_reconciles_only_exact_audit() {
     let AgentWorkOutcome::Recovery(mut recovery) = handle.take_outcome().unwrap() else {
         panic!("dormant controller cannot succeed");
     };
-    assert!(recovery.state.credential.is_none());
+    assert!(recovery.state.access.is_none());
     assert!(recovery.state.transport.is_none());
     assert!(recovery.state.input.as_ref().unwrap().objective.is_none());
     assert_eq!(recovery.journal_admission(owner).unwrap().next(), admission);
@@ -2935,7 +2935,7 @@ fn provider_fixture_with_discovery_account(
                 panic!("audit debt cannot close: {outcome:?}");
             };
             if let Some(session) = recovery.state.session.as_ref() {
-                assert!(session.credential.is_none());
+                assert!(session.access.is_none());
                 assert!(session.extraction_output.is_none());
                 assert_eq!(session.policy.pending_model_calls(), 0);
                 assert_eq!(session.policy.pending_effects(), 0);
@@ -3160,7 +3160,7 @@ fn provider_fixture_with_discovery_account(
         assert!(matches!(recovery.failure(), AgentWorkFailure::Browser(_)));
     }
     let session = recovery.state.session.as_ref().expect("retained session");
-    assert!(session.credential.is_none());
+    assert!(session.access.is_none());
     assert_eq!(session.policy.pending_model_calls(), 0);
     assert!(session.transport.snapshot().expect("transport").is_idle());
     assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Unclean));
@@ -3555,5 +3555,164 @@ fn isolated_storage_requirement_preserves_the_approved_scope_and_deadline() {
             isolated.manifest.scope().accounts().to_vec()
         ),
         manifest
+    );
+}
+
+/// Answers every page turn with one locate call, as a chosen model would; the
+/// first reply also narrates beside its call.
+struct ChosenModel {
+    requests: AtomicU64,
+}
+
+impl zephium_agentic::work_model::WorkModelClient for ChosenModel {
+    fn call<'a>(
+        &'a self,
+        request: zephium_agentic::work_model::WorkModelRequest,
+        _events: &'a (dyn Fn(zephium_agentic::work_model::WorkModelEvent) + Send + Sync),
+    ) -> zephium_agentic::work_model::WorkModelFuture<'a> {
+        use zephium_agentic::work_model::*;
+        let turn = self.requests.fetch_add(1, Ordering::Relaxed);
+        assert!(request.tools.iter().any(|tool| tool.name == "locate"));
+        assert!(!request.parallel_tools && !request.native_search);
+        let mut assistant = Vec::new();
+        if turn == 0 {
+            assistant.push(WorkModelPart::Text("Looking.".to_owned()));
+        }
+        assistant.push(WorkModelPart::ToolCall(WorkModelToolCall {
+            id: format!("toolu_{turn}"),
+            name: "locate".to_owned(),
+            arguments: serde_json::json!({"semantic_query": "document", "scope": {"kind": "initial"}}),
+        }));
+        Box::pin(async move {
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    input_tokens: 120,
+                    output_tokens: 8,
+                    ..WorkModelUsage::default()
+                },
+                assistant,
+            })
+        })
+    }
+}
+
+fn chosen_entry() -> zephium_agentic::work_model::WorkModelEntry {
+    use zephium_agentic::work_model::*;
+    WorkModelEntry {
+        id: "anthropic/claude-test-5".to_owned(),
+        model: WorkModelRef {
+            provider: WorkModelProvider::Anthropic,
+            wire: WorkModelWire::AnthropicMessages,
+            model: "claude-test-5".to_owned(),
+        },
+        display_name: "Claude Test".to_owned(),
+        roles: vec![WorkModelRole::Page],
+        recommended: false,
+        context_window: 200_000,
+        max_output: 64_000,
+        supports: WorkModelSupports {
+            tools: true,
+            vision: false,
+            prompt_cache: true,
+            reasoning: false,
+            native_search: false,
+        },
+        price: Some(WorkModelPrice {
+            input: 3_000_000,
+            cached_input: 300_000,
+            output: 15_000_000,
+        }),
+    }
+}
+
+/// Keeps the page going so each turn reaches the model.
+struct KeepGoing;
+
+impl AgentWorkTask for KeepGoing {
+    fn evaluate(
+        &mut self,
+        _: &SemanticObservation,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        Ok(AgentWorkTaskProgress::Continue)
+    }
+    fn assess(
+        &self,
+        action: &SemanticPreparedAction,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        Ok(AgentEffectAssessment::new(
+            action,
+            action.frame().origin().clone(),
+            SemanticEffectClass::Read,
+        ))
+    }
+    fn attest_account(
+        &self,
+        context: ContextJoin,
+        now: AgentPolicyInstant,
+    ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+        Task.attest_account(context, now)
+    }
+}
+
+#[test]
+fn a_chosen_model_drives_the_same_turns_to_the_exact_ceiling() {
+    let _guard = lock(&SERIAL);
+    let client = Arc::new(ChosenModel {
+        requests: AtomicU64::new(0),
+    });
+    let model = zephium_agentic::AgentProviderModelClient::try_new(&chosen_entry(), client.clone())
+        .expect("chosen model");
+    let (controller, handle) = AgentWorkController::try_new(
+        input_with_navigation_budget(
+            &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+            None,
+            None,
+            64,
+        ),
+        AgentProviderTransportConfig::STANDARD,
+        super::super::AgentBrowserModelAccess::Chosen(model),
+        Arc::new(Audit(Fault::None)),
+        Box::new(KeepGoing),
+    )
+    .expect("actor");
+    let (outcome, shutdown, calls, events) = drive(controller, handle, Fault::None);
+    let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+        panic!("the turn ceiling closes the page: {outcome:?}");
+    };
+    assert_eq!(
+        closed.failure(),
+        AgentWorkFailure::Browser(AgentBrowserProviderError::TurnLimit)
+    );
+    assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+    assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+    assert_eq!(closed.policy_settlement().closure().model_calls(), 8);
+    assert_eq!(client.requests.load(Ordering::Relaxed), 8);
+    let settled: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event.kind() {
+            AgentWorkEventKind::ModelSettled {
+                input_tokens,
+                accounting,
+                ..
+            } => Some((input_tokens, accounting)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(settled.len(), 8);
+    assert!(settled
+        .iter()
+        .all(|settled| *settled == (120, AgentModelUsageAccounting::PricedCeiling)));
+    let trimmed: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.kind(), AgentWorkEventKind::ModelReplyTrimmed { .. }))
+        .map(|event| event.kind())
+        .collect();
+    assert_eq!(
+        trimmed,
+        [AgentWorkEventKind::ModelReplyTrimmed {
+            dropped_tool_calls: 0,
+            dropped_text_bytes: 8,
+        }]
     );
 }

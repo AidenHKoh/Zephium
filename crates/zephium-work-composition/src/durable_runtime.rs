@@ -13,7 +13,9 @@ use std::{
     collections::BTreeSet,
     time::{Duration, Instant},
 };
-use zephium_agent_controller::{AgentBrowserModel, AgentWorkEventKind, AgentWorkFailure};
+use zephium_agent_controller::{
+    AgentBrowserModel, AgentBrowserModelAccess, AgentWorkEventKind, AgentWorkFailure,
+};
 use zephium_agent_provider_transport::AgentProviderCredential;
 use zephium_agentic::*;
 use zephium_app::{
@@ -33,7 +35,8 @@ pub enum WorkDecisionPreference {
     /// Use the fixed TypeSafe Keychain item, with per-question OpenAI fallback.
     #[default]
     Recommended,
-    /// Answer the same typed questions through the existing OpenAI credential.
+    /// Answer the same typed questions with a model: the chosen one, or the
+    /// existing OpenAI credential's.
     Emulation,
     /// Use the existing page planner directly.
     Disabled,
@@ -43,6 +46,9 @@ pub enum WorkDecisionPreference {
 /// a controller implementation or provider configuration.
 pub struct WorkBrowserAdapterSettings {
     pub decisions: WorkDecisionPreference,
+    /// Answers typed questions the primary backend leaves open; without it a
+    /// chosen page model does, and an exact session uses GPT-6 Luna.
+    pub decision_model: Option<AgentProviderModelClient>,
     /// Explicit opt-in for public development traces; absent in release builds.
     #[cfg(feature = "public-qualification")]
     pub retain_public_responses: bool,
@@ -62,19 +68,21 @@ pub struct WorkBrowserAdapterSettings {
     #[cfg(feature = "public-qualification")]
     pub loopback_anonymous: bool,
     pub profile: AgentWorkProfileBinding,
+    /// The catalog model of an exact access; a chosen model carries its own.
     pub model: AgentBrowserModel,
     pub config: AgentWorkApplicationConfig,
-    pub credential: AgentProviderCredential,
+    pub access: AgentBrowserModelAccess,
 }
 impl WorkBrowserAdapterSettings {
     pub fn new(
         profile: AgentWorkProfileBinding,
         model: AgentBrowserModel,
         config: AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
     ) -> Self {
         Self {
             decisions: WorkDecisionPreference::Recommended,
+            decision_model: None,
             #[cfg(feature = "public-qualification")]
             retain_public_responses: false,
             #[cfg(feature = "retained-lifetime-diagnostic")]
@@ -90,7 +98,7 @@ impl WorkBrowserAdapterSettings {
             profile,
             model,
             config,
-            credential,
+            access: access.into(),
         }
     }
 }
@@ -472,8 +480,13 @@ impl NativeWorkComposition {
             request: request.clone(),
             profile: settings.profile,
             model: settings.model,
+            chosen: match &settings.access {
+                AgentBrowserModelAccess::Chosen(model) => Some(model.clone()),
+                AgentBrowserModelAccess::Exact(_) => None,
+            },
             config: settings.config.clone(),
             decisions,
+            decision_model: settings.decision_model.clone(),
             deadline: probe.deadline().min(Instant::now() + MAX_STEP_DURATION),
         };
         // Every page of a run shares its page group: reads and page tasks,
@@ -1117,7 +1130,7 @@ impl NativeWorkComposition {
                             .checked_add(resume.actions)
                             .ok_or(WorkError::Capacity)?;
                         let remaining = remaining_read(limits, total, calls, actions, task)?;
-                        let credential = load_resume_credential().await?;
+                        let access = resume_access(plan.chosen.as_ref()).await?;
                         let mut request = plan.request.clone();
                         request.limits = remaining.0;
                         let goal = match &plan.request.step {
@@ -1133,9 +1146,10 @@ impl NativeWorkComposition {
                             plan.profile,
                             plan.model,
                             plan.config.clone(),
-                            credential,
+                            access,
                         );
                         settings.decisions = plan.decisions;
+                        settings.decision_model = plan.decision_model.clone();
                         let mut invocation = compile_step(
                             attempt,
                             request,
@@ -1173,7 +1187,7 @@ impl NativeWorkComposition {
                             resume.generation,
                             invocation.input,
                             invocation.config,
-                            invocation.credential,
+                            invocation.access,
                             invocation.task,
                         )
                         .map_err(|_| WorkError::Invalid)?;
@@ -2330,8 +2344,10 @@ struct ResumePlan {
     request: WorkAgentBrowseRequest,
     profile: AgentWorkProfileBinding,
     model: AgentBrowserModel,
+    chosen: Option<AgentProviderModelClient>,
     config: AgentWorkApplicationConfig,
     decisions: WorkDecisionPreference,
+    decision_model: Option<AgentProviderModelClient>,
     deadline: Instant,
 }
 async fn configure_decisions(
@@ -2430,6 +2446,16 @@ fn confirmation(pending: &crate::open_objective::site_work::Pending) -> WorkSite
             })
             .collect(),
         run_option: matches!(preview.consequence, Consequence::Edit | Consequence::Type),
+    }
+}
+/// A page resumed after the person's turn continues on the model it started
+/// with; only an exact catalog model reloads its key.
+async fn resume_access(
+    chosen: Option<&AgentProviderModelClient>,
+) -> Result<AgentBrowserModelAccess, WorkError> {
+    match chosen {
+        Some(model) => Ok(AgentBrowserModelAccess::Chosen(model.clone())),
+        None => load_resume_credential().await.map(Into::into),
     }
 }
 async fn load_resume_credential() -> Result<AgentProviderCredential, WorkError> {
@@ -2573,6 +2599,29 @@ fn loopback_page(
 /// A step reads one page, anonymously or in the person's session, or works
 /// toward a goal on one site; each is bounded by the loop's remaining limits.
 fn compile_step(
+    probe: &WorkAttemptProbe,
+    request: WorkAgentBrowseRequest,
+    mut settings: WorkBrowserAdapterSettings,
+    collection: Option<&WorkBrowseCollectionSchema>,
+    resume: Option<ResumeCompile>,
+    gate: Option<std::sync::Arc<crate::open_objective::site_work::SiteGate>>,
+) -> Result<crate::TrustedWorkRequest, WorkError> {
+    let decision_model = settings.decision_model.take();
+    compile_page_step(probe, request, settings, collection, resume, gate)
+        .map(|request| with_decision_model(request, decision_model))
+}
+
+fn with_decision_model(
+    mut request: crate::TrustedWorkRequest,
+    model: Option<AgentProviderModelClient>,
+) -> crate::TrustedWorkRequest {
+    if let Some(model) = model {
+        request.input.set_decision_model(model);
+    }
+    request
+}
+
+fn compile_page_step(
     probe: &WorkAttemptProbe,
     request: WorkAgentBrowseRequest,
     settings: WorkBrowserAdapterSettings,
@@ -2747,7 +2796,7 @@ fn compile_step(
             deadline,
         },
         settings.config,
-        settings.credential,
+        settings.access,
     )
     .with_persistent_result();
     let invocation = if task {
@@ -2816,6 +2865,16 @@ fn refused(settings: &WorkBrowserAdapterSettings, stage: &str, error: WorkError)
 }
 
 fn compile(
+    attempt: &WorkNodeAttempt,
+    mut settings: WorkBrowserAdapterSettings,
+    collection: Option<&WorkBrowseCollectionSchema>,
+) -> Result<crate::TrustedWorkRequest, WorkError> {
+    let decision_model = settings.decision_model.take();
+    compile_node(attempt, settings, collection)
+        .map(|request| with_decision_model(request, decision_model))
+}
+
+fn compile_node(
     attempt: &WorkNodeAttempt,
     settings: WorkBrowserAdapterSettings,
     collection: Option<&WorkBrowseCollectionSchema>,
@@ -2935,7 +2994,7 @@ fn compile(
             deadline: attempt.deadline(),
         },
         settings.config,
-        settings.credential,
+        settings.access,
     )
     .with_persistent_result();
     #[cfg(feature = "public-qualification")]
@@ -3020,6 +3079,63 @@ fn map_archive(
 #[cfg(test)]
 mod human_budget_tests {
     use super::*;
+
+    struct Unused;
+
+    impl work_model::WorkModelClient for Unused {
+        fn call<'a>(
+            &'a self,
+            _: work_model::WorkModelRequest,
+            _: &'a (dyn Fn(work_model::WorkModelEvent) + Send + Sync),
+        ) -> work_model::WorkModelFuture<'a> {
+            Box::pin(async { Err(work_model::WorkModelError::Network) })
+        }
+    }
+
+    #[test]
+    fn resume_after_takeover_reuses_the_chosen_model_without_a_key() {
+        use work_model::*;
+        let entry = WorkModelEntry {
+            id: "google/gemini-test".to_owned(),
+            model: WorkModelRef {
+                provider: WorkModelProvider::Google,
+                wire: WorkModelWire::Gemini,
+                model: "gemini-test".to_owned(),
+            },
+            display_name: "Gemini Test".to_owned(),
+            roles: vec![WorkModelRole::Page],
+            recommended: false,
+            context_window: 1_000_000,
+            max_output: 32_000,
+            supports: WorkModelSupports {
+                tools: true,
+                vision: true,
+                prompt_cache: false,
+                reasoning: true,
+                native_search: true,
+            },
+            price: None,
+        };
+        let model = AgentProviderModelClient::try_new(&entry, std::sync::Arc::new(Unused))
+            .expect("chosen model");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let AgentBrowserModelAccess::Chosen(resumed) = runtime
+            .block_on(resume_access(Some(&model)))
+            .expect("resumed access")
+        else {
+            panic!("a chosen model never falls back to a key");
+        };
+        let guard = |model: &AgentProviderModelClient| {
+            model
+                .try_call_config(4_096)
+                .expect("config")
+                .accounting_guard()
+        };
+        assert_eq!(guard(&resumed), guard(&model));
+    }
+
     #[test]
     fn continuation_deducts_every_previous_episode_and_never_renews_limits() {
         let limits = WorkExecutionLimits {

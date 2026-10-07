@@ -111,6 +111,28 @@ async fn search_backend(
     ))
 }
 
+/// The page agent runs on the page model the person chose; a page model that
+/// cannot call tools leaves the page to the lead model.
+fn page_model(
+    models: &WorkLeadModels,
+) -> Result<zephium_agentic::AgentProviderModelClient, WorkError> {
+    for model in [&models.page, &models.lead] {
+        if let Ok(page) =
+            zephium_agentic::AgentProviderModelClient::try_new(&model.entry, model.client.clone())
+        {
+            record_diagnostic(format_args!(
+                "work: phase=lead state=page_model model={} vision={} priced={}",
+                model.entry.id,
+                page.supports_vision(),
+                page.is_priced()
+            ));
+            return Ok(page);
+        }
+    }
+    record_diagnostic(format_args!("work: phase=lead state=page_model model=none"));
+    Err(WorkError::Unavailable)
+}
+
 /// No search backend: every search is refused before anything is sent.
 struct NoSearch;
 
@@ -169,6 +191,14 @@ impl WorkProviders {
             "work: phase=lead state=models lead={} page={} light={}",
             models.lead.entry.id, models.page.entry.id, models.light.entry.id
         ));
+        let page = page_model(&models)?;
+        // Typed decisions the recommended backend leaves open go to the light
+        // model; one that cannot call tools leaves them to the page model.
+        let light = zephium_agentic::AgentProviderModelClient::try_new(
+            &models.light.entry,
+            models.light.client.clone(),
+        )
+        .ok();
         let callback = shell.callback_handle();
         let work = command.work;
         let started = std::time::Instant::now();
@@ -184,7 +214,10 @@ impl WorkProviders {
                 search.as_ref(),
                 |probe, request| {
                     let callback = &callback;
+                    let page = page.clone();
+                    let light = light.clone();
                     async move {
+                        // The catalog model is unused: the chosen page model carries its own.
                         let mut settings = zephium_work_composition::durable_runtime::WorkBrowserAdapterSettings::new(
                             binding,
                             zephium_agent_controller::AgentBrowserModel::Gpt6Luna,
@@ -192,11 +225,12 @@ impl WorkProviders {
                                 zephium_agent_runtime::AgentRuntimeConfig::STANDARD,
                                 AgentProviderTransportConfig::STANDARD,
                             ),
-                            credential().await?,
+                            zephium_agent_controller::AgentBrowserModelAccess::Chosen(page),
                         );
                         settings.decisions = super::super::work_decision::composition_preference(
                             super::super::work_decision::selected_choice(profile).await,
                         );
+                        settings.decision_model = light;
                         #[cfg(feature = "work-development-traces")]
                         let settings = {
                             let mut settings = settings;

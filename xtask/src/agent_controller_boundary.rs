@@ -838,6 +838,10 @@ fn validate_terra(source: &str) -> Result<(), String> {
         ".bind_diff_request_with_action_authority(",
         ".try_prepare_for_provider_exact_count(&mut self.policy, request, diff)",
         ".try_prove_shutdown()",
+        ".try_admit_model(input, &mut self.policy, model, cancellation)",
+        ".execute_model_client(|batch| {",
+        "settle_chosen_terminal(*settlement, chosen, policy)",
+        "chosen_call_budget(",
     ] {
         if !source.contains(required) {
             return Err(format!(

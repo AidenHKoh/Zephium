@@ -97,6 +97,7 @@ impl WorkModelClient for Script {
                 usage: WorkModelUsage {
                     input_tokens: 1_000,
                     cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                     output_tokens: 100,
                     reasoning_tokens: 0,
                     cost_micros: None,
@@ -403,6 +404,7 @@ impl WorkModelClient for Day {
                 usage: WorkModelUsage {
                     input_tokens: 1_000,
                     cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                     output_tokens: 100,
                     reasoning_tokens: 0,
                     cost_micros: None,

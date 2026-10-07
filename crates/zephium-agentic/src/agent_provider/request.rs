@@ -261,6 +261,19 @@ impl AgentProviderObjective {
         })
     }
 
+    /// The same conservatively admitted objective under another counting
+    /// revision. A UTF-8 byte bound does not depend on the tokenizer, so only
+    /// its label changes; an exact count is never relabeled.
+    pub fn try_relabel_conservative(
+        &self,
+        counting_revision: &SemanticTokenizerRevision,
+    ) -> Result<Self, AgentProviderObjectiveError> {
+        if self.measurement.quality() != SemanticTokenCountQuality::Conservative {
+            return Err(AgentProviderObjectiveError::TokenQuality);
+        }
+        Self::try_admit_conservative_utf8(self.content.to_string(), counting_revision)
+    }
+
     /// Exact admitted token count used for policy reservation.
     pub const fn token_measurement(&self) -> &SemanticTokenMeasurement {
         &self.measurement
@@ -1906,7 +1919,8 @@ impl AgentPreparedObservationRequest {
     ) -> Result<Self, AgentProviderRequestError> {
         if inspections.is_some() || action_progress.is_some() {
             if config.provider() != AgentProviderKind::OpenAiResponses
-                || config.input_accounting != super::AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation {
+                || !config.input_accounting.reserves_whole_request()
+            {
                 return Err(AgentProviderRequestError::Encoding);
             }
             return Self::try_openai_with_inspections(
@@ -1948,7 +1962,8 @@ impl AgentPreparedObservationRequest {
         match (config.provider(), config.input_accounting) {
             (
                 AgentProviderKind::OpenAiResponses,
-                super::AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation,
+                super::AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+                | super::AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation,
             ) => Self::try_openai_for_provider_exact_count(
                 policy,
                 request,
@@ -1981,7 +1996,8 @@ impl AgentPreparedObservationRequest {
         match (config.provider(), config.input_accounting) {
             (
                 AgentProviderKind::OpenAiResponses,
-                super::AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation,
+                super::AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+                | super::AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation,
             ) => Self::try_openai_for_provider_exact_count_with_action_authority(
                 policy,
                 request,
@@ -3945,9 +3961,21 @@ struct OpenAiExtractionFormatWire<'a> {
 enum OpenAiContinuationInputWire<'a> {
     Message(OpenAiInputMessageWire<'a>),
     Reasoning(OpenAiReasoningReplayWire<'a>),
+    ModelTurn(ModelTurnReplayWire<'a>),
     FunctionCall(OpenAiFunctionCallWire<'a>),
     FunctionCallOutput(OpenAiFunctionCallOutputWire<'a>),
     FunctionCallImageOutput(OpenAiFunctionCallImageOutputWire<'a>),
+}
+
+/// Input item of a chosen model's own turn; only its translator reads it.
+pub(super) const MODEL_TURN_ITEM: &str = "zephium_model_turn";
+
+/// A chosen model's own turn, read back only by the chosen-model translator.
+#[derive(Serialize)]
+struct ModelTurnReplayWire<'a> {
+    r#type: &'static str,
+    call_id: &'a str,
+    parts: &'a [Value],
 }
 
 #[derive(Serialize)]
@@ -4182,6 +4210,13 @@ fn push_openai_replay_items<'a>(
                     encrypted_content,
                 },
             )),
+            OpenAiResponseReplayItem::ModelTurn { call_id, parts } => input.push(
+                OpenAiContinuationInputWire::ModelTurn(ModelTurnReplayWire {
+                    r#type: MODEL_TURN_ITEM,
+                    call_id,
+                    parts,
+                }),
+            ),
             OpenAiResponseReplayItem::FunctionCall => {
                 input.push(OpenAiContinuationInputWire::FunctionCall(
                     OpenAiFunctionCallWire {
@@ -4298,7 +4333,7 @@ fn openai_text_message<'a>(role: &'static str, text: &'a str) -> OpenAiInputMess
     }
 }
 
-fn encode_openai_body(
+pub(in crate::agent_provider) fn encode_openai_body(
     config: &AgentProviderCallConfig,
     objective: &str,
     semantic: &str,
@@ -4682,7 +4717,7 @@ fn encode_openai_extraction_body(
     )
 }
 
-fn encode_openai_extraction_payload(
+pub(in crate::agent_provider) fn encode_openai_extraction_payload(
     config: &AgentProviderCallConfig,
     objective: &str,
     payload: &str,
@@ -5191,6 +5226,27 @@ fn encode_anthropic_screenshot_continuation_body(
         stream: true,
     };
     encode_bounded_provider_body(&wire)
+}
+
+/// The screenshot encoder's own tool-result item, for translation tests.
+#[cfg(test)]
+pub(in crate::agent_provider) fn screenshot_result_item_for_test(
+    call_id: &str,
+    png: &[u8],
+) -> Value {
+    let image_url = encode_png_data_url(png).expect("png data url");
+    serde_json::to_value(OpenAiContinuationInputWire::FunctionCallImageOutput(
+        OpenAiFunctionCallImageOutputWire {
+            r#type: "function_call_output",
+            call_id,
+            output: [OpenAiInputImageWire {
+                r#type: "input_image",
+                image_url: &image_url,
+                detail: "high",
+            }],
+        },
+    ))
+    .expect("screenshot item")
 }
 
 fn encode_png_data_url(png: &[u8]) -> Result<String, AgentProviderRequestError> {
@@ -6844,18 +6900,72 @@ fn provider_count_preflight(
     Ok(structured)
 }
 
+/// Envelope tokens a chosen model's provider may add around the translated
+/// request: role and tool-call framing, its own tool-use preamble and host-note
+/// labels. Request bytes already bound every text and schema token.
+pub(crate) const MODEL_REPORTED_ENVELOPE_TOKENS: u32 = 4_096;
+/// Tokens reserved for one image, above every supported provider's charge for
+/// the bounded screenshot. Image bytes themselves are not tokens.
+pub(crate) const MODEL_REPORTED_IMAGE_TOKENS: u32 = 8_192;
+
 fn conservative_request_measurement(
     config: &AgentProviderCallConfig,
     body: &[u8],
 ) -> Result<SemanticTokenMeasurement, AgentProviderRequestError> {
-    let bytes =
-        u32::try_from(body.len()).map_err(|_| AgentProviderContractError::AdmissionBudget)?;
+    let bytes = match config.input_accounting_mode() {
+        super::AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation => {
+            model_reported_reservation(body)?
+        }
+        _ => u32::try_from(body.len()).map_err(|_| AgentProviderContractError::AdmissionBudget)?,
+    };
     SemanticTokenMeasurement::try_new(
         config.tokenizer().clone(),
         bytes,
         SemanticTokenCountQuality::Conservative,
     )
     .map_err(|_| AgentProviderContractError::AdmissionBudget.into())
+}
+
+/// Request bytes outside inline image data, plus the fixed envelope and
+/// per-image allowances of the provider-reported mode.
+fn model_reported_reservation(body: &[u8]) -> Result<u32, AgentProviderRequestError> {
+    fn image_bytes(value: &Value, images: &mut u32, bytes: &mut usize) {
+        match value {
+            Value::Object(object) => {
+                if object.get("type").and_then(Value::as_str) == Some("input_image") {
+                    if let Some(url) = object
+                        .get("image_url")
+                        .and_then(Value::as_str)
+                        .filter(|url| url.starts_with("data:"))
+                    {
+                        *images = images.saturating_add(1);
+                        *bytes = bytes.saturating_add(url.len());
+                    }
+                }
+                object
+                    .values()
+                    .for_each(|value| image_bytes(value, images, bytes));
+            }
+            Value::Array(values) => values
+                .iter()
+                .for_each(|value| image_bytes(value, images, bytes)),
+            _ => {}
+        }
+    }
+    let wire: Value =
+        serde_json::from_slice(body).map_err(|_| AgentProviderRequestError::Encoding)?;
+    let (mut images, mut inline) = (0_u32, 0_usize);
+    image_bytes(&wire, &mut images, &mut inline);
+    let text = body
+        .len()
+        .checked_sub(inline)
+        .and_then(|bytes| u32::try_from(bytes).ok())
+        .ok_or(AgentProviderContractError::AdmissionBudget)?;
+    images
+        .checked_mul(MODEL_REPORTED_IMAGE_TOKENS)
+        .and_then(|images| images.checked_add(MODEL_REPORTED_ENVELOPE_TOKENS))
+        .and_then(|allowance| allowance.checked_add(text))
+        .ok_or_else(|| AgentProviderContractError::AdmissionBudget.into())
 }
 
 #[cfg(test)]
@@ -7154,6 +7264,43 @@ mod tests {
     }
 
     #[test]
+    fn provider_reported_reservation_bounds_text_and_replaces_image_bytes() {
+        let mut config = openai_config(128);
+        config.input_accounting = super::super::AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation;
+        let body = encode_openai_body(&config, "objective", "observed evidence").unwrap();
+        let measured = conservative_request_measurement(&config, &body).unwrap();
+        assert_eq!(measured.quality(), SemanticTokenCountQuality::Conservative);
+        assert_eq!(
+            measured.tokens() as usize,
+            body.len() + MODEL_REPORTED_ENVELOPE_TOKENS as usize
+        );
+
+        let image = format!("data:image/png;base64,{}", "A".repeat(100_000));
+        let wire = json!({"input": [{
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": [{"type": "input_image", "image_url": image, "detail": "high"}],
+        }]});
+        let bytes = serde_json::to_vec(&wire).unwrap();
+        let measured = conservative_request_measurement(&config, &bytes).unwrap();
+        assert_eq!(
+            measured.tokens() as usize,
+            bytes.len() - image.len()
+                + (MODEL_REPORTED_ENVELOPE_TOKENS + MODEL_REPORTED_IMAGE_TOKENS) as usize
+        );
+        assert!(conservative_request_measurement(&config, b"not json").is_err());
+
+        // Provider-exact reservation still counts every byte.
+        config.input_accounting = super::super::AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation;
+        assert_eq!(
+            conservative_request_measurement(&config, &bytes)
+                .unwrap()
+                .tokens() as usize,
+            bytes.len()
+        );
+    }
+
+    #[test]
     fn decision_budget_is_current_bounded_and_reserves_mapping() {
         let first = crate::AgentModelCallId::new(41).unwrap();
         let mut base = openai_config(128)
@@ -7168,6 +7315,9 @@ mod tests {
             .with_decision_budget(crate::AgentModelCallId::new(u64::MAX).unwrap(), 2)
             .is_err());
         let config = base.clone().with_decision_budget(first, 5).unwrap();
+        let mut reported = base.clone();
+        reported.input_accounting = super::super::AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation;
+        assert!(reported.with_decision_budget(first, 5).is_ok());
         assert!(base
             .clone()
             .restrict_to_extraction()
@@ -8309,7 +8459,30 @@ mod tests {
             );
             assert_eq!(objective.token_measurement().revision(), &selected);
             assert!(!format!("{objective:?}").contains(content));
+            let chosen = revision("reported:chosen-model");
+            let relabeled = objective
+                .try_relabel_conservative(&chosen)
+                .expect("relabeled");
+            assert_eq!(relabeled.token_measurement().revision(), &chosen);
+            assert_eq!(
+                relabeled.token_measurement().tokens(),
+                objective.token_measurement().tokens()
+            );
         }
+        let exact = AgentProviderObjective::try_admit(
+            "exact objective".to_owned(),
+            &FixedCounter {
+                revision: selected.clone(),
+                tokens: 3,
+                quality: SemanticTokenCountQuality::ExactLocal,
+            },
+            &selected,
+        )
+        .expect("exact objective");
+        assert!(matches!(
+            exact.try_relabel_conservative(&revision("reported:chosen-model")),
+            Err(AgentProviderObjectiveError::TokenQuality)
+        ));
         assert!(matches!(
             AgentProviderObjective::try_admit_conservative_utf8(
                 "use ghp_abcdefghijklmnop".to_owned(),

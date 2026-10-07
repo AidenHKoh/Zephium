@@ -26,7 +26,7 @@ impl DecisionCallAccounting for Accounting {
     }
 }
 
-fn admitted_fixture() -> (
+pub(super) fn admitted_fixture() -> (
     AgentRunPolicy,
     AgentModelCallRequest,
     SemanticObservation,
@@ -332,7 +332,7 @@ fn emulation_config() -> WorkPlanningConfig {
     .unwrap()
 }
 
-fn fixture_answers(request: &DecisionRequest) -> serde_json::Value {
+pub(super) fn fixture_answers(request: &DecisionRequest) -> serde_json::Value {
     let answers: BTreeMap<_, _> = request.questions().iter().map(|(key, question)| {
         let value = match question {
             Question::Noul { .. } => json!({"type":"noul","noul":0.01}),

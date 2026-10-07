@@ -414,6 +414,7 @@ impl LeadClient {
 
     fn usage(&self, total: &Decoded) -> WorkModelUsage {
         let mut usage = total.usage;
+        usage.cache_write_input_tokens = total.cache_write_tokens.min(usage.input_tokens);
         usage.cost_micros = total.provider_cost_micros.or_else(|| {
             let price = self.price.as_ref()?;
             let cached = u128::from(usage.cached_input_tokens.min(usage.input_tokens));
@@ -934,6 +935,20 @@ pub(crate) fn replayed<'a>(part: &'a WorkModelPart, wire: &str) -> Option<&'a Va
             value.get("value")
         }
         _ => None,
+    }
+}
+
+/// The request's tool choice, refused when it forces a tool it does not offer.
+pub(crate) fn tool_choice(
+    request: &WorkModelRequest,
+) -> Result<&WorkModelToolChoice, WorkModelError> {
+    let offered = |name: &str| request.tools.iter().any(|tool| tool.name == name);
+    match &request.tool_choice {
+        WorkModelToolChoice::Required if request.tools.is_empty() => {
+            Err(WorkModelError::BadRequest)
+        }
+        WorkModelToolChoice::Named(name) if !offered(name) => Err(WorkModelError::BadRequest),
+        choice => Ok(choice),
     }
 }
 

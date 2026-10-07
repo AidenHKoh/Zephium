@@ -20,6 +20,8 @@ pub mod agent;
 pub mod decision;
 /// General tool-calling transports for the lead agent.
 pub mod lead;
+/// Page-agent turns on the person's chosen model.
+pub mod model_client;
 /// Public search through the chosen model's own provider search.
 pub mod model_search;
 pub mod planning;
@@ -1078,7 +1080,6 @@ impl AgentProviderTransport {
         credential: &AgentProviderCredential,
         cancellation: AgentProviderCancellation,
     ) -> Result<AgentProviderAttempt, AgentProviderAdmissionError> {
-        let call = input.request().call();
         let provider = input.request().config().provider();
         let endpoint = input.request().endpoint();
         let Some(deadline) = Instant::now().checked_add(self.config.request_timeout) else {
@@ -1093,7 +1094,11 @@ impl AgentProviderTransport {
                 .map_err(AgentProviderAdmissionError::Settlement)?;
             return Err(AgentProviderAdmissionError::CredentialProvider);
         }
-        if !provider_endpoint_matches(provider, endpoint) {
+        // A chosen model's request is never sent to a fixed endpoint.
+        if !provider_endpoint_matches(provider, endpoint)
+            || input.request().config().response_route()
+                == crate::AgentProviderResponseRoute::ModelReported
+        {
             let _outcome = input
                 .refuse(policy)
                 .map_err(AgentProviderAdmissionError::Settlement)?;
@@ -1108,6 +1113,68 @@ impl AgentProviderTransport {
                 return Err(AgentProviderAdmissionError::Credential);
             }
         };
+        self.commit_admitted(
+            input,
+            policy,
+            cancellation,
+            deadline,
+            Some(credential),
+            None,
+        )
+    }
+
+    /// Admits one turn on the person's chosen model without starting a call.
+    ///
+    /// The request must carry the provider-reported accounting mode bound to
+    /// exactly this model's pricing schedule. Every capacity, duplicate,
+    /// cancellation and shutdown check, and the disclosure commit, are the
+    /// fixed-endpoint path's own.
+    pub fn try_admit_model(
+        &self,
+        input: AgentProviderTransportInput,
+        policy: &mut AgentRunPolicy,
+        model: &model_client::AgentProviderModelClient,
+        cancellation: AgentProviderCancellation,
+    ) -> Result<AgentProviderAttempt, AgentProviderAdmissionError> {
+        let Some(deadline) = Instant::now().checked_add(self.config.request_timeout) else {
+            let _outcome = input
+                .refuse(policy)
+                .map_err(AgentProviderAdmissionError::Settlement)?;
+            return Err(AgentProviderAdmissionError::State);
+        };
+        let config = input.request().config();
+        if input.request().endpoint() != AgentProviderEndpoint::OpenAiResponses
+            || config.input_accounting_mode()
+                != crate::AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation
+            || !model.binds(config)
+        {
+            let _outcome = input
+                .refuse(policy)
+                .map_err(AgentProviderAdmissionError::Settlement)?;
+            return Err(AgentProviderAdmissionError::ModelBinding);
+        }
+        self.commit_admitted(
+            input,
+            policy,
+            cancellation,
+            deadline,
+            None,
+            Some(model.clone()),
+        )
+    }
+
+    fn commit_admitted(
+        &self,
+        input: AgentProviderTransportInput,
+        policy: &mut AgentRunPolicy,
+        cancellation: AgentProviderCancellation,
+        deadline: Instant,
+        credential: Option<AgentProviderAttemptCredential>,
+        model: Option<model_client::AgentProviderModelClient>,
+    ) -> Result<AgentProviderAttempt, AgentProviderAdmissionError> {
+        let call = input.request().call();
+        let provider = input.request().config().provider();
+        let endpoint = input.request().endpoint();
         let mut slot = match self.reserve(call) {
             Ok(slot) => slot,
             Err(error) => {
@@ -1174,7 +1241,9 @@ impl AgentProviderTransport {
                 .then(|| self.endpoints.openai_input_tokens.clone()),
             provider,
             prior_disclosure_stage: AgentProviderDisclosureStage::NotDispatched,
-            credential: Some(credential),
+            credential,
+            model,
+            model_reply: None,
             core: Some(AgentProviderAttemptCore::PreDispatch {
                 committed: Box::new(committed),
                 slot: Some(slot),
@@ -1346,6 +1415,9 @@ pub enum AgentProviderAdmissionError {
     /// Exact cancellation won before semantic disclosure committed.
     #[error("agent provider request was cancelled before commitment")]
     Cancelled,
+    /// The request was not bound to the chosen model it was admitted for.
+    #[error("agent provider request is not bound to the chosen model")]
+    ModelBinding,
     /// Bounded transport admission state became unavailable.
     #[error("agent provider transport state is unavailable")]
     State,
@@ -1414,9 +1486,15 @@ pub struct AgentProviderTransportResult {
     outcome: AgentProviderTransportOutcomeOwned,
     disclosure_stage: AgentProviderDisclosureStage,
     continuation: Option<Box<AgentProviderContinuationSeed>>,
+    model_reply: Option<crate::AgentProviderModelReplyFacts>,
 }
 
 impl AgentProviderTransportResult {
+    /// Closed facts about a chosen model's reply, when one was decoded.
+    pub const fn model_reply(&self) -> Option<crate::AgentProviderModelReplyFacts> {
+        self.model_reply
+    }
+
     /// Exact non-authorizing correlation for this result.
     pub fn call(&self) -> AgentProviderCallIdentity {
         AgentProviderCallIdentity::from_active(&self.active)
@@ -1496,6 +1574,7 @@ impl AgentProviderTransportResult {
             outcome,
             disclosure_stage,
             continuation,
+            model_reply: _,
         } = self;
         match outcome {
             AgentProviderTransportOutcomeOwned::Stream(finished) => {
@@ -1763,6 +1842,8 @@ pub struct AgentProviderAttempt {
     provider: AgentProviderKind,
     prior_disclosure_stage: AgentProviderDisclosureStage,
     credential: Option<AgentProviderAttemptCredential>,
+    model: Option<model_client::AgentProviderModelClient>,
+    model_reply: Option<crate::AgentProviderModelReplyFacts>,
     core: Option<AgentProviderAttemptCore>,
     phase: AgentProviderAttemptPhase,
     cancellation: AgentProviderCancellation,
@@ -2081,8 +2162,9 @@ impl AgentProviderAttempt {
             .take()
             .ok_or(AgentProviderAttemptStateError::Terminal)?;
         drop(self.credential.take());
+        drop(self.model.take());
         self.phase = AgentProviderAttemptPhase::Terminal;
-        let result = match core {
+        let mut result = match core {
             AgentProviderAttemptCore::PreDispatch { committed, slot } => {
                 let input_metric_receipt = committed.sealed_input_metric_receipt();
                 let (request, input, continuation) = (*committed).into_parts();
@@ -2112,6 +2194,7 @@ impl AgentProviderAttempt {
                 )
             }
         };
+        result.model_reply = self.model_reply.take();
         Ok(result)
     }
 
@@ -2633,6 +2716,7 @@ impl fmt::Debug for AgentProviderAttempt {
             .field("provider", &self.provider)
             .field("endpoint", &"[fixed]")
             .field("credential", &"[redacted]")
+            .field("model", &self.model.is_some())
             .field("phase", &self.phase_label())
             .field("cancelled", &self.cancellation.is_cancelled())
             .finish()
@@ -2789,6 +2873,7 @@ fn finish_attempt(
         outcome,
         disclosure_stage,
         continuation: continuation.map(Box::new),
+        model_reply: None,
     }
 }
 
@@ -3176,7 +3261,7 @@ mod tests {
         (fixture.policy, fixture.input)
     }
 
-    fn provider_exact_fixture() -> (AgentRunPolicy, AgentProviderTransportInput) {
+    pub(super) fn provider_exact_fixture() -> (AgentRunPolicy, AgentProviderTransportInput) {
         let fixture = stateful_provider_fixture_with_accounting(
             AgentProviderKind::OpenAiResponses,
             AgentProviderPricingProfile::try_new(
@@ -3233,6 +3318,32 @@ mod tests {
         provider: AgentProviderKind,
         pricing_profile: AgentProviderPricingProfile,
         provider_exact: bool,
+    ) -> StatefulProviderFixture {
+        stateful_provider_fixture_for(provider, pricing_profile, provider_exact, None)
+    }
+
+    /// The provider-exact fixture's run, admitted for a chosen model instead.
+    pub(super) fn model_reported_fixture(
+        model: &model_client::AgentProviderModelClient,
+    ) -> (AgentRunPolicy, AgentProviderTransportInput) {
+        let fixture = stateful_provider_fixture_for(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderPricingProfile::try_new(
+                AgentProviderPricingRevision::new(1).expect("pricing revision"),
+                crate::MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS,
+            )
+            .expect("pricing profile"),
+            true,
+            Some(model),
+        );
+        (fixture.policy, fixture.input)
+    }
+
+    fn stateful_provider_fixture_for(
+        provider: AgentProviderKind,
+        pricing_profile: AgentProviderPricingProfile,
+        provider_exact: bool,
+        chosen: Option<&model_client::AgentProviderModelClient>,
     ) -> StatefulProviderFixture {
         assert!(
             !provider_exact || provider == AgentProviderKind::OpenAiResponses,
@@ -3300,8 +3411,15 @@ mod tests {
         .expect("observation assembler")
         .finish()
         .expect("observation");
-        let tokenizer =
-            SemanticTokenizerRevision::try_new("transport-test-v1".to_owned()).expect("tokenizer");
+        let tokenizer = match chosen {
+            Some(model) => model
+                .try_call_config(20)
+                .expect("chosen model config")
+                .tokenizer()
+                .clone(),
+            None => SemanticTokenizerRevision::try_new("transport-test-v1".to_owned())
+                .expect("tokenizer"),
+        };
         let payload = if provider_exact {
             encode_semantic_observation(
                 &observation,
@@ -3434,7 +3552,9 @@ mod tests {
         let schedule =
             fixture_pricing_schedule(provider, model, reasoning, tokenizer, pricing_profile)
                 .expect("provider schedule");
-        let config = if provider_exact {
+        let config = if let Some(model) = chosen {
+            model.try_call_config(20).expect("chosen model config")
+        } else if provider_exact {
             schedule
                 .try_provider_exact_call_config(20, AgentProviderStreamBudget::STANDARD)
                 .expect("provider-exact config")

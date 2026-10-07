@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::task::Waker;
 use std::time::{Duration, Instant};
 use zephium_agent_controller::*;
-use zephium_agent_provider_transport::{AgentProviderCredential, AgentProviderTransportConfig};
+use zephium_agent_provider_transport::AgentProviderTransportConfig;
 use zephium_agent_runtime::*;
 
 #[path = "work_resources_human.rs"]
@@ -54,18 +54,18 @@ impl StagedActor {
         input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
         transport: zephium_agent_provider_transport::AgentProviderTransport,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<Self, AgentWorkFailure> {
-        Self::for_probe_human(input, browser, transport, credential, audit, task, None)
+        Self::for_probe_human(input, browser, transport, access, audit, task, None)
     }
     #[cfg(all(test, feature = "work-execution-probe"))]
     pub(super) fn for_probe_human(
         input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
         transport: zephium_agent_provider_transport::AgentProviderTransport,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
         waiting: Option<AgentWorkWaitingForHuman>,
@@ -77,7 +77,7 @@ impl StagedActor {
                 input,
                 browser,
                 transport,
-                credential,
+                access,
                 audit.clone(),
                 task,
             )
@@ -86,7 +86,7 @@ impl StagedActor {
                 input,
                 browser,
                 transport,
-                credential,
+                access,
                 audit.clone(),
                 task,
             )
@@ -108,7 +108,7 @@ impl StagedActor {
         browser: Box<dyn AgentWorkRetainedBrowser>,
         config: AgentRuntimeConfig,
         provider: AgentProviderTransportConfig,
-        credential: AgentProviderCredential,
+        access: AgentBrowserModelAccess,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
         waiting: Option<AgentWorkWaitingForHuman>,
@@ -120,7 +120,7 @@ impl StagedActor {
                 input,
                 browser,
                 provider,
-                credential,
+                access,
                 audit.clone(),
                 task,
             )
@@ -129,7 +129,7 @@ impl StagedActor {
                 input,
                 browser,
                 provider,
-                credential,
+                access,
                 audit.clone(),
                 task,
             )

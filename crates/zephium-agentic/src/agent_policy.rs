@@ -1267,6 +1267,33 @@ impl AgentRunPolicy {
         )
     }
 
+    /// Unreserved cost under both the run and the exact lease node.
+    /// Advisory only: every request still requires its original reservation.
+    pub fn remaining_cost_micro_usd(
+        &self,
+        lease: AgentPlanLeaseId,
+    ) -> Result<u64, AgentPolicyError> {
+        let index = self.lease_index(lease).ok_or(AgentPolicyError::Lease)?;
+        let node = self
+            .manifest
+            .plan_node(self.leases[index].binding.node())
+            .ok_or(AgentPolicyError::Invariant)?;
+        let remaining = |budget: AgentRunBudget, accounting: AgentPolicyAccounting| {
+            budget
+                .cost_micro_usd()
+                .checked_sub(accounting.consumed_cost_micro_usd())
+                .and_then(|value| value.checked_sub(accounting.reserved_cost_micro_usd()))
+                .ok_or(AgentPolicyError::Budget)
+        };
+        Ok(
+            remaining(self.manifest.budget(), self.accounting())?.min(remaining(
+                node.budget(),
+                self.lease_accounting(lease)
+                    .ok_or(AgentPolicyError::Invariant)?,
+            )?),
+        )
+    }
+
     /// Consumed and reserved accounting for one exact plan lease.
     pub fn lease_accounting(&self, lease: AgentPlanLeaseId) -> Option<AgentPolicyAccounting> {
         let state = self
@@ -4510,6 +4537,16 @@ mod tests {
         assert_eq!(
             fixture.policy.remaining_model_tokens(fixture.lease),
             Ok(920)
+        );
+        assert_eq!(
+            fixture.policy.remaining_cost_micro_usd(fixture.lease),
+            Ok(9_900)
+        );
+        assert_eq!(
+            fixture
+                .policy
+                .remaining_cost_micro_usd(AgentPlanLeaseId::from_raw(999)),
+            Err(AgentPolicyError::Lease)
         );
         let admission_debug = format!("{admission:?}");
 

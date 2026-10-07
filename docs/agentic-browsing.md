@@ -580,7 +580,9 @@ The exact-local path requires an exact (`ExactLocal` or authenticated
 count before policy mutation. The OpenAI-only provider-exact path instead
 reserves the already-serialized complete replay by its UTF-8 byte length before
 the authenticated count request; an Anthropic provider estimate is never
-accepted as exact admission. Policy proves the exact committed baseline cohort
+accepted as exact admission. A chosen-model call takes neither path: it
+reserves the replay as a provider-reported upper bound, described below, and
+is never exact admission either. Policy proves the exact committed baseline cohort
 and every returned reference/origin, then reuses that cohort unchanged. This
 admits truthful empty reads, preserves the conservative prior
 sensitivity and trust, and adds no origin, account, reference, or taint-cohort
@@ -1212,6 +1214,41 @@ ceiling remains held until terminal settlement. Provider-exact standard-rate
 calls are capped at 272,000 input tokens so a future long-context pricing tier
 cannot be charged under the wrong schedule. Anthropic remains exact-local until
 it offers a qualifying exact authenticated contract.
+
+The third mode, `ProviderReportedAfterConservativeReservation`, serves the
+person's chosen page model from any provider through its own client. It is
+explicitly not exact admission. The same encoders build the same
+Responses-shaped body, which is reserved before disclosure as a strict upper
+bound: its UTF-8 bytes without inline image data, plus a fixed 4,096-token
+envelope allowance and 8,192 tokens per image. The call is then priced on the
+usage the provider reports, at the person's catalog price for that model or,
+for an unpriced model, at fixed conservative fallback rates under their own
+pricing revision. Reported usage above the reservation is never priced: the
+call fails and is charged its reservation. Each call is sized to what the
+lease can still afford at the model's highest input rate, and its pricing
+range stops below every supported provider's long-context tier. This mode can
+never take the authenticated count path, and an exact catalog entry can never
+settle on reported usage.
+
+The chosen-model drive keeps every other transport rule: admission, the
+disclosure commit, cancellation, the absolute deadline and terminal
+settlement are the fixed-endpoint path's own. A body Zephium built is
+translated into one provider-neutral call: the fixed instructions become the
+system prompt, developer host facts become user text whose first line marks
+them, replayed function calls and results become tool turns, reasoning items
+are dropped, a screenshot reaches only a model that accepts images, and a
+structured-output mapping becomes one forced answer tool. Any item Zephium
+never writes refuses the call before dispatch. The reply crosses back through
+the closed browser-tool decoder and stream ceilings: only the first tool call
+is decoded, it must be a tool the request offered, it receives Zephium's own
+call identity, and further calls and narration are dropped and counted
+without conferring anything. When its one call was kept whole, the model's
+own parts around it (thinking blocks, signatures, reasoning items) and the
+call identity it gave are retained, bounded and opaque, only to be given back
+to its wire with that call on the next turn. Typed decisions the primary backend leaves open
+are answered by the person's light model through one forced tool whose schema
+is the request's own answer schema, under the same validator, reservation and
+deadline as the OpenAI emulation.
 
 The BYOK HTTPS shell uses private exact provider endpoints, provider-bound
 zeroizing credential owners, redirect refusal, identity-only response content

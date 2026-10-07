@@ -2,11 +2,10 @@
 
 use std::{sync::Arc, time::Instant};
 use zephium_agent_controller::{
-    AgentBrowserModel, AgentWorkAccountSource, AgentWorkContextSpec, AgentWorkDiscoveryTask,
-    AgentWorkFailure, AgentWorkLocalActionPolicy, AgentWorkRunInput, AgentWorkRunSettings,
-    AgentWorkTask, TerraControllerIds,
+    AgentBrowserModel, AgentBrowserModelAccess, AgentWorkAccountSource, AgentWorkContextSpec,
+    AgentWorkDiscoveryTask, AgentWorkFailure, AgentWorkLocalActionPolicy, AgentWorkRunInput,
+    AgentWorkRunSettings, AgentWorkTask, TerraControllerIds,
 };
-use zephium_agent_provider_transport::AgentProviderCredential;
 use zephium_agentic::*;
 use zephium_app::{AgentWorkApplicationConfig, AgentWorkProfileBinding};
 
@@ -66,7 +65,7 @@ pub struct PublicReadWorkInvocation {
     objective: PublicReadWorkObjective,
     settings: PublicReadWorkSettings,
     config: AgentWorkApplicationConfig,
-    credential: AgentProviderCredential,
+    access: AgentBrowserModelAccess,
     persist_result: bool,
     #[cfg(feature = "public-qualification")]
     inspectable_public: bool,
@@ -131,13 +130,13 @@ impl PublicReadWorkInvocation {
         objective: PublicReadWorkObjective,
         settings: PublicReadWorkSettings,
         config: AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
     ) -> Self {
         Self {
             objective,
             settings,
             config,
-            credential,
+            access: access.into(),
             persist_result: false,
             #[cfg(feature = "public-qualification")]
             inspectable_public: false,
@@ -171,7 +170,7 @@ impl PublicReadWorkInvocation {
             self.objective,
             self.settings,
             self.config,
-            self.credential,
+            self.access,
         )?;
         if self.persist_result {
             request.input = request.input.persist_extraction_result()?;
@@ -209,14 +208,14 @@ struct LocalActions {
 }
 
 impl PublicLocalActionWorkInvocation {
-    /// Consumes the same objective, account, profile settings and credential as
+    /// Consumes the same objective, account, profile settings and model access as
     /// public reading, plus trusted local effect approval and an independent
     /// action ceiling. Admission is dormant; no page or provider work runs here.
     pub fn try_new(
         objective: PublicReadWorkObjective,
         settings: PublicReadWorkSettings,
         config: AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         policy: Box<dyn AgentWorkLocalActionPolicy>,
         max_actions: u64,
     ) -> Result<Self, AgentWorkFailure> {
@@ -224,7 +223,7 @@ impl PublicLocalActionWorkInvocation {
             return Err(AgentWorkFailure::Contract);
         }
         Ok(Self {
-            read: PublicReadWorkInvocation::new(objective, settings, config, credential),
+            read: PublicReadWorkInvocation::new(objective, settings, config, access),
             actions: LocalActions {
                 policy,
                 max_actions,
@@ -281,7 +280,7 @@ impl PublicLocalActionWorkInvocation {
         if self.read.persist_result {
             input = input.persist_extraction_result()?;
         }
-        let request = TrustedWorkRequest::new(input, self.read.config, self.read.credential, task)
+        let request = TrustedWorkRequest::new(input, self.read.config, self.read.access, task)
             .with_browser_profile(profile);
         #[cfg(feature = "public-qualification")]
         if self.read.inspectable_public {
@@ -307,7 +306,7 @@ impl TrustedWorkRequest {
         objective: PublicReadWorkObjective,
         settings: PublicReadWorkSettings,
         config: AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
     ) -> Result<Self, AgentWorkFailure> {
         let identity = ContextIdentity::new(
             ContextId::generate(),
@@ -316,7 +315,7 @@ impl TrustedWorkRequest {
             ContextKind::Owned,
         );
         let (input, task) = assemble(identity, profile.storage_class(), objective, settings)?;
-        Ok(Self::new(input, config, credential, task).with_browser_profile(profile))
+        Ok(Self::new(input, config, access, task).with_browser_profile(profile))
     }
 }
 

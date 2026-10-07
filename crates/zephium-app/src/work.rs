@@ -22,10 +22,10 @@ use std::{
     time::{Duration, Instant},
 };
 use zephium_agent_controller::{
-    AgentWorkController, AgentWorkEvent, AgentWorkFailure, AgentWorkHandle, AgentWorkOutcome,
-    AgentWorkRunInput, AgentWorkTask,
+    AgentBrowserModelAccess, AgentWorkController, AgentWorkEvent, AgentWorkFailure,
+    AgentWorkHandle, AgentWorkOutcome, AgentWorkRunInput, AgentWorkTask,
 };
-use zephium_agent_provider_transport::{AgentProviderCredential, AgentProviderTransportConfig};
+use zephium_agent_provider_transport::AgentProviderTransportConfig;
 use zephium_agent_runtime::{
     AgentRuntimeCompletion, AgentRuntimeConfig, AgentRuntimeHandle, AgentRuntimeStopReason,
     NativeEventSink, PendingAgentRuntime,
@@ -111,14 +111,14 @@ impl PreparedAgentWork {
     pub fn try_new(
         input: AgentWorkRunInput,
         config: AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         task: Box<dyn AgentWorkTask>,
         ports: AgentWorkApplicationPorts,
     ) -> Result<Self, AgentWorkFailure> {
         let (controller, handle) = AgentWorkController::try_new(
             input,
             config.provider,
-            credential,
+            access,
             ports.audit.clone(),
             task,
         )?;

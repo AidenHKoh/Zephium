@@ -12,6 +12,7 @@ use zephium_decision::{DecisionRequest, DecisionResponse, DecisionUsage, MAX_RES
 mod apps;
 mod capture;
 mod link;
+mod model;
 mod projection;
 mod read;
 mod rows;
@@ -20,6 +21,7 @@ pub use apps::{app_view_control, app_views, read_app_view, AppView, DailyApp};
 #[cfg(feature = "probe-harness")]
 pub use capture::capture_app_views;
 pub use capture::{app_view_wire, captured_app_view, AppViewSink};
+pub use model::ModelDecisionCall;
 pub use projection::{
     DecisionActionSelection, DecisionObservation, DecisionObservationAnswers,
     DecisionObservationFallback, DecisionOperation, DecisionProjectionError,

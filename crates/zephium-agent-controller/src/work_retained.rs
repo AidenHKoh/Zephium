@@ -387,7 +387,7 @@ impl AgentWorkRetainedController {
         input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
         transport: AgentProviderTransportConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<super::super::AgentBrowserModelAccess>,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<
@@ -399,7 +399,7 @@ impl AgentWorkRetainedController {
         AgentWorkFailure,
     > {
         Self::validate_human_successor(waiting, browser.as_ref())?;
-        Self::try_new(input, browser, transport, credential, audit, task)
+        Self::try_new(input, browser, transport, access, audit, task)
     }
 
     #[cfg(feature = "probe-harness")]
@@ -410,7 +410,7 @@ impl AgentWorkRetainedController {
         input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
         transport: AgentProviderTransport,
-        credential: AgentProviderCredential,
+        access: impl Into<super::super::AgentBrowserModelAccess>,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<
@@ -422,7 +422,7 @@ impl AgentWorkRetainedController {
         AgentWorkFailure,
     > {
         Self::validate_human_successor(waiting, browser.as_ref())?;
-        Self::try_new_for_probe(input, browser, transport, credential, audit, task)
+        Self::try_new_for_probe(input, browser, transport, access, audit, task)
     }
 
     fn validate_human_successor(
@@ -462,7 +462,7 @@ impl AgentWorkRetainedController {
         input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
         transport: AgentProviderTransportConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<super::super::AgentBrowserModelAccess>,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<
@@ -479,7 +479,7 @@ impl AgentWorkRetainedController {
             input,
             browser,
             transport,
-            credential,
+            access.into(),
             audit,
             task,
             AgentBrowserRetention::Stateless,
@@ -492,7 +492,7 @@ impl AgentWorkRetainedController {
         input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
         transport: AgentProviderTransport,
-        credential: AgentProviderCredential,
+        access: impl Into<super::super::AgentBrowserModelAccess>,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<
@@ -507,7 +507,7 @@ impl AgentWorkRetainedController {
             input,
             browser,
             transport,
-            credential,
+            access.into(),
             audit,
             task,
             AgentBrowserRetention::Stateless,
@@ -520,7 +520,7 @@ impl AgentWorkRetainedController {
         input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
         transport: AgentProviderTransportConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<super::super::AgentBrowserModelAccess>,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<
@@ -537,7 +537,7 @@ impl AgentWorkRetainedController {
             input,
             browser,
             transport,
-            credential,
+            access.into(),
             audit,
             task,
             AgentBrowserRetention::InspectablePublicData,
@@ -549,7 +549,7 @@ impl AgentWorkRetainedController {
         mut input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
         transport: AgentProviderTransport,
-        credential: AgentProviderCredential,
+        access: super::super::AgentBrowserModelAccess,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
         retention: AgentBrowserRetention,
@@ -612,7 +612,7 @@ impl AgentWorkRetainedController {
         let (mut controller, handle) = AgentWorkController::with_transport(
             input,
             transport,
-            credential,
+            access,
             audit,
             task,
             retention,

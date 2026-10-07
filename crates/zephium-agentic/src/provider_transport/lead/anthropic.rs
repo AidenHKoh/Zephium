@@ -143,13 +143,17 @@ pub(super) fn body(
     }
     body.insert("messages".into(), Value::Array(messages));
     if !tools.is_empty() {
+        let mut choice = match tool_choice(request)? {
+            WorkModelToolChoice::Auto => json!({"type": "auto"}),
+            WorkModelToolChoice::Required => json!({"type": "any"}),
+            WorkModelToolChoice::Named(name) => json!({"type": "tool", "name": name}),
+        };
+        choice["disable_parallel_tool_use"] = json!(!request.parallel_tools);
         body.insert("tools".into(), Value::Array(tools));
-        body.insert(
-            "tool_choice".into(),
-            json!({"type": "auto", "disable_parallel_tool_use": !request.parallel_tools}),
-        );
+        body.insert("tool_choice".into(), choice);
     }
-    if let Some(reasoning) = request.reasoning {
+    let forced = !request.tools.is_empty() && request.tool_choice != WorkModelToolChoice::Auto;
+    if let Some(reasoning) = request.reasoning.filter(|_| !forced) {
         if budget_thinking(model) {
             let budget: u32 = match reasoning {
                 WorkModelReasoning::Low => 2_048,

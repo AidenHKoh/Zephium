@@ -71,6 +71,7 @@ pub(super) fn request(wire: WorkModelWire, model: &str) -> WorkModelRequest {
         reasoning: Some(WorkModelReasoning::Medium),
         native_search: true,
         parallel_tools: true,
+        tool_choice: WorkModelToolChoice::Auto,
     }
 }
 
@@ -378,6 +379,7 @@ fn cost_follows_the_catalog_price_and_search_fees() {
         usage: WorkModelUsage {
             input_tokens: 1_000_000,
             cached_input_tokens: 500_000,
+            cache_write_input_tokens: 0,
             output_tokens: 100_000,
             ..Default::default()
         },
@@ -387,7 +389,9 @@ fn cost_follows_the_catalog_price_and_search_fees() {
     };
     // 400k fresh × $4 + 500k cached × $0.20 + 100k written × $5 + 100k out × $20 + 2 × $0.01
     let expected = 1_600_000 + 100_000 + 500_000 + 2_000_000 + 20_000;
-    assert_eq!(client.usage(&decoded).cost_micros, Some(expected));
+    let usage = client.usage(&decoded);
+    assert_eq!(usage.cost_micros, Some(expected));
+    assert_eq!(usage.cache_write_input_tokens, 100_000);
 }
 
 #[test]

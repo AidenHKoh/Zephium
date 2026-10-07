@@ -333,7 +333,8 @@ fn shipping_preparation_checks_profile_storage_original_audit_and_result_contrac
                 AgentProviderKind::OpenAiResponses,
                 "fixture-not-a-secret".into(),
             )
-            .unwrap(),
+            .unwrap()
+            .into(),
             Box::new(task()),
             crate::RetainedWorkPorts::new(
                 Arc::new(crate::shell::tests::FakeEngine::default()),

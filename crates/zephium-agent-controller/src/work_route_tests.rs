@@ -799,7 +799,7 @@ pub(super) fn assert_outcome(
         if let Some(session) = &recovery.state.session {
             assert_eq!(session.policy.pending_model_calls(), 0);
             assert_eq!(session.policy.pending_effects(), 0);
-            assert!(session.credential.is_none());
+            assert!(session.access.is_none());
             if fault == RouteFault::RefusalSecondClockStuck {
                 assert_eq!(session.policy.pending_navigations(), 1);
                 assert!(session.navigation_refusal.is_some());

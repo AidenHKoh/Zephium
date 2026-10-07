@@ -1,8 +1,9 @@
 //! The only production adapter from actual desktop owners to Work admission.
 
 use std::sync::{Arc, Mutex};
-use zephium_agent_controller::{AgentWorkFailure, AgentWorkRunInput, AgentWorkTask};
-use zephium_agent_provider_transport::AgentProviderCredential;
+use zephium_agent_controller::{
+    AgentBrowserModelAccess, AgentWorkFailure, AgentWorkRunInput, AgentWorkTask,
+};
 use zephium_app::{
     AgentWorkApplicationConfig, AgentWorkApplicationHandle, AgentWorkApplicationPorts,
     CallbackHandle, PreparedAgentWork,
@@ -20,7 +21,7 @@ pub struct TrustedWorkRequest {
     work: Option<zephium_agentic::WorkId>,
     pub(crate) input: AgentWorkRunInput,
     pub(crate) config: AgentWorkApplicationConfig,
-    pub(crate) credential: AgentProviderCredential,
+    pub(crate) access: AgentBrowserModelAccess,
     pub(crate) task: Box<dyn AgentWorkTask>,
     browser_profile: Option<zephium_app::AgentWorkProfileBinding>,
     #[cfg(feature = "public-qualification")]
@@ -32,7 +33,7 @@ impl TrustedWorkRequest {
     pub fn new(
         input: AgentWorkRunInput,
         config: AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         task: Box<dyn AgentWorkTask>,
     ) -> Self {
         Self {
@@ -42,7 +43,7 @@ impl TrustedWorkRequest {
             work: None,
             input,
             config,
-            credential,
+            access: access.into(),
             task,
             browser_profile: None,
             #[cfg(feature = "public-qualification")]
@@ -147,7 +148,7 @@ impl NativeWorkComposition {
             request.input,
             binding,
             request.config,
-            request.credential,
+            request.access,
             request.task,
             ports,
         )?;
@@ -209,7 +210,7 @@ impl NativeWorkComposition {
             return PreparedAgentWork::try_new_for_public_probe(
                 request.input,
                 request.config,
-                request.credential,
+                request.access,
                 request.task,
                 self.ports(),
             )?
@@ -218,7 +219,7 @@ impl NativeWorkComposition {
         let prepared = PreparedAgentWork::try_new(
             request.input,
             request.config,
-            request.credential,
+            request.access,
             request.task,
             self.ports(),
         )?;
