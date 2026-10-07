@@ -272,8 +272,8 @@ native surface boundaries and meet the visual/performance guidance above.
 ## Work presentation foundation
 
 Use `features/work` through its lazy loaders. Shared semantic renderers live in
-`shared/ui/data`; their display types are not Work IPC contracts. XYFlow, SVG
-LayerChart and the constrained Tiptap editor load on demand. Tables remain lightweight.
+`shared/ui/data`; their display types are not Work IPC contracts. XYFlow, the
+in-house SVG charts and the constrained Tiptap editor load on demand. Tables remain lightweight.
 
 Open Work using the browser sidebar mode switch. Rust admits the internal surface
 and suppresses native page WebViews; returning to Browse uses the existing verified

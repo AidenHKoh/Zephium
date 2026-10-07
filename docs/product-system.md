@@ -837,9 +837,9 @@ a Zephium-owned domain boundary:
 - **Pointer Events and Svelte actions:** spatial movement and resize; native
   drag-and-drop only at OS or WebView boundaries, with no generic DnD framework
   by default;
-- **LayerChart:** the existing semantic chart renderer, lazy-loaded behind
-  bounded chart contracts. Change rendering technology only for measured needs;
-  an unused upstream style is not by itself a reason to replace working APIs;
+- **Our own SVG charts:** the semantic chart renderer in `shared/ui/data/Chart`,
+  lazy-loaded behind bounded chart contracts, with no charting dependency. It
+  replaced LayerChart and d3 on measured cost: about 43 KB instead of 360 KB;
 - **TanStack Table/Virtual:** large tables and lists;
 - **MapLibre:** lazy-loaded only when a map is present;
 - **CodeMirror 6:** lazy-loaded only for editable code surfaces;
