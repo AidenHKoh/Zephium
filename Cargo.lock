@@ -7239,6 +7239,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-account"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+ "zephium-credentials",
+ "zeroize",
+]
+
+[[package]]
 name = "zephium-agent-controller"
 version = "0.1.0"
 dependencies = [
@@ -7415,6 +7428,9 @@ dependencies = [
 name = "zephium-credentials"
 version = "0.1.0"
 dependencies = [
+ "dirs",
+ "security-framework",
+ "security-framework-sys",
  "windows-sys 0.61.2",
  "zeroize",
 ]

@@ -26,6 +26,7 @@ zephium-agent-controller = { path = "crates/zephium-agent-controller", version =
 zephium-blocker = { path = "crates/zephium-blocker", version = "=0.1.0", default-features = false }
 zephium-blocker-service = { path = "crates/zephium-blocker-service", version = "=0.1.0", default-features = false }
 zephium-blocker-update = { path = "crates/zephium-blocker-update", version = "=0.1.0", default-features = false }
+zephium-account = { path = "crates/zephium-account", version = "=0.1.0" }
 zephium-core = { path = "crates/zephium-core", version = "=0.1.0" }
 zephium-credentials = { path = "crates/zephium-credentials", version = "=0.1.0" }
 zephium-ipc = { path = "crates/zephium-ipc", version = "=0.1.0" }
