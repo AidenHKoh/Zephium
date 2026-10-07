@@ -7,7 +7,6 @@ use crate::{AgentWorkProfileBinding, AgentWorkProfileReadiness, CallbackHandle, 
 use std::collections::VecDeque;
 use std::time::Instant;
 use zephium_agent_controller::*;
-use zephium_agent_provider_transport::AgentProviderCredential;
 
 fn retain_latest_frame(
     current: &mut Option<Arc<zephium_agentic::WorkBrowserFrame>>,
@@ -34,9 +33,10 @@ impl PreparedRetainedContinuation {
         generation: u32,
         input: AgentWorkRunInput,
         config: crate::AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<Self, AgentWorkFailure> {
+        let access = access.into();
         let spec = input.retained_resource_spec()?;
         let (runtime, provider) = config.into_parts();
         let actor = ActorRequest {
@@ -49,7 +49,7 @@ impl PreparedRetainedContinuation {
                     browser,
                     runtime,
                     provider,
-                    credential,
+                    access,
                     audit,
                     task,
                     Some(waiting),
@@ -171,7 +171,7 @@ impl PreparedRetainedWork {
         input: AgentWorkRunInput,
         profile: AgentWorkProfileBinding,
         config: crate::AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: AgentBrowserModelAccess,
         task: Box<dyn AgentWorkTask>,
         ports: RetainedWorkPorts,
     ) -> Result<Self, AgentWorkFailure> {
@@ -182,7 +182,7 @@ impl PreparedRetainedWork {
             deadline: spec.expires_at,
             prepare: Box::new(move |browser, audit, waiting| {
                 StagedActor::try_new(
-                    input, browser, runtime, provider, credential, audit, task, waiting,
+                    input, browser, runtime, provider, access, audit, task, waiting,
                 )
             }),
         };

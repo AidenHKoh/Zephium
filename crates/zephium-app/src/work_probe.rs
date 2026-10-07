@@ -4,7 +4,7 @@
 compile_error!("Work application qualification is forbidden in optimized builds");
 
 use super::*;
-use zephium_agent_controller::AgentBrowserRetention;
+use zephium_agent_controller::{AgentBrowserModelAccess, AgentBrowserRetention};
 use zephium_agent_provider_transport::AgentProviderTransport;
 
 impl PreparedAgentWork {
@@ -14,7 +14,7 @@ impl PreparedAgentWork {
     pub fn try_new_for_public_probe(
         input: AgentWorkRunInput,
         config: AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         task: Box<dyn AgentWorkTask>,
         ports: AgentWorkApplicationPorts,
     ) -> Result<Self, AgentWorkFailure> {
@@ -23,7 +23,7 @@ impl PreparedAgentWork {
         let (controller, handle) = AgentWorkController::try_new_for_probe(
             input,
             transport,
-            credential,
+            access,
             ports.audit.clone(),
             task,
             AgentBrowserRetention::InspectablePublicData,

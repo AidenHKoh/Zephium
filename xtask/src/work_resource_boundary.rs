@@ -200,8 +200,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
         "crates/zephium-app/src/work_resources_product.rs",
         &[
             // b8bf7f37: the actor also carries the durable human wait; a continuation must have one.
-            "letspec=input.retained_resource_spec()?", "StagedActor::try_new(input,browser,runtime,provider,credential,audit,task,waiting,)",
-            "letwaiting=waiting.ok_or(AgentWorkFailure::Contract)?;StagedActor::try_new(input,browser,runtime,provider,credential,audit,task,Some(waiting),)",
+            "letspec=input.retained_resource_spec()?", "StagedActor::try_new(input,browser,runtime,provider,access,audit,task,waiting,)",
+            "letwaiting=waiting.ok_or(AgentWorkFailure::Contract)?;StagedActor::try_new(input,browser,runtime,provider,access,audit,task,Some(waiting),)",
             "spec.identity.profile()!=profile.profile()", "spec.storage!=profile.storage_class()",
             "!std::ptr::addr_eq(Arc::as_ptr(&journal),Arc::as_ptr(&audit))",
             "Arc::ptr_eq(engine,&prepared.engine)",

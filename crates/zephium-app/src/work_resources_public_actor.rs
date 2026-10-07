@@ -70,7 +70,7 @@ impl StagedActor {
         browser: Box<dyn AgentWorkRetainedBrowser>,
         config: AgentRuntimeConfig,
         provider: AgentProviderTransportConfig,
-        credential: AgentProviderCredential,
+        access: AgentBrowserModelAccess,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<Self, AgentWorkFailure> {
@@ -79,7 +79,7 @@ impl StagedActor {
             input,
             browser,
             provider,
-            credential,
+            access,
             audit.clone(),
             task,
         )?;
