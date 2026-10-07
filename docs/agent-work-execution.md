@@ -219,7 +219,14 @@ page then says it committed something stops the page task. Password and
 secret fields are never typed into. A sign-in wall (a password field or a
 sign-in form, read by Rust or raised by the page agent) holds the page for the
 person; the page continues by itself once their navigation settles back on the
-site, off any sign-in path. A page load the person finishes on the site in an
+site, off any sign-in path (two-factor, OTP and verification paths count as
+signing in). A visible one-time-code, card-number or security-code field holds
+the page the same way: as a sign-in step, or as a payment for the person when
+the page reads as a checkout. A visible challenge widget in an embedded frame
+(hCaptcha, Turnstile, reCAPTCHA's checkbox, read only by the frame's title)
+holds it as a human check. Rust reads these walls at the start, after every
+verified step and after every navigation or followed load, before any model
+call is spent on a page the agent cannot pass. A page load the person finishes on the site in an
 ordinary tab (a count, never its URL) wakes a held page, which starts over
 once in the fresh session. Facts from the person's pages never ride a search
 query, provider retention never applies to them, and diagnostics carry only
