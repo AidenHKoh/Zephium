@@ -1608,6 +1608,8 @@
   "work_provider_citation_history": "Provider-reported source; not a captured browser-page excerpt.",
   "work_provider_web_search": "{provider} web search",
   "work_provider_model": "the model's provider",
+  "work_provider_results_page": "its results page",
+  "work_provider_your_engine": "your search engine",
   "work_open_source_browse": "Open source in Browse",
   "work_env_focus_result": "Focus result",
   "work_env_send": "Send",

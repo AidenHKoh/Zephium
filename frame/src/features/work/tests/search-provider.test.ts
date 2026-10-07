@@ -16,3 +16,11 @@ test("a citation names OpenAI's search, or the model's own provider searching na
   });
   expect(searchProvider("native", "mystery-model").provider).toBe("the model's provider");
 });
+
+test("a browser search's citation names the person's engine and its results page", () => {
+  expect(searchProvider("browser", "duckduckgo")).toEqual({
+    provider: "DuckDuckGo",
+    model: "its results page",
+  });
+  expect(searchProvider("browser", "custom").provider).toBe("your search engine");
+});

@@ -8,15 +8,27 @@ const VENDORS: Record<string, string> = {
   openrouter: "OpenRouter",
 };
 
+const ENGINES: Record<string, string> = {
+  google: "Google",
+  duckduckgo: "DuckDuckGo",
+  bing: "Bing",
+  brave: "Brave Search",
+};
+
 /**
  * Who supplied a cited page, as the evidence names it: OpenAI's own search,
- * or the chosen model's provider searching natively (its catalog id says
- * which, `anthropic/claude-…`).
+ * the chosen model's provider searching natively (its catalog id says
+ * which, `anthropic/claude-…`), or the person's search engine's results page.
  */
 export function searchProvider(
   provider: string,
   model: string,
 ): { provider: string; model: string } {
+  if (provider === "browser")
+    return {
+      provider: ENGINES[model] ?? m.work_provider_your_engine(),
+      model: m.work_provider_results_page(),
+    };
   const [vendor, ...rest] = model.split("/");
   const name = rest.length ? rest.join("/") : model;
   if (provider === "open_ai")
