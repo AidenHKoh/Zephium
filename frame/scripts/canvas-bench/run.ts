@@ -9,7 +9,8 @@
 // back and at rest, with the CPU the page, GPU, host and WindowServer
 // processes spend while it pans and pinches. The window must stay visible:
 // WebKit throttles an occluded page.
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
 import { ensurePhotos } from "./photos.ts";
 
@@ -32,10 +33,24 @@ ensurePhotos(
   Math.max(...list("items", "50,200,500")) * 2,
 );
 
+// A server left on the port by an interrupted run would answer with its old config.
+const taken = await new Promise<boolean>((done) => {
+  const probe = connect(port, "localhost", () => {
+    probe.destroy();
+    done(true);
+  });
+  probe.on("error", () => done(false));
+});
+if (taken) throw new Error(`port ${port} is already served; stop that server first`);
 const server = spawn(process.execPath, [vite, "preview", "--config", config], {
   cwd: frame,
   stdio: "ignore",
 });
+for (const signal of ["SIGINT", "SIGTERM"] as const)
+  process.on(signal, () => {
+    server.kill();
+    process.exit(1);
+  });
 
 type Reply = Record<string, unknown>;
 function nativeHost() {
@@ -80,6 +95,29 @@ function nativeHost() {
   };
 }
 
+/** The highest page plus GPU footprint seen, sampled every 250 ms until stopped. */
+function peak(pids: number[]) {
+  let highest = 0;
+  let going = true;
+  const one = (pid: number) =>
+    new Promise<number>((done) =>
+      execFile("footprint", ["-f", "bytes", String(pid)], (error, out) =>
+        done(error ? 0 : Number(/phys_footprint:\s+(\d+)/u.exec(out)?.[1] ?? 0) / 1048576),
+      ),
+    );
+  const loop = (async () => {
+    while (going) {
+      const sizes = await Promise.all(pids.map(one));
+      highest = Math.max(highest, Math.round(sizes.reduce((sum, size) => sum + size, 0)));
+      await new Promise((done) => setTimeout(done, 250));
+    }
+  })();
+  return async () => {
+    going = false;
+    await loop;
+    return highest;
+  };
+}
 const footprintMB = (pid: number) => {
   const out = execFileSync("footprint", ["-f", "bytes", String(pid)]).toString();
   return Math.round(Number(/phys_footprint:\s+(\d+)/u.exec(out)?.[1] ?? 0) / 1048576);
@@ -153,10 +191,13 @@ try {
         `return await window.bench.open(${JSON.stringify({ items, zoom, mix })});`,
       );
       const opened = memory();
+      if (process.env.CANVAS_BENCH_PROBE)
+        console.log(JSON.stringify(await host.evaluate(process.env.CANVAS_BENCH_PROBE)));
       const idle = await host.evaluate("return await window.bench.idle();");
       if (css) await host.evaluate(`window.bench.css(${JSON.stringify(css)}); return true;`);
       const gpu = gpuPid(host.started);
       const busy = cpu({ content, gpu, ui: host.process, windowServer });
+      const peaking = peak(gpu ? [content, gpu] : [content]);
       const pan = await host.evaluate("return await window.bench.pan();");
       const panCpu = busy();
       // While the person is at the canvas: its layers are held.
@@ -164,6 +205,10 @@ try {
       const pinchBusy = cpu({ content, gpu, ui: host.process, windowServer });
       const pinch = await host.evaluate("return await window.bench.pinch();");
       const pinchCpu = pinchBusy();
+      const movingPeak = await peaking();
+      // Once motion has stopped for a moment: what the canvas keeps between gestures.
+      await new Promise((done) => setTimeout(done, 2500));
+      const settled = memory();
       // --shots=<dir>: this window as the compositor drew it once a pinch to 100% has settled.
       const shots = arg("shots", "");
       if (shots) {
@@ -199,6 +244,8 @@ try {
             before,
             open: opened,
             moving,
+            movingPeak,
+            settled,
             swept: sweptMemory,
             back: backMemory,
             rest: restMemory,
