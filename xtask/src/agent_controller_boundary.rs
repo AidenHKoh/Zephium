@@ -253,12 +253,12 @@ fn validate_account_refresh(
         // Pinned across the actor's two files; new admission paths (discovery,
         // waits, screenshots, decisions, a site's whole first look, the whole
         // look a consent press is made on, an app view's look and each
-        // landmark it opens, and each view an app read switches to) each sample
-        // once more.
+        // landmark it opens, each view an app read switches to, and a results
+        // page's read) each sample once more.
         || format!("{work}\n{decision}")
             .matches("state.refresh_account(worker, browser)?")
             .count()
-            != 28
+            != 29
         || !policy.contains("MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS: u64 = 30_000;")
     {
         return Err("Work lost per-admission sampling, control or original expiry boundary".into());
