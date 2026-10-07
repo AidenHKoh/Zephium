@@ -13,18 +13,13 @@ import {
   readout,
   shortValue,
   valuesCsv,
-  type PlanSeries,
-  type Row,
-} from "../layer";
+} from "../plan";
 
 const bars = (points: [string, number | null][], extra: Partial<ChartSpec> = {}): ChartSpec => ({
   kind: "bars",
   series: [{ name: "Price", points: points.map(([x, y]) => ({ x, y })) }],
   ...extra,
 });
-
-const read = (series: PlanSeries, row: Row) =>
-  Array.isArray(series.value) ? series.value.map((get) => get(row)) : series.value(row);
 
 test("bars: one row per category, a grouped series per spec series, round ticks from zero", () => {
   const shape = plan(
@@ -34,7 +29,7 @@ test("bars: one row per category, a grouped series per spec series, round ticks 
       ["C", null],
     ]),
   );
-  expect(shape.rows.map((row) => row.x)).toEqual(["A", "B", "C"]);
+  expect(shape.rows.map((row) => row.key)).toEqual(["A", "B", "C"]);
   expect(shape.scale).toBe("band");
   expect(shape.layout).toBe("group");
   expect(shape.ticks).toEqual([0, 10, 20, 30, 40]);
@@ -42,7 +37,7 @@ test("bars: one row per category, a grouped series per spec series, round ticks 
   const [series] = shape.series;
   expect(series).toMatchObject({ key: "s0", label: "Price", color: "var(--chart-1)" });
   // A null stays a gap: nothing is drawn and nothing invented.
-  expect(shape.rows.map((row) => read(series!, row))).toEqual([12, 37, null]);
+  expect(shape.rows.map((row) => row.points[0]?.y ?? null)).toEqual([12, 37, null]);
 });
 
 test("stacked: diverging layout, a missing part stacks as nothing, ticks span the sums", () => {
@@ -59,9 +54,12 @@ test("stacked: diverging layout, a missing part stacks as nothing, ticks span th
       { name: "Write", points: [{ x: "Mon", y: 20 }] },
     ],
   });
-  expect(shape.layout).toBe("stackDiverging");
+  expect(shape.layout).toBe("stack");
   expect(shape.ticks).toEqual([0, 20, 40, 60]);
-  expect(shape.rows.map((row) => read(shape.series[1]!, row))).toEqual([20, 0]);
+  expect(shape.stacks[1]).toEqual([
+    [30, 50],
+    [10, 10],
+  ]);
 });
 
 test("range: each series reads low and high", () => {
@@ -69,7 +67,7 @@ test("range: each series reads low and high", () => {
     kind: "range",
     series: [{ name: "Quote", points: [{ x: "A", y: 3000, y2: 8000 }] }],
   });
-  expect(read(shape.series[0]!, shape.rows[0]!)).toEqual([3000, 8000]);
+  expect(shape.rows[0]!.points[0]).toMatchObject({ y: 3000, y2: 8000 });
   expect(shape.domain).toEqual([0, 8000]);
 });
 
@@ -104,8 +102,7 @@ test("line: its own range; a time axis reads Dates in order", () => {
   expect(categoryKeys(spec)).toEqual(["2026-09-01", "2026-09-03"]);
   const area = plan(spec);
   expect(area.scale).toBe("time");
-  expect(area.rows[0]!.x).toBeInstanceOf(Date);
-  expect((area.rows[0]!.x as Date).getDate()).toBe(1);
+  expect(new Date(area.rows[0]!.at).getDate()).toBe(1);
   expect(area.domain[0]).toBe(0);
 });
 
@@ -295,8 +292,12 @@ test("a trend over categories stands them at even steps, edge to edge", () => {
     ],
   });
   expect(shape.scale).toBe("index");
-  expect(shape.rows.map((row) => row.x)).toEqual([0, 1]);
+  expect(shape.rows.map((row) => row.at)).toEqual([0, 1]);
   expect(shape.layout).toBe("stack");
+  expect(shape.stacks[1]).toEqual([
+    [1, 4],
+    [2, 6],
+  ]);
   expect(shape.domain[1]).toBeGreaterThanOrEqual(6);
 });
 

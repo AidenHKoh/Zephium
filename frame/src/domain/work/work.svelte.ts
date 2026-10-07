@@ -6,10 +6,8 @@ import type {
   WorkSummary,
   WorkUserEdit,
   WorkRuntimeIntent,
-  WorkPlanRevision,
   WorkEvidenceLink,
   WorkEvidencePreviewV1,
-  WorkPlanProposal,
   WorkSignalV1,
   WorkPageV1,
   WorkArtifactDataV1,
@@ -19,28 +17,19 @@ import { events } from "$shared/ipc/native-events";
 import { observe } from "$shared/lib/observe";
 import { registerCloseTask } from "$shared/lib/close";
 import { SvelteMap } from "svelte/reactivity";
-import {
-  admitProjection,
-  commandId,
-  validRevision,
-  planProposal,
-  AGENT_GRANT,
-  AGENT_LIMITS,
-} from "./work-model";
+import { admitProjection, commandId, validRevision, AGENT_GRANT, AGENT_LIMITS } from "./work-model";
 import { currentActivity } from "./work-activity";
 import { WorkOperations } from "./work-operations.svelte";
 
 export type WorkDelivery =
   "ready" | "pending" | "rejected" | "conflict" | "unknown" | "resynchronizing";
 type Mutation = Extract<WorkCallV1, { kind: "author" | "execute" }>;
-type DraftField = "objective" | `question:${string}`;
 type ArtifactDraft = {
   basis: string;
   execution: string;
   data: WorkArtifactDataV1;
   evidence: WorkEvidenceLink[];
 };
-type TextDraft = { basis: string; text: string };
 
 /** Profile-scoped Rust projections. Pending operands survive view unmount. */
 export class WorkSession {
@@ -65,8 +54,6 @@ export class WorkSession {
   /** Requests waiting on an origin grant, by work: the context rides with the run once allowed. */
   private activityRefresh: ReturnType<typeof setTimeout> | undefined;
   private readonly artifacts = new SvelteMap<string, ArtifactDraft>();
-  private readonly drafts = new SvelteMap<string, TextDraft>();
-  private readonly plans = new SvelteMap<string, { basis: string; proposal: WorkPlanProposal }>();
   private active = false;
   private generation = 0;
   private reads = 0;
@@ -87,13 +74,7 @@ export class WorkSession {
     this.removeCloseTask = registerCloseTask(async () => {
       if (this.writing) await this.writing;
       const settled = this.pending ? await this.retry() : true;
-      return (
-        settled &&
-        !this.composer &&
-        this.drafts.size === 0 &&
-        this.plans.size === 0 &&
-        this.artifacts.size === 0
-      );
+      return settled && !this.composer && this.artifacts.size === 0;
     });
   }
   async start() {
@@ -267,78 +248,8 @@ export class WorkSession {
       command: { version: 1, command, intent: { kind: "create", objective } },
     });
   }
-  draft(field: DraftField): string | undefined {
-    return this.drafts.get(`${this.selected}:${field}`)?.text;
-  }
   get canRelease() {
-    return (
-      !this.pending &&
-      !this.composer &&
-      !this.selected &&
-      this.drafts.size === 0 &&
-      this.plans.size === 0 &&
-      this.artifacts.size === 0
-    );
-  }
-  get hasDrafts() {
-    return (
-      !!this.selected &&
-      (this.plans.has(this.selected) ||
-        [...this.artifacts.keys()].some((key) => key.startsWith(`${this.selected}:`)) ||
-        [...this.drafts.keys()].some((key) => key.startsWith(`${this.selected}:`)))
-    );
-  }
-  get planDraft() {
-    return this.selected ? this.plans.get(this.selected) : undefined;
-  }
-  editPlan(proposal?: WorkPlanProposal) {
-    const work = this.projection?.work;
-    if (!work) return;
-    const original =
-      proposal ??
-      (work.plan
-        ? planProposal(work.plan)
-        : {
-            nodes: [
-              {
-                key: 0,
-                objective: work.objective,
-                dependencies: [],
-                outputs: [
-                  {
-                    name: "Result",
-                    description: work.objective,
-                    review: "source_mapped_needs_review" as const,
-                  },
-                ],
-              },
-            ],
-          });
-    this.plans.set(work.id, {
-      basis: this.plans.get(work.id)?.basis ?? work.revision,
-      proposal: original,
-    });
-  }
-  savePlan() {
-    const draft = this.planDraft;
-    return draft
-      ? this.edit({ kind: "replace_draft", proposal: draft.proposal }, draft.basis)
-      : Promise.resolve(false);
-  }
-  discardDrafts() {
-    if (this.pending) return;
-    const work = this.selected;
-    if (!work) return;
-    this.plans.delete(work);
-    for (const key of this.artifacts.keys())
-      if (key.startsWith(`${work}:`)) this.artifacts.delete(key);
-    for (const key of this.drafts.keys()) {
-      if (key.startsWith(`${work}:`)) this.drafts.delete(key);
-    }
-    if (this.delivery === "conflict" || this.delivery === "rejected") {
-      this.delivery = "ready";
-      this.failure = null;
-    }
+    return !this.pending && !this.composer && !this.selected && this.artifacts.size === 0;
   }
   artifactDraft(artifact: string) {
     return this.artifacts.get(`${this.selected}:${artifact}`);
@@ -376,30 +287,6 @@ export class WorkSession {
         )
       : Promise.resolve(false);
   }
-  setDraft(field: DraftField, text: string) {
-    const work = this.projection?.work;
-    if (!work) return;
-    const key = `${work.id}:${field}`;
-    const previous = this.drafts.get(key);
-    const original = field === "objective" ? work.objective : "";
-    if (text === original) this.drafts.delete(key);
-    else this.drafts.set(key, { basis: previous?.basis ?? work.revision, text });
-  }
-  async saveDraft(field: DraftField, text: string) {
-    const work = this.projection?.work;
-    if (!work) return false;
-    const key = `${work.id}:${field}`;
-    const draft = this.drafts.get(key);
-    if (!draft || draft.text.trim() !== text) return false;
-    const saved = await this.edit(
-      field === "objective"
-        ? { kind: "set_objective", objective: text }
-        : { kind: "answer_question", id: field.slice(9), answer: text },
-      draft.basis,
-    );
-    if (saved && this.drafts.get(key) === draft) this.drafts.delete(key);
-    return saved;
-  }
   edit(edit: WorkUserEdit, expected?: string) {
     const work = this.projection?.work;
     if (!work) return Promise.resolve(false);
@@ -409,31 +296,6 @@ export class WorkSession {
         version: 1,
         command: commandId(),
         intent: { kind: "edit", work: work.id, expected_revision: expected ?? work.revision, edit },
-      },
-    });
-  }
-  async readPublic(context: WorkContextSelectionV1 | null = null) {
-    const work = this.projection?.work;
-    if (!work || this.pending || this.operations.busy(work.id)) return;
-    await this.operations.begin({
-      kind: "read_public",
-      ...(context ? { context } : {}),
-      command: {
-        version: 1,
-        work: work.id,
-        expected_revision: work.revision,
-        command: commandId(),
-        intent: {
-          kind: "read_public",
-          scope: { provider: "open_ai", model: "gpt-6-luna", query: work.objective },
-          limits: {
-            model_tokens: 147456,
-            cost_micro_usd: 100000,
-            operations: 1,
-            timeout_seconds: 180,
-            max_workers: 1,
-          },
-        },
       },
     });
   }
@@ -586,9 +448,8 @@ export class WorkSession {
         : call.kind === "execute" &&
           reply.kind === "execution_applied" &&
           reply.projection.work.id === call.command.work &&
-          (call.command.intent.kind === "approve" ||
-            ("execution" in call.command.intent &&
-              reply.receipt.execution === call.command.intent.execution)));
+          "execution" in call.command.intent &&
+          reply.receipt.execution === call.command.intent.execution);
     if (!matching) {
       const failure = reply.kind === "error" ? reply.error : "outcome_unknown";
       this.failure = failure;
@@ -618,35 +479,6 @@ export class WorkSession {
         this.composer = "";
         this.selected = reply.receipt.work;
       }
-      if (call.kind === "author" && call.command.intent.kind === "edit") {
-        const { work, expected_revision, edit } = call.command.intent;
-        if (edit.kind === "replace_draft") {
-          const draft = this.plans.get(work);
-          if (
-            draft?.basis === expected_revision &&
-            JSON.stringify(draft.proposal) === JSON.stringify(edit.proposal)
-          )
-            this.plans.delete(work);
-        }
-        const field =
-          edit.kind === "set_objective"
-            ? "objective"
-            : edit.kind === "answer_question"
-              ? `question:${edit.id}`
-              : null;
-        if (field) {
-          const key = `${work}:${field}`;
-          const draft = this.drafts.get(key);
-          const text =
-            edit.kind === "set_objective"
-              ? edit.objective
-              : edit.kind === "answer_question"
-                ? edit.answer
-                : null;
-          if (draft?.basis === expected_revision && draft.text.trim() === text)
-            this.drafts.delete(key);
-        }
-      }
       if (reply.receipt.deleted && this.selected === reply.receipt.work) this.back();
     }
     if (
@@ -661,17 +493,6 @@ export class WorkSession {
       if (this.selected) await this.open(this.selected);
     }
     return true;
-  }
-  async plan(revision: string): Promise<WorkPlanRevision | null> {
-    const work = this.selected;
-    if (!work) return null;
-    const result = await this.call(
-      { kind: "query", request: { version: 1, query: { kind: "plan", work, revision } } },
-      this.lifetime.signal,
-    );
-    return this.selected === work && result.kind === "plan" && result.plan.revision === revision
-      ? result.plan
-      : null;
   }
   async evidence(link: WorkEvidenceLink): Promise<WorkEvidencePreviewV1 | null> {
     const work = this.selected;

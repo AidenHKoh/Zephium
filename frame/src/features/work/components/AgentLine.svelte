@@ -8,7 +8,6 @@
   import type { WorkHumanSession } from "$domain/work-human";
   import RunAsks from "./asks/RunAsks.svelte";
   import { asksOf, openAsks } from "./asks/asks";
-  import { preparationFailure } from "../lib/preparation-failure";
   import { fileName } from "../lib/work-files";
   import type { CanvasItem } from "../lib/canvas-model";
   import { Character, Orb, Shimmer, type Mood } from "$shared/ui/presence";
@@ -191,24 +190,12 @@
   });
   const question = $derived(asking ? undefined : (questions.at(-1) ?? stoppedQuestion));
   const failure = $derived(
-    preparationFailure(run?.state) ??
-      (run?.state.kind === "settled" && run.state.response.reply.kind === "error"
+    run?.state.kind === "refused"
+      ? run.state.error
+      : run?.state.kind === "settled" && run.state.response.reply.kind === "error"
         ? run.state.response.reply.error
-        : null),
+        : null,
   );
-  const approval = $derived(work ? session.operations.latest(work.id, "prepare_plan") : undefined);
-  const approvalDraft = $derived.by(() => {
-    const state = approval?.state;
-    const reply =
-      state?.kind === "settled"
-        ? state.response.reply
-        : state?.kind === "planned" && state.response.outcome.kind === "settled"
-          ? state.response.outcome.response.reply
-          : null;
-    return reply?.kind === "approval_draft" && reply.expected_revision === work?.revision
-      ? reply
-      : null;
-  });
   const intervention = $derived(execution?.intervention ?? null);
   /** Why the agent stopped for a person, in the person's words. */
   const interventionLabel = $derived.by(() => {
@@ -682,19 +669,6 @@
               aria-expanded={panel === "next"}
               onclick={() => (want = want === "next" ? null : "next")}
               >{m.work_line_next()}<Icon icon={ArrowDown01Icon} size={12} /></button
-            >
-          {:else if approvalDraft && !live}
-            <button
-              type="button"
-              class="action"
-              disabled={blocked}
-              onclick={() => {
-                if (approvalDraft)
-                  void session.execute(
-                    { kind: "approve", spec: approvalDraft.spec },
-                    approvalDraft.expected_revision,
-                  );
-              }}>{m.work_line_approve()}</button
             >
           {/if}
           {#if live}

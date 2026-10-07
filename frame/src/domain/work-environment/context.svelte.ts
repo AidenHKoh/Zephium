@@ -3,7 +3,6 @@ import { commands } from "$shared/ipc/bindings";
 import type {
   WorkEnvironmentSnapshot,
   WorkRuntimeProjection,
-  WorkPlanRevision,
   NoteSummary,
   WorkPageV1,
   MediaAssetV1_Deserialize as MediaAssetV1,
@@ -19,7 +18,6 @@ const PUBLISH_WITHIN = 250;
 /** Read-only joins for visible Work resources. No model or operation supervisor is started. */
 export class WorkEnvironmentContext {
   readonly objectives = new SvelteMap<string, WorkRuntimeProjection>();
-  readonly plans = new SvelteMap<string, WorkPlanRevision>();
   /**
    * The pages each attached work opened, with the last frame recorded for
    * every one. A page card is drawn from the run's steps, which arrive with
@@ -47,10 +45,7 @@ export class WorkEnvironmentContext {
   private stop: (() => void) | null = null;
   private lifetime = new AbortController();
   /** Reads that finished while others are still out: published together, so a work opens in one pass. */
-  private arrived: Record<
-    string,
-    { projection: WorkRuntimeProjection; pages?: WorkPageV1[]; plan?: WorkPlanRevision }
-  > = {};
+  private arrived: Record<string, { projection: WorkRuntimeProjection; pages?: WorkPageV1[] }> = {};
   private publishing: ReturnType<typeof setTimeout> | undefined;
   private since = 0;
   constructor(readonly profile: string) {}
@@ -101,7 +96,6 @@ export class WorkEnvironmentContext {
     for (const id of [...this.objectives.keys()])
       if (!wanted.includes(id)) {
         this.objectives.delete(id);
-        this.plans.delete(id);
         this.pages.delete(id);
       }
     for (const id of [...this.unavailable.keys()])
@@ -165,35 +159,10 @@ export class WorkEnvironmentContext {
       ) {
         const pages = next.executions.length ? await this.readPages(id, generation) : undefined;
         if (!this.active || generation !== this.generation || !this.wanted.includes(id)) return;
-        const revision = next.executions.at(-1)?.spec.plan_revision ?? next.work.plan?.revision;
-        let plan: WorkPlanRevision | undefined;
-        if (revision && next.work.plan?.revision === revision) plan = next.work.plan;
-        else if (revision && this.plans.get(id)?.revision !== revision) {
-          const historical = await observe(
-            Promise.resolve().then(() =>
-              commands.workCall(this.profile, {
-                kind: "query",
-                request: { version: 1, query: { kind: "plan", work: id, revision } },
-              }),
-            ),
-            9000,
-            this.lifetime.signal,
-          );
-          if (!this.active || generation !== this.generation || !this.wanted.includes(id)) return;
-          if (
-            historical.state === "received" &&
-            historical.value.version === 1 &&
-            historical.value.profile === this.profile &&
-            historical.value.reply.kind === "plan" &&
-            historical.value.reply.plan.revision === revision
-          )
-            plan = historical.value.reply.plan;
-        }
         this.failures.delete(id);
         this.arrive(id, {
           projection: next,
           ...(pages ? { pages } : {}),
-          ...(plan ? { plan } : {}),
         });
         return;
       }
@@ -216,10 +185,7 @@ export class WorkEnvironmentContext {
    * most a moment, then everything that arrived is published at once: the
    * canvas lays out once for all of them instead of once for each.
    */
-  private arrive(
-    id: string,
-    read: { projection: WorkRuntimeProjection; pages?: WorkPageV1[]; plan?: WorkPlanRevision },
-  ) {
+  private arrive(id: string, read: { projection: WorkRuntimeProjection; pages?: WorkPageV1[] }) {
     if (!Object.keys(this.arrived).length) this.since = Date.now();
     this.arrived[id] = read;
     clearTimeout(this.publishing);
@@ -237,7 +203,6 @@ export class WorkEnvironmentContext {
       this.objectives.set(id, read.projection);
       this.unavailable.delete(id);
       if (read.pages) this.pages.set(id, read.pages);
-      if (read.plan) this.plans.set(id, read.plan);
     }
   }
   /** The frames one work recorded, so its page cards are pictures on arrival. */
@@ -336,7 +301,6 @@ export class WorkEnvironmentContext {
     this.objectives.clear();
     this.media.clear();
     this.mediaRevisions.clear();
-    this.plans.clear();
     this.pages.clear();
     this.unavailable.clear();
     this.notes = [];

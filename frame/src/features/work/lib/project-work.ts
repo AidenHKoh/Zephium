@@ -1,6 +1,4 @@
 import type {
-  WorkRuntimeProjection,
-  WorkPlanRevision,
   WorkArtifactV1,
   WorkExecutionFact,
   WorkArtifactDataV1,
@@ -16,9 +14,7 @@ import type {
 import { createSubscriber } from "svelte/reactivity";
 import { loadMarkdown } from "$features/notes";
 import * as m from "$shared/i18n/messages";
-import type { CanvasItem, CanvasLink } from "./canvas-model";
 import { fileFolder } from "./work-files";
-import { isLive } from "./agent-steps";
 
 /** Hostname for a source label. Resolved here so a small lazy chunk that needs
  * one line of text does not pull the whole Artifact UI module with it. */
@@ -95,26 +91,6 @@ function answerBlocks(markdown: string): DocumentNodeView[] {
   }
   return blocks;
 }
-
-/** Display derivation of one objective; neither WorkProjectionV1 nor a store. */
-export type ProjectedWork = {
-  key: string;
-  title: string;
-  objective: string;
-  phase: string;
-  notice?: { title: string; detail: string };
-  questions: readonly { key: string; prompt: string; options: readonly string[] }[];
-  items: readonly (CanvasItem & { artifactKey?: string })[];
-  links: readonly CanvasLink[];
-  artifacts: readonly ArtifactView[];
-  actions: readonly {
-    key: string;
-    label: string;
-    scope: string;
-    consequence: string;
-    disabledReason?: string;
-  }[];
-};
 
 type Refs = (indices: readonly number[] | undefined) => EvidenceReference[];
 function subjects(
@@ -334,129 +310,6 @@ export function artifactView(artifact: WorkArtifactV1, execution: WorkExecutionF
 /** Marked as the agent's own knowledge rather than a source, as a whole or as a chart. */
 const knowledge = (artifact: WorkArtifactV1, data: WorkArtifactDataV1) =>
   artifact.general_knowledge ?? (data.kind === "chart" && !!data.general_knowledge);
-
-/** Display derivation only. A historical execution must join its original plan. */
-export function projectWork(
-  state: WorkRuntimeProjection,
-  plan: WorkPlanRevision | null,
-  executionId: string | null,
-  activity: readonly WorkSignalV1[] = [],
-): ProjectedWork {
-  const execution = state.executions.find((item) => item.id === executionId);
-  const interrupted = !!execution && state.interrupted.includes(execution.id);
-  const exactPlan =
-    plan && (!execution || plan.revision === execution.spec.plan_revision) ? plan : null;
-  const nodes = exactPlan?.draft.nodes ?? [];
-  const artifacts = execution?.artifacts ?? [];
-  const live = execution && isLive(state, execution);
-  const nodeIds = new Set(nodes.map((node) => node.id));
-  const items: ProjectedWork["items"][number][] = nodes.map((node) => {
-    const attempts = execution?.attempts.filter((attempt) => attempt.node === node.id) ?? [];
-    const signal = activity.find(
-      (entry) => entry.execution === execution?.id && entry.node === node.id,
-    );
-    const scope = execution?.spec.nodes.find((item) => item.node === node.id);
-    return {
-      id: node.id,
-      title: node.objective.slice(0, 512),
-      kind: scope?.parent
-        ? m.work_child_agent()
-        : scope &&
-            ["coordinate", "coordinate_public_discovery", "coordinate_public_research"].includes(
-              scope.capability.kind,
-            )
-          ? m.work_primary_agent()
-          : m.work_plan_node(),
-      detail: node.outputs
-        .map((output) => output.description)
-        .join("\n")
-        .slice(0, 2048),
-      status: interrupted
-        ? m.work_interrupted()
-        : signal
-          ? (activityLabel(signal.activity) ?? "")
-          : (attempts.at(-1)?.status ?? m.work_not_started()),
-    };
-  });
-  const links: ProjectedWork["links"][number][] = nodes.flatMap((node) =>
-    node.dependencies
-      .filter((id) => nodeIds.has(id))
-      .map((id) => ({
-        id: `${id}:${node.id}`,
-        source: id,
-        target: node.id,
-        kind: "dependency" as const,
-      })),
-  );
-  for (const scope of execution?.spec.nodes ?? []) {
-    if (scope.parent && nodeIds.has(scope.parent) && nodeIds.has(scope.node))
-      links.push({
-        id: `owner:${scope.parent}:${scope.node}`,
-        source: scope.parent,
-        target: scope.node,
-        kind: "reference",
-      });
-  }
-  for (const artifact of artifacts) {
-    items.push({
-      id: artifact.id,
-      title: artifact.title,
-      kind: m.work_result(),
-      detail: artifact.output,
-      status: artifactView(artifact, execution!).reviewLabel,
-      artifactKey: artifact.id,
-    });
-    if (nodeIds.has(artifact.node))
-      links.push({
-        id: `${artifact.node}:${artifact.id}`,
-        source: artifact.node,
-        target: artifact.id,
-        kind: "reference",
-      });
-  }
-  const actions: ProjectedWork["actions"][number][] = [];
-  if (live && execution.status !== "cancel_requested")
-    actions.push({
-      key: `cancel:${execution.id}`,
-      label: m.work_cancel(),
-      scope: m.work_cancel_scope(),
-      consequence: m.work_cancel_consequence(),
-    });
-  if (interrupted)
-    actions.push({
-      key: `acknowledge:${execution.id}`,
-      label: m.work_acknowledge(),
-      scope: m.work_interrupted(),
-      consequence: m.work_acknowledge_consequence(),
-    });
-  if (!live)
-    actions.push({
-      key: state.work.lifecycle === "archived" ? "restore" : "archive",
-      label: state.work.lifecycle === "archived" ? m.resource_restore() : m.work_archive(),
-      scope: state.work.objective.slice(0, 4096),
-      consequence: m.work_archive_consequence(),
-    });
-  return {
-    key: `${state.work.profile}:${state.work.id}`,
-    title: m.work_workspace(),
-    objective: state.work.objective,
-    phase: interrupted ? m.work_interrupted() : (execution?.status ?? state.work.status),
-    notice: interrupted
-      ? { title: m.work_interrupted(), detail: m.work_interruption_detail() }
-      : undefined,
-    questions: state.work.questions
-      .filter((question) => question.state === "active")
-      .map((question) => ({
-        key: question.id,
-        prompt: question.prompt,
-        options: question.options,
-      })),
-    items,
-    links,
-    artifacts: execution ? artifacts.map((artifact) => artifactView(artifact, execution)) : [],
-    actions,
-  };
-}
 
 const ACTIVITY_LABELS: Record<WorkSignalV1["activity"], () => string> = {
   planning: m.work_activity_planning,

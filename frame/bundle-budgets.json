@@ -1,16 +1,12 @@
 {
   "browser-panel": {
     "browser": {
-      "js": 385993,
+      "js": 383800,
       "css": 107064
     },
     "lazy:app/browser/WorkWorkspace.svelte": {
-      "js": 37473,
+      "js": 33200,
       "css": 366
-    },
-    "lazy:dependency/d3-quadtree/src/index.js": {
-      "js": 4911,
-      "css": 0
     },
     "lazy:domain/notes/index.ts": {
       "js": 14747,
@@ -229,7 +225,7 @@
       "css": 12961
     },
     "lazy:features/work/components/AgentLine.svelte": {
-      "js": 129397,
+      "js": 124800,
       "css": 26053
     },
     "lazy:features/work/components/bar/ModelPicker.svelte": {
@@ -329,7 +325,7 @@
       "css": 6945
     },
     "lazy:features/work/components/WorkCanvas.svelte": {
-      "js": 622028,
+      "js": 617000,
       "css": 119544
     },
     "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
@@ -340,16 +336,12 @@
       "js": 15706,
       "css": 3456
     },
-    "lazy:features/work/components/WorkObjectiveInspector.svelte": {
-      "js": 107882,
-      "css": 28174
-    },
     "lazy:features/work/components/WorkResultInspector.svelte": {
-      "js": 120656,
+      "js": 115200,
       "css": 31341
     },
     "lazy:features/work/components/WorkSubjectInspector.svelte": {
-      "js": 64151,
+      "js": 59800,
       "css": 6709
     },
     "lazy:features/work/lib/diagram-worker.ts": {
@@ -357,19 +349,19 @@
       "css": 0
     },
     "lazy:shared/ui/data/Artifact/WorkChart.svelte": {
-      "js": 379558,
-      "css": 14907
+      "js": 50100,
+      "css": 10500
     },
     "lazy:shared/ui/data/Chart/Chart.svelte": {
-      "js": 377480,
-      "css": 14907
+      "js": 48100,
+      "css": 10500
     },
     "lazy:shared/ui/data/Code/CodeBlock.svelte": {
       "js": 13446,
       "css": 2750
     },
     "panel": {
-      "js": 113655,
+      "js": 111400,
       "css": 35642
     }
   },

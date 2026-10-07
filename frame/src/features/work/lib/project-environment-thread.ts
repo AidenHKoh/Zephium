@@ -1,6 +1,6 @@
 import type { WorkRuntimeProjection } from "$shared/ipc/bindings";
 import { clipText, type CanvasItem, type CanvasLink, type CanvasPosition } from "./canvas-model";
-import type { Board } from "./board/types";
+import type { Board, Block, ObjectKind } from "./board/types";
 import type { Rect } from "./board/layout";
 import type { TrailLine } from "./board/trail";
 import { RUN, type RunPlace } from "./run/layout";
@@ -64,6 +64,34 @@ export type RunTurn =
   { kind: "ask"; question: string; answer: string | null } | { kind: "steer"; text: string };
 export type RunTurns = { local: LocalRead[]; exchange: RunTurn[] };
 const REQUEST_TEXT = 512;
+
+/** The object kind a reviewed run's block reads as, for its mark in a list. */
+const BLOCK_KIND: Partial<Record<Block["kind"], ObjectKind>> = {
+  table: "sheet",
+  comparison: "sheet",
+  chart: "plot",
+  checklist: "list",
+  document: "document",
+  code: "code",
+  diagram: "diagram",
+  gallery: "picks",
+  entity: "picks",
+};
+
+/** What a request's runs put on the canvas, by name: the answer first, then each object. */
+export function stageMade(stage: WorkStage): { id: string; title: string; kind: ObjectKind }[] {
+  const objects = [...(stage.reply ? [stage.reply] : []), ...stage.objects];
+  if (objects.length)
+    return objects.flatMap(({ id, view }) => {
+      const title = (view.kind === "reply" ? view.headline : view.title)?.trim();
+      return title ? [{ id, title, kind: view.kind }] : [];
+    });
+  return stage.board.blocks.flatMap((block) =>
+    block.title
+      ? [{ id: block.id, title: block.title, kind: BLOCK_KIND[block.kind] ?? "note" }]
+      : [],
+  );
+}
 
 /** The sentence a work began with; the objective element keeps saying it. */
 export function firstRequest(projection: WorkRuntimeProjection): string {

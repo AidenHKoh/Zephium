@@ -72,7 +72,7 @@
   } from "../lib/project-environment-board";
   import type { BoardActions } from "../lib/canvas-context";
   import type { ObjectActions, ObjectView } from "../lib/board/types";
-  import HostGlyph from "./cards/HostGlyph.svelte";
+  import { objectIcon, objectLabel } from "../lib/object-kind";
   import { clipText, defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
   import { youtubeThumbnail } from "../lib/link-media";
@@ -81,7 +81,6 @@
   import { documentMarkdown, resultKey, WorkNotes } from "../lib/work-notes";
   import type { LiftAction } from "./LiftHeader.svelte";
   import { isAgentExecution, isLive } from "../lib/agent-steps";
-  import { environmentPlan } from "../lib/project-environment-plan";
   import {
     environmentAgents,
     environmentBoards,
@@ -96,9 +95,15 @@
     viewPlacements,
   } from "../lib/project-environment";
   import { canvasOpenTasks, canvasProbe } from "../lib/canvas-context";
-  import { environmentRequests, requestDress, runFolders } from "../lib/project-environment-thread";
+  import {
+    environmentRequests,
+    requestDress,
+    runFolders,
+    stageMade,
+  } from "../lib/project-environment-thread";
   import { artifactView } from "../lib/project-work";
-  import RunView from "./board/RunView.svelte";
+  import RequestLift from "./lift/RequestLift.svelte";
+  import SourcesLift from "./lift/SourcesLift.svelte";
   import { failureLine, humanPage, regionOf, sameRegion } from "../lib/work-human";
   import { openOver, type PaneRect } from "../lib/pane-geometry";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
@@ -657,8 +662,6 @@
       case "objective":
       case "request":
         return { width: 640, height: 600 };
-      case "responsibility":
-        return { width: 480, height: 320 };
       case "sources":
       case "part":
         return { width: 560, height: 560 };
@@ -731,21 +734,15 @@
       ? environmentItems(snapshot, tabs, context.notes, context.objectives, context.media)
       : [],
   );
-  let expanded = $state<string | null>(null);
   let planGeometry = $state.raw<CanvasView>({
     positions: {},
     sizes: {},
     viewport: { x: 0, y: 0, zoom: 1 },
   });
-  const scene = $derived(
-    snapshot
-      ? environmentPlan(snapshot, baseItems, context.objectives, context.plans, expanded)
-      : { items: [], links: [], targets: new Map(), positions: {} },
-  );
   const results = $derived(
     snapshot
-      ? environmentResults(snapshot, scene.items, objectiveSession?.projection ?? null)
-      : { items: scene.items, references: new Map<string, ResultReference>(), remaining: null },
+      ? environmentResults(snapshot, baseItems, objectiveSession?.projection ?? null)
+      : { items: baseItems, references: new Map<string, ResultReference>(), remaining: null },
   );
   /** What the run this canvas is watching is doing right now. */
   const signalOf = (objective: string) =>
@@ -1029,11 +1026,7 @@
     ...environmentSources(stages),
     ...agents.items,
   ]);
-  const links = $derived([
-    ...scene.links,
-    ...(snapshot ? environmentLinks(snapshot) : []),
-    ...requests.links,
-  ]);
+  const links = $derived([...(snapshot ? environmentLinks(snapshot) : []), ...requests.links]);
   const organizing = new SvelteSet<string>();
   /** A run whose placing was refused, by the revision it was refused at: tried again only after a change. */
   const stalled: Record<string, string> = {};
@@ -1398,19 +1391,6 @@
   const liftedElement = $derived(snapshot?.elements.find((element) => element.id === lifted?.id));
   /** A request opens its run: what it did, its steps, its sources. */
   const liftedStage = $derived(stages.find((stage) => stage.card === lifted?.id));
-  /** A reviewed plan's objective keeps its plan view; an agent's request opens its run. */
-  const liftedAgent = $derived.by(() => {
-    const stage = liftedStage;
-    if (!stage) return false;
-    // The run the canvas is watching is the freshest word on what this request is.
-    const projection =
-      objectiveSession?.projection?.work.id === stage.objective
-        ? objectiveSession.projection
-        : context.objectives.get(stage.objective);
-    return !!projection?.executions.some(
-      (run) => stage.executions.includes(run.id) && isAgentExecution(run),
-    );
-  });
 
   /** Every admitted picture of one subject element, in the order it admitted them. */
   function picturesOf(element: string) {
@@ -1433,6 +1413,13 @@
   const liftedPictures = $derived(
     liftedElement?.reference.kind === "subject" ? picturesOf(liftedElement.id) : [],
   );
+  /** An opened object's line beside its kind: how many sources it rests on, when it changed. */
+  function objectMeta(view: ObjectView) {
+    const sources = Object.keys(view.sources ?? {}).length;
+    return [sources ? m.work_env_sources_count({ count: sources }) : "", view.updated ?? ""]
+      .filter(Boolean)
+      .join(" · ");
+  }
   /** The one meta line of a media lift: what it is, how large, where it came from. */
   function mediaMeta(asset: NonNullable<CanvasItem["media"]>["asset"]) {
     const origin = asset.origin.kind === "fetched" ? host(asset.origin.url) : "";
@@ -1447,7 +1434,6 @@
   const loadCentre = () => import("./objects/ObjectCentre.svelte");
   const loadModels = () => import("./bar/ModelPicker.svelte");
   const loadSubject = () => import("./WorkSubjectInspector.svelte");
-  const loadDetail = () => import("./WorkObjectiveInspector.svelte");
   /** The file a source row opened, shown as the run recorded it. */
   let liftFile = $state.raw<WorkFileEvidenceV1 | null>(null);
   /** One surface: a result opens in the lift, on the run that produced it. */
@@ -1490,7 +1476,6 @@
     if (!snapshot) return undefined;
     const own = environmentView(snapshot);
     const placed = {
-      ...scene.positions,
       ...plannedGeometry.positions,
       ...planGeometry.positions,
       ...savedResultPositions,
@@ -1503,7 +1488,6 @@
     return {
       ...own,
       positions: {
-        ...scene.positions,
         ...plannedGeometry.positions,
         ...planGeometry.positions,
         ...savedResultPositions,
@@ -1855,9 +1839,7 @@
     camera = view.viewport ?? camera;
     if (!snapshot || session.loading) return;
     const ids = Object.keys(view.positions).filter(
-      (id) =>
-        scene.targets.has(id) ||
-        (results.references.has(id) && !snapshot.elements.some((element) => element.id === id)),
+      (id) => results.references.has(id) && !snapshot.elements.some((element) => element.id === id),
     );
     const positions = Object.fromEntries(
       [
@@ -2258,15 +2240,7 @@
                   composerElement?.querySelector<HTMLElement>("textarea")?.focus();
                   return;
                 }
-                const reference = results.references.get(id);
-                if (reference) {
-                  void saveResult(id);
-                  return;
-                }
-                expanded =
-                  items.find((item) => item.id === id)?.actionLabel === m.work_env_collapse_plan()
-                    ? null
-                    : id;
+                if (results.references.has(id)) void saveResult(id);
               }}
               onviewchange={checkpoint}
             />{/snippet}</LazyView
@@ -2328,6 +2302,7 @@
       source={lifted.id || null}
       bounds={cardBounds}
       preferred={liftSize(liftedItem)}
+      hug={!lifted.proposal && !liftFile && liftedElement?.reference.kind !== "resource"}
       title={lifted.proposal ? m.work_line_review() : (liftedItem?.title ?? "")}
       onclose={() => {
         const closing = lifted?.id;
@@ -2372,49 +2347,44 @@
             <module.default record={liftedCommand} />
           {/await}
         </div>
-      {:else if liftedItem?.sources}
-        <div class="lift-body">
-          <LiftHeader
-            kind={liftedItem.type === "part" ? m.work_part() : m.work_sources()}
-            title={liftedItem.title}
-            meta={liftedItem.type === "part" && liftedItem.part?.helper === "browser"
-              ? m.work_part_pages({ count: liftedItem.sources.length })
-              : m.work_env_sources_count({ count: liftedItem.sources.length })}
-            icon={GlobalIcon}
-          />
-          {#if liftedItem.part?.notes?.length}{#await import("./objects/ObjectView.svelte") then module}
-              <div class="lift-notes">
+      {:else if liftedItem?.sources || liftedItem?.drawn}
+        {@const part = liftedItem.type === "part"}
+        <SourcesLift
+          kind={part ? m.work_part() : m.work_sources()}
+          title={part ? liftedItem.title : undefined}
+          rows={liftedItem.sources
+            ? liftedItem.sources.map((row) => ({
+                key: row.key,
+                title: row.title,
+                host: row.where,
+                url: row.url,
+                ...(row.note ? { note: row.note } : {}),
+                ...(row.file ? { file: row.file.record } : {}),
+              }))
+            : (liftedItem.drawn?.rows ?? []).map((row) => ({
+                key: row.key,
+                title: row.title,
+                host: row.host,
+                url: row.url,
+                ...(row.file ? { file: row.file.record } : {}),
+              }))}
+          unread={liftedItem.drawn?.unread ?? []}
+          onopen={(row) => {
+            if (row.file) {
+              liftFile = fileEvidence(context.objectives, row.file) ?? null;
+              return;
+            }
+            lifted = null;
+            openPane({ kind: "url", url: row.url }, null);
+          }}
+        >
+          {#snippet notes()}{#if liftedItem?.part?.notes?.length}{#await import("./objects/ObjectView.svelte") then module}
                 {#each liftedItem.part.notes as note (note.id)}<module.default
                     object={note}
                     centre
                   />{/each}
-              </div>
-            {/await}{/if}
-          <ul class="lift-sources">
-            {#each liftedItem.sources as row (row.key)}
-              <li>
-                <button
-                  type="button"
-                  onclick={() => {
-                    if (row.file) {
-                      liftFile = fileEvidence(context.objectives, row.file.record) ?? null;
-                      return;
-                    }
-                    const url = row.url;
-                    lifted = null;
-                    openPane({ kind: "url", url }, null);
-                  }}
-                >
-                  <HostGlyph host={row.where} file={!!row.file} size={22} />
-                  <span class="source-text">
-                    <strong>{row.title}</strong>
-                    <span>{row.note || row.where}</span>
-                  </span>
-                </button>
-              </li>
-            {/each}
-          </ul>
-        </div>
+              {/await}{/if}{/snippet}
+        </SourcesLift>
       {:else if liftedElement?.reference.kind === "resource" && liftedItem?.media}
         {@const asset = liftedItem.media.asset}
         {@const image =
@@ -2491,29 +2461,15 @@
                 (liftFile = fileEvidence(context.objectives, record) ?? null)}
             />{/snippet}</LazyView
         >
-      {:else if !liftedAgent && liftedElement?.reference.kind === "objective" && objectiveSession}
-        <LazyView
-          loader={loadDetail}
-          loadingLabel={m.surface_loading()}
-          failureLabel={m.surface_render_failed()}
-          retryLabel={m.surface_retry()}
-          >{#snippet children(Detail)}<Detail
-              session={objectiveSession!}
-              attached={snapshot?.elements.map((element) => element.reference) ?? []}
-              onopencitation={openCitation}
-              onattach={(reference) => void session.edit({ kind: "add", reference, area: null })}
-            />{/snippet}</LazyView
-        >
       {:else if liftedStage}
-        <RunView
+        <RequestLift
           request={liftedStage.request}
           trail={liftedStage.trail}
           runs={context.objectives
             .get(liftedStage.objective)
             ?.executions.filter((run) => liftedStage.executions.includes(run.id)) ?? []}
-          made={liftedStage.board.blocks.flatMap((block) =>
-            block.title ? [{ id: block.id, title: block.title }] : [],
-          )}
+          made={stageMade(liftedStage)}
+          oncommand={(record) => boardActions.command(record)}
           onsource={(row) => {
             if (row.file) {
               liftFile = fileEvidence(context.objectives, row.file.record) ?? null;
@@ -2528,16 +2484,29 @@
           }}
         />
       {:else if liftedObject && !(liftedItem && results.references.has(liftedItem.id) && !agentBlock(liftedItem.id))}
-        <LazyView
-          loader={loadCentre}
-          loadingLabel={m.surface_loading()}
-          failureLabel={m.surface_render_failed()}
-          retryLabel={m.surface_retry()}
-          >{#snippet children(Centre)}<Centre
-              object={liftedObject!}
-              actions={centreActions}
-            />{/snippet}</LazyView
-        >
+        {@const named = liftedObject.kind === "reply" ? liftedObject.headline : liftedObject.title}
+        <div class="lift-body">
+          <LiftHeader
+            kind={objectLabel(liftedObject.kind)}
+            meta={objectMeta(liftedObject)}
+            icon={objectIcon(liftedObject.kind)}
+            primary={liftedItem ? resultAction(liftedItem.id) : undefined}
+          >
+            {#snippet actions()}{#if named}<Button size="compact" onclick={() => askAbout(named)}
+                  >{m.work_lift_ask()}</Button
+                >{/if}{/snippet}
+          </LiftHeader>
+          <LazyView
+            loader={loadCentre}
+            loadingLabel={m.surface_loading()}
+            failureLabel={m.surface_render_failed()}
+            retryLabel={m.surface_retry()}
+            >{#snippet children(Centre)}<Centre
+                object={liftedObject!}
+                actions={centreActions}
+              />{/snippet}</LazyView
+          >
+        </div>
       {:else if liftedItem?.artifact}
         <div class="lift-result">
           {#if results.references.get(liftedItem.id) && objectiveSession}
@@ -2822,68 +2791,6 @@
     flex-direction: column;
     gap: 16px;
     min-block-size: 0;
-  }
-
-  /* What a research part handed the lead, read before the pages it came from. */
-  .lift-notes {
-    display: flex;
-    flex-direction: column;
-    gap: 28px;
-    margin-block-end: 28px;
-  }
-
-  .lift-sources {
-    list-style: none;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin: 0;
-    padding: 0;
-  }
-
-  .lift-sources button {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    inline-size: 100%;
-    box-sizing: border-box;
-    padding: 8px 10px;
-    border: 0;
-    border-radius: var(--radius-control-compact);
-    background: transparent;
-    color: var(--color-text);
-    font: inherit;
-    text-align: start;
-    cursor: default;
-    transition: background-color var(--motion-instant) ease;
-  }
-
-  .lift-sources button:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: -2px;
-  }
-
-  .lift-sources button:hover {
-    background: var(--color-fill-hover);
-  }
-
-  .source-text {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-inline-size: 0;
-  }
-
-  .source-text strong {
-    font-weight: 550;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .source-text span {
-    color: var(--color-muted);
-    font-size: var(--text-caption);
   }
 
   .lift-media {

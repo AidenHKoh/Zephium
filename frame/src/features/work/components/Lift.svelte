@@ -11,6 +11,7 @@
     source = null,
     bounds,
     preferred = { width: 720, height: 520 },
+    hug = true,
     title,
     onclose,
     children,
@@ -20,7 +21,10 @@
     /** The canvas item the lift grows out of, found by the `data-card-id` its card carries. */
     source?: string | null;
     bounds: DOMRect;
+    /** The widest and tallest the kind reads at. */
     preferred?: { width: number; height: number };
+    /** The lift is only as tall as what it holds; a picture or an editor fills it instead. */
+    hug?: boolean;
     title: string;
     onclose: () => void;
     children: Snippet;
@@ -28,8 +32,39 @@
   provideSiteMarks(siteMark);
   /** Never closer than 48 px to the canvas's edges, whatever the kind asks for. */
   const MARGIN = 48;
+  const LEAST = 200;
   const width = $derived(Math.max(280, Math.min(preferred.width, bounds.width - MARGIN * 2)));
-  const height = $derived(Math.max(200, Math.min(preferred.height, bounds.height - MARGIN * 2)));
+  const tallest = $derived(Math.max(LEAST, Math.min(preferred.height, bounds.height - MARGIN * 2)));
+  /** What the well holds, measured, so a short request does not stand in an empty sheet. */
+  let natural = $state(0);
+  const height = $derived(
+    hug && natural ? Math.max(LEAST, Math.min(tallest, Math.ceil(natural))) : tallest,
+  );
+  let inner = $state<HTMLElement>();
+  $effect(() => {
+    const element = inner;
+    if (!element || !hug) return;
+    const observer = new ResizeObserver(() => {
+      const style = getComputedStyle(element.parentElement!);
+      natural =
+        element.offsetHeight +
+        Number.parseFloat(style.paddingBlockStart) +
+        Number.parseFloat(style.paddingBlockEnd);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  });
+  /** A lazily drawn body has a frame or two to arrive before the morph takes its picture. */
+  async function measured() {
+    if (!hug) return;
+    const started = performance.now();
+    let last = -1;
+    while (performance.now() - started < 120) {
+      await new Promise((done) => requestAnimationFrame(done));
+      if (natural && natural === last) return;
+      last = natural;
+    }
+  }
   const left = $derived(bounds.left + (bounds.width - width) / 2);
   const top = $derived(bounds.top + (bounds.height - height) / 2);
   let panel = $state<HTMLElement>();
@@ -44,6 +79,7 @@
   let ghost: HTMLElement | null = null;
   const MORPH = "work-lift-morph";
   const RETURN = "work-lift-return";
+  const OPEN = "work-lift-open";
 
   /** The card this lift stands for: by id, or the one sitting where it was opened. */
   function findCard(): HTMLElement | null {
@@ -99,10 +135,11 @@
     }
     ghost?.remove();
     ghost = null;
-    document.documentElement.classList.remove(MORPH, RETURN);
+    document.documentElement.classList.remove(MORPH, RETURN, OPEN);
   }
 
-  onMount(() => {
+  /** Grows out of its card; the card hides while the lift stands for it. */
+  function arrive() {
     card = findCard();
     if (reducedMotion() || !card) {
       // Reduced motion, or a card no longer drawn: the lift crossfades in place.
@@ -116,7 +153,7 @@
         panel?.animate([{ opacity: 0 }, { opacity: 1 }], fade);
         backdrop?.animate([{ opacity: 0 }, { opacity: 1 }], fade);
       });
-      return release;
+      return;
     }
     const from = card;
     if (morphs()) {
@@ -134,7 +171,7 @@
         root.classList.remove(MORPH);
         panel?.focus({ preventScroll: true });
       });
-      return release;
+      return;
     }
     // Without it, the lift's own box travels from the card while a copy of the card fades.
     const rect = from.getBoundingClientRect();
@@ -163,8 +200,42 @@
           if (ghost === clone) ghost = null;
         });
     });
-    return release;
+  }
+
+  /** Where focus was when the lift opened; it goes back there when the lift is gone. */
+  const returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  onMount(() => {
+    let gone = false;
+    const root = document.documentElement;
+    root.classList.add(OPEN);
+    void measured().then(() => {
+      if (!gone && !closing) arrive();
+    });
+    return () => {
+      gone = true;
+      root.classList.remove(OPEN);
+      release();
+      const lost = !document.activeElement || document.activeElement === document.body;
+      if (lost && returnTo?.isConnected) returnTo.focus({ preventScroll: true });
+    };
   });
+
+  const FOCUSABLE =
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
+  /** The lift is modal: Tab walks round what it holds and never onto the canvas behind. */
+  function contain(event: KeyboardEvent) {
+    if (event.key !== "Tab" || !panel) return;
+    const stops = [...panel.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
+      (element) => element.offsetParent !== null,
+    );
+    event.preventDefault();
+    if (!stops.length) return;
+    // WebKit's own Tab skips buttons unless keyboard navigation is on; the lift walks them all.
+    const at = stops.indexOf(document.activeElement as HTMLElement);
+    const step = event.shiftKey ? -1 : 1;
+    const next = at < 0 ? (event.shiftKey ? stops.length - 1 : 0) : at + step;
+    stops[(next + stops.length) % stops.length]!.focus();
+  }
 
   /** Back into the card, wherever it sits now. */
   export function close() {
@@ -275,6 +346,7 @@
   role="dialog"
   aria-modal="true"
   aria-label={title}
+  onkeydown={contain}
   style:left={`${left}px`}
   style:top={`${top}px`}
   style:inline-size={`${width}px`}
@@ -289,7 +361,7 @@
       data-lift-scrolled={scrolled || undefined}
       onscroll={(event) => (scrolled = event.currentTarget.scrollTop > 0)}
     >
-      {@render children()}
+      <div class="inner" bind:this={inner}>{@render children()}</div>
     </div>
   </div>
 </div>
@@ -299,7 +371,7 @@
     position: fixed;
     z-index: 25;
     border-radius: var(--content-radius);
-    background: color-mix(in srgb, var(--color-canvas) 55%, transparent);
+    background: color-mix(in srgb, var(--color-canvas) 72%, transparent);
     visibility: hidden;
   }
 
@@ -378,6 +450,12 @@
     padding: var(--lift-pad);
     overflow: auto;
     overscroll-behavior: contain;
+  }
+
+  /* A selected card's toolbar floats over the canvas in its own layer; it steps back with it. */
+  /* stylelint-disable-next-line selector-class-pattern */
+  :global(html.work-lift-open .svelte-flow__node-toolbar) {
+    visibility: hidden;
   }
 
   /* The morph: one frame travels from the card's rect to the lift's; the card's

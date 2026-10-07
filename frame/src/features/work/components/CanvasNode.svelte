@@ -26,7 +26,6 @@
   import NoteCard from "./cards/NoteCard.svelte";
   import MediaCard from "./cards/MediaCard.svelte";
   import ObjectiveCard from "./cards/ObjectiveCard.svelte";
-  import ResponsibilityCard from "./cards/ResponsibilityCard.svelte";
   import ResultCard from "./cards/ResultCard.svelte";
   import SubjectCard from "./cards/SubjectCard.svelte";
   import CompareCard from "./cards/CompareCard.svelte";
@@ -62,17 +61,7 @@
   const type = $derived(data.type ?? (data.artifact ? "result" : "objective"));
   /** A card the run drew, not an element the person placed: it takes no orders. */
   const inert = $derived(
-    [
-      "responsibility",
-      "page",
-      "sources",
-      "request",
-      "block",
-      "head",
-      "trail",
-      "part",
-      "input",
-    ].includes(type),
+    ["page", "sources", "request", "block", "head", "trail", "part", "input"].includes(type),
   );
   /** A lane card takes its size from its lane. */
   const laid = $derived(!!data.size);
@@ -178,7 +167,6 @@
     {:else if type === "page"}<PageCard item={data} {selected} onhelp={() => action(id, "help")} />
     {:else if type === "note"}<NoteCard item={data} {selected} />
     {:else if type === "media"}<MediaCard item={data} {selected} />
-    {:else if type === "responsibility"}<ResponsibilityCard item={data} {selected} />
     {:else if type === "objective" || type === "request"}<RequestText
         item={data}
         {selected}

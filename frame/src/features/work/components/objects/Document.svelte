@@ -2,6 +2,8 @@
   import DocumentView from "$shared/ui/data/Artifact/DocumentView.svelte";
   import * as m from "$shared/i18n/messages";
   import type { DocumentObjectView, ObjectActions } from "../../lib/board/types";
+  import Inline from "./Inline.svelte";
+  import { noteBlocks } from "./markdown";
   /** Text the person asked for, set as a sheet of paper: its first page on the canvas. */
   let {
     object,
@@ -13,6 +15,10 @@
     /** Opened in the centre: all of it, at reading size. */
     centre?: boolean;
   } = $props();
+  /** Plain paragraphs a model wrote in Markdown read as the headings and lists it meant. */
+  const written = $derived(
+    object.content.formatted ? [] : noteBlocks(object.content.paragraphs.join("\n\n")),
+  );
   let body = $state<HTMLElement>();
   let width = $state(0);
   let overflows = $state(false);
@@ -27,23 +33,27 @@
   });
 </script>
 
-<article class="paper" aria-label={object.title}>
+<article class="paper" class:centre aria-label={object.title}>
   <div
     class="page"
     class:overflows
     bind:this={body}
     bind:clientWidth={width}
     style:max-block-size={width && !centre ? `${Math.round(width * 1.294)}px` : undefined}
-    style:min-block-size={width ? `${Math.round(width * 0.72)}px` : undefined}
+    style:min-block-size={width && !centre ? `${Math.round(width * 0.72)}px` : undefined}
   >
     {#if object.title}<h2>{object.title}</h2>{/if}
     <div class="text">
       {#if object.content.formatted}<DocumentView
           document={object.content.formatted}
           onlink={actions.link}
-        />{:else}{#each object.content.paragraphs as paragraph, index (index)}<p>
-            {paragraph}
-          </p>{/each}{/if}
+        />{:else}{#each written as part, index (index)}{#if part.kind === "heading"}<h3>
+              <Inline text={part.text} plain />
+            </h3>{:else if part.kind === "list"}<svelte:element this={part.ordered ? "ol" : "ul"}
+              >{#each part.items as item, at (at)}<li>
+                  <Inline text={item} plain />
+                </li>{/each}</svelte:element
+            >{:else}<p><Inline text={part.lines.join(" ")} plain /></p>{/if}{/each}{/if}
     </div>
   </div>
   {#if overflows && !centre}<button
@@ -68,6 +78,16 @@
     box-sizing: border-box;
     padding: 44px 48px;
     overflow: hidden;
+  }
+
+  /* Opened, the lift is the sheet: the page loses its own paper and margins. */
+  .paper.centre {
+    background: none;
+    box-shadow: none;
+  }
+
+  .centre .page {
+    padding: 8px 0 16px;
   }
 
   .page.overflows {

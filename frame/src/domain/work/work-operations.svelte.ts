@@ -97,28 +97,21 @@ export class WorkOperations {
   private async accept(job: OperationObservation, state: WorkOperationStateV1) {
     if (this.jobs.get(job.id) !== job) return;
     const work = operationBasis(job.input).work;
+    // Only an agent run is ever begun; a reply shaped for any other operation is not ours.
+    const run = job.input.kind === "run";
     const matching =
       state.kind === "pending"
         ? state.work === work
         : state.kind === "planned"
-          ? ["plan", "prepare_plan"].includes(job.input.kind) &&
-            state.response.version === 1 &&
-            state.response.profile === this.profile &&
-            state.response.work === work &&
-            state.response.basis_revision === operationBasis(job.input).expected_revision
+          ? false
           : state.kind === "settled"
             ? state.response.version === 1 &&
               state.response.profile === this.profile &&
               (state.response.reply.kind === "error" ||
-                (["prepare", "prepare_account"].includes(job.input.kind) &&
-                  state.response.reply.kind === "approval_draft" &&
-                  state.response.reply.work === work &&
-                  state.response.reply.expected_revision ===
-                    operationBasis(job.input).expected_revision) ||
-                (["prepare_account", "run"].includes(job.input.kind) &&
+                (run &&
                   state.response.reply.kind === "account_grant_draft" &&
                   state.response.reply.work === work) ||
-                (["start", "read_public", "run"].includes(job.input.kind) &&
+                (run &&
                   state.response.reply.kind === "projection" &&
                   state.response.reply.projection.work.id === work &&
                   state.response.reply.projection.work.profile === this.profile))

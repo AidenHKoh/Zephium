@@ -1,6 +1,5 @@
 import type {
   WorkRuntimeProjection,
-  WorkPlanRevision,
   WorkAgentGrantV1,
   WorkExecutionLimits,
 } from "$shared/ipc/bindings";
@@ -67,17 +66,4 @@ export function admitProjection(
     projection.work.revision === current.work.revision ||
     newerRevision(projection.work.revision, current.work.revision)
   );
-}
-
-export function planProposal(plan: WorkPlanRevision) {
-  return {
-    nodes: plan.draft.nodes.map((node, key) => ({
-      key,
-      objective: node.objective,
-      outputs: node.outputs.map((output) => ({ ...output })),
-      dependencies: node.dependencies.map((id) =>
-        plan.draft.nodes.findIndex((item) => item.id === id),
-      ),
-    })),
-  };
 }

@@ -69,3 +69,58 @@ test("a finding about the subject lends its sentence to the source it cites", ()
   expect(detail.sources.map((source) => source.url)).toEqual(["https://stripe.com/pricing"]);
   expect(Object.values(detail.quotes)).toEqual(["Stripe charges 2.9%."]);
 });
+
+test("a page cited for no subject in particular counts for one only on its own site", () => {
+  const execution = structuredClone(projection.executions[0]!);
+  execution.user_artifacts = [];
+  const citations = ["https://www.airbnb.com/rooms/1", "https://lot.com/fares"].map((url) => ({
+    url,
+    title: url,
+    start_index: 0,
+    end_index: 1,
+  }));
+  execution.provider_evidence = [
+    {
+      id: "record",
+      node: "node",
+      attempt: "attempt",
+      evidence: {
+        version: 1,
+        provider: "open_ai",
+        model: "m",
+        response_model: "m",
+        response_id: "r",
+        search_call_id: "s",
+        answer: "",
+        actual_input_tokens: 0,
+        actual_output_tokens: 0,
+        citations,
+      },
+    },
+  ];
+  execution.artifacts = [
+    {
+      ...execution.artifacts[0]!,
+      id: "sources",
+      evidence: [
+        { extraction_id: "record", source_id: 1 },
+        { extraction_id: "record", source_id: 2 },
+      ],
+      data: {
+        kind: "evidence_collection",
+        summary: "",
+        entries: [
+          { evidence: 0, title: "Sunny flat", role: "listing" },
+          { evidence: 1, title: "Fares", role: "fares" },
+        ],
+      },
+    },
+  ];
+  const urls = (homepage?: string) =>
+    subjectDetail(execution, { name: "Sunny flat", ...(homepage ? { homepage } : {}) }).sources.map(
+      (source) => source.url,
+    );
+  expect(urls("https://airbnb.com/rooms/1")).toEqual(["https://www.airbnb.com/rooms/1"]);
+  // With nothing of its own, the run's pages are still where its facts came from.
+  expect(urls()).toEqual(["https://www.airbnb.com/rooms/1", "https://lot.com/fares"]);
+});

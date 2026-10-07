@@ -1,54 +1,22 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import { expoOut } from "svelte/easing";
-  import { scaleBand, scaleLinear, scaleTime } from "d3-scale";
-  import { curveMonotoneX } from "d3-shape";
-  import {
-    Arc,
-    Area,
-    Axis,
-    Bars,
-    ChartCore as Plot,
-    Grid,
-    Highlight,
-    Pie,
-    Points,
-    Rect,
-    Rule,
-    Spline,
-    Svg,
-    Text,
-  } from "layerchart/svg";
-  import type { AnyScale } from "layerchart/utils/scales.svelte";
   import { duration, reducedMotion } from "$shared/lib/motion";
   import * as m from "$shared/i18n/messages";
-  import Radar from "./Radar.svelte";
-  import ChartContainer from "./ChartContainer.svelte";
+  import Cartesian from "./Cartesian.svelte";
   import ChartLegend from "./ChartLegend.svelte";
-  import ChartTooltip from "./ChartTooltip.svelte";
-  import { colorOf, type ChartConfig } from "./chart-utils";
+  import Heat from "./Heat.svelte";
+  import Radar from "./Radar.svelte";
+  import Round from "./Round.svelte";
+  import Spark from "./Spark.svelte";
   import {
     extremes,
     formatValue,
     pointText,
-    tickLabel,
-    xText,
     type ChartEvidence,
     type ChartKind,
     type ChartSpec,
   } from "./chart";
-  import {
-    card,
-    legendRule,
-    plan,
-    readout,
-    ringTop,
-    shortValue,
-    valuesCsv,
-    type Cell,
-    type Part,
-    type Row,
-  } from "./layer";
+  import { card, legendRule, plan, valuesCsv } from "./plan";
   let {
     spec,
     title,
@@ -83,19 +51,12 @@
     heat: m.chart_kind_heat,
     spark: m.chart_kind_spark,
   };
-  const CHAR = 6.5;
   const uid = $props.id();
-  // A chart arrives once over --motion-base; reduced motion draws it settled.
-  const still = reducedMotion();
-  const arrival = still ? 0 : duration("base");
-  const tween = still
-    ? ("none" as const)
-    : { type: "tween" as const, duration: arrival, easing: expoOut };
-  const draw = still ? undefined : { duration: arrival, easing: expoOut };
-  let settled = $state(still);
+  // A chart arrives once; reduced motion draws it settled.
+  let settled = $state(reducedMotion());
   $effect(() => {
     if (settled) return;
-    const timer = setTimeout(() => (settled = true), arrival + 60);
+    const timer = setTimeout(() => (settled = true), duration("page") + 240);
     return () => clearTimeout(timer);
   });
 
@@ -110,40 +71,26 @@
     spec.series.some((series) => series.points.some((point) => point.y !== null)),
   );
   const round = $derived(spec.kind === "donut" || spec.kind === "radial");
-  const cartesian = $derived(!round && spec.kind !== "heat" && spec.kind !== "radar" && !spark);
-  const trend = $derived(spec.kind === "line" || spec.kind === "area");
   const lying = $derived(shape.horizontal);
-  const band = $derived(shape.scale === "band");
   const shares = new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 0 });
-  const partKey = (index: number) => `p${index}`;
-  /** Every series and part by its key, the colour it is drawn in and the name it is read by. */
-  const config = $derived<ChartConfig>(
-    Object.fromEntries([
-      ...shape.series.map((series) => [series.key, { label: series.label, color: series.color }]),
-      ...shape.parts.map((part) => [partKey(part.index), { label: part.label, color: part.color }]),
-    ]),
-  );
-  const legend = $derived.by((): { keys: string[]; shares: Record<string, string> } => {
-    if (spark || spec.kind === "heat" || quiet) return { keys: [], shares: {} };
+  const legend = $derived.by(() => {
+    if (spark || spec.kind === "heat" || quiet) return [];
     if (round)
       return spec.compact
-        ? { keys: [], shares: {} }
-        : {
-            keys: shape.parts.map((part) => partKey(part.index)),
-            shares: Object.fromEntries(
-              shape.parts.map((part) => [
-                partKey(part.index),
-                spec.kind === "donut"
-                  ? shape.total
-                    ? shares.format(part.value / shape.total)
-                    : ""
-                  : pointText(part.points[0], spec.y),
-              ]),
-            ),
-          };
+        ? []
+        : shape.parts.map((part) => ({
+            key: `p${part.index}`,
+            label: part.label,
+            color: part.color,
+            share:
+              spec.kind === "donut"
+                ? shape.total
+                  ? shares.format(part.value / shape.total)
+                  : ""
+                : pointText(part.points[0], spec.y),
+          }));
     const rule = spec.compact ? labels.legend : legendRule(spec.series.length, false);
-    if (rule !== "rows") return { keys: [], shares: {} };
-    return { keys: shape.series.map((series) => series.key), shares: {} };
+    return rule === "rows" ? shape.series : [];
   });
   const table = $derived(
     !spark && !quiet && spec.values !== false && (!spec.compact || labels.legend === "table"),
@@ -166,53 +113,8 @@
   const cited = $derived(
     spec.series.some((series) => series.points.some((point) => point.evidence?.length)),
   );
-  /** Bars that carry their own values need no value axis. */
-  const valued = $derived(
-    !quiet &&
-      (spec.compact
-        ? labels.values
-        : (spec.kind === "bars" || spec.kind === "range") &&
-          spec.series.length === 1 &&
-          shape.rows.length <= 12),
-  );
-  const valueAxis = $derived(!compact && !valued);
-  /** A line's points are drawn while there are few enough to tell apart. */
-  const dotted = $derived(
-    spec.kind === "line" && !tile && shape.rows.length <= 16 && spec.series.length <= 3,
-  );
   /** The one figure the chart exists to say: the spec's own, or a round chart's total. */
   const headline = $derived(spec.headline);
-
-  // Sizes in the chart's own pixels; the width is the container's, measured by the chart once.
-  const tickRoom = $derived(
-    Math.max(24, ...shape.ticks.map((tick) => label(tick).length * CHAR + 10)),
-  );
-  const nameRoom = $derived(
-    Math.min(160, Math.max(...shape.rows.map((row) => row.label.length * CHAR), 0) + 12),
-  );
-  /** Room right of lying bars for the longest value written after one. */
-  const valueRoom = $derived(
-    Math.max(
-      24,
-      ...shape.rows.flatMap((row) =>
-        row.points.map((point) =>
-          point
-            ? (spec.compact ? shortValue(point, spec.y) : pointText(point, spec.y)).length * CHAR +
-              12
-            : 0,
-        ),
-      ),
-    ),
-  );
-  /** Category names under the plot, thinned evenly so no two ever touch. */
-  function spaced(width: number): (string | number | Date)[] | undefined {
-    if (!band || lying) return indexTicks;
-    const widest = Math.max(...shape.rows.map((row) => category(row.x).length * CHAR), 0) + 10;
-    const every = Math.max(1, Math.ceil((shape.rows.length * widest) / Math.max(1, width)));
-    return every === 1
-      ? undefined
-      : shape.rows.filter((_, index) => index % every === 0).map((row) => row.key);
-  }
   const rowHeight = $derived(compact ? 20 : Math.max(24, 10 + spec.series.length * 12));
   const plotHeight = $derived.by(() => {
     if (tile && height) return height;
@@ -228,128 +130,6 @@
     if (tile) return 96;
     return detail === "overview" ? 200 : spec.compact ? 132 : 220;
   });
-  const padding = $derived.by(() => {
-    if (round || tile) return { top: 2, right: 2, bottom: 2, left: 2 };
-    if (spec.kind === "heat")
-      return compact
-        ? { top: 0, right: 0, bottom: 0, left: 0 }
-        : {
-            top: 4,
-            right: 0,
-            bottom: 20,
-            left: Math.max(...spec.series.map((series) => series.name.length * CHAR), 0) + 14,
-          };
-    if (lying)
-      return {
-        top: compact ? 4 : 4,
-        right: valued || labels.values ? valueRoom : 8,
-        bottom: valueAxis ? 22 : 4,
-        left: quiet ? 4 : nameRoom,
-      };
-    const labelled = spec.compact && !quiet && (labels.categories || !!labels.ends);
-    // The value axis reads on the left, as a reader looks for it; a line keeps room at both ends for its dots.
-    return {
-      top: valued || (spec.compact && labels.values && !quiet) ? 20 : 8,
-      right: spec.compact && labels.ends && !quiet ? 36 : trend ? 14 : 4,
-      bottom: quiet ? 4 : spec.compact ? (labelled ? 18 : 4) : 24,
-      left: valueAxis ? tickRoom : trend ? 14 : 0,
-    };
-  });
-
-  function label(tick: number) {
-    return tickLabel(tick, spec.y);
-  }
-  const timeSpan = $derived.by(() => {
-    const times = shape.rows.map((row) => (row.x instanceof Date ? row.x.getTime() : 0));
-    return Math.max(...times, 0) - Math.min(...times, 0);
-  });
-  const timeFormat = $derived(
-    new Intl.DateTimeFormat(
-      undefined,
-      timeSpan > 2 * 86_400_000
-        ? { month: "short", day: "numeric" }
-        : { hour: "numeric", minute: "2-digit" },
-    ),
-  );
-  function category(value: unknown): string {
-    if (value instanceof Date) return timeFormat.format(value);
-    if (shape.scale === "index") return shape.rows[Number(value)]?.label ?? "";
-    if (typeof value === "number") return xText(value, "linear");
-    return xText(String(value), spec.x?.kind);
-  }
-  const valueScale = (): AnyScale => scaleLinear();
-  const bandScale = (): AnyScale =>
-    scaleBand()
-      .paddingInner(tile ? 0.2 : 0.28)
-      .paddingOuter(0.1);
-  const xScale = $derived<AnyScale>(
-    shape.scale === "time" ? scaleTime() : shape.scale === "band" ? bandScale() : scaleLinear(),
-  );
-  /** Category ticks on an index axis: every one while they fit, else evenly thinned. */
-  const indexTicks = $derived.by(() => {
-    if (shape.scale !== "index") return undefined;
-    const every = Math.max(1, Math.ceil(shape.rows.length / 8));
-    return shape.rows.filter((row) => row.index % every === 0).map((row) => row.index);
-  });
-  /** Where a bar's value or a line's last value is written, in plot pixels. */
-  function spot(
-    context: {
-      xScale: AnyScale;
-      yScale: AnyScale;
-      x1Scale: AnyScale | null;
-      y1Scale: AnyScale | null;
-    },
-    row: Row,
-    order: number,
-  ): { x: number; y: number; anchor: "start" | "middle" } | null {
-    const point = row.points[order];
-    if (!point || point.y === null) return null;
-    const key = `s${order}`;
-    const top = point.y2 ?? point.y;
-    const up = top >= 0;
-    if (lying) {
-      const offset = context.y1Scale
-        ? context.y1Scale(key) + (context.y1Scale.bandwidth?.() ?? 0) / 2
-        : (context.yScale.bandwidth?.() ?? 0) / 2;
-      return {
-        x: context.xScale(top) + (up ? 6 : -6),
-        y: context.yScale(row.key) + offset + 4,
-        anchor: "start",
-      };
-    }
-    const at = band ? row.key : row.x;
-    const offset = !band
-      ? 0
-      : context.x1Scale
-        ? context.x1Scale(key) + (context.x1Scale.bandwidth?.() ?? 0) / 2
-        : (context.xScale.bandwidth?.() ?? 0) / 2;
-    return {
-      x: context.xScale(at) + offset,
-      y: context.yScale(top) + (up ? -7 : 14),
-      anchor: "middle",
-    };
-  }
-  /** Bars are rounded to their band, never past half of it. */
-  function radius(context: { xScale: AnyScale; yScale: AnyScale; x1Scale: AnyScale | null }) {
-    const scale = lying ? context.yScale : (context.x1Scale ?? context.xScale);
-    const width = scale.bandwidth?.() ?? 12;
-    return Math.max(2, Math.min(tile ? 3 : 6, width / 2));
-  }
-  const ends = $derived(
-    labels.ends && shape.rows.length > 1
-      ? [shape.rows[0]!.x, shape.rows.at(-1)!.x]
-      : shape.rows.slice(0, 1).map((row) => row.x),
-  );
-  const lastRow = $derived(shape.rows.findLast((row) => row.points[0] && row.points[0].y !== null));
-  const tint = (tone: number | null) =>
-    tone === null
-      ? "var(--color-fill)"
-      : `color-mix(in oklab, var(--color-lit) ${Math.round(6 + tone * 94)}%, var(--color-surface))`;
-  const indexOf = (data: unknown): number => {
-    const found = data as Partial<Row & Part & Cell> | null;
-    return found?.index ?? -1;
-  };
-  const top = $derived(spec.kind === "radial" ? ringTop(spec, shape.parts) : 1);
   /** What a round chart says in its middle: the headline, else the total or the one value. */
   const middle = $derived.by(() => {
     if (spec.compact && labels.lead) return { value: labels.lead.share, label: labels.lead.label };
@@ -373,56 +153,9 @@
   }
 </script>
 
-{#snippet tip()}
-  {#if !quiet}<ChartTooltip
-      read={(data) => readout(spec, shape, indexOf(data))}
-      {still}
-      indicator={trend ? "line" : "dot"}
-      {onevidence}
-      {glyph}
-    />{/if}
-{/snippet}
-
-{#snippet washes()}
-  <defs>
-    {#each shape.series as series, order (series.key)}
-      <linearGradient id={`${uid}-wash-${order}`} x1="0" y1="0" x2="0" y2="1">
-        <stop
-          offset="0%"
-          style:stop-color={colorOf(series.key)}
-          style:stop-opacity={tile ? 0.5 : 0.4}
-        />
-        <stop offset="100%" style:stop-color={colorOf(series.key)} style:stop-opacity="0.03" />
-      </linearGradient>
-    {/each}
-  </defs>
-{/snippet}
-
 {#if spark}
-  <span class="spark" style:block-size={height ? `${height}px` : undefined}>
-    {#if usable}
-      <Plot
-        data={shape.rows}
-        x={band ? "key" : "x"}
-        {xScale}
-        series={shape.series.slice(0, 1)}
-        valueAxis="y"
-        yDomain={spec.x?.kind === "category" ? shape.domain : undefined}
-        yNice={false}
-        bandPadding={0.25}
-        padding={{ top: 2, right: 1, bottom: 2, left: 1 }}
-        {height}
-        tooltipContext={false}
-      >
-        <Svg role="img" aria-label={summary}>
-          {#if spec.x?.kind === "category"}
-            <Bars seriesKey="s0" fill={shape.series[0]?.color} motion={tween} class="mark bar" />
-          {:else}
-            <Spline seriesKey="s0" curve={curveMonotoneX} {draw} class="mark line" />
-          {/if}
-        </Svg>
-      </Plot>
-    {/if}
+  <span class="spark-box" style:block-size={height ? `${height}px` : undefined}>
+    {#if usable}<Spark {spec} {shape} {summary} {settled} />{/if}
   </span>
 {:else}
   <figure
@@ -437,310 +170,54 @@
       </p>
     {/if}
     {#if usable}
-      <ChartContainer {config} class={round && legend.keys.length ? "body beside" : "body"}>
-        <div
-          class="plot"
-          style:block-size={`${plotHeight}px`}
-          style:inline-size={round ? `${plotHeight}px` : undefined}
-        >
-          {#if spec.kind === "radar"}
+      <div class="body" class:beside={round && legend.length}>
+        {#if spec.kind === "radar"}
+          <div class="plot" style:block-size={`${plotHeight}px`}>
             <Radar {spec} {shape} {detail} {summary} {settled} {onevidence} {glyph} />
-          {:else if round}
-            <Plot
-              data={shape.parts}
-              x="value"
-              height={plotHeight}
-              {padding}
-              tooltipContext={quiet ? false : { mode: "manual", hideDelay: 160 }}
-            >
-              {#snippet children({ context })}
-                {@const outer = Math.max(8, Math.min(context.width, context.height) / 2 - 2)}
-                <Svg center role="img" aria-label={summary}>
-                  <g class="ring" class:enter={!settled}>
-                    {#if spec.kind === "donut"}
-                      <Pie sort={null} padAngle={shape.parts.length > 1 ? 0.02 : 0}>
-                        {#snippet children({ arcs })}
-                          {#each arcs as slice, index (index)}
-                            <Arc
-                              startAngle={slice.startAngle}
-                              endAngle={slice.endAngle}
-                              padAngle={slice.padAngle}
-                              innerRadius={outer * (tile ? 0.58 : 0.66)}
-                              outerRadius={outer}
-                              cornerRadius={tile ? 2 : 4}
-                              data={slice.data}
-                              fill={colorOf(partKey((slice.data as Part).index))}
-                              tooltip={!quiet}
-                              class={context.tooltip.data && context.tooltip.data !== slice.data
-                                ? "mark slice dim"
-                                : "mark slice"}
-                            />
-                          {/each}
-                        {/snippet}
-                      </Pie>
-                    {:else}
-                      {@const count = Math.max(1, shape.parts.length)}
-                      {@const inner = outer * (count === 1 ? 0.72 : 0.36)}
-                      {@const step = (outer - inner) / count}
-                      {@const thickness = Math.max(3, step * (count === 1 ? 1 : 0.72))}
-                      {#each shape.parts as part (part.index)}
-                        {@const edge = outer - part.index * step}
-                        <Arc
-                          value={Math.min(part.value, top)}
-                          domain={[0, top]}
-                          range={[0, 360]}
-                          innerRadius={edge - thickness}
-                          outerRadius={edge}
-                          cornerRadius={thickness / 2}
-                          track={{ class: "track" }}
-                          motion={tween}
-                          data={part}
-                          fill={colorOf(partKey(part.index))}
-                          tooltip={!quiet}
-                          class={context.tooltip.data && context.tooltip.data !== part
-                            ? "mark slice dim"
-                            : "mark slice"}
-                        />
-                      {/each}
-                    {/if}
-                  </g>
-                  {#if middle && !tile && (spec.kind === "donut" || shape.parts.length === 1)}
-                    <Text
-                      value={middle.value}
-                      y={detail === "full" ? -1 : 0}
-                      textAnchor="middle"
-                      class="total"
-                    />
-                    {#if detail === "full"}<Text
-                        value={middle.label}
-                        y={spec.compact ? 14 : 17}
-                        textAnchor="middle"
-                        class={spec.compact ? "caption-text lead" : "caption-text"}
-                      />{/if}
-                  {/if}
-                </Svg>
-                {@render tip()}
-              {/snippet}
-            </Plot>
-          {:else if spec.kind === "heat"}
-            <Plot
-              data={shape.cells}
-              x="key"
-              xScale={scaleBand().paddingInner(0.08)}
-              xDomain={shape.keys}
-              y="order"
-              yScale={scaleBand().paddingInner(0.1)}
-              yDomain={spec.series.map((_, order) => String(order))}
-              height={plotHeight}
-              {padding}
-              tooltipContext={quiet ? false : { mode: "manual", hideDelay: 160 }}
-            >
-              {#snippet children({ context })}
-                <Svg role="img" aria-label={summary}>
-                  {#each shape.cells as cell (cell.index)}
-                    <Rect
-                      x={context.xScale(cell.key)}
-                      y={context.yScale(cell.order)}
-                      width={context.xScale.bandwidth?.() ?? 0}
-                      height={context.yScale.bandwidth?.() ?? 0}
-                      rx={2}
-                      fill={tint(cell.tone)}
-                      class={`mark cell${settled ? "" : " enter"}${context.tooltip.data === cell ? " on" : ""}`}
-                      onpointermove={(event: PointerEvent) =>
-                        !quiet && context.tooltip.show(event, cell)}
-                      onpointerleave={() => context.tooltip.hide()}
-                    />
-                  {/each}
-                  {#if !compact}
-                    <Axis placement="bottom" format={category} tickMarks={false} rule={false} />
-                    <Axis
-                      placement="left"
-                      format={(order: string) => spec.series[Number(order)]?.name ?? ""}
-                      tickMarks={false}
-                      rule={false}
-                      class="names"
-                    />
-                  {/if}
-                </Svg>
-                {@render tip()}
-              {/snippet}
-            </Plot>
-          {:else if cartesian}
-            <Plot
-              data={shape.rows}
-              x={lying ? undefined : band ? "key" : "x"}
-              y={lying ? "key" : undefined}
-              xScale={lying ? valueScale() : xScale}
-              yScale={lying ? bandScale() : valueScale()}
-              xDomain={lying
-                ? shape.domain
-                : band
-                  ? shape.keys
-                  : shape.scale === "index"
-                    ? [0, Math.max(1, shape.rows.length - 1)]
-                    : undefined}
-              yDomain={lying ? shape.keys : shape.domain}
-              xNice={false}
-              yNice={false}
-              valueAxis={lying ? "x" : "y"}
-              series={shape.series}
-              seriesLayout={shape.layout}
-              bandPadding={0.28}
-              groupPadding={0.14}
-              height={plotHeight}
-              {padding}
-              tooltipContext={quiet ? false : { mode: band ? "band" : "bisect-x", hideDelay: 160 }}
-            >
-              {#snippet children({ context })}
-                <Svg role="img" aria-label={summary}>
-                  {#if trend && spec.kind === "area"}{@render washes()}{/if}
-                  {#if !tile && !(lying && valued)}
-                    <Grid
-                      x={lying}
-                      y={!lying}
-                      xTicks={lying ? shape.ticks : undefined}
-                      yTicks={lying ? undefined : shape.ticks}
-                      class="grid"
-                    />
-                  {/if}
-                  {#if shape.domain[0] < 0 && shape.domain[1] > 0}
-                    <Rule x={lying ? 0 : false} y={lying ? false : 0} class="zero" />
-                  {/if}
-                  {#if band && !quiet}<Highlight area />{/if}
-                  {#if trend}
-                    {#each shape.series as series, order (series.key)}
-                      {#if spec.kind === "area"}
-                        <Area
-                          seriesKey={series.key}
-                          y0={shape.layout === "stack"
-                            ? undefined
-                            : () => Math.max(shape.domain[0], Math.min(0, shape.domain[1]))}
-                          curve={curveMonotoneX}
-                          defined={(row: Row) => row.points[order]?.y != null}
-                          fill={`url(#${uid}-wash-${order})`}
-                          line={{
-                            stroke: colorOf(series.key),
-                            class: "mark line",
-                            draw,
-                          }}
-                          class={settled ? "mark area" : "mark area enter"}
-                        />
-                      {:else}
-                        <Spline
-                          seriesKey={series.key}
-                          curve={curveMonotoneX}
-                          defined={(row: Row) => row.points[order]?.y != null}
-                          stroke={colorOf(series.key)}
-                          {draw}
-                          class="mark line"
-                        />
-                        {#if dotted}
-                          <Points
-                            seriesKey={series.key}
-                            r={3.5}
-                            fill={colorOf(series.key)}
-                            class={settled ? "mark dot" : "mark dot enter"}
-                          />
-                        {/if}
-                      {/if}
-                    {/each}
-                    {#if !quiet}<Highlight points={{ r: 4 }} lines />{/if}
-                  {:else}
-                    {#each shape.series as series (series.key)}
-                      <Bars
-                        seriesKey={series.key}
-                        x1={!lying && shape.layout === "group" ? () => series.key : undefined}
-                        y1={lying && shape.layout === "group" ? () => series.key : undefined}
-                        rounded={shape.layout === "stackDiverging"
-                          ? (row: Row) =>
-                              context.series.isStackTop(series.key, row) ? "edge" : "none"
-                          : spec.kind === "range"
-                            ? "all"
-                            : "edge"}
-                        radius={radius(context)}
-                        stackPadding={shape.layout === "stackDiverging" ? 2 : 0}
-                        fill={colorOf(series.key)}
-                        motion={tween}
-                        class="mark bar"
-                      />
-                      {#if valued}
-                        {@const order = Number(series.key.slice(1))}
-                        {#each shape.rows as row (row.key)}
-                          {@const at = spot(context, row, order)}
-                          {#if at}
-                            <Text
-                              x={at.x}
-                              y={at.y}
-                              textAnchor={at.anchor}
-                              value={spec.compact
-                                ? shortValue(row.points[order], spec.y)
-                                : pointText(row.points[order], spec.y)}
-                              class={settled ? "value" : "value enter"}
-                            />
-                          {/if}
-                        {/each}
-                      {/if}
-                    {/each}
-                  {/if}
-                  {#if !compact}
-                    {#if valueAxis}
-                      <Axis
-                        placement={lying ? "bottom" : "left"}
-                        ticks={shape.ticks}
-                        format={label}
-                        tickMarks={false}
-                        rule={false}
-                      />
-                    {/if}
-                    <Axis
-                      placement={lying ? "left" : "bottom"}
-                      ticks={spaced(context.width)}
-                      format={category}
-                      tickMarks={false}
-                      rule={false}
-                      class={lying ? "names" : undefined}
-                    />
-                  {:else if quiet}
-                    <!-- Nothing written: the marks and the headline carry it. -->
-                  {:else if labels.categories}
-                    <Axis
-                      placement={lying ? "left" : "bottom"}
-                      format={category}
-                      tickMarks={false}
-                      rule={false}
-                      class="names"
-                    />
-                  {:else if labels.ends}
-                    <Axis
-                      placement="bottom"
-                      ticks={ends}
-                      format={category}
-                      tickMarks={false}
-                      rule={false}
-                    />
-                    {@const at = lastRow && spot(context, lastRow, 0)}
-                    {#if at && labels.ends}
-                      <Text
-                        x={at.x + 6}
-                        y={at.y + 4}
-                        textAnchor="start"
-                        value={labels.ends.value}
-                        class="value end"
-                      />
-                    {/if}
-                  {/if}
-                </Svg>
-                {@render tip()}
-              {/snippet}
-            </Plot>
-          {/if}
-        </div>
-        {#if legend.keys.length}<ChartLegend
-            keys={legend.keys}
-            shares={legend.shares}
+          </div>
+        {:else if round}
+          <Round
+            {spec}
+            {shape}
+            size={plotHeight}
+            {detail}
+            {summary}
+            {settled}
+            {middle}
+            {onevidence}
+            {glyph}
+          />
+        {:else if spec.kind === "heat"}
+          <Heat
+            {spec}
+            {shape}
+            height={plotHeight}
+            {compact}
+            {quiet}
+            {summary}
+            {settled}
+            {onevidence}
+            {glyph}
+          />
+        {:else}
+          <Cartesian
+            {spec}
+            {shape}
+            {labels}
+            {detail}
+            {summary}
+            {uid}
+            height={plotHeight}
+            {settled}
+            {onevidence}
+            {glyph}
+          />
+        {/if}
+        {#if legend.length}<ChartLegend
+            entries={legend}
             layout={round ? "list" : spec.compact ? "rows" : "row"}
           />{/if}
-      </ChartContainer>
+      </div>
     {:else}<p role="status" class="caption">{m.chart_unavailable()}</p>{/if}
     {#if spec.basis?.trim() && !quiet}<p class="caption basis">{spec.basis}</p>{/if}
     {#if table}
@@ -839,12 +316,19 @@
     line-height: 1.25;
   }
 
-  .round :global(.body),
-  .radar :global(.body) {
+  .body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-inline-size: 0;
+  }
+
+  .round .body,
+  .radar .body {
     align-items: center;
   }
 
-  .chart :global(.body.beside) {
+  .body.beside {
     flex-direction: row;
     gap: 28px;
   }
@@ -856,82 +340,11 @@
     min-inline-size: 0;
   }
 
-  .spark {
+  .spark-box {
     display: block;
     inline-size: 100%;
     block-size: 100%;
     min-block-size: 16px;
-  }
-
-  .chart :global(.line),
-  .spark :global(.line) {
-    fill: none;
-    stroke-width: 2;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-
-  .tile :global(.line) {
-    stroke-width: 2.5;
-  }
-
-  .spark :global(.line) {
-    --stroke-color: var(--chart-1);
-
-    stroke-width: 1.5;
-  }
-
-  .chart :global(.area) {
-    stroke: none;
-  }
-
-  .chart :global(.dot) {
-    stroke: var(--color-surface);
-    stroke-width: 1.5;
-  }
-
-  .chart :global(.slice) {
-    transition: opacity var(--motion-fast) var(--ease-smooth);
-  }
-
-  .chart :global(.slice.dim) {
-    opacity: 0.4;
-  }
-
-  .chart :global(.track) {
-    fill: var(--color-fill);
-  }
-
-  .chart :global(.total) {
-    --fill-color: var(--color-text);
-
-    font-size: var(--text-title);
-    font-weight: 650;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: -0.02em;
-    dominant-baseline: central;
-  }
-
-  .compact :global(.total) {
-    font-size: var(--text-body);
-    font-weight: 600;
-  }
-
-  .overview :global(.total) {
-    font-size: var(--text-overview-figure);
-  }
-
-  .overview :global(.caption-text) {
-    font-size: var(--text-overview-label);
-  }
-
-  .chart :global(.cell.on) {
-    stroke: var(--color-text);
-    stroke-width: 1.5;
-  }
-
-  .chart :global(.enter) {
-    animation: arrive var(--motion-base) var(--ease-emphasized) both;
   }
 
   .caption,
@@ -1022,11 +435,5 @@
   .chip:hover:not(:disabled) {
     background: var(--color-fill-hover);
     color: var(--color-text);
-  }
-
-  @keyframes arrive {
-    from {
-      opacity: 0;
-    }
   }
 </style>

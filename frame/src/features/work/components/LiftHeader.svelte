@@ -28,7 +28,8 @@
     actions,
   }: {
     kind: string;
-    title: string;
+    /** Without one the header is a single line over a view that names itself. */
+    title?: string;
     /** One line: date · status, whatever the kind has. */
     meta?: string;
     /** Where it lives: drawn with the site's mark. */
@@ -49,9 +50,9 @@
   {#if leading || icon}<span class="glyph" aria-hidden="true">
       {#if leading}{@render leading()}{:else if icon}<Icon {icon} size={16} />{/if}
     </span>{/if}
-  <div class="titles">
+  <div class="titles" class:eyebrow={!title}>
     <p class="kind">{kind}</p>
-    <h2 class:whole>{title}</h2>
+    {#if title}<h2 class:whole>{title}</h2>{/if}
     {#if host || meta}<p class="meta">
         {#if host && onhost}<button
             type="button"
@@ -128,6 +129,25 @@
     gap: 8px;
     min-inline-size: 0;
     color: var(--color-muted);
+  }
+
+  /* Kind and where it came from on one line, level with the mark. */
+  .titles.eyebrow {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    min-block-size: 28px;
+  }
+
+  .eyebrow .kind {
+    color: var(--color-label-secondary);
+    font-size: var(--text-label);
+    font-weight: 600;
+  }
+
+  .eyebrow .meta::before {
+    color: var(--color-faint);
+    content: "·";
   }
 
   .host {
