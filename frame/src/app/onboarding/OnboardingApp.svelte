@@ -31,8 +31,8 @@
   // stays running while its page is replaced.
   let finished = $state(false);
 
-  async function finish(): Promise<boolean> {
-    const opened = await commands.onboardingFinish().catch(() => false);
+  async function finish(then: "account" | "models" | null): Promise<boolean> {
+    const opened = await commands.onboardingFinish(then).catch(() => false);
     if (opened) {
       finished = true;
       await tick();
