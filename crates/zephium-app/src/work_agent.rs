@@ -201,7 +201,6 @@ const TURN_TOKEN_FLOOR: u32 = 12_000;
 const MAX_UNREADABLE_POLLS: u8 = 12;
 const MAX_FAILED_TURNS: u8 = 3;
 const STEPS_EXHAUSTED: &str = "The step budget is used up: no more searches or reads will run. Publish the result from the sources already collected and finish.";
-const ASK_POLL: Duration = Duration::from_millis(500);
 const MAX_PREVIEWS: usize = 96;
 const INHERITED_PREVIEWS: usize = 64;
 const INHERITED_ARTIFACTS: usize = 32;
@@ -1600,8 +1599,9 @@ impl Driver {
     ) -> Result<Option<WorkAttemptStatus>, WorkError> {
         self.probe.record_activity(WorkActivityV1::WaitingForHuman);
         let since = self.wait();
+        let mut changes = self.probe.changes();
         loop {
-            tokio::time::sleep(ASK_POLL).await;
+            changes.next(crate::work_changes::FALLBACK).await;
             let state = self.probe.runtime_projection().await?;
             let execution = state
                 .executions
@@ -1986,8 +1986,9 @@ impl Driver {
         );
         let id = self.begin(step, vec![], None).await?;
         let since = self.wait();
+        let mut changes = self.probe.changes();
         loop {
-            tokio::time::sleep(ASK_POLL).await;
+            changes.next(crate::work_changes::FALLBACK).await;
             let state = self.probe.runtime_projection().await?;
             let execution = state
                 .executions

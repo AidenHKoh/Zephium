@@ -339,11 +339,11 @@ impl WorkAttemptProbe {
         &self,
         future: impl std::future::Future<Output = Result<T, WorkPublicSearchError>>,
     ) -> Result<T, WorkPublicSearchError> {
-        // Each look reads the run's whole projection: once a second keeps a
-        // run's parallel searches from crowding the store queue.
+        // Each look reads the run's whole projection: only when the work changed.
+        let mut changes = self.changes();
         let cancelled = async {
             loop {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                changes.next(crate::work_changes::FALLBACK).await;
                 if self.cancellation_requested().await.unwrap_or(false) {
                     break;
                 }

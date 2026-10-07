@@ -189,6 +189,10 @@ impl WorkNodeAttempt {
     pub fn work(&self) -> WorkId {
         self.work
     }
+    /// Durable changes to this attempt's work from now on, to wait on instead of polling.
+    pub(crate) fn changes(&self) -> crate::work_changes::WorkChanges {
+        crate::work_changes::watch(self.work)
+    }
     pub fn execution(&self) -> WorkExecutionId {
         self.execution
     }
@@ -919,6 +923,10 @@ impl WorkAttemptProbe {
     }
     pub async fn runtime_projection(&self) -> Result<WorkRuntimeProjection, WorkError> {
         read(&self.handle, self.profile, self.work).await
+    }
+    /// Durable changes to this attempt's work from now on, to wait on instead of polling.
+    pub(crate) fn changes(&self) -> crate::work_changes::WorkChanges {
+        crate::work_changes::watch(self.work)
     }
     pub async fn cancellation_requested(&self) -> Result<bool, WorkError> {
         self.cancellation_cause().await.map(|cause| cause.is_some())

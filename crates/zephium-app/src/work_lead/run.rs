@@ -12,7 +12,6 @@ use crate::work_runtime::{WorkAttemptProbe, WorkCancelCause};
 /// How long a question or a proposed change waits for the person before the
 /// run stops on it; the next request answers it.
 pub(crate) const WAIT_PATIENCE: Duration = Duration::from_secs(30 * 60);
-const POLL: Duration = Duration::from_millis(500);
 const MAX_UNREADABLE_POLLS: u8 = 12;
 pub(crate) const MAX_SOURCES: usize = 160;
 /// The address question's option words; the frame sends them back as given.
@@ -452,8 +451,9 @@ impl LeadRun {
         let id = self.begin(step, vec![]).await?;
         let waiting = self.wait();
         let since = Instant::now();
+        let mut changes = self.probe.changes();
         loop {
-            tokio::time::sleep(POLL).await;
+            changes.next(crate::work_changes::FALLBACK).await;
             let execution = self.execution().await?;
             let asked = execution
                 .steps
@@ -501,8 +501,9 @@ impl LeadRun {
         let id = self.begin(step, vec![]).await?;
         let waiting = self.wait();
         let since = Instant::now();
+        let mut changes = self.probe.changes();
         loop {
-            tokio::time::sleep(POLL).await;
+            changes.next(crate::work_changes::FALLBACK).await;
             let execution = self.execution().await?;
             let decision =
                 execution
@@ -549,6 +550,7 @@ impl LeadRun {
         self.activity(WorkActivityV1::WaitingForHuman);
         let waiting = self.wait();
         let since = Instant::now();
+        let mut changes = self.probe.changes();
         loop {
             let execution = self.execution().await?;
             let decision = execution
@@ -569,7 +571,7 @@ impl LeadRun {
             if self.cancelled().await {
                 return Ok(None);
             }
-            tokio::time::sleep(POLL).await;
+            changes.next(crate::work_changes::FALLBACK).await;
         }
     }
     /// Why the run stopped, in the person's words.

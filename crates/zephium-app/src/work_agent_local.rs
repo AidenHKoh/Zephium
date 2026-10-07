@@ -62,6 +62,7 @@ impl Driver {
         if scope != WorkCommandApprovalScopeV1::None {
             self.probe.record_activity(WorkActivityV1::WaitingForHuman);
             let since = self.wait();
+            let mut changes = self.probe.changes();
             loop {
                 let state = self.probe.runtime_projection().await?;
                 let decision = state
@@ -86,7 +87,7 @@ impl Driver {
                         .await?;
                     return Ok(Some(WorkAttemptStatus::Cancelled));
                 }
-                tokio::time::sleep(ASK_POLL).await;
+                changes.next(crate::work_changes::FALLBACK).await;
             }
         }
         if self.cancelled().await {

@@ -191,6 +191,18 @@ impl crate::Shell {
                         Ok(WorkReply::Deleted { id }) => Some(*id),
                         _ => None,
                     };
+                    #[cfg(feature = "work-runtime")]
+                    {
+                        let admitted = match &result {
+                            Ok(WorkReply::AgentAdmitted { projection, .. }) => {
+                                Some(projection.work.id)
+                            }
+                            _ => None,
+                        };
+                        if let Some(changed) = work.or(admitted) {
+                            crate::work_changes::publish(changed);
+                        }
+                    }
                     if let (Some(queue), Some(work)) = (&queue, work) {
                         let _ = queue.try_push(crate::Command::WorkChanged(
                             zephium_ipc::work::WorkChangedV1 {

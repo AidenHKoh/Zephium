@@ -2,6 +2,8 @@ use super::*;
 use zephium_core::work::collection::*;
 
 const MAX_CONCURRENT_PAGE_READS: usize = 3;
+/// How often a page read looks at the steps its pages hold for the person.
+const HELD_POLL: Duration = Duration::from_millis(500);
 
 struct PendingRead<F> {
     request: WorkAgentBrowseRequest,
@@ -328,8 +330,12 @@ impl Driver {
         // An entry question the start page's check put to the person.
         let mut entry: Option<(WorkConfirmPort, WorkStepId, String, Vec<String>)> = None;
         let mut signed_out = false;
+        // The person's answers are durable: the run's projection is read
+        // when the work changed, not on every look at the pages.
+        let mut changes = self.probe.changes();
+        let mut looked = Instant::now();
         loop {
-            let settled = tokio::time::timeout(ASK_POLL, next_read(pending))
+            let settled = tokio::time::timeout(HELD_POLL, next_read(pending))
                 .await
                 .ok();
             let port_of = |request: &WorkAgentBrowseRequest| {
@@ -419,8 +425,13 @@ impl Driver {
                     }
                 }
             }
-            if let Some((port, step, site, options)) =
-                entry.clone().filter(|(port, ..)| port.entry().is_none())
+            let look = changes.take() || looked.elapsed() >= crate::work_changes::FALLBACK;
+            if look {
+                looked = Instant::now();
+            }
+            if let Some((port, step, site, options)) = entry
+                .clone()
+                .filter(|(port, ..)| look && port.entry().is_none())
             {
                 let state = self.probe.runtime_projection().await?;
                 let answer = state
@@ -445,7 +456,7 @@ impl Driver {
                     });
                 }
             }
-            if open.iter().any(|confirm| !confirm.decided) {
+            if look && open.iter().any(|confirm| !confirm.decided) {
                 let state = self.probe.runtime_projection().await?;
                 let steps = state
                     .executions
