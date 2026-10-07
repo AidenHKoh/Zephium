@@ -1210,13 +1210,20 @@ impl AgentProviderCallConfig {
 
     #[cfg(feature = "provider-transport")]
     pub(crate) fn planning_cost_ceiling(&self, input: u32, output: u32) -> Option<u64> {
+        self.cost_ceiling(u64::from(input), output)
+    }
+
+    /// Strict ceiling for `input` and `output` tokens: every input token at
+    /// the highest input rate, rounded up once.
+    pub(crate) fn cost_ceiling(&self, input: u64, output: u32) -> Option<u64> {
         let rates = self.catalog.rates();
         let input_rate = rates
             .uncached_input()
             .max(rates.cached_input())
             .max(rates.cache_write_input());
-        let numerator = u128::from(input) * u128::from(input_rate)
-            + u128::from(output) * u128::from(rates.output());
+        let numerator = u128::from(input)
+            .checked_mul(u128::from(input_rate))?
+            .checked_add(u128::from(output) * u128::from(rates.output()))?;
         u64::try_from(numerator.div_ceil(1_000_000)).ok()
     }
     #[cfg(feature = "provider-transport")]

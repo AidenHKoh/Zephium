@@ -494,6 +494,7 @@ impl AgentProviderRequest {
                 request.id(),
                 policy.remaining_operations(request.lease())?,
                 policy.remaining_model_tokens(request.lease())?,
+                policy.remaining_cost_micro_usd(request.lease())?,
             )?;
         }
         self.body = encode_native_action_budget(
@@ -1859,6 +1860,7 @@ impl AgentPreparedObservationRequest {
             call_request.id(),
             policy.remaining_operations(call_request.lease())?,
             policy.remaining_model_tokens(call_request.lease())?,
+            policy.remaining_cost_micro_usd(call_request.lease())?,
         )?;
         let body = encode_native_action_budget(body, call_request.remaining_native_actions())?;
         let continuation_transcript = transcript.into_transcript();
@@ -2180,6 +2182,7 @@ impl AgentPreparedObservationRequest {
             call_request.id(),
             policy.remaining_operations(call_request.lease())?,
             policy.remaining_model_tokens(call_request.lease())?,
+            policy.remaining_cost_micro_usd(call_request.lease())?,
         )?;
         let body = encode_native_action_budget(body, call_request.remaining_native_actions())?;
         let structured_input = conservative_request_measurement(&config, &body)?;
@@ -4428,19 +4431,38 @@ fn append_act_targets(
     encode_bounded_provider_body(&wire)
 }
 
+/// Bytes the decision-budget fact and its envelope add to a request.
+const DECISION_BUDGET_FACT_BYTES: u64 = 512;
+
 fn encode_decision_budget(
     body: Vec<u8>,
     config: &AgentProviderCallConfig,
     call: crate::AgentModelCallId,
     remaining_operations: u32,
     remaining_model_tokens: u64,
+    remaining_cost_micro_usd: u64,
 ) -> Result<Vec<u8>, AgentProviderRequestError> {
     let Some(remaining) = config.remaining_decision_calls(call)? else {
         return Ok(body);
     };
-    let remaining = u32::from(remaining).min(remaining_operations.saturating_sub(1));
+    let mut remaining = u32::from(remaining).min(remaining_operations.saturating_sub(1));
     if remaining == 0 {
         return Err(crate::AgentPolicyError::Budget.into());
+    }
+    // A page whose money covers this call and one more of its size makes
+    // this its last decision, so the mapping call still fits. Spending it on
+    // browsing would leave cited evidence that no call can map.
+    let this_call = conservative_request_measurement(config, &body)
+        .ok()
+        .and_then(|measured| {
+            config.cost_ceiling(
+                u64::from(measured.tokens()) + DECISION_BUDGET_FACT_BYTES,
+                config.max_output_tokens(),
+            )
+        })
+        .ok_or(AgentProviderRequestError::Encoding)?;
+    if remaining_cost_micro_usd < this_call.saturating_mul(2) {
+        remaining = 1;
     }
     let text = format!(
         "ZEPHIUM_HOST_DECISION_BUDGET_V1\ndecision_calls_remaining_including_this={remaining}; \
@@ -7329,6 +7351,7 @@ mod tests {
                 crate::AgentModelCallId::new(id).unwrap(),
                 u32::MAX,
                 64_000,
+                u64::MAX,
             )
             .unwrap();
             let wire: Value = serde_json::from_slice(&body).unwrap();
@@ -7369,7 +7392,8 @@ mod tests {
                 &config,
                 crate::AgentModelCallId::new(id).unwrap(),
                 u32::MAX,
-                64_000
+                64_000,
+                u64::MAX
             )
             .is_err());
         }
@@ -7380,6 +7404,7 @@ mod tests {
             crate::AgentModelCallId::new(44).unwrap(),
             u32::MAX,
             64_000,
+            u64::MAX,
         )
         .unwrap();
         let wire: Value = serde_json::from_slice(&body).unwrap();
@@ -7410,6 +7435,7 @@ mod tests {
                 first,
                 operations,
                 64_000,
+                u64::MAX,
             );
             if operations < 2 {
                 assert!(matches!(
@@ -7447,6 +7473,7 @@ mod tests {
                 first,
                 operations,
                 64_000,
+                u64::MAX,
             )
             .unwrap();
             let tools = wire_tool_names(&body);
@@ -7455,9 +7482,48 @@ mod tests {
         }
         let body = encode_openai_body(&base, "objective", "evidence").unwrap();
         assert_eq!(
-            encode_decision_budget(body.clone(), &base, first, u32::MAX, 64_000).unwrap(),
+            encode_decision_budget(body.clone(), &base, first, u32::MAX, 64_000, u64::MAX).unwrap(),
             body
         );
+    }
+
+    #[test]
+    fn a_page_short_of_money_extracts_while_the_mapping_call_still_fits() {
+        let first = crate::AgentModelCallId::new(41).unwrap();
+        let mut base = openai_config(128)
+            .restrict_to_navigation_and_extraction()
+            .with_baseline_read()
+            .with_progressive_observation();
+        base.input_accounting = super::super::AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation;
+        let config = base.with_decision_budget(first, 20).unwrap();
+        let body = encode_openai_body(&config, "objective", "current evidence").unwrap();
+        let measured = conservative_request_measurement(&config, &body).unwrap();
+        let this_call = config
+            .cost_ceiling(
+                u64::from(measured.tokens()) + DECISION_BUDGET_FACT_BYTES,
+                config.max_output_tokens(),
+            )
+            .unwrap();
+        assert!(this_call > 0);
+        let encode = |cost| {
+            let body = encode_decision_budget(body.clone(), &config, first, u32::MAX, 64_000, cost)
+                .unwrap();
+            serde_json::from_slice::<Value>(&body).unwrap()
+        };
+        let plenty = encode(2 * this_call);
+        assert!(plenty["input"][2]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("decision_calls_remaining_including_this=19"));
+        assert!(plenty["tools"].as_array().unwrap().len() > 1);
+        let short = encode(2 * this_call - 1);
+        assert!(short["input"][2]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("decision_calls_remaining_including_this=1"));
+        assert_eq!(short["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(short["tools"][0]["name"], "extract");
+        assert_eq!(short["tool_choice"], "required");
     }
 
     #[test]
