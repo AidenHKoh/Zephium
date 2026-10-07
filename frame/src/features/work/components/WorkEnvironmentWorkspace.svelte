@@ -73,7 +73,6 @@
   import type { BoardActions } from "../lib/canvas-context";
   import type { ObjectActions, ObjectView } from "../lib/board/types";
   import { objectIcon, objectLabel } from "../lib/object-kind";
-  import HostGlyph from "./cards/HostGlyph.svelte";
   import { clipText, defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
   import { youtubeThumbnail } from "../lib/link-media";
@@ -104,6 +103,7 @@
   } from "../lib/project-environment-thread";
   import { artifactView } from "../lib/project-work";
   import RequestLift from "./lift/RequestLift.svelte";
+  import SourcesLift from "./lift/SourcesLift.svelte";
   import { failureLine, humanPage, regionOf, sameRegion } from "../lib/work-human";
   import { openOver, type PaneRect } from "../lib/pane-geometry";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
@@ -2349,49 +2349,44 @@
             <module.default record={liftedCommand} />
           {/await}
         </div>
-      {:else if liftedItem?.sources}
-        <div class="lift-body">
-          <LiftHeader
-            kind={liftedItem.type === "part" ? m.work_part() : m.work_sources()}
-            title={liftedItem.title}
-            meta={liftedItem.type === "part" && liftedItem.part?.helper === "browser"
-              ? m.work_part_pages({ count: liftedItem.sources.length })
-              : m.work_env_sources_count({ count: liftedItem.sources.length })}
-            icon={GlobalIcon}
-          />
-          {#if liftedItem.part?.notes?.length}{#await import("./objects/ObjectView.svelte") then module}
-              <div class="lift-notes">
+      {:else if liftedItem?.sources || liftedItem?.drawn}
+        {@const part = liftedItem.type === "part"}
+        <SourcesLift
+          kind={part ? m.work_part() : m.work_sources()}
+          title={part ? liftedItem.title : undefined}
+          rows={liftedItem.sources
+            ? liftedItem.sources.map((row) => ({
+                key: row.key,
+                title: row.title,
+                host: row.where,
+                url: row.url,
+                ...(row.note ? { note: row.note } : {}),
+                ...(row.file ? { file: row.file.record } : {}),
+              }))
+            : (liftedItem.drawn?.rows ?? []).map((row) => ({
+                key: row.key,
+                title: row.title,
+                host: row.host,
+                url: row.url,
+                ...(row.file ? { file: row.file.record } : {}),
+              }))}
+          unread={liftedItem.drawn?.unread ?? []}
+          onopen={(row) => {
+            if (row.file) {
+              liftFile = fileEvidence(context.objectives, row.file) ?? null;
+              return;
+            }
+            lifted = null;
+            openPane({ kind: "url", url: row.url }, null);
+          }}
+        >
+          {#snippet notes()}{#if liftedItem?.part?.notes?.length}{#await import("./objects/ObjectView.svelte") then module}
                 {#each liftedItem.part.notes as note (note.id)}<module.default
                     object={note}
                     centre
                   />{/each}
-              </div>
-            {/await}{/if}
-          <ul class="lift-sources">
-            {#each liftedItem.sources as row (row.key)}
-              <li>
-                <button
-                  type="button"
-                  onclick={() => {
-                    if (row.file) {
-                      liftFile = fileEvidence(context.objectives, row.file.record) ?? null;
-                      return;
-                    }
-                    const url = row.url;
-                    lifted = null;
-                    openPane({ kind: "url", url }, null);
-                  }}
-                >
-                  <HostGlyph host={row.where} file={!!row.file} size={22} />
-                  <span class="source-text">
-                    <strong>{row.title}</strong>
-                    <span>{row.note || row.where}</span>
-                  </span>
-                </button>
-              </li>
-            {/each}
-          </ul>
-        </div>
+              {/await}{/if}{/snippet}
+        </SourcesLift>
       {:else if liftedElement?.reference.kind === "resource" && liftedItem?.media}
         {@const asset = liftedItem.media.asset}
         {@const image =
@@ -2798,68 +2793,6 @@
     flex-direction: column;
     gap: 16px;
     min-block-size: 0;
-  }
-
-  /* What a research part handed the lead, read before the pages it came from. */
-  .lift-notes {
-    display: flex;
-    flex-direction: column;
-    gap: 28px;
-    margin-block-end: 28px;
-  }
-
-  .lift-sources {
-    list-style: none;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin: 0;
-    padding: 0;
-  }
-
-  .lift-sources button {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    inline-size: 100%;
-    box-sizing: border-box;
-    padding: 8px 10px;
-    border: 0;
-    border-radius: var(--radius-control-compact);
-    background: transparent;
-    color: var(--color-text);
-    font: inherit;
-    text-align: start;
-    cursor: default;
-    transition: background-color var(--motion-instant) ease;
-  }
-
-  .lift-sources button:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: -2px;
-  }
-
-  .lift-sources button:hover {
-    background: var(--color-fill-hover);
-  }
-
-  .source-text {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-inline-size: 0;
-  }
-
-  .source-text strong {
-    font-weight: 550;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .source-text span {
-    color: var(--color-muted);
-    font-size: var(--text-caption);
   }
 
   .lift-media {

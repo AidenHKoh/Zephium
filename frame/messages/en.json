@@ -1768,6 +1768,8 @@
   "work_lift_run_steps_one": "1 step",
   "work_lift_run_label": "What the agent did",
   "work_lift_ask": "Ask about this",
+  "work_lift_read": "Read",
+  "work_lift_unread": "Would not open",
   "work_lift_ask_prefix": "About {name}: ",
   "work_timeline_ms": "{ms} ms",
   "work_timeline_seconds": "{seconds} s",
