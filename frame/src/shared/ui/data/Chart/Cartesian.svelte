@@ -159,14 +159,17 @@
           to = point.y;
         }
         const offset = stacked || spec.series.length === 1 ? 0 : inner.start(order);
-        const across = stacked || spec.series.length === 1 ? bands.width : inner.width;
-        const start = bands.start(row.index) + offset;
+        const room = stacked || spec.series.length === 1 ? bands.width : inner.width;
+        // A few bars in a wide plot stay bars, centred in their room, not slabs.
+        const across = Math.min(room, lying ? 28 : 64);
+        const start = bands.start(row.index) + offset + (room - across) / 2;
         let a = value(from);
         let b = value(to);
         // A range quoted as one figure is a capsule at that figure, never nothing.
-        if (spec.kind === "range" && Math.abs(b - a) < across) {
+        const least = Math.min(across, 8);
+        if (spec.kind === "range" && Math.abs(b - a) < least) {
           const mid = (a + b) / 2;
-          const half = (across / 2) * (b >= a ? 1 : -1);
+          const half = (least / 2) * (b >= a ? 1 : -1);
           [a, b] = [mid - half, mid + half];
         }
         // Parts of a stack are parted by a 2px gap on the side away from the baseline.
