@@ -329,11 +329,18 @@ fn automatically_restarting(reason: COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON) -> b
 
 impl Downloads {
     pub(super) fn ensure_timer(self: &Rc<Self>) {
+        let (period, slow) = self.tick_period();
         if self.timer.borrow().is_some() {
-            return;
+            if self.timer_slow.get() == slow {
+                return;
+            }
+            if let Some(timer) = self.timer.borrow_mut().take() {
+                stop_timer(timer);
+            }
         }
+        self.timer_slow.set(slow);
         let weak = Rc::downgrade(self);
-        let timer = timer::schedule(Duration::from_millis(200), move || {
+        let timer = timer::schedule(period, move || {
             if let Some(manager) = weak.upgrade() {
                 manager.timer.borrow_mut().take();
                 manager.tick();
