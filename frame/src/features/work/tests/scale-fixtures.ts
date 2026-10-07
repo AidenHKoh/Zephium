@@ -253,26 +253,6 @@ export function drawn(root: HTMLElement) {
   };
 }
 
-/** What wakes while nothing happens: animation frames and timers asked for over two seconds. */
-export async function idle() {
-  const raf = window.requestAnimationFrame;
-  const timeout = window.setTimeout as unknown as (handler: TimerHandler, ms?: number) => number;
-  let frames = 0;
-  let timers = 0;
-  window.requestAnimationFrame = (callback) => {
-    frames += 1;
-    return raf.call(window, callback);
-  };
-  window.setTimeout = ((handler: TimerHandler, ms?: number) => {
-    timers += 1;
-    return timeout.call(window, handler, ms);
-  }) as unknown as typeof window.setTimeout;
-  await new Promise((done) => timeout.call(window, done, 2000));
-  window.requestAnimationFrame = raf;
-  window.setTimeout = timeout as unknown as typeof window.setTimeout;
-  return { frames, timers };
-}
-
 /** Over every row of the canvas and back, a card at a time, two frames on each. */
 export async function sweep(center: (id: string) => void, count: number) {
   const columns = Math.ceil(Math.sqrt(count));

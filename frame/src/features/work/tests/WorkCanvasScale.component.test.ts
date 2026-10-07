@@ -3,7 +3,8 @@ import { test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { commands, page } from "vitest/browser";
 import WorkCanvas from "../components/WorkCanvas.svelte";
-import { drawn, drive, idle, scaleCanvas, settle, sweep, type ScaleMix } from "./scale-fixtures";
+import { wakeupCounter } from "$shared/testing/idle";
+import { drawn, drive, scaleCanvas, settle, sweep, type ScaleMix } from "./scale-fixtures";
 
 /**
  * A seeded canvas of N mixed items measured in Playwright's WebKit: what
@@ -22,6 +23,7 @@ declare module "vitest/browser" {
   }
 }
 
+const counter = wakeupCounter();
 let pictures = new Map<string, string>();
 vi.mock("$domain/resources", async (original) => ({
   ...(await original<typeof import("$domain/resources")>()),
@@ -72,7 +74,7 @@ test.skipIf(!cases.length).each(cases.length ? cases : [[50, 1] as const])(
     const open = Math.round(performance.now() - opened);
     const atOpen = drawn(root);
     const openFootprint = await commands.webkitFootprint();
-    const rest = await idle();
+    const rest = await counter.rest(2000);
     if (env.VITE_SCALE_CSS)
       document.head.insertAdjacentHTML(
         "beforeend",

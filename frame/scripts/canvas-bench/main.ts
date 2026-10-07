@@ -5,16 +5,17 @@
 import "$styles/global.css";
 import { flushSync, mount, unmount } from "svelte";
 import WorkCanvas from "../../src/features/work/components/WorkCanvas.svelte";
+import { wakeupCounter } from "../../src/shared/testing/idle";
 import {
   drawn,
   drive,
-  idle,
   scaleCanvas,
   settle,
   sweep,
   type ScaleMix,
 } from "../../src/features/work/tests/scale-fixtures";
 
+const counter = wakeupCounter();
 const pictures = new Map<string, string>();
 (globalThis as { __benchPictures?: Map<string, string> }).__benchPictures = pictures;
 
@@ -62,7 +63,7 @@ const bench = {
     await settle(host);
     return { mountMs: Math.round(mounted), ...drawn(host) };
   },
-  idle,
+  idle: () => counter.rest(2000),
   css(text: string) {
     document.getElementById("bench-css")?.remove();
     if (text)
