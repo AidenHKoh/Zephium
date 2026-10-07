@@ -511,6 +511,72 @@ pub(crate) fn sign_in_wall(observation: &SemanticObservation) -> bool {
         })
 }
 
+/// Titles a challenge widget's own frame carries. The frame is never read;
+/// its title alone says a person has to pass it.
+const EMBEDDED_CHALLENGE_TITLES: [&str; 5] = [
+    "hcaptcha",
+    "security challenge",
+    "recaptcha challenge",
+    "captcha challenge",
+    "verify you are human",
+];
+/// reCAPTCHA's checkbox and the score badge many pages carry share one frame
+/// title; the checkbox is the wider one (304 against 256 CSS pixels).
+const RECAPTCHA_CHECKBOX_MIN_WIDTH: u32 = 290;
+
+/// A visible challenge widget in an embedded frame, on a page of any size:
+/// the agent cannot pass it and must not try.
+pub(crate) fn embedded_human_challenge(observation: &SemanticObservation) -> bool {
+    observation
+        .frames()
+        .iter()
+        .flat_map(SemanticSnapshot::nodes)
+        .filter(|node| node.role() == SemanticRole::FrameBoundary)
+        .any(|node| {
+            let (Some(name), Some(rect)) = (node.name(), node.geometry()) else {
+                return false;
+            };
+            let name = name.as_str().trim().to_ascii_lowercase();
+            EMBEDDED_CHALLENGE_TITLES
+                .iter()
+                .any(|title| name.contains(title))
+                || (name == "recaptcha" && rect.width() >= RECAPTCHA_CHECKBOX_MIN_WIDTH)
+        })
+}
+
+/// Words a checkout shows around its card fields.
+const PAYMENT_WORDS: [&str; 5] = ["card", "checkout", "billing", "payment", "płatność"];
+
+/// A visible field only the person may type into: a one-time code, a card
+/// number or a security code. Rust reads it as secret and the page agent
+/// may never fill it, so the step goes to the person instead of a refusal
+/// the model keeps meeting. Beside a checkout it is a payment, otherwise a
+/// sign-in step such as a two-factor code.
+pub(crate) fn secret_entry(observation: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
+    let snapshot = observation.frames().first()?;
+    let nodes = snapshot.nodes();
+    nodes
+        .iter()
+        .any(|node| {
+            node.sensitivity() == SemanticSensitivity::Secret
+                && node.role() != SemanticRole::Password
+                && node.geometry().is_some()
+                && !node.states().contains(SemanticState::Disabled)
+                && node.operations().contains(SemanticOperationClass::Fill)
+        })
+        .then(|| {
+            if nodes.iter().any(|node| {
+                matches!(node.role(), SemanticRole::Heading | SemanticRole::Button)
+                    && (names_any(&label(node), &PAYMENT_WORDS)
+                        || names_any(&label(node), &PURCHASE_WORDS))
+            }) {
+                AgentBrowserHumanReason::SensitiveEffect
+            } else {
+                AgentBrowserHumanReason::SignIn
+            }
+        })
+}
+
 /// What the person sees before a held step runs, built only from the page.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Preview {
@@ -1122,7 +1188,13 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             return Some(AgentBrowserHumanReason::UserDecision);
         }
         drop(state);
-        sign_in_wall(observation).then_some(AgentBrowserHumanReason::SignIn)
+        if sign_in_wall(observation) {
+            return Some(AgentBrowserHumanReason::SignIn);
+        }
+        if embedded_human_challenge(observation) {
+            return Some(AgentBrowserHumanReason::HumanChallenge);
+        }
+        secret_entry(observation)
     }
 
     fn model_action_operations(
@@ -1947,6 +2019,73 @@ mod tests {
             policy.consent_dismissal(&banner),
             Some(banner.frames()[0].nodes()[3].reference())
         );
+    }
+
+    #[test]
+    fn a_code_card_or_challenge_the_agent_cannot_pass_goes_to_the_person() {
+        let policy = SiteWorkPolicy {
+            gate: Arc::new(SiteGate::new("github.com".into(), false, false)),
+            asks: true,
+        };
+        let at = json!({"x":10,"y":50,"w":200,"h":30});
+        // A two-factor page names no sign-in phrase; its code field is secret.
+        let two_factor = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"heading","n":"Two-factor authentication","l":1}),
+            json!({"k":3,"p":0,"r":"textbox","n":"Authentication code","q":"secret","o":11,"b":at}),
+            json!({"k":4,"p":0,"r":"button","n":"Verify","o":1,"ak":1}),
+        ]);
+        assert!(!sign_in_wall(&two_factor));
+        assert_eq!(
+            policy.human_wall(&two_factor),
+            Some(AgentBrowserHumanReason::SignIn)
+        );
+        let checkout = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"heading","n":"Payment","l":2}),
+            json!({"k":3,"p":0,"r":"textbox","n":"Card number","q":"secret","o":11,"b":at}),
+            json!({"k":4,"p":0,"r":"button","n":"Place order","o":1,"ak":1}),
+        ]);
+        assert_eq!(
+            policy.human_wall(&checkout),
+            Some(AgentBrowserHumanReason::SensitiveEffect)
+        );
+        // Hidden or read-only secret fields hold nothing.
+        for field in [
+            json!({"k":3,"p":0,"r":"textbox","n":"Card number","q":"secret","o":11}),
+            json!({"k":3,"p":0,"r":"textbox","n":"Card number","q":"secret","o":9,"b":at}),
+        ] {
+            let quiet = page(vec![
+                json!({"k":1,"r":"document","o":16}),
+                json!({"k":2,"p":0,"r":"heading","n":"Payment","l":2}),
+                field,
+            ]);
+            assert_eq!(policy.human_wall(&quiet), None);
+        }
+        let challenge = |title: &str, width: u32| {
+            page(vec![
+                json!({"k":1,"r":"document","o":16}),
+                json!({"k":2,"p":0,"r":"textbox","n":"Email","o":11,"b":at}),
+                json!({"k":3,"p":0,"r":"frame_boundary","n":title,"b":{"x":10,"y":90,"w":width,"h":78}}),
+            ])
+        };
+        for (title, width) in [
+            (
+                "Widget containing checkbox for hCaptcha security challenge",
+                300,
+            ),
+            ("Widget containing a Cloudflare security challenge", 300),
+            ("reCAPTCHA", 304),
+        ] {
+            assert_eq!(
+                policy.human_wall(&challenge(title, width)),
+                Some(AgentBrowserHumanReason::HumanChallenge),
+                "{title}"
+            );
+        }
+        // reCAPTCHA's score badge shares the title and stands on many pages.
+        assert_eq!(policy.human_wall(&challenge("reCAPTCHA", 256)), None);
+        assert_eq!(policy.human_wall(&challenge("Embedded video", 640)), None);
     }
 
     #[test]
