@@ -46,7 +46,10 @@ export function keyState(models: WorkModelsV1 | null, provider: WorkModelProvide
 /** A provider can run calls now: its key is set and not refused. */
 export function usable(models: WorkModelsV1 | null, provider: WorkModelProvider): boolean {
   if (!models) return false;
-  if (provider === "cloud") return false;
+  if (provider === "cloud")
+    return (
+      models.cloud.signed_in && models.entries.some((entry) => entry.model.provider === "cloud")
+    );
   if (provider === "compatible")
     return (
       !!models.providers.find((row) => row.provider === "compatible")?.base &&
@@ -60,9 +63,9 @@ type ModelGroup = { provider: WorkModelProvider; entries: WorkModelEntry[] };
 
 /**
  * The picker's list for a role: every curated model of usable providers,
- * recommended first, grouped by provider. The person's own
- * server adds the models it serves. Providers without a key are listed
- * apart, as needing one.
+ * recommended first, grouped by provider, the signed-in account's hosted
+ * models first. The person's own server adds the models it serves.
+ * Providers without a key are listed apart, as needing one.
  */
 export function pickerGroups(
   models: WorkModelsV1 | null,
@@ -70,7 +73,7 @@ export function pickerGroups(
   endpoint: readonly WorkModelEntry[] = [],
 ) {
   const entries = [...(models?.entries ?? []), ...endpoint];
-  const order: readonly WorkModelProvider[] = keyedProviders;
+  const order: readonly WorkModelProvider[] = ["cloud", ...keyedProviders];
   const ready: ModelGroup[] = [];
   const needsKey: WorkModelProvider[] = [];
   for (const provider of order) {

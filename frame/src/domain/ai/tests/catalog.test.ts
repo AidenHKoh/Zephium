@@ -4,19 +4,19 @@ import { pickerGroups, shortName, usable } from "../catalog";
 import { entry, models } from "$shared/testing/work-models";
 
 describe("the picker's list", () => {
-  test("groups the curated models of usable providers, recommended first, with Cloud hidden", () => {
+  test("groups the curated models of usable providers, recommended first, hosted first", () => {
     const view = models({
       keys: { anthropic: "valid", open_ai: "set", google: "invalid" },
       cloud: true,
     });
     const { ready, needsKey } = pickerGroups(view, "lead");
-    expect(ready.map((group) => group.provider)).toEqual(["anthropic", "open_ai"]);
-    expect(ready[0]!.entries.map((item) => item.id)).toEqual([
+    expect(ready.map((group) => group.provider)).toEqual(["cloud", "anthropic", "open_ai"]);
+    expect(ready[1]!.entries.map((item) => item.id)).toEqual([
       "anthropic/claude-opus-5-5",
       "anthropic/claude-sonnet-5-5",
       "anthropic/claude-fable-5-1",
     ]);
-    expect(ready[1]!.entries.map((item) => item.id)).toEqual([
+    expect(ready[2]!.entries.map((item) => item.id)).toEqual([
       "openai/gpt-6-luna",
       "openai/gpt-6-sol",
       "openai/gpt-6-astra",
@@ -24,6 +24,10 @@ describe("the picker's list", () => {
     // A refused key reads as needing one, not as broken; OpenRouter and a
     // custom server are optional and never ask.
     expect(needsKey).toEqual(["google", "deep_seek"]);
+    // Signed out, hosted models are neither offered nor listed as needing a key.
+    const signedOut = pickerGroups({ ...view, cloud: { signed_in: false, plan: null } }, "lead");
+    expect(signedOut.ready.map((group) => group.provider)).toEqual(["anthropic", "open_ai"]);
+    expect(signedOut.needsKey).not.toContain("cloud");
   });
 
   test("a custom server adds the models it serves", () => {
