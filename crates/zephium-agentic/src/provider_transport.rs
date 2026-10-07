@@ -323,11 +323,10 @@ fn load_windows_credential<P: AgentCredentialBinding>(
 #[cfg(feature = "probe-harness")]
 pub fn load_probe_openai_credential() -> Result<AgentProviderCredential, AgentProviderVaultError> {
     #[cfg(target_os = "macos")]
-    {
-        return load_macos_probe_openai_credential();
-    }
+    let loaded = load_macos_probe_openai_credential();
     #[cfg(not(target_os = "macos"))]
-    load_development_openai_credential()
+    let loaded = load_development_openai_credential();
+    loaded
 }
 
 /// Loads the exact development OpenAI key into a move-only zeroizing credential.
