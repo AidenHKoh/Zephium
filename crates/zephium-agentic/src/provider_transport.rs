@@ -20,6 +20,8 @@ pub mod agent;
 pub mod decision;
 /// General tool-calling transports for the lead agent.
 pub mod lead;
+/// Public search through the chosen model's own provider search.
+pub mod model_search;
 pub mod planning;
 mod rig;
 /// Bounded non-reasoning provider-native public search.

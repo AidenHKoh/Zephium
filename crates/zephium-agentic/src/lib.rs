@@ -674,6 +674,8 @@ pub use provider_transport::planning::{OpenAiWorkPlanner, WorkPlanningConfig};
 pub use provider_transport::synthesis::OpenAiWorkSynthesizer;
 
 #[cfg(feature = "provider-transport")]
+pub use provider_transport::model_search::ModelNativeSearch;
+#[cfg(feature = "provider-transport")]
 pub use provider_transport::search::{
     OpenAiPublicSearch, OpenAiPublicSearchCitation, OpenAiPublicSearchConfig,
     OpenAiPublicSearchResult,

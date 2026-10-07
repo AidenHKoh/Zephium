@@ -601,7 +601,7 @@ fn untracked_citation(url: &str) -> Option<String> {
 
 /// Rewrites tracked citation addresses in the citations and in the answer's
 /// own links, moving every citation span with the text it covers.
-fn untrack_answer(
+pub(super) fn untrack_answer(
     text: String,
     mut citations: Vec<OpenAiPublicSearchCitation>,
 ) -> (String, Vec<OpenAiPublicSearchCitation>) {
@@ -676,7 +676,7 @@ mod tests;
 
 /// Admitted public context rides with the query as data. Rust admitted every
 /// body; the model is told they are user-selected public results, not rules.
-fn search_input(
+pub(super) fn search_input(
     query: &str,
     context: &[zephium_core::work::context::WorkContextBody],
 ) -> Result<String, WorkError> {
