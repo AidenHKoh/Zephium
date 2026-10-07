@@ -135,6 +135,7 @@ pub(crate) const OPENAI_STANDARD_SERVICE_TIER: &str = "default";
 pub(crate) const ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST: &str = "standard_only";
 pub(crate) const ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE: &str = "standard";
 pub(crate) const ANTHROPIC_GLOBAL_INFERENCE_GEO: &str = "global";
+pub(crate) const MODEL_REPORTED_SERVICE_TIER: &str = "model-reported";
 
 /// Explicit immutable reasoning effort selected for one model call.
 ///
@@ -198,6 +199,18 @@ pub enum AgentProviderBillingClass {
     OpenAiDefault,
     /// Anthropic standard capacity and global inference.
     AnthropicStandardGlobal,
+    /// Usage the person's chosen model reported, priced from their catalog.
+    ModelReported,
+}
+
+impl AgentProviderBillingClass {
+    /// Request protocol this billing class can price.
+    pub const fn provider(self) -> AgentProviderKind {
+        match self {
+            Self::OpenAiDefault | Self::ModelReported => AgentProviderKind::OpenAiResponses,
+            Self::AnthropicStandardGlobal => AgentProviderKind::AnthropicMessages,
+        }
+    }
 }
 
 /// Closed provider execution route selected by the trusted catalog.
@@ -211,13 +224,17 @@ pub enum AgentProviderResponseRoute {
     OpenAiDefault,
     /// Anthropic standard capacity constrained to global inference.
     AnthropicStandardGlobal,
+    /// The person's chosen model, called through its own client. Requests
+    /// keep the OpenAI Responses shape internally and are translated per call;
+    /// the response identity is the requested model, never a provider claim.
+    ModelReported,
 }
 
 impl AgentProviderResponseRoute {
     /// Provider protocol compatible with this exact route.
     pub const fn provider(self) -> AgentProviderKind {
         match self {
-            Self::OpenAiDefault => AgentProviderKind::OpenAiResponses,
+            Self::OpenAiDefault | Self::ModelReported => AgentProviderKind::OpenAiResponses,
             Self::AnthropicStandardGlobal => AgentProviderKind::AnthropicMessages,
         }
     }
@@ -227,12 +244,13 @@ impl AgentProviderResponseRoute {
         match self {
             Self::OpenAiDefault => AgentProviderBillingClass::OpenAiDefault,
             Self::AnthropicStandardGlobal => AgentProviderBillingClass::AnthropicStandardGlobal,
+            Self::ModelReported => AgentProviderBillingClass::ModelReported,
         }
     }
 
     pub(crate) const fn request_service_tier(self) -> &'static str {
         match self {
-            Self::OpenAiDefault => OPENAI_STANDARD_SERVICE_TIER,
+            Self::OpenAiDefault | Self::ModelReported => OPENAI_STANDARD_SERVICE_TIER,
             Self::AnthropicStandardGlobal => ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
         }
     }
@@ -241,12 +259,13 @@ impl AgentProviderResponseRoute {
         match self {
             Self::OpenAiDefault => OPENAI_STANDARD_SERVICE_TIER,
             Self::AnthropicStandardGlobal => ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE,
+            Self::ModelReported => MODEL_REPORTED_SERVICE_TIER,
         }
     }
 
     pub(crate) const fn response_inference_geo(self) -> Option<&'static str> {
         match self {
-            Self::OpenAiDefault => None,
+            Self::OpenAiDefault | Self::ModelReported => None,
             Self::AnthropicStandardGlobal => Some(ANTHROPIC_GLOBAL_INFERENCE_GEO),
         }
     }
@@ -503,6 +522,7 @@ fn response_identity_guard(
     hasher.update([match route {
         AgentProviderResponseRoute::OpenAiDefault => 1,
         AgentProviderResponseRoute::AnthropicStandardGlobal => 2,
+        AgentProviderResponseRoute::ModelReported => 3,
     }]);
     hasher.update([match reasoning_effort {
         AgentProviderReasoningEffort::None => 1,
@@ -723,14 +743,32 @@ pub enum AgentProviderInputAccountingMode {
     /// then replaced by an authenticated `/responses/input_tokens` count before
     /// model generation.
     ProviderExactAfterConservativeReservation,
+    /// The person's chosen model. The complete request is reserved before
+    /// dispatch as a strict upper bound: its UTF-8 bytes without image data,
+    /// plus a fixed envelope allowance and a fixed allowance per image. The
+    /// call then settles on the usage its provider reports. This is never
+    /// exact admission: reported usage above the reservation is charged the
+    /// reservation and fails the call.
+    ProviderReportedAfterConservativeReservation,
 }
 
 impl AgentProviderInputAccountingMode {
     const fn fixed_input_tokens(self) -> Option<u32> {
         match self {
             Self::ExactLocal { fixed_input_tokens } => Some(fixed_input_tokens),
-            Self::ProviderExactAfterConservativeReservation => None,
+            Self::ProviderExactAfterConservativeReservation
+            | Self::ProviderReportedAfterConservativeReservation => None,
         }
+    }
+
+    /// Whether admission reserves the whole serialized request rather than a
+    /// locally counted payload and fixed envelope.
+    pub const fn reserves_whole_request(self) -> bool {
+        matches!(
+            self,
+            Self::ProviderExactAfterConservativeReservation
+                | Self::ProviderReportedAfterConservativeReservation
+        )
     }
 }
 
@@ -783,13 +821,27 @@ impl AgentProviderCallConfig {
             }
             AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
                 if catalog.provider() != AgentProviderKind::OpenAiResponses
+                    || catalog.response_route() != AgentProviderResponseRoute::OpenAiDefault
+                    || catalog.pricing_profile().max_input_tokens()
+                        > pricing::MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS =>
+            {
+                return Err(AgentProviderContractError::InputAccountingMode);
+            }
+            AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation
+                if catalog.response_route() != AgentProviderResponseRoute::ModelReported
                     || catalog.pricing_profile().max_input_tokens()
                         > pricing::MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS =>
             {
                 return Err(AgentProviderContractError::InputAccountingMode);
             }
             AgentProviderInputAccountingMode::ExactLocal { .. }
-            | AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation => {}
+                if catalog.response_route() == AgentProviderResponseRoute::ModelReported =>
+            {
+                return Err(AgentProviderContractError::InputAccountingMode);
+            }
+            AgentProviderInputAccountingMode::ExactLocal { .. }
+            | AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+            | AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation => {}
         }
         if max_output_tokens == 0 || u64::from(max_output_tokens) > MAX_AGENT_RUN_MODEL_TOKENS {
             return Err(AgentProviderContractError::OutputTokens);
@@ -951,8 +1003,7 @@ impl AgentProviderCallConfig {
         max_calls: u8,
     ) -> Result<Self, AgentProviderContractError> {
         if self.provider() != AgentProviderKind::OpenAiResponses
-            || self.input_accounting
-                != AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+            || !self.input_accounting.reserves_whole_request()
         {
             return Err(AgentProviderContractError::InputAccountingMode);
         }
@@ -1334,8 +1385,7 @@ impl AgentProviderCallConfig {
         semantic_inputs: [Option<&SemanticTokenMeasurement>; 2],
         structured_input: &SemanticTokenMeasurement,
     ) -> Result<(), AgentProviderContractError> {
-        if self.input_accounting
-            != AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+        if !self.input_accounting.reserves_whole_request()
             || self.provider() != AgentProviderKind::OpenAiResponses
         {
             return Err(AgentProviderContractError::InputAccountingMode);

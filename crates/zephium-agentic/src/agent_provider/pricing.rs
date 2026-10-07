@@ -383,6 +383,21 @@ impl AgentProviderPricingSchedule {
         )
     }
 
+    /// Derives a call for the person's chosen model, settled on the usage its
+    /// provider reports after a conservative whole-request reservation.
+    pub fn try_provider_reported_call_config(
+        &self,
+        max_output_tokens: u32,
+        stream: super::AgentProviderStreamBudget,
+    ) -> Result<AgentProviderCallConfig, super::AgentProviderContractError> {
+        AgentProviderCallConfig::from_catalog(
+            Arc::clone(&self.binding),
+            AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation,
+            max_output_tokens,
+            stream,
+        )
+    }
+
     /// Requested provider model alias or snapshot bound by this entry.
     pub fn requested_model(&self) -> &AgentProviderModelRevision {
         self.binding.requested_model()
@@ -515,6 +530,7 @@ fn schedule_guard(binding: &AgentProviderCatalogBinding) -> [u8; 32] {
     hasher.update([match binding.response_route.billing_class() {
         AgentProviderBillingClass::OpenAiDefault => 1,
         AgentProviderBillingClass::AnthropicStandardGlobal => 2,
+        AgentProviderBillingClass::ModelReported => 3,
     }]);
     hasher.update([response_route_guard_byte(binding.response_route)]);
     hasher.update([reasoning_effort_guard_byte(binding.reasoning_effort)]);
@@ -542,6 +558,7 @@ const fn response_route_guard_byte(route: AgentProviderResponseRoute) -> u8 {
     match route {
         AgentProviderResponseRoute::OpenAiDefault => 1,
         AgentProviderResponseRoute::AnthropicStandardGlobal => 2,
+        AgentProviderResponseRoute::ModelReported => 3,
     }
 }
 
@@ -835,6 +852,81 @@ mod tests {
             long_context.try_provider_exact_call_config(64, AgentProviderStreamBudget::STANDARD),
             Err(super::super::AgentProviderContractError::InputAccountingMode)
         ));
+    }
+
+    fn model_reported_schedule(max_input_tokens: u64) -> AgentProviderPricingSchedule {
+        let model = AgentProviderModelRevision::try_new("chosen-model".to_owned()).expect("model");
+        AgentProviderPricingSchedule::try_new(
+            AgentProviderKind::OpenAiResponses,
+            model.clone(),
+            vec![model],
+            AgentProviderResponseRoute::ModelReported,
+            AgentProviderReasoningEffort::None,
+            SemanticTokenizerRevision::try_new("reported:chosen-model".to_owned())
+                .expect("tokenizer"),
+            profile(max_input_tokens),
+            rates(),
+        )
+        .expect("schedule")
+    }
+
+    #[test]
+    fn provider_reported_config_never_takes_an_exact_or_counted_path() {
+        let schedule = model_reported_schedule(MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS);
+        let reported = schedule
+            .try_provider_reported_call_config(64, AgentProviderStreamBudget::STANDARD)
+            .expect("reported config");
+        assert_eq!(
+            reported.input_accounting_mode(),
+            AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation
+        );
+        assert!(reported.input_accounting_mode().reserves_whole_request());
+        assert_eq!(
+            reported.billing_class(),
+            AgentProviderBillingClass::ModelReported
+        );
+        assert_eq!(
+            reported.billing_class().provider(),
+            AgentProviderKind::OpenAiResponses
+        );
+        // The model route can be neither exact-counted nor locally exact.
+        assert!(matches!(
+            schedule.try_provider_exact_call_config(64, AgentProviderStreamBudget::STANDARD),
+            Err(super::super::AgentProviderContractError::InputAccountingMode)
+        ));
+        assert!(matches!(
+            schedule.try_call_config(32, 64, AgentProviderStreamBudget::STANDARD),
+            Err(super::super::AgentProviderContractError::InputAccountingMode)
+        ));
+        // And an OpenAI catalog entry cannot be settled on reported usage.
+        let openai = provider_schedule(
+            AgentProviderKind::OpenAiResponses,
+            "gpt-fixed",
+            MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS,
+            rates(),
+        );
+        assert!(matches!(
+            openai.try_provider_reported_call_config(64, AgentProviderStreamBudget::STANDARD),
+            Err(super::super::AgentProviderContractError::InputAccountingMode)
+        ));
+        assert!(matches!(
+            model_reported_schedule(MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS + 1)
+                .try_provider_reported_call_config(64, AgentProviderStreamBudget::STANDARD),
+            Err(super::super::AgentProviderContractError::InputAccountingMode)
+        ));
+        // Reported usage prices like any other usage, under its own identity.
+        let usage = AgentProviderUsage::try_new(100, 10, 20, 30, 0).expect("usage");
+        let priced = schedule
+            .try_price(&reported, response_identity(&reported), usage)
+            .expect("priced");
+        let (_, cost, attribution) = priced.into_policy_parts();
+        // 50 fresh × $1 + 20 cached × $0.10 + 30 written × $1.25 + 10 out × $5
+        // per million tokens is 139.5 micro-USD, rounded up once.
+        assert_eq!(cost, 140);
+        assert_eq!(
+            attribution.billing_class(),
+            AgentProviderBillingClass::ModelReported
+        );
     }
 
     fn response_identity(config: &AgentProviderCallConfig) -> AgentProviderResponseIdentity {
