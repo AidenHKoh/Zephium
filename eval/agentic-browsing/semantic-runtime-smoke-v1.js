@@ -76,7 +76,7 @@ class MutationObserver {
   constructor(callback) { this.callback = callback; }
   observe(target, options) {
     if (target._relaySetupThrow) throw Error("native observe failure");
-    this.target = target; this.filter = options.attributeFilter; terminalObservers.add(this);
+    this.target = target; this.filter = options.attributeFilter; this.subtree = options.subtree === true; terminalObservers.add(this);
   }
   disconnect() { terminalObservers.delete(this); }
 }
@@ -2584,6 +2584,44 @@ async function finish() {
     }
   }
 
+  {
+    // A settled action waits for a quiet page, and a page that never goes
+    // quiet is bounded by the host's ceiling; style-only animation is ignored.
+    const root = new Element("main");
+    const loadMore = root.append(new Element("button", { "aria-label": "Load more" }));
+    document._root = root; root._parent = document; setOwner(root, document); document._active = null; document._hit = loadMore;
+    const before = JSON.parse(invoke(990, 990, { k: "initial" }));
+    const target = before.n.find(node => node.n === "Load more");
+    const click = (attempt, ceiling) => {
+      const request = JSON.parse(actionRequest(990));
+      Object.assign(request, { i: 990, g: 990, a: attempt, t: target.k, q: ceiling,
+        f: { a: target.ak, r: 7, o: 9, q: 1, s: 0, n: "Load more", vk: 0, vt: null, vo: 0, vb: false } });
+      return JSON.stringify(request);
+    };
+    const settleObserver = () => [...terminalObservers].find(observer => observer.target === document && observer.subtree);
+    const settle = async (attempt, ceiling, poke, every) => {
+      const pending = runtime.invoke(click(attempt, ceiling));
+      assert(pending instanceof Promise, "a settled action returned before the page was quiet");
+      const started = Date.now();
+      const ticker = every === null ? setTimeout(() => settleObserver()?.callback([poke]), 100)
+        : setInterval(() => settleObserver()?.callback([poke]), every);
+      const result = await pending;
+      clearInterval(ticker); clearTimeout(ticker);
+      assert(!result.startsWith("E") && settleObserver() === undefined, `settled action failed or leaked its observer: ${result}`);
+      return Date.now() - started;
+    };
+    const extended = await settle(991, 2000, { type: "childList" }, null);
+    assert(extended >= 280 && extended < 1000, `a late change did not extend the quiet window: ${extended}`);
+    const bounded = await settle(992, 600, { type: "characterData" }, 50);
+    assert(bounded >= 580 && bounded < 1000, `a never-idle page was not bounded by the ceiling: ${bounded}`);
+    const animated = await settle(993, 2000, { type: "attributes", attributeName: "style" }, 50);
+    assert(animated < 500, `style animation held the settle: ${animated}`);
+    assert(loadMore._fixedClickCount === 3, "settled clicks did not each run once");
+    const scroll = JSON.parse(click(994, 500));
+    Object.assign(scroll, { k: "scroll", sc: ["down", "page"] });
+    assert(runtime.invoke(JSON.stringify(scroll)) === "E1:invalid_request", "a scroll accepted a settle ceiling");
+  }
+
   process.stdout.write(`${JSON.stringify({
     independent_scroll_samples: true,
     empty_contenteditable_roundtrip: true,
@@ -2623,6 +2661,7 @@ async function finish() {
     fill_change_events: true,
     typed_field_fill: true,
     rerendered_target_rebound: true,
+    bounded_settle_quiet: true,
     document_parent_option_brand_guard: true,
     select_rewrite_nonretryable: true,
     fill_native_primitives_captured: true,

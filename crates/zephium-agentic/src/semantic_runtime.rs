@@ -89,8 +89,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0xad, 0x35, 0xd1, 0xfb, 0xdd, 0x61, 0x30, 0xcf, 0xdd, 0x46, 0xc0, 0x5c, 0x04, 0x82, 0xef, 0xca,
-    0x18, 0x66, 0xd1, 0x55, 0x53, 0x40, 0xb3, 0x42, 0x59, 0x84, 0x38, 0x5e, 0x84, 0x07, 0x2e, 0xd4,
+    0x00, 0x66, 0x27, 0x47, 0xb8, 0xfa, 0x3d, 0x07, 0x73, 0x1c, 0xa2, 0x20, 0xd6, 0x85, 0xbf, 0xa7,
+    0x65, 0x83, 0x77, 0xdc, 0x22, 0x69, 0xe9, 0x16, 0x37, 0xf6, 0xf4, 0x6e, 0x53, 0xb6, 0x00, 0x06,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -715,6 +715,7 @@ pub fn encode_semantic_action_runtime_invocation(
         target_descriptor: request.target_runtime_descriptor(),
         option_descriptor,
         page_dialog_opened: request.page_dialog_opened(),
+        settle_quiet: request.settle_quiet_millis(),
         press: request.press_key().map(press_key_wire),
         scroll: request
             .scroll_recipe()
@@ -1296,6 +1297,8 @@ struct SemanticActionRuntimeInvocationWire<'a> {
     press: Option<&'static str>,
     #[serde(rename = "u", skip_serializing_if = "std::ops::Not::not")]
     page_dialog_opened: bool,
+    #[serde(rename = "q", skip_serializing_if = "Option::is_none")]
+    settle_quiet: Option<u32>,
     #[serde(rename = "v")]
     version: u16,
     #[serde(rename = "o")]
@@ -1679,10 +1682,22 @@ mod tests {
                 "forbidden runtime surface: {forbidden}"
             );
         }
-        // Fill has no page-originated transport or idle observer.
+        // Fill has no page-originated transport or idle observer. The one
+        // mutation observer only times an action's settle: it lives inside
+        // that pending action, reads no content and is always disconnected.
+        let (before_settle, settle) = source
+            .split_once("function settleQuiet(")
+            .expect("settle quiet");
+        let (settle, after_settle) = settle.split_once("function runAction(").expect("action");
+        assert_eq!(settle.matches("new nativeMutationObserver(").count(), 1);
+        assert!(settle.contains(".disconnect()") && settle.contains("[finish, ceiling]"));
+        let outside = format!("{before_settle}{after_settle}").replace(
+            "const nativeMutationObserver = globalThis.MutationObserver;",
+            "",
+        );
         for forbidden in ["MutationObserver", "CustomEvent", "PAGE_RELAY"] {
             assert!(
-                !source.contains(forbidden),
+                !outside.contains(forbidden),
                 "forbidden fill transport: {forbidden}"
             );
         }
@@ -2127,6 +2142,7 @@ mod tests {
             target_descriptor: &descriptor,
             option_descriptor: None,
             page_dialog_opened: false,
+            settle_quiet: None,
             scroll: None,
         };
         let encoded = serde_json::to_string(&wire).expect("maximum legal fill wire");
@@ -2176,6 +2192,7 @@ mod tests {
                         target_descriptor: &descriptor,
                         option_descriptor: None,
                         page_dialog_opened: false,
+                        settle_quiet: None,
                         scroll: None,
                     };
                     let encoded = serde_json::to_string(&wire).expect("legal fill variant");

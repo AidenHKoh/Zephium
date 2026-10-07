@@ -622,7 +622,9 @@ impl AgentWorkController {
             .as_ref()
             .is_some_and(AgentNavigationDiscovery::is_site_session)
         {
-            let request = request.with_follow(state.follow.clone());
+            let request = request
+                .with_follow(state.follow.clone())
+                .with_settle_quiet();
             if state.consent_press {
                 request.with_consent()
             } else {

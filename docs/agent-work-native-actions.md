@@ -26,7 +26,17 @@ ancestors, whose role and complete action descriptor (name, state,
 operations, sensitivity, value) still match takes over the target's key, so
 the action and its fresh-observation proof join on one identity. A second
 match, or an element the look observed under another key, leaves the
-reference `stale_reference`; nothing is guessed. Click
+reference `stale_reference`; nothing is guessed.
+
+In a site session every click, fill, select and press asks the runtime to
+settle before it answers: the result is held until the page's DOM and its
+resource loads have been quiet for 200 ms, or until a ceiling of half the
+native budget and at most 1.5 s. Style-attribute changes (JavaScript
+animation) do not hold it; sockets, polling and timers are bounded by the
+ceiling instead of waited out. The observer exists only while that action is
+pending, reads no content and is disconnected on either ending, so the page
+controls only how long the bounded wait lasts, never an effect. A scroll keeps
+its own rendering sample. Rust's settle and page-change looks still follow. Click
 also reaches a row, cell or list item the page made clickable itself (a click
 handler attribute, a tab stop, or a pointer cursor set on the item and not
 inherited from its parent), such as a mail client's thread rows; the decoder

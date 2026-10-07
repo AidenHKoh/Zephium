@@ -145,6 +145,8 @@
   const nativeInputEvent = globalThis.InputEvent;
   const nativeEvent = globalThis.Event;
   const nativeFocusEvent = globalThis.FocusEvent;
+  const nativeMutationObserver = globalThis.MutationObserver;
+  const nativePerformanceObserver = globalThis.PerformanceObserver;
   const fixedDispatchEvent = EventTarget.prototype.dispatchEvent;
   const inputValueSetter = setter(HTMLInputElement.prototype, "value");
   const textareaValueSetter = setter(HTMLTextAreaElement.prototype, "value");
@@ -357,6 +359,10 @@
           !["line", "half_page", "page", "into_view"].includes(request.sc[1])) return null;
     } else if (objectHasOwn(request, "sc")) return null;
     if (objectHasOwn(request, "u")) actionKeys.push("u");
+    if (objectHasOwn(request, "q")) {
+      if (!numberIsSafeInteger(request.q) || request.q < 1 || request.q > 5000 || request.k === "scroll") return null;
+      actionKeys.push("q");
+    }
     if (request.k === "press") {
       if (typeof request.pk !== "string" || PRESS_KEYS[request.pk] === undefined) return null;
       actionKeys.push("pk");
@@ -3504,6 +3510,43 @@
     });
   }
 
+  // A page settles once its DOM and its resource loads have been quiet for a
+  // moment, or at the host's ceiling: sockets, polling and animations bound
+  // the wait instead of holding it. Style-only changes are animation.
+  const SETTLE_QUIET_MILLIS = 200;
+  function settleQuiet(result, ceiling) {
+    if (typeof result !== "string") return apply(promiseThen, result, [(value) => settleQuiet(value, ceiling)]);
+    if (result.startsWith("E") || typeof nativeMutationObserver !== "function") return result;
+    return new nativePromise((resolve) => {
+      let quiet = null, done = false, changes = null, loads = null;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        apply(fixedClearTimeout, globalThis, [quiet]);
+        apply(fixedClearTimeout, globalThis, [cap]);
+        for (const observer of [changes, loads]) try { if (observer !== null) observer.disconnect(); } catch (_) {}
+        resolve(result);
+      };
+      const restart = () => {
+        if (done) return;
+        apply(fixedClearTimeout, globalThis, [quiet]);
+        quiet = apply(fixedTimeout, globalThis, [finish, SETTLE_QUIET_MILLIS]);
+      };
+      const cap = apply(fixedTimeout, globalThis, [finish, ceiling]);
+      try {
+        changes = new nativeMutationObserver((records) => {
+          if (records.some(record => record.type !== "attributes" || record.attributeName !== "style")) restart();
+        });
+        changes.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+        if (typeof nativePerformanceObserver === "function") {
+          loads = new nativePerformanceObserver(restart);
+          loads.observe({ type: "resource" });
+        }
+      } catch (_) {}
+      restart();
+    });
+  }
+
   function runAction(request) {
     pendingDialogSample = null;
     pendingScrollSample = null;
@@ -3863,6 +3906,7 @@
       let result;
       try {
         result = runAction(request);
+        if (objectHasOwn(request, "q")) result = settleQuiet(result, request.q);
       } catch (_) {
         busy = false;
         return actionFault("internal");
