@@ -51,7 +51,14 @@ impl HumanNavigation {
                         "authorize",
                         "2fa",
                         "mfa",
+                        "2sv",
+                        "otp",
+                        "totp",
+                        "two-factor",
+                        "two_factor",
+                        "twofactor",
                         "verify",
+                        "verification",
                         "challenge",
                         "checkpoint",
                     ]
@@ -511,5 +518,24 @@ mod tests {
         assert!(gate.human_clear_of_sign_in());
         gate.finish_human(back, gate.human_revision().unwrap())
             .unwrap();
+    }
+
+    #[test]
+    fn a_two_factor_step_on_the_site_is_still_signing_in() {
+        let gate = ready_gate();
+        let source = ContextNavigationTarget::parse(URL).unwrap();
+        gate.begin_human(&source, Instant::now() + Duration::from_secs(30), true)
+            .unwrap();
+        for (id, path) in [
+            (2, "https://example.test/sessions/two-factor/app"),
+            (3, "https://example.test/account/otp"),
+            (4, "https://example.test/signin/verification"),
+        ] {
+            assert!(gate.allows_apple_action(path, apple_action(T::Other, true)));
+            gate.observe(event(id, E::Started, path)).unwrap();
+            gate.observe(event(id, E::Committed, path)).unwrap();
+            gate.observe(event(id, E::Finished, path)).unwrap();
+            assert!(!gate.human_clear_of_sign_in(), "{path}");
+        }
     }
 }
