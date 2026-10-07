@@ -3135,7 +3135,11 @@ impl AgentWorkController {
                 observation = next.0;
                 captured_at = next.1;
                 progress = next.2;
-                turn = next.3;
+                let Some(next_turn) = next.3 else {
+                    state.observation = Some(observation);
+                    return Ok(());
+                };
+                turn = next_turn;
                 frames.clear();
                 frames.extend(
                     observation
@@ -3327,7 +3331,13 @@ impl AgentWorkController {
                             progress,
                         )
                         .await?;
-                        (observation, captured_at, progress, turn) = next;
+                        let next_turn;
+                        (observation, captured_at, progress, next_turn) = next;
+                        let Some(next_turn) = next_turn else {
+                            state.observation = Some(observation);
+                            return Ok(());
+                        };
+                        turn = next_turn;
                         frames.clear();
                         frames.extend(
                             observation
@@ -3391,7 +3401,13 @@ impl AgentWorkController {
                     progress,
                 )
                 .await?;
-                (observation, captured_at, progress, turn) = next;
+                let next_turn;
+                (observation, captured_at, progress, next_turn) = next;
+                let Some(next_turn) = next_turn else {
+                    state.observation = Some(observation);
+                    return Ok(());
+                };
+                turn = next_turn;
                 frames.clear();
                 frames.extend(
                     observation

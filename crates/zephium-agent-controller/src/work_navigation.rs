@@ -146,7 +146,7 @@ impl AgentWorkController {
             SemanticObservation,
             SemanticCaptureInstant,
             AgentWorkTaskProgress,
-            AgentBrowserProviderTurn,
+            Option<AgentBrowserProviderTurn>,
         ),
         AgentWorkFailure,
     > {
@@ -535,6 +535,15 @@ impl AgentWorkController {
         }
         state.navigation_hops += 1;
         let fresh = Self::fit_model_observation(Self::observe(state, worker, browser).await?)?;
+        // A move can land on a sign-in, code or bot-check page: the person
+        // gets it before any model call is spent on a page it cannot pass.
+        let (fresh, held) = if state.human_request
+            && (state.task.human_wall(&fresh).is_some() || looks_like_human_challenge(&fresh))
+        {
+            Box::pin(Self::settle_human_challenge(state, worker, browser, fresh)).await?
+        } else {
+            (fresh, false)
+        };
         let captured_at = SemanticCaptureInstant::from_millis(
             state
                 .journal_mut()?
@@ -544,6 +553,9 @@ impl AgentWorkController {
                 .millis(),
         );
         let progress = state.task_progress(&fresh)?;
+        if held {
+            return Ok((fresh, captured_at, progress, None));
+        }
         let navigation_available = !state.navigation_complete();
         let action_authority = state
             .session
@@ -579,7 +591,7 @@ impl AgentWorkController {
             ),
         )
         .await?;
-        Ok((fresh, captured_at, progress, turn))
+        Ok((fresh, captured_at, progress, Some(turn)))
     }
 }
 
