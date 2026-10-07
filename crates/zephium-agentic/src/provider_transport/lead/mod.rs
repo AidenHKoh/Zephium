@@ -33,6 +33,10 @@ const ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1";
 const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 const DEEPSEEK_BASE: &str = "https://api.deepseek.com";
 const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
+const XAI_BASE: &str = "https://api.x.ai/v1";
+const MISTRAL_BASE: &str = "https://api.mistral.ai/v1";
+const GROQ_BASE: &str = "https://api.groq.com/openai/v1";
+const CEREBRAS_BASE: &str = "https://api.cerebras.ai/v1";
 /// Zephium Cloud's production base; each wire appends its provider's own path.
 pub const ZEPHIUM_CLOUD_BASE: &str = "https://api.zephium.app";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -135,6 +139,10 @@ impl LeadTarget {
             WorkModelProvider::Google => (WorkModelWire::Gemini, GEMINI_BASE),
             WorkModelProvider::DeepSeek => (WorkModelWire::ChatCompletions, DEEPSEEK_BASE),
             WorkModelProvider::OpenRouter => (WorkModelWire::ChatCompletions, OPENROUTER_BASE),
+            WorkModelProvider::XAi => (WorkModelWire::OpenAiResponses, XAI_BASE),
+            WorkModelProvider::Mistral => (WorkModelWire::ChatCompletions, MISTRAL_BASE),
+            WorkModelProvider::Groq => (WorkModelWire::ChatCompletions, GROQ_BASE),
+            WorkModelProvider::Cerebras => (WorkModelWire::ChatCompletions, CEREBRAS_BASE),
             WorkModelProvider::Compatible | WorkModelProvider::Cloud => {
                 return Err(WorkModelError::BadRequest)
             }
@@ -170,9 +178,12 @@ impl LeadTarget {
             WorkModelProvider::Google => (WorkModelWire::Gemini, "google/v1beta"),
             WorkModelProvider::DeepSeek => (WorkModelWire::ChatCompletions, "deepseek/v1"),
             WorkModelProvider::OpenRouter => (WorkModelWire::ChatCompletions, "openrouter/v1"),
-            WorkModelProvider::Compatible | WorkModelProvider::Cloud => {
-                return Err(WorkModelError::BadRequest)
-            }
+            WorkModelProvider::XAi
+            | WorkModelProvider::Mistral
+            | WorkModelProvider::Groq
+            | WorkModelProvider::Cerebras
+            | WorkModelProvider::Compatible
+            | WorkModelProvider::Cloud => return Err(WorkModelError::BadRequest),
         };
         Ok(Self {
             wire,

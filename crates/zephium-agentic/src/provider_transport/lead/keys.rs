@@ -20,6 +20,10 @@ pub fn service(provider: WorkModelProvider) -> Option<&'static str> {
         WorkModelProvider::Google => "app.zephium.agent-provider.google",
         WorkModelProvider::DeepSeek => "app.zephium.agent-provider.deepseek",
         WorkModelProvider::OpenRouter => "app.zephium.agent-provider.openrouter",
+        WorkModelProvider::XAi => "app.zephium.agent-provider.xai",
+        WorkModelProvider::Mistral => "app.zephium.agent-provider.mistral",
+        WorkModelProvider::Groq => "app.zephium.agent-provider.groq",
+        WorkModelProvider::Cerebras => "app.zephium.agent-provider.cerebras",
         WorkModelProvider::Compatible => "app.zephium.agent-provider.compatible",
         WorkModelProvider::Cloud => return None,
     })

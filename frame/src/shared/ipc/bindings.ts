@@ -4275,7 +4275,7 @@ export type WorkModelPrice = {
 	output: number,
 };
 
-export type WorkModelProvider = "open_ai" | "anthropic" | "google" | "deep_seek" | "open_router" | 
+export type WorkModelProvider = "open_ai" | "anthropic" | "google" | "deep_seek" | "open_router" | "xai" | "mistral" | "groq" | "cerebras" | 
 /**  Any OpenAI-compatible chat endpoint the person configured. */
 "compatible" | 
 /**  Zephium Cloud: the upstream's native body, our base URL and bearer. */

@@ -591,3 +591,92 @@ fn replay_from_another_wire_is_dropped() {
         json!([{"type": "text", "text": "Hi", "cache_control": {"type": "ephemeral"}}])
     );
 }
+
+#[test]
+fn mistral_streams_thinking_chunks_and_gets_them_back_as_a_chunk() {
+    let fixture = data(&[
+        json!({"choices": [{"index": 0, "delta": {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": [{"type": "text", "text": "Check the page."}]}]}}]}),
+        json!({"choices": [{"index": 0, "delta": {"content": [{"type": "text", "text": "Done."}]}}]}),
+        json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20}}),
+    ]);
+    let (events, decoded) = decode(WorkModelWire::ChatCompletions, &fixture);
+    let decoded = decoded.unwrap();
+    assert_eq!(text_of(&events), "Done.");
+    assert_eq!(decoded.usage.input_tokens, 100);
+
+    let target = LeadTarget::direct(WorkModelProvider::Mistral).unwrap();
+    let mut next = request(WorkModelWire::ChatCompletions, "mistral-medium-3-5");
+    next.native_search = false;
+    next.messages
+        .push(WorkModelMessage::Assistant(decoded.assistant));
+    let body = chat::body(&next, &target).unwrap();
+    let last = body["messages"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(
+        last["content"],
+        json!([
+            {"type": "thinking", "thinking": [{"type": "text", "text": "Check the page."}]},
+            {"type": "text", "text": "Done."}
+        ])
+    );
+    assert!(last.get("thinking").is_none());
+    assert!(body.get("stream_options").is_none());
+    assert!(body.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn groq_and_cerebras_take_effort_only_where_their_models_accept_it() {
+    let body = |provider, model: &str| {
+        let mut call = request(WorkModelWire::ChatCompletions, model);
+        call.native_search = false;
+        call.reasoning = Some(WorkModelReasoning::Medium);
+        call.parallel_tools = false;
+        call.tools = vec![WorkModelTool {
+            name: "read".into(),
+            description: "Read a page.".into(),
+            schema: json!({"type": "object"}),
+        }];
+        chat::body(&call, &LeadTarget::direct(provider).unwrap()).unwrap()
+    };
+    let groq = body(WorkModelProvider::Groq, "openai/gpt-oss-120b");
+    assert_eq!(groq["reasoning_effort"], "medium");
+    assert_eq!(groq["parallel_tool_calls"], false);
+    assert!(body(WorkModelProvider::Groq, "qwen/qwen3.8-27b")
+        .get("reasoning_effort")
+        .is_none());
+    let cerebras = body(WorkModelProvider::Cerebras, "qwen-3.8-27b");
+    assert_eq!(cerebras["reasoning_effort"], "medium");
+    assert!(cerebras.get("parallel_tool_calls").is_none());
+    assert_eq!(cerebras["stream_options"], json!({"include_usage": true}));
+}
+
+#[test]
+fn new_providers_reach_their_own_endpoints() {
+    for (provider, url) in [
+        (WorkModelProvider::XAi, "https://api.x.ai/v1/responses"),
+        (
+            WorkModelProvider::Mistral,
+            "https://api.mistral.ai/v1/chat/completions",
+        ),
+        (
+            WorkModelProvider::Groq,
+            "https://api.groq.com/openai/v1/chat/completions",
+        ),
+        (
+            WorkModelProvider::Cerebras,
+            "https://api.cerebras.ai/v1/chat/completions",
+        ),
+    ] {
+        let target = LeadTarget::direct(provider).unwrap();
+        assert_eq!(target.call_url("model").unwrap().as_str(), url);
+        assert!(LeadTarget::cloud(ZEPHIUM_CLOUD_BASE, provider).is_err());
+    }
+    let xai = openai::body(
+        &request(WorkModelWire::OpenAiResponses, "grok-4.7"),
+        &LeadTarget::direct(WorkModelProvider::XAi).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(xai["store"], false);
+    assert_eq!(xai["include"], json!(["reasoning.encrypted_content"]));
+}

@@ -263,6 +263,37 @@ fn row_entry(
             let id = text("id")?;
             (id.to_owned(), id.to_owned(), None, None, false, true)
         }
+        WorkModelProvider::XAi
+        | WorkModelProvider::Mistral
+        | WorkModelProvider::Groq
+        | WorkModelProvider::Cerebras => {
+            let id = text("id")?;
+            // Their lists mix chat models with speech, embedding, image and
+            // safety models, which cannot run a turn.
+            let other = [
+                "embed",
+                "whisper",
+                "tts",
+                "guard",
+                "moderation",
+                "ocr",
+                "image",
+                "imagine",
+                "audio",
+                "transcri",
+                "voxtral",
+                "safeguard",
+            ];
+            if other
+                .iter()
+                .any(|word| id.to_ascii_lowercase().contains(word))
+            {
+                return None;
+            }
+            let window =
+                number(row.get("context_window")).or_else(|| number(row.get("max_context_length")));
+            (id.to_owned(), id.to_owned(), window, None, false, true)
+        }
         WorkModelProvider::Cloud => return None,
     };
     if deprecated(provider, &model) || !valid_text(&model, 160) || !valid_text(&name, 96) {

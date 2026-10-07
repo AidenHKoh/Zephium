@@ -1,5 +1,5 @@
-//! OpenAI-compatible Chat Completions: DeepSeek, OpenRouter and custom
-//! endpoints. Reasoning the provider requires back (DeepSeek
+//! OpenAI-compatible Chat Completions: DeepSeek, OpenRouter, Mistral, Groq,
+//! Cerebras and custom endpoints. Reasoning the provider requires back (DeepSeek
 //! `reasoning_content`, OpenRouter `reasoning_details`) rides in a replay part.
 
 use serde_json::{json, Map, Value};
@@ -9,6 +9,8 @@ use super::sse::SseEvent;
 use super::*;
 
 const WIRE: &str = "chat";
+/// A replay key, not a field: it becomes the message's leading thinking chunk.
+const MISTRAL_THINKING: &str = "thinking";
 
 pub(super) fn body(
     request: &WorkModelRequest,
@@ -78,6 +80,7 @@ pub(super) fn body(
             WorkModelMessage::Assistant(parts) => {
                 let mut text = String::new();
                 let mut calls = Vec::new();
+                let mut thinking = None;
                 let mut message = json!({"role": "assistant"});
                 for part in parts {
                     match part {
@@ -93,16 +96,29 @@ pub(super) fn body(
                         part => {
                             if let Some(extra) = replayed(part, WIRE).and_then(Value::as_object) {
                                 for (key, value) in extra {
-                                    message[key] = value.clone();
+                                    if key == MISTRAL_THINKING {
+                                        thinking = value.as_str().map(str::to_owned);
+                                    } else {
+                                        message[key] = value.clone();
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                message["content"] = if text.is_empty() {
-                    Value::Null
-                } else {
-                    json!(text)
+                message["content"] = match thinking {
+                    Some(thinking) if upstream == WorkModelProvider::Mistral => {
+                        let mut chunks = vec![json!({
+                            "type": "thinking",
+                            "thinking": [{"type": "text", "text": thinking}],
+                        })];
+                        if !text.is_empty() {
+                            chunks.push(json!({"type": "text", "text": text}));
+                        }
+                        Value::Array(chunks)
+                    }
+                    _ if text.is_empty() => Value::Null,
+                    _ => json!(text),
                 };
                 if !calls.is_empty() {
                     message["tool_calls"] = Value::Array(calls);
@@ -129,7 +145,11 @@ pub(super) fn body(
     body.insert("model".into(), json!(request.model.model));
     body.insert("messages".into(), Value::Array(messages));
     body.insert("stream".into(), json!(true));
-    body.insert("stream_options".into(), json!({"include_usage": true}));
+    // Mistral refuses fields it does not define, and reports usage on its
+    // last chunk without being asked.
+    if upstream != WorkModelProvider::Mistral {
+        body.insert("stream_options".into(), json!({"include_usage": true}));
+    }
     body.insert("max_tokens".into(), json!(request.max_output_tokens));
     if !request.tools.is_empty() {
         let tools: Vec<Value> = request
@@ -143,7 +163,7 @@ pub(super) fn body(
             .collect();
         body.insert("tools".into(), Value::Array(tools));
         body.insert("tool_choice".into(), json!("auto"));
-        if !request.parallel_tools {
+        if !request.parallel_tools && upstream != WorkModelProvider::Cerebras {
             body.insert("parallel_tool_calls".into(), json!(false));
         }
     }
@@ -157,6 +177,16 @@ pub(super) fn body(
                 "low"
             } else {
                 "high"
+            };
+            body.insert("reasoning_effort".into(), json!(effort));
+        }
+        (WorkModelProvider::Groq | WorkModelProvider::Cerebras, Some(reasoning))
+            if takes_effort(upstream, &request.model.model) =>
+        {
+            let effort = match reasoning {
+                WorkModelReasoning::Low => "low",
+                WorkModelReasoning::Medium => "medium",
+                WorkModelReasoning::High => "high",
             };
             body.insert("reasoning_effort".into(), json!(effort));
         }
@@ -176,6 +206,13 @@ pub(super) fn body(
     Ok(Value::Object(body))
 }
 
+/// Groq takes an effort only for GPT-OSS; Cerebras also for Qwen. Any other
+/// model there refuses the field.
+fn takes_effort(upstream: WorkModelProvider, model: &str) -> bool {
+    model.contains("gpt-oss")
+        || (upstream == WorkModelProvider::Cerebras && model.starts_with("qwen"))
+}
+
 #[derive(Default)]
 struct PendingCall {
     id: String,
@@ -187,6 +224,8 @@ struct PendingCall {
 pub(super) struct Decoder {
     text: String,
     reasoning: String,
+    /// Mistral's reasoning, which it wants back as a thinking chunk.
+    thinking: String,
     details: Vec<Value>,
     calls: Vec<PendingCall>,
     finish: Option<String>,
@@ -235,6 +274,27 @@ impl Decoder {
             push_text(&mut self.text, text)?;
             if !text.is_empty() {
                 out.push(WorkModelEvent::Text(text.to_owned()));
+            }
+        }
+        // Mistral streams a reasoning model's content as typed chunks.
+        for chunk in delta["content"].as_array().into_iter().flatten() {
+            match chunk["type"].as_str() {
+                Some("text") => {
+                    let text = chunk["text"].as_str().unwrap_or_default();
+                    push_text(&mut self.text, text)?;
+                    if !text.is_empty() {
+                        out.push(WorkModelEvent::Text(text.to_owned()));
+                    }
+                }
+                Some("thinking") => {
+                    for part in chunk["thinking"].as_array().into_iter().flatten() {
+                        push_text(
+                            &mut self.thinking,
+                            part["text"].as_str().unwrap_or_default(),
+                        )?;
+                    }
+                }
+                _ => {}
             }
         }
         if let Some(reasoning) = delta["reasoning_content"].as_str() {
@@ -307,6 +367,9 @@ impl Decoder {
         let mut extra = Map::new();
         if !self.reasoning.is_empty() {
             extra.insert("reasoning_content".into(), json!(self.reasoning));
+        }
+        if !self.thinking.is_empty() {
+            extra.insert(MISTRAL_THINKING.into(), json!(self.thinking));
         }
         if !self.details.is_empty() {
             extra.insert("reasoning_details".into(), Value::Array(self.details));

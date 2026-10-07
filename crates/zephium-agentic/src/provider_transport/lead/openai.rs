@@ -13,7 +13,6 @@ pub(super) fn body(
     request: &WorkModelRequest,
     target: &LeadTarget,
 ) -> Result<Value, WorkModelError> {
-    let _ = target;
     let mut input = Vec::new();
     for message in &request.messages {
         match message {
@@ -101,7 +100,8 @@ pub(super) fn body(
     body.insert("store".into(), json!(false));
     body.insert("max_output_tokens".into(), json!(request.max_output_tokens));
     let mut include = vec![json!("reasoning.encrypted_content")];
-    if request.native_search {
+    // xAI's Responses API documents no search include.
+    if request.native_search && target.upstream() != WorkModelProvider::XAi {
         include.push(json!("web_search_call.action.sources"));
     }
     body.insert("include".into(), Value::Array(include));

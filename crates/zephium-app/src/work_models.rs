@@ -20,21 +20,29 @@ use WorkModelProvider as P;
 
 /// The order a role falls back to a provider when nothing is chosen: the
 /// person's own keys first, then the signed-in account's hosted models.
-const FALLBACK_ORDER: [WorkModelProvider; 7] = [
+const FALLBACK_ORDER: [WorkModelProvider; 11] = [
     P::Anthropic,
     P::OpenAi,
     P::Google,
+    P::XAi,
+    P::Mistral,
     P::DeepSeek,
+    P::Groq,
+    P::Cerebras,
     P::OpenRouter,
     P::Compatible,
     P::Cloud,
 ];
 /// Providers that take a key in Settings, in display order.
-pub const KEYED_PROVIDERS: [WorkModelProvider; 6] = [
+pub const KEYED_PROVIDERS: [WorkModelProvider; 10] = [
     P::Anthropic,
     P::OpenAi,
     P::Google,
+    P::XAi,
+    P::Mistral,
     P::DeepSeek,
+    P::Groq,
+    P::Cerebras,
     P::OpenRouter,
     P::Compatible,
 ];

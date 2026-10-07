@@ -21,6 +21,11 @@ pub enum WorkModelProvider {
     Google,
     DeepSeek,
     OpenRouter,
+    #[serde(rename = "xai")]
+    XAi,
+    Mistral,
+    Groq,
+    Cerebras,
     /// Any OpenAI-compatible chat endpoint the person configured.
     Compatible,
     /// Zephium Cloud: the upstream's native body, our base URL and bearer.
