@@ -661,7 +661,7 @@ pub use provider_transport::agent::{OpenAiWorkAgent, WorkAgentWireFault};
 pub use provider_transport::decision::capture_app_views;
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::decision::{
-    app_view_control, app_view_wire, app_views, captured_app_view, read_app_view,
+    app_view_control, app_view_wire, app_views, captured_app_view, read_app_view, read_cited_rows,
     search_enough_projection, search_reuse_projection, untracked_document_address,
     AdmittedDecisionOutput, AppView, AppViewSink, DailyApp, DecisionActionSelection,
     DecisionBackendKind, DecisionCallAccounting, DecisionCallDiagnostic, DecisionCallFailure,
@@ -671,6 +671,8 @@ pub use provider_transport::decision::{
     JevDecisionClient, ModelDecisionCall, OpenAiDecisionCall, OpenAiDecisionClient,
     SearchQueryTerms,
 };
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::decision::{read_search_page, SearchPageRead, SEARCH_PAGE_RESULTS};
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::planning::{OpenAiWorkPlanner, WorkPlanningConfig};
 #[cfg(feature = "provider-transport")]

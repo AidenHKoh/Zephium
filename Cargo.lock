@@ -7296,6 +7296,7 @@ dependencies = [
  "base64 0.22.1",
  "crc32fast",
  "dirs",
+ "dom_query 0.28.0",
  "futures-util",
  "httpdate",
  "proptest",

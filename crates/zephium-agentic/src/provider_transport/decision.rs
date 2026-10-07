@@ -15,9 +15,10 @@ mod link;
 mod model;
 mod projection;
 mod read;
+mod results;
 mod rows;
 mod search;
-pub use apps::{app_view_control, app_views, read_app_view, AppView, DailyApp};
+pub use apps::{app_view_control, app_views, read_app_view, read_cited_rows, AppView, DailyApp};
 #[cfg(feature = "probe-harness")]
 pub use capture::capture_app_views;
 pub use capture::{app_view_wire, captured_app_view, AppViewSink};
@@ -27,6 +28,7 @@ pub use projection::{
     DecisionObservationFallback, DecisionOperation, DecisionProjectionError,
 };
 pub use read::{untracked_document_address, DecisionLocatedRead, DecisionReadSelection};
+pub use results::{read_search_page, SearchPageRead, SEARCH_PAGE_RESULTS};
 pub use rows::DecisionRowDiscovery;
 pub(super) use search::SearchDecisionRanking;
 pub use search::{search_enough_projection, search_reuse_projection, SearchQueryTerms};
