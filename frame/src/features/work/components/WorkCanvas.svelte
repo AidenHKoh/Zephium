@@ -918,6 +918,12 @@
     transition: none;
   }
 
+  /* While a person is at the canvas each card is a layer (see layers.ts). */
+  /* stylelint-disable-next-line selector-class-pattern */
+  .work-canvas :global(.svelte-flow__viewport[data-held] .svelte-flow__node) {
+    will-change: transform;
+  }
+
   /* A handle is where a line meets a card, never a thing to see. */
   /* stylelint-disable-next-line selector-class-pattern */
   .work-canvas :global(.svelte-flow__handle) {

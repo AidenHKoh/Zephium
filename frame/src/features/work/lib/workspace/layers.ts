@@ -13,7 +13,10 @@ const HELD_MS = 12_000;
  * A person at the canvas is the exception: while their pointer or a pan or
  * pinch is on it, the viewport is held as its own layer, so moving it is the
  * compositor sliding and scaling a picture, never a repaint of everything on
- * it. It is let go after a while of rest, or at once when the window hides.
+ * it. Its cards are held as layers of their own too (`data-held`, styled by
+ * the canvas): a pan or pinch then moves and rescales each card's picture
+ * rather than repainting the viewport's tiles, rounded photos and all. It is
+ * let go after a while of rest, or at once when the window hides.
  */
 export function layerRelease(root: HTMLElement) {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -59,7 +62,10 @@ export function layerRelease(root: HTMLElement) {
     if (!holding) return;
     holding = false;
     const viewport = viewportOf();
-    if (viewport) viewport.style.willChange = "";
+    if (viewport) {
+      viewport.style.willChange = "";
+      delete viewport.dataset.held;
+    }
     moved();
   };
   /** The person is at the canvas: its layer is held, and the hold is renewed. */
@@ -70,6 +76,7 @@ export function layerRelease(root: HTMLElement) {
       if (!viewport) return;
       holding = true;
       viewport.style.willChange = "transform";
+      viewport.dataset.held = "";
     }
     clearTimeout(held);
     held = setTimeout(letGo, HELD_MS);
