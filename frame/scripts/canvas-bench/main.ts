@@ -131,6 +131,26 @@ const bench = {
     layer.remove();
     return { open, close, closed };
   },
+  /** Pinches toward `zoom` around the middle of the view, a trackpad step a frame. */
+  async zoomTo(zoom: number) {
+    const viewport = host.querySelector<HTMLElement>(".svelte-flow__viewport")!;
+    const pane = host.querySelector(".svelte-flow__pane")!;
+    const current = () => Number(/scale\(([\d.]+)\)/u.exec(viewport.style.transform)?.[1] ?? 1);
+    for (let step = 0; step < 300 && Math.abs(current() - zoom) > 0.03; step++) {
+      pane.dispatchEvent(
+        new WheelEvent("wheel", {
+          deltaY: current() < zoom ? -4 : 4,
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+          clientX: 720,
+          clientY: 450,
+        }),
+      );
+      await new Promise((done) => requestAnimationFrame(done));
+    }
+    return current();
+  },
   close() {
     if (screen) void unmount(screen);
     screen = null;

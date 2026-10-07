@@ -74,6 +74,7 @@ function nativeHost() {
       return reply.ok as T;
     },
     pid: async () => Number((await send("pid")).pid),
+    shot: (path: string) => send(`shot ${path}`),
     process: child.pid ?? 0,
     close: () => child.kill(),
   };
@@ -158,9 +159,19 @@ try {
       const busy = cpu({ content, gpu, ui: host.process, windowServer });
       const pan = await host.evaluate("return await window.bench.pan();");
       const panCpu = busy();
+      // While the person is at the canvas: its layers are held.
+      const moving = memory();
       const pinchBusy = cpu({ content, gpu, ui: host.process, windowServer });
       const pinch = await host.evaluate("return await window.bench.pinch();");
       const pinchCpu = pinchBusy();
+      // --shots=<dir>: this window as the compositor drew it once a pinch to 100% has settled.
+      const shots = arg("shots", "");
+      if (shots) {
+        const reached = await host.evaluate("return await window.bench.zoomTo(1);");
+        await new Promise((done) => setTimeout(done, 2000));
+        await host.shot(`${shots}/pinched-${items}-${zoom}-${css ? "css" : "base"}.png`);
+        console.log(JSON.stringify({ reached }));
+      }
       await host.evaluate("window.bench.css(''); return true;");
       const lift = await host.evaluate("return await window.bench.lift();");
       const swept = await host.evaluate("return await window.bench.sweep();");
@@ -187,6 +198,7 @@ try {
           memoryMB: {
             before,
             open: opened,
+            moving,
             swept: sweptMemory,
             back: backMemory,
             rest: restMemory,
