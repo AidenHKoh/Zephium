@@ -257,6 +257,8 @@ where
                 native_search: false,
                 parallel_tools: true,
                 tool_choice: WorkModelToolChoice::Auto,
+                volatile_tail: 0,
+                cache_key: Some(work_model_cache_key(&system, &tools)),
             };
             let (outcome, usage) = match call::call(self.run, model, request).await {
                 Ok(done) => done,

@@ -72,6 +72,8 @@ async fn round_trip(provider: WorkModelProvider, search: bool) -> Result<(), Wor
         native_search: false,
         parallel_tools: true,
         tool_choice: WorkModelToolChoice::Auto,
+        volatile_tail: 0,
+        cache_key: None,
     };
     let searches = Arc::new(Mutex::new(0_usize));
     let seen = searches.clone();

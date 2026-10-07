@@ -763,3 +763,60 @@ fn a_forced_tool_the_request_does_not_offer_is_refused() {
     let anthropic = LeadTarget::direct(WorkModelProvider::Anthropic).unwrap();
     assert!(anthropic::body(&request, &anthropic).is_ok());
 }
+
+#[test]
+fn the_conversation_cache_closes_before_the_facts_that_change_every_call() {
+    let mut next = request(WorkModelWire::AnthropicMessages, "claude-haiku-4-5");
+    next.messages
+        .push(WorkModelMessage::ToolResults(vec![WorkModelToolResult {
+            call: "toolu_1".into(),
+            content: "Clicked.".into(),
+            is_error: false,
+        }]));
+    next.messages
+        .push(WorkModelMessage::User(vec![WorkModelPart::Text(
+            "[developer]\nnative_actions_remaining=2".into(),
+        )]));
+    next.volatile_tail = 1;
+    let target = LeadTarget::direct(WorkModelProvider::Anthropic).unwrap();
+    let body = anthropic::body(&next, &target).unwrap();
+    let closing = body["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let [.., result, facts] = closing.as_slice() else {
+        panic!("a result and the facts close the conversation");
+    };
+    assert_eq!(result["type"], "tool_result");
+    assert_eq!(result["cache_control"], json!({"type": "ephemeral"}));
+    assert!(facts.get("cache_control").is_none());
+
+    // With nothing volatile, the newest block closes the cache as before.
+    next.volatile_tail = 0;
+    let body = anthropic::body(&next, &target).unwrap();
+    let closing = body["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        closing.last().unwrap()["cache_control"],
+        json!({"type": "ephemeral"})
+    );
+}
+
+#[test]
+fn openai_routes_one_conversation_to_one_cache_and_xai_gets_no_key() {
+    let mut openai = request(WorkModelWire::OpenAiResponses, "gpt-6-luna");
+    openai.cache_key = Some("zk_0123456789abcdef".into());
+    let target = LeadTarget::direct(WorkModelProvider::OpenAi).unwrap();
+    let body = openai::body(&openai, &target).unwrap();
+    assert_eq!(body["prompt_cache_key"], "zk_0123456789abcdef");
+
+    let mut xai = openai.clone();
+    xai.model.provider = WorkModelProvider::XAi;
+    let target = LeadTarget::direct(WorkModelProvider::XAi).unwrap();
+    assert!(openai::body(&xai, &target)
+        .unwrap()
+        .get("prompt_cache_key")
+        .is_none());
+}

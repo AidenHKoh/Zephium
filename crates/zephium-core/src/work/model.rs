@@ -146,6 +146,12 @@ pub struct WorkModelRequest {
     pub native_search: bool,
     pub parallel_tools: bool,
     pub tool_choice: WorkModelToolChoice,
+    /// Parts closing the last message that change on every call, such as the
+    /// host's running facts; a prompt cache breakpoint goes before them.
+    pub volatile_tail: usize,
+    /// Stable across one conversation's calls and free of its content, so a
+    /// provider that routes caches by key keeps them on one cache.
+    pub cache_key: Option<String>,
 }
 
 #[derive(Clone)]
@@ -208,6 +214,24 @@ pub enum WorkModelError {
     Protocol,
     Cancelled,
     OverBudget,
+}
+
+/// A cache key for one conversation, from what stays fixed across its calls:
+/// the system text and the tools' names. A hash, so no text leaves in it.
+pub fn work_model_cache_key(system: &[WorkModelSystemBlock], tools: &[WorkModelTool]) -> String {
+    // FNV-1a: the same key on every build, unlike the standard hasher.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let parts = system
+        .iter()
+        .map(|block| block.text.as_str())
+        .chain(tools.iter().map(|tool| tool.name.as_str()));
+    for part in parts {
+        for byte in part.bytes().chain([0]) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    format!("zk_{hash:016x}")
 }
 
 impl fmt::Display for WorkModelError {

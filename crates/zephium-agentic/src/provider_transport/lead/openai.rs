@@ -98,6 +98,15 @@ pub(super) fn body(
     body.insert("input".into(), Value::Array(input));
     body.insert("stream".into(), json!(true));
     body.insert("store".into(), json!(false));
+    // OpenAI, directly or through Zephium Cloud; xAI speaks this wire without the key.
+    if matches!(
+        request.model.provider,
+        WorkModelProvider::OpenAi | WorkModelProvider::Cloud
+    ) {
+        if let Some(key) = &request.cache_key {
+            body.insert("prompt_cache_key".into(), json!(key));
+        }
+    }
     body.insert("max_output_tokens".into(), json!(request.max_output_tokens));
     let mut include = vec![json!("reasoning.encrypted_content")];
     // xAI's Responses API documents no search include.

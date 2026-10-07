@@ -99,6 +99,8 @@ impl ModelNativeSearch {
             native_search: true,
             parallel_tools: false,
             tool_choice: WorkModelToolChoice::Auto,
+            volatile_tail: 0,
+            cache_key: None,
         }
     }
 

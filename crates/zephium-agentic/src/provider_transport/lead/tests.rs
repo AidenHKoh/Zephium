@@ -72,6 +72,8 @@ pub(super) fn request(wire: WorkModelWire, model: &str) -> WorkModelRequest {
         native_search: true,
         parallel_tools: true,
         tool_choice: WorkModelToolChoice::Auto,
+        volatile_tail: 0,
+        cache_key: None,
     }
 }
 

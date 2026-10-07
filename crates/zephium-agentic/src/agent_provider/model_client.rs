@@ -10,9 +10,9 @@
 use base64::Engine as _;
 use serde_json::Value;
 use zephium_core::work::model::{
-    WorkModelMessage, WorkModelOutcome, WorkModelPart, WorkModelReasoning, WorkModelRef,
-    WorkModelRequest, WorkModelStop, WorkModelSystemBlock, WorkModelTool, WorkModelToolCall,
-    WorkModelToolChoice, WorkModelToolResult,
+    work_model_cache_key, WorkModelMessage, WorkModelOutcome, WorkModelPart, WorkModelReasoning,
+    WorkModelRef, WorkModelRequest, WorkModelStop, WorkModelSystemBlock, WorkModelTool,
+    WorkModelToolCall, WorkModelToolChoice, WorkModelToolResult,
 };
 
 use super::request::MODEL_TURN_ITEM;
@@ -252,19 +252,33 @@ pub(crate) fn translate(
             (tools, offered, choice)
         }
     };
+    let system = vec![
+        WorkModelSystemBlock {
+            text: instructions.to_owned(),
+            cache: false,
+        },
+        WorkModelSystemBlock {
+            text: DEVELOPER_NOTE.to_owned(),
+            cache: true,
+        },
+    ];
+    // The host's running facts close the newest message and change on every
+    // call, so the cacheable conversation ends before them.
+    let volatile_tail = match messages.last() {
+        Some(WorkModelMessage::User(parts)) => parts
+            .iter()
+            .rev()
+            .take_while(|part| {
+                matches!(part, WorkModelPart::Text(text) if text.starts_with(DEVELOPER_LABEL))
+            })
+            .count(),
+        _ => 0,
+    };
+    let cache_key = Some(work_model_cache_key(&system, &tools));
     Ok((
         WorkModelRequest {
             model: model.clone(),
-            system: vec![
-                WorkModelSystemBlock {
-                    text: instructions.to_owned(),
-                    cache: false,
-                },
-                WorkModelSystemBlock {
-                    text: DEVELOPER_NOTE.to_owned(),
-                    cache: true,
-                },
-            ],
+            system,
             tools,
             messages,
             max_output_tokens: config.max_output_tokens(),
@@ -279,6 +293,8 @@ pub(crate) fn translate(
             native_search: false,
             parallel_tools: false,
             tool_choice,
+            volatile_tail,
+            cache_key,
         },
         ModelClientReplyContract {
             structured: is_structured,

@@ -163,6 +163,13 @@ fn an_observation_becomes_one_user_turn_under_the_fixed_instructions() {
             "[developer]\nZEPHIUM_HOST_ACTION_BUDGET_V1\nnative_actions_remaining=2"
         ]
     );
+    // The budget changes every call, so caches close before it; the key is
+    // stable for the page's fixed prompt and tools.
+    assert_eq!(request.volatile_tail, 1);
+    assert_eq!(
+        request.cache_key,
+        Some(work_model_cache_key(&request.system, &request.tools))
+    );
 }
 
 #[test]

@@ -108,18 +108,20 @@ pub(super) fn body(
             }
         }
     }
-    // Conversation caching: the newest cacheable block closes a breakpoint.
+    // Conversation caching: the newest cacheable block closes a breakpoint,
+    // short of the volatile blocks that close the conversation.
     if breakpoints < MAX_BREAKPOINTS {
         if let Some(block) = messages
-            .last_mut()
-            .and_then(|message| message["content"].as_array_mut())
-            .and_then(|content| {
-                content.iter_mut().rev().find(|block| {
-                    matches!(
-                        block["type"].as_str(),
-                        Some("text" | "tool_result" | "image" | "tool_use")
-                    )
-                })
+            .iter_mut()
+            .rev()
+            .filter_map(|message| message["content"].as_array_mut())
+            .flat_map(|content| content.iter_mut().rev())
+            .skip(request.volatile_tail)
+            .find(|block| {
+                matches!(
+                    block["type"].as_str(),
+                    Some("text" | "tool_result" | "image" | "tool_use")
+                )
             })
         {
             block["cache_control"] = json!({"type": "ephemeral"});

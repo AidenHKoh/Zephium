@@ -78,6 +78,8 @@ impl<'a> ModelDecisionCall<'a> {
             native_search: false,
             parallel_tools: false,
             tool_choice: WorkModelToolChoice::Named(DECISION_TOOL.to_owned()),
+            volatile_tail: 0,
+            cache_key: None,
         })
     }
 
