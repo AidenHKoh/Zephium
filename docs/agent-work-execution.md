@@ -240,7 +240,9 @@ signing in). A visible one-time-code, card-number or security-code field holds
 the page the same way: as a sign-in step, or as a payment for the person when
 the page reads as a checkout. A visible challenge widget in an embedded frame
 (hCaptcha, Turnstile, reCAPTCHA's checkbox, read only by the frame's title)
-holds it as a human check. Rust reads these walls at the start, after every
+holds it as a human check, and a visible card-field frame from a payment
+provider (Stripe, Braintree, Adyen and the like, read only by the frame's
+title) holds it as a payment for the person. Rust reads these walls at the start, after every
 verified step and after every navigation or followed load, before any model
 call is spent on a page the agent cannot pass. A page load the person finishes on the site in an
 ordinary tab (a count, never its URL) wakes a held page, which starts over

@@ -544,6 +544,33 @@ pub(crate) fn embedded_human_challenge(observation: &SemanticObservation) -> boo
         })
 }
 
+/// Titles payment providers give their card-field frames (Stripe, Braintree,
+/// Adyen, Checkout.com and the like). The frame is never read.
+const PAYMENT_FRAME_TITLES: [&str; 10] = [
+    "card number",
+    "card payment",
+    "payment input",
+    "credit card",
+    "card data",
+    "card details",
+    "expiration date",
+    "expiry date",
+    "cvc",
+    "cvv",
+];
+
+/// A visible card-field frame: the person enters card details, never the
+/// agent, which cannot see or reach inside the frame anyway.
+pub(crate) fn payment_frame(observation: &SemanticObservation) -> bool {
+    observation
+        .frames()
+        .iter()
+        .flat_map(SemanticSnapshot::nodes)
+        .filter(|node| node.role() == SemanticRole::FrameBoundary && node.geometry().is_some())
+        .filter_map(|node| node.name())
+        .any(|name| names_any(name.as_str(), &PAYMENT_FRAME_TITLES))
+}
+
 /// Words a checkout shows around its card fields.
 const PAYMENT_WORDS: [&str; 5] = ["card", "checkout", "billing", "payment", "płatność"];
 
@@ -1193,6 +1220,9 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
         }
         if embedded_human_challenge(observation) {
             return Some(AgentBrowserHumanReason::HumanChallenge);
+        }
+        if payment_frame(observation) {
+            return Some(AgentBrowserHumanReason::SensitiveEffect);
         }
         secret_entry(observation)
     }
@@ -2080,6 +2110,17 @@ mod tests {
             assert_eq!(
                 policy.human_wall(&challenge(title, width)),
                 Some(AgentBrowserHumanReason::HumanChallenge),
+                "{title}"
+            );
+        }
+        for title in [
+            "Secure card payment input frame",
+            "Secure Credit Card Frame - Credit Card Number",
+            "Iframe for card number",
+        ] {
+            assert_eq!(
+                policy.human_wall(&challenge(title, 300)),
+                Some(AgentBrowserHumanReason::SensitiveEffect),
                 "{title}"
             );
         }
