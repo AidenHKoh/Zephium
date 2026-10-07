@@ -81,7 +81,6 @@
   import { documentMarkdown, resultKey, WorkNotes } from "../lib/work-notes";
   import type { LiftAction } from "./LiftHeader.svelte";
   import { isAgentExecution, isLive } from "../lib/agent-steps";
-  import { environmentPlan } from "../lib/project-environment-plan";
   import {
     environmentAgents,
     environmentBoards,
@@ -662,8 +661,6 @@
       case "objective":
       case "request":
         return { width: 640, height: 600 };
-      case "responsibility":
-        return { width: 480, height: 320 };
       case "sources":
       case "part":
         return { width: 560, height: 560 };
@@ -738,21 +735,15 @@
       ? environmentItems(snapshot, tabs, context.notes, context.objectives, context.media)
       : [],
   );
-  let expanded = $state<string | null>(null);
   let planGeometry = $state.raw<CanvasView>({
     positions: {},
     sizes: {},
     viewport: { x: 0, y: 0, zoom: 1 },
   });
-  const scene = $derived(
-    snapshot
-      ? environmentPlan(snapshot, baseItems, context.objectives, context.plans, expanded)
-      : { items: [], links: [], targets: new Map(), positions: {} },
-  );
   const results = $derived(
     snapshot
-      ? environmentResults(snapshot, scene.items, objectiveSession?.projection ?? null)
-      : { items: scene.items, references: new Map<string, ResultReference>(), remaining: null },
+      ? environmentResults(snapshot, baseItems, objectiveSession?.projection ?? null)
+      : { items: baseItems, references: new Map<string, ResultReference>(), remaining: null },
   );
   /** What the run this canvas is watching is doing right now. */
   const signalOf = (objective: string) =>
@@ -1036,11 +1027,7 @@
     ...environmentSources(stages),
     ...agents.items,
   ]);
-  const links = $derived([
-    ...scene.links,
-    ...(snapshot ? environmentLinks(snapshot) : []),
-    ...requests.links,
-  ]);
+  const links = $derived([...(snapshot ? environmentLinks(snapshot) : []), ...requests.links]);
   const organizing = new SvelteSet<string>();
   /** A run whose placing was refused, by the revision it was refused at: tried again only after a change. */
   const stalled: Record<string, string> = {};
@@ -1405,19 +1392,6 @@
   const liftedElement = $derived(snapshot?.elements.find((element) => element.id === lifted?.id));
   /** A request opens its run: what it did, its steps, its sources. */
   const liftedStage = $derived(stages.find((stage) => stage.card === lifted?.id));
-  /** A reviewed plan's objective keeps its plan view; an agent's request opens its run. */
-  const liftedAgent = $derived.by(() => {
-    const stage = liftedStage;
-    if (!stage) return false;
-    // The run the canvas is watching is the freshest word on what this request is.
-    const projection =
-      objectiveSession?.projection?.work.id === stage.objective
-        ? objectiveSession.projection
-        : context.objectives.get(stage.objective);
-    return !!projection?.executions.some(
-      (run) => stage.executions.includes(run.id) && isAgentExecution(run),
-    );
-  });
 
   /** Every admitted picture of one subject element, in the order it admitted them. */
   function picturesOf(element: string) {
@@ -1454,7 +1428,6 @@
   const loadCentre = () => import("./objects/ObjectCentre.svelte");
   const loadModels = () => import("./bar/ModelPicker.svelte");
   const loadSubject = () => import("./WorkSubjectInspector.svelte");
-  const loadDetail = () => import("./WorkObjectiveInspector.svelte");
   /** The file a source row opened, shown as the run recorded it. */
   let liftFile = $state.raw<WorkFileEvidenceV1 | null>(null);
   /** One surface: a result opens in the lift, on the run that produced it. */
@@ -1497,7 +1470,6 @@
     if (!snapshot) return undefined;
     const own = environmentView(snapshot);
     const placed = {
-      ...scene.positions,
       ...plannedGeometry.positions,
       ...planGeometry.positions,
       ...savedResultPositions,
@@ -1510,7 +1482,6 @@
     return {
       ...own,
       positions: {
-        ...scene.positions,
         ...plannedGeometry.positions,
         ...planGeometry.positions,
         ...savedResultPositions,
@@ -1862,9 +1833,7 @@
     camera = view.viewport ?? camera;
     if (!snapshot || session.loading) return;
     const ids = Object.keys(view.positions).filter(
-      (id) =>
-        scene.targets.has(id) ||
-        (results.references.has(id) && !snapshot.elements.some((element) => element.id === id)),
+      (id) => results.references.has(id) && !snapshot.elements.some((element) => element.id === id),
     );
     const positions = Object.fromEntries(
       [
@@ -2265,15 +2234,7 @@
                   composerElement?.querySelector<HTMLElement>("textarea")?.focus();
                   return;
                 }
-                const reference = results.references.get(id);
-                if (reference) {
-                  void saveResult(id);
-                  return;
-                }
-                expanded =
-                  items.find((item) => item.id === id)?.actionLabel === m.work_env_collapse_plan()
-                    ? null
-                    : id;
+                if (results.references.has(id)) void saveResult(id);
               }}
               onviewchange={checkpoint}
             />{/snippet}</LazyView
@@ -2496,19 +2457,6 @@
               onopen={openCitation}
               onfile={(record: string) =>
                 (liftFile = fileEvidence(context.objectives, record) ?? null)}
-            />{/snippet}</LazyView
-        >
-      {:else if !liftedAgent && liftedElement?.reference.kind === "objective" && objectiveSession}
-        <LazyView
-          loader={loadDetail}
-          loadingLabel={m.surface_loading()}
-          failureLabel={m.surface_render_failed()}
-          retryLabel={m.surface_retry()}
-          >{#snippet children(Detail)}<Detail
-              session={objectiveSession!}
-              attached={snapshot?.elements.map((element) => element.reference) ?? []}
-              onopencitation={openCitation}
-              onattach={(reference) => void session.edit({ kind: "add", reference, area: null })}
             />{/snippet}</LazyView
         >
       {:else if liftedStage}

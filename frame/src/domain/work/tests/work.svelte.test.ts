@@ -70,39 +70,32 @@ beforeEach(() => {
   native.close = null;
 });
 
-test("keeps a draft's basis through fresh projections and Browse/Work transitions", async () => {
+test("an edit refused as a conflict stays a conflict across a reopen", async () => {
   const { WorkSession } = await import("../work.svelte");
   let revision = "1";
   native.call.mockImplementation((_profile: string, call: WorkCallV1) => reads(call, revision));
   const session = new WorkSession(profile);
   await session.start();
   await session.open(work);
-  session.setDraft("objective", "My investigation");
   revision = "9007199254740993";
-  await session.open(work);
-  session.stopObserving();
-  await session.start();
-  expect(session.draft("objective")).toBe("My investigation");
   native.call.mockImplementation((_profile: string, call: WorkCallV1) => {
     if (call.kind !== "author" || call.command.intent.kind !== "edit") return reads(call, revision);
     expect(call.command.intent.expected_revision).toBe("1");
     return response({ kind: "error", error: "conflict" });
   });
-  expect(await session.saveDraft("objective", "My investigation")).toBe(false);
+  expect(await session.edit({ kind: "set_objective", objective: "My investigation" })).toBe(false);
   expect(session.delivery).toBe("conflict");
   await session.open(work);
   expect(session.delivery).toBe("conflict");
-  expect(await native.close?.()).toBe(false);
   session.dispose();
 });
 
-test("retains exact operands after a wrong-profile acknowledgement and clears the confirmed draft on replay", async () => {
+test("retains exact operands after a wrong-profile acknowledgement and replays them once", async () => {
   const { WorkSession } = await import("../work.svelte");
   native.call.mockImplementation((_profile: string, call: WorkCallV1) => reads(call));
   const session = new WorkSession(profile);
   await session.start();
   await session.open(work);
-  session.setDraft("objective", "Review the dependency");
   const sent: WorkCallV1[] = [];
   native.call.mockImplementation((_profile: string, call: WorkCallV1) => {
     if (call.kind !== "author") return reads(call, "2");
@@ -118,7 +111,9 @@ test("retains exact operands after a wrong-profile acknowledgement and clears th
     });
     return sent.length === 1 ? { ...reply, profile: "00000000000000000000000003" } : reply;
   });
-  expect(await session.saveDraft("objective", "Review the dependency")).toBe(false);
+  expect(await session.edit({ kind: "set_objective", objective: "Review the dependency" })).toBe(
+    false,
+  );
   expect(session.delivery).toBe("unknown");
   expect(session.pending).not.toBeNull();
   session.stopObserving();
@@ -127,7 +122,6 @@ test("retains exact operands after a wrong-profile acknowledgement and clears th
   expect(await session.reconcile()).toBe(true);
   expect(sent[1]).toEqual(sent[0]);
   expect(session.pending).toBeNull();
-  expect(session.draft("objective")).toBeUndefined();
   session.dispose();
 });
 
@@ -168,18 +162,16 @@ test("does not roll back a precision-safe projection when a stale read arrives",
   session.dispose();
 });
 
-test("a home session with an unresolved Work draft cannot be evicted", async () => {
+test("a home session with unsent words in its composer cannot be evicted", async () => {
   const { WorkSession } = await import("../work.svelte");
   native.call.mockImplementation((_profile: string, call: WorkCallV1) => reads(call));
   const session = new WorkSession(profile);
   await session.start();
   await session.open(work);
-  session.setDraft("objective", "Keep this draft");
+  session.composer = "Keep these words";
   session.back();
   expect(session.canRelease).toBe(false);
-  await session.open(work);
-  session.discardDrafts();
-  session.back();
+  session.composer = "";
   expect(session.canRelease).toBe(true);
   session.dispose();
 });

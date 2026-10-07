@@ -59,7 +59,6 @@ test("the Work screen's own chrome, at rest and in use, in both themes", async (
     objective.projection = structuredClone(projection);
     return true;
   });
-  vi.spyOn(objective, "plan").mockResolvedValue(null);
   const screen = await render(WorkEnvironmentWorkspace, {
     session: environment,
     tabs: [],

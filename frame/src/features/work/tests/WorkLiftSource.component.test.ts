@@ -22,7 +22,6 @@ test("the lift grows from the card it was opened on, even with another card on t
     objective.projection = structuredClone(projection);
     return true;
   });
-  vi.spyOn(objective, "plan").mockResolvedValue(null);
   native.call.mockResolvedValue({
     version: 1,
     profile: snapshot.profile,

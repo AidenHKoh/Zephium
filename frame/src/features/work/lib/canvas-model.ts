@@ -23,7 +23,6 @@ type CanvasKind =
   | "media"
   | "objective"
   | "request"
-  | "responsibility"
   | "result"
   | "subject"
   | "sources"
@@ -52,8 +51,6 @@ export type CanvasItem = {
   artifact?: ArtifactView;
   layout?: "artifact";
   actionLabel?: string;
-  /** Planned output names only; these are not produced artifact resources. */
-  responsibility?: { outputs: string[] };
   subject?: SubjectView;
   /** What the run established about a subject, price first. */
   facts?: { label: string; value: string }[];
@@ -248,7 +245,6 @@ const QUIET = new Set<CanvasKind | undefined>([
   "result",
   "agent",
   "page",
-  "responsibility",
   "block",
   "head",
   "trail",
@@ -512,7 +508,6 @@ export function reconcileNodes(
         node.data.when === item.when &&
         JSON.stringify(node.data.object) === JSON.stringify(item.object) &&
         JSON.stringify(node.data.facts) === JSON.stringify(item.facts) &&
-        JSON.stringify(node.data.responsibility) === JSON.stringify(item.responsibility) &&
         JSON.stringify(node.data.block) === JSON.stringify(item.block) &&
         JSON.stringify(node.data.trail) === JSON.stringify(item.trail) &&
         JSON.stringify(node.data.size) === JSON.stringify(item.size);

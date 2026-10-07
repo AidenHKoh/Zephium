@@ -69,7 +69,6 @@ async function workspace(edit?: (state: WorkRuntimeProjection) => void) {
     objective.selected = id;
     return true;
   });
-  vi.spyOn(objective, "plan").mockResolvedValue(null);
   const screen = await render(WorkEnvironmentWorkspace, {
     session: environment,
     tabs: [],

@@ -1,8 +1,6 @@
 export { WorkSession, workSession } from "./work.svelte";
 export type {
   WorkRuntimeProjection,
-  WorkPlanRevision,
-  WorkPlanProposal,
   WorkArtifactV1,
   WorkArtifactDataV1,
   WorkExecutionFact,

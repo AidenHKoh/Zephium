@@ -52,7 +52,6 @@ export { default as StickyNote03Icon } from "@hugeicons/core-free-icons/StickyNo
 export { default as StopIcon } from "@hugeicons/core-free-icons/StopIcon";
 export { default as Table01Icon } from "@hugeicons/core-free-icons/Table01Icon";
 export { default as Target01Icon } from "@hugeicons/core-free-icons/Target01Icon";
-export { default as Task01Icon } from "@hugeicons/core-free-icons/Task01Icon";
 export { default as Tick02Icon } from "@hugeicons/core-free-icons/Tick02Icon";
 export { default as Upload01Icon } from "@hugeicons/core-free-icons/Upload01Icon";
 export { default as UserIcon } from "@hugeicons/core-free-icons/UserIcon";

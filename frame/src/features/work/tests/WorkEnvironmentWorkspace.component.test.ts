@@ -171,7 +171,6 @@ test("opening an objective lifts it over the canvas and returns on close", async
     objective.projection = structuredClone(projection);
     return true;
   });
-  vi.spyOn(objective, "plan").mockResolvedValue(null);
   native.call.mockResolvedValue({
     version: 1,
     profile: snapshot.profile,
@@ -202,115 +201,6 @@ test("opening an objective lifts it over the canvas and returns on close", async
   await screen.unmount();
   environment.dispose();
   objective.dispose();
-});
-
-test("a real attached objective expands its historical responsibilities directly on canvas", async () => {
-  const { projection, snapshot } = await import("./environment-fixtures");
-  const state = { ...projection, work: { ...projection.work, profile: "graph-profile" } };
-  const environment = new WorkEnvironmentSession("graph-profile", snapshot.space);
-  environment.snapshot = { ...structuredClone(snapshot), profile: "graph-profile" };
-  environment.selected = snapshot.id;
-  native.call.mockImplementation((_profile: string, call: WorkCallV1) => {
-    if (call.kind === "query")
-      return {
-        version: 1,
-        profile: "graph-profile",
-        reply:
-          call.request.query.kind === "plan"
-            ? {
-                kind: "plan",
-                plan: {
-                  author: "user",
-                  revision: "2",
-                  basis_revision: "1",
-                  draft: {
-                    id: "plan",
-                    nodes: [
-                      {
-                        id: "read",
-                        objective: "Read evidence",
-                        dependencies: [],
-                        outputs: [
-                          {
-                            name: "Evidence shortlist",
-                            description: "Operational prose should stay in optional details",
-                            review: "user_acceptance",
-                          },
-                        ],
-                      },
-                      {
-                        id: "compare",
-                        objective: "Compare findings",
-                        dependencies: ["read"],
-                        outputs: [],
-                      },
-                    ],
-                  },
-                },
-              }
-            : { kind: "projection", projection: state },
-      };
-    if (call.kind !== "environment" || call.request.kind !== "checkpoint")
-      throw new Error("Unexpected mutation");
-    expect(call.request.view.placements.map((place) => place.element)).toEqual([
-      "objective-card",
-      "result-card",
-    ]);
-    const request = call.request;
-    return {
-      version: 1,
-      profile: "graph-profile",
-      reply: {
-        kind: "environment",
-        reply: {
-          kind: "checkpointed",
-          expected: request.expected,
-          applied_view_revision: String(BigInt(request.expected) + 1n),
-          replayed: false,
-          snapshot: {
-            ...environment.snapshot!,
-            view: { ...request.view, revision: String(BigInt(request.expected) + 1n) },
-          },
-        },
-      },
-    };
-  });
-  const screen = await render(WorkEnvironmentWorkspace, {
-    session: environment,
-    tabs: [],
-    spaceName: "Personal",
-    profileLabel: "Reader",
-    aiEnabled: false,
-    onopen: vi.fn(),
-    onnewtab: vi.fn(),
-  });
-  const root = screen.container.querySelector(".environment") as HTMLElement;
-  root.style.height = "720px";
-  root.style.width = "1400px";
-  await screen.getByRole("button", { name: "Show plan", exact: true }).click();
-  await expect.element(screen.getByText("Read evidence", { exact: true })).toBeVisible();
-  await expect.element(screen.getByText("Compare findings", { exact: true })).toBeVisible();
-  await expect.element(screen.getByText("Evidence shortlist", { exact: true })).toBeVisible();
-  // The request, the result in its Made group, and the plan's two responsibilities.
-  expect(screen.container.querySelectorAll(".svelte-flow__node")).toHaveLength(5);
-  expect(screen.container.textContent).not.toContain(
-    "Operational prose should stay in optional details",
-  );
-  // Two plan dependencies, and the band's one line from the request into its result.
-  await expect.poll(() => screen.container.querySelectorAll(".svelte-flow__edge").length).toBe(3);
-  const dependency = screen.container.querySelector(
-    '[aria-label="Compare findings depends on Read evidence"]',
-  );
-  expect(dependency).not.toBeNull();
-  expect(dependency?.getAttribute("tabindex")).toBeNull();
-  expect(dependency?.getAttribute("aria-describedby")).toBeNull();
-  await screen.getByRole("button", { name: "Collapse plan", exact: true }).click();
-  await expect.element(screen.getByText("Read evidence", { exact: true })).not.toBeInTheDocument();
-  await screen.getByRole("button", { name: "Show plan", exact: true }).click();
-  await expect.element(screen.getByText("Read evidence", { exact: true })).toBeVisible();
-  await environment.flushView();
-  await screen.unmount();
-  environment.dispose();
 });
 
 test("prompt submission keeps work on canvas and clarification choices above the available composer", async () => {
