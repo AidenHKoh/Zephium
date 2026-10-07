@@ -327,6 +327,9 @@ pub(crate) async fn work_models(caller: WebviewWindow, expected_profile: String)
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, specta::Type, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WorkSearchReadyV1 {
+    /// The person's search engine's results page, read in the agent browser
+    /// with no model; a model's search answers only when the page cannot be used.
+    Browser,
     /// A chosen model's own provider search.
     Native,
     /// The fixed public search with the person's OpenAI key.
@@ -358,10 +361,16 @@ pub(crate) async fn work_models_ready(
     let (ready, search) = match profile {
         Some(profile) => {
             use zephium_app::work_models::{self as models, WorkSearchReadiness};
-            let search = match models::search_readiness(profile).await {
-                WorkSearchReadiness::Native(_) => WorkSearchReadyV1::Native,
-                WorkSearchReadiness::OpenAi => WorkSearchReadyV1::OpenAi,
-                WorkSearchReadiness::Unavailable => WorkSearchReadyV1::Unavailable,
+            // Runs search results pages in the agent browser wherever Work
+            // runs; a model's search is only their fallback.
+            let search = if cfg!(any(target_os = "macos", target_os = "windows")) {
+                WorkSearchReadyV1::Browser
+            } else {
+                match models::search_readiness(profile).await {
+                    WorkSearchReadiness::Native(_) => WorkSearchReadyV1::Native,
+                    WorkSearchReadiness::OpenAi => WorkSearchReadyV1::OpenAi,
+                    WorkSearchReadiness::Unavailable => WorkSearchReadyV1::Unavailable,
+                }
             };
             (models::ready(profile).await, search)
         }

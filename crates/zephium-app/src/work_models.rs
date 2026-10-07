@@ -905,7 +905,8 @@ pub async fn ready(profile: ProfileId) -> bool {
     effective(&state(), profile, WorkModelRole::Lead).is_some()
 }
 
-/// How a run in `profile` would search the web, in the order a run picks.
+/// The provider search a run in `profile` would fall back to when its
+/// browser search cannot use a results page, in the order a run picks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkSearchReadiness {
     /// A chosen model's own provider search, light first.
@@ -916,7 +917,7 @@ pub enum WorkSearchReadiness {
     Unavailable,
 }
 
-/// Mirrors the run's own choice of search backend.
+/// Mirrors the run's own choice of fallback search.
 pub async fn search_readiness(profile: ProfileId) -> WorkSearchReadiness {
     ensure_presence().await;
     let state = state();

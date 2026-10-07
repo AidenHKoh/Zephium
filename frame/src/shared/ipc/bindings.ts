@@ -2398,6 +2398,11 @@ export type WorkAgentGrantV1_Deserialize = {
 	 *  this skill loaded. A name it does not know is ignored.
 	 */
 	skill?: string | null,
+	/**
+	 *  What a browser search falls back to when a results page cannot be
+	 *  used; only a browser search grant names one.
+	 */
+	search_fallback?: WorkSearchFallbackV1 | null,
 };
 
 export type WorkAgentGrantV1_Serialize = {
@@ -2428,6 +2433,11 @@ export type WorkAgentGrantV1_Serialize = {
 	 *  this skill loaded. A name it does not know is ignored.
 	 */
 	skill?: string | null,
+	/**
+	 *  What a browser search falls back to when a results page cannot be
+	 *  used; only a browser search grant names one.
+	 */
+	search_fallback?: WorkSearchFallbackV1 | null,
 };
 
 export type WorkApprovalRequestV1 = {
@@ -5101,14 +5111,35 @@ export type WorkProjectStackV1_Serialize = {
 	manifest?: string | null,
 };
 
-export type WorkProviderSearchCitation = {
+export type WorkProviderSearchCitation = WorkProviderSearchCitation_Serialize | WorkProviderSearchCitation_Deserialize;
+
+export type WorkProviderSearchCitation_Deserialize = {
 	url: string,
 	title: string,
 	start_index: number,
 	end_index: number,
+	/**
+	 *  The engine's own text under a browser search result. A browser search
+	 *  has no answer, so its results span nothing.
+	 */
+	snippet?: string | null,
 };
 
-export type WorkProviderSearchEvidenceV1 = {
+export type WorkProviderSearchCitation_Serialize = {
+	url: string,
+	title: string,
+	start_index: number,
+	end_index: number,
+	/**
+	 *  The engine's own text under a browser search result. A browser search
+	 *  has no answer, so its results span nothing.
+	 */
+	snippet?: string | null,
+};
+
+export type WorkProviderSearchEvidenceV1 = WorkProviderSearchEvidenceV1_Serialize | WorkProviderSearchEvidenceV1_Deserialize;
+
+export type WorkProviderSearchEvidenceV1_Deserialize = {
 	version: number,
 	provider: WorkSearchProvider,
 	model: string,
@@ -5116,8 +5147,27 @@ export type WorkProviderSearchEvidenceV1 = {
 	response_model: string,
 	response_id: string,
 	search_call_id: string,
+	/**  Empty for a browser search: a results page gives no answer. */
 	answer: string,
-	citations: WorkProviderSearchCitation[],
+	/**  For a browser search, its results in the engine's order. */
+	citations: WorkProviderSearchCitation_Deserialize[],
+	/**  Provider-reported usage, distinct from fixed billed search-content units. */
+	actual_input_tokens: number,
+	actual_output_tokens: number,
+};
+
+export type WorkProviderSearchEvidenceV1_Serialize = {
+	version: number,
+	provider: WorkSearchProvider,
+	model: string,
+	/**  Catalog-validated actual snapshot returned by the provider. */
+	response_model: string,
+	response_id: string,
+	search_call_id: string,
+	/**  Empty for a browser search: a results page gives no answer. */
+	answer: string,
+	/**  For a browser search, its results in the engine's order. */
+	citations: WorkProviderSearchCitation_Serialize[],
 	/**  Provider-reported usage, distinct from fixed billed search-content units. */
 	actual_input_tokens: number,
 	actual_output_tokens: number,
@@ -5137,7 +5187,7 @@ export type WorkProviderSearchRecordV1_Deserialize = {
 	id: WorkArtifactId,
 	node: WorkPlanNodeId,
 	attempt: WorkAttemptId,
-	evidence: WorkProviderSearchEvidenceV1,
+	evidence: WorkProviderSearchEvidenceV1_Deserialize,
 	ranking?: WorkPublicSearchRanking | null,
 };
 
@@ -5149,7 +5199,7 @@ export type WorkProviderSearchRecordV1_Serialize = {
 	id: WorkArtifactId,
 	node: WorkPlanNodeId,
 	attempt: WorkAttemptId,
-	evidence: WorkProviderSearchEvidenceV1,
+	evidence: WorkProviderSearchEvidenceV1_Serialize,
 	ranking?: WorkPublicSearchRanking | null,
 };
 
@@ -5405,12 +5455,31 @@ export type WorkRuntimeProjection_Serialize = {
 /** Store incarnation; never serialized as execution authority. */
 export type WorkRuntimeSessionId = string;
 
+/**
+ *  The search a browser search falls back to when it cannot use a results
+ *  page.
+ */
+export type WorkSearchFallbackV1 = {
+	provider: WorkSearchProvider,
+	model: string,
+};
+
 export type WorkSearchProvider = "open_ai" | 
 /**  The web search built into the chosen model's own provider. */
-"native";
+"native" | 
+/**
+ *  The person's search engine's results page, read in the agent browser
+ *  with no model call.
+ */
+"browser";
 
 /**  How a run would search the web with the models chosen now. */
 export type WorkSearchReadyV1 = 
+/**
+ *  The person's search engine's results page, read in the agent browser
+ *  with no model; a model's search answers only when the page cannot be used.
+ */
+"browser" | 
 /**  A chosen model's own provider search. */
 "native" | 
 /**  The fixed public search with the person's OpenAI key. */
