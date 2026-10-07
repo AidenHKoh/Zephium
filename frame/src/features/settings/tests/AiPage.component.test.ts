@@ -2,6 +2,7 @@ import "$styles/global.css";
 import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
+import type { WorkLocalServerV1 } from "$shared/ipc/bindings";
 import { PROFILE, models } from "$shared/testing/work-models";
 import AiPage from "../components/sections/AiPage.svelte";
 
@@ -14,6 +15,8 @@ const native = vi.hoisted(() => ({
   test: vi.fn(),
   choose: vi.fn(),
   account: vi.fn(),
+  local: vi.fn(async () => [] as WorkLocalServerV1[]),
+  endpoint: vi.fn(),
 }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
@@ -23,6 +26,8 @@ vi.mock("$shared/ipc/bindings", async () => {
     workTestProviderKey: native.test,
     workChooseModel: native.choose,
     accountGet: native.account,
+    workLocalServers: native.local,
+    workSetModelEndpoint: native.endpoint,
     workDecisionPreference: async () => ({
       version: 1,
       profile: PROFILE,
@@ -157,4 +162,19 @@ test("Zephium AI is offered where the server hosts models, and shows the account
   await expect
     .element(signed.getByText("Add a provider key or sign in", { exact: false }))
     .not.toBeInTheDocument();
+});
+
+test("a model server already running here is one click away", async () => {
+  await page.viewport(1100, 1400);
+  native.read.mockResolvedValue(models({}));
+  native.local.mockResolvedValue([
+    { kind: "ollama", base: "http://localhost:11434/v1", models: 3 },
+  ]);
+  native.endpoint.mockResolvedValue(models({ base: "http://localhost:11434/v1" }));
+  const screen = await render(AiPage);
+  await screen.getByRole("button", { name: "Use Ollama on this Mac" }).click();
+  expect(native.endpoint).toHaveBeenCalledWith(PROFILE, "http://localhost:11434/v1");
+  await expect
+    .element(screen.getByText("Set OLLAMA_CONTEXT_LENGTH", { exact: false }))
+    .toBeVisible();
 });

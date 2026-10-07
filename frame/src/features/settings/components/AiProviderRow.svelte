@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { onMount, tick } from "svelte";
   import { commands } from "$shared/ipc/bindings";
-  import type { WorkModelProvider } from "$shared/ipc/bindings";
+  import type { WorkLocalServerV1, WorkModelProvider } from "$shared/ipc/bindings";
   import { type ModelsSession, keyState, providerMark, providerName } from "$domain/ai";
   import Button from "$shared/ui/Button";
   import Field from "$shared/ui/Field";
@@ -46,6 +46,27 @@
       cloud: m.ai_provider_compatible,
     }[provider](),
   );
+
+  /** Model servers already running here, offered in one click. */
+  let local = $state.raw<WorkLocalServerV1[]>([]);
+  onMount(() => {
+    if (!custom) return;
+    let live = true;
+    void Promise.resolve()
+      .then(() => commands.workLocalServers())
+      .then((found) => {
+        if (live) local = found;
+      })
+      .catch(() => {});
+    return () => (live = false);
+  });
+  const ollama = $derived(!!base && /^http:\/\/(localhost|127\.0\.0\.1):11434\b/u.test(base));
+
+  async function useLocal(server: WorkLocalServerV1) {
+    message = null;
+    if (!(await session.setEndpoint(server.base)))
+      message = { text: explain(session.fault?.fault), tone: "error" };
+  }
 
   let editing = $state(false);
   let secret = $state("");
@@ -211,6 +232,15 @@
         }}>{m.ai_get_key({ provider: name })}</a
       >
     </p>{/if}
+  {#if custom && !configured && !editing && local.length}<div class="local">
+      {#each local as server (server.kind)}<Button
+          size="compact"
+          disabled={!!session.busy}
+          onclick={() => void useLocal(server)}
+          >{server.kind === "ollama" ? m.ai_local_use_ollama() : m.ai_local_use_lm_studio()}</Button
+        >{/each}
+    </div>{/if}
+  {#if custom && ollama && !editing}<p class="message">{m.ai_local_ollama_context()}</p>{/if}
   {#if providerFault && !message}<p class="message" role="status">{explain(providerFault)}</p>{/if}
   {#if editing}
     <form
@@ -405,6 +435,12 @@
   .message {
     margin: 8px 0 0 44px;
     white-space: normal;
+  }
+
+  .local {
+    display: flex;
+    gap: 6px;
+    margin: 10px 0 0 44px;
   }
 
   a {
