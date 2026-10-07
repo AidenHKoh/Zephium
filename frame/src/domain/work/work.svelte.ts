@@ -202,9 +202,7 @@ export class WorkSession {
               !result.projection.interrupted.includes(entry.id),
           )
         )
-          this.activityRefresh = setTimeout(() => {
-            if (this.active && this.selected === work) void this.open(work);
-          }, 1_000);
+          this.followActivity(work, generation, 0);
       }
       if (this.delivery === "ready") this.failure = null;
       return true;
@@ -212,6 +210,26 @@ export class WorkSession {
     if (result.kind === "error") this.failure = result.error;
     else this.failure = "unsupported_projection";
     return false;
+  }
+  /**
+   * While a run is live, what it is doing and its pages' newest frames are
+   * read every second; they are not durable, so nothing announces them. The
+   * projection itself is re-read when native says the work changed, and only
+   * every tenth second besides, should an announcement be lost.
+   */
+  private followActivity(work: string, generation: number, tick: number) {
+    clearTimeout(this.activityRefresh);
+    this.activityRefresh = setTimeout(() => {
+      if (!this.active || this.selected !== work || generation !== this.reads) return;
+      const state = this.projection;
+      if (!state || tick >= 9) {
+        void this.open(work);
+        return;
+      }
+      void this.readActivity(state, generation).then(() =>
+        this.followActivity(work, generation, tick + 1),
+      );
+    }, 1_000);
   }
   private async readActivity(state: WorkRuntimeProjection, generation: number) {
     try {

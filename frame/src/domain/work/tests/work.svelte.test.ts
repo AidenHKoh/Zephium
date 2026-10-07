@@ -251,6 +251,45 @@ test("page frames survive a settled run, an overtaking read, and a return to Wor
   session.dispose();
 });
 
+test("a live run's activity is read each second, its projection only every tenth", async () => {
+  vi.useFakeTimers();
+  const { WorkSession } = await import("../work.svelte");
+  const live = {
+    id: "execution",
+    approved_revision: "1",
+    status: "running",
+    attempts: [],
+    artifacts: [],
+    user_artifacts: [],
+  } as unknown as WorkExecutionFact;
+  native.call.mockImplementation((_profile: string, call: WorkCallV1) => reads(call, "1", [live]));
+  native.activity.mockResolvedValue({
+    version: 1,
+    profile,
+    work,
+    signals: [],
+    pages: [],
+    error: null,
+  } satisfies WorkActivityResponseV1);
+  const session = new WorkSession(profile);
+  await session.start();
+  await session.open(work);
+  const projections = () =>
+    native.call.mock.calls.filter((args) => {
+      const call = args[1] as WorkCallV1;
+      return call.kind === "query" && call.request.query.kind === "projection";
+    }).length;
+  const opened = projections();
+  const activities = native.activity.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(9_500);
+  expect(projections()).toBe(opened);
+  expect(native.activity.mock.calls.length).toBe(activities + 9);
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(projections()).toBeGreaterThan(opened);
+  session.dispose();
+  vi.useRealTimers();
+});
+
 test("the next request first acknowledges a run an earlier launch left running", async () => {
   const { WorkSession } = await import("../work.svelte");
   const session = new WorkSession(profile);
