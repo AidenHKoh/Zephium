@@ -475,6 +475,7 @@ impl AgentWorkRunSettings {
 #[must_use]
 pub struct AgentWorkRunInput {
     decision_provider: Option<super::AgentBrowserDecisionProvider>,
+    decision_model: Option<zephium_agentic::AgentProviderModelClient>,
     manifest: AgentRunManifest,
     lease: AgentPlanLeaseBinding,
     context: AgentWorkContextSpec,
@@ -495,6 +496,12 @@ impl AgentWorkRunInput {
     /// Replaces only the trusted dormant provider selection before admission.
     pub fn set_decision_provider(&mut self, provider: super::AgentBrowserDecisionProvider) {
         self.decision_provider = Some(provider);
+    }
+
+    /// Answers typed questions no primary backend settled with the person's
+    /// chosen model instead of the OpenAI emulation. No scope is added.
+    pub fn set_decision_model(&mut self, model: zephium_agentic::AgentProviderModelClient) {
+        self.decision_model = Some(model);
     }
     /// Requires isolated native storage without changing account or disclosure scope.
     pub fn with_isolated_website_data(mut self) -> Self {
@@ -607,6 +614,7 @@ impl AgentWorkRunInput {
                 .map_err(|_| AgentWorkFailure::Contract)?;
         Ok(Self {
             decision_provider: None,
+            decision_model: None,
             manifest,
             lease,
             context,
@@ -2154,7 +2162,7 @@ impl AgentWorkController {
         )
         .map_err(AgentWorkFailure::Browser)?;
         if let Some(provider) = input.decision_provider.take() {
-            if let Err(error) = session.configure_decisions(provider) {
+            if let Err(error) = session.configure_decisions(provider, input.decision_model.take()) {
                 session.journal = state.journal.take();
                 state.session = Some(session);
                 return Err(AgentWorkFailure::Browser(error));

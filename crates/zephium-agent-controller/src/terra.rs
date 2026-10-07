@@ -4663,7 +4663,7 @@ mod tests {
             );
             let deadline = session.deadline;
             session
-                .configure_decisions(AgentBrowserDecisionProvider::Emulation)
+                .configure_decisions(AgentBrowserDecisionProvider::Emulation, None)
                 .unwrap();
             let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
             if let Some(mut answers) = session
@@ -4686,6 +4686,98 @@ mod tests {
             assert!(session.transport.snapshot().unwrap().is_idle());
             assert!(session.try_finish().is_ok());
         }
+    }
+
+    /// Answers every decision batch with an empty answer object.
+    #[derive(Default)]
+    struct DecidingModel {
+        choices: Mutex<Vec<zephium_agentic::work_model::WorkModelToolChoice>>,
+    }
+
+    impl zephium_agentic::work_model::WorkModelClient for DecidingModel {
+        fn call<'a>(
+            &'a self,
+            request: zephium_agentic::work_model::WorkModelRequest,
+            _: &'a (dyn Fn(zephium_agentic::work_model::WorkModelEvent) + Send + Sync),
+        ) -> zephium_agentic::work_model::WorkModelFuture<'a> {
+            use zephium_agentic::work_model::*;
+            self.choices
+                .lock()
+                .expect("choices")
+                .push(request.tool_choice);
+            Box::pin(async {
+                Ok(WorkModelOutcome {
+                    stop: WorkModelStop::ToolUse,
+                    usage: WorkModelUsage {
+                        input_tokens: 600,
+                        output_tokens: 20,
+                        ..WorkModelUsage::default()
+                    },
+                    assistant: vec![WorkModelPart::ToolCall(WorkModelToolCall {
+                        id: "call_1".to_owned(),
+                        name: "typed_decision".to_owned(),
+                        arguments: serde_json::json!({"answers": {}}),
+                    })],
+                })
+            })
+        }
+    }
+
+    fn deciding_entry() -> zephium_agentic::work_model::WorkModelEntry {
+        use zephium_agentic::work_model::*;
+        WorkModelEntry {
+            id: "openrouter/light-test".to_owned(),
+            model: WorkModelRef {
+                provider: WorkModelProvider::OpenRouter,
+                wire: WorkModelWire::ChatCompletions,
+                model: "vendor/light-test".to_owned(),
+            },
+            display_name: "Light Test".to_owned(),
+            roles: vec![WorkModelRole::Light],
+            recommended: false,
+            context_window: 128_000,
+            max_output: 8_000,
+            supports: WorkModelSupports {
+                tools: true,
+                vision: false,
+                prompt_cache: false,
+                reasoning: false,
+                native_search: false,
+            },
+            price: Some(WorkModelPrice {
+                input: 100_000,
+                cached_input: 10_000,
+                output: 400_000,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn unsettled_decisions_fall_back_to_the_chosen_light_model() {
+        let (mut session, observation) = browser_fixture();
+        let client = Arc::new(DecidingModel::default());
+        let light =
+            zephium_agentic::AgentProviderModelClient::try_new(&deciding_entry(), client.clone())
+                .expect("light model");
+        session
+            .configure_decisions(AgentBrowserDecisionProvider::Emulation, Some(light))
+            .unwrap();
+        let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+        session
+            .decide_observation(&observation, &authority, None, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            *client.choices.lock().unwrap(),
+            [zephium_agentic::work_model::WorkModelToolChoice::Named(
+                "typed_decision".to_owned()
+            )]
+        );
+        assert_eq!(session.turns, 1);
+        assert_eq!(session.model_receipts.len(), 1);
+        assert_eq!(session.policy.pending_model_calls(), 0);
+        assert!(session.transport.snapshot().unwrap().is_idle());
+        assert!(session.try_finish().is_ok());
     }
 
     #[tokio::test]

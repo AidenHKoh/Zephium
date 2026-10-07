@@ -1,8 +1,9 @@
 use super::*;
 use zephium_agentic::{
     AgentPolicyError, AgentProviderCallIdentity, AgentProviderInputMetricReceipt,
-    DecisionCallAccounting, DecisionCallFailure, DecisionCredentialProvider, DecisionObservation,
-    DecisionObservationAnswers, DecisionProjectionError, JevDecisionClient, OpenAiDecisionCall,
+    AgentProviderModelClient, DecisionCallAccounting, DecisionCallFailure,
+    DecisionCredentialProvider, DecisionObservation, DecisionObservationAnswers,
+    DecisionProjectionError, JevDecisionClient, ModelDecisionCall, OpenAiDecisionCall,
     WorkPlanningConfig,
 };
 
@@ -28,7 +29,15 @@ pub enum AgentBrowserDecisionProvider {
 
 pub(super) struct BrowserDecisions {
     jev: Option<JevDecisionClient>,
-    emulation: WorkPlanningConfig,
+    emulation: DecisionEmulation,
+}
+
+/// Who answers the typed questions the primary backend left open.
+enum DecisionEmulation {
+    /// GPT-6 Luna through the session's OpenAI key.
+    OpenAi(WorkPlanningConfig),
+    /// The person's chosen model through its own client.
+    Model(AgentProviderModelClient),
 }
 
 struct Accounting<'a> {
@@ -62,9 +71,12 @@ impl DecisionCallAccounting for Accounting<'_> {
 }
 
 impl AgentBrowserSession {
+    /// A chosen decision model, else a chosen page model, answers what the
+    /// primary backend leaves open; an exact session falls back to GPT-6 Luna.
     pub(super) fn configure_decisions(
         &mut self,
         provider: AgentBrowserDecisionProvider,
+        model: Option<AgentProviderModelClient>,
     ) -> Result<(), AgentBrowserProviderError> {
         self.check_live()?;
         if self.turns != 0 || self.decisions.is_some() {
@@ -91,14 +103,24 @@ impl AgentBrowserSession {
             Err(DecisionCallFailure::Unavailable) => None,
             Err(_) => return Err(AgentBrowserProviderError::Transport),
         };
-        let config = zephium_agent_model_catalog::try_gpt6_luna_decision_call_config(
-            EMULATION_OUTPUT_TOKENS,
-            zephium_agent_model_catalog::Gpt6LunaDecisionEffort::Low,
-        )
-        .map_err(|_| AgentBrowserProviderError::Catalog)?;
-        let emulation =
-            WorkPlanningConfig::try_new(config, EMULATION_INPUT_TOKENS, EMULATION_COST_MICRO_USD)
+        let emulation = match model.or_else(|| self.chosen.clone()) {
+            Some(model) => DecisionEmulation::Model(model),
+            None => {
+                let config = zephium_agent_model_catalog::try_gpt6_luna_decision_call_config(
+                    EMULATION_OUTPUT_TOKENS,
+                    zephium_agent_model_catalog::Gpt6LunaDecisionEffort::Low,
+                )
                 .map_err(|_| AgentBrowserProviderError::Catalog)?;
+                DecisionEmulation::OpenAi(
+                    WorkPlanningConfig::try_new(
+                        config,
+                        EMULATION_INPUT_TOKENS,
+                        EMULATION_COST_MICRO_USD,
+                    )
+                    .map_err(|_| AgentBrowserProviderError::Catalog)?,
+                )
+            }
+        };
         self.decisions = Some(BrowserDecisions { jev, emulation });
         Ok(())
     }
@@ -236,8 +258,7 @@ impl AgentBrowserSession {
         let fallback = projection
             .route(primary)
             .map_err(|_| AgentBrowserProviderError::Authority)?;
-        let can_emulate = self.has_decision_capacity()?
-            && matches!(self.access, Some(AgentBrowserModelAccess::Exact(_)));
+        let can_emulate = self.has_decision_capacity()? && self.can_emulate();
         if fallback.projection().is_some() {
             if let Some(journal) = &self.journal {
                 journal
@@ -249,32 +270,49 @@ impl AgentBrowserSession {
                     .map_err(|_| AgentBrowserProviderError::Journal)?;
             }
         }
-        let emulation = if let Some(projection) = fallback.projection().filter(|_| can_emulate) {
-            self.check_live()?;
-            let decisions = self
-                .decisions
-                .as_ref()
-                .ok_or(AgentBrowserProviderError::Authority)?;
-            let Some(AgentBrowserModelAccess::Exact(credential)) = self.access.as_ref() else {
-                return Err(AgentBrowserProviderError::Cancelled);
-            };
-            let client =
-                OpenAiDecisionCall::try_new(&self.transport, credential, &decisions.emulation)
-                    .map_err(|_| AgentBrowserProviderError::Catalog)?;
-            let budget = client
+        let emulation = match fallback.projection().filter(|_| can_emulate) {
+            Some(projection) => self.emulate(observation, projection).await?,
+            None => None,
+        };
+        self.check_live()?;
+        Ok(Some(fallback.finish(emulation)))
+    }
+
+    fn can_emulate(&self) -> bool {
+        match self
+            .decisions
+            .as_ref()
+            .map(|decisions| &decisions.emulation)
+        {
+            Some(DecisionEmulation::Model(_)) => true,
+            Some(DecisionEmulation::OpenAi(_)) => {
+                matches!(self.access, Some(AgentBrowserModelAccess::Exact(_)))
+            }
+            None => false,
+        }
+    }
+
+    async fn emulate(
+        &mut self,
+        observation: &zephium_agentic::SemanticObservation,
+        projection: &DecisionObservation,
+    ) -> Result<Option<zephium_decision::DecisionResponse>, AgentBrowserProviderError> {
+        self.check_live()?;
+        let model = match self
+            .decisions
+            .as_ref()
+            .map(|decisions| &decisions.emulation)
+        {
+            Some(DecisionEmulation::Model(model)) => Some(model.clone()),
+            Some(DecisionEmulation::OpenAi(_)) => None,
+            None => return Err(AgentBrowserProviderError::Authority),
+        };
+        let output = if let Some(model) = model {
+            let budget = ModelDecisionCall::new(&self.transport, &model)
                 .call_budget()
                 .map_err(AgentBrowserProviderError::RequestPolicy)?;
             let call = self.next_model_call_request_with_budget(budget)?;
-            let decisions = self
-                .decisions
-                .as_ref()
-                .ok_or(AgentBrowserProviderError::Authority)?;
-            let Some(AgentBrowserModelAccess::Exact(credential)) = self.access.as_ref() else {
-                return Err(AgentBrowserProviderError::Cancelled);
-            };
-            let client =
-                OpenAiDecisionCall::try_new(&self.transport, credential, &decisions.emulation)
-                    .map_err(|_| AgentBrowserProviderError::Catalog)?;
+            let client = ModelDecisionCall::new(&self.transport, &model);
             let mut accounting = Accounting {
                 journal: self.journal.as_mut(),
                 receipts: &mut self.model_receipts,
@@ -282,7 +320,7 @@ impl AgentBrowserSession {
                 maximum: self.max_model_calls,
                 failure: &mut self.failure,
             };
-            let output = client
+            client
                 .evaluate_observation(
                     &mut self.policy,
                     call,
@@ -292,13 +330,55 @@ impl AgentBrowserSession {
                     &self.cancellation,
                     Some(&mut accounting),
                 )
-                .await;
-            self.settle_decision(output)?.ok()
+                .await
         } else {
-            None
+            let decisions = self
+                .decisions
+                .as_ref()
+                .ok_or(AgentBrowserProviderError::Authority)?;
+            let DecisionEmulation::OpenAi(config) = &decisions.emulation else {
+                return Err(AgentBrowserProviderError::Authority);
+            };
+            let Some(AgentBrowserModelAccess::Exact(credential)) = self.access.as_ref() else {
+                return Err(AgentBrowserProviderError::Cancelled);
+            };
+            let budget = OpenAiDecisionCall::try_new(&self.transport, credential, config)
+                .map_err(|_| AgentBrowserProviderError::Catalog)?
+                .call_budget()
+                .map_err(AgentBrowserProviderError::RequestPolicy)?;
+            let call = self.next_model_call_request_with_budget(budget)?;
+            let decisions = self
+                .decisions
+                .as_ref()
+                .ok_or(AgentBrowserProviderError::Authority)?;
+            let DecisionEmulation::OpenAi(config) = &decisions.emulation else {
+                return Err(AgentBrowserProviderError::Authority);
+            };
+            let Some(AgentBrowserModelAccess::Exact(credential)) = self.access.as_ref() else {
+                return Err(AgentBrowserProviderError::Cancelled);
+            };
+            let client = OpenAiDecisionCall::try_new(&self.transport, credential, config)
+                .map_err(|_| AgentBrowserProviderError::Catalog)?;
+            let mut accounting = Accounting {
+                journal: self.journal.as_mut(),
+                receipts: &mut self.model_receipts,
+                turns: &mut self.turns,
+                maximum: self.max_model_calls,
+                failure: &mut self.failure,
+            };
+            client
+                .evaluate_observation(
+                    &mut self.policy,
+                    call,
+                    observation,
+                    projection,
+                    self.deadline,
+                    &self.cancellation,
+                    Some(&mut accounting),
+                )
+                .await
         };
-        self.check_live()?;
-        Ok(Some(fallback.finish(emulation)))
+        Ok(self.settle_decision(output)?.ok())
     }
 
     fn settle_decision(

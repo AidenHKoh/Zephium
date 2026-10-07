@@ -192,6 +192,13 @@ impl WorkProviders {
             models.lead.entry.id, models.page.entry.id, models.light.entry.id
         ));
         let page = page_model(&models)?;
+        // Typed decisions the recommended backend leaves open go to the light
+        // model; one that cannot call tools leaves them to the page model.
+        let light = zephium_agentic::AgentProviderModelClient::try_new(
+            &models.light.entry,
+            models.light.client.clone(),
+        )
+        .ok();
         let callback = shell.callback_handle();
         let work = command.work;
         let started = std::time::Instant::now();
@@ -208,6 +215,7 @@ impl WorkProviders {
                 |probe, request| {
                     let callback = &callback;
                     let page = page.clone();
+                    let light = light.clone();
                     async move {
                         // The catalog model is unused: the chosen page model carries its own.
                         let mut settings = zephium_work_composition::durable_runtime::WorkBrowserAdapterSettings::new(
@@ -222,6 +230,7 @@ impl WorkProviders {
                         settings.decisions = super::super::work_decision::composition_preference(
                             super::super::work_decision::selected_choice(profile).await,
                         );
+                        settings.decision_model = light;
                         #[cfg(feature = "work-development-traces")]
                         let settings = {
                             let mut settings = settings;

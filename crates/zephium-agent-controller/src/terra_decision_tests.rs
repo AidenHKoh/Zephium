@@ -88,7 +88,7 @@ async fn decision_call_joins_the_shared_work_journal() {
         .unwrap();
     session.journal = Some(journal);
     session
-        .configure_decisions(AgentBrowserDecisionProvider::Emulation)
+        .configure_decisions(AgentBrowserDecisionProvider::Emulation, None)
         .unwrap();
     let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
     let mut answers = session

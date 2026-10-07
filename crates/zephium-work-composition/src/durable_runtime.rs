@@ -35,7 +35,8 @@ pub enum WorkDecisionPreference {
     /// Use the fixed TypeSafe Keychain item, with per-question OpenAI fallback.
     #[default]
     Recommended,
-    /// Answer the same typed questions through the existing OpenAI credential.
+    /// Answer the same typed questions with a model: the chosen one, or the
+    /// existing OpenAI credential's.
     Emulation,
     /// Use the existing page planner directly.
     Disabled,
@@ -45,6 +46,9 @@ pub enum WorkDecisionPreference {
 /// a controller implementation or provider configuration.
 pub struct WorkBrowserAdapterSettings {
     pub decisions: WorkDecisionPreference,
+    /// Answers typed questions the primary backend leaves open; without it a
+    /// chosen page model does, and an exact session uses GPT-6 Luna.
+    pub decision_model: Option<AgentProviderModelClient>,
     /// Explicit opt-in for public development traces; absent in release builds.
     #[cfg(feature = "public-qualification")]
     pub retain_public_responses: bool,
@@ -78,6 +82,7 @@ impl WorkBrowserAdapterSettings {
     ) -> Self {
         Self {
             decisions: WorkDecisionPreference::Recommended,
+            decision_model: None,
             #[cfg(feature = "public-qualification")]
             retain_public_responses: false,
             #[cfg(feature = "retained-lifetime-diagnostic")]
@@ -481,6 +486,7 @@ impl NativeWorkComposition {
             },
             config: settings.config.clone(),
             decisions,
+            decision_model: settings.decision_model.clone(),
             deadline: probe.deadline().min(Instant::now() + MAX_STEP_DURATION),
         };
         // Every page of a run shares its page group: reads and page tasks,
@@ -1143,6 +1149,7 @@ impl NativeWorkComposition {
                             access,
                         );
                         settings.decisions = plan.decisions;
+                        settings.decision_model = plan.decision_model.clone();
                         let mut invocation = compile_step(
                             attempt,
                             request,
@@ -2340,6 +2347,7 @@ struct ResumePlan {
     chosen: Option<AgentProviderModelClient>,
     config: AgentWorkApplicationConfig,
     decisions: WorkDecisionPreference,
+    decision_model: Option<AgentProviderModelClient>,
     deadline: Instant,
 }
 async fn configure_decisions(
@@ -2593,6 +2601,29 @@ fn loopback_page(
 fn compile_step(
     probe: &WorkAttemptProbe,
     request: WorkAgentBrowseRequest,
+    mut settings: WorkBrowserAdapterSettings,
+    collection: Option<&WorkBrowseCollectionSchema>,
+    resume: Option<ResumeCompile>,
+    gate: Option<std::sync::Arc<crate::open_objective::site_work::SiteGate>>,
+) -> Result<crate::TrustedWorkRequest, WorkError> {
+    let decision_model = settings.decision_model.take();
+    compile_page_step(probe, request, settings, collection, resume, gate)
+        .map(|request| with_decision_model(request, decision_model))
+}
+
+fn with_decision_model(
+    mut request: crate::TrustedWorkRequest,
+    model: Option<AgentProviderModelClient>,
+) -> crate::TrustedWorkRequest {
+    if let Some(model) = model {
+        request.input.set_decision_model(model);
+    }
+    request
+}
+
+fn compile_page_step(
+    probe: &WorkAttemptProbe,
+    request: WorkAgentBrowseRequest,
     settings: WorkBrowserAdapterSettings,
     collection: Option<&WorkBrowseCollectionSchema>,
     resume: Option<ResumeCompile>,
@@ -2834,6 +2865,16 @@ fn refused(settings: &WorkBrowserAdapterSettings, stage: &str, error: WorkError)
 }
 
 fn compile(
+    attempt: &WorkNodeAttempt,
+    mut settings: WorkBrowserAdapterSettings,
+    collection: Option<&WorkBrowseCollectionSchema>,
+) -> Result<crate::TrustedWorkRequest, WorkError> {
+    let decision_model = settings.decision_model.take();
+    compile_node(attempt, settings, collection)
+        .map(|request| with_decision_model(request, decision_model))
+}
+
+fn compile_node(
     attempt: &WorkNodeAttempt,
     settings: WorkBrowserAdapterSettings,
     collection: Option<&WorkBrowseCollectionSchema>,
