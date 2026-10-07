@@ -6373,7 +6373,7 @@ fn validate_provider_transport_shutdown_contract(
     );
     for required in [
         "pubconstMAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES:usize=32;",
-        "#[cfg(feature=\"probe-harness\")]pubfnload_probe_openai_credential()->Result<AgentProviderCredential,AgentProviderVaultError>{#[cfg(target_os=\"macos\")]{returnload_macos_probe_openai_credential();}#[cfg(not(target_os=\"macos\"))]load_development_openai_credential()}",
+        "#[cfg(feature=\"probe-harness\")]pubfnload_probe_openai_credential()->Result<AgentProviderCredential,AgentProviderVaultError>{#[cfg(target_os=\"macos\")]letloaded=load_macos_probe_openai_credential();#[cfg(not(target_os=\"macos\"))]letloaded=load_development_openai_credential();loaded}",
         "pubconstfnis_idle(self)->bool{self.active==0}",
         "pubconstfnis_quiescent(self)->bool{self.sealed&&self.active==0}",
         "drained:Notify,",
