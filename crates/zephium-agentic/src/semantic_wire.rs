@@ -565,13 +565,12 @@ fn allowed_operations(role: SemanticRole) -> Result<SemanticOperations, Semantic
         | SemanticRole::Landmark
         | SemanticRole::List
         | SemanticRole::Table => &[Scroll],
+        // Only when the page made the item clickable itself.
+        SemanticRole::ListItem | SemanticRole::Row | SemanticRole::Cell => &[Click],
         SemanticRole::Heading
         | SemanticRole::Paragraph
         | SemanticRole::Dialog
-        | SemanticRole::ListItem
-        | SemanticRole::Row
         | SemanticRole::CellHeader
-        | SemanticRole::Cell
         | SemanticRole::Image
         | SemanticRole::Progress
         | SemanticRole::Status
@@ -1723,6 +1722,37 @@ mod tests {
                 Err(SemanticDecodeError::NodeContract)
             );
         }
+    }
+
+    #[test]
+    fn page_clickable_items_admit_click_and_nothing_more() {
+        for role in ["row", "cell", "list_item"] {
+            let snapshot = decode_semantic_snapshot(
+                decode_context(),
+                &payload(json!([{"k": 1, "r": role, "o": 1}])),
+            )
+            .expect("clickable item");
+            assert_eq!(
+                snapshot.nodes()[0].operations(),
+                SemanticOperations::try_new(&[SemanticOperationClass::Click]).unwrap()
+            );
+            for operations in [2, 4, 8, 16] {
+                assert_eq!(
+                    decode_semantic_snapshot(
+                        decode_context(),
+                        &payload(json!([{"k": 1, "r": role, "o": operations}])),
+                    ),
+                    Err(SemanticDecodeError::NodeContract)
+                );
+            }
+        }
+        assert_eq!(
+            decode_semantic_snapshot(
+                decode_context(),
+                &payload(json!([{"k": 1, "r": "cell_header", "o": 1}])),
+            ),
+            Err(SemanticDecodeError::NodeContract)
+        );
     }
 
     #[test]

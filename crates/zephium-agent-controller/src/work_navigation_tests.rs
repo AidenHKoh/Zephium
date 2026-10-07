@@ -33,6 +33,19 @@ pub(super) fn query_discovery_scope() -> AgentNavigationDiscovery {
     .unwrap()
 }
 
+/// The arrival's first look is an application shell of loading placeholders.
+static BOOTING_ARRIVAL: AtomicBool = AtomicBool::new(false);
+
+#[test]
+fn a_booting_arrival_fills_in_before_the_next_model_call() {
+    let _serial = lock(&SERIAL);
+    BOOTING_ARRIVAL.store(true, Ordering::Relaxed);
+    // The fixture provider asserts the post-navigation call carries the
+    // arrival's own heading, not its loading shell.
+    provider_fixture(ProviderFault::Navigation(NavigationFault::Discovery));
+    BOOTING_ARRIVAL.store(false, Ordering::Relaxed);
+}
+
 #[test]
 fn discovered_link_workflow_uses_original_controller_and_refuses_unobserved_urls() {
     let _serial = lock(&SERIAL);
@@ -1139,13 +1152,16 @@ pub(super) fn capture(
     }
     let arrived = lock(&port.calls).contains(&9);
     let correlation = invocation.correlation();
-    if !matches!(
-        fault,
-        NavigationFault::DiscoveryEvidence(_)
-            | NavigationFault::DiscoveryScopeRefusal(_)
-            | NavigationFault::DiscoveryAction(_)
-            | NavigationFault::DiscoveryActionRefusal(_, _)
-    ) {
+    let booting = arrived && BOOTING_ARRIVAL.load(Ordering::Relaxed);
+    if !booting
+        && !matches!(
+            fault,
+            NavigationFault::DiscoveryEvidence(_)
+                | NavigationFault::DiscoveryScopeRefusal(_)
+                | NavigationFault::DiscoveryAction(_)
+                | NavigationFault::DiscoveryActionRefusal(_, _)
+        )
+    {
         assert_eq!(
             correlation.snapshot_generation().get(),
             1,
@@ -1248,6 +1264,18 @@ pub(super) fn capture(
                 "u": format!("https://public.example.test/{index}/{}", "a".repeat(170))
             }));
         }
+        serde_json::to_string(&value).unwrap()
+    } else {
+        wire
+    };
+    let wire = if booting && correlation.snapshot_generation().get() == 1 {
+        let mut value: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        value["n"] = serde_json::json!([
+            {"k": 1, "r": "document", "o": 16},
+            {"k": 2, "p": 0, "r": "progress"},
+            {"k": 3, "p": 0, "r": "progress"},
+            {"k": 4, "p": 0, "r": "progress"},
+        ]);
         serde_json::to_string(&value).unwrap()
     } else {
         wire
@@ -1597,7 +1625,12 @@ pub(super) fn assert_outcome(
             matches!(&result.sources(value.source_span()).unwrap().next().unwrap().content, SemanticOwnedReadContent::Text(text) if text == "Arrival certificate")
         );
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
-        assert_eq!(calls, [1, 2, 3, 2, 9, 3, 4, 5, 6]);
+        if BOOTING_ARRIVAL.load(Ordering::Relaxed) {
+            // One more look at the arrival while its shell filled in.
+            assert_eq!(calls, [1, 2, 3, 2, 9, 3, 3, 4, 5, 6]);
+        } else {
+            assert_eq!(calls, [1, 2, 3, 2, 9, 3, 4, 5, 6]);
+        }
     } else if matches!(
         fault,
         NavigationFault::Redirect

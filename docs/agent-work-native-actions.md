@@ -4,7 +4,13 @@ The macOS engine implements `AgentBrowserPort::work_resource_act` on the existin
 retained WKWebView. The accepted native recipes are Click, Fill, and Select.
 These reuse the immutable isolated runtime and the separately attested fixed
 page-world fill shim. This path neither synthesizes trusted OS input nor grants
-page activation. Other platforms retain explicit `Unsupported` until they have
+page activation. Select writes the native index through the captured setter, checks it,
+then dispatches untrusted bubbling `input` and `change` events, as a person's
+choice does: sort and filter menus act on those events, never on the write. Click
+also reaches a row, cell or list item the page made clickable itself (a click
+handler attribute, a tab stop, or a pointer cursor set on the item and not
+inherited from its parent), such as a mail client's thread rows; the decoder
+admits Click and nothing else on those roles. Other platforms retain explicit `Unsupported` until they have
 their own verified adapter.
 
 The request must already contain an independently policy-authorized native

@@ -387,8 +387,9 @@ Object.assign(globalThis, {
   cancelAnimationFrame(handle) { clearImmediate(handle); },
   innerWidth: 1280,
   innerHeight: 720,
-  getComputedStyle() {
-    return { display: "block", visibility: "visible", contentVisibility: "visible", overflowX: "auto", overflowY: "auto" };
+  getComputedStyle(element) {
+    return { display: "block", visibility: "visible", contentVisibility: "visible", overflowX: "auto", overflowY: "auto",
+      cursor: (element && element._cursor) || "auto" };
   }
 });
 Object.defineProperty(globalThis, "crypto", {
@@ -1180,6 +1181,11 @@ async function finish() {
     of: descriptorFor(germanNode)
   });
   document._hit = languageSelect;
+  const selectEvents = [];
+  for (const type of ["input", "change"]) {
+    languageSelect.addEventListener(type, (event) => selectEvents.push(
+      `${event.type}:${event.bubbles}:${event.isTrusted}`));
+  }
   const selectSuccess = JSON.parse(runtime.invoke(selectRequest(29)));
   assert(
     selectSuccess.a === 29 && selectSuccess.d === 1 &&
@@ -1187,11 +1193,16 @@ async function finish() {
       germanOption.selected,
     "fixed native-select execution evidence mismatch"
   );
+  assert(
+    JSON.stringify(selectEvents) === '["input:true:false","change:true:false"]',
+    "native selection did not tell the page as a person's choice does"
+  );
+  selectEvents.length = 0;
   languageSelect._selectedIndex = 0;
   languageSelect._rewriteAfterSet = true;
   assert(
     runtime.invoke(selectRequest(30)) === "E2:applied_unverified" &&
-      languageSelect._selectedIndex === 0,
+      languageSelect._selectedIndex === 0 && selectEvents.length === 0,
     "page-rewritten native selection remained retryable"
   );
   languageSelect._rewriteAfterSet = false;
@@ -2136,6 +2147,31 @@ async function finish() {
     const rich = JSON.parse(invoke(190, 190, { k: "initial" })).n.find(node => node.n === "Fill diagnostic");
     assert(rich && rich.fs === 1 && (rich.o & 2) !== 0, `formatting-only editor lost Fill: ${rich && rich.fs}`);
   }
+  {
+    // A page's own clickable rows and items are clickable; inert ones and
+    // cells that only inherit their row's pointer are not.
+    main._children = new NodeList();
+    const list = main.append(new Element("ul"));
+    list.append(new Element("li", { onclick: "open()" })).append(new CharacterData("Handled item"));
+    list.append(new Element("li", { tabindex: "0" })).append(new CharacterData("Focusable item"));
+    list.append(new Element("li")).append(new CharacterData("Inert item"));
+    const table = main.append(new Element("table"));
+    const row = table.append(new Element("tr"));
+    row._cursor = "pointer";
+    const cell = row.append(new Element("td"));
+    cell._cursor = "pointer";
+    cell.append(new CharacterData("Thread subject"));
+    const nodes = JSON.parse(invoke(191, 191, { k: "initial" })).n;
+    const ops = (role, text) => {
+      const found = nodes.find(node => node.r === role && (text === null || node.t === text || node.n === text));
+      assert(found, `missing ${role} ${text}`);
+      return found.o || 0;
+    };
+    assert(ops("list_item", "Handled item") === 1 && ops("list_item", "Focusable item") === 1 &&
+      ops("list_item", "Inert item") === 0, "list items' own clickability was misread");
+    assert(ops("row", null) === 1 && ops("cell", "Thread subject") === 0,
+      "a pointer row was not clickable or its inheriting cell was");
+  }
 
   // A nested leaf never inherits write authority over its editor. A fresh
   // descriptor cannot silently rebind the private observed ancestor identities.
@@ -2506,6 +2542,8 @@ async function finish() {
     fixed_action_execution: true,
     fixed_fill_execution: true,
     fixed_select_execution: true,
+    select_change_events: true,
+    clickable_items: true,
     document_parent_option_brand_guard: true,
     select_rewrite_nonretryable: true,
     fill_native_primitives_captured: true,

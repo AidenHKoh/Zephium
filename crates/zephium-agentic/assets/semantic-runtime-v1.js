@@ -143,6 +143,7 @@
   const fixedTimeout = globalThis.setTimeout;
   const fixedClearTimeout = globalThis.clearTimeout;
   const nativeInputEvent = globalThis.InputEvent;
+  const nativeEvent = globalThis.Event;
   const fixedDispatchEvent = EventTarget.prototype.dispatchEvent;
   const inputValueSetter = setter(HTMLInputElement.prototype, "value");
   const textareaValueSetter = setter(HTMLTextAreaElement.prototype, "value");
@@ -1277,6 +1278,22 @@
     return viewport === null ? null : {x: 0, y: 0, width: viewport.width, height: viewport.height};
   }
 
+  // Rows, cells and list items a page made clickable itself (mail threads,
+  // app lists) carry no interactive role. A click handler attribute, a tab
+  // stop or a pointer cursor set on the item, not inherited, says so.
+  function clickableItem(element) {
+    if (has(element, "onclick") || attribute(element, "tabindex", 8) === "0" ||
+        lower(attribute(element, "jsaction", 1024) || "").includes("click")) return true;
+    try {
+      const cursor = apply(getComputedStyleFixed, globalThis, [element]).cursor;
+      const parent = read(nodeParentGetter, element);
+      return cursor === "pointer" && !(parent !== null && nodeType(parent) === 1 &&
+        apply(getComputedStyleFixed, globalThis, [parent]).cursor === "pointer");
+    } catch (_) {
+      return false;
+    }
+  }
+
   function operationBits(descriptor, disabled, readonly, element) {
     if (disabled || descriptor.noOperations === true) return 0;
     switch (descriptor.role) {
@@ -1308,6 +1325,10 @@
           fillControlKind(descriptor, "") !== 0 ? 1 | 2 | 8 : 1 | 8;
       case "listbox":
         return 4 | 8 | (scrollElement(element) === null ? 0 : 16);
+      case "row":
+      case "cell":
+      case "list_item":
+        return clickableItem(element) ? 1 : 0;
       case "group":
       case "document":
       case "landmark":
@@ -3370,14 +3391,15 @@
     }
     try {
       write(selectIndexSetter, target, desired);
+      if (read(selectIndexGetter, target) !== desired) return "applied_unverified";
+      // A person's choice fires input then change; sort and filter menus act
+      // on them, and a write alone leaves the page's own state unchanged.
+      apply(fixedDispatchEvent, target, [new nativeEvent("input", { bubbles: true, composed: true })]);
+      apply(fixedDispatchEvent, target, [new nativeEvent("change", { bubbles: true })]);
     } catch (_) {
       return "applied_unverified";
     }
-    try {
-      return read(selectIndexGetter, target) === desired ? "ok" : "applied_unverified";
-    } catch (_) {
-      return "applied_unverified";
-    }
+    return "ok";
   }
 
   function encodeActionEvidence(request, backend, readiness, geometry, viewport, point, delta) {

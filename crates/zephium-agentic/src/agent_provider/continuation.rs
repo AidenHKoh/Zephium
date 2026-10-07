@@ -69,6 +69,9 @@ pub const MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES: usize = 256 * 1024;
 pub const MAX_AGENT_PROVIDER_CONTINUATION_TURNS: usize = 64;
 /// Transcript bytes past which the oldest looks are retired to a stub.
 const TRANSCRIPT_WORKING_BYTES: usize = 48 * 1024;
+/// Retirement goes down to this, so the next few calls only append and their
+/// shared prefix stays cached instead of changing on every call.
+const TRANSCRIPT_RETIRED_BYTES: usize = 24 * 1024;
 const RETIRED_TOOL_RESULT: &str =
     r#"{"status":"retired","note":"an earlier look; its refs are retired, use the latest look"}"#;
 
@@ -585,11 +588,15 @@ impl AgentProviderTranscript {
     /// Earlier looks' page content is stale once newer looks exist (their
     /// refs are retired): past the working size, the oldest tool results
     /// become a short stub, the latest two kept whole, so a long look at one
-    /// page does not resend every earlier capture on each call.
+    /// page does not resend every earlier capture on each call. Retiring in
+    /// one batch down to a lower mark keeps the prefix stable for later calls.
     fn retire_to_fit(&mut self, incoming: usize) {
+        if self.retained_bytes.saturating_add(incoming) <= TRANSCRIPT_WORKING_BYTES {
+            return;
+        }
         let keep = self.turns.len().saturating_sub(2);
         for turn in self.turns.iter_mut().take(keep) {
-            if self.retained_bytes.saturating_add(incoming) <= TRANSCRIPT_WORKING_BYTES {
+            if self.retained_bytes.saturating_add(incoming) <= TRANSCRIPT_RETIRED_BYTES {
                 break;
             }
             if turn.tool_result.len() > RETIRED_TOOL_RESULT.len() {
@@ -5366,6 +5373,104 @@ mod tests {
         assert!(!debug.contains("private retained tool result"));
         assert!(!debug.contains("call_continuation_1"));
         assert!(debug.contains("[redacted]"));
+    }
+
+    /// Bytes of the leading input items a call shares with the call before
+    /// it: what a provider's prefix cache can serve. Instructions and tools
+    /// are fixed for a page and precede the input on every wire.
+    fn cached_prefix(previous: &[u8], next: &[u8]) -> (usize, usize) {
+        let items = |body: &[u8]| -> Vec<String> {
+            let wire: serde_json::Value = serde_json::from_slice(body).expect("body");
+            wire["input"]
+                .as_array()
+                .expect("input")
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+        let (previous, next) = (items(previous), items(next));
+        let shared = previous
+            .iter()
+            .zip(&next)
+            .take_while(|(a, b)| a == b)
+            .map(|(item, _)| item.len())
+            .sum();
+        (shared, next.iter().map(String::len).sum())
+    }
+
+    #[test]
+    fn verified_actions_on_one_page_extend_the_cached_prefix_instead_of_rewriting_it() {
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let diff = "d".repeat(2 * 1024);
+        let mut retained = AgentProviderTranscript::try_initial(
+            Arc::from("private objective"),
+            "o".repeat(12 * 1024),
+        )
+        .expect("bounded transcript");
+        let mut progress = None;
+        let mut previous: Option<Vec<u8>> = None;
+        let (mut shared, mut total) = (0, 0);
+        for id in 1..=8 {
+            let result = crate::semantic_action_result::tests::scroll_provider_fixture(id, true);
+            progress = Some(AgentActionProgress::record(progress, &result).expect("progress"));
+            retained.action_progress = progress.take();
+            let bound = retained
+                .try_bind_for_test(openai_correlation("{}"), diff.clone())
+                .expect("bounded turn");
+            let body = super::super::request::encode_openai_continuation_body(&config, &bound)
+                .expect("body");
+            if let Some(previous) = &previous {
+                let (call_shared, call_total) = cached_prefix(previous, &body);
+                shared += call_shared;
+                total += call_total;
+            }
+            previous = Some(body);
+            retained = bound.into_transcript();
+            progress = retained.action_progress.take();
+        }
+        let percent = shared * 100 / total;
+        // Every earlier turn is byte-identical on the next call; only the new
+        // turn and the trailing host facts are fresh. Measured 86%; 50% while
+        // the action history preceded the turns.
+        assert!(percent >= 85, "{percent}% ({shared}/{total} bytes)");
+    }
+
+    #[test]
+    fn retiring_old_captures_keeps_the_prefix_stable_across_several_calls() {
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let capture = "c".repeat(6 * 1024);
+        let mut retained = transcript();
+        let mut previous: Option<Vec<u8>> = None;
+        let (mut shared, mut total, mut rewrites) = (0, 0, 0);
+        for _ in 0..16 {
+            let bound = retained
+                .try_bind_for_test(openai_correlation("{}"), capture.clone())
+                .expect("bounded turn");
+            let body = super::super::request::encode_openai_continuation_body(&config, &bound)
+                .expect("body");
+            if let Some(previous) = &previous {
+                let (call_shared, call_total) = cached_prefix(previous, &body);
+                // A call that does not reuse its predecessor's whole input
+                // rewrote an earlier turn.
+                let before: serde_json::Value = serde_json::from_slice(previous).expect("body");
+                let before = before["input"].as_array().map_or(0, |input| {
+                    input
+                        .iter()
+                        .map(|item| item.to_string().len())
+                        .sum::<usize>()
+                });
+                rewrites += usize::from(call_shared < before);
+                shared += call_shared;
+                total += call_total;
+            }
+            previous = Some(body);
+            retained = bound.into_transcript();
+        }
+        let percent = shared * 100 / total;
+        // Measured 73% and 2 rewrites; 25% and 9 when every call retired one.
+        assert!(retained.retained_bytes <= TRANSCRIPT_WORKING_BYTES + capture.len());
+        assert!(rewrites <= 4, "{rewrites} rewrites in 15 calls");
+        assert!(percent >= 70, "{percent}% ({shared}/{total} bytes)");
     }
 
     #[test]

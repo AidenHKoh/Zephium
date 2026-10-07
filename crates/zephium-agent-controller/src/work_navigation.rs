@@ -146,7 +146,7 @@ impl AgentWorkController {
             SemanticObservation,
             SemanticCaptureInstant,
             AgentWorkTaskProgress,
-            AgentBrowserProviderTurn,
+            Option<AgentBrowserProviderTurn>,
         ),
         AgentWorkFailure,
     > {
@@ -534,7 +534,18 @@ impl AgentWorkController {
                 })?;
         }
         state.navigation_hops += 1;
-        let fresh = Self::fit_model_observation(Self::observe(state, worker, browser).await?)?;
+        let fresh = Self::fit_model_observation(
+            Box::pin(Self::observe_after_navigation(state, worker, browser)).await?,
+        )?;
+        // A move can land on a sign-in, code or bot-check page: the person
+        // gets it before any model call is spent on a page it cannot pass.
+        let (fresh, held) = if state.human_request
+            && (state.task.human_wall(&fresh).is_some() || looks_like_human_challenge(&fresh))
+        {
+            Box::pin(Self::settle_human_challenge(state, worker, browser, fresh)).await?
+        } else {
+            (fresh, false)
+        };
         let captured_at = SemanticCaptureInstant::from_millis(
             state
                 .journal_mut()?
@@ -544,6 +555,9 @@ impl AgentWorkController {
                 .millis(),
         );
         let progress = state.task_progress(&fresh)?;
+        if held {
+            return Ok((fresh, captured_at, progress, None));
+        }
         let navigation_available = !state.navigation_complete();
         let action_authority = state
             .session
@@ -579,7 +593,58 @@ impl AgentWorkController {
             ),
         )
         .await?;
-        Ok((fresh, captured_at, progress, turn))
+        Ok((fresh, captured_at, progress, Some(turn)))
+    }
+}
+
+impl AgentWorkController {
+    /// A document a move just committed may still be an application shell of
+    /// loading placeholders. A few bounded looks give it time to fill in, so
+    /// the model is not paid to read, or snapshot again, an empty page. Like
+    /// the first look's wait, this is scheduling only, never readiness proof.
+    async fn observe_after_navigation(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        const DELAYS_MS: [u64; 4] = [250, 500, 1000, 1500];
+        let mut observation = Self::observe(state, worker, browser).await?;
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(4))
+            .ok_or(AgentWorkFailure::Deadline)?
+            .min(state.native.deadline);
+        for delay in DELAYS_MS {
+            if !has_dominant_loading_placeholders(&observation)
+                || state
+                    .native
+                    .retained
+                    .as_ref()
+                    .is_some_and(|browser| !browser.allows_readiness_retry())
+            {
+                break;
+            }
+            let wake = Instant::now()
+                .checked_add(Duration::from_millis(delay))
+                .ok_or(AgentWorkFailure::Deadline)?;
+            if wake >= deadline {
+                break;
+            }
+            tokio::select! {
+                biased;
+                event = state.native.next_event(worker, browser) => {
+                    state.native.retain(event?)?;
+                    return Err(AgentWorkFailure::Mailbox);
+                }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+            }
+            state.check_task_contract()?;
+            // The arrival's account is attested once, after its settled look.
+            state.native.check_control(worker, browser)?;
+            let next = Self::observe(state, worker, browser).await?;
+            validate_initial_readiness_successor(&observation, &next)?;
+            observation = next;
+        }
+        Ok(observation)
     }
 }
 

@@ -391,7 +391,14 @@ pub(super) fn reading_observation(
         &serde_json::to_vec(&wire).unwrap(),
     )
     .unwrap();
-    SemanticObservationAssembler::new(
+    // Work captures mark every embedded frame unobserved, as here.
+    let boundaries = snapshot
+        .nodes()
+        .iter()
+        .filter(|node| node.role() == SemanticRole::FrameBoundary)
+        .map(SemanticNode::reference)
+        .collect::<Vec<_>>();
+    let mut assembler = SemanticObservationAssembler::new(
         SemanticObservationRequest::initial(
             SemanticObservationId::new(1).unwrap(),
             context,
@@ -399,9 +406,17 @@ pub(super) fn reading_observation(
         ),
         snapshot,
     )
-    .unwrap()
-    .finish()
-    .unwrap()
+    .unwrap();
+    for boundary in boundaries {
+        assembler
+            .mark_frame_unsupported(
+                FrameId::MAIN,
+                boundary,
+                SemanticFrameUnsupported::PolicyBlocked,
+            )
+            .unwrap();
+    }
+    assembler.finish().unwrap()
 }
 
 #[cfg(feature = "durable-runtime")]

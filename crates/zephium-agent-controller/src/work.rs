@@ -3135,7 +3135,11 @@ impl AgentWorkController {
                 observation = next.0;
                 captured_at = next.1;
                 progress = next.2;
-                turn = next.3;
+                let Some(next_turn) = next.3 else {
+                    state.observation = Some(observation);
+                    return Ok(());
+                };
+                turn = next_turn;
                 frames.clear();
                 frames.extend(
                     observation
@@ -3281,6 +3285,7 @@ impl AgentWorkController {
                 }
             };
             Self::retain_action_read_evidence(state, &proposal, &observation, captured_at)?;
+            let link = Self::clicked_link(state, proposal.action(), &observation);
             let (current, current_at, transition) = match Self::execute_prepared_action(
                 state,
                 worker,
@@ -3313,7 +3318,10 @@ impl AgentWorkController {
                         state.refresh_account(worker, browser)?;
                         let _ = Box::pin(Self::observe(state, worker, browser)).await?;
                     }
-                    if let Some(target) = state.follow.take() {
+                    // A link whose click went nowhere (a new-window link, a
+                    // covered or script-only one) is followed to its observed
+                    // destination rather than handed back to the model.
+                    if let Some(target) = state.follow.take().or(link) {
                         let next = Self::navigate_current(
                             state,
                             worker,
@@ -3327,7 +3335,13 @@ impl AgentWorkController {
                             progress,
                         )
                         .await?;
-                        (observation, captured_at, progress, turn) = next;
+                        let next_turn;
+                        (observation, captured_at, progress, next_turn) = next;
+                        let Some(next_turn) = next_turn else {
+                            state.observation = Some(observation);
+                            return Ok(());
+                        };
+                        turn = next_turn;
                         frames.clear();
                         frames.extend(
                             observation
@@ -3391,7 +3405,13 @@ impl AgentWorkController {
                     progress,
                 )
                 .await?;
-                (observation, captured_at, progress, turn) = next;
+                let next_turn;
+                (observation, captured_at, progress, next_turn) = next;
+                let Some(next_turn) = next_turn else {
+                    state.observation = Some(observation);
+                    return Ok(());
+                };
+                turn = next_turn;
                 frames.clear();
                 frames.extend(
                     observation
@@ -3440,6 +3460,41 @@ impl AgentWorkController {
             )
             .await?;
         }
+    }
+
+    /// The in-scope observed destination of a link this action clicks, for
+    /// following when the click itself changes nothing.
+    fn clicked_link(
+        state: &WorkState,
+        action: &SemanticPreparedAction,
+        observation: &SemanticObservation,
+    ) -> Option<ContextNavigationTarget> {
+        let session = state.session.as_ref()?;
+        let headroom = usize::from(session.turns) + 2 <= usize::from(session.max_model_calls)
+            && session
+                .policy
+                .remaining_operations(session.lease.lease())
+                .is_ok_and(|operations| operations >= 3);
+        if action.kind() != SemanticActionKind::Click
+            || !headroom
+            || !state
+                .navigation_discovery
+                .as_ref()
+                .is_some_and(AgentNavigationDiscovery::is_site_session)
+        {
+            return None;
+        }
+        let target = observation
+            .frames()
+            .iter()
+            .flat_map(SemanticSnapshot::nodes)
+            .find(|node| node.reference() == action.target_reference())
+            .filter(|node| node.role() == SemanticRole::Link)?
+            .link_destination()?
+            .clone();
+        Self::navigation_refusal(state, &target, observation)
+            .is_none()
+            .then_some(target)
     }
 
     /// The daily app the page's admitted document is on.
