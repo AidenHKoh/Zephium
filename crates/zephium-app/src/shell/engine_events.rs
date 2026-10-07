@@ -516,7 +516,12 @@ impl Shell {
             EngineEvent::ShortcutPressed { .. } => {}
             EngineEvent::TitleChanged { id, title } => {
                 self.crash.presentations.remove(&id);
-                self.items.set_title(id, title.clone());
+                // Pages re-publish the title they already have (counters,
+                // tickers, frameworks on every route); each would cost chrome a
+                // projection, history a write and extensions a new surface.
+                if !self.items.set_title(id, title.clone()) {
+                    return;
+                }
                 self.amend_recorded_visit_title(id, &title);
                 self.project_tab(id);
                 self.sync_extension_browser_surface_metadata(id);

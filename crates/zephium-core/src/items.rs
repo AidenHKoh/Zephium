@@ -547,10 +547,17 @@ impl Items {
         }
     }
 
-    pub fn set_title(&mut self, id: ItemId, title: String) {
-        if let Some(tab) = self.tab_mut(id) {
-            tab.title = sanitize_page_title(&title);
+    /// Whether the tab's title changed.
+    pub fn set_title(&mut self, id: ItemId, title: String) -> bool {
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        let title = sanitize_page_title(&title);
+        if tab.title == title {
+            return false;
         }
+        tab.title = title;
+        true
     }
 
     pub fn set_loading(&mut self, id: ItemId, loading: bool) {
