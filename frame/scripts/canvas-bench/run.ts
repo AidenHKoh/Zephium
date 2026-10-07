@@ -6,7 +6,9 @@
 // work-memory host) and, for each case, prints open cost, frames while panning
 // and pinching, what stays drawn, what wakes at rest, and the WebContent and
 // GPU processes' footprint after opening, after a sweep over everything and
-// back. The window must stay visible: WebKit throttles an occluded page.
+// back and at rest, with the CPU the page, GPU, host and WindowServer
+// processes spend while it pans and pinches. The window must stay visible:
+// WebKit throttles an occluded page.
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { ensurePhotos } from "./photos.ts";
@@ -72,6 +74,7 @@ function nativeHost() {
       return reply.ok as T;
     },
     pid: async () => Number((await send("pid")).pid),
+    process: child.pid ?? 0,
     close: () => child.kill(),
   };
 }
@@ -94,6 +97,33 @@ function gpuPid(since: number): number | null {
   }
   return null;
 }
+
+const seconds = (pid: number) => {
+  try {
+    const time = execFileSync("ps", ["-o", "time=", "-p", String(pid)])
+      .toString()
+      .trim();
+    return time.split(":").reduce((sum, part) => sum * 60 + Number(part), 0);
+  } catch {
+    return 0;
+  }
+};
+/** CPU each process spends from now until the returned function is called, in ms. */
+function cpu(pids: Record<string, number | null>) {
+  const start = Object.entries(pids).map(
+    ([name, pid]) => [name, pid, pid ? seconds(pid) : 0] as const,
+  );
+  return () =>
+    Object.fromEntries(
+      start.map(([name, pid, from]) => [
+        name,
+        pid ? Math.round((seconds(pid) - from) * 1000) : null,
+      ]),
+    );
+}
+const windowServer = Number(
+  execFileSync("pgrep", ["-x", "WindowServer"]).toString().trim().split("\n")[0],
+);
 
 const host = nativeHost();
 try {
@@ -124,13 +154,21 @@ try {
       const opened = memory();
       const idle = await host.evaluate("return await window.bench.idle();");
       if (css) await host.evaluate(`window.bench.css(${JSON.stringify(css)}); return true;`);
+      const gpu = gpuPid(host.started);
+      const busy = cpu({ content, gpu, ui: host.process, windowServer });
       const pan = await host.evaluate("return await window.bench.pan();");
+      const panCpu = busy();
+      const pinchBusy = cpu({ content, gpu, ui: host.process, windowServer });
       const pinch = await host.evaluate("return await window.bench.pinch();");
+      const pinchCpu = pinchBusy();
       await host.evaluate("window.bench.css(''); return true;");
       const swept = await host.evaluate("return await window.bench.sweep();");
       const sweptMemory = memory();
       const back = await host.evaluate("return await window.bench.back();");
       const backMemory = memory();
+      // Past the canvas layer's hold (layers.ts), when an idle canvas gives its layer back.
+      await new Promise((done) => setTimeout(done, 14_000));
+      const restMemory = memory();
       await host.evaluate("window.bench.close(); return true;");
       console.log(
         JSON.stringify({
@@ -140,11 +178,17 @@ try {
           ...(css ? { css } : {}),
           open,
           idle,
-          pan,
-          pinch,
+          pan: { ...(pan as object), cpuMs: panCpu },
+          pinch: { ...(pinch as object), cpuMs: pinchCpu },
           swept,
           back,
-          memoryMB: { before, open: opened, swept: sweptMemory, back: backMemory },
+          memoryMB: {
+            before,
+            open: opened,
+            swept: sweptMemory,
+            back: backMemory,
+            rest: restMemory,
+          },
         }),
       );
     }
