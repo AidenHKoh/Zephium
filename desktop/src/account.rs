@@ -215,14 +215,22 @@ pub(crate) fn install(app: &tauri::AppHandle) {
     }
     #[cfg(feature = "work-product")]
     hosted::install(service.clone());
+    // Nobody who has not chosen an account, or another server, is ever
+    // connected to one: the server is asked only once they have.
+    if !contacted(&service) {
+        return;
+    }
     tauri::async_runtime::spawn(async move {
         let _ = service.load_config().await;
-        if service.signed_in() {
-            if let Err(error) = service.refresh(true).await {
-                write_diagnostic(format_args!("account: refresh fault={error:?}"));
-            }
+        if let Err(error) = service.refresh(true).await {
+            write_diagnostic(format_args!("account: refresh fault={error:?}"));
         }
     });
+}
+
+/// Whether the person has chosen to involve an account server.
+fn contacted(service: &Service) -> bool {
+    service.signed_in() || service.view().custom_server
 }
 
 /// The signed-in account as Work's hosted model provider.
@@ -308,14 +316,16 @@ fn available() -> bool {
 fn project(view: View) -> AccountV1 {
     let config = view.config.as_ref();
     let billing = view.billing.as_ref();
+    // Until Zephium's own server has been asked, what it offers is known.
+    let ours = (!view.custom_server).then_some(true);
     AccountV1 {
         version: 1,
         available: available(),
         server: view.server,
         custom_server: view.custom_server,
-        hosted_models: config.map(|c| c.cloud_enabled),
-        billing: config.map(|c| c.billing_enabled),
-        signup_open: config.map(|c| c.signup_open),
+        hosted_models: config.map(|c| c.cloud_enabled).or(ours),
+        billing: config.map(|c| c.billing_enabled).or(ours),
+        signup_open: config.map(|c| c.signup_open).or(ours),
         signed_in: view.signed_in,
         pending_email: view.pending_email,
         resend_in: view.resend_in,
@@ -429,7 +439,8 @@ fn log(action: &str, result: &Result<(), AccountError>) {
     }
 }
 
-/// The account now, refreshing what is stale in the background.
+/// The account now, refreshing what is stale in the background. Asks no
+/// server unless the person is signed in or chose one.
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn account_get(caller: WebviewWindow) -> AccountReplyV1 {
@@ -437,13 +448,15 @@ pub(crate) async fn account_get(caller: WebviewWindow) -> AccountReplyV1 {
         Ok(service) => service,
         Err(error) => return reply(Err(error)),
     };
-    let background = service.clone();
-    tauri::async_runtime::spawn(async move {
-        if background.view().config.is_none() {
-            let _ = background.load_config().await;
-        }
-        let _ = background.refresh(false).await;
-    });
+    if contacted(&service) {
+        let background = service.clone();
+        tauri::async_runtime::spawn(async move {
+            if background.view().config.is_none() {
+                let _ = background.load_config().await;
+            }
+            let _ = background.refresh(false).await;
+        });
+    }
     reply(Ok(()))
 }
 

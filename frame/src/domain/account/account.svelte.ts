@@ -22,7 +22,6 @@ type AccountAction =
   | "send"
   | "verify"
   | "sign_out"
-  | "refresh"
   | "buy"
   | "manage"
   | "revoke"
@@ -135,6 +134,19 @@ export function clearFault() {
 
 export const sendCode = (email: string) => act("send", () => commands.accountSendCode(email));
 export const verify = (code: string) => act("verify", () => commands.accountVerify(code));
+/**
+ * Asks the server now; opening Account is the person choosing to. It holds
+ * no action slot, so signing in is never blocked behind it.
+ */
+export async function refresh() {
+  const started = generation;
+  const response = await observe(
+    Promise.resolve().then(() => commands.accountRefresh()),
+    TIMEOUT,
+  );
+  if (started !== generation || busy) return;
+  if (response.state === "received" && response.value?.account) adopt(response.value);
+}
 export const buy = (purchase: AccountPurchaseV1) => act("buy", () => commands.accountBuy(purchase));
 export const manage = () => act("manage", () => commands.accountManage());
 export const setServer = (server: string | null) =>

@@ -13,7 +13,7 @@
   import { explainAccountFault } from "../../lib/account";
 
   onMount(() => {
-    void session.retain();
+    void session.retain().then(() => session.refresh());
     return () => session.release();
   });
 
