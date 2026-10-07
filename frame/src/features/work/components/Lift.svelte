@@ -79,6 +79,7 @@
   let ghost: HTMLElement | null = null;
   const MORPH = "work-lift-morph";
   const RETURN = "work-lift-return";
+  const OPEN = "work-lift-open";
 
   /** The card this lift stands for: by id, or the one sitting where it was opened. */
   function findCard(): HTMLElement | null {
@@ -134,7 +135,7 @@
     }
     ghost?.remove();
     ghost = null;
-    document.documentElement.classList.remove(MORPH, RETURN);
+    document.documentElement.classList.remove(MORPH, RETURN, OPEN);
   }
 
   /** Grows out of its card; the card hides while the lift stands for it. */
@@ -205,11 +206,14 @@
   const returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   onMount(() => {
     let gone = false;
+    const root = document.documentElement;
+    root.classList.add(OPEN);
     void measured().then(() => {
       if (!gone && !closing) arrive();
     });
     return () => {
       gone = true;
+      root.classList.remove(OPEN);
       release();
       const lost = !document.activeElement || document.activeElement === document.body;
       if (lost && returnTo?.isConnected) returnTo.focus({ preventScroll: true });
@@ -446,6 +450,12 @@
     padding: var(--lift-pad);
     overflow: auto;
     overscroll-behavior: contain;
+  }
+
+  /* A selected card's toolbar floats over the canvas in its own layer; it steps back with it. */
+  /* stylelint-disable-next-line selector-class-pattern */
+  :global(html.work-lift-open .svelte-flow__node-toolbar) {
+    visibility: hidden;
   }
 
   /* The morph: one frame travels from the card's rect to the lift's; the card's
