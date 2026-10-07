@@ -2553,6 +2553,37 @@ async function finish() {
     }
   }
 
+  for (const mode of ["twin", "renamed", "observed-other"]) {
+    // A target the page re-rendered after the look is acted on only when one
+    // equal element stands at its observed place and was not observed apart.
+    const root = new Element("main");
+    const original = root.append(new Element("button", { "aria-label": "Continue" }));
+    const other = mode === "observed-other" ? root.append(new Element("button", { "aria-label": "Continue" })) : null;
+    document._root = root; root._parent = document; setOwner(root, document); document._active = null; document._hit = original;
+    const generation = 970 + ["twin", "renamed", "observed-other"].indexOf(mode) * 2;
+    const before = JSON.parse(invoke(generation, generation, { k: "initial" }));
+    const target = before.n.find(node => node.n === "Continue");
+    const replacement = other || new Element("button", { "aria-label": mode === "renamed" ? "Delete" : "Continue" });
+    root._children.values = root._children.values.filter(node => node !== original && node !== replacement);
+    root.append(replacement);
+    original._parent = null; setOwner(original, null);
+    document._hit = replacement;
+    const click = JSON.parse(actionRequest(generation));
+    Object.assign(click, { i: generation, g: generation, a: generation, t: target.k,
+      f: { a: target.ak, r: 7, o: 9, q: 1, s: 0, n: "Continue", vk: 0, vt: null, vo: 0, vb: false } });
+    const result = runtime.invoke(JSON.stringify(click));
+    if (mode === "twin") {
+      assert(!result.startsWith("E") && replacement._fixedClickCount === 1 && !original._fixedClickCount,
+        `re-rendered target was not acted on: ${result}`);
+      const after = JSON.parse(invoke(generation + 1, generation, { k: "initial" }));
+      assert(after.n.some(node => node.k === target.k && node.n === "Continue"),
+        "re-rendered target lost the identity its proof joins");
+    } else {
+      assert(result === "E2:stale_reference" && !replacement._fixedClickCount,
+        `ambiguous or changed replacement was acted on: ${mode} ${result}`);
+    }
+  }
+
   process.stdout.write(`${JSON.stringify({
     independent_scroll_samples: true,
     empty_contenteditable_roundtrip: true,
@@ -2591,6 +2622,7 @@ async function finish() {
     clickable_items: true,
     fill_change_events: true,
     typed_field_fill: true,
+    rerendered_target_rebound: true,
     document_parent_option_brand_guard: true,
     select_rewrite_nonretryable: true,
     fill_native_primitives_captured: true,

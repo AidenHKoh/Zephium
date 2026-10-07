@@ -17,7 +17,16 @@ line, number fields with a plain decimal, `date` as YYYY-MM-DD, `month`,
 dispatch. An empty private field (autocomplete email, phone, address) reports
 its emptiness, which discloses nothing. A field whose value was not observed
 is refused at binding as `value_unobserved`, never typed into and left
-unverified. Click
+unverified.
+
+A target the page re-rendered between the look and the action (a list row
+or button replaced by its framework) is rebound once, deterministically:
+the one element at the target's observed centre, or its nearest composed
+ancestors, whose role and complete action descriptor (name, state,
+operations, sensitivity, value) still match takes over the target's key, so
+the action and its fresh-observation proof join on one identity. A second
+match, or an element the look observed under another key, leaves the
+reference `stale_reference`; nothing is guessed. Click
 also reaches a row, cell or list item the page made clickable itself (a click
 handler attribute, a tab stop, or a pointer cursor set on the item and not
 inherited from its parent), such as a mail client's thread rows; the decoder

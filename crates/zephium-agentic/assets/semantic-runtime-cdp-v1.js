@@ -724,6 +724,36 @@ return null;
 }
 return entry.node;
 }
+function rebindReplaced(request) {
+const entry = keyNodes.get(request.t);
+if (entry !== undefined && belongsToCurrentDocument(entry.node)) return null;
+let node;
+try {
+node = apply(documentElementFromPoint, document, [request.e.x + request.e.w / 2, request.e.y + request.e.h / 2]);
+} catch (_) { return null; }
+let found = null;
+for (let depth = 0; node !== null && node !== undefined && depth <= MAX_TREE_DEPTH; depth += 1) {
+const descriptor = nodeType(node) === 1 ? classify(node) : null;
+if (descriptor !== null && descriptor.role === request.r) {
+const key = apply(weakMapGet, nodeKeys, [node]);
+const owner = key === undefined ? undefined : keyNodes.get(key);
+if (owner !== undefined && owner.generation === request.g && key !== request.t) return null;
+if (descriptorMatches(request.f, runtimeDescriptor(node, request.g))) {
+if (found !== null) return null;
+found = node;
+}
+}
+let parent = read(nodeParentGetter, node);
+if (parent !== null && nodeType(parent) === 11 && shadowHostGetter !== null) parent = read(shadowHostGetter, parent) || null;
+node = parent;
+}
+if (found === null) return null;
+const fresh = apply(weakMapGet, nodeKeys, [found]);
+if (fresh !== undefined) keyNodes.delete(fresh);
+apply(weakMapSet, nodeKeys, [found, request.t]);
+keyNodes.set(request.t, { node: found, generation: request.g });
+return found;
+}
 function resolveKeyAtGeneration(key, generation) {
 const entry = keyNodes.get(key);
 if (entry === undefined || entry.generation !== generation) return null;
@@ -3199,7 +3229,8 @@ lastObservationGeneration !== request.g
 return actionFault("target_changed");
 }
 sweepIdentities(request.g);
-const target = resolveKeyAtGeneration(request.t, request.g);
+const target = resolveKeyAtGeneration(request.t, request.g) ||
+(request.k === "scroll" ? null : rebindReplaced(request));
 if (target === null || (nodeType(target) !== 1 && !(request.k === "scroll" && target === document))) return actionFault("stale_reference");
 const descriptor = classify(target);
 if (descriptor === null) return actionFault("target_changed");
