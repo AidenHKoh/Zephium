@@ -8,7 +8,13 @@ import AiPage from "../components/sections/AiPage.svelte";
 vi.mock("$domain/tabs", () => ({
   tabs: { profile: () => ({ id: "00000000000000000000000001", kind: "regular" }) },
 }));
-const native = vi.hoisted(() => ({ read: vi.fn(), set: vi.fn(), test: vi.fn(), choose: vi.fn() }));
+const native = vi.hoisted(() => ({
+  read: vi.fn(),
+  set: vi.fn(),
+  test: vi.fn(),
+  choose: vi.fn(),
+  account: vi.fn(),
+}));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
@@ -16,6 +22,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     workSetProviderKey: native.set,
     workTestProviderKey: native.test,
     workChooseModel: native.choose,
+    accountGet: native.account,
     workDecisionPreference: async () => ({
       version: 1,
       profile: PROFILE,
@@ -78,7 +85,7 @@ test("a role follows Automatic until the person chooses a model", async () => {
   expect(native.choose).toHaveBeenCalledWith(PROFILE, "lead", "anthropic/claude-sonnet-5-5");
 });
 
-test("billing trouble preserves acceptance and dormant Cloud stays hidden", async () => {
+test("billing trouble preserves acceptance and the old Cloud group stays gone", async () => {
   await page.viewport(1100, 1200);
   const view = models({ keys: { open_ai: "valid" }, cloud: true });
   view.providers = view.providers.map((provider) =>
@@ -103,4 +110,51 @@ test("Settings AI exposes Jev setup beside the regular model controls with hones
   await expect.element(screen.getByRole("radio", { name: "Recommended" })).toBeChecked();
   await expect.element(screen.getByText("Active: Standard")).toBeVisible();
   await expect.element(screen.getByRole("heading", { name: "Work", exact: true })).toBeVisible();
+});
+
+test("Zephium AI is offered where the server hosts models, and shows the account once signed in", async () => {
+  await page.viewport(1100, 1200);
+  native.read.mockResolvedValue(models({}));
+  const account = {
+    version: 1,
+    available: true,
+    server: "https://api.zephium.app",
+    custom_server: false,
+    hosted_models: true,
+    billing: true,
+    signup_open: true,
+    signed_in: false,
+    pending_email: null,
+    resend_in: null,
+    email: null,
+    name: null,
+    plan: null,
+    usage: null,
+    subscription: null,
+    offers: [],
+    checkout_open: false,
+    notice: null,
+  };
+  native.account.mockResolvedValue({ account, fault: null, retry_after: null });
+  const screen = await render(AiPage);
+  await expect.element(screen.getByRole("button", { name: "Sign in…" })).toBeVisible();
+  await screen.unmount();
+
+  native.read.mockResolvedValue(models({ cloud: true }));
+  native.account.mockResolvedValue({
+    account: {
+      ...account,
+      signed_in: true,
+      email: "ada@example.com",
+      plan: "free",
+      usage: { used_percent: 30, resets_at: null, extra: false },
+    },
+    fault: null,
+    retry_after: null,
+  });
+  const signed = await render(AiPage);
+  await expect.element(signed.getByText("Signed in · Free plan · 30% used")).toBeVisible();
+  await expect
+    .element(signed.getByText("Add a provider key or sign in", { exact: false }))
+    .not.toBeInTheDocument();
 });
