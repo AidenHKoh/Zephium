@@ -207,10 +207,14 @@ pub(crate) fn install(app: &tauri::AppHandle) {
             "zephium:account-changed",
             &AccountChanged { version: 1 },
         );
+        #[cfg(feature = "work-product")]
+        hosted::account_changed();
     }));
     if SERVICE.set(service.clone()).is_err() {
         return;
     }
+    #[cfg(feature = "work-product")]
+    hosted::install(service.clone());
     tauri::async_runtime::spawn(async move {
         let _ = service.load_config().await;
         if service.signed_in() {
@@ -219,6 +223,78 @@ pub(crate) fn install(app: &tauri::AppHandle) {
             }
         }
     });
+}
+
+/// The signed-in account as Work's hosted model provider.
+#[cfg(feature = "work-product")]
+mod hosted {
+    use super::*;
+    use zephium_agentic::lead::{LeadCredential, LeadSecret, LeadSecretFuture};
+    use zephium_app::work_models::{self, WorkCloudSession};
+    use zephium_core::work::model::WorkModelError;
+
+    static SIGNED_IN: AtomicBool = AtomicBool::new(false);
+
+    struct Hosted(Arc<Service>);
+
+    impl WorkCloudSession for Hosted {
+        fn signed_in(&self) -> bool {
+            self.0.signed_in()
+        }
+        fn plan(&self) -> Option<String> {
+            self.0.plan()
+        }
+        fn base(&self) -> String {
+            self.0.origin()
+        }
+        fn credential(&self) -> Arc<dyn LeadCredential> {
+            Arc::new(Bearer(self.0.clone()))
+        }
+    }
+
+    struct Bearer(Arc<Service>);
+
+    impl LeadCredential for Bearer {
+        fn secret(&self) -> LeadSecretFuture<'_> {
+            let service = self.0.clone();
+            Box::pin(async move {
+                // The first read after launch may touch the vault.
+                let token = tokio::task::spawn_blocking(move || service.bearer())
+                    .await
+                    .map_err(|_| WorkModelError::MissingKey)?
+                    .map_err(|_| WorkModelError::MissingKey)?;
+                LeadSecret::new(token.expose().to_owned())
+                    .map(Arc::new)
+                    .map_err(|_| WorkModelError::MissingKey)
+            })
+        }
+
+        fn rejected(&self) {
+            self.0.bearer_refused();
+        }
+    }
+
+    pub(super) fn install(service: Arc<Service>) {
+        SIGNED_IN.store(service.signed_in(), Ordering::Release);
+        work_models::install_cloud_session(Arc::new(Hosted(service)));
+        refresh_catalog();
+    }
+
+    /// Only a sign-in or sign-out changes what the picker offers.
+    pub(super) fn account_changed() {
+        let Some(service) = super::service() else {
+            return;
+        };
+        let now = service.signed_in();
+        if SIGNED_IN.swap(now, Ordering::AcqRel) != now {
+            work_models::cloud_session_changed();
+            refresh_catalog();
+        }
+    }
+
+    fn refresh_catalog() {
+        tauri::async_runtime::spawn(work_models::refresh_cloud_catalog());
+    }
 }
 
 pub(crate) fn service() -> Option<Arc<Service>> {

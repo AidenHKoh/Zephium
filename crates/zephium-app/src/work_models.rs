@@ -18,8 +18,17 @@ use zephium_core::work::model::*;
 
 use WorkModelProvider as P;
 
-/// Keys, in the order a role falls back to a provider when nothing is chosen.
-const FALLBACK_ORDER: [WorkModelProvider; 6] = KEYED_PROVIDERS;
+/// The order a role falls back to a provider when nothing is chosen: the
+/// person's own keys first, then the signed-in account's hosted models.
+const FALLBACK_ORDER: [WorkModelProvider; 7] = [
+    P::Anthropic,
+    P::OpenAi,
+    P::Google,
+    P::DeepSeek,
+    P::OpenRouter,
+    P::Compatible,
+    P::Cloud,
+];
 /// Providers that take a key in Settings, in display order.
 pub const KEYED_PROVIDERS: [WorkModelProvider; 6] = [
     P::Anthropic,
@@ -82,6 +91,24 @@ pub fn install_cloud_session(session: Arc<dyn WorkCloudSession>) {
 /// Called after any change a picker or Settings shows (keys, choices, catalog).
 pub fn set_observer(observer: Observer) {
     let _ = OBSERVER.set(observer);
+}
+
+/// The account signed in or out. Signed out, the hosted catalog and its
+/// cached copy go; signed in, the next refresh fetches it.
+pub fn cloud_session_changed() {
+    let signed_in = cloud().is_some();
+    {
+        let mut state = state();
+        state.cloud_fetched = None;
+        if !signed_in {
+            state.cloud.clear();
+            state.cloud_loaded = true;
+        }
+    }
+    if !signed_in {
+        store_setting(CLOUD_CATALOG_KEY.to_owned(), String::new());
+    }
+    notify();
 }
 
 fn notify() {
@@ -258,7 +285,8 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
 /// Reads which keys exist, from Keychain attributes only, once per process.
 async fn ensure_presence() {
     let missing: Vec<_> = {
-        let state = state();
+        let mut state = state();
+        load_cloud_cache(&mut state);
         KEYED_PROVIDERS
             .into_iter()
             .filter(|provider| !state.presence.contains_key(provider))
@@ -305,7 +333,7 @@ fn compatible_base() -> Option<String> {
 /// Whether calls to `provider` can be made now.
 fn usable(state: &State, provider: WorkModelProvider) -> bool {
     match provider {
-        P::Cloud => false,
+        P::Cloud => cloud().is_some() && !state.cloud.is_empty(),
         P::Compatible => {
             compatible_base().is_some() && key_status(state, provider) != WorkKeyStatus::Invalid
         }
@@ -378,7 +406,8 @@ pub async fn refresh_cloud_catalog() {
     notify();
 }
 
-/// Curated BYOK entries and custom endpoint models. Cloud stays dormant.
+/// Curated BYOK entries, custom endpoint models, and the signed-in account's
+/// hosted models.
 fn entries(state: &State) -> Vec<WorkModelEntry> {
     let mut all = Vec::new();
     all.extend(models::builtin().into_iter().filter(|entry| {
@@ -393,6 +422,9 @@ fn entries(state: &State) -> Vec<WorkModelEntry> {
                 all.push(entry.clone());
             }
         }
+    }
+    if cloud().is_some() {
+        all.extend(state.cloud.iter().map(|model| model.entry.clone()));
     }
     all
 }
@@ -419,7 +451,12 @@ fn family_entry(
     role: WorkModelRole,
 ) -> Option<WorkModelEntry> {
     if provider == P::Cloud {
-        return None;
+        let hosted = || state.cloud.iter().map(|model| &model.entry);
+        return hosted()
+            .find(|entry| entry.recommended && entry.roles.contains(&role))
+            .or_else(|| hosted().find(|entry| entry.roles.contains(&role)))
+            .or_else(|| hosted().find(|entry| entry.roles.contains(&WorkModelRole::Lead)))
+            .cloned();
     }
     let offered = |entry: &&WorkModelEntry| {
         entry.model.provider == provider
@@ -463,10 +500,14 @@ fn family_entry(
 /// usable, else the lead's provider family, else the first keyed provider.
 fn effective(state: &State, profile: ProfileId, role: WorkModelRole) -> Option<WorkModelEntry> {
     if let Some(choice) = stored_choice(state, profile, role) {
-        let exists = state
-            .listed
-            .get(&choice.model.provider)
-            .is_none_or(|entries| entries.iter().any(|entry| entry.id == choice.id));
+        let exists = if choice.model.provider == P::Cloud {
+            state.cloud.iter().any(|model| model.entry.id == choice.id)
+        } else {
+            state
+                .listed
+                .get(&choice.model.provider)
+                .is_none_or(|entries| entries.iter().any(|entry| entry.id == choice.id))
+        };
         return (usable(state, choice.model.provider) && exists).then_some(choice);
     }
     if role != WorkModelRole::Lead {
@@ -682,8 +723,8 @@ pub async fn view(profile: ProfileId) -> WorkModelsView {
         chosen,
         effective,
         providers,
-        cloud_signed_in: false,
-        cloud_plan: None,
+        cloud_signed_in: cloud().is_some(),
+        cloud_plan: cloud().and_then(|session| session.plan()),
     }
 }
 
@@ -1073,5 +1114,61 @@ mod tests {
         assert!(vault().present(P::OpenAi).unwrap());
         vault().clear(P::OpenAi).unwrap();
         assert!(!vault().present(P::OpenAi).unwrap());
+
+        // Signed in with no keys, hosted models carry every role.
+        struct Session;
+        impl WorkCloudSession for Session {
+            fn signed_in(&self) -> bool {
+                true
+            }
+            fn plan(&self) -> Option<String> {
+                Some("free".into())
+            }
+            fn base(&self) -> String {
+                "https://api.zephium.app".into()
+            }
+            fn credential(&self) -> Arc<dyn LeadCredential> {
+                Arc::new(LeadStaticCredential::new(
+                    LeadSecret::new("session".into()).unwrap(),
+                ))
+            }
+        }
+        let hosted = profile_id(43);
+        with_keys(&[]);
+        install_cloud_session(Arc::new(Session));
+        state().cloud = models::parse_cloud(&serde_json::json!({"models": [
+            {"id": "fast", "provider": "openai", "upstream_model": "gpt-6-luna",
+             "display_name": "GPT-6 Luna", "roles": ["lead", "page", "light"], "recommended": true,
+             "supports": {"tools": true, "vision": true}},
+            {"id": "deep", "provider": "anthropic", "upstream_model": "claude-opus-5-5",
+             "display_name": "Claude Opus 5.5", "roles": ["lead"], "recommended": true,
+             "supports": {"tools": true}}
+        ]}));
+        assert!(ready(hosted).await);
+        let lead = effective(&state(), hosted, WorkModelRole::Lead).unwrap();
+        assert_eq!(lead.model.provider, P::Cloud);
+        assert!(client(&state(), &lead).is_ok());
+        let view = view(hosted).await;
+        assert!(view.cloud_signed_in);
+        assert_eq!(view.cloud_plan.as_deref(), Some("free"));
+        assert!(view.entries.iter().any(|entry| entry.id == "zephium/deep"));
+        choose(hosted, WorkModelRole::Lead, Some("zephium/deep")).unwrap();
+        assert_eq!(
+            effective(&state(), hosted, WorkModelRole::Lead).unwrap().id,
+            "zephium/deep"
+        );
+
+        // Signing out takes the hosted catalog with it; the choice stays for later.
+        if let Ok(mut slot) = CLOUD.write() {
+            *slot = None;
+        }
+        cloud_session_changed();
+        assert!(state().cloud.is_empty());
+        assert!(!ready(hosted).await);
+        assert!(stored_choice(&state(), hosted, WorkModelRole::Lead).is_some());
+    }
+
+    fn profile_id(id: u128) -> ProfileId {
+        ProfileId::from(id)
     }
 }

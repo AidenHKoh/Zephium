@@ -212,7 +212,11 @@ mod product {
 
     pub(super) async fn act(profile: ProfileId, action: Action) -> Option<WorkModelsFaultV1> {
         let result = match action {
-            Action::Read => Ok(()),
+            Action::Read => {
+                // Refreshes only a stale hosted catalog, at most hourly.
+                tauri::async_runtime::spawn(models::refresh_cloud_catalog());
+                Ok(())
+            }
             Action::Choose(role, id) => models::choose(profile, role, id.as_deref()),
             Action::SetKey(provider, secret) => match models::set_key(provider, secret).await {
                 Ok(status) => return checked(profile, provider, status),
