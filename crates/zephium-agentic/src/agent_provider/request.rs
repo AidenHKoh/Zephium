@@ -261,6 +261,19 @@ impl AgentProviderObjective {
         })
     }
 
+    /// The same conservatively admitted objective under another counting
+    /// revision. A UTF-8 byte bound does not depend on the tokenizer, so only
+    /// its label changes; an exact count is never relabeled.
+    pub fn try_relabel_conservative(
+        &self,
+        counting_revision: &SemanticTokenizerRevision,
+    ) -> Result<Self, AgentProviderObjectiveError> {
+        if self.measurement.quality() != SemanticTokenCountQuality::Conservative {
+            return Err(AgentProviderObjectiveError::TokenQuality);
+        }
+        Self::try_admit_conservative_utf8(self.content.to_string(), counting_revision)
+    }
+
     /// Exact admitted token count used for policy reservation.
     pub const fn token_measurement(&self) -> &SemanticTokenMeasurement {
         &self.measurement
@@ -8427,7 +8440,30 @@ mod tests {
             );
             assert_eq!(objective.token_measurement().revision(), &selected);
             assert!(!format!("{objective:?}").contains(content));
+            let chosen = revision("reported:chosen-model");
+            let relabeled = objective
+                .try_relabel_conservative(&chosen)
+                .expect("relabeled");
+            assert_eq!(relabeled.token_measurement().revision(), &chosen);
+            assert_eq!(
+                relabeled.token_measurement().tokens(),
+                objective.token_measurement().tokens()
+            );
         }
+        let exact = AgentProviderObjective::try_admit(
+            "exact objective".to_owned(),
+            &FixedCounter {
+                revision: selected.clone(),
+                tokens: 3,
+                quality: SemanticTokenCountQuality::ExactLocal,
+            },
+            &selected,
+        )
+        .expect("exact objective");
+        assert!(matches!(
+            exact.try_relabel_conservative(&revision("reported:chosen-model")),
+            Err(AgentProviderObjectiveError::TokenQuality)
+        ));
         assert!(matches!(
             AgentProviderObjective::try_admit_conservative_utf8(
                 "use ghp_abcdefghijklmnop".to_owned(),
