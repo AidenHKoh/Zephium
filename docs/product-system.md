@@ -711,8 +711,10 @@ Work merely to make the hosted option appear better.
 
 ### 6.3 Search and capability providers
 
-Prefer the chosen provider's native web search for BYOK public discovery when
-that model/API supports it. Preserve search activity, citations, provenance,
+Work searches the person's own search engine's results page in the agent
+browser and reads it with no model call (see
+[Work execution](agent-work-execution.md#web-search)); the chosen provider's
+native web search is its capped fallback. Preserve search activity, citations, provenance,
 usage, cancellation, and attribution requirements through typed adapters. Do
 not require Tavily, Firecrawl, a Zephium account, or a hosted search subscription
 for BYOK. A future hosted offering can add suitable search services.

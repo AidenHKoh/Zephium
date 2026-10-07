@@ -251,6 +251,41 @@ query, provider retention never applies to them, and diagnostics carry only
 the page kind and its path class. Origin grants, their page budget and the
 single-field update are retired; stored runs that used them still load.
 
+## Web search
+
+A lead run searches the way the person does: `web_search` opens the results
+page of the engine set for the address bar (`search.engine`, or the custom
+`search.custom-url`) for the query, as if it were typed there, and Rust reads
+the results off the page. The navigation policy's sensitive-input guard
+decides whether a query may leave at all; a query it refuses is sent nowhere.
+The lead's freshness becomes the engine's own parameter where one exists
+(Google `tbs`, DuckDuckGo `df`, Bing `filters`, Brave `tf`).
+
+The page opens as a step of the run, beside the batch's other searches, in a
+fresh ephemeral store of its own: nothing from the person's tabs or the run's
+other pages. Typed decisions are off, and the results policy takes the
+page's whole first look, presses nothing and ends there, so no model sees it
+and nothing is charged but the step. The reader
+(`zephium_agentic::read_search_page`) keeps up to eight results in the
+engine's order, each a title link's destination with Google's `/url?q=`,
+Bing's `/ck/a?u=a1…` and DuckDuckGo's `/l/?uddg=` redirects unwrapped, its
+title and the engine's own snippet. Ads, the engine's own links, non-web
+links and repeats of the same page are left out. Built-in engines read their
+own markup (Brave's titles are text inside the link); a custom engine reads
+headed links in its main content. The evidence names the `browser` provider
+with the engine as its model, carries those results with their snippets and
+no answer, and costs no tokens; the lead sees a ranked list with source keys
+and reads the pages it picks.
+
+A page with no results says why: a challenge or unusual-traffic page, a
+consent page, the engine's own "no results", or a page it cannot read. Rust
+never answers a challenge or a consent page. The search then falls back to
+the provider search behind it, the chosen models' own search or else the
+OpenAI public search, at most `BROWSER_SEARCH_FALLBACKS` (three) times a run;
+past that, or with none, the step fails as a search that could not be sent.
+The run's grant records that fallback, so its evidence belongs to the run.
+Diagnostics name only the backend, the engine and the page's kind.
+
 ## Artifact kinds
 
 An agent turn places closed semantic objects (`WorkArtifactDataV1`): `answer`,
