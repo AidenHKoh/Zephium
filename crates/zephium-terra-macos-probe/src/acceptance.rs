@@ -291,7 +291,18 @@ pub(super) fn site_scenario(start: &str, goal: &str) -> &'static LeadScenario {
 /// The lead and helper turns of a page check: start one browser part, browse
 /// the start page toward the goal with records, then finish.
 pub(super) use super::loopback_support::Scripted;
-pub(super) const LEAD_SCENARIOS: [LeadScenario; 19] = [
+pub(super) const LEAD_SCENARIOS: [LeadScenario; 20] = [
+    // A fact the person states once is kept and shapes a later request.
+    LeadScenario {
+        name: "memory",
+        requests: &[
+            "I'm vegetarian, I live in Krakow and I prefer quiet places. Remember that.",
+            "Suggest three places for dinner tonight",
+        ],
+        answer: "",
+        folder: false,
+        site: None,
+    },
     // An open request: one finished piece of real work, never the person's
     // own apps.
     LeadScenario {
