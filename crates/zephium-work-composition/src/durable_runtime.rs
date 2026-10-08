@@ -2906,9 +2906,12 @@ fn compile_page_step(
         }
         .map_err(|_| WorkError::Invalid)?
     } else if matches!(request.step, WorkStepKindV1::Read { .. }) && !site && !loopback {
-        navigation
-            .with_same_document_query_updates()
-            .map_err(|_| refused(&settings, "navigation", WorkError::Invalid))?
+        if results.is_some() {
+            navigation.with_results_page_redirects()
+        } else {
+            navigation.with_same_document_query_updates()
+        }
+        .map_err(|_| refused(&settings, "navigation", WorkError::Invalid))?
     } else {
         navigation
     };
