@@ -237,6 +237,7 @@ async fn page(
                 held_back: false,
                 rerun: false,
                 search: None,
+                redirect: None,
             });
         }
         if !hang {
@@ -271,6 +272,7 @@ async fn page(
         held_back: false,
         rerun: false,
         search: None,
+        redirect: None,
     })
 }
 
@@ -977,6 +979,7 @@ async fn work_a_human_check_is_read_again_only_after_a_person_continued_it() {
                             held_back: false,
                             rerun: false,
                             search: None,
+                            redirect: None,
                         })
                     }
                 },

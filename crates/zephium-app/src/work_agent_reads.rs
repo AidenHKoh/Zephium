@@ -992,6 +992,7 @@ mod tests {
                 held_back: false,
                 rerun: false,
                 search: None,
+                redirect: None,
             };
             assert!(matches!(
                 checked_outcome(Ok(outcome), limits),

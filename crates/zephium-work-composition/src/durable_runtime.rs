@@ -429,6 +429,7 @@ impl NativeWorkComposition {
                 held_back: false,
                 rerun: false,
                 search: None,
+                redirect: None,
             });
         }
         settings.decisions = WorkDecisionPreference::Disabled;
@@ -494,6 +495,7 @@ impl NativeWorkComposition {
             held_back: false,
             rerun: false,
             search,
+            redirect: None,
         })
     }
 
@@ -542,6 +544,7 @@ impl NativeWorkComposition {
                 held_back: false,
                 rerun: false,
                 search: None,
+                redirect: None,
             });
         }
         let diagnostics = Diagnostics::from(&settings);
@@ -707,11 +710,62 @@ impl NativeWorkComposition {
             held_back: gate.held_back(),
             rerun,
             search: None,
+            redirect: run
+                .redirect
+                .map(|destination| destination.as_url().to_string()),
         })
     }
 
+    /// One retained page. A public page whose first load the native gate
+    /// refused as a redirect fails naming where it leads, whatever closed
+    /// it; nothing ran on it, since it was never ready.
     #[allow(clippy::too_many_arguments)]
     async fn run_retained(
+        &self,
+        shell: &CallbackHandle,
+        attempt: &WorkAttemptProbe,
+        invocation: crate::TrustedWorkRequest,
+        intervention_origin: Option<String>,
+        limits: WorkExecutionLimits,
+        outputs: &[String],
+        collection: Option<&WorkBrowseCollectionSchema>,
+        page: Option<(WorkStepId, String)>,
+        diagnostics: Diagnostics,
+        decisions: WorkDecisionPreference,
+        resume_plan: Option<ResumePlan>,
+        gate: Option<std::sync::Arc<crate::open_objective::site_work::SiteGate>>,
+    ) -> Result<BrowserRun, WorkError> {
+        let redirect = invocation.redirect.clone();
+        let mut run = self
+            .run_retained_page(
+                shell,
+                attempt,
+                invocation,
+                intervention_origin,
+                limits,
+                outputs,
+                collection,
+                page,
+                diagnostics,
+                decisions,
+                resume_plan,
+                gate,
+            )
+            .await?;
+        if let Some(destination) = redirect
+            .and_then(|redirect| redirect.destination())
+            .filter(|_| run.status != WorkAttemptStatus::Succeeded)
+        {
+            run.status = WorkAttemptStatus::Failed;
+            run.artifacts.clear();
+            run.note = Some(redirect_note(&destination));
+            run.redirect = Some(destination);
+        }
+        Ok(run)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_retained_page(
         &self,
         shell: &CallbackHandle,
         attempt: &WorkAttemptProbe,
@@ -1023,6 +1077,7 @@ impl NativeWorkComposition {
                         ),
                         measurements: measure.settle(started, model_in_flight),
                         helped,
+                        redirect: None,
                     });
                 }
                 return Err(WorkError::OutcomeUnknown);
@@ -1399,6 +1454,7 @@ impl NativeWorkComposition {
                         note: Some("The browser was not ready for this page".into()),
                         measurements: measure.settle(started, model_in_flight),
                         helped,
+                        redirect: None,
                     });
                 }
                 RetainedWorkPhase::Uncertain if anonymous => {
@@ -1420,6 +1476,7 @@ impl NativeWorkComposition {
                         intervention,
                         measurements: measure.settle(started, model_in_flight),
                         helped,
+                        redirect: None,
                     });
                 }
                 RetainedWorkPhase::Uncertain => {
@@ -1869,6 +1926,8 @@ struct BrowserRun {
     note: Option<String>,
     measurements: WorkStepMeasurementsV1,
     helped: bool,
+    /// Where the page's first load was redirected; the read itself failed.
+    redirect: Option<ContextNavigationTarget>,
 }
 /// Closed words for why a page needs a person; shown on the step and read by the model.
 fn intervention_note(intervention: Option<&WorkInterventionV1>) -> Option<&'static str> {
@@ -1897,11 +1956,18 @@ fn construction_note(
     })
 }
 
+/// The step's own words for a redirected read: the person and the lead
+/// both read where the page leads.
+fn redirect_note(destination: &ContextNavigationTarget) -> String {
+    format!("The page redirects to {}", destination.as_url())
+}
+
 fn failure_note(failure: AgentWorkFailure) -> &'static str {
     use zephium_agent_controller::AgentBrowserProviderError as Browser;
     match failure {
         AgentWorkFailure::Deadline => "The page took too long",
         AgentWorkFailure::ContextLost => zephium_core::work::runtime::read_note::UNSETTLED,
+        AgentWorkFailure::Redirected => "The page redirects elsewhere",
         AgentWorkFailure::Browser(Browser::TurnLimit | Browser::ActionLimit) => {
             "The page needed more steps than one read allows"
         }
@@ -1989,6 +2055,7 @@ impl BrowserRun {
             note: note.filter(|_| status != WorkAttemptStatus::Succeeded),
             measurements,
             helped,
+            redirect: None,
         }
     }
 }
@@ -2845,6 +2912,7 @@ fn compile_page_step(
     } else {
         navigation
     };
+    let public = navigation.document_policy().is_public();
     let mut objective = String::from("Overall user objective and constraints:\n");
     objective.push_str(&request.objective);
     objective.push_str("\n\nContribute evidence for only the browser assignment below. Other assignments are coordinated separately; do not repeat the entire multi-page objective in this step. Preserve all user constraints.\n\nThis step: ");
@@ -2983,6 +3051,11 @@ fn compile_page_step(
     let mut request = request;
     if continuing || loopback || task || reads_results {
         request.input = request.input.with_isolated_website_data();
+    }
+    // An anonymous public page whose first load is redirected fails naming
+    // where; its owner decides whether to read that address.
+    if public && !continuing && !loopback && !task {
+        request = request.with_redirect(WorkBrowserRedirect::default());
     }
     // A results page keeps nothing from the run's other pages: without the
     // run's session it opens in a fresh store of its own.

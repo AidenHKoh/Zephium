@@ -188,6 +188,9 @@ pub struct WorkBrowserOutcome {
     pub rerun: bool,
     /// What a search step's results page showed, as Rust read it.
     pub search: Option<WorkSearchPage>,
+    /// Where a public read's first load was redirected: the read failed,
+    /// and only a new read of this address may follow it.
+    pub redirect: Option<String>,
 }
 pub struct WorkAgentProviders<'a> {
     pub turn: &'a dyn WorkAgentTurnProvider,

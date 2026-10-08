@@ -825,6 +825,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                     held_back: false,
                     rerun: false,
                     search: None,
+                    redirect: None,
                 })
             },
             |_| {},
@@ -949,6 +950,7 @@ async fn a_run_that_runs_out_of_time_says_so() {
                     held_back: false,
                     rerun: false,
                     search: None,
+                    redirect: None,
                 })
             },
             |_| {},

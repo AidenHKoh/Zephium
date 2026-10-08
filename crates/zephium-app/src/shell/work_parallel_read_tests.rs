@@ -205,6 +205,7 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
                                 held_back: false,
                                 rerun: false,
                                 search: None,
+                                redirect: None,
                             })
                         }
                     },

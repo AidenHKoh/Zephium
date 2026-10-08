@@ -437,6 +437,7 @@ async fn page(request: WorkAgentBrowseRequest) -> Result<WorkBrowserOutcome, Wor
         held_back: false,
         rerun: false,
         search: None,
+        redirect: None,
     })
 }
 
@@ -1152,6 +1153,7 @@ fn outcome(
         held_back: false,
         rerun: false,
         search,
+        redirect: None,
     }
 }
 
@@ -1369,3 +1371,4 @@ async fn a_challenged_results_page_falls_back_to_the_models_own_search() {
     assert_eq!(evidence.model, SEARCH_MODEL);
     assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
