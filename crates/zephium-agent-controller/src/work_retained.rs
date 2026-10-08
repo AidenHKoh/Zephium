@@ -632,8 +632,8 @@ impl AgentWorkRetainedController {
 }
 
 /// The frame a retained page starts on: the requested origin, or for a site
-/// session another origin of its site the load settled on (a consent or
-/// locale host), when the frame stands for that settled document.
+/// session or a results page another origin of its site the load settled on
+/// (a consent or locale host), when the frame stands for that settled document.
 fn settled_origin_admitted(
     policy: zephium_agentic::WorkBrowserDocumentPolicy,
     requested: &SemanticOrigin,
@@ -641,7 +641,7 @@ fn settled_origin_admitted(
     document: &ContextNavigationTarget,
 ) -> bool {
     frame == requested
-        || (policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+        || (policy.follows_site_loads()
             && SemanticOrigin::parse(document.as_url().as_str())
                 .is_ok_and(|origin| &origin == frame))
 }
@@ -1152,6 +1152,12 @@ mod settled_origin_tests {
             Policy::SiteSession,
             &requested,
             &origin("https://accounts.google.com/"),
+            &consent
+        ));
+        assert!(settled_origin_admitted(
+            Policy::PublicResultsPage,
+            &requested,
+            &origin("https://consent.google.com/"),
             &consent
         ));
         // Other policies keep the exact origin.
