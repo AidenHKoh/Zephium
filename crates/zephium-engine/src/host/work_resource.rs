@@ -1295,6 +1295,8 @@ impl EngineHost {
         let invariant = guard.clone();
         #[cfg(target_os = "macos")]
         let panic = guard.clone();
+        #[cfg(target_os = "macos")]
+        let redirected = guard.clone();
         // Publish/retain this exact native reservation before a fallible
         // constructor can allocate a partial view/delegate graph. An error
         // is not absence proof and must not return its capacity to another
@@ -1374,7 +1376,14 @@ impl EngineHost {
                 panic.fail();
                 resource_callback(panic.clone());
             },
-        );
+        )
+        .with_redirect(move |destination| {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            redirected.record_failure_cause(ResourceFailureCause::Redirected);
+            redirected.record_redirect(destination);
+            redirected.fail();
+            resource_callback(redirected.clone());
+        });
         #[cfg(all(
             target_os = "macos",
             feature = "native-agentic-work-lifetime-diagnostic"

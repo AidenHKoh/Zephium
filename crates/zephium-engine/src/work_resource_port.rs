@@ -109,6 +109,7 @@ pub(crate) struct WorkResourceGuard {
     document: Option<ContextNavigationTarget>,
     document_policy: zephium_agentic::WorkBrowserDocumentPolicy,
     construction_window: Option<(zephium_agentic::WorkBrowserConstructionAttempt, Instant)>,
+    redirect: Option<zephium_agentic::WorkBrowserRedirect>,
     state: Mutex<State>,
     // Drop order is deliberate: the original native reporting owner retires
     // before its counted delivery lane. No audit may overlook a live reporter.
@@ -161,6 +162,7 @@ impl WorkResourceGuard {
             document: request.document().cloned(),
             document_policy: request.document_policy(),
             construction_window: request.construction_window(),
+            redirect: request.redirect().cloned(),
             health: None,
             health_permit: None,
             #[cfg(test)]
@@ -186,6 +188,13 @@ impl WorkResourceGuard {
     }
     pub(crate) fn resource(&self) -> &WorkBrowserResourceJoin {
         &self.resource
+    }
+    /// Hands the owner of a public construction the destination its first
+    /// load was redirected to; the document still fails.
+    pub(crate) fn record_redirect(&self, destination: ContextNavigationTarget) {
+        if let Some(redirect) = &self.redirect {
+            redirect.record(destination);
+        }
     }
     pub(crate) fn notify_frame_projection(&self) {
         if let Some(health) = &self.health {

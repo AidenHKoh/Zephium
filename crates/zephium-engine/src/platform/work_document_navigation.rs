@@ -54,6 +54,10 @@ struct State {
     hand_on_pending: bool,
     /// When the current load committed.
     committed_at: Option<Instant>,
+    /// A public first load's refused redirect, safe to admit as a new read.
+    redirect: Option<ContextNavigationTarget>,
+    /// The redirect's failure was already handed to the resource owner.
+    redirect_reported: bool,
     /// Open while an admitted action runs on a ready site-session page.
     follow: Option<Follow>,
     #[cfg(target_os = "windows")]
@@ -203,6 +207,8 @@ impl Default for WorkDocumentNavigation {
             handed_on: false,
             hand_on_pending: false,
             committed_at: None,
+            redirect: None,
+            redirect_reported: false,
             follow: None,
             #[cfg(target_os = "windows")]
             write_dispatched: false,
@@ -298,6 +304,46 @@ impl State {
             }
             _ => false,
         }
+    }
+}
+
+impl State {
+    /// A public first load sent elsewhere before its document is ready: a
+    /// server redirect, or the page's own script replacing it. The load is
+    /// refused like any unsolicited one, and the document with it; the
+    /// destination is kept only when a new public read could be admitted
+    /// there. A refusal at any other time is not a redirect.
+    fn refuse_redirect(&mut self, raw: &str) -> bool {
+        let initial = self.policy.is_public()
+            && self.operation.is_none()
+            && self.human.is_none()
+            && self.admission_kind == Some(AdmissionKind::ProgrammaticGet)
+            && self.requested
+            && match self.phase {
+                Phase::Loading => self.native_id.is_some(),
+                Phase::Committed | Phase::Finalizing | Phase::Sampling => true,
+                _ => false,
+            };
+        if !initial {
+            return false;
+        }
+        let Some(destination) = ContextNavigationTarget::parse(raw)
+            .ok()
+            .filter(|destination| {
+                self.target.as_ref() != Some(destination)
+                    && self.policy.admits_request(destination)
+                    && zephium_agentic::AgentNavigationDiscovery::try_new_public_page(
+                        destination.clone(),
+                    )
+                    .is_ok()
+            })
+        else {
+            return false;
+        };
+        self.redirect = Some(destination);
+        self.clear_write_navigation();
+        self.phase = Phase::Refused;
+        true
     }
 }
 
@@ -716,6 +762,8 @@ impl WorkDocumentNavigation {
             return state.site_follows(target);
         }
         // A refused unsolicited navigation grants no replacement document.
+        // WebView2 asks again for each server redirect of the main frame.
+        state.refuse_redirect(target);
         false
     }
     #[cfg(target_os = "windows")]
@@ -878,7 +926,28 @@ impl WorkDocumentNavigation {
             state.requested = true;
             return true;
         }
+        if action.target_is_main_frame == Some(true) && action.is_get {
+            state.refuse_redirect(target);
+        }
         false
+    }
+    /// The refused redirect that failed this public document, if one did.
+    pub(crate) fn redirected(&self) -> Option<ContextNavigationTarget> {
+        let state = self.0.lock().ok()?;
+        (state.phase == Phase::Refused)
+            .then(|| state.redirect.clone())
+            .flatten()
+    }
+    /// The redirect failure, the first time it is asked for after the gate
+    /// refused the load; the policy callback reports it at once.
+    pub(crate) fn take_redirect_report(&self) -> Option<ContextNavigationTarget> {
+        let mut state = self.0.lock().ok()?;
+        if state.phase != Phase::Refused || state.redirect_reported {
+            return None;
+        }
+        let redirect = state.redirect.clone()?;
+        state.redirect_reported = true;
+        Some(redirect)
     }
     /// Returns (actual document committed, resource owner must reconcile).
     pub(crate) fn observe(&self, event: wry::NavigationEvent) -> Result<(bool, bool), ()> {
@@ -1462,6 +1531,96 @@ mod tests {
         settle(&gate, "https://app.slack.com/client/T1");
         assert!(gate.ready(Some("https://app.slack.com/client/T1")));
         assert!(!gate.failed());
+    }
+    fn public_gate(
+        url: &str,
+        policy: zephium_agentic::WorkBrowserDocumentPolicy,
+    ) -> WorkDocumentNavigation {
+        let gate = WorkDocumentNavigation::default();
+        assert!(gate.allows("about:blank"));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(9, phase, "about:blank")).unwrap();
+        }
+        gate.arm_with_policy(ContextNavigationTarget::parse(url).unwrap(), policy)
+            .unwrap();
+        assert!(gate.allows(url));
+        gate
+    }
+    #[test]
+    fn a_public_first_load_redirect_is_kept_and_refused_without_an_invariant() {
+        use zephium_agentic::WorkBrowserDocumentPolicy as P;
+        let start = "https://hetzner.com/cloud";
+        for (policy, to) in [
+            (P::PublicSameDocumentQuery, "https://www.hetzner.com/cloud"),
+            (P::PublicQueryFinalization, "https://www.hetzner.com/cloud"),
+            // A cross-site destination is kept too; its owner decides.
+            (
+                P::PublicSameDocumentQuery,
+                "https://www.other-site.com/cloud?x=1",
+            ),
+        ] {
+            let gate = public_gate(start, policy);
+            gate.observe(event(1, E::Started, start)).unwrap();
+            assert_eq!(gate.redirected(), None);
+            // WebKit and WebView2 ask policy again for the server redirect.
+            assert!(!gate.allows(to));
+            assert!(gate.failed());
+            let to = ContextNavigationTarget::parse(to).unwrap();
+            assert_eq!(gate.take_redirect_report(), Some(to.clone()));
+            assert_eq!(gate.take_redirect_report(), None);
+            // The cancelled provisional load changes nothing after that.
+            assert_eq!(gate.observe(event(1, E::Failed, start)), Ok((false, false)));
+            assert_eq!(gate.redirected(), Some(to));
+            assert!(!gate.allows(start));
+        }
+    }
+    #[test]
+    fn a_public_script_redirect_before_ready_is_kept_but_never_after() {
+        use zephium_agentic::WorkBrowserDocumentPolicy as P;
+        let start = "https://www.example.com/plans";
+        let to = "https://www.example.com/plans/";
+        let gate = public_gate(start, P::PublicSameDocumentQuery);
+        gate.observe(event(1, E::Started, start)).unwrap();
+        gate.observe(event(1, E::Committed, start)).unwrap();
+        assert!(!gate.allows(to));
+        assert_eq!(gate.redirected(), ContextNavigationTarget::parse(to).ok());
+        // Once ready, a page-initiated load is refused and the page stays.
+        let gate = public_gate(start, P::PublicSameDocumentQuery);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        assert!(!gate.allows(to));
+        assert!(!gate.failed() && gate.ready(Some(start)));
+        assert_eq!(gate.redirected(), None);
+        assert_eq!(gate.take_redirect_report(), None);
+    }
+    #[test]
+    fn an_unsafe_or_non_public_refusal_keeps_today_s_failure() {
+        use zephium_agentic::WorkBrowserDocumentPolicy as P;
+        let start = "https://www.example.com/plans";
+        for to in [
+            "http://www.example.com/plans",
+            "https://127.0.0.1/plans",
+            "https://intranet.local/plans",
+            "https://www.example.com/plans?access_token=private-value",
+            "https://www.example.com/plans#section",
+            start,
+        ] {
+            let gate = public_gate(start, P::PublicSameDocumentQuery);
+            gate.observe(event(1, E::Started, start)).unwrap();
+            assert!(!gate.allows(to), "{to}");
+            assert!(!gate.failed(), "{to}");
+            assert_eq!(gate.observe(event(1, E::Failed, start)), Ok((false, true)));
+            assert!(gate.failed() && gate.redirected().is_none(), "{to}");
+        }
+        // Exact and site-session documents never keep a redirect.
+        for policy in [P::Exact, P::SiteSession] {
+            let gate = public_gate(start, policy);
+            gate.observe(event(1, E::Started, start)).unwrap();
+            assert!(!gate.allows("https://www.other-site.com/"));
+            assert_eq!(gate.redirected(), None);
+        }
     }
     #[test]
     fn site_session_routes_in_place_and_cancels_page_loads_without_losing_the_page() {

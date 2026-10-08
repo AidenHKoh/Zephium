@@ -408,6 +408,7 @@ const fn map_semantic_runtime_failure(
 pub(crate) struct AgentOwnedViewCallbacks<Navigation, Location, RendererLost, Invariant, Panic> {
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     failure_diagnostic: Option<Rc<dyn Fn(crate::WorkResourceFailureCause)>>,
+    redirect: Option<Rc<dyn Fn(zephium_agentic::ContextNavigationTarget)>>,
     navigation: Navigation,
     location: Location,
     renderer_lost: RendererLost,
@@ -428,12 +429,22 @@ impl<Navigation, Location, RendererLost, Invariant, Panic>
         Self {
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             failure_diagnostic: None,
+            redirect: None,
             navigation,
             location,
             renderer_lost,
             invariant,
             panic,
         }
+    }
+    /// Ends a public document whose first load the Work gate refused as a
+    /// redirect. Without it, that refusal is an invariant failure.
+    pub(crate) fn with_redirect(
+        mut self,
+        redirect: impl Fn(zephium_agentic::ContextNavigationTarget) + 'static,
+    ) -> Self {
+        self.redirect = Some(Rc::new(redirect));
+        self
     }
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     pub(crate) fn with_failure_diagnostic(
@@ -523,6 +534,7 @@ where
     let AgentOwnedViewCallbacks {
         #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
         failure_diagnostic,
+        redirect: on_redirect,
         navigation: on_navigation,
         location: on_location,
         renderer_lost: on_renderer_lost,
@@ -546,6 +558,26 @@ where
     let navigation_invariant_failure = invariant_failure_callback.clone();
     let renderer_invariant_failure = invariant_failure_callback.clone();
     let on_callback_panic = Rc::new(on_callback_panic);
+    let redirect_invariant_failure = invariant_failure_callback.clone();
+    let redirect_callback_panicked = on_callback_panic.clone();
+    // A refused redirect ends the document like any refused load, but its
+    // owner reads it as a redirect, never as a broken invariant.
+    let on_redirect: Rc<dyn Fn(zephium_agentic::ContextNavigationTarget)> = match on_redirect {
+        Some(redirect) => Rc::new(move |destination| {
+            invoke_owned_unit_callback(
+                &|| redirect(destination.clone()),
+                redirect_callback_panicked.as_ref(),
+            );
+        }),
+        None => Rc::new(move |_| {
+            invoke_owned_unit_callback(
+                redirect_invariant_failure.as_ref(),
+                redirect_callback_panicked.as_ref(),
+            )
+        }),
+    };
+    let policy_redirect = on_redirect.clone();
+    let event_redirect = on_redirect;
     let navigation_callback_panicked = on_callback_panic.clone();
     let location_callback_panicked = on_callback_panic.clone();
     let renderer_callback_panicked = on_callback_panic.clone();
@@ -557,6 +589,7 @@ where
     )
     .map_err(|_| AgentOwnedViewConstructionError::ExtensionIsolation)?;
     let navigation_semantic = semantic.controller().clone();
+    let redirect_semantic = semantic.controller().clone();
     let human_semantic_prepare = semantic.human_navigation_preparer();
     let follow_semantic_prepare = semantic.follow_navigation_preparer();
     let renderer_semantic = semantic.controller().clone();
@@ -593,6 +626,14 @@ where
             let allowed = allowed
                 && (!work_policy.as_ref().is_some_and(|gate| gate.take_hand_on())
                     || follow_semantic_prepare());
+            if let Some(destination) = work_policy
+                .as_ref()
+                .filter(|_| !allowed)
+                .and_then(|gate| gate.take_redirect_report())
+            {
+                redirect_semantic.cancel();
+                policy_redirect(destination);
+            }
             #[cfg(feature = "agentic-browser-qa")]
             if action.target_is_main_frame != Some(false) {
                 super::agentic_liveness_probe::trace(format_args!(
@@ -633,7 +674,10 @@ where
             if let Some(gate) = &work_events {
                 match gate.observe(event) {
                     Ok((committed, notify)) => {
-                        if gate.failed() {
+                        if let Some(destination) = gate.redirected() {
+                            event_redirect(destination);
+                            navigation_semantic.cancel();
+                        } else if gate.failed() {
                             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                             if let Some(report) = &navigation_diagnostic {
                                 report(crate::WorkResourceFailureCause::NavigationEventRefused);

@@ -410,6 +410,7 @@ impl EngineHost {
         let browser = guard.clone();
         let invariant = guard.clone();
         let panic = guard.clone();
+        let redirected = guard.clone();
         let owned_profile = if storage == ContextProfileStorageClass::Durable {
             AgentOwnedProfile::work_site(guard.document().ok_or(ContextPortFailure::NativeRefused)?)
                 .map_err(|_| ContextPortFailure::NativeRefused)?
@@ -502,7 +503,16 @@ impl EngineHost {
                     panic.fail();
                     super::notify_work_resource(panic.clone());
                 },
-            ),
+            )
+            .with_redirect(move |destination| {
+                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                redirected.record_failure_cause(
+                    crate::agent_context_port::work_resource_failure_diagnostic::WorkResourceFailureCause::Redirected,
+                );
+                redirected.record_redirect(destination);
+                redirected.fail();
+                super::notify_work_resource(redirected.clone());
+            }),
         );
         for debt in wry::pending_webview2_cleanup_debts() {
             let resource = native_resource.take().or_else(|| {

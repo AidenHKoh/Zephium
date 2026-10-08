@@ -127,6 +127,7 @@ pub(crate) struct AgentOwnedViewCallbacks<
     browser_lost: BrowserLost,
     invariant: Invariant,
     panic: Panic,
+    redirect: Option<Rc<dyn Fn(zephium_agentic::ContextNavigationTarget)>>,
 }
 
 impl<Navigation, Location, RendererLost, BrowserLost, Invariant, Panic>
@@ -147,7 +148,17 @@ impl<Navigation, Location, RendererLost, BrowserLost, Invariant, Panic>
             browser_lost,
             invariant,
             panic,
+            redirect: None,
         }
+    }
+    /// Ends a public document whose first load the Work gate refused as a
+    /// redirect. Without it, that refusal is an invariant failure.
+    pub(crate) fn with_redirect(
+        mut self,
+        redirect: impl Fn(zephium_agentic::ContextNavigationTarget) + 'static,
+    ) -> Self {
+        self.redirect = Some(Rc::new(redirect));
+        self
     }
 }
 
@@ -1430,6 +1441,7 @@ where
         browser_lost: on_browser_lost,
         invariant: on_invariant_failure,
         panic: on_callback_panic,
+        redirect: on_redirect,
     } = callbacks;
     let navigation = AgentNavigationController::default();
     let navigation_policy = navigation.clone();
@@ -1446,6 +1458,21 @@ where
     let browser_lost_callback = Rc::new(on_browser_lost);
     let invariant_callback = Rc::new(on_invariant_failure);
     let panic_callback = Rc::new(on_callback_panic);
+    let redirect_invariant = invariant_callback.clone();
+    let redirect_panic = panic_callback.clone();
+    // A refused redirect ends the document like any refused load, but its
+    // owner reads it as a redirect, never as a broken invariant.
+    let on_redirect: Rc<dyn Fn(zephium_agentic::ContextNavigationTarget)> = match on_redirect {
+        Some(redirect) => Rc::new(move |destination| {
+            invoke_unit_callback(&|| redirect(destination.clone()), redirect_panic.as_ref());
+        }),
+        None => Rc::new(move |_| {
+            invoke_unit_callback(redirect_invariant.as_ref(), redirect_panic.as_ref())
+        }),
+    };
+    let policy_redirect = on_redirect.clone();
+    let event_redirect = on_redirect.clone();
+    let location_redirect = on_redirect;
     let work_activity_panic: Rc<dyn Fn()> = invariant_callback.clone();
     let navigation_invariant = invariant_callback.clone();
     let renderer_invariant = invariant_callback.clone();
@@ -1484,6 +1511,9 @@ where
             };
             let human_prepare = gate.human_load_preparation_needed(Some(true));
             let allowed = gate.allows(&target);
+            if let Some(destination) = gate.take_redirect_report().filter(|_| !allowed) {
+                policy_redirect(destination);
+            }
             let prepare = allowed && (human_prepare || gate.take_hand_on());
             let prepared = !prepare || semantic_policy.begin_document_load().is_ok();
             if !prepared {
@@ -1503,7 +1533,9 @@ where
                             );
                             return;
                         }
-                        if gate.failed() {
+                        if let Some(destination) = gate.redirected() {
+                            event_redirect(destination);
+                        } else if gate.failed() {
                             invoke_unit_callback(
                                 navigation_invariant.as_ref(),
                                 navigation_panic.as_ref(),
@@ -1666,7 +1698,10 @@ where
         if let Some(gate) = &work_location {
             match gate.location_changed(super::current_url_core(&location_core).as_deref()) {
                 Ok(changed) => {
-                    if gate.failed() {
+                    if let Some(destination) = gate.redirected() {
+                        location_semantic.revoke_document_authority();
+                        location_redirect(destination);
+                    } else if gate.failed() {
                         location_semantic.revoke_document_authority();
                         invoke_unit_callback(location_invariant.as_ref(), location_panic.as_ref());
                     }
