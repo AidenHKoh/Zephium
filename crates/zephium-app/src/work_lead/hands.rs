@@ -377,21 +377,39 @@ where
                 } => crate::work_sites::site_of(url).map(|site| self.browser.site_lane(&site)),
                 _ => None,
             };
-            let future = {
-                let mut browser = self
-                    .browser
-                    .browser
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                (browser)(probe, request)
+            // A read the driver opens where an earlier read was redirected
+            // passes the checks a read the lead asked for itself passes.
+            let followed = match (&request.redirected_from, &request.step) {
+                (Some(_), WorkStepKindV1::Read { url, .. }) => {
+                    Some((url.clone(), request.step.clone()))
+                }
+                _ => None,
             };
-            let pages = &self.browser.pages;
+            let browser = &self.browser;
+            let (run, part) = (self.run, self.part);
             async move {
+                if let Some((url, kind)) = followed {
+                    run.allow_url(&url);
+                    let admitted = match super::parts::redirected_read(&kind, &url, run) {
+                        Ok(_) => run.admit_address(&url, part).await,
+                        Err(why) => Err(why),
+                    };
+                    if let Err(why) = admitted {
+                        return Ok(not_opened(why));
+                    }
+                }
                 let _site = match &lane {
                     Some(lane) => Some(lane.lock().await),
                     None => None,
                 };
-                let _page = pages.acquire().await.ok();
+                let future = {
+                    let mut browser = browser
+                        .browser
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    (browser)(probe, request)
+                };
+                let _page = browser.pages.acquire().await.ok();
                 future.await
             }
         };
@@ -413,6 +431,7 @@ where
         for site in driver.take_typing_allowed() {
             self.run.trust_site(&site);
         }
+        let redirects = driver.take_redirects();
         let used = driver.used();
         let notices = driver.take_notices();
         {
@@ -482,6 +501,25 @@ where
             let step = new.iter().find(|step| {
                 !used_steps.contains(&step.id) && same_request(&request.kind, &step.kind)
             });
+            // A read the driver followed to its redirect answers as the last
+            // read of its chain, which cites the final address; a redirect
+            // it did not follow is the lead's to read or not.
+            let (mut read_at, mut unfollowed) = (None, None);
+            let step = step.map(|first| {
+                let mut step = first;
+                while let Some((_, destination, next)) =
+                    redirects.iter().find(|(id, _, _)| *id == step.id)
+                {
+                    let Some(next) = next.and_then(|next| new.iter().find(|s| s.id == next)) else {
+                        unfollowed = Some(destination.clone());
+                        break;
+                    };
+                    used_steps.insert(step.id);
+                    read_at = Some(destination.clone());
+                    step = next;
+                }
+                step
+            });
             let (content, error) = match (step, &execution) {
                 (Some(step), Some(execution)) => {
                     used_steps.insert(step.id);
@@ -503,6 +541,19 @@ where
                         .unwrap_or_else(|| "Not run: the part's budget or steps are spent".into()),
                     true,
                 ),
+            };
+            let content = match (&read_at, &request.kind) {
+                (Some(destination), WorkStepKindV1::Read { url, .. }) => format!(
+                    "{url} redirects to {destination}; this is a read of {destination}.\n{content}"
+                ),
+                _ => content,
+            };
+            let content = match &unfollowed {
+                Some(destination) => format!(
+                    "{}\nRead {destination} if it is what you need: this read did not follow the redirect there.",
+                    content.trim_end()
+                ),
+                None => content,
             };
             results.push((request.call.clone(), content, error));
         }
@@ -1089,6 +1140,23 @@ fn host(url: &str) -> String {
 
 /// The step the driver made for a request: same query, url or path. A page
 /// task may start from the site's entry page, so its goal decides.
+/// A followed read the lead's own checks refused: it never opened.
+fn not_opened(why: String) -> WorkBrowserOutcome {
+    WorkBrowserOutcome {
+        status: WorkStepStatus::Failed,
+        usage: Some(WorkUsage::default()),
+        artifacts: vec![],
+        intervention: None,
+        note: Some(why),
+        measurements: None,
+        helped: false,
+        held_back: false,
+        rerun: false,
+        search: None,
+        redirect: None,
+    }
+}
+
 fn same_request(request: &WorkStepKindV1, step: &WorkStepKindV1) -> bool {
     match (request, step) {
         (WorkStepKindV1::Search { query: a }, WorkStepKindV1::Search { query: b }) => a == b,

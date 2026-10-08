@@ -1300,6 +1300,40 @@ pub(crate) fn step_request(
         },
         _ => return Err(format!("{name} is not a tool here")),
     };
+    admit_kind(name, kind, run)
+}
+
+/// A new plain read of the address a read's first load was redirected to,
+/// admitted by the same checks as a read the lead asked for itself.
+pub(crate) fn redirected_read(
+    kind: &WorkStepKindV1,
+    destination: &str,
+    run: &super::run::LeadRun,
+) -> Result<WorkStepKindV1, String> {
+    let WorkStepKindV1::Read {
+        collection,
+        goal: None,
+        ..
+    } = kind
+    else {
+        return Err("only a plain read follows a redirect".into());
+    };
+    admit_kind(
+        "read",
+        WorkStepKindV1::Read {
+            url: destination.to_owned(),
+            collection: collection.clone(),
+            goal: None,
+        },
+        run,
+    )
+}
+
+fn admit_kind(
+    name: &str,
+    kind: WorkStepKindV1,
+    run: &super::run::LeadRun,
+) -> Result<WorkStepKindV1, String> {
     if let WorkStepKindV1::Search { query } = &kind {
         zephium_core::work::search::validate_public_search_query(query)
             .map_err(|_| "query is one line of at most 512 characters".to_owned())?;

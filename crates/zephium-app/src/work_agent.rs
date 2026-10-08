@@ -45,6 +45,9 @@ pub struct WorkAgentBrowseRequest {
     pub view: bool,
     /// A search step's results page: Rust reads its results, no model.
     pub results: Option<WorkResultsPage>,
+    /// A new read of where an earlier read's first load was redirected on
+    /// its own site: the address that redirected here.
+    pub redirected_from: Option<String>,
 }
 
 /// A step a page task holds for the person, as the site policy read it
@@ -476,6 +479,7 @@ impl WorkAgentService {
             views: Vec::new(),
             typing_held: Vec::new(),
             typing_allowed: Vec::new(),
+            redirects: Vec::new(),
         };
         if !driver.tabs.is_empty() {
             driver.report(WorkAgentDiagnostic::TabsListed {
@@ -578,6 +582,9 @@ struct Driver {
     typing_held: Vec<String>,
     /// Sites the person allowed typing on for the run, for the run to learn.
     typing_allowed: Vec<String>,
+    /// Page reads whose first load was redirected: the step, where it was
+    /// sent, and the step that read it there when the driver followed it.
+    redirects: Vec<(WorkStepId, String, Option<WorkStepId>)>,
 }
 
 enum Fetched {
@@ -1445,6 +1452,7 @@ impl Driver {
                     entry: false,
                     view: false,
                     results: Some(page),
+                    redirected_from: None,
                 },
             )));
         }
@@ -1855,7 +1863,9 @@ impl Driver {
                                 })
                                 .to_owned(),
                         };
-                        if status == WorkStepStatus::Failed {
+                        if let Some(destination) = outcome.redirect.clone() {
+                            self.redirects.push((id, destination, None));
+                        } else if status == WorkStepStatus::Failed {
                             self.notice(&format!(
                                 "A page read failed: {}. Use another listed source or finish with what the canvas has; do not reopen that page.",
                                 outcome.note.as_deref().unwrap_or("the page gave nothing")
@@ -2365,6 +2375,7 @@ impl WorkPartDriver {
             views: Vec::new(),
             typing_held: Vec::new(),
             typing_allowed: Vec::new(),
+            redirects: Vec::new(),
         })
     }
     /// Runs searches, page reads and tasks, and file and command steps. A
@@ -2437,6 +2448,11 @@ impl WorkPartDriver {
     /// Records the run's entry answer for one of this driver's sites.
     pub(crate) async fn enter(&mut self, site: &str, answer: crate::work_sites::EntryAnswer) {
         self.0.answer_entry(site, answer).await;
+    }
+    /// Page reads redirected since this was last asked: each step, where
+    /// its first load was sent, and the step that read it there, if any.
+    pub(crate) fn take_redirects(&mut self) -> Vec<(WorkStepId, String, Option<WorkStepId>)> {
+        std::mem::take(&mut self.0.redirects)
     }
     /// What the driver refused or learned since it was last asked, in
     /// closed words.

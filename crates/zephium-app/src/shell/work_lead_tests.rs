@@ -1372,3 +1372,212 @@ async fn a_challenged_results_page_falls_back_to_the_models_own_search() {
     assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
+/// A read whose first load the page's server redirected: the browser read
+/// failed naming where, as the composition reports it.
+fn redirected(to: &str) -> WorkBrowserOutcome {
+    WorkBrowserOutcome {
+        status: WorkStepStatus::Failed,
+        usage: Some(WorkUsage {
+            model_tokens: 0,
+            cost_micro_usd: 0,
+            operations: 1,
+            accounting: WorkUsageAccounting::Exact,
+        }),
+        artifacts: vec![],
+        intervention: None,
+        note: Some(format!("The page redirects to {to}")),
+        measurements: None,
+        helped: false,
+        held_back: false,
+        rerun: false,
+        search: None,
+        redirect: Some(to.into()),
+    }
+}
+
+fn notes(request: WorkAgentBrowseRequest, claim: &str) -> WorkBrowserOutcome {
+    outcome(
+        None,
+        vec![WorkArtifactDraft {
+            output: request.output,
+            title: "Notes".into(),
+            data: WorkArtifactDataV1::Findings {
+                subjects: vec![],
+                items: vec![WorkFinding {
+                    claim: claim.into(),
+                    subject: None,
+                    evidence: vec![0],
+                    confidence: WorkConfidence::Supported,
+                    detail: None,
+                    general_knowledge: false,
+                }],
+            },
+            evidence: vec![WorkEvidenceLink {
+                extraction_id: WorkArtifactId::from(902),
+                source_id: 1,
+            }],
+        }],
+    )
+}
+
+fn finish() -> Vec<WorkModelPart> {
+    vec![
+        call(
+            "r",
+            "create",
+            json!({"kind": "reply", "title": "Plans", "data": {
+            "headline": "Plans", "text": "The plans are listed."}}),
+        ),
+        call("d", "finish", json!({"say": "Done.", "title": "Plans"})),
+    ]
+}
+
+fn reads(run: &WorkExecutionFact) -> Vec<(String, WorkStepStatus, Option<String>, usize)> {
+    run.steps
+        .iter()
+        .filter_map(|step| match &step.kind {
+            WorkStepKindV1::Read { url, .. } => Some((
+                url.clone(),
+                step.status,
+                step.note.clone(),
+                step.artifacts.len(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_same_site_redirect_is_read_again_as_one_fresh_read_of_its_destination() {
+    fn turns(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        match turn {
+            0 => vec![call(
+                "f",
+                "web_fetch",
+                json!({"url": "https://hetzner.com/cloud"}),
+            )],
+            1 => {
+                assert!(
+                    seen.contains("https://hetzner.com/cloud redirects to https://www.hetzner.com/cloud; this is a read of https://www.hetzner.com/cloud."),
+                    "{seen}"
+                );
+                assert!(seen.contains("CX22 costs 3.79 EUR a month"), "{seen}");
+                assert!(!seen.contains("Failed"), "{seen}");
+                finish()
+            }
+            _ => panic!("the run finished at turn 1"),
+        }
+    }
+    fn browse(request: WorkAgentBrowseRequest) -> WorkBrowserOutcome {
+        let WorkStepKindV1::Read { url, .. } = &request.step else {
+            panic!("a page read");
+        };
+        match url.as_str() {
+            "https://hetzner.com/cloud" => {
+                assert_eq!(request.redirected_from, None);
+                redirected("https://www.hetzner.com/cloud")
+            }
+            "https://www.hetzner.com/cloud" => {
+                assert_eq!(
+                    request.redirected_from.as_deref(),
+                    Some("https://hetzner.com/cloud")
+                );
+                notes(request, "CX22 costs 3.79 EUR a month")
+            }
+            other => panic!("unexpected read of {other}"),
+        }
+    }
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let run = scripted_search(
+        "Hetzner cloud prices",
+        turns,
+        &browser_search(&asked),
+        browse,
+    )
+    .await;
+    assert_eq!(run.status, WorkExecutionStatus::NeedsReview);
+    assert_eq!(
+        reads(&run),
+        [
+            (
+                "https://hetzner.com/cloud".into(),
+                WorkStepStatus::Failed,
+                Some("The page redirects to https://www.hetzner.com/cloud".into()),
+                0,
+            ),
+            (
+                "https://www.hetzner.com/cloud".into(),
+                WorkStepStatus::Succeeded,
+                reads(&run)[1].2.clone(),
+                1,
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_cross_site_redirect_goes_back_to_the_lead_and_a_chain_stops_at_its_bound_or_a_loop() {
+    fn turns(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        match turn {
+            0 => vec![
+                call(
+                    "a",
+                    "web_fetch",
+                    json!({"url": "https://plans.example.com/a"}),
+                ),
+                call(
+                    "b",
+                    "web_fetch",
+                    json!({"url": "https://loop.example.org/a"}),
+                ),
+                call(
+                    "c",
+                    "web_fetch",
+                    json!({"url": "https://round.example.org/a"}),
+                ),
+                // Work never loads plain http: this reads the https page.
+                call("e", "web_fetch", json!({"url": "http://example.com/"})),
+            ],
+            1 => {
+                assert!(
+                    seen.contains("Failed: The page redirects to https://other.example.net/plans\nRead https://other.example.net/plans if it is what you need: this read did not follow the redirect there."),
+                    "{seen}"
+                );
+                assert!(
+                    seen.contains("https://loop.example.org/a redirects to https://loop.example.org/c; this is a read of https://loop.example.org/c.\nFailed: The page redirects to https://loop.example.org/d\nRead https://loop.example.org/d if it is what you need"),
+                    "{seen}"
+                );
+                assert!(
+                    seen.contains("https://round.example.org/a redirects to https://round.example.org/b; this is a read of https://round.example.org/b.\nFailed: The page redirects to https://round.example.org/a\n"),
+                    "{seen}"
+                );
+                finish()
+            }
+            _ => panic!("the run finished at turn 1"),
+        }
+    }
+    fn browse(request: WorkAgentBrowseRequest) -> WorkBrowserOutcome {
+        let WorkStepKindV1::Read { url, .. } = &request.step else {
+            panic!("a page read");
+        };
+        match url.as_str() {
+            "https://example.com/" => notes(request, "Example Domain is for examples"),
+            "https://round.example.org/a" => redirected("https://round.example.org/b"),
+            "https://round.example.org/b" => redirected("https://round.example.org/a"),
+            "https://plans.example.com/a" => redirected("https://other.example.net/plans"),
+            "https://loop.example.org/a" => redirected("https://loop.example.org/b"),
+            "https://loop.example.org/b" => redirected("https://loop.example.org/c"),
+            "https://loop.example.org/c" => redirected("https://loop.example.org/d"),
+            other => panic!("unexpected read of {other}"),
+        }
+    }
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let run = scripted_search("Compare plans", turns, &browser_search(&asked), browse).await;
+    assert_eq!(run.status, WorkExecutionStatus::NeedsReview);
+    let urls: Vec<String> = reads(&run).into_iter().map(|(url, ..)| url).collect();
+    // Each address is read once: the bound ends one chain, the loop another.
+    assert_eq!(urls.len(), 7, "{urls:?}");
+    assert!(urls.iter().any(|url| url == "https://example.com/"));
+    assert!(!urls.iter().any(|url| url.contains("other.example.net")));
+    assert!(!urls.iter().any(|url| url.ends_with("/d")));
+}

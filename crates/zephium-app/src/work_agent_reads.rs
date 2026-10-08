@@ -2,6 +2,9 @@ use super::*;
 use zephium_core::work::collection::*;
 
 const MAX_CONCURRENT_PAGE_READS: usize = 3;
+/// New reads one plain read may become by following its own site's
+/// redirects.
+pub(crate) const MAX_REDIRECT_HOPS: usize = 2;
 /// How often a page read looks at the steps its pages hold for the person.
 const HELD_POLL: Duration = Duration::from_millis(500);
 
@@ -123,6 +126,8 @@ impl Driver {
             )> = Vec::new();
             let mut terminal = None;
             let mut failure = None;
+            // Each live read's step and the addresses its chain has read.
+            let mut chains: Vec<(WorkStepId, Vec<String>)> = Vec::new();
             for ((kind, session), limits) in batch.iter().zip(limits) {
                 if self.cancelled().await {
                     terminal = Some(WorkAttemptStatus::Cancelled);
@@ -193,7 +198,9 @@ impl Driver {
                         && crate::work_sites::site_of(url)
                             .is_some_and(|site| self.typing_held.contains(&site)),
                     results: None,
+                    redirected_from: None,
                 };
+                chains.push((id, vec![url.clone()]));
                 let future = Box::pin(browser(self.probe.clone(), request.clone()));
                 pending.push(PendingRead {
                     request,
@@ -269,6 +276,11 @@ impl Driver {
                         continue;
                     }
                 }
+                let redirect = outcome
+                    .as_ref()
+                    .ok()
+                    .and_then(|outcome| outcome.redirect.clone().zip(outcome.usage));
+                let id = request.id;
                 match self
                     .settle_fetched(attempt, Fetched::Browse(request.id, outcome, prior))
                     .await
@@ -285,6 +297,35 @@ impl Driver {
                     }
                     _ => {}
                 }
+                let Some((destination, used)) = redirect else {
+                    continue;
+                };
+                if terminal.is_some() || failure.is_some() || self.cancelled().await {
+                    continue;
+                }
+                let read = chains
+                    .iter()
+                    .find(|(step, _)| *step == id)
+                    .map(|(_, read)| read.clone())
+                    .unwrap_or_default();
+                match self
+                    .redirect_read(&request, &destination, used, &read)
+                    .await
+                {
+                    Ok(Some(next)) => {
+                        let mut read = read;
+                        read.push(destination);
+                        chains.push((next.id, read));
+                        let future = Box::pin(browser(self.probe.clone(), next.clone()));
+                        pending.push(PendingRead {
+                            request: next,
+                            future,
+                            prior: None,
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(error) => failure = Some(error),
+                }
             }
             if let Some(error) = failure {
                 return Err(error);
@@ -295,6 +336,80 @@ impl Driver {
             offset += count;
         }
         Ok(None)
+    }
+}
+
+impl Driver {
+    /// A new read of the address a plain public read's first load was
+    /// redirected to on its own site: its own step citing that address,
+    /// within what the first read left of its share, never an address the
+    /// chain already read, and at most `MAX_REDIRECT_HOPS` of them. The
+    /// host still admits it as it would a read asked for directly.
+    /// `None` leaves the redirect with the failed read's step.
+    async fn redirect_read(
+        &mut self,
+        request: &WorkAgentBrowseRequest,
+        destination: &str,
+        used: WorkUsage,
+        read: &[String],
+    ) -> Result<Option<WorkAgentBrowseRequest>, WorkError> {
+        let WorkStepKindV1::Read {
+            url,
+            goal: None,
+            collection,
+        } = &request.step
+        else {
+            return Ok(None);
+        };
+        let target = |url: &str| zephium_agentic::ContextNavigationTarget::parse(url).ok();
+        let same_site = target(url)
+            .zip(target(destination))
+            .is_some_and(|(from, to)| zephium_agentic::same_work_site(&from, &to));
+        let followed = read.len().saturating_sub(1);
+        let follows = same_site
+            && request.results.is_none()
+            && request.session == crate::work_sites::SiteSession::Private
+            && followed < MAX_REDIRECT_HOPS
+            && !read.iter().any(|known| known == destination)
+            && usize::from(self.grant.max_steps) > self.steps as usize + 1;
+        crate::work_trace::record(format_args!(
+            "work: phase=page event=redirected same_site={same_site} hop={followed} followed={follows}"
+        ));
+        let Some(limits) = retry_limits(request.limits, used).filter(|_| follows) else {
+            return Ok(None);
+        };
+        let kind = WorkStepKindV1::Read {
+            url: destination.to_owned(),
+            goal: None,
+            collection: collection.clone(),
+        };
+        let id = self
+            .begin(
+                self.step(kind.clone(), WorkStepStatus::Running),
+                vec![],
+                None,
+            )
+            .await?;
+        if let Some(site) = crate::work_sites::site_of(destination) {
+            self.page_sites.push((id, site));
+        }
+        if let Some(redirect) = self
+            .redirects
+            .iter_mut()
+            .rev()
+            .find(|(step, _, _)| *step == request.id)
+        {
+            redirect.2 = Some(id);
+        }
+        self.probe.record_activity(WorkActivityV1::Reading);
+        Ok(Some(WorkAgentBrowseRequest {
+            construction_attempt: Default::default(),
+            id,
+            step: kind,
+            limits,
+            redirected_from: Some(url.clone()),
+            ..request.clone()
+        }))
     }
 }
 
