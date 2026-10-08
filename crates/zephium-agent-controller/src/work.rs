@@ -5417,6 +5417,9 @@ pub enum AgentWorkFailure {
     Screenshot(SemanticScreenshotNativeFailure),
     /// Renderer or navigation authority changed; stale refs are revoked.
     ContextLost,
+    /// The public page's first load was redirected before it was ready.
+    /// The gate refused it; the destination stays with the read's owner.
+    Redirected,
     /// Provider or action authority returned a closed refusal.
     Browser(AgentBrowserProviderError),
     /// A progress/receipt/metric join was refused.

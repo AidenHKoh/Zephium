@@ -109,6 +109,7 @@ impl RetainedWorkPorts {
 pub struct PreparedRetainedWork {
     construction_attempt: zephium_agentic::WorkBrowserConstructionAttempt,
     anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
+    redirect: Option<zephium_agentic::WorkBrowserRedirect>,
     page: Option<RetainedPageAdmission>,
     work: Option<WorkId>,
     engine: crate::SharedEngine,
@@ -158,6 +159,19 @@ impl PreparedRetainedWork {
             return Err(AgentWorkFailure::Contract);
         }
         self.anonymous_session = Some(session);
+        Ok(self)
+    }
+
+    /// Keeps where a public first load was redirected; the native gate still
+    /// refuses the redirect, and the page fails as `Redirected`.
+    pub fn with_redirect(
+        mut self,
+        redirect: zephium_agentic::WorkBrowserRedirect,
+    ) -> Result<Self, AgentWorkFailure> {
+        if !self.spec.isolated_public || !self.spec.document_policy.is_public() {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.redirect = Some(redirect);
         Ok(self)
     }
 
@@ -217,6 +231,7 @@ impl PreparedRetainedWork {
         Ok(Self {
             construction_attempt: Default::default(),
             anonymous_session: None,
+            redirect: None,
             page: None,
             work: None,
             engine,
@@ -874,6 +889,7 @@ impl ProductWork {
             prepared.spec.document_policy,
             prepared.spec.isolated_public,
             prepared.anonymous_session,
+            prepared.redirect.clone(),
             Some((prepared.construction_attempt, prepared.spec.deadline)),
             now,
         ) {
@@ -888,6 +904,11 @@ impl ProductWork {
                     prepared.journal,
                     prepared.audit,
                 ));
+                if let (Some(redirect), Some(coordinator)) =
+                    (prepared.redirect, self.coordinator.as_mut())
+                {
+                    coordinator.set_redirect(redirect);
+                }
                 if let Some(group) = self.runtime_group.take() {
                     if let Some(coordinator) = self.coordinator.as_mut() {
                         coordinator.set_runtime_group(group);

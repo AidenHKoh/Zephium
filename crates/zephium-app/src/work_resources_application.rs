@@ -354,6 +354,8 @@ pub(super) struct RetainedWork {
     destroyed: bool,
     unexpected_native: Option<ContextNativeEvent>,
     native_shutdown: Option<RetainedNativeShutdown>,
+    /// Where the native gate saw a public first load redirected.
+    redirect: Option<zephium_agentic::WorkBrowserRedirect>,
 }
 impl RetainedWork {
     /// The newest canvas frame of this resource's page, if the engine hosts one.
@@ -443,6 +445,7 @@ impl RetainedWork {
             destroyed: false,
             unexpected_native: None,
             native_shutdown: None,
+            redirect: None,
         }
     }
 
@@ -617,6 +620,18 @@ impl RetainedWork {
         {
             group.fail();
         }
+        // A lost document whose first load the gate refused as a redirect
+        // was redirected; its owner reads the destination from the slot.
+        let failure = if failure == AgentWorkFailure::ContextLost
+            && self
+                .redirect
+                .as_ref()
+                .is_some_and(|redirect| redirect.destination().is_some())
+        {
+            AgentWorkFailure::Redirected
+        } else {
+            failure
+        };
         self.failure.get_or_insert(failure);
         self.phase = AdmissionPhase::Uncertain;
         self.stopping = true;
@@ -786,6 +801,9 @@ impl RetainedWork {
         Ok(())
     }
 
+    pub(super) fn set_redirect(&mut self, redirect: zephium_agentic::WorkBrowserRedirect) {
+        self.redirect = Some(redirect);
+    }
     pub(super) fn set_runtime_group(&mut self, group: RetainedWorkGroup) {
         self.runtime_group = Some(group);
         self.grouped = true;
