@@ -221,6 +221,23 @@ session closed; a private run (`WorkAgentGrantV1.private`) uses the run's own
 storage everywhere. A plain `read` uses the session only on a site the run
 already works on as the person.
 
+A public `read` cites the exact address it read, so a redirect never moves
+it. When the page's server (a 3xx) or its own script before the page is ready
+sends the first load elsewhere, the native gate refuses that load like any
+other and keeps the destination only if a new public read could be admitted
+there (safe public HTTPS, the read's own navigation checks). The read fails
+as `Redirected` (not a lost page), its step says `The page redirects to …`,
+and nothing on it ran. On the same site (its registrable domain, as
+`same_work_site` defines it) the driver opens one fresh read of the
+destination as its own step, citing that address, within what the first read
+left of its share; the lead's hands admit it exactly as a `read` the lead
+asked for (the same address checks and, in a private run, the person's
+answer). A chain follows at most two redirects and never an address it read;
+a cross-site redirect, or one past the bound, goes back to the lead as
+`Read … if it is what you need`, with the address admitted for a later
+`read`. A lead `read` of a plain `http://` address reads its `https://`
+address: Work never loads plain HTTP.
+
 The page agent reads, navigates, searches, filters and fills drafts. A step
 Rust reads as committing (send, post, pay, book, delete, share, save, submit a
 non-search form, Enter in a composer, an edit that saves as it types), or one
@@ -276,6 +293,13 @@ headed links in its main content. The evidence names the `browser` provider
 with the engine as its model, carries those results with their snippets and
 no answer, and costs no tokens; the lead sees a ranked list with source keys
 and reads the pages it picks.
+
+Before that first look the results page settles: its document policy
+(`PublicResultsPage`) follows the engine's own same-site redirects and script
+reloads (Google answers a fresh client with a page that reloads `/search`) in
+place, up to six loads, each preparing the page's semantic runtime for the
+new document; a cross-site load is refused. A results page is read by Rust
+and never cited by its own address, so its settled document stands for it.
 
 A page with no results says why: a challenge or unusual-traffic page, a
 consent page, the engine's own "no results", or a page it cannot read. Rust

@@ -397,6 +397,30 @@ reloads, unsolicited destinations and observed post-ready location changes
 cannot authorize a replacement document. The empty-source construction path is
 retained but cannot issue an observation.
 
+A public document's first load is the one exception to "refused means lost".
+When a public policy's gate refuses a main-frame GET while its initial load
+is loading, committed or finalizing (a server redirect, or the page's script
+replacing it before it is ready), and the destination is a safe public HTTPS
+address a new public read could be admitted to, the gate keeps it and ends
+the document at once. The view reports that through its own redirect callback,
+never the invariant callback: the native guard records the destination in the
+construction's `WorkBrowserRedirect` slot (bound only to anonymous public
+construction) and fails, the content-free cause is `Redirected`, and the
+application names the read's failure `AgentWorkFailure::Redirected`. The
+destination never enters diagnostics. Any other refusal (after ready, an
+unsafe destination, the requested address itself, `Exact` and site-session
+policies) keeps today's failure. Windows applies the same gate to WebView2's
+navigation-starting requests for the main frame.
+
+`PublicResultsPage` is a browser search's results page. Like a site session,
+its gate follows same-site GET loads (registrable domain, safe public HTTPS)
+until the first document is ready, at most six, and the settled document may
+sit on another origin of the site; a cross-site load is refused. Once ready it
+is held like `PublicSameDocumentQuery`. A load the gate follows after a commit
+prepares the semantic runtime for the new document, as an action's own load
+does, so the next commit is not a replaced-document invariant; site sessions
+share this.
+
 `construct_document_with_policy` additionally offers the explicit trusted
 `InitialQueryFinalization` startup policy. `Exact` remains the default (and the
 synthetic retained fixture policy). This opt-in accepts only an initially
