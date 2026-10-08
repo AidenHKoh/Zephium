@@ -241,6 +241,7 @@ impl WorkBrowserConstructionAttempt {
 #[derive(Debug, Default)]
 struct ConstructionSettings {
     anonymous_session: Option<crate::WorkBrowserSession>,
+    redirect: Option<crate::WorkBrowserRedirect>,
     window: Option<(WorkBrowserConstructionAttempt, std::time::Instant)>,
 }
 
@@ -309,6 +310,31 @@ impl WorkBrowserResourceRequest {
         self.construction
             .as_ref()
             .and_then(|settings| settings.anonymous_session.as_ref())
+    }
+
+    /// Where the native gate keeps a public document's refused redirect,
+    /// for exact public construction only.
+    pub fn with_redirect(
+        mut self,
+        redirect: crate::WorkBrowserRedirect,
+    ) -> Result<Self, Box<Self>> {
+        if self.operation() != WorkBrowserResourceOperation::Construct
+            || !self.isolated_public
+            || !self.document_policy.is_public()
+            || self.redirect().is_some()
+        {
+            return Err(Box::new(self));
+        }
+        self.construction
+            .get_or_insert_with(Default::default)
+            .redirect = Some(redirect);
+        Ok(self)
+    }
+    /// The refused-redirect slot of a public construction, if one was bound.
+    pub fn redirect(&self) -> Option<&crate::WorkBrowserRedirect> {
+        self.construction
+            .as_ref()
+            .and_then(|settings| settings.redirect.as_ref())
     }
 
     /// Attaches one stable resource-health observer to original construction.
