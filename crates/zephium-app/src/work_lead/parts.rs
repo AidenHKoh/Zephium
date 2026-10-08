@@ -1204,6 +1204,12 @@ pub(crate) fn step_request(
         }
         "read" => {
             let url = text("url").ok_or("url is required")?;
+            // Work never loads plain http: the page is read, and cited, at
+            // its https address, which is where its server would send it.
+            let url = match url.strip_prefix("http://") {
+                Some(rest) => format!("https://{rest}"),
+                None => url,
+            };
             WorkStepKindV1::Read {
                 url,
                 collection: hands::collection(args.get("records"))?,

@@ -278,7 +278,9 @@ static PAGE_OBJECTIVE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 pub(super) fn run_agent_page(url: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
     let url = url
         .to_str()
-        .filter(|url| url.starts_with("https://") && url.len() <= 512)
+        .filter(|url| {
+            (url.starts_with("https://") || url.starts_with("http://")) && url.len() <= 512
+        })
         .ok_or(super::ProbeFailure::Authority)?;
     let _ = PAGE_URL.set(url.to_owned());
     let _ = PAGE_OBJECTIVE.set(format!("Read {url} in one browser read and report the places to stay it shows with their displayed prices, as cited findings from that page. Do not search, follow links, book, sign in or interact with verification controls. If the page shows no places to stay, report that honestly."));
