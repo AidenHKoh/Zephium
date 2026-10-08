@@ -8,13 +8,19 @@ use serde_json::json;
 use zephium_agentic::lead::{keys, models, LeadClient, LeadTarget};
 use zephium_core::work::model::*;
 
-const PROVIDERS: [WorkModelProvider; 5] = [
+const PROVIDERS: [WorkModelProvider; 9] = [
     WorkModelProvider::OpenAi,
     WorkModelProvider::Anthropic,
     WorkModelProvider::Google,
     WorkModelProvider::DeepSeek,
     WorkModelProvider::OpenRouter,
+    WorkModelProvider::XAi,
+    WorkModelProvider::Mistral,
+    WorkModelProvider::Groq,
+    WorkModelProvider::Cerebras,
 ];
+/// The roles whose catalog defaults each provider is tried with.
+const ROLES: [WorkModelRole; 2] = [WorkModelRole::Lead, WorkModelRole::Light];
 
 fn say(line: std::fmt::Arguments<'_>) {
     let _ = writeln!(std::io::stdout(), "{line}");
@@ -23,11 +29,11 @@ fn say(line: std::fmt::Arguments<'_>) {
 /// The provider's lead default; OpenRouter's cheapest listed tool model.
 async fn model_for(
     provider: WorkModelProvider,
+    role: WorkModelRole,
     target: &LeadTarget,
 ) -> Result<(String, Option<WorkModelPrice>), WorkModelError> {
     if provider != WorkModelProvider::OpenRouter {
-        let model = models::family_default(provider, WorkModelRole::Lead)
-            .ok_or(WorkModelError::BadRequest)?;
+        let model = models::family_default(provider, role).ok_or(WorkModelError::BadRequest)?;
         return Ok((model.to_owned(), models::builtin_price(provider, model)));
     }
     let secret = keys::load(provider).map_err(|_| WorkModelError::MissingKey)?;
@@ -40,9 +46,13 @@ async fn model_for(
         .ok_or(WorkModelError::Protocol)
 }
 
-async fn round_trip(provider: WorkModelProvider, search: bool) -> Result<(), WorkModelError> {
+async fn round_trip(
+    provider: WorkModelProvider,
+    role: WorkModelRole,
+    search: bool,
+) -> Result<(), WorkModelError> {
     let target = LeadTarget::direct(provider)?;
-    let (model, price) = model_for(provider, &target).await?;
+    let (model, price) = model_for(provider, role, &target).await?;
     let model = model.as_str();
     let client = LeadClient::new(
         target.clone(),
@@ -73,7 +83,13 @@ async fn round_trip(provider: WorkModelProvider, search: bool) -> Result<(), Wor
         parallel_tools: true,
         tool_choice: WorkModelToolChoice::Auto,
         volatile_tail: 0,
-        cache_key: None,
+        cache_key: Some(work_model_cache_key(
+            &[WorkModelSystemBlock {
+                text: "lead-smoke".into(),
+                cache: true,
+            }],
+            &[],
+        )),
     };
     let searches = Arc::new(Mutex::new(0_usize));
     let seen = searches.clone();
@@ -99,7 +115,7 @@ async fn round_trip(provider: WorkModelProvider, search: bool) -> Result<(), Wor
         .filter(|part| matches!(part, WorkModelPart::Replay(_)))
         .count();
     say(format_args!(
-        "lead-smoke: provider={provider:?} model={model} turn=1 stop={:?} tool_calls={} replays={replays} input={} cached={} output={} cost_micros={:?}",
+        "lead-smoke: provider={provider:?} role={role:?} model={model} turn=1 stop={:?} tool_calls={} replays={replays} input={} cached={} output={} cost_micros={:?}",
         first.stop,
         calls.len(),
         first.usage.input_tokens,
@@ -146,7 +162,7 @@ async fn round_trip(provider: WorkModelProvider, search: bool) -> Result<(), Wor
         })
         .sum();
     say(format_args!(
-        "lead-smoke: provider={provider:?} model={model} turn=2 stop={:?} text_bytes={text} search_hits={} input={} cached={} output={} cost_micros={:?}",
+        "lead-smoke: provider={provider:?} role={role:?} model={model} turn=2 stop={:?} text_bytes={text} search_hits={} input={} cached={} output={} cost_micros={:?}",
         second.stop,
         searches.lock().map(|count| *count).unwrap_or(0),
         second.usage.input_tokens,
@@ -175,13 +191,18 @@ pub(super) fn run() -> Result<(), super::ProbeFailure> {
         }
         let search = matches!(
             provider,
-            WorkModelProvider::OpenAi | WorkModelProvider::Anthropic | WorkModelProvider::Google
+            WorkModelProvider::OpenAi
+                | WorkModelProvider::Anthropic
+                | WorkModelProvider::Google
+                | WorkModelProvider::XAi
         );
-        if let Err(error) = runtime.block_on(round_trip(provider, search)) {
-            failed = true;
-            say(format_args!(
-                "lead-smoke: provider={provider:?} error={error:?}"
-            ));
+        for role in ROLES {
+            if let Err(error) = runtime.block_on(round_trip(provider, role, search)) {
+                failed = true;
+                say(format_args!(
+                    "lead-smoke: provider={provider:?} role={role:?} error={error:?}"
+                ));
+            }
         }
     }
     if failed {
