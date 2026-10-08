@@ -136,6 +136,7 @@ enum SourceMaterialRepair {
 }
 
 /// Names the downloaded list compiling right now, inside the source cache.
+#[cfg(feature = "official-https")]
 const COMPILE_MARKER: &str = "compiling";
 
 fn hex_digest(digest: &[u8; 32]) -> String {

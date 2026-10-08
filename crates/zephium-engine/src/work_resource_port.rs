@@ -573,7 +573,10 @@ impl WorkResourceGuard {
                     )
             })
     }
-    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    #[cfg(all(
+        target_os = "windows",
+        feature = "native-agentic-work-lifetime-diagnostic"
+    ))]
     pub(crate) fn revocation_drain_facts(
         &self,
         lease: &WorkBrowserExecutionLease,
