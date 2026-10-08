@@ -908,6 +908,16 @@ pub(super) async fn lead_workflow(
         "lead-run: models lead={} page={} light={}",
         lead.entry.id, page.entry.id, light.entry.id
     ));
+    // The page agent runs on the chosen page model, as in the app; a scripted
+    // lead still browses with the real page and light models.
+    let chosen_page =
+        zephium_agentic::AgentProviderModelClient::try_new(&page.entry, page.client.clone())
+            .or_else(|_| {
+                zephium_agentic::AgentProviderModelClient::try_new(&lead.entry, lead.client.clone())
+            })
+            .map_err(|_| "page_model")?;
+    let chosen_light =
+        zephium_agentic::AgentProviderModelClient::try_new(&light.entry, light.client.clone()).ok();
     let models = match scenario.site {
         Some(start) => {
             let scripted = LeadModel {
@@ -1076,6 +1086,8 @@ pub(super) async fn lead_workflow(
                 |probe, request| {
                     let key = keys.lock().ok().and_then(|mut keys| keys.pop());
                     let callback = &callback;
+                    let chosen_page = chosen_page.clone();
+                    let chosen_light = chosen_light.clone();
                     async move {
                         let key = match key {
                             Some(key) => key,
@@ -1086,13 +1098,12 @@ pub(super) async fn lead_workflow(
                             .map_err(|_| WorkError::Unavailable)?
                             .map_err(|_| WorkError::Unavailable)?,
                         };
+                        let mut settings = super::work_durable::browser_settings(binding, key);
+                        settings.access =
+                            zephium_agent_controller::AgentBrowserModelAccess::Chosen(chosen_page);
+                        settings.decision_model = chosen_light;
                         composition
-                            .run_agent_step(
-                                callback,
-                                &probe,
-                                request,
-                                super::work_durable::browser_settings(binding, key),
-                            )
+                            .run_agent_step(callback, &probe, request, settings)
                             .await
                     }
                 },
