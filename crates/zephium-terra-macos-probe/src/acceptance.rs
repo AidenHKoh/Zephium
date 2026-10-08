@@ -956,7 +956,7 @@ pub(super) async fn lead_workflow(
     let work = created.work;
     let transport = AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
         .map_err(|_| "transport")?;
-    let search = OpenAiPublicSearch::try_new(
+    let fallback = OpenAiPublicSearch::try_new(
         transport,
         keys.pop().ok_or("search_key")?,
         OpenAiPublicSearchConfig::try_new(
@@ -969,6 +969,24 @@ pub(super) async fn lead_workflow(
         .map_err(|_| "search_config")?,
     )
     .map_err(|_| "search_provider")?;
+    // As the app searches: the engine's results page first, the provider's
+    // search behind it. ZEPHIUM_PROBE_SEARCH_ENGINE picks the engine.
+    let engine = std::env::var("ZEPHIUM_PROBE_SEARCH_ENGINE")
+        .ok()
+        .and_then(|id| zephium_core::search::SearchEngine::from_id(&id))
+        .unwrap_or_default();
+    say(format_args!("lead-run: search engine={}", engine.id()));
+    let search = zephium_agentic::BrowserSearch::try_new(engine, "")
+        .and_then(|browser| {
+            browser.with_fallback(
+                Box::new(fallback),
+                WorkSearchFallbackV1 {
+                    provider: WorkSearchProvider::OpenAi,
+                    model: PUBLIC_SEARCH_MODEL.into(),
+                },
+            )
+        })
+        .map_err(|_| "search_provider")?;
     if scenario.name == "day" {
         seed_tasks(handle, profile).await?;
     }
