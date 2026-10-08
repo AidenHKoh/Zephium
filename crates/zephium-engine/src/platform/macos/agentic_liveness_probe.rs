@@ -56,6 +56,8 @@ pub enum LivenessSite {
     GovernmentCanonical,
     Cloudflare,
     AnimationFixture,
+    /// A browser search's results page, held by the results-page policy.
+    GoogleResults,
 }
 impl LivenessSite {
     fn url(self) -> &'static str {
@@ -64,6 +66,7 @@ impl LivenessSite {
             Self::GovernmentCanonical => "https://travel.state.gov/en.html",
             Self::Cloudflare => "https://www.cloudflare.com/",
             Self::AnimationFixture => "about:blank",
+            Self::GoogleResults => "https://www.google.com/search?q=rust+async+runtime&hl=en",
         }
     }
 }
@@ -259,7 +262,14 @@ fn run(
             zephium_core::ids::ProfileId::generate(),
             zephium_agentic::ContextProfileStorageClass::Ephemeral,
             Some(&store),
-            AgentOwnedViewCallbacks::new(|_| {}, || {}, || {}, || {}, || {}),
+            AgentOwnedViewCallbacks::new(
+                |_| {},
+                || {},
+                || {},
+                || eprintln!("liveness_probe invariant_failure=true"),
+                || {},
+            )
+            .with_redirect(|_| eprintln!("liveness_probe redirect_refused=true")),
         )
         .map_err(|_| "owned_construction")?;
         let navigation = owned.work_navigation().ok_or("owned_gate")?.clone();
@@ -489,6 +499,8 @@ fn arm(
         zephium_agentic::ContextNavigationTarget::parse(target).map_err(|_| "target")?,
         if site == LivenessSite::AnimationFixture {
             zephium_agentic::WorkBrowserDocumentPolicy::Exact
+        } else if site == LivenessSite::GoogleResults {
+            zephium_agentic::WorkBrowserDocumentPolicy::PublicResultsPage
         } else {
             zephium_agentic::WorkBrowserDocumentPolicy::PublicSameDocumentQuery
         },

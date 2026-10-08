@@ -42,6 +42,7 @@ fn main() -> std::process::ExitCode {
         Some("government-canonical") => LivenessSite::GovernmentCanonical,
         Some("cloudflare") => LivenessSite::Cloudflare,
         Some("animation-fixture") => LivenessSite::AnimationFixture,
+        Some("google-results") => LivenessSite::GoogleResults,
         _ => return std::process::ExitCode::from(2),
     };
     let stage = match args.get(1).map(String::as_str) {
