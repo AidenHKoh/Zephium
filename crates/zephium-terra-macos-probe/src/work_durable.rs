@@ -837,6 +837,43 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             execution.provider_evidence.len(),
             execution.attempts.first().and_then(|attempt| attempt.usage),
         );
+        if mode == Mode::AgentPage {
+            // Closed relations only: whether the requested page was read as
+            // asked or at where it redirected, and which read the records cite.
+            let reads: Vec<(&str, WorkStepStatus, bool)> = execution
+                .steps
+                .iter()
+                .filter_map(|step| match &step.kind {
+                    WorkStepKindV1::Read { url, .. } => {
+                        Some((url.as_str(), step.status, !step.artifacts.is_empty()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let requested = PAGE_URL
+                .get()
+                .map(|url| url.replacen("http://", "https://", 1))
+                .unwrap_or_default();
+            let cited: Vec<&str> = reads
+                .iter()
+                .filter(|(_, _, records)| *records)
+                .map(|(url, _, _)| *url)
+                .collect();
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                "agent-work: page_reads={} redirected_reads={} cited_reads={} cited_requested={} cited_last_read={} content=redacted",
+                reads.len(),
+                reads
+                    .iter()
+                    .filter(|(_, status, _)| *status == WorkStepStatus::Failed)
+                    .count(),
+                cited.len(),
+                cited.iter().any(|url| *url == requested),
+                reads.last().is_some_and(|(url, status, _)| {
+                    *status == WorkStepStatus::Succeeded && cited.contains(url)
+                }),
+            );
+        }
     }
     if state.executions[0].status != expected_status || state.executions[0].artifacts.is_empty() {
         return Err(Error::Runtime);
