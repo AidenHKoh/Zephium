@@ -5,6 +5,7 @@
   import * as m from "$shared/i18n/messages";
   import { commands, type WorkLocalServerV1 } from "$shared/ipc/bindings";
   import Icon, { ZephiumMark } from "$shared/ui/Icon";
+  import ZephiumTile from "$shared/ui/ZephiumTile";
   import type { Mind } from "../../lib/minds";
 
   let {
@@ -90,13 +91,9 @@
         onkeydown={keydown}
       />
       <span class="top">
-        <span class="tile"
-          ><Icon
-            icon={option.icon}
-            size={18}
-            strokeWidth={option.id === "zephium" ? 1.5 : 1.7}
-          /></span
-        >
+        {#if option.id === "zephium"}<ZephiumTile size={36} />{:else}<span class="tile"
+            ><Icon icon={option.icon} size={18} /></span
+          >{/if}
         {#if option.found}<span class="found">{option.found}</span>{/if}
       </span>
       <span class="title">{option.title}</span>

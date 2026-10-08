@@ -2,7 +2,7 @@
   import { accountSession as session } from "$domain/account";
   import { commands } from "$shared/ipc/bindings";
   import * as m from "$shared/i18n/messages";
-  import Icon, { ZephiumMark } from "$shared/ui/Icon";
+  import ZephiumTile from "$shared/ui/ZephiumTile";
   import Button from "$shared/ui/Button";
   import Field from "$shared/ui/Field";
   import {
@@ -88,9 +88,7 @@
 </script>
 
 <div class="sign-in">
-  <div class="mark" aria-hidden="true">
-    <Icon icon={ZephiumMark} size={26} strokeWidth={1.5} />
-  </div>
+  <div class="mark"><ZephiumTile size={52} /></div>
   {#if !pendingEmail}
     <h2>{m.account_intro_title()}</h2>
     <p class="body">{m.account_intro_body()}</p>
@@ -196,14 +194,9 @@
   }
 
   .mark {
-    display: grid;
-    inline-size: 52px;
-    block-size: 52px;
+    display: flex;
     margin-block-end: 18px;
-    border-radius: var(--radius-panel);
-    background: var(--color-fill);
-    color: var(--color-text);
-    place-items: center;
+    filter: drop-shadow(0 6px 14px rgb(0 0 0 / 0.18));
   }
 
   h2 {

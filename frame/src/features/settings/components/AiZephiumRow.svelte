@@ -3,7 +3,7 @@
   import { accountSession as session, planName } from "$domain/account";
   import * as m from "$shared/i18n/messages";
   import Button from "$shared/ui/Button";
-  import Icon, { ZephiumMark } from "$shared/ui/Icon";
+  import ZephiumTile from "$shared/ui/ZephiumTile";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import * as settings from "../lib/settings-state.svelte";
 
@@ -32,9 +32,7 @@
 
 {#if offered}<SettingsGroup title={m.ai_cloud_group()}>
     <div class="zephium-row">
-      <span class="tile" aria-hidden="true"
-        ><Icon icon={ZephiumMark} size={17} strokeWidth={1.5} /></span
-      >
+      <ZephiumTile size={32} />
       <div class="copy">
         <h3>{m.ai_cloud_title()}</h3>
         <p>{detail}</p>
@@ -57,17 +55,6 @@
     box-sizing: border-box;
     min-height: var(--row-page);
     padding: 12px 18px 12px 14px;
-  }
-
-  .tile {
-    display: grid;
-    flex: none;
-    inline-size: 32px;
-    block-size: 32px;
-    border-radius: var(--radius-control);
-    background: var(--color-fill);
-    color: var(--color-text);
-    place-items: center;
   }
 
   .copy {
