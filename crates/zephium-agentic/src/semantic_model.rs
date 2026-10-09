@@ -37,7 +37,7 @@ pub const INITIAL_SEMANTIC_MODEL_TOKEN_TARGET: u32 = 2_000;
 /// objective while allowing a bounded 16 KiB local preflight for complete
 /// native-select option sets; the complete immutable request is counted by the
 /// authenticated provider endpoint before generation begins.
-pub const INITIAL_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING: u32 = 16 * 1_024;
+pub const INITIAL_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING: u32 = 32 * 1_024;
 /// Normal action-diff token target from the product qualification contract.
 pub const ACTION_SEMANTIC_DIFF_TOKEN_TARGET: u32 = 200;
 /// Conservative byte ceiling for an action diff before provider-exact counting.
@@ -1787,8 +1787,8 @@ mod tests {
     #[test]
     fn provider_exact_preflight_keeps_target_and_conservative_ceiling_distinct() {
         let budget = SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE;
-        assert_eq!(budget.max_bytes(), 16 * 1_024);
-        assert_eq!(budget.max_tokens(), 16 * 1_024);
+        assert_eq!(budget.max_bytes(), 32 * 1_024);
+        assert_eq!(budget.max_tokens(), 32 * 1_024);
         assert_eq!(
             budget.token_requirement(),
             SemanticTokenCountRequirement::ConservativeAllowed

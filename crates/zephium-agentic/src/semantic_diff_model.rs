@@ -1052,7 +1052,7 @@ mod tests {
         use crate::*;
         let context = context();
         let mut nodes = vec![json!({"k":9001,"r":"landmark","lm":"main"})];
-        for index in 0..72 {
+        for index in 0..140 {
             nodes.push(
                 json!({"k":9002+index,"p":0,"r":"link","n":format!("Result {index}"),
                 "u":format!("https://public.example.test/{index}/{}", "a".repeat(170))}),
@@ -1064,9 +1064,9 @@ mod tests {
             11,
             21,
             Value::Array(nodes),
-            SemanticObservationBudget::INITIAL_FILTERED,
+            SemanticObservationBudget::WHOLE_PAGE,
         );
-        assert!(raw.total_text_bytes() <= 16 * 1024);
+        assert!(raw.total_text_bytes() <= 32 * 1024);
         let budget = SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE;
         assert!(matches!(
             encode_semantic_observation(&raw, budget),
@@ -1096,7 +1096,7 @@ mod tests {
             .unwrap()
             .admit_conservative_utf8(&revision())
             .unwrap();
-        assert!(payload.as_str().len() <= 16 * 1024);
+        assert!(payload.as_str().len() <= 32 * 1024);
         assert!(payload
             .as_str()
             .contains("complete=truncated_model_projection"));

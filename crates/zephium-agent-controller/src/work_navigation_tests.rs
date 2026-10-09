@@ -784,9 +784,9 @@ impl NavigationFault {
                 assert!(observation.contains("r=heading"));
                 assert!(observation.contains("Arrival certificate"));
                 if case == 4 {
-                    assert!(observation.contains("truncated_model_projection"));
-                    assert!(observation.len() <= 16 * 1024);
-                    assert!(!observation.contains("public.example.test/71/"));
+                    // A whole filtered capture now fits the model's look.
+                    assert!(observation.len() <= 32 * 1024);
+                    assert!(observation.contains("public.example.test/71/"));
                 }
                 assert_eq!(
                     std::str::from_utf8(bytes).unwrap().matches("ZSEM3").count(),
