@@ -139,8 +139,7 @@ fn unrendered(observation: &SemanticObservation) -> bool {
         && nodes().all(|node| node.role() != SemanticRole::FrameBoundary)
         && nodes()
             .map(|node| {
-                node.text().map_or(0, |text| text.len())
-                    + node.name().map_or(0, |name| name.len())
+                node.text().map_or(0, |text| text.len()) + node.name().map_or(0, |name| name.len())
             })
             .sum::<usize>()
             < 64
@@ -5299,8 +5298,7 @@ fn looks_like_human_challenge(observation: &SemanticObservation) -> bool {
         && all().any(|node| node.role() == SemanticRole::FrameBoundary)
         && all()
             .map(|node| {
-                node.text().map_or(0, |text| text.len())
-                    + node.name().map_or(0, |name| name.len())
+                node.text().map_or(0, |text| text.len()) + node.name().map_or(0, |name| name.len())
             })
             .sum::<usize>()
             < 64
