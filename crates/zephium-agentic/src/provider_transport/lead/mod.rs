@@ -13,6 +13,7 @@ mod listing;
 pub mod models;
 mod openai;
 mod sse;
+mod transcribe;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -27,9 +28,10 @@ use zephium_core::work::model::*;
 use zeroize::Zeroizing;
 
 pub use listing::{
-    check_key, detect_local_servers, fetch_cloud_catalog, list_models, LeadKeyCheck, LocalServer,
-    LocalServerKind,
+    check_key, detect_local_servers, fetch_cloud_catalog, list_models, CloudCatalog, LeadKeyCheck,
+    LocalServer, LocalServerKind,
 };
+pub use transcribe::{transcribe, Transcript, TranscriptionTarget};
 
 const OPENAI_BASE: &str = "https://api.openai.com/v1";
 const ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1";
