@@ -139,7 +139,7 @@ const SAVE_WORDS: [&str; 16] = [
     "wyloguj",
 ];
 /// Controls that close or step back and so commit nothing.
-const DISMISS_WORDS: [&str; 8] = [
+const DISMISS_WORDS: [&str; 13] = [
     "close",
     "dismiss",
     "cancel",
@@ -148,6 +148,11 @@ const DISMISS_WORDS: [&str; 8] = [
     "later",
     "skip",
     "no thanks",
+    "zamknij",
+    "nie teraz",
+    "schließen",
+    "fermer",
+    "cerrar",
 ];
 const SIGN_IN_PHRASES: [&str; 8] = [
     "sign in",
@@ -263,8 +268,29 @@ fn queries(node: &SemanticNode) -> bool {
     })
 }
 
+/// Names a site gives its search field when it marks it as no search box
+/// (x-kom's "Czego szukasz?").
+const SEARCH_NAMES: [&str; 14] = [
+    "search",
+    "what are you looking for",
+    "szukaj",
+    "wyszukaj",
+    "czego szukasz",
+    "suche",
+    "suchen",
+    "wonach suchst du",
+    "rechercher",
+    "recherche",
+    "buscar",
+    "cerca",
+    "zoeken",
+    "hledat",
+];
+
 fn in_search(node: &SemanticNode, snapshot: &SemanticSnapshot) -> bool {
     node.role() == SemanticRole::Searchbox
+        || (matches!(node.role(), SemanticRole::Textbox | SemanticRole::Combobox)
+            && names_any(&label(node), &SEARCH_NAMES))
         || node.form().is_some_and(|form| form.search())
         || ancestors(node, snapshot).any(|(index, ancestor)| {
             ancestor.landmark_kind() == Some(SemanticLandmarkKind::Search)
@@ -429,6 +455,18 @@ pub(crate) fn classify(
             }
         }
         SemanticActionKind::Press => match key {
+            // Enter on a button, link or menu item activates it like a click.
+            Some(SemanticPressKey::Enter)
+                if matches!(
+                    node.role(),
+                    SemanticRole::Button
+                        | SemanticRole::Link
+                        | SemanticRole::MenuItem
+                        | SemanticRole::Tab
+                ) =>
+            {
+                classify(SemanticActionKind::Click, None, node, snapshot)
+            }
             Some(SemanticPressKey::Enter) => {
                 if in_search(node, snapshot)
                     || queries(node)
@@ -1765,6 +1803,32 @@ mod tests {
             effect(&forms, 6, SemanticActionKind::Click),
             SiteEffect::Commit(Consequence::Save)
         );
+    }
+
+    #[test]
+    fn a_field_named_for_search_searches_and_enter_on_a_control_is_its_click() {
+        let shop = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"landmark","lm":"banner"}),
+            json!({"k":3,"p":1,"r":"textbox","n":"Czego szukasz?","o":10}),
+            json!({"k":4,"p":1,"r":"button","n":"Zamknij powiadomienie","o":9,"ak":1}),
+            json!({"k":5,"p":1,"r":"link","n":"Laptopy","o":9,"u":"https://example.test/laptopy"}),
+            json!({"k":6,"p":1,"r":"textbox","n":"Message","o":10}),
+            json!({"k":7,"p":1,"r":"button","n":"Delete account","o":9,"ak":1}),
+        ]);
+        let enter = |key: u64| {
+            effect_key(
+                &shop,
+                key,
+                SemanticActionKind::Press,
+                Some(SemanticPressKey::Enter),
+            )
+        };
+        assert_eq!(enter(3), SiteEffect::Read);
+        assert_eq!(enter(4), SiteEffect::Read);
+        assert_eq!(enter(5), SiteEffect::Read);
+        assert_eq!(enter(7), SiteEffect::Commit(Consequence::Destructive));
+        assert!(matches!(enter(6), SiteEffect::Commit(_)));
     }
 
     #[test]

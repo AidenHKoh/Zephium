@@ -126,13 +126,6 @@ pub(crate) fn dismissable(snapshot: &SemanticSnapshot) -> Vec<(std::ops::Range<u
     found
 }
 
-/// Whether node `index` sits in a dialog the page lets the person close.
-pub(crate) fn in_dismissable(snapshot: &SemanticSnapshot, index: usize) -> bool {
-    dismissable(snapshot)
-        .iter()
-        .any(|(range, _)| range.contains(&index))
-}
-
 /// The close control Rust presses on a look the page agent has not acted on
 /// yet: the first overlay with one that is on screen. A cookie banner is the
 /// consent module's, which refuses rather than closes.
@@ -176,8 +169,8 @@ mod tests {
         let offer = page(nodes);
         let snapshot = &offer.frames()[0];
         assert_eq!(dismissal(&offer), Some(snapshot.nodes()[3].reference()));
-        assert!(in_dismissable(snapshot, 4));
-        assert!(!in_dismissable(snapshot, 1));
+        let offers = dismissable(snapshot);
+        assert!(offers.len() == 1 && offers[0].0.contains(&4) && !offers[0].0.contains(&1));
 
         // The same dialog as the whole page is the page itself.
         let alone = page(vec![
