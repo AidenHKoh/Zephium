@@ -289,12 +289,19 @@ pub(super) fn site_scenario(start: &str, goal: &str) -> &'static LeadScenario {
 }
 
 /// A request of the person's own, through the whole lead.
+/// The person's requests, one per line: each later line is a follow-up in
+/// the same work, as the person sends it.
 pub(super) fn request_scenario(request: &str, answer: &str) -> &'static LeadScenario {
-    let request: &'static str = Box::leak(request.to_owned().into_boxed_str());
+    let requests: Vec<&'static str> = request
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| &*Box::leak(line.to_owned().into_boxed_str()))
+        .collect();
     let answer: &'static str = Box::leak(answer.to_owned().into_boxed_str());
     Box::leak(Box::new(LeadScenario {
         name: "request",
-        requests: Box::leak(vec![request].into_boxed_slice()),
+        requests: Box::leak(requests.into_boxed_slice()),
         answer,
         folder: false,
         site: None,

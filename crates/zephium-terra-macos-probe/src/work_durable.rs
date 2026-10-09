@@ -177,7 +177,8 @@ pub(super) fn run_lead(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure
     run_mode(Mode::Lead)
 }
 
-/// One request of the person's own through the whole lead, as the app runs
+/// The person's own requests (one per line, later lines follow up in the
+/// same work) through the whole lead, as the app runs
 /// it, with the stand-in's answer to any question it asks.
 pub(super) fn run_lead_request(
     request: &std::ffi::OsStr,
@@ -186,7 +187,7 @@ pub(super) fn run_lead_request(
     let (Some(request), Some(answer)) = (request.to_str(), answer.to_str()) else {
         return Err(super::ProbeFailure::Authority);
     };
-    if request.is_empty() || request.len() > 600 || answer.len() > 600 {
+    if request.is_empty() || request.len() > 2400 || answer.len() > 600 {
         return Err(super::ProbeFailure::Authority);
     }
     let _ = LEAD_SCENARIO.set(super::acceptance::request_scenario(request, answer));
@@ -569,7 +570,12 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         | Mode::AgentExplainMechanism
         | Mode::AgentCodeReview
         | Mode::AgentConceptComparison => 720,
-        Mode::Lead => 860,
+        // Each follow-up of a scenario gets a request's own time.
+        Mode::Lead => {
+            860 * LEAD_SCENARIO
+                .get()
+                .map_or(1, |scenario| scenario.requests.len().max(1)) as u64
+        }
         Mode::Public => 160,
         _ => 240,
     });
