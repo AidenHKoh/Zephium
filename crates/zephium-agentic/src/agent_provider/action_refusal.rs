@@ -92,8 +92,19 @@ impl super::super::AgentProviderSettledToolTurn {
                 AgentProviderContinuationError::ToolKind,
             ));
         };
-        let refusal_context = if actions.actions().len() == 1 {
-            let action = &actions.actions()[0];
+        let mut actions = actions.into_actions();
+        for action in &mut actions {
+            if let Some(click) = select_as_click(
+                action,
+                observation,
+                frames,
+                continuation.transcript.action_targets(),
+            ) {
+                *action = click;
+            }
+        }
+        let refusal_context = if actions.len() == 1 {
+            let action = &actions[0];
             let target = action.intent().target();
             observation
                 .reference_frame(target)
@@ -119,7 +130,7 @@ impl super::super::AgentProviderSettledToolTurn {
             .transcript
             .action_targets()
             .and_then(|targets| {
-                actions.actions().iter().find_map(|action| {
+                actions.iter().find_map(|action| {
                     let target = action.intent().target();
                     let expected = observation.reference_frame(target).ok()?;
                     let current = frames
@@ -171,7 +182,7 @@ impl super::super::AgentProviderSettledToolTurn {
                 },
             ));
         }
-        match SemanticActionBatch::bind(id, observation, frames, actions.into_actions()) {
+        match SemanticActionBatch::bind(id, observation, frames, actions) {
             Ok(batch) => {
                 let incomplete = batch.actions().first().is_some_and(|action| {
                     observation
@@ -225,6 +236,50 @@ impl super::super::AgentProviderSettledToolTurn {
             Err(error) => Err(Error::Binding(error)),
         }
     }
+}
+
+/// Planners "select" what is no choice list: a filter checkbox, a place
+/// field's suggestion, a menu entry. A select whose target takes no select
+/// becomes a click on the option it named (the control itself when it named
+/// itself), verified as a page change; every rule after this judges that
+/// click as if the model had proposed it.
+fn select_as_click(
+    action: &crate::SemanticActionProposal,
+    observation: &SemanticObservation,
+    frames: &[SemanticFrameJoin],
+    targets: Option<&AgentProviderActionTargets>,
+) -> Option<crate::SemanticActionProposal> {
+    let crate::SemanticActionIntent::Select { target, option } = *action.intent() else {
+        return None;
+    };
+    let operations = |reference: SemanticReferenceId| {
+        let expected = observation.reference_frame(reference).ok()?;
+        let current = frames
+            .iter()
+            .find(|current| current.frame() == expected.frame())?;
+        let node = observation.resolve_node(reference, current).ok()?;
+        Some(match targets {
+            Some(targets) => targets.permitted_operations(reference),
+            None => node.operations(),
+        })
+    };
+    if operations(target)?.contains(SemanticOperationClass::Select)
+        || !operations(option)?.contains(SemanticOperationClass::Click)
+        || !matches!(
+            action.effect(),
+            crate::SemanticEffectClass::Read | crate::SemanticEffectClass::LocalWrite
+        )
+    {
+        return None;
+    }
+    crate::SemanticActionProposal::try_new(
+        crate::SemanticActionIntent::Click { target: option },
+        action.effect(),
+        crate::SemanticWaitCondition::Immediate,
+        crate::SemanticVerification::PageChanged,
+        action.settle_budget(),
+    )
+    .ok()
 }
 
 /// Move-only proof that the original settled action was never prepared or issued.
