@@ -209,9 +209,11 @@ before the page ends as too slow, instead of the run's whole deadline.
 
 A site task's looks use the whole-page budget (320 nodes, 32 KiB): a first
 look holds everything in view, then the main landmark's records below the fold
-(list items, rows, articles) in document order, then the headings below, so a
-results page reaches the planner with its records rather than its header and
-filters. A dialog the site lays over the page unasked with its own short close
+(list items, rows, articles, then its prose and tables) in document order,
+then the headings below, so a results page reaches the planner with its
+records rather than its header and filters. A page with no main landmark
+gets its below-the-fold list items, rows, articles, tables and paragraphs the
+same way. A dialog the site lays over the page unasked with its own short close
 control (a sign-in, newsletter or app offer) is closed by Rust as a read on the
 first look, like a cookie banner, and is never read as a sign-in wall. A
 control a click found covered loses click and keeps press in the next looks of
@@ -221,7 +223,15 @@ third identical refused proposal in a row gets a fresh look of the page
 instead of the same refusal again, and so does the third refused look in a
 row, a moment later. The first scroll proposed right after a verified fill of
 a field that commits nothing (a search, filter or place box) is refused unrun
-and the planner is told to run the search first. A native select offers only
+and the planner is told to run the search first; a second such scroll has Rust
+press Enter in that field as its own read and hand the planner the page it
+produced. A fourth scroll in a row is refused and the planner is pointed at
+extract or at the site's results address with the goal's filters. A
+screenshot that cannot be taken of the current look goes back as a fresh text
+look. A load a step diverted is followed only when the site session admits
+it; a section anchor loads its page, and an anchor of the open page stays a
+scroll. A navigation to an exact address an earlier hop requested and the site
+answered with another page is refused before any authority is minted. A native select offers only
 select: a click or key would open WebKit's own menu, whose modal loop holds
 the page. A locate scope the look cannot hold searches the whole look. A
 chosen page model replies within 4,096 output tokens, and a lost or runaway
