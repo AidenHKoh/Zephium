@@ -2018,7 +2018,6 @@
   "settings_work_website_data": "Work's website data",
   "settings_work_website_data_desc": "Sites Work visited remember things like solved checks and cookie choices. Your own browsing data is separate.",
   "settings_work_website_data_open": "Clear…",
-  "settings_work_website_data_title": "Clear Work's website data?",
   "settings_work_website_data_confirm": "Sites Work visited will forget cookies, solved checks and anything signed in within Work. Your own browsing data stays.",
   "settings_work_website_data_apply": "Clear data",
   "settings_work_website_data_done": "Work's website data cleared.",
