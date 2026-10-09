@@ -1285,12 +1285,20 @@ impl AgentProviderContinuation {
             return Err(AgentProviderContinuationError::Payload);
         }
         let self_with_progress = self.with_verified_action_progress(result)?;
+        let guidance = if result.verified().kind == crate::SemanticActionKind::Fill {
+            // Planners typed a query and then scrolled or looked again,
+            // never running it.
+            "The prior action was independently verified: the text is in the field. If the field searches or filters, run it now with press Enter in it (effect read, verification page_changed) or a click on its search button; do not scroll or look again first. This is the fresh post-action viewport. All prior semantic refs are retired. Use only current refs."
+        } else {
+            "The prior action was independently verified. This is the fresh post-action viewport: inspect it directly; another snapshot is only needed for missing details. All prior semantic refs are retired. Use only current refs. Truncation does not mean omitted content is absent."
+        };
         let output = serde_json::json!({
             "status": "verified",
             "update": "replace_observation",
-            "guidance": "The prior action was independently verified. This is the fresh post-action viewport: inspect it directly; another snapshot is only needed for missing details. All prior semantic refs are retired. Use only current refs. Truncation does not mean omitted content is absent.",
+            "guidance": guidance,
             "observation": payload.as_str(),
-        }).to_string();
+        })
+        .to_string();
         let (prior, _, _, correlation, transcript) = self_with_progress.into_parts();
         // Effects invalidate inspection anchors and old page replay. Keep the
         // objective and exact navigation policy binding; original run budgets
