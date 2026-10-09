@@ -1814,18 +1814,31 @@ fn admit_value<'a>(
                         _ => return Err(SemanticExtractionError::VerbatimMismatch),
                     },
                     Some(value) => {
-                        let token = cited
-                            .iter()
-                            .find(|(_, exact)| {
-                                *exact == value
-                                    || field.verbatim_value(exact) == value
-                                    || (field.money_like()
-                                        && crate::semantic_money::currency_amounts(exact)
-                                            .contains(&value.as_str()))
-                            })
-                            .map(|(token, _)| *token)
-                            .ok_or(SemanticExtractionError::VerbatimMismatch)?;
-                        (token, value)
+                        let found = cited.iter().find(|(_, exact)| {
+                            *exact == value
+                                || field.verbatim_value(exact) == value
+                                || (field.money_like()
+                                    && crate::semantic_money::currency_amounts(exact)
+                                        .contains(&value.as_str()))
+                        });
+                        match found {
+                            Some((token, _)) => (*token, value),
+                            // A price written with its label ("Price 806 zł")
+                            // publishes the one amount it names, when the
+                            // cited text shows that amount.
+                            None => field
+                                .money_like()
+                                .then(|| crate::semantic_money::single_currency_amount(&value))
+                                .flatten()
+                                .and_then(|amount| {
+                                    cited.iter().find_map(|(token, exact)| {
+                                        crate::semantic_money::currency_amounts(exact)
+                                            .contains(&amount)
+                                            .then(|| (*token, amount.to_owned()))
+                                    })
+                                })
+                                .ok_or(SemanticExtractionError::VerbatimMismatch)?,
+                        }
                     }
                 };
                 return Ok(SemanticExtractedValue::Text(admit_text(
@@ -3487,12 +3500,14 @@ mod tests {
         let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
             panic!("rows");
         };
-        // A price column copies one amount the cited text shows, never an
-        // amount it does not.
+        // A price column copies one amount the cited text shows; a price
+        // written with words around it publishes the amount it names.
         assert!(
             matches!(rows.items()[0].fields()[1].value(), SemanticExtractedValue::Text(price) if price.as_str() == "3249 PLN")
         );
-        assert_eq!(rows.items()[1].fields().len(), 2);
+        assert!(
+            matches!(rows.items()[1].fields()[1].value(), SemanticExtractedValue::Text(price) if price.as_str() == "4399 PLN")
+        );
         let urls: Vec<_> = rows
             .items()
             .iter()
