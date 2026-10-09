@@ -27,6 +27,12 @@ export function explainAccountFault(fault: AccountFaultV1, retryAfter: number | 
       return m.account_fault_vault();
     case "invalid":
       return m.account_fault_invalid();
+    case "reauth_required":
+      return m.account_fault_reauth();
+    case "email_taken":
+      return m.account_fault_email_taken();
+    case "not_found":
+      return m.account_fault_not_found();
   }
 }
 

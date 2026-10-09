@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { initials, offerKey, planName, priceLabel, shortDate, usageTone } from "../account-model";
+import {
+  credits,
+  initials,
+  offerKey,
+  planName,
+  positive,
+  priceLabel,
+  requestStanding,
+  shortDate,
+  usageTone,
+} from "../account-model";
 
 describe("account model", () => {
   it("draws initials from a name, else from the address", () => {
@@ -51,6 +61,40 @@ describe("account model", () => {
         features: [],
       }),
     ).toBe("plan:pro:yearly");
-    expect(offerKey({ kind: "top_up", id: "s", price: null, expires_days: null })).toBe("topup:s");
+    expect(
+      offerKey({
+        kind: "top_up",
+        id: "s",
+        name: null,
+        units: null,
+        price: null,
+        expires_days: null,
+      }),
+    ).toBe("topup:s");
+  });
+
+  it("shows unit amounts as credits without touching the strings it was given", () => {
+    expect(credits("2500000", 1_000_000, "en-US")).toBe("2.5");
+    expect(credits("812000", 1_000_000, "en-US")).toBe("0.81");
+    expect(credits("0", 1_000_000, "en-US")).toBe("0");
+    expect(credits("3", 1_000_000, "en-US")).toBe("<0.01");
+    expect(credits("123456789012345678901234", 1_000_000, "en-US")).toMatch(
+      /^123,456,789,012,345,680/u,
+    );
+    expect(credits("-1", 1_000_000)).toBeNull();
+    expect(credits("1.5", 1_000_000)).toBeNull();
+    expect(credits("1", 0)).toBeNull();
+    expect(credits(null, 1_000_000)).toBeNull();
+    expect(positive("0")).toBe(false);
+    expect(positive("1")).toBe(true);
+    expect(positive(null)).toBe(false);
+  });
+
+  it("treats only a settled request as charged", () => {
+    expect(requestStanding("settled")).toBe("charged");
+    expect(requestStanding("released")).toBe("free");
+    expect(requestStanding("usage_unknown")).toBe("checking");
+    expect(requestStanding("reserved")).toBe("running");
+    expect(requestStanding("running")).toBe("running");
   });
 });

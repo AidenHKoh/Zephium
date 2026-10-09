@@ -8,6 +8,7 @@
   import AccountDelete from "../account/AccountDelete.svelte";
   import AccountDevices from "../account/AccountDevices.svelte";
   import AccountPlan from "../account/AccountPlan.svelte";
+  import AccountProfile from "../account/AccountProfile.svelte";
   import AccountServer from "../account/AccountServer.svelte";
   import AccountSignIn from "../account/AccountSignIn.svelte";
   import { explainAccountFault } from "../../lib/account";
@@ -33,12 +34,25 @@
   const signOutFault = $derived(
     fault?.action === "sign_out" ? explainAccountFault(fault.fault, fault.retryAfter) : null,
   );
+  const moved = $derived(session.movedTo());
+  let exported = $state<"saved" | string | null>(null);
+
+  async function exportData() {
+    exported = null;
+    const result = await session.exportData();
+    if (result === "saved") exported = "saved";
+    else if (result !== "cancelled") exported = explainAccountFault(result, null);
+  }
 </script>
 
 {#if session.unavailable()}<p class="note" role="status">{m.account_unavailable()}</p>
 {:else if account}
+  {#if account.update_required}<p class="note" data-tone="warning" role="status">
+      {m.account_update_required()}
+    </p>{/if}
   {#if !account.signed_in}
-    {#if ended}<p class="note" role="status">{ended}</p>{/if}
+    {#if moved}<p class="note" role="status">{m.account_email_moved({ email: moved })}</p>
+    {:else if ended}<p class="note" role="status">{ended}</p>{/if}
     <AccountSignIn />
   {:else}
     <div class="identity">
@@ -51,9 +65,19 @@
     {#if account.notice}<p class="note" data-tone={account.notice.warning ? "warning" : undefined}>
         {account.notice.text}
       </p>{/if}
+    <AccountProfile />
     <AccountPlan />
     <AccountDevices />
     <SettingsGroup title={m.section_account()}>
+      <SettingsRow title={m.account_export_title()} description={m.account_export_desc()}>
+        {#if exported === "saved"}<span class="saved" role="status">{m.account_export_saved()}</span
+          >{/if}
+        <Button
+          pending={busy === "export"}
+          disabled={!!busy && busy !== "export"}
+          onclick={() => void exportData()}>{m.account_export()}</Button
+        >
+      </SettingsRow>
       <SettingsRow title={m.account_sign_out_title()} description={m.account_sign_out_desc()}>
         <Button
           pending={busy === "sign_out"}
@@ -64,6 +88,9 @@
       <AccountDelete />
     </SettingsGroup>
     {#if signOutFault}<p class="note" data-tone="error" role="alert">{signOutFault}</p>{/if}
+    {#if exported && exported !== "saved"}<p class="note" data-tone="error" role="alert">
+        {exported}
+      </p>{/if}
   {/if}
   <AccountServer />
 {/if}
@@ -125,5 +152,10 @@
 
   .note[data-tone="warning"] {
     color: var(--color-warning);
+  }
+
+  .saved {
+    color: var(--color-muted);
+    font-size: var(--text-label);
   }
 </style>

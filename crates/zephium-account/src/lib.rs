@@ -3,20 +3,22 @@
 //! sees.
 //!
 //! Everything here is native. The bearer never leaves this crate except as an
-//! `Authorization` header to the configured origin or the hosted gateway, and
-//! no server text is logged or shown.
+//! `Authorization` header to the origin it was issued by, and no server text is
+//! logged or shown. Each origin keeps its own vault entry.
 
 mod client;
 mod service;
 mod vault;
+mod version;
 pub mod wire;
 
 use reqwest::header::HeaderValue;
 use zeroize::Zeroizing;
 
-pub use client::{Client, Origin};
+pub use client::{Client, ConfigReply, Origin};
 pub use service::{AccountSettings, Service, View};
 pub use vault::{AccountVault, SystemVault, VaultFault};
+pub use version::older_than;
 
 /// The production account service.
 pub const DEFAULT_ORIGIN: &str = "https://api.zephium.app";
@@ -48,6 +50,13 @@ pub enum AccountError {
     Vault,
     /// The input was refused before or by the service.
     Invalid,
+    /// This change needs a session started in the last few minutes: sign in
+    /// again first. The current session stays valid.
+    ReauthRequired,
+    /// Another account already uses that address.
+    EmailTaken,
+    /// The service does not know that request, or it is someone else's.
+    NotFound,
 }
 
 /// The session bearer, zeroized on drop and never printed.

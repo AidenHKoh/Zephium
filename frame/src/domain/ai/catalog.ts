@@ -56,7 +56,10 @@ export function usable(models: WorkModelsV1 | null, provider: WorkModelProvider)
   if (!models) return false;
   if (provider === "cloud")
     return (
-      models.cloud.signed_in && models.entries.some((entry) => entry.model.provider === "cloud")
+      models.cloud.signed_in &&
+      models.entries.some(
+        (entry) => entry.model.provider === "cloud" && !models.cloud.locked.includes(entry.id),
+      )
     );
   if (provider === "compatible")
     return (
@@ -108,6 +111,11 @@ export function pickerGroups(
     }
   }
   return { ready, needsKey };
+}
+
+/** A hosted model the account's plan does not include: listed to explain the plan, never chosen. */
+export function locked(models: WorkModelsV1 | null, id: string): boolean {
+  return !!models?.cloud.locked.includes(id);
 }
 
 export function entryOf(models: WorkModelsV1 | null, id: string | null | undefined) {

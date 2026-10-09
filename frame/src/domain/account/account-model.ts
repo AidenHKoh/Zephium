@@ -68,3 +68,36 @@ export function usageTone(percent: number | null | undefined): "calm" | "high" |
 export function offerKey(offer: AccountOfferV1): string {
   return offer.kind === "plan" ? `plan:${offer.plan}:${offer.interval}` : `topup:${offer.id}`;
 }
+
+const UNITS = /^\d{1,30}$/u;
+
+/**
+ * Integer units as display credits, `scale` units to one credit. The units
+ * stay strings for accounting; only this display is rounded.
+ */
+export function credits(
+  units: string | null | undefined,
+  scale: number,
+  locale?: string,
+): string | null {
+  if (!units || !UNITS.test(units) || !Number.isSafeInteger(scale) || scale <= 0) return null;
+  const value = BigInt(units);
+  const whole = value / BigInt(scale);
+  const part = Number(value % BigInt(scale)) / scale;
+  const format = new Intl.NumberFormat(locale, { maximumFractionDigits: 2 });
+  if (whole === 0n && part > 0 && part < 0.01) return `<${format.format(0.01)}`;
+  return format.format(Number(whole) + part);
+}
+
+/** Whether a unit amount is above zero. */
+export function positive(units: string | null | undefined): boolean {
+  return !!units && UNITS.test(units) && BigInt(units) > 0n;
+}
+
+/** How a hosted request's accounting reads; only `settled` is a final charge. */
+export function requestStanding(state: string): "charged" | "free" | "checking" | "running" {
+  if (state === "settled") return "charged";
+  if (state === "released") return "free";
+  if (state === "usage_unknown") return "checking";
+  return "running";
+}
