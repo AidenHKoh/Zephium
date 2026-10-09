@@ -1794,7 +1794,7 @@ async function finish() {
     const choice = facets.append(new HTMLInputElement({ type: "checkbox", "aria-label": "Facet " + index }, ""));
     choice.rect = { x: 10, y: 120 + index * 40, width: 20, height: 20 };
   }
-  for (let index = 0; index < 8; index += 1) {
+  for (let index = 0; index < 240; index += 1) {
     const count = facets.append(new Element("p"));
     count.rect = { x: 40, y: 900 + index * 40, width: 200, height: 20 };
     count.append(new CharacterData("( " + (100 + index) + " )"));

@@ -2070,18 +2070,17 @@ if (!anchored && (descriptor.role === "checkbox" || descriptor.role === "radio")
 choices.length < MAX_DEFERRED_RECORDS) {
 choices.push(item.node);
 }
-if (!anchored && !admitted && visible && rect !== null && item.main === true &&
+if (!anchored && !admitted && visible && rect !== null &&
 (recordLike || descriptor.role === "list" || descriptor.role === "table" ||
-descriptor.role === "paragraph") &&
-deferred.length < MAX_DEFERRED_ANCHORS &&
-!deferred.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {
-deferred.push({ element: item.node, parent, rect });
-} else if (!anchored && !admitted && visible && rect !== null && item.main !== true &&
-(recordLike || descriptor.role === "list" || descriptor.role === "table" ||
-descriptor.role === "paragraph" || descriptor.role === "link") &&
-loose.length < MAX_DEFERRED_ANCHORS &&
-!loose.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {
-loose.push({ element: item.node, parent, rect });
+descriptor.role === "paragraph" || (item.main !== true && descriptor.role === "link"))) {
+const into = item.main === true ? deferred : loose;
+if (!into.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {
+const aside = facetPanel({ element: item.node, rect }, choices);
+if (into.filter(anchor => anchor.aside === aside).length <
+(aside ? MAX_DEFERRED_RECORDS : MAX_DEFERRED_ANCHORS)) {
+into.push({ element: item.node, parent, rect, aside });
+}
+}
 }
 if (!anchored && !admitted && visible &&
 (descriptor.role === "heading" || summaryDetails(item.node) !== null) &&
