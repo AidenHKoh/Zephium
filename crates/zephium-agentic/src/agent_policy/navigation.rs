@@ -56,7 +56,8 @@ pub enum AgentNavigationLedgerRefusal {
     AlreadyHere,
     /// The target was visited as often as the scope allows.
     Revisited,
-    /// The site already answered this exact address with another document.
+    /// This exact address already led, through the site's redirect, to the
+    /// document the page is on.
     Redirected,
 }
 
@@ -623,7 +624,8 @@ impl AgentRunPolicy {
             return Some(AgentNavigationLedgerRefusal::AlreadyHere);
         }
         // Planners asked again and again for a results address the site sent
-        // to its home page; asking again lands there again.
+        // to its home page; asking again only lands there again. Returning
+        // to such an address from elsewhere stays a navigation.
         if self
             .navigation_destinations
             .iter()
@@ -631,7 +633,8 @@ impl AgentRunPolicy {
             .take(hop)
             .any(|(requested, landed)| {
                 requested.as_ref() == Some(target)
-                    && landed.as_ref().is_some_and(|landed| landed != target)
+                    && landed.as_ref() == Some(current)
+                    && current != target
             })
         {
             return Some(AgentNavigationLedgerRefusal::Redirected);

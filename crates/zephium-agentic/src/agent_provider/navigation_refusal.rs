@@ -13,7 +13,7 @@ pub enum AgentProviderNavigationRefusalReason {
     AlreadyHere,
     /// The target was opened as often as the scope allows.
     Revisited,
-    /// The site answered this exact address with another page before.
+    /// The site already redirected this exact address to the open page.
     Redirected,
     /// Every page visit of the task is spent.
     HopsSpent,
@@ -116,7 +116,7 @@ impl AgentProviderNavigationRefusal {
             ),
             AgentProviderNavigationRefusalReason::Redirected => (
                 "navigation_redirected",
-                "No navigation occurred. The site already answered this exact address with another page (requested_document_url versus current_document_url), so it would do so again. Use the site's own search box, form or links, or another address its pages show.",
+                "No navigation occurred. This exact address already led to the page you are on: the site redirected it (requested_document_url versus current_document_url) and would do so again. Work on this page, or use the site's own search box, filters or links.",
             ),
             AgentProviderNavigationRefusalReason::HopsSpent => (
                 "navigation_budget_spent",
