@@ -16,9 +16,9 @@
     inline-size: var(--size);
     block-size: var(--size);
     border-radius: calc(var(--size) * 0.23);
-    background: linear-gradient(180deg, #29292b 0%, #3a3a3c 62%, #4a4a4c 100%);
-    box-shadow: inset 0 0 0 0.5px rgb(255 255 255 / 0.14);
-    color: #fff;
+    background: var(--brand-tile);
+    box-shadow: var(--shadow-brand-tile);
+    color: var(--color-brand-tile-ink);
     place-items: center;
   }
 </style>
