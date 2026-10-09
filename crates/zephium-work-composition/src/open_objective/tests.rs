@@ -948,3 +948,72 @@ fn a_page_in_the_persons_session_is_read_never_dismissed_or_consented() {
         .contains(SemanticOperationClass::Click));
     assert!(policy.consent_dismissal(&observation).is_none());
 }
+
+/// A page task on a site, in the person's session (after its entry
+/// question) or in Work's own website data: the shape the app compiles.
+#[cfg(feature = "durable-runtime")]
+fn site_task(
+    objective_bytes: usize,
+    yours: bool,
+) -> Result<(AgentWorkRunInput, Box<dyn AgentWorkTask>), AgentWorkFailure> {
+    let account = AgentAccountId::generate();
+    let mut definition = objective();
+    definition.objective = "x".repeat(objective_bytes);
+    definition.navigation = AgentNavigationDiscovery::try_new_site_session(
+        ContextNavigationTarget::parse("https://www.airbnb.com/s/San-Francisco/homes?adults=1")
+            .unwrap(),
+        16,
+    )
+    .unwrap();
+    let mut limits = settings(if yours {
+        PublicReadWorkAccount::Identified {
+            account,
+            source: Box::new(crate::account_scope::SessionAccount { account }),
+        }
+    } else {
+        PublicReadWorkAccount::Anonymous
+    });
+    limits.max_model_calls = 40;
+    assemble_with_actions(
+        identity(),
+        ContextProfileStorageClass::Durable,
+        definition,
+        limits,
+        Some(LocalActions {
+            policy: Box::new(RefuseLocalActions),
+            max_actions: 60,
+            read_only: false,
+            commits: Vec::new(),
+        }),
+    )
+}
+
+// The provider counts an objective conservatively, one token per byte: a
+// page task whose objective passed the Work text bound but not this one was
+// refused before its page opened, as "The browser was not available".
+#[cfg(feature = "durable-runtime")]
+#[test]
+fn a_site_task_admits_an_objective_up_to_the_provider_count_and_no_further() {
+    let limit = zephium_agentic::MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS as usize;
+    for yours in [false, true] {
+        let (input, task) = site_task(limit, yours).unwrap();
+        assert!(task.allows_actions_before_extraction());
+        let input = input.persist_extraction_result().unwrap();
+        assert!(zephium_agent_controller::AgentWorkController::try_new(
+            input,
+            zephium_agent_provider_transport::AgentProviderTransportConfig::STANDARD,
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "unused-test-credential".into()
+            )
+            .unwrap(),
+            Arc::new(DormantAudit),
+            task
+        )
+        .is_ok());
+        assert_eq!(
+            site_task(limit + 1, yours).err(),
+            Some(AgentWorkFailure::Contract)
+        );
+    }
+}

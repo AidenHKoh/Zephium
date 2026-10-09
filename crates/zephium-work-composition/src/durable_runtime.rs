@@ -2970,9 +2970,7 @@ fn compile_page_step(
         navigation
     };
     let public = navigation.document_policy().is_public();
-    let mut objective = String::from("Overall user objective and constraints:\n");
-    objective.push_str(&request.objective);
-    objective.push_str("\n\nContribute evidence for only the browser assignment below. Other assignments are coordinated separately; do not repeat the entire multi-page objective in this step. Preserve all user constraints.\n\nThis step: ");
+    let mut objective = String::from("\n\nContribute evidence for only the browser assignment below. Other assignments are coordinated separately; do not repeat the entire multi-page objective in this step. Preserve all user constraints.\n\nThis step: ");
     objective.push_str(&assignment);
     objective.push_str(if task {
         SITE_WORK
@@ -2996,17 +2994,14 @@ fn compile_page_step(
             .map_err(|error| refused(&settings, "fields", error))?;
     }
     // A daily app's own reading note, when the objective has room for it.
-    if let (true, WorkStepKindV1::Read { url, .. }) = (task, &request.step) {
-        if let Some(note) = zephium_app::work_sites::host_of(url).and_then(|host| apps::note(&host))
-        {
-            if objective.len() + note.len() <= zephium_core::work::MAX_WORK_TEXT_BYTES {
-                objective.push_str(note);
-            }
+    let note = match (task, &request.step) {
+        (true, WorkStepKindV1::Read { url, .. }) => {
+            zephium_app::work_sites::host_of(url).and_then(|host| apps::note(&host))
         }
-    }
-    if objective.len() > zephium_core::work::MAX_WORK_TEXT_BYTES {
-        return Err(refused(&settings, "capacity", WorkError::Capacity));
-    }
+        _ => None,
+    };
+    let objective = fit_objective(&request.objective, &objective, note)
+        .ok_or_else(|| refused(&settings, "capacity", WorkError::Capacity))?;
     let output_fields = vec![match collection {
         Some(schema) => schema
             .extraction_field()
@@ -3124,6 +3119,54 @@ fn compile_page_step(
         return Ok(request);
     }
     Ok(request.with_anonymous_session(probe.browser_session().clone()))
+}
+
+/// The provider admits an objective of this many bytes: its conservative
+/// count takes one token per byte.
+const MAX_PAGE_OBJECTIVE_BYTES: usize = {
+    let tokens = zephium_agentic::MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS as usize;
+    if tokens < zephium_agentic::MAX_AGENT_PROVIDER_OBJECTIVE_BYTES {
+        tokens
+    } else {
+        zephium_agentic::MAX_AGENT_PROVIDER_OBJECTIVE_BYTES
+    }
+};
+/// The person's overall objective keeps at least this much before a site's
+/// reading note gives way to it.
+const MIN_OVERALL_OBJECTIVE_BYTES: usize = 600;
+const OVERALL_OBJECTIVE: &str = "Overall user objective and constraints:\n";
+
+/// The page agent's whole objective within what the provider admits. The
+/// step's own assignment and rules stay whole; the person's overall
+/// objective, which the step's goal already narrows, is clipped to the room
+/// left, and a site's reading note gives way first when keeping it would
+/// leave that objective too short. None when the step alone does not fit.
+fn fit_objective(overall: &str, step: &str, note: Option<&str>) -> Option<String> {
+    let room = |note: &str| {
+        MAX_PAGE_OBJECTIVE_BYTES.checked_sub(OVERALL_OBJECTIVE.len() + step.len() + note.len())
+    };
+    let note = note
+        .filter(|note| {
+            room(note).is_some_and(|left| left >= overall.len().min(MIN_OVERALL_OBJECTIVE_BYTES))
+        })
+        .unwrap_or_default();
+    let left = room(note)?;
+    let mut objective = String::with_capacity(MAX_PAGE_OBJECTIVE_BYTES);
+    objective.push_str(OVERALL_OBJECTIVE);
+    if overall.len() <= left {
+        objective.push_str(overall);
+    } else {
+        const MORE: &str = "…";
+        let mut end = left.saturating_sub(MORE.len());
+        while !overall.is_char_boundary(end) {
+            end -= 1;
+        }
+        objective.push_str(overall[..end].trim_end());
+        objective.push_str(MORE);
+    }
+    objective.push_str(step);
+    objective.push_str(note);
+    Some(objective)
 }
 
 /// Interrupted records of dead processes accepted per step before giving up.
@@ -3354,6 +3397,77 @@ fn map_archive(
         });
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod page_objective_tests {
+    use super::*;
+
+    fn admitted(objective: &str) -> bool {
+        let revision = zephium_agentic::SemanticTokenizerRevision::try_new("o200k_base".into())
+            .expect("revision");
+        zephium_agentic::AgentProviderObjective::try_admit_conservative_utf8(
+            objective.to_owned(),
+            &revision,
+        )
+        .is_ok()
+    }
+
+    /// What a page task's own part of the objective holds, as compiled.
+    fn step(goal: &str) -> String {
+        format!(
+            "\n\nContribute evidence for only the browser assignment below.\n\nThis step: Work on this site, starting at https://www.airbnb.com/s/San-Francisco--CA/homes?checkin=2027-01-05&checkout=2027-04-05&adults=1\nGoal: {goal}{SITE_WORK}\noutput_0: a list of separately cited findings from the visited pages."
+        )
+    }
+
+    #[test]
+    fn a_long_request_is_clipped_so_a_site_task_with_its_note_still_opens() {
+        let note = apps::note("www.airbnb.com").expect("airbnb note");
+        let step = step("Find a monthly stay near the YC office for one adult");
+        // A follow-up's request carries the earlier turns: well past the room.
+        let overall = "Plan my trip from Warsaw to SF for the YC batch — ".repeat(60);
+        assert!(!admitted(&format!(
+            "{OVERALL_OBJECTIVE}{overall}{step}{note}"
+        )));
+        let objective = fit_objective(&overall, &step, Some(note)).expect("fits");
+        assert!(objective.len() <= MAX_PAGE_OBJECTIVE_BYTES);
+        assert!(admitted(&objective));
+        assert!(objective.starts_with(OVERALL_OBJECTIVE));
+        assert!(objective.ends_with(&format!("{step}{note}")));
+        assert!(objective.contains("…\n\nContribute evidence"));
+    }
+
+    #[test]
+    fn a_short_request_keeps_everything_and_a_crowded_one_gives_up_the_note_first() {
+        let note = apps::note("www.booking.com").expect("booking note");
+        let step = step("Find hotels for one adult");
+        let objective = fit_objective("Check Booking.com", &step, Some(note)).expect("fits");
+        assert_eq!(
+            objective,
+            format!("{OVERALL_OBJECTIVE}Check Booking.com{step}{note}")
+        );
+        // Keeping the note would leave the request less than its floor.
+        let crowded = step.clone() + &"y".repeat(MAX_PAGE_OBJECTIVE_BYTES - step.len() - 900);
+        let overall = "z".repeat(4000);
+        let objective = fit_objective(&overall, &crowded, Some(note)).expect("fits");
+        assert!(!objective.contains(note));
+        assert!(objective.ends_with(&crowded));
+        assert!(admitted(&objective));
+        // A step that alone exceeds the provider's count is refused.
+        assert_eq!(
+            fit_objective("", &"s".repeat(MAX_PAGE_OBJECTIVE_BYTES), None),
+            None
+        );
+    }
+
+    #[test]
+    fn clipping_never_splits_a_character() {
+        let step = step("Find a stay");
+        let overall = "Жильё на месяц ".repeat(400);
+        let objective = fit_objective(&overall, &step, None).expect("fits");
+        assert!(objective.len() <= MAX_PAGE_OBJECTIVE_BYTES);
+        assert!(admitted(&objective));
+    }
 }
 
 #[cfg(test)]
