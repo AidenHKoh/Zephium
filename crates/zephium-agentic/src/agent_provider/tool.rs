@@ -934,6 +934,18 @@ fn decode_proposal(
             }
             let target = ContextNavigationTarget::parse(&value.url)
                 .map_err(|_| AgentBrowserToolContractError::Navigation)?;
+            // A section anchor on another page ("…/functools.html#lru_cache")
+            // loads that page: the anchor only scrolls. A hash route
+            // ("#/settings", "#!/a") is the page itself and stays.
+            let target = match target.as_url().fragment() {
+                Some(fragment) if !fragment.starts_with(['/', '!']) => {
+                    let mut page = target.as_url().clone();
+                    page.set_fragment(None);
+                    ContextNavigationTarget::parse(page.as_str())
+                        .map_err(|_| AgentBrowserToolContractError::Navigation)?
+                }
+                _ => target,
+            };
             Ok(AgentBrowserToolProposal::Navigate(target))
         }
         AgentBrowserToolKind::Back => {
@@ -1711,6 +1723,22 @@ mod tests {
         let navigate =
             decode("navigate", r#"{"url":"https://example.test/path"}"#).expect("navigate");
         assert_eq!(navigate.proposal().kind(), AgentBrowserToolKind::Navigate);
+        let target = |url: &str| match decode("navigate", &format!(r#"{{"url":"{url}"}}"#))
+            .expect("navigate")
+            .proposal()
+        {
+            AgentBrowserToolProposal::Navigate(target) => target.as_url().to_string(),
+            _ => panic!("navigate"),
+        };
+        // A section anchor loads its page; a hash route is kept.
+        assert_eq!(
+            target("https://docs.example.test/library/functools.html#functools.lru_cache"),
+            "https://docs.example.test/library/functools.html"
+        );
+        assert_eq!(
+            target("https://app.example.test/#/settings"),
+            "https://app.example.test/#/settings"
+        );
         for name in [
             "back",
             "forward",
