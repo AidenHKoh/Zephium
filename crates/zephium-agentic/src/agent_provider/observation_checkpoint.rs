@@ -1081,6 +1081,47 @@ mod action_history_tests {
     }
 
     #[test]
+    fn a_whole_look_refused_for_its_streak_points_at_narrower_looks() {
+        let config = config(AgentProviderKind::OpenAiResponses).with_progressive_observation();
+        let result = crate::semantic_action_result::tests::scroll_provider_fixture(1, false);
+        let observation = result.fresh_snapshot().unwrap();
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            crate::semantic_diff::SemanticObservationFingerprint::from_observation(observation),
+        );
+        let look = |name: &str, arguments: &str| {
+            let transcript =
+                AgentProviderTranscript::try_initial(Arc::from("Search"), "page".into()).unwrap();
+            turn(
+                1,
+                name,
+                arguments,
+                baseline.clone(),
+                config.clone(),
+                transcript,
+            )
+        };
+        let refusal = look("snapshot", r#"{"scope":{"kind":"initial"}}"#)
+            .refuse_whole_look(observation, &config)
+            .unwrap();
+        let (_, bound) = refusal
+            .bind(observation, &config, "current observation".into())
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_str(bound.latest().tool_result()).unwrap();
+        assert_eq!(result["code"], "looked_enough");
+        assert_eq!(result["executed"], false);
+        assert!(result["guidance"].as_str().is_some_and(|guidance| guidance
+            .contains("text_search")
+            && guidance.contains("extract")));
+        // Only a look can be refused as one.
+        assert!(look(
+            "act",
+            r#"{"actions":[{"kind":"scroll","target":"@a1","direction":"down","amount":"page","effect":"read","wait":{"kind":"immediate"},"verification":{"kind":"scroll_position_changed"},"settle_millis":250}]}"#,
+        )
+        .refuse_whole_look(observation, &config)
+        .is_err());
+    }
+
+    #[test]
     fn two_verified_scrolls_survive_wait_and_snapshot_retirement() {
         let config = config(AgentProviderKind::OpenAiResponses)
             .with_progressive_observation()
