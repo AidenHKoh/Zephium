@@ -401,6 +401,16 @@ impl AgentWorkController {
                 .collect::<Vec<_>>();
             let batch = SemanticActionBatchId::new(session.next_action)
                 .ok_or(AgentWorkFailure::Contract)?;
+            // A step Rust takes on answers an earlier look gave (a scroll to
+            // find more rows, a disclosure) may act on a look no model has
+            // been sent: the look taints the run as a model's reading would,
+            // as for Rust's own consent press.
+            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+            let account = session.account;
+            session
+                .policy
+                .admit_owned_observation(&observation, account)
+                .map_err(|_| AgentWorkFailure::Contract)?;
             let proposal = match crate::AgentBrowserActionProposal::bind_decision(
                 selection,
                 recipe,
