@@ -793,6 +793,62 @@ fn retained_result_requires_atomic_ack_and_remains_readable_after_handoff() {
     ));
 }
 
+#[test]
+fn unarchivable_result_classifies_its_row_and_the_page_still_closes() {
+    if child("unarchivable_result_classifies_its_row_and_the_page_still_closes") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, store) = coordinator_with_storage(
+        directory.path(),
+        Arc::new(|| true),
+        ContextProfileStorageClass::Durable,
+    );
+    let servers = Servers::default();
+    poll_until(&mut work, RetainedWork::ready);
+    REFUSE_PUBLICATION.store(true, Ordering::Release);
+    assert!(work
+        .submit(
+            request_with_result(
+                ContextRunId::generate(),
+                vec![response_stream(1), response_stream(2)],
+                servers.clone(),
+                true
+            ),
+            now()
+        )
+        .is_ok());
+    poll_until(&mut work, |work| {
+        work.record()
+            .is_some_and(|record| record.disposition() == AgentWorkDisposition::FailedClosed)
+    });
+    assert!(!REFUSE_PUBLICATION.load(Ordering::Acquire));
+    assert_eq!(work.phase(), AdmissionPhase::Uncertain);
+    assert_eq!(work.failures(), (Some(AgentWorkFailure::Contract), None));
+    assert!(work.artifact().is_none());
+    assert!(work.take_extraction().is_none());
+    assert!(store.pending_artifact.lock().unwrap().is_none());
+    // A later page of this process claims beside the classified row and runs.
+    let (mut later, _later_native) = coordinator_beside(&store);
+    run_fresh_read(&mut later, &servers);
+    assert!(later.shutdown_until(
+        &Clock(AtomicU64::new(2)),
+        Instant::now() + Duration::from_secs(2)
+    ));
+    native.join();
+    assert!(work.shutdown_until(
+        &Clock(AtomicU64::new(2)),
+        Instant::now() + Duration::from_secs(2)
+    ));
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 1);
+    for server in servers.lock().unwrap().drain(..) {
+        assert_eq!(server.join().unwrap(), 2);
+    }
+}
+
 fn request(run: ContextRunId, responses: Vec<String>, servers: Servers) -> ActorRequest {
     request_with_result(run, responses, servers, false)
 }

@@ -2772,8 +2772,13 @@ impl AgentBrowserSession {
     ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
         use zephium_agentic::*;
         self.check_live()?;
-        // Pixels reach only a model that sees, and only a whole-look mapping.
-        let viewport = viewport.filter(|_| self.supports_vision() && previous.is_none());
+        // Pixels reach only a model that sees, only a whole-look mapping, and
+        // only within the image allowance that keeps the request admitted.
+        let viewport = viewport.filter(|screenshot| {
+            self.supports_vision()
+                && previous.is_none()
+                && screenshot.as_png().len() <= MAX_AGENT_PROVIDER_VIEWPORT_IMAGE_PNG_BYTES
+        });
         if self.turns >= self.max_model_calls {
             return Err(AgentBrowserProviderError::TurnLimit);
         }

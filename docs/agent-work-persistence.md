@@ -167,6 +167,17 @@ Explicit durable-profile extraction can require an atomic private
 retained request slot and Store permits, not the content-free journal/audit
 body format. Read-only archive failures release their own slot without consuming
 future admission; publication uncertainty retains the exact original owner.
+A result that cannot be prepared for publication never reached the Store, so
+it is not uncertainty: the exact Running row is classified `FailedClosed`
+through the same resent CAS, and the page closes like any failed page.
+
+A page whose request is still uncertain after its last resend cannot be
+classified in this process. It keeps that request, its debt and its native
+seat, because its native audit never precedes the row's classification; a
+late acknowledgement still settles it. Its page group therefore cannot close,
+so the Shell refuses every page waiting for a seat at once with `Unsettled`
+instead of letting each wait out its own deadline. A restart classifies the
+row `Interrupted` as usual.
 
 The existing shell mailbox carries one globally coalesced Work wake. No extra
 worker or periodic poll is added; the existing timer wakes only for pending

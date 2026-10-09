@@ -2006,7 +2006,8 @@ fn note_reason(note: Option<&str>, search: bool) -> Option<WorkPartReasonV1> {
         | "The browser was not ready for this page"
         | "The browsing profile was not available"
         | "Too many pages were already open"
-        | read_note::WORK_STORAGE => return None,
+        | read_note::WORK_STORAGE
+        | read_note::STORAGE_UNCONFIRMED => return None,
         _ if read_note::is_human_check(note) => R::BlockedByCheck,
         _ if search => return None,
         _ => R::CouldntRead,

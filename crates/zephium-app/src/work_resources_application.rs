@@ -903,6 +903,20 @@ impl RetainedWork {
                 .lock()
                 .map(|mut slot| slot.take())
                 .map_err(|_| ());
+            #[cfg(test)]
+            let reply = match reply {
+                Ok(Some(Ok(_)))
+                    if UNCONFIRMED_TERMINALS.load(Ordering::Acquire)
+                        && matches!(
+                            &flight.request,
+                            DurableRequest::Journal(AgentWorkJournalRequest::CompareAndSet(mutation))
+                                if mutation.next().disposition().is_terminal()
+                        ) =>
+                {
+                    Ok(Some(Err(AgentWorkJournalError::Uncertain)))
+                }
+                reply => reply,
+            };
             let mut retain = false;
             let result = match reply {
                 Ok(Some(Ok(reply))) => match (&flight.request, reply) {
@@ -1163,6 +1177,14 @@ impl RetainedWork {
                                             terminal, profile, result,
                                         )
                                     });
+                                #[cfg(test)]
+                                let publication = publication.and_then(|publication| {
+                                    if REFUSE_PUBLICATION.swap(false, Ordering::AcqRel) {
+                                        Err(AgentWorkJournalError::Uncertain)
+                                    } else {
+                                        Ok(publication)
+                                    }
+                                });
                                 match publication {
                                     Ok(publication) => self.dispatch_attempt(
                                         DurableRequest::Artifact(
@@ -1173,9 +1195,28 @@ impl RetainedWork {
                                         self.phase,
                                         0,
                                     ),
-                                    Err(error) => {
-                                        self.persistence_failure = Some(error);
+                                    // Nothing reached the Store: the result cannot be
+                                    // archived, so the run is no success. Classify its
+                                    // exact Running row like a run stopped before it
+                                    // could finish, through the same resent CAS.
+                                    Err(_) => {
                                         self.fail(AgentWorkFailure::Contract);
+                                        match AgentWorkJournalMutation::transition(
+                                            record,
+                                            AgentWorkDisposition::FailedClosed,
+                                        ) {
+                                            Ok(mutation) => {
+                                                self.phase = AdmissionPhase::Closing;
+                                                self.dispatch(
+                                                    AgentWorkJournalRequest::CompareAndSet(
+                                                        mutation,
+                                                    ),
+                                                );
+                                            }
+                                            Err(error) => {
+                                                self.persistence_failure = Some(error);
+                                            }
+                                        }
                                     }
                                 }
                             } else {
@@ -1672,6 +1713,17 @@ impl RetainedWork {
             RetainedNativeShutdown::in_flight,
         )
     }
+    /// Its row cannot be classified in this process any more: its exact
+    /// request stayed uncertain past every resend, or it failed with nothing
+    /// to send. It keeps that request and its debt for a late acknowledgement
+    /// or restart recovery, and so its native seat: its native audit never
+    /// precedes the classification.
+    pub(super) fn durably_unsettled(&self) -> bool {
+        self.persistence_failure.is_some()
+            && self.flight.as_ref().is_none_or(|flight| {
+                flight.uncertain && flight.reconciliations >= MAX_RECONCILIATIONS
+            })
+    }
     /// Its audit ended; nothing further can close it cleanly for the group.
     pub(super) fn native_audit_settled(&self) -> bool {
         self.native_shutdown
@@ -1777,13 +1829,26 @@ impl RetainedWork {
     }
 }
 
+/// Refuses the next terminal publication before it reaches the Store.
+#[cfg(test)]
+pub(in crate::work_resources) static REFUSE_PUBLICATION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Reads every terminal journal acknowledgement as uncertain.
+#[cfg(test)]
+pub(in crate::work_resources) static UNCONFIRMED_TERMINALS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 const MAX_RECONCILIATIONS: u8 = 4;
 
 /// Half a second, doubling: the last resend leaves within about 15 s of the
 /// first uncertainty, past a Store that is only slow, not one that is gone.
 fn reconciliation_backoff(reconciliations: u8) -> Duration {
-    Duration::from_millis(500) * (1 << reconciliations.min(MAX_RECONCILIATIONS))
+    RECONCILIATION_BACKOFF * (1 << reconciliations.min(MAX_RECONCILIATIONS))
 }
+#[cfg(not(test))]
+const RECONCILIATION_BACKOFF: Duration = Duration::from_millis(500);
+#[cfg(test)]
+const RECONCILIATION_BACKOFF: Duration = Duration::from_millis(20);
 
 /// A record whose actor is gone and whose debt stays historical: a prior
 /// process's interruption, or this process's own scoped recovery.

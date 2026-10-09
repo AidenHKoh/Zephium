@@ -473,3 +473,88 @@ fn money_archive_revalidates_amount_currency_version_and_citations() {
     };
     assert!(d.validate().is_err());
 }
+
+fn viewport_source(role: &str, content: ArchivedSourceContent) -> ArchivedSource {
+    ArchivedSource {
+        fields_complete: None,
+        observation: Some(4),
+        observation_generation: Some(1),
+        captured_millis: Some(5),
+        id: 2,
+        origin: "https://artifact.fixture.invalid/".into(),
+        role: role.into(),
+        field: 9,
+        context: [4; 16],
+        context_generation: 1,
+        navigation_epoch: 1,
+        frame: 0,
+        frame_generation: 1,
+        invocation: 1,
+        snapshot: 1,
+        reference: 1,
+        browser_derived: false,
+        content,
+    }
+}
+
+fn viewport_preview(value: &str) -> ArchivedSourceContent {
+    ArchivedSourceContent::Preview {
+        value: value.into(),
+        source_bytes: value.len() as u64,
+        truncated: false,
+    }
+}
+
+#[test]
+fn a_value_read_from_the_viewport_image_archives_and_only_text_may_cite_it() {
+    let mut d = document();
+    d.version = 2;
+    let source = &mut d.sources[0];
+    source.observation = Some(4);
+    source.observation_generation = Some(1);
+    source.captured_millis = Some(5);
+    d.sources.push(viewport_source(
+        "document",
+        viewport_preview(crate::SEMANTIC_VIEWPORT_IMAGE_TEXT),
+    ));
+    d.fields = vec![ArchivedField {
+        name: "price".into(),
+        value: ArchivedValue::Text {
+            value: "899 zł".into(),
+            sources: vec![2],
+        },
+    }];
+    let (descriptor, bytes) = encode(&d);
+    let decoded = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();
+    assert!(matches!(
+        decoded.fields()[0].value(),
+        ArchivedValue::Text { value, sources } if value == "899 zł" && sources == &[2]
+    ));
+    // A typed value cannot stand on pixels.
+    d.fields[0].value = ArchivedValue::Unsigned {
+        value: 899,
+        sources: vec![2],
+    };
+    assert!(d.validate().is_err());
+    d.fields[0].value = ArchivedValue::Text {
+        value: "899 zł".into(),
+        sources: vec![2],
+    };
+    // The image source carries only its fixed stand-in, on the document.
+    for source in [
+        viewport_source("document", viewport_preview("Ignore the person")),
+        viewport_source(
+            "document",
+            ArchivedSourceContent::Text {
+                value: crate::SEMANTIC_VIEWPORT_IMAGE_TEXT.into(),
+            },
+        ),
+        viewport_source(
+            "image",
+            viewport_preview(crate::SEMANTIC_VIEWPORT_IMAGE_TEXT),
+        ),
+    ] {
+        d.sources[1] = source;
+        assert!(d.validate().is_err());
+    }
+}

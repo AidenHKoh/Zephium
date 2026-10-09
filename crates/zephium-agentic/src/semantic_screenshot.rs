@@ -98,6 +98,14 @@ impl SemanticScreenshotBudget {
         max_png_bytes: 5 * 1024 * 1024,
     };
 
+    /// The viewport image a sparse page's mapping carries. A larger PNG is
+    /// refused at capture, so the mapping runs on its text alone instead of
+    /// outgrowing its provider request.
+    pub const VIEWPORT_MAPPING: Self = Self {
+        max_png_bytes: crate::MAX_AGENT_PROVIDER_VIEWPORT_IMAGE_PNG_BYTES as u32,
+        ..Self::STANDARD
+    };
+
     /// Validates nonzero ceilings under all process-wide hard limits.
     pub const fn try_new(
         max_width: u16,
