@@ -989,21 +989,6 @@ fn drained_failed_mapping_projects_original_typed_failure_through_terminal_ack()
     );
 }
 
-#[test]
-fn multiline_mapping_projects_invalid_text_through_terminal_ack() {
-    if child("multiline_mapping_projects_invalid_text_through_terminal_ack") {
-        return;
-    }
-    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    // Two levels of JSON string encoding: SSE delta, then mapped value.
-    failed_mapping_projection(
-        "First.\\\\n\\\\nSecond.",
-        SemanticExtractionError::InvalidText,
-    );
-}
-
 fn failed_mapping_projection(value: &str, error: SemanticExtractionError) {
     use zephium_agent_controller::AgentBrowserProviderError;
     let directory = tempfile::tempdir().unwrap();

@@ -48,6 +48,7 @@ impl AgentAuditPort for Audit {
 }
 #[derive(Default)]
 struct Native {
+    screenshots: AtomicUsize,
     hold_human: AtomicBool,
     human: Mutex<
         Option<(
@@ -447,7 +448,11 @@ impl AgentBrowserPort for Native {
         _: SemanticScreenshotNativeRequest,
         _: SemanticScreenshotNativeCompletion,
     ) -> ContextDispatch {
-        panic!("no retained screenshot authority")
+        // A sparse look's mapping asks for one best-effort viewport image
+        // (c509850a). The fixture has no pixels: it refuses, and mapping
+        // runs on text alone.
+        self.screenshots.fetch_add(1, Ordering::AcqRel);
+        ContextDispatch::Rejected(ContextPortFailure::NativeRefused)
     }
     fn seal_for_shutdown(&self, audit: ContextResourceAuditId) -> ContextShutdownDispatch {
         if self.allow_global_shutdown.load(Ordering::Acquire)
@@ -2112,16 +2117,22 @@ fn common_mapping_refuses_foreign_source_and_preserves_original_owner_on_audit_l
         .unwrap_or_else(|e| e.into_inner());
     for audit_lost in [false, true] {
         let (owner, native, resource, browser) = setup();
-        let mapping = if audit_lost {
-            response_stream(2)
-        } else {
-            response_stream(2).replace("@r1", "@r999")
+        // A miscited value the page shows verbatim is cited where it shows
+        // (820dba49); one it does not show has no source, even after the one
+        // corrective mapping call that refusal earns.
+        let foreign = |turn| {
+            response_stream(turn)
+                .replace("@r1", "@r999")
+                .replace("Fixture result", "Not on the page")
         };
-        let (controller, mut result, scope, server) = prepared(
-            Box::new(browser),
-            vec![response_stream(1), mapping],
-            audit_lost,
-        );
+        let responses = if audit_lost {
+            vec![response_stream(1), response_stream(2)]
+        } else {
+            vec![response_stream(1), foreign(2), foreign(3)]
+        };
+        let calls = responses.len();
+        let (controller, mut result, scope, server) =
+            prepared(Box::new(browser), responses, audit_lost);
         let (handle, lifecycle) = start(controller, scope);
         let mut outcome = None;
         if audit_lost {
@@ -2158,7 +2169,7 @@ fn common_mapping_refuses_foreign_source_and_preserves_original_owner_on_audit_l
         ));
         owner.seal_resources().unwrap();
         assert!(owner.locally_retired());
-        assert_eq!(server.join().unwrap(), 2);
+        assert_eq!(server.join().unwrap(), calls);
     }
 }
 
