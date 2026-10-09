@@ -25,7 +25,9 @@ admission. The actor supplies the original capture timestamp, never the time
 of the later read. Secret values are mechanically withheld; sensitivity,
 source incompleteness and item/byte omissions remain explicit.
 
-The standard projection admits at most 128 fragments and 32 KiB content; the
+The standard projection admits at most 128 fragments and 32 KiB content (a
+terminal mapping read 256 and 48 KiB), shedding control labels and options
+before facts when a page holds more; the
 shipping encoding additionally caps its entire semantic payload at 16 KiB.
 An oversized encoded projection refuses rather than truncating a serialized
 result or silently broadening a budget. Its conservative UTF-8 preflight is not
@@ -136,11 +138,14 @@ action execution; those require their own effect and native ownership join.
 ## Recovering an invalid inspection scope
 
 A model can request a well-formed `text_search` against a heading after a
-`surrounding_text` capture. A heading is not a tree-search boundary. The
-controller now returns an authenticated `invalid_snapshot_scope` tool result
-and lets the model select another operation within the original call,
-operation, token and time budgets. Unknown current refs and unsupported
-inspection scope classes use the same pre-dispatch refusal. No rejected
+`surrounding_text` capture. A heading is not a tree-search boundary, so the
+search runs inside the document instead. A `table` scope, and a `region` on a
+node that is no region, are captured as that node's `subtree` under the same
+budget: refusing them cost whole reads of plain articles and tables (two such
+refusals narrowed a Wikipedia read to its last calls). Unknown current refs
+and still-unsupported scope classes return an authenticated
+`invalid_snapshot_scope` tool result and let the model select another
+operation within the original call, operation, token and time budgets. No rejected
 capture runs, no generation advances, and the trusted capture timestamp and
 retained evidence remain unchanged. Repeated invalid choices stop at the
 existing limit, preserving the terminal mapper reservation.
