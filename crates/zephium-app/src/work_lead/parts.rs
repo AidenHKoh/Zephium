@@ -87,7 +87,17 @@ pub(crate) fn spec(args: &Value) -> Result<PartSpec, String> {
         Some("connection") => WorkHelperV1::Connection,
         _ => return Err("helper is one of browser, research, computer, connection".into()),
     };
-    let goal = text_arg(args, "goal").ok_or("goal is required")?;
+    // A part sent with its search but no goal still says what it is for.
+    let goal = text_arg(args, "goal")
+        .or_else(|| {
+            let query = args
+                .pointer("/search/query")
+                .and_then(Value::as_str)?
+                .trim();
+            let site = text_arg(args, "service").unwrap_or_else(|| title.clone());
+            (!query.is_empty()).then(|| clip(&format!("Find {query} on {site}"), 200))
+        })
+        .ok_or("goal is required")?;
     if goal.chars().count() > 200 || goal.contains('\n') {
         return Err("goal is one line of at most 200 characters; put details in brief".into());
     }
@@ -2137,6 +2147,17 @@ mod tests {
             site_turn(&[part("x-kom", None)], "allegro.pl"),
             SiteTurn::Go
         );
+    }
+
+    #[test]
+    fn a_part_sent_without_a_goal_takes_its_search() {
+        let spec = spec(&serde_json::json!({
+            "title": "Allegro", "helper": "browser", "service": "allegro.pl",
+            "search": {"query": "LEGO 42115"}
+        }))
+        .unwrap();
+        assert_eq!(spec.goal, "Find LEGO 42115 on allegro.pl");
+        assert!(super::spec(&serde_json::json!({"title": "Notes", "helper": "research"})).is_err());
     }
 
     #[test]
