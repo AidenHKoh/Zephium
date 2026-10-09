@@ -1990,6 +1990,8 @@ pub struct AgentBrowserSession {
     navigation: Option<zephium_agentic::AgentActiveNavigation>,
     navigation_refusal: Option<AgentBrowserNavigationDispatchRefusal>,
     navigation_receipt: Option<zephium_agentic::AgentNavigationReceipt>,
+    /// The settled navigation whose arrival already holds the account.
+    arrived: Option<zephium_agentic::ContextOperationJoin>,
     history_depth: usize,
     journal: Option<work::WorkJournal>,
     journal_receipts: usize,
@@ -2249,6 +2251,7 @@ impl AgentBrowserSession {
             navigation: None,
             navigation_refusal: None,
             navigation_receipt: None,
+            arrived: None,
             history_depth: 0,
             journal: None,
             journal_receipts: 0,

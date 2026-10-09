@@ -346,7 +346,9 @@ impl AgentWorkTask for RouteTask {
                 }
             }
         }
-        if self.documents.len() == 3 {
+        // The final document's samples, the one taken as soon as its load
+        // settles included.
+        if self.documents.len() == 3 || context.navigation_epoch().get() == 4 {
             let prior = self.prior_account.get().unwrap();
             match self.fault {
                 RouteFault::StaleFinalAccount => {

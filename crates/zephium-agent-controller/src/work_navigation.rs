@@ -564,6 +564,20 @@ impl AgentWorkController {
         let fresh = Self::fit_model_observation(
             Box::pin(Self::observe_after_navigation(state, worker, browser)).await?,
         )?;
+        let now = state
+            .session
+            .as_mut()
+            .ok_or(AgentWorkFailure::Contract)?
+            .policy_now()
+            .map_err(AgentWorkFailure::Browser)?;
+        let account = state.task.attest_account(operation.context(), now);
+        state.native.check_control(worker, browser)?;
+        state
+            .session
+            .as_mut()
+            .ok_or(AgentWorkFailure::Contract)?
+            .accept_arrival(receipt, account?)
+            .map_err(AgentWorkFailure::Browser)?;
         // A move can land on a sign-in, code or bot-check page: the person
         // gets it before any model call is spent on a page it cannot pass.
         let (fresh, held) = if state.human_request
@@ -772,15 +786,12 @@ impl AgentBrowserSession {
         if self.turns >= self.max_model_calls {
             return Err(AgentBrowserProviderError::TurnLimit);
         }
-        if receipt.source() != self.account.context()
-            || account.observed_at() < receipt.settled_at()
-            || account.attestation() == self.account.attestation()
-        {
-            return Err(AgentBrowserProviderError::Account(
-                super::super::AgentBrowserAccountError::ContextChanged,
-            ));
+        let arrived = self.arrived.take() == Some(receipt.operation());
+        if arrived {
+            self.validate_account_update(account, receipt.operation().context())?;
+        } else {
+            self.validate_arrival(receipt, account)?;
         }
-        self.validate_account_update(account, receipt.operation().context())?;
         let provisional = self.next_model_call_request()?;
         let request = AgentModelCallRequest::new(
             provisional.id(),
@@ -843,9 +854,43 @@ impl AgentBrowserSession {
             ),
         }
         .map_err(AgentBrowserProviderError::from_request)?;
+        if account != self.account {
+            self.account_attestations.push(account.attestation());
+            self.account = account;
+        }
+        self.drive(prepared.into_transport_input()).await
+    }
+
+    fn validate_arrival(
+        &mut self,
+        receipt: AgentNavigationReceipt,
+        account: AgentContextAccountBinding,
+    ) -> Result<(), AgentBrowserProviderError> {
+        if receipt.source() != self.account.context()
+            || account.observed_at() < receipt.settled_at()
+            || account.attestation() == self.account.attestation()
+        {
+            return Err(AgentBrowserProviderError::Account(
+                super::super::AgentBrowserAccountError::ContextChanged,
+            ));
+        }
+        self.validate_account_update(account, receipt.operation().context())
+    }
+
+    /// Moves the account to the document a settled navigation arrived on
+    /// before anything looks at it again: a bot check or sign-in wall found
+    /// on arrival samples the account of the new document, not the old.
+    pub(super) fn accept_arrival(
+        &mut self,
+        receipt: AgentNavigationReceipt,
+        account: AgentContextAccountBinding,
+    ) -> Result<(), AgentBrowserProviderError> {
+        self.check_live()?;
+        self.validate_arrival(receipt, account)?;
         self.account_attestations.push(account.attestation());
         self.account = account;
-        self.drive(prepared.into_transport_input()).await
+        self.arrived = Some(receipt.operation());
+        Ok(())
     }
 }
 
