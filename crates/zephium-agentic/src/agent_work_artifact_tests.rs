@@ -368,6 +368,22 @@ fn url_archive_roundtrip_revalidates_version_destination_and_source_kind() {
         sources: vec![1],
     };
     assert!(d.validate().is_err());
+    // A cited text that prints the address on its own page supports it.
+    d.fields[0].value = ArchivedValue::Url {
+        value: url.into(),
+        sources: vec![1],
+    };
+    d.sources[0].origin = "https://shop.example.test/".into();
+    d.sources[0].role = "paragraph".into();
+    d.sources[0].field = 2;
+    d.sources[0].content = ArchivedSourceContent::Text {
+        value: "product: Example | url: /product/42 ;; product: Other | url: /product/43".into(),
+    };
+    assert!(d.validate().is_ok());
+    d.sources[0].content = ArchivedSourceContent::Text {
+        value: "product: Other | url: /product/43".into(),
+    };
+    assert!(d.validate().is_err());
 }
 #[test]
 fn image_archive_roundtrip_revalidates_version_destination_and_source_kind() {
@@ -445,7 +461,7 @@ fn money_archive_revalidates_amount_currency_version_and_citations() {
     assert!(d.validate().is_err());
     d.version = 6;
     d.sources[0].content = ArchivedSourceContent::Text {
-        value: "$20.00".into(),
+        value: "€20.00".into(),
     };
     assert!(d.validate().is_err());
     d.sources[0].content = ArchivedSourceContent::Text {

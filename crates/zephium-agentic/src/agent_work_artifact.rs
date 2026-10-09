@@ -174,7 +174,9 @@ impl AgentWorkArtifactPublication {
                 6
             } else if sources.values().any(|source| source.field == 7) {
                 5
-            } else if sources.values().any(|source| source.field == 6) {
+            } else if sources.values().any(|source| source.field == 6)
+                || fields.iter().any(contains_link)
+            {
                 4
             } else if result
                 .fields()
@@ -751,10 +753,22 @@ impl ArchivedDocument {
                     ArchivedValue::Url { value, sources }
                     | ArchivedValue::ImageUrl { value, sources } => {
                         let image = matches!(field.value, ArchivedValue::ImageUrl { .. });
+                        // A link is a cited destination, the read's own
+                        // address, or one a cited text prints on its page.
+                        let printed = |source: &ArchivedSource| {
+                            !image
+                                && matches!(source.field, 1 | 2)
+                                && matches!(&source.content, ArchivedSourceContent::Text { value: text }
+                                if url::Url::parse(&source.origin).is_ok_and(|origin| {
+                                    crate::semantic_extract::printed_addresses(text, &origin)
+                                        .iter()
+                                        .any(|(_, _, resolved)| resolved == value)
+                                }))
+                        };
                         if self.version < if image { 5 } else { 4 } || !crate::semantic_extract::exact_public_url(value)
                             || !sources.iter().any(|id| self.sources.iter().any(|source|
-                                source.id == *id && (source.field == if image { 7 } else { 6 } || (!image && source.field == 8)) && matches!(&source.content,
-                                    ArchivedSourceContent::Preview { value: observed, .. } if observed == value))) {
+                                source.id == *id && (((source.field == if image { 7 } else { 6 } || (!image && source.field == 8)) && matches!(&source.content,
+                                    ArchivedSourceContent::Preview { value: observed, .. } if observed == value)) || printed(source)))) {
                             return Err(invalid);
                         }
                         valid_text(value, crate::semantic::MAX_SEMANTIC_LINK_DESTINATION_BYTES)?;
@@ -837,6 +851,14 @@ fn extracted_money(field: &SemanticExtractedField) -> bool {
             .items()
             .iter()
             .any(|row| row.fields().iter().any(extracted_money)),
+        _ => false,
+    }
+}
+
+fn contains_link(field: &ArchivedField) -> bool {
+    match &field.value {
+        ArchivedValue::Url { .. } => true,
+        ArchivedValue::Rows { items } => items.iter().flatten().any(contains_link),
         _ => false,
     }
 }

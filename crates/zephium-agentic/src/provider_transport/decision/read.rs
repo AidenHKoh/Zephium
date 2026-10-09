@@ -1253,7 +1253,8 @@ impl<'a> DecisionLocatedRead<'a> {
             .as_ref()
             .map(|(schema, read)| (schema, read))
     }
-    pub(crate) fn baseline(&self) -> &SemanticObservationAcknowledgement {
+    /// The acknowledged observation the located read was taken from.
+    pub fn baseline(&self) -> &SemanticObservationAcknowledgement {
         &self.baseline
     }
     pub(crate) fn account(&self) -> AgentContextAccountBinding {

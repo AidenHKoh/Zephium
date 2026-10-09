@@ -2990,7 +2990,7 @@ impl AgentWorkController {
                                 SemanticReadAuthority::Acknowledged(checkpoint.baseline()),
                                 captured_at,
                                 SemanticReadSensitivityLimit::PublicOnly,
-                                SemanticReadBudget::STANDARD,
+                                SemanticReadBudget::EXTRACTION,
                                 schema,
                             )
                             .map_err(|error| {
@@ -5328,6 +5328,9 @@ pub enum AgentWorkEventKind {
         /// Records and fields left out.
         values: u16,
     },
+    /// Rust refused a mapping and the model mapped the same read once more,
+    /// told why.
+    ExtractionCorrected,
     /// A read's own target re-rendered while its page visibly changed; the
     /// change proved the action (a channel, thread or date opened).
     AppliedOnPageChange,

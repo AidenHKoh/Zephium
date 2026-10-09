@@ -319,25 +319,13 @@ pub fn decode_semantic_snapshot(
             }
         }
 
-        // Only public, credential-free, canonical document links enter model
-        // context. Rejected destinations are omitted, not repaired or truncated.
+        // Only public, credential-free document links enter model context.
         let link_destination = raw_destination
-            .filter(|value| {
-                sensitivity == SemanticSensitivity::Public
-                    && !looks_like_secret_value(value.as_str())
-            })
-            .and_then(|value| {
-                let target = crate::ContextNavigationTarget::parse(value.as_str()).ok()?;
-                (target.as_url().as_str() == value.as_str() && model_safe_public_url(&target))
-                    .then_some(target)
-            });
+            .filter(|_| sensitivity == SemanticSensitivity::Public)
+            .and_then(|value| public_destination(value.as_str()));
         let image_source = raw_image
             .filter(|_| sensitivity == SemanticSensitivity::Public)
-            .and_then(|value| {
-                let target = crate::ContextNavigationTarget::parse(value.as_str()).ok()?;
-                (target.as_url().as_str() == value.as_str() && model_safe_public_url(&target))
-                    .then_some(target)
-            });
+            .and_then(|value| public_destination(value.as_str()));
         retained_text_bytes = retained_text_bytes
             .checked_add(
                 image_source
@@ -683,6 +671,55 @@ fn contains_sensitive_embedded_url_state_at_depth(value: &str, depth: u8) -> boo
 }
 
 /// Shared final disclosure boundary for page-derived or trusted-checkpoint URLs.
+/// A canonical page address as the model may see it. An address whose query
+/// or fragment carries opaque or credential-like state (a store's tracking
+/// blob, a session id) loses those parameters and keeps the rest, so a
+/// product link stays the product's own page instead of disappearing; an
+/// address whose user, host or path itself looks secret stays omitted.
+pub(crate) fn public_destination(value: &str) -> Option<crate::ContextNavigationTarget> {
+    let target = crate::ContextNavigationTarget::parse(value).ok()?;
+    if target.as_url().as_str() == value
+        && !looks_like_secret_value(value)
+        && model_safe_public_url(&target)
+    {
+        return Some(target);
+    }
+    let mut url = target.as_url().clone();
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || looks_like_secret_value(url.path())
+    {
+        return None;
+    }
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, value)| {
+            !(is_sensitive_url_parameter_name(key.as_ref())
+                || has_credential_label(key.as_ref())
+                || looks_like_secret_value(key.as_ref())
+                || looks_like_secret_value(value.as_ref())
+                || value.contains('%')
+                || contains_sensitive_embedded_url_state(key.as_ref())
+                || contains_sensitive_embedded_url_state(value.as_ref()))
+        })
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    if kept.is_empty() {
+        url.set_query(None);
+    } else {
+        url.query_pairs_mut().clear().extend_pairs(kept);
+    }
+    if url.fragment().is_some_and(fragment_contains_sensitive_data) {
+        url.set_fragment(None);
+    }
+    let repaired = crate::ContextNavigationTarget::parse(url.as_str()).ok()?;
+    (repaired.as_url().as_str() == url.as_str()
+        && !looks_like_secret_value(url.as_str())
+        && model_safe_public_url(&repaired))
+    .then_some(repaired)
+}
+
 pub(crate) fn model_safe_public_url(target: &crate::ContextNavigationTarget) -> bool {
     let url = target.as_url();
     matches!(url.scheme(), "http" | "https")
@@ -1104,6 +1141,41 @@ mod tests {
     use serde_json::json;
     use zephium_core::ids::ProfileId;
 
+    #[test]
+    fn destinations_lose_opaque_state_and_keep_the_page() {
+        let amazon = "https://www.amazon.com/LEGO-Technic-Chevrolet-Corvette-Stingray/dp/B0DFTPRHFK/ref=sr_1_1?dib=eyJ2IjoiMSJ9.Yk3c9Hn0pQ2wXZ7aB_cD.e5fG6hI7jK8lM9nO&dib_tag=se&keywords=lego+technic&qid=1760000000&sr=8-1";
+        assert_eq!(
+            public_destination(amazon).map(|target| target.as_url().to_string()),
+            Some("https://www.amazon.com/LEGO-Technic-Chevrolet-Corvette-Stingray/dp/B0DFTPRHFK/ref=sr_1_1?dib_tag=se&keywords=lego+technic&qid=1760000000&sr=8-1".to_owned())
+        );
+        for (value, expected) in [
+            (
+                "https://shop.example.test/item/42?session_id=abcdef123456&color=blue",
+                Some("https://shop.example.test/item/42?color=blue"),
+            ),
+            (
+                "https://shop.example.test/item/42?token=sk_live_12345678901234567890",
+                Some("https://shop.example.test/item/42"),
+            ),
+            (
+                "https://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html",
+                Some("https://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html"),
+            ),
+            ("https://user:pass@shop.example.test/item", None),
+            (
+                "https://shop.example.test/sk_live_12345678901234567890/item",
+                None,
+            ),
+            ("javascript:alert(1)", None),
+        ] {
+            assert_eq!(
+                public_destination(value).map(|target| target.as_url().to_string()),
+                expected.map(str::to_owned),
+                "{value}"
+            );
+        }
+    }
+
     fn decode_context() -> SemanticDecodeContext {
         let identity = ContextIdentity::new(
             ContextId::from_raw(1),
@@ -1451,20 +1523,47 @@ mod tests {
                 ])),
             )
             .unwrap();
-            assert_eq!(
-                snapshot.nodes()[0].link_destination().is_some(),
-                retained,
-                "{destination}"
-            );
+            let kept = snapshot.nodes()[0]
+                .link_destination()
+                .map(|target| target.as_url().to_string());
+            if retained {
+                assert_eq!(kept.as_deref(), Some(destination), "{destination}");
+            } else if let Some(kept) = &kept {
+                // Opaque or credential-like state is removed, never the page.
+                assert!(
+                    sensitivity == "public" && kept.starts_with("https://example.test/docs"),
+                    "{destination} -> {kept}"
+                );
+                for marker in ["secret", "short", "Qm9V", "c2ln", "credential", "ghp", "token"] {
+                    assert!(!kept.contains(marker), "{destination} -> {kept}");
+                }
+            }
             assert_eq!(
                 snapshot.total_text_bytes(),
-                if retained {
-                    destination.len() as u32
-                } else {
-                    0
-                }
+                kept.as_ref().map_or(0, |kept| kept.len() as u32)
             );
             assert!(!format!("{snapshot:?}").contains("example.test"));
+        }
+        for (destination, sensitivity) in [
+            (good, "sensitive"),
+            (good, "secret"),
+            ("https://user:secret@example.test/docs", "public"),
+            ("javascript:alert(1)", "public"),
+            ("about:blank", "public"),
+            ("/docs/next", "public"),
+            ("https://example.test/sk-secret-key-value", "public"),
+        ] {
+            let snapshot = decode_semantic_snapshot(
+                decode_context(),
+                &payload(json!([
+                    {"k":1,"r":"link","u":destination,"q":sensitivity}
+                ])),
+            )
+            .unwrap();
+            assert!(
+                snapshot.nodes()[0].link_destination().is_none(),
+                "{destination}"
+            );
         }
         assert_eq!(
             decode_semantic_snapshot(

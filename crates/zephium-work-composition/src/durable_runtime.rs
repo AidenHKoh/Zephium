@@ -926,6 +926,7 @@ impl NativeWorkComposition {
                         | AgentWorkEventKind::ActionProposalRefused(_)
                         | AgentWorkEventKind::AppliedOnPageChange
                         | AgentWorkEventKind::ExtractionDropped { .. }
+                        | AgentWorkEventKind::ExtractionCorrected
                         | AgentWorkEventKind::Verified
                         | AgentWorkEventKind::ModelRequestedHuman(_)
                         | AgentWorkEventKind::DecisionSettled(_)

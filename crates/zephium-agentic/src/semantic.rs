@@ -502,7 +502,7 @@ impl SemanticText {
     }
 }
 
-fn invalid_semantic_char(character: char) -> bool {
+pub(crate) fn invalid_semantic_char(character: char) -> bool {
     character.is_control()
         || matches!(
             character,
