@@ -1462,7 +1462,11 @@ impl NativeWorkComposition {
                         usage: Some(WorkUsage::default()),
                         artifacts: vec![],
                         intervention: None,
-                        note: Some("The browser was not ready for this page".into()),
+                        note: Some(
+                            storage_note(&snapshot)
+                                .unwrap_or("The browser was not ready for this page")
+                                .into(),
+                        ),
                         measurements: measure.settle(started, model_in_flight),
                         helped,
                         redirect: None,
@@ -1475,14 +1479,17 @@ impl NativeWorkComposition {
                         usage: Some(uncertain_usage(settled, model_in_flight, limits)),
                         artifacts: vec![],
                         note: Some(
-                            construction_note(
-                                snapshot.construction_timed_out,
-                                construction_attempt,
-                            )
-                            .or_else(|| intervention_note(intervention.as_ref()))
-                            .or_else(|| snapshot.failure.map(failure_note))
-                            .unwrap_or("The page could not be read reliably")
-                            .into(),
+                            storage_note(&snapshot)
+                                .or_else(|| {
+                                    construction_note(
+                                        snapshot.construction_timed_out,
+                                        construction_attempt,
+                                    )
+                                })
+                                .or_else(|| intervention_note(intervention.as_ref()))
+                                .or_else(|| snapshot.failure.map(failure_note))
+                                .unwrap_or("The page could not be read reliably")
+                                .into(),
                         ),
                         intervention,
                         measurements: measure.settle(started, model_in_flight),
@@ -1741,6 +1748,7 @@ impl NativeWorkComposition {
                     _ if snapshot.construction_timed_out => {
                         construction_note(true, construction_attempt)
                     }
+                    _ if storage_note(&snapshot).is_some() => storage_note(&snapshot),
                     _ if not_ready => Some("The browser was not ready for this page"),
                     Some(AgentWorkDisposition::Succeeded | AgentWorkDisposition::Cancelled) => None,
                     Some(AgentWorkDisposition::WaitingForHuman) if gave_up_on_person => {
@@ -1981,6 +1989,12 @@ fn construction_note(
 /// both read where the page leads.
 fn redirect_note(destination: &ContextNavigationTarget) -> String {
     format!("The page redirects to {}", destination.as_url())
+}
+
+/// The Store refused the page because recovery history fills it.
+fn storage_note(snapshot: &zephium_app::RetainedWorkSnapshot) -> Option<&'static str> {
+    (snapshot.persistence_failure == Some(AgentWorkJournalError::Capacity))
+        .then_some(zephium_core::work::runtime::read_note::WORK_STORAGE)
 }
 
 fn failure_note(failure: AgentWorkFailure) -> &'static str {

@@ -496,7 +496,10 @@ where
         if new.iter().any(|step| {
             matches!(step.kind, WorkStepKindV1::Read { .. })
                 && step.status != WorkStepStatus::Succeeded
-                && step.note.as_deref() == Some(NOT_READY)
+                && matches!(
+                    step.note.as_deref(),
+                    Some(NOT_READY | zephium_core::work::runtime::read_note::WORK_STORAGE)
+                )
         }) {
             self.run.set_browser_down();
         }
