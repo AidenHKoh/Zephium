@@ -633,8 +633,15 @@ impl AgentWorkController {
             .checked_add(Duration::from_secs(4))
             .ok_or(AgentWorkFailure::Deadline)?
             .min(state.native.deadline);
+        // A site page that has rendered next to nothing yet (an app booting,
+        // results still on their way) is waited out like a first page.
+        let site = state
+            .navigation_discovery
+            .as_ref()
+            .is_some_and(AgentNavigationDiscovery::is_site_session);
         for delay in DELAYS_MS {
-            if !has_dominant_loading_placeholders(&observation)
+            if !(has_dominant_loading_placeholders(&observation)
+                || (site && super::unrendered(&observation)))
                 || state
                     .native
                     .retained
@@ -661,7 +668,11 @@ impl AgentWorkController {
             // The arrival's account is attested once, after its settled look.
             state.native.check_control(worker, browser)?;
             let next = Self::observe(state, worker, browser).await?;
-            validate_initial_readiness_successor(&observation, &next)?;
+            // A page that loaded its own site meanwhile is a new document:
+            // its look continues the wait.
+            if !super::replaced_document(&observation, &next) {
+                validate_initial_readiness_successor(&observation, &next)?;
+            }
             observation = next;
         }
         Ok(observation)
