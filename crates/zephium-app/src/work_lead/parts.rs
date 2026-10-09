@@ -206,6 +206,18 @@ where
         let _ = self.run.part(fact.clone()).await;
         self.run.activity(WorkActivityV1::Delegating);
         let mut report = self.helper(fact.id, &spec).await;
+        if report.objects.is_empty()
+            && report.state != WorkPartStateV1::Stopped
+            && matches!(self.kit(spec.helper), Kit::Browser)
+        {
+            if let Some((id, count)) = self.place_found(fact.id, &spec).await {
+                report.objects.push(id);
+                if report.state == WorkPartStateV1::Failed && report.need.is_none() {
+                    report.state = WorkPartStateV1::Done;
+                    report.summary = Some(format!("{count} found"));
+                }
+            }
+        }
         self.settle_need(fact.id, &spec, &mut report).await;
         if let Kit::Registered(helper) = self.kit(spec.helper) {
             let context = LeadToolContext {
@@ -274,6 +286,63 @@ where
         }
         out.push_str(&report.digest);
         (out, report.state != WorkPartStateV1::Done)
+    }
+
+    /// Places the records a browser part's pages gave as its picks, when it
+    /// placed nothing itself; returns the object and how many it holds.
+    async fn place_found(
+        &self,
+        part: WorkPartId,
+        spec: &PartSpec,
+    ) -> Option<(WorkArtifactId, usize)> {
+        use super::found;
+        let execution = self.run.execution().await.ok()?;
+        let rows = found::rows(&execution, part);
+        if rows.is_empty() {
+            return None;
+        }
+        let facet = found::facet(
+            spec.search.as_ref(),
+            &format!("{} {} {}", spec.title, spec.goal, spec.brief),
+            &rows,
+        );
+        let query = spec.search.as_ref().and_then(|s| s.query.as_deref());
+        let cheapest = found::wants_cheapest(&format!("{} {}", spec.goal, self.objective));
+        let (data, sources) = found::picks(&rows, facet, query, cheapest, |link, page| {
+            self.run.cite(link.clone(), "", Some(page))
+        })?;
+        let count = data["items"].as_array().map_or(0, Vec::len);
+        let site = spec
+            .service
+            .as_ref()
+            .and_then(|s| s.host.as_deref())
+            .map(|host| {
+                let label = host
+                    .trim_start_matches("www.")
+                    .split('.')
+                    .next()
+                    .unwrap_or(host);
+                if spec.title.to_lowercase().contains(&label.to_lowercase()) {
+                    spec.title.clone()
+                } else {
+                    crate::work_sites::service_name(host)
+                }
+            });
+        let title = found::title(facet, site.as_deref(), &spec.title);
+        let mut proposed =
+            objects::propose(self.run, &[], "picks", &title, data, &sources, &[], true).ok()?;
+        let honesty = objects::Honesty {
+            sourced: !proposed.evidence.is_empty(),
+            failed: Vec::new(),
+        };
+        if objects::honest(&proposed.data, &honesty).is_err() {
+            proposed.data = objects::mend(&proposed.data, &honesty)?.0;
+        }
+        let id = objects::publish(self.run, proposed, Some(part), None)
+            .await
+            .ok()?;
+        self.run.activity(WorkActivityV1::ProducingArtifact);
+        Some((id, count))
     }
 
     fn kit(&self, helper: WorkHelperV1) -> Kit {
