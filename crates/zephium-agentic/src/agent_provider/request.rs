@@ -3076,6 +3076,63 @@ impl AgentProviderExtractionRequestDraft {
         })
     }
 
+    /// A second mapping of the same delivered schema and read after Rust
+    /// refused the first one, told exactly why. It uses the same baseline,
+    /// provider and admission as the refused call, and is never repeated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_after_refusal(
+        baseline: &SemanticObservationAcknowledgement,
+        prior: AgentProviderInputMetricReceipt,
+        call: AgentModelCallRequest,
+        config: &AgentProviderCallConfig,
+        objective: &AgentProviderObjective,
+        payload: crate::SemanticExtractionModelPayload,
+        schema: &SemanticExtractionSchema,
+        read: &SemanticReadResult<'_>,
+        refusal: crate::SemanticExtractionError,
+    ) -> Result<Self, AgentProviderRequestError> {
+        if prior.lease != call.lease()
+            || prior.call >= call.id()
+            || !payload.matches(schema, read)
+            || !read.matches_acknowledgement(baseline)
+            || !config.permits_tool(AgentBrowserToolKind::Extract)
+        {
+            return Err(AgentPolicyError::Authority.into());
+        }
+        let (text, semantic_stats, delivery) = payload.into_provider_parts();
+        let note = crate::semantic_extraction_refusal_note(refusal);
+        let body = encode_openai_extraction_messages(
+            config,
+            objective.as_str(),
+            &text,
+            Some(&note),
+            &bound_extraction_output_schema(schema, Some(read)),
+        )?;
+        let continuation_transcript =
+            AgentProviderTranscript::try_initial(Arc::from(objective.as_str()), text)
+                .ok_or(AgentProviderRequestError::Encoding)?;
+        Ok(Self {
+            request: AgentProviderRequest {
+                call: AgentProviderCallIdentity {
+                    manifest: prior.manifest,
+                    manifest_guard: prior.manifest_guard,
+                    call: call.id(),
+                    lease: call.lease(),
+                    node: prior.node,
+                },
+                config: config.clone(),
+                endpoint: AgentProviderEndpoint::OpenAiResponses,
+                body,
+            },
+            baseline: baseline.clone(),
+            delivery,
+            semantic_stats,
+            continuation_transcript,
+            schema: schema.id(),
+            subtree_target: None,
+        })
+    }
+
     /// Encodes the selected provider's fixed constrained-output protocol.
     pub fn try_new(
         continuation: AgentProviderBoundExtractionContinuation,
@@ -4743,15 +4800,30 @@ pub(in crate::agent_provider) fn encode_openai_extraction_payload(
     payload: &str,
     output_schema: &Value,
 ) -> Result<Vec<u8>, AgentProviderRequestError> {
+    encode_openai_extraction_messages(config, objective, payload, None, output_schema)
+}
+
+fn encode_openai_extraction_messages(
+    config: &AgentProviderCallConfig,
+    objective: &str,
+    payload: &str,
+    refusal: Option<&str>,
+    output_schema: &Value,
+) -> Result<Vec<u8>, AgentProviderRequestError> {
     if config.provider() != AgentProviderKind::OpenAiResponses {
         return Err(AgentProviderRequestError::Encoding);
     }
     // Mapping is a fresh constrained call. The exact Extract correlation stays
     // bound in Rust; browsing replay is neither evidence nor mapper authority.
-    let input = vec![
+    let mut input = vec![
         OpenAiContinuationInputWire::Message(openai_text_message("user", objective)),
         OpenAiContinuationInputWire::Message(openai_text_message("user", payload)),
     ];
+    if let Some(refusal) = refusal {
+        input.push(OpenAiContinuationInputWire::Message(openai_text_message(
+            "user", refusal,
+        )));
+    }
     let wire = OpenAiExtractionRequestWire {
         model: config.model().as_str(),
         instructions: AGENT_EXTRACTION_INSTRUCTIONS_V1,
