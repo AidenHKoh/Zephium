@@ -57,6 +57,8 @@ pub(crate) use agent_audit::{AgentAuditAppendOutcome, MAX_DURABLE_AGENT_AUDIT_EV
 pub(crate) use agent_work::work_test_guard;
 #[cfg(all(test, windows, feature = "work-execution"))]
 pub(crate) use agent_work::work_test_storage;
+#[cfg(feature = "work-execution")]
+pub(crate) use agent_work::AGENT_WORK_PRUNE_BATCH;
 use compatibility::remove_legacy_source;
 pub(crate) use compatibility::LEGACY_IMPORT_STATE_KEY;
 #[cfg(test)]
@@ -280,6 +282,13 @@ impl Hub {
                     ));
                 }
             }
+        }
+        // Windows Work storage opens lazily and prunes when it does.
+        #[cfg(all(feature = "work-execution", not(windows)))]
+        hub.prune_agent_work(0, agent_work::AGENT_WORK_PRUNE_AT_OPEN);
+        #[cfg(all(feature = "work-execution", windows))]
+        if hub.windows_work_storage.is_none() {
+            hub.prune_agent_work(0, agent_work::AGENT_WORK_PRUNE_AT_OPEN);
         }
         Ok(hub)
     }

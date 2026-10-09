@@ -208,6 +208,7 @@ impl Hub {
         if self.windows_work_database.is_none() {
             let selector = self.windows_work_storage.as_ref().ok_or_else(unavailable)?;
             self.windows_work_database = Some(WindowsWorkDatabase::open(selector)?);
+            self.prune_agent_work(0, super::agent_work::AGENT_WORK_PRUNE_AT_OPEN);
         }
         self.windows_work_database.as_mut().ok_or_else(unavailable)
     }

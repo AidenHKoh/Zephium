@@ -786,20 +786,7 @@ impl ApplicationWork {
     }
 
     fn remember(&mut self, record: AgentWorkRecord) -> bool {
-        let mut projection = lock(&self.projection);
-        if let Some(previous) = projection
-            .records
-            .iter_mut()
-            .find(|previous| previous.key() == record.key())
-        {
-            *previous = record;
-            true
-        } else if projection.records.len() < MAX_DURABLE_AGENT_WORK_RUNS {
-            projection.records.push(record);
-            true
-        } else {
-            false
-        }
+        zephium_agentic::remember_agent_work_record(&mut lock(&self.projection).records, record)
     }
 
     fn acknowledge(
@@ -894,7 +881,7 @@ impl ApplicationWork {
                 AgentWorkJournalRequest::Claim,
                 AgentWorkJournalReply::Claimed { owner, records },
             ) => {
-                if records.len() > MAX_DURABLE_AGENT_WORK_RUNS
+                if records.len() > zephium_agentic::MAX_AGENT_WORK_INVENTORY
                     || records
                         .windows(2)
                         .any(|pair| pair[0].key() >= pair[1].key())

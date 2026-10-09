@@ -984,6 +984,9 @@ pub mod read_note {
         "The page did not become ready within its loading window";
     pub const SLOW_SITE: &str =
         "The site is slowing us down; the page did not become ready after two attempts";
+    /// Live and interrupted page runs kept for recovery fill Work storage.
+    pub const WORK_STORAGE: &str =
+        "Work storage needs attention: too many interrupted page runs are waiting for review";
 
     /// A page that ended behind a bot check or waiting on the person:
     /// "state.gov asks for a human check; its page was skipped", "Airbnb

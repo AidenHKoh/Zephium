@@ -302,10 +302,11 @@ pub use agent_supervisor::{
     MAX_AGENT_WORK_ORCHESTRATION_TURNS,
 };
 pub use agent_work_journal::{
-    AgentWorkDebt, AgentWorkDisposition, AgentWorkHumanHandoff, AgentWorkIncarnation,
-    AgentWorkJournalCompletion, AgentWorkJournalError, AgentWorkJournalMutation,
-    AgentWorkJournalPort, AgentWorkJournalReply, AgentWorkJournalRequest, AgentWorkRecord,
-    AGENT_WORK_RECORD_BYTES, MAX_DURABLE_AGENT_WORK_RUNS,
+    outstanding_agent_work_runs, remember_agent_work_record, AgentWorkDebt, AgentWorkDisposition,
+    AgentWorkHumanHandoff, AgentWorkIncarnation, AgentWorkJournalCompletion, AgentWorkJournalError,
+    AgentWorkJournalMutation, AgentWorkJournalPort, AgentWorkJournalReply, AgentWorkJournalRequest,
+    AgentWorkRecord, AGENT_WORK_RECORD_BYTES, MAX_AGENT_WORK_INVENTORY,
+    MAX_DURABLE_AGENT_WORK_RUNS, RETAINED_CLEAN_AGENT_WORK_RUNS,
 };
 #[cfg(all(
     feature = "provider-transport",

@@ -14,8 +14,8 @@ use zephium_agentic::{
     AgentWorkArtifactReply, AgentWorkArtifactRequest, AgentWorkDisposition, AgentWorkIncarnation,
     AgentWorkJournalError as Error, AgentWorkJournalMutation, AgentWorkJournalReply as Reply,
     AgentWorkJournalRequest as Request, AgentWorkRecord, AGENT_WORK_RECORD_BYTES,
-    MAX_AGENT_WORK_ARTIFACT_BYTES, MAX_AGENT_WORK_ARTIFACT_TOTAL_BYTES,
-    MAX_DURABLE_AGENT_WORK_RUNS,
+    MAX_AGENT_WORK_ARTIFACT_BYTES, MAX_AGENT_WORK_ARTIFACT_TOTAL_BYTES, MAX_AGENT_WORK_INVENTORY,
+    MAX_DURABLE_AGENT_WORK_RUNS, RETAINED_CLEAN_AGENT_WORK_RUNS,
 };
 use zephium_core::ids::ProfileId;
 use zephium_private_fs::LockedPrivateNamespace;
@@ -45,6 +45,17 @@ mod windows_tests;
 
 const _: [(); 96] = [(); AGENT_WORK_RECORD_BYTES];
 const _: [(); 1024] = [(); MAX_DURABLE_AGENT_WORK_RUNS];
+
+/// Every stored run, settled or not; META v25 and WORK v2 enforce the same
+/// ceiling. Only results Work still cites can hold clean runs past the window.
+const MAX_STORED_AGENT_WORK_RUNS: usize = 4096;
+/// Runs one prune pass may delete after a run ends.
+pub(crate) const AGENT_WORK_PRUNE_BATCH: usize = 64;
+/// Enough at Store open to bring any Store back to its retained window.
+pub(super) const AGENT_WORK_PRUNE_AT_OPEN: usize = MAX_STORED_AGENT_WORK_RUNS;
+/// The newest results a byte prune never takes: a run reads its own back.
+const PROTECTED_RECENT_RESULTS: usize = 16;
+const CLEAN_TERMINAL: &str = "terminal = 1 AND substr(record, 3, 1) = X'00'";
 
 pub(super) struct WorkOwnership {
     lease: WorkLease,
@@ -214,6 +225,9 @@ impl Hub {
         {
             return Err(Error::Fenced);
         }
+        if let AgentWorkArtifactRequest::Publish(publication) = &request {
+            self.prune_agent_work(publication.body().len(), AGENT_WORK_PRUNE_BATCH);
+        }
         ownership.verified(|| {
             self.with_work_connection(|connection| {
                 verify_owner(connection, owner)?;
@@ -252,6 +266,61 @@ impl Hub {
                 }
             })
         })
+    }
+
+    /// Deletes clean terminal runs beyond the retained window, oldest first,
+    /// with their results, and makes `room` result bytes available. Results a
+    /// Work execution still cites stay. Best effort: nothing waits on it.
+    pub(crate) fn prune_agent_work(&mut self, room: usize, limit: usize) {
+        if self.recovery_required.is_some() || limit == 0 {
+            return;
+        }
+        let Ok((settled, bytes)) = self.with_work_connection(|connection| {
+            Ok((settled_clean(connection)?, artifact_bytes(connection)?))
+        }) else {
+            return;
+        };
+        let mut over = (bytes + room).saturating_sub(MAX_AGENT_WORK_ARTIFACT_TOTAL_BYTES);
+        let mut prunable = Vec::new();
+        // Newest first; walk oldest first so the window keeps the newest.
+        for (age, run) in settled.iter().enumerate().rev() {
+            if prunable.len() == limit {
+                break;
+            }
+            let by_count = age >= RETAINED_CLEAN_AGENT_WORK_RUNS;
+            let by_bytes = over > 0 && run.bytes > 0 && age >= PROTECTED_RECENT_RESULTS;
+            if !(by_count || by_bytes) {
+                continue;
+            }
+            if let Some((profile, id)) = run.result {
+                if self.work_result_cited(profile, id) {
+                    continue;
+                }
+            }
+            over = over.saturating_sub(run.bytes);
+            prunable.push(run.key);
+        }
+        if !prunable.is_empty() {
+            let _ = self.with_work_connection(|connection| delete_clean(connection, &prunable));
+        }
+    }
+
+    // Any verbatim occurrence counts: a false positive only keeps a result.
+    fn work_result_cited(&mut self, profile: ProfileId, id: [u8; 16]) -> bool {
+        if !self.registry.contains(&profile) {
+            return false;
+        }
+        let needle = ulid::Ulid(u128::from_be_bytes(id)).to_string();
+        let Ok(connection) = self.profile_conn(profile) else {
+            return true;
+        };
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM work_executions WHERE instr(body, ?1) > 0)",
+                [needle],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(true)
     }
 
     fn claim_work(&mut self) -> Result<Reply, Error> {
@@ -356,22 +425,48 @@ fn decode(bytes: Vec<u8>, terminal: bool, key: &[u8]) -> Result<AgentWorkRecord,
     Ok(record)
 }
 
-fn inventory(connection: &Connection) -> Result<Vec<AgentWorkRecord>, Error> {
+fn count_runs(connection: &Connection, filter: &str) -> Result<usize, Error> {
     let count: i64 = connection
-        .query_row("SELECT count(*) FROM agent_work_runs", [], |row| row.get(0))
+        .query_row(
+            &format!("SELECT count(*) FROM agent_work_runs WHERE {filter}"),
+            [],
+            |row| row.get(0),
+        )
         .map_err(|_| Error::Uncertain)?;
-    if !(0..=MAX_DURABLE_AGENT_WORK_RUNS as i64).contains(&count) {
+    usize::try_from(count).map_err(|_| Error::Uncertain)
+}
+
+/// Live or debt-bearing runs: the only ones admission capacity counts.
+fn outstanding(connection: &Connection) -> Result<usize, Error> {
+    count_runs(connection, &format!("NOT ({CLEAN_TERMINAL})"))
+}
+
+/// Every live or debt-bearing run plus the most recently settled clean ones.
+/// Older clean runs are history the Store may already have pruned.
+fn inventory(connection: &Connection) -> Result<Vec<AgentWorkRecord>, Error> {
+    if outstanding(connection)? > MAX_DURABLE_AGENT_WORK_RUNS {
         return Err(Error::Capacity);
     }
     let mut records = Vec::new();
     records
-        .try_reserve_exact(count as usize)
+        .try_reserve_exact(MAX_AGENT_WORK_INVENTORY)
         .map_err(|_| Error::Capacity)?;
     let mut statement = connection
-        .prepare("SELECT run_key, record, terminal FROM agent_work_runs ORDER BY run_key")
+        .prepare(&format!(
+            "SELECT run_key, record, terminal FROM agent_work_runs
+             WHERE NOT ({CLEAN_TERMINAL}) OR run_key IN (
+                 SELECT run_key FROM agent_work_runs WHERE {CLEAN_TERMINAL}
+                 ORDER BY settled IS NULL, settled DESC, run_key DESC LIMIT ?1)
+             ORDER BY run_key"
+        ))
         .map_err(|_| Error::Uncertain)?;
-    let mut rows = statement.query([]).map_err(|_| Error::Uncertain)?;
+    let mut rows = statement
+        .query([RETAINED_CLEAN_AGENT_WORK_RUNS as i64])
+        .map_err(|_| Error::Uncertain)?;
     while let Some(row) = rows.next().map_err(|_| Error::Uncertain)? {
+        if records.len() == MAX_AGENT_WORK_INVENTORY {
+            return Err(Error::Uncertain);
+        }
         let key: Vec<u8> = row.get(0).map_err(|_| Error::Uncertain)?;
         records.push(decode(
             row.get(1).map_err(|_| Error::Uncertain)?,
@@ -380,6 +475,84 @@ fn inventory(connection: &Connection) -> Result<Vec<AgentWorkRecord>, Error> {
         )?);
     }
     Ok(records)
+}
+
+struct SettledRun {
+    key: [u8; 32],
+    result: Option<(ProfileId, [u8; 16])>,
+    bytes: usize,
+}
+
+/// Clean terminal runs, most recently settled first. Runs settled before
+/// settlement was ordered come last, by key.
+fn settled_clean(connection: &Connection) -> Result<Vec<SettledRun>, Error> {
+    let mut statement = connection
+        .prepare(
+            "SELECT r.run_key, a.profile_id, a.artifact_id, coalesce(length(a.body), 0)
+             FROM agent_work_runs r LEFT JOIN agent_work_artifacts a ON a.run_key = r.run_key
+             WHERE r.terminal = 1 AND substr(r.record, 3, 1) = X'00'
+             ORDER BY r.settled IS NULL, r.settled DESC, r.run_key DESC
+             LIMIT ?1",
+        )
+        .map_err(|_| Error::Uncertain)?;
+    let mut rows = statement
+        .query([MAX_STORED_AGENT_WORK_RUNS as i64])
+        .map_err(|_| Error::Uncertain)?;
+    let mut runs = Vec::new();
+    while let Some(row) = rows.next().map_err(|_| Error::Uncertain)? {
+        let key: Vec<u8> = row.get(0).map_err(|_| Error::Uncertain)?;
+        let profile: Option<String> = row.get(1).map_err(|_| Error::Uncertain)?;
+        let id: Option<Vec<u8>> = row.get(2).map_err(|_| Error::Uncertain)?;
+        let bytes: i64 = row.get(3).map_err(|_| Error::Uncertain)?;
+        let result = match (profile, id) {
+            (Some(profile), Some(id)) => Some((
+                ProfileId::parse(&profile).ok_or(Error::Uncertain)?,
+                id.try_into().map_err(|_| Error::Uncertain)?,
+            )),
+            (None, None) => None,
+            _ => return Err(Error::Uncertain),
+        };
+        runs.push(SettledRun {
+            key: key.try_into().map_err(|_| Error::Uncertain)?,
+            result,
+            bytes: usize::try_from(bytes).map_err(|_| Error::Uncertain)?,
+        });
+    }
+    Ok(runs)
+}
+
+fn artifact_bytes(connection: &Connection) -> Result<usize, Error> {
+    let bytes: i64 = connection
+        .query_row(
+            "SELECT coalesce(sum(length(body)), 0) FROM agent_work_artifacts",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| Error::Uncertain)?;
+    usize::try_from(bytes).map_err(|_| Error::Uncertain)
+}
+
+/// One transaction; the schema refuses a run that is not clean terminal.
+fn delete_clean(connection: &mut Connection, keys: &[[u8; 32]]) -> Result<(), Error> {
+    let transaction = connection.transaction().map_err(|_| Error::Unavailable)?;
+    for key in keys {
+        transaction
+            .execute(
+                &format!(
+                    "DELETE FROM agent_work_artifacts WHERE run_key = ?1 AND EXISTS(
+                         SELECT 1 FROM agent_work_runs WHERE run_key = ?1 AND {CLEAN_TERMINAL})"
+                ),
+                [key.as_slice()],
+            )
+            .map_err(|_| Error::Uncertain)?;
+        transaction
+            .execute(
+                &format!("DELETE FROM agent_work_runs WHERE run_key = ?1 AND {CLEAN_TERMINAL}"),
+                [key.as_slice()],
+            )
+            .map_err(|_| Error::Uncertain)?;
+    }
+    transaction.commit().map_err(|_| Error::Uncertain)
 }
 
 fn read(connection: &Connection, key: [u8; 32]) -> Result<Option<AgentWorkRecord>, Error> {
@@ -498,11 +671,17 @@ fn compare_and_set_records(
     }
     let changed = if let Some(previous) = expected {
         transaction.execute(
-            "UPDATE agent_work_runs SET record = ?1, terminal = ?2 WHERE run_key = ?3 AND record = ?4 AND terminal = 0",
+            "UPDATE agent_work_runs SET record = ?1, terminal = ?2,
+                 settled = CASE WHEN ?2 THEN (SELECT coalesce(max(settled), 0) + 1 FROM agent_work_runs) END
+             WHERE run_key = ?3 AND record = ?4 AND terminal = 0",
             params![next.as_bytes().as_slice(), next.disposition().is_terminal(), next.key().as_slice(), previous.as_bytes().as_slice()],
         )
     } else {
-        if inventory(&transaction)?.len() >= MAX_DURABLE_AGENT_WORK_RUNS { return Err(Error::Capacity); }
+        if outstanding(&transaction)? >= MAX_DURABLE_AGENT_WORK_RUNS
+            || count_runs(&transaction, "1")? >= MAX_STORED_AGENT_WORK_RUNS
+        {
+            return Err(Error::Capacity);
+        }
         transaction.execute(
             "INSERT INTO agent_work_runs(run_key, record, terminal, result_profile) VALUES (?1, ?2, 0, ?3)",
             params![next.key().as_slice(), next.as_bytes().as_slice(), result_destination.map(|profile| profile.to_string())],

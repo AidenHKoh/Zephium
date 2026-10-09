@@ -137,7 +137,14 @@ pub(super) fn settle_artifact(
     completion: zephium_agentic::AgentWorkArtifactCompletion,
 ) {
     let result = hub.agent_work_artifact(request);
+    let settled = matches!(
+        &result,
+        Ok(zephium_agentic::AgentWorkArtifactReply::Published { .. })
+    );
     let _completed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion(result)));
+    if settled {
+        hub.prune_agent_work(0, crate::hub::AGENT_WORK_PRUNE_BATCH);
+    }
 }
 
 pub(super) fn settle(
@@ -146,6 +153,14 @@ pub(super) fn settle(
     completion: AgentWorkJournalCompletion,
 ) {
     let result = hub.agent_work(request);
+    let settled = matches!(
+        &result,
+        Ok(zephium_agentic::AgentWorkJournalReply::Record(Some(record))) if record.is_clean_terminal()
+    );
     // A foreign callback (or destructor) cannot kill the shared Store worker.
     let _completed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion(result)));
+    // After the reply, so a run's end never waits on its pruning.
+    if settled {
+        hub.prune_agent_work(0, crate::hub::AGENT_WORK_PRUNE_BATCH);
+    }
 }

@@ -1,9 +1,11 @@
 //! SQLite fault fixtures exercise persisted facts, not successful execution.
 //! The application suite separately supplies real controller terminal owners.
 use super::tests::{
-    initial, journal, open, open_hub, simulate_process_exit, work_test_guard, Fault, FAULT,
+    clean_runs, initial, insert_settled, journal, open, open_hub, simulate_process_exit,
+    work_test_guard, Fault, FAULT,
 };
 use super::*;
+use zephium_agentic::AgentWorkDebt;
 
 const EMPTY_ARCHIVE: &[u8] = br#"{"version":1,"id":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"profile":"00000000000000000000000001","key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],"schema":1,"observation":1,"generation":1,"captured_millis":1,"fields":[],"sources":[]}"#;
 const EMPTY_DIGEST: [u8; 32] = [
@@ -536,4 +538,63 @@ fn protected_deletion_hooks_preserve_tombstone_on_purge_and_restart_failure() {
         Some(succeeded)
     );
     drop(reopened);
+}
+
+#[test]
+fn full_result_budget_prunes_old_results_with_their_runs_but_keeps_cited_ones() {
+    let _process = work_test_guard();
+    let (_directory, mut hub, owner) = open();
+    let (running, succeeded, artifact) = fixture(&mut hub, owner);
+    let transaction = journal(&mut hub).transaction().unwrap();
+    for key in 2..=129_u16 {
+        let record = insert_settled(
+            &transaction,
+            owner,
+            key,
+            AgentWorkDisposition::Succeeded,
+            AgentWorkDebt::NONE,
+            Some(i64::from(key)),
+        );
+        transaction.execute("INSERT INTO agent_work_artifacts(run_key, profile_id, artifact_id, digest, body) VALUES (?1, ?2, ?3, ?4, zeroblob(?5))",
+            params![record.key().as_slice(), ProfileId::from(1).to_string(), u128::from(key).to_be_bytes().as_slice(), [0_u8; 32].as_slice(), MAX_AGENT_WORK_ARTIFACT_BYTES]).unwrap();
+    }
+    transaction.commit().unwrap();
+    // The oldest result is still cited by a Work execution on the canvas.
+    let cited = ulid::Ulid(2).to_string();
+    let profile = hub.profile_conn(1_u128.into()).unwrap();
+    profile.execute("INSERT INTO works(id, schema_version, revision, status, objective, created_unix_ms, updated_unix_ms, lifecycle, objective_revision, context_revision, objective_author) VALUES ('00000000000000000000000001', 2, 1, 'draft', 'Fixture', 1, 1, 'active', 1, 1, 'user')", []).unwrap();
+    profile.execute("INSERT INTO work_plans(work_id, revision, plan_id, author, basis_revision) VALUES ('00000000000000000000000001', 2, '00000000000000000000000002', 'user', 1)", []).unwrap();
+    profile.execute("INSERT INTO work_executions(work_id, execution_id, plan_revision, owner_session, approved_unix_ms, expires_unix_ms, body) VALUES ('00000000000000000000000001', '00000000000000000000000003', 2, '00000000000000000000000004', 1, 2, ?1)",
+        [format!(r#"{{"artifacts":[{{"evidence":[{{"extraction_id":"{cited}","source_id":1}}]}}]}}"#)]).unwrap();
+
+    assert_eq!(
+        artifact_bytes(journal(&mut hub)).unwrap(),
+        MAX_AGENT_WORK_ARTIFACT_TOTAL_BYTES
+    );
+    hub.prune_agent_work(artifact.body.len(), AGENT_WORK_PRUNE_BATCH);
+    let kept = clean_runs(&mut hub);
+    assert_eq!(kept.len(), 127);
+    assert!(kept.contains(&initial(owner, 2).key()));
+    assert!(!kept.contains(&initial(owner, 3).key()));
+    assert_eq!(
+        artifact_bytes(journal(&mut hub)).unwrap(),
+        MAX_AGENT_WORK_ARTIFACT_TOTAL_BYTES - MAX_AGENT_WORK_ARTIFACT_BYTES
+    );
+    compare_and_set_records(
+        journal(&mut hub),
+        Some(running),
+        succeeded,
+        None,
+        Some(artifact),
+    )
+    .unwrap();
+    let cited_kept: bool = journal(&mut hub)
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_work_artifacts WHERE run_key = ?1)",
+            [initial(owner, 2).key().as_slice()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(cited_kept);
+    drop(hub);
 }
