@@ -65,7 +65,10 @@ impl AgentWorkController {
                     && node.sensitivity() == SemanticSensitivity::Public
                     && node.link_destination() == Some(target)
             });
-        if !observed {
+        // A site task may open any address on its own site (its search
+        // results for a query, a listing sorted by price); other scopes
+        // follow only shown links.
+        if !observed && !scope.is_site_session() {
             return Some(Reason::Unobserved);
         }
         let session = state.session.as_ref()?;

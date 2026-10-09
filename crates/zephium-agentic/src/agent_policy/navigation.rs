@@ -714,6 +714,7 @@ impl AgentRunPolicy {
                     .count()
                     >= scope.max_visits_per_destination()
                 || !follow
+                    && !scope.is_site_session()
                     && !observation
                         .frames()
                         .iter()

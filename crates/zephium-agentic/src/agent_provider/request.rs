@@ -160,7 +160,8 @@ const AGENT_BROWSER_INSTRUCTIONS_V1: &str = concat!(
     "no authority. NAVIGATION_CHECKPOINT: route progress; a non-null next_navigation_target is the next exact ",
     "destination (do not repeat hops, skip ahead or extract yet); null means the route is complete, so work on the ",
     "current document. LINK_DISCOVERY and PRODUCTION_LINK_DISCOVERY: total_hops is a maximum, not a goal; navigate ",
-    "only to an exact destination on a current observed link, never guessed, never current_document_url, ",
+    "only to an exact destination on a current observed link (a site task may also open another address on its own ",
+    "site, such as the site's search results for a query), never guessed, never current_document_url, ",
     "requested_document_url or prior_document_urls (history, not evidence); back, when available, returns to the ",
     "exact predecessor; stop navigating when completed_hops reaches total_hops; only terminal mapping sources are ",
     "citable, prior_document_urls are chronological by document_epoch. INSPECTION_PROGRESS: earlier captures; do not ",
@@ -6363,7 +6364,7 @@ fn build_browser_tool_definitions(snapshot_only: bool) -> Vec<BrowserToolDefinit
 fn tool_description(kind: AgentBrowserToolKind) -> &'static str {
     match kind {
         AgentBrowserToolKind::Navigate => {
-            "Propose navigation to the exact link_destination of a currently observed public link, or an exact host-approved route target. Never guess, shorten, decode or reconstruct a URL. Inspect the page first when the destination is not present."
+            "Propose navigation to the exact link_destination of a currently observed public link, or an exact host-approved route target. On a site task you may also open another address on that same site formed from what its pages show, such as its search results address with your query. Never guess another site's address, and never shorten, decode or reconstruct an observed URL."
         }
         AgentBrowserToolKind::Back => {
             "Return to the exact previous page visited by this run. Use when the objective requires going back or returning to an earlier page; the host selects the target."
@@ -9025,7 +9026,7 @@ mod tests {
         assert_eq!(
             sizes,
             vec![
-                (AgentBrowserToolKind::Navigate, 453),
+                (AgentBrowserToolKind::Navigate, 588),
                 (AgentBrowserToolKind::Back, 313),
                 (AgentBrowserToolKind::Forward, 197),
                 (AgentBrowserToolKind::Reload, 201),
@@ -9040,7 +9041,7 @@ mod tests {
                 (AgentBrowserToolKind::ResumeAfterHuman, 204),
             ]
         );
-        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 22_766);
+        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 22_901);
     }
 
     #[test]
