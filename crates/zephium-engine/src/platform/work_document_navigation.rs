@@ -55,6 +55,8 @@ struct State {
     first_document: bool,
     /// That load still needs the page's semantic runtime prepared for it.
     hand_on_pending: bool,
+    /// Loads of the page's own the gate admitted that have not started yet.
+    page_loads_unstarted: u8,
     /// When the current load committed.
     committed_at: Option<Instant>,
     /// A public first load's refused redirect, safe to admit as a new read.
@@ -214,6 +216,7 @@ impl Default for WorkDocumentNavigation {
             handed_on: false,
             first_document: true,
             hand_on_pending: false,
+            page_loads_unstarted: 0,
             committed_at: None,
             redirect: None,
             redirect_reported: false,
@@ -342,6 +345,30 @@ impl State {
                 // The committed document's semantic runtime ends with it; the
                 // policy callback prepares the runtime for the new one.
                 self.hand_on_pending = true;
+                self.page_loads_unstarted = 1;
+                true
+            }
+            // The page asked for another load of its own before the one the
+            // gate followed started (a bot check that reloads its page more
+            // than once): WebKit drops the earlier request for the later one,
+            // so refusing the later one leaves the page loading nothing.
+            Phase::Armed
+                if self.page_loads_unstarted > 0
+                    && self.requested
+                    && self.operation.is_none()
+                    && self.follow.is_none()
+                    && self.human.is_none()
+                    && self.site_loads < MAX_SITE_LOADS =>
+            {
+                let (Some(loads), Some(unstarted)) = (
+                    self.site_loads.checked_add(1),
+                    self.page_loads_unstarted.checked_add(1),
+                ) else {
+                    return false;
+                };
+                self.site_loads = loads;
+                self.page_loads_unstarted = unstarted;
+                self.hand_on_pending = true;
                 true
             }
             Phase::Ready
@@ -374,6 +401,7 @@ impl State {
                 // document, which the host finalizes as it does a hand-on.
                 self.handed_on = true;
                 self.hand_on_pending = true;
+                self.page_loads_unstarted = 1;
                 true
             }
             _ => false,
@@ -714,6 +742,7 @@ impl WorkDocumentNavigation {
         state.follow = None;
         state.operation = Some(request.operation());
         state.first_document = false;
+        state.page_loads_unstarted = 0;
         state.target = Some(request.target().clone());
         state.effective = None;
         state.policy = request.document_policy();
@@ -756,6 +785,7 @@ impl WorkDocumentNavigation {
         state.follow = None;
         state.operation = Some(operation);
         state.first_document = false;
+        state.page_loads_unstarted = 0;
         state.target = Some(target);
         state.effective = None;
         state.policy = zephium_agentic::WorkBrowserDocumentPolicy::Exact;
@@ -1170,6 +1200,7 @@ impl WorkDocumentNavigation {
             (Phase::Armed, E::Started) if exact && state.requested && state.native_id.is_none() => {
                 state.native_id = Some(event.id);
                 state.phase = Phase::Loading;
+                state.page_loads_unstarted = state.page_loads_unstarted.saturating_sub(1);
                 #[cfg(target_os = "windows")]
                 if state.handed_on
                     && state
@@ -1182,6 +1213,18 @@ impl WorkDocumentNavigation {
                         .filter(|target| target.as_url().as_str() == event.url)
                         .map(|target| (event.id, state.finalization_generation, target));
                 }
+                Ok((false, false))
+            }
+            // A later request of the page's own replaced the load the gate
+            // was following before it committed.
+            (Phase::Loading, E::Started)
+                if site
+                    && exact
+                    && state.page_loads_unstarted > 0
+                    && state.native_id.is_some_and(|id| id != event.id) =>
+            {
+                state.superseded = state.native_id.replace(event.id);
+                state.page_loads_unstarted = state.page_loads_unstarted.saturating_sub(1);
                 Ok((false, false))
             }
             (Phase::Loading, E::Committed) if exact && state.native_id == Some(event.id) => {
@@ -1690,6 +1733,48 @@ mod tests {
         // Another site, or another page of it, is never followed.
         assert!(!gate.allows("https://elsewhere.example.org/"));
         assert!(!gate.allows("https://www.example.com/account"));
+    }
+
+    #[test]
+    fn a_page_that_asks_for_its_load_again_before_it_starts_keeps_loading() {
+        let start = "https://allegro.pl/listing?string=gpu";
+        let gate = site_gate(start);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        // A bot check reloads its page three times in a row; WebKit starts
+        // only the last request.
+        assert!(gate.allows(start));
+        assert!(gate.allows(start));
+        assert!(gate.allows(start));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(2, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        assert!(gate.ready(Some(start)));
+
+        // When WebKit does start an earlier request, the later one replaces
+        // it before it commits.
+        let gate = site_gate(start);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        assert!(gate.allows(start));
+        assert!(gate.allows(start));
+        gate.observe(event(2, E::Started, start)).unwrap();
+        gate.observe(event(3, E::Started, start)).unwrap();
+        gate.observe(event(2, E::Cancelled, start)).unwrap();
+        for phase in [E::Committed, E::Finished] {
+            gate.observe(event(3, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        assert!(gate.ready(Some(start)));
+        assert!(!gate.failed());
+        // Once the followed load started, the page's other loads are its own
+        // again: another page of the site is not followed.
+        assert!(!gate.allows("https://allegro.pl/konto"));
     }
 
     #[test]
