@@ -248,11 +248,12 @@ fn expected_manifest(
 }
 
 /// Separate protected Work lineage. No ordinary AppData tables are imported.
-pub(crate) static WORK: &[Migration] = &[Migration {
-    version: 1,
-    up: |tx| {
-        (META[16].up)(tx)?;
-        tx.execute_batch(
+pub(crate) static WORK: &[Migration] = &[
+    Migration {
+        version: 1,
+        up: |tx| {
+            (META[16].up)(tx)?;
+            tx.execute_batch(
             "ALTER TABLE agent_work_runs ADD COLUMN result_profile TEXT
                  CHECK (result_profile IS NULL OR length(result_profile) = 26);
              CREATE TRIGGER agent_work_result_intent_immutable BEFORE UPDATE ON agent_work_runs
@@ -289,8 +290,13 @@ pub(crate) static WORK: &[Migration] = &[Migration {
              WHEN EXISTS(SELECT 1 FROM agent_work_profile_deletion WHERE profile_id = NEW.result_profile)
              BEGIN SELECT RAISE(ABORT, 'work result profile is retired'); END;",
         )
+        },
     },
-}];
+    Migration {
+        version: 2,
+        up: retain_clean_work_runs,
+    },
+];
 
 fn schema_manifest(conn: &Connection) -> rusqlite::Result<Vec<SchemaObject>> {
     let count = conn.query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
@@ -1775,7 +1781,37 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 25,
+        up: retain_clean_work_runs,
+    },
 ];
+
+/// Clean terminal runs become history the Store may prune; anything live or
+/// carrying debt stays recovery history that no statement can delete. Only
+/// live or debt-bearing runs count against admission. Runs settled before
+/// this migration keep a NULL order and are pruned first, by key.
+fn retain_clean_work_runs(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "DROP TRIGGER agent_work_capacity;
+         DROP TRIGGER agent_work_retained;
+         ALTER TABLE agent_work_runs ADD COLUMN settled INTEGER
+             CHECK (settled IS NULL OR (terminal = 1 AND settled >= 1));
+         CREATE UNIQUE INDEX agent_work_run_settlement
+             ON agent_work_runs(settled) WHERE settled IS NOT NULL;
+         CREATE TRIGGER agent_work_capacity BEFORE INSERT ON agent_work_runs
+         WHEN (SELECT count(*) FROM agent_work_runs
+               WHERE terminal = 0 OR substr(record, 3, 1) != X'00') >= 1024
+             OR (SELECT count(*) FROM agent_work_runs) >= 4096
+         BEGIN SELECT RAISE(ABORT, 'work capacity exceeded'); END;
+         CREATE TRIGGER agent_work_settlement BEFORE UPDATE ON agent_work_runs
+         WHEN OLD.terminal = 0 AND NEW.terminal = 1 AND NEW.settled IS NULL
+         BEGIN SELECT RAISE(ABORT, 'work settlement is ordered'); END;
+         CREATE TRIGGER agent_work_retained BEFORE DELETE ON agent_work_runs
+         WHEN OLD.terminal = 0 OR substr(OLD.record, 3, 1) != X'00'
+         BEGIN SELECT RAISE(ABORT, 'work recovery history is retained'); END;",
+    )
+}
 
 // These statements are the exact extension-branch PROFILE v14 artifact. The
 // schema manifest uses their stored CREATE text to recognize existing files.
@@ -2635,6 +2671,7 @@ mod tests {
         (22, 0x6a156db401738842),
         (23, 0x6a156db401738842),
         (24, 0xb38257a2cbe5bad8),
+        (25, 0xdd0b59247509897e),
     ];
     const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
         (1, 0x10b8_b7a3_094f_23d7),
@@ -3163,6 +3200,72 @@ mod tests {
             (0, 9),
             "later explicit opt-out survives reopening"
         );
+    }
+
+    #[test]
+    fn work_retention_upgrade_keeps_runs_and_only_lets_clean_history_go() {
+        fn run(key: u16, disposition: u8, debt: u8) -> ([u8; 32], [u8; 96]) {
+            let mut record = [0_u8; 96];
+            record[0] = 1;
+            record[1] = disposition;
+            record[2] = debt;
+            record[15] = 3;
+            record[16..32].fill(7);
+            record[46..48].copy_from_slice(&key.to_be_bytes());
+            record[62..64].copy_from_slice(&key.to_be_bytes());
+            (record[32..64].try_into().unwrap(), record)
+        }
+        fn insert(conn: &Connection, key: u16, disposition: u8, debt: u8) -> rusqlite::Result<()> {
+            let (run_key, record) = run(key, disposition, debt);
+            conn.execute(
+                "INSERT INTO agent_work_runs(run_key, record, terminal) VALUES (?1, ?2, ?3)",
+                rusqlite::params![run_key.as_slice(), record.as_slice(), disposition >= 6],
+            )
+            .map(|_| ())
+        }
+        let delete = |conn: &Connection, key: u16| {
+            conn.execute(
+                "DELETE FROM agent_work_runs WHERE run_key = ?1",
+                [run(key, 0, 0).0.as_slice()],
+            )
+        };
+        for (migrations, shipped, current) in [(META, 24, 25), (WORK, 1, 2)] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            apply(&mut conn, &migrations[..shipped]).unwrap();
+            insert(&conn, 1, 10, 0).unwrap();
+            insert(&conn, 2, 9, 63).unwrap();
+            insert(&conn, 3, 1, 63).unwrap();
+            assert!(delete(&conn, 1).is_err(), "shipped schema retains all");
+            apply(&mut conn, migrations).unwrap();
+            assert_eq!(
+                conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                current
+            );
+            for (key, disposition, debt) in [(1, 10, 0), (2, 9, 63), (3, 1, 63)] {
+                let (stored, settled): (Vec<u8>, Option<i64>) = conn
+                    .query_row(
+                        "SELECT record, settled FROM agent_work_runs WHERE run_key = ?1",
+                        [run(key, 0, 0).0.as_slice()],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(stored, run(key, disposition, debt).1);
+                assert_eq!(settled, None);
+            }
+            assert!(delete(&conn, 2).is_err(), "debt is recovery history");
+            assert!(delete(&conn, 3).is_err(), "live runs stay");
+            assert_eq!(delete(&conn, 1).unwrap(), 1);
+
+            // Clean history no longer counts against admission.
+            for key in 10..1500 {
+                insert(&conn, key, 6, 0).unwrap();
+            }
+            for key in 2000..2000 + 1022 {
+                insert(&conn, key, 1, 63).unwrap();
+            }
+            assert!(insert(&conn, 4000, 1, 63).is_err());
+        }
     }
 
     #[test]
