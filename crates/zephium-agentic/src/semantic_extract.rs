@@ -2381,10 +2381,10 @@ fn resolve_source_url(
             return Ok(only);
         }
     }
-    let subject = subject
+    let named_subject = subject
         .map(comparable)
         .filter(|name| name.chars().count() >= 4);
-    if let Some(subject) = subject {
+    if let Some(subject) = named_subject {
         let mut best: Option<(bool, usize, (String, String))> = None;
         for named in read.fragments() {
             if !matches!(
@@ -2427,7 +2427,65 @@ fn resolve_source_url(
             return Ok(found);
         }
     }
+    if field == crate::SemanticReadField::LinkDestination {
+        if let Some(found) = cited
+            .iter()
+            .find_map(|fragment| address_in_text(*fragment, proposed, subject))
+        {
+            return Ok(found);
+        }
+    }
     Err(SemanticExtractionError::SourceInvalid)
+}
+
+/// A link a cited text itself prints, such as a page-facts summary's
+/// `url: /p/123-laptop.html`: the one the model copied, else the first after
+/// the record's subject, resolved against the page's own origin. The cited
+/// text stays the citation.
+fn address_in_text(
+    fragment: SemanticReadFragment<'_>,
+    proposed: Option<&str>,
+    subject: Option<&str>,
+) -> Option<(String, String)> {
+    if !matches!(
+        fragment.field(),
+        crate::SemanticReadField::VisibleText | crate::SemanticReadField::AccessibleName
+    ) {
+        return None;
+    }
+    let text = fragment_text(fragment)?;
+    let mut offset = 0;
+    let addresses: Vec<(usize, &str)> = text
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, '|' | '"' | '\'' | '<' | '>'))
+        .filter_map(|token| {
+            let at = offset;
+            offset += token.len() + 1;
+            let token = token.trim_end_matches([',', ';', '.', ')']);
+            ((token.starts_with('/') && !token.starts_with("//")) || token.starts_with("https://"))
+                .then_some((at, token))
+        })
+        .collect();
+    let chosen = match (proposed, subject) {
+        (Some(proposed), _) => {
+            addresses
+                .iter()
+                .find(|(_, address)| *address == proposed || proposed.ends_with(*address))?
+                .1
+        }
+        (None, Some(subject)) => {
+            let lower = text.to_ascii_lowercase();
+            let at = lower.find(&subject.trim().to_ascii_lowercase())?;
+            addresses.iter().find(|(start, _)| *start > at)?.1
+        }
+        (None, None) => match addresses.as_slice() {
+            [(_, only)] => only,
+            _ => return None,
+        },
+    };
+    let resolved = fragment.provenance().origin().as_url().join(chosen).ok()?;
+    let target = crate::ContextNavigationTarget::parse(resolved.as_str()).ok()?;
+    let value = target.as_url().as_str();
+    exact_public_url(value).then(|| (value.to_owned(), fragment.id().model_token()))
 }
 
 pub(crate) fn exact_public_url(value: &str) -> bool {
@@ -2896,7 +2954,13 @@ mod tests {
         assert!(
             matches!(resolved.fields()[0].value(), SemanticExtractedValue::Url(value) if value.as_str() == url)
         );
-        for sources in [vec![token.as_str(), token.as_str()], vec![&token[1..]]] {
+        // A paragraph that prints the address is evidence for it too.
+        for sources in [
+            vec![token.as_str(), token.as_str()],
+            vec![&token[1..]],
+            vec!["@r1"],
+            vec!["@r01"],
+        ] {
             let resolved = extract_semantic_read(
                 &schema,
                 &read,
@@ -2909,7 +2973,7 @@ mod tests {
                 matches!(resolved.fields()[0].value(), SemanticExtractedValue::Url(value) if value.as_str() == url)
             );
         }
-        for sources in [vec![], vec!["@r1"], vec!["@r999"], vec!["@r01"]] {
+        for sources in [vec![], vec!["@r999"]] {
             assert!(extract_semantic_read(
                 &schema,
                 &read,
@@ -3293,6 +3357,78 @@ mod tests {
                 "photo".into(),
                 "https://m.media-amazon.com/images/I/71mclaren.jpg".into()
             )
+        );
+    }
+
+    #[test]
+    fn record_links_printed_in_cited_page_facts_resolve_against_the_page() {
+        // Shaped like the recorded x-kom.pl page facts: one summary paragraph
+        // lists every product with a site-relative address.
+        let observation = observation_with_nodes(json!([
+            {"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"paragraph","n":"Page facts","t":"product: Acer Aspire 14 AI/32GB | price: 3249 PLN | url: /p/1322289-acer.html ;; product: Dell 15 Ryzen 7/32GB | price: 4399 PLN | url: /p/1520309-dell.html"}
+        ]));
+        let row = vec![
+            SemanticExtractionFieldSchema::try_text("name".into(), true, 512).unwrap(),
+            SemanticExtractionFieldSchema::try_url("url".into(), true, 2048).unwrap(),
+        ];
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows("output_0".into(), true, row, 8).unwrap()],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+            &schema,
+        )
+        .unwrap();
+        let delivery = delivered(&read);
+        let facts = read
+            .fragments()
+            .iter()
+            .find(|fragment| fragment.field() == crate::SemanticReadField::VisibleText)
+            .unwrap()
+            .id()
+            .model_token();
+        let output = json!({"fields":[{"name":"output_0","value":{"k":"rows","items":[
+            {"fields":[
+                {"name":"name","value":{"k":"text","value":"Acer Aspire 14 AI/32GB","sources":[facts]}},
+                {"name":"url","value":{"k":"url","sources":[facts]}}
+            ]},
+            {"fields":[
+                {"name":"name","value":{"k":"text","value":"Dell 15 Ryzen 7/32GB","sources":[facts]}},
+                {"name":"url","value":{"k":"url","value":"/p/1520309-dell.html","sources":[facts]}}
+            ]}
+        ]}}]});
+        let result = extract_semantic_read(
+            &schema,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&output).unwrap(),
+        )
+        .unwrap();
+        let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+            panic!("rows");
+        };
+        let urls: Vec<_> = rows
+            .items()
+            .iter()
+            .map(|row| match row.fields()[1].value() {
+                SemanticExtractedValue::Url(url) => url.as_str().to_owned(),
+                _ => panic!("url"),
+            })
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                "https://extract.example.test/p/1322289-acer.html",
+                "https://extract.example.test/p/1520309-dell.html"
+            ]
         );
     }
 
