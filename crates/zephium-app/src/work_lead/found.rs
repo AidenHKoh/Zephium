@@ -29,6 +29,22 @@ pub(crate) struct Row {
     pub page: String,
 }
 
+/// How surely a column holds the price to show, lower first: a nightly
+/// rate, then a price, then a total or a bare amount. None for no price.
+fn price_rank(name: &str) -> Option<u8> {
+    let has = |words: &[&str]| words.iter().any(|w| name.contains(w));
+    if has(&["night", "per_day", "daily"]) {
+        Some(0)
+    } else if has(&["price", "cost", "fare", "rate", "cena", "preis", "prix"]) && !has(&["rating"])
+    {
+        Some(1)
+    } else if has(&["total", "amount", "eur", "usd", "pln", "gbp"]) {
+        Some(2)
+    } else {
+        None
+    }
+}
+
 /// What kind of things the picks hold.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Facet {
@@ -90,6 +106,7 @@ pub(crate) fn rows(execution: &WorkExecutionFact, part: WorkPartId) -> Vec<Row> 
                     page: url.clone(),
                     ..Row::default()
                 };
+                let mut prices: Vec<(u8, String, String)> = Vec::new();
                 for (criterion, cell) in criteria.iter().zip(row) {
                     let value = match &cell.value {
                         WorkCellValue::Text { text } => text.trim().to_owned(),
@@ -115,10 +132,8 @@ pub(crate) fn rows(execution: &WorkExecutionFact, part: WorkPartId) -> Vec<Row> 
                     }
                     let name = criterion.name.to_ascii_lowercase();
                     let is = |words: &[&str]| words.iter().any(|w| name.contains(w));
-                    if is(&["price", "cost", "fare", "rate", "cena", "preis"])
-                        && found.price.is_none()
-                    {
-                        found.price = Some(value);
+                    if let Some(rank) = price_rank(&name) {
+                        prices.push((rank, criterion.name.clone(), value));
                     } else if is(&["rating", "stars", "score", "review", "ocena"])
                         && found.rating.is_none()
                     {
@@ -134,6 +149,14 @@ pub(crate) fn rows(execution: &WorkExecutionFact, part: WorkPartId) -> Vec<Row> 
                     } else {
                         found.facts.push((criterion.name.clone(), value));
                     }
+                }
+                // A nightly price leads a stay; any other price is a fact
+                // beside it.
+                prices.sort_by_key(|(rank, ..)| *rank);
+                let mut prices = prices.into_iter();
+                found.price = prices.next().map(|(_, _, value)| value);
+                for (_, name, value) in prices.rev() {
+                    found.facts.insert(0, (name, value));
                 }
                 if found.source.is_none() {
                     found.source = artifact.evidence.first().cloned();
@@ -223,13 +246,26 @@ pub(crate) fn picks(
             continue;
         }
         let duplicate = kept.iter().any(|known| {
-            known.name.eq_ignore_ascii_case(&row.name) && known.price == row.price
-                || (known.url.is_some() && known.url == row.url && !root(row.url.as_deref()))
+            known.name.eq_ignore_ascii_case(&row.name)
+                && (known.price == row.price
+                    || (known.url.is_some() && known.url == row.url && !root(row.url.as_deref())))
         });
         if !duplicate {
             kept.push(row);
         }
     }
+    // One address on records of different things belongs to none of them
+    // for sure: they stand without a link rather than with a wrong one.
+    let shared: Vec<String> = kept
+        .iter()
+        .filter_map(|row| row.url.clone())
+        .filter(|url| {
+            kept.iter()
+                .filter(|row| row.url.as_ref() == Some(url))
+                .count()
+                > 1
+        })
+        .collect();
     if cheapest {
         let shared = currency_of(&kept);
         kept.sort_by(|a, b| {
@@ -270,7 +306,11 @@ pub(crate) fn picks(
                     json!(short(subtitle, limit::PICK_SUBTITLE)),
                 );
             }
-            if let Some(url) = row.url.as_deref().filter(|url| !root(Some(url))) {
+            if let Some(url) = row
+                .url
+                .as_deref()
+                .filter(|url| !root(Some(url)) && !shared.iter().any(|s| s == url))
+            {
                 item.insert("url".into(), json!(url));
             }
             let images: Vec<&String> = row.images.iter().take(limit::PICK_IMAGES).collect();
@@ -590,6 +630,30 @@ mod tests {
         assert_eq!(items[0]["price"]["currency"], "PLN");
         assert!(items[1]["name"].as_str().unwrap().chars().count() <= limit::PICK_NAME);
         assert_eq!(data["facet"], "product");
+    }
+
+    #[test]
+    fn stays_show_their_nightly_price_and_no_link_shared_by_different_homes() {
+        let home = |name: &str, total: &str, nightly: &str| Row {
+            name: name.into(),
+            url: Some("https://www.airbnb.com/rooms/17587616?adults=2".into()),
+            price: Some(nightly.into()),
+            facts: vec![("stay_total_eur".into(), total.into())],
+            page: "https://www.airbnb.com/s/Lisbon/homes".into(),
+            ..Row::default()
+        };
+        let rows = vec![
+            home("Green Apartment", "€220 total", "€73.33 per night"),
+            home("Studio with bathtub", "€235 total", "€78.33 per night"),
+        ];
+        let (data, _) = picks(&rows, Facet::Stay, None, false, |_, _| "s1".into()).unwrap();
+        let items = data["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "{data}");
+        assert!(items.iter().all(|item| item.get("url").is_none()), "{data}");
+        assert_eq!(items[0]["price"]["display"], "€73.33 per night");
+        assert_eq!(price_rank("stay_total_eur"), Some(2));
+        assert_eq!(price_rank("nightly_eur"), Some(0));
+        assert_eq!(price_rank("guest_rating"), None);
     }
 
     #[test]
