@@ -18,8 +18,52 @@ use crate::{
 
 /// Fixed version-one record width, including reserved zero bytes.
 pub const AGENT_WORK_RECORD_BYTES: usize = 96;
-/// Retention is explicit; capacity exhaustion never evicts recovery obligations.
+/// Ceiling on runs that are live or carry debt. Clean terminal runs do not
+/// count; exhaustion refuses admission and never evicts recovery obligations.
 pub const MAX_DURABLE_AGENT_WORK_RUNS: usize = 1024;
+/// Most recent clean terminal runs kept, with their results. Older ones are
+/// pruned unless a Work artifact still cites their result.
+pub const RETAINED_CLEAN_AGENT_WORK_RUNS: usize = 256;
+/// A claimed inventory: every live or debt-bearing run plus the retained clean
+/// window.
+pub const MAX_AGENT_WORK_INVENTORY: usize =
+    MAX_DURABLE_AGENT_WORK_RUNS + RETAINED_CLEAN_AGENT_WORK_RUNS;
+
+/// Live or debt-bearing runs in a claimed inventory.
+pub fn outstanding_agent_work_runs(inventory: &[AgentWorkRecord]) -> usize {
+    inventory
+        .iter()
+        .filter(|record| !record.is_clean_terminal())
+        .count()
+}
+
+/// Updates or appends one acknowledged record in a claimed inventory. Clean
+/// terminal history past the retained window leaves first, as the Store's
+/// does. False when live or debt-bearing runs would pass their ceiling.
+pub fn remember_agent_work_record(
+    inventory: &mut Vec<AgentWorkRecord>,
+    record: AgentWorkRecord,
+) -> bool {
+    if let Some(previous) = inventory.iter_mut().find(|old| old.key() == record.key()) {
+        *previous = record;
+    } else if record.is_clean_terminal()
+        || outstanding_agent_work_runs(inventory) < MAX_DURABLE_AGENT_WORK_RUNS
+    {
+        inventory.push(record);
+    } else {
+        return false;
+    }
+    let clean = inventory.len() - outstanding_agent_work_runs(inventory);
+    if clean > RETAINED_CLEAN_AGENT_WORK_RUNS {
+        if let Some(oldest) = inventory
+            .iter()
+            .position(|old| old.is_clean_terminal() && old.key() != record.key())
+        {
+            inventory.remove(oldest);
+        }
+    }
+    true
+}
 
 /// Unpredictable identity of one exclusively fenced Store owner incarnation.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -262,6 +306,10 @@ impl AgentWorkRecord {
     /// Conservative debt retained even when human review closes the record.
     pub const fn debt(self) -> AgentWorkDebt {
         AgentWorkDebt(self.0[2])
+    }
+    /// Terminal with no recorded debt: history only, never recovery.
+    pub fn is_clean_terminal(self) -> bool {
+        self.disposition().is_terminal() && self.debt() == AgentWorkDebt::NONE
     }
     /// Durable handoff reason and exact run-local observation correlation.
     /// This is descriptive state only and cannot recreate browser authority.

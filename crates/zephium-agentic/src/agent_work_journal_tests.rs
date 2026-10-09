@@ -270,3 +270,37 @@ fn debug_projection_is_content_free_and_omits_durable_identifiers() {
         "AgentWorkIncarnation([redacted])"
     );
 }
+
+#[test]
+fn inventory_keeps_every_obligation_and_only_a_window_of_clean_history() {
+    let run = |key: u16, disposition: AgentWorkDisposition, debt: AgentWorkDebt| {
+        let mut bytes = *initial().as_bytes();
+        bytes[1] = disposition as u8;
+        bytes[2] = debt.bits();
+        bytes[62..64].copy_from_slice(&key.to_be_bytes());
+        AgentWorkRecord::decode(bytes).unwrap()
+    };
+    let mut inventory = Vec::new();
+    for key in 0..2000 {
+        let clean = run(key, AgentWorkDisposition::Failed, AgentWorkDebt::NONE);
+        assert!(clean.is_clean_terminal());
+        assert!(remember_agent_work_record(&mut inventory, clean));
+    }
+    assert_eq!(inventory.len(), RETAINED_CLEAN_AGENT_WORK_RUNS);
+    assert_eq!(inventory[0].key()[30..], (2000 - 256_u16).to_be_bytes());
+    for key in 3000..3000 + MAX_DURABLE_AGENT_WORK_RUNS as u16 {
+        let debt = run(key, AgentWorkDisposition::Rejected, AgentWorkDebt::UNKNOWN);
+        assert!(!debt.is_clean_terminal());
+        assert!(remember_agent_work_record(&mut inventory, debt));
+    }
+    assert!(!remember_agent_work_record(&mut inventory, initial()));
+    assert!(remember_agent_work_record(
+        &mut inventory,
+        run(9000, AgentWorkDisposition::Succeeded, AgentWorkDebt::NONE)
+    ));
+    assert_eq!(
+        outstanding_agent_work_runs(&inventory),
+        MAX_DURABLE_AGENT_WORK_RUNS
+    );
+    assert_eq!(inventory.len(), MAX_AGENT_WORK_INVENTORY);
+}
