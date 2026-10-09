@@ -938,6 +938,9 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
             "work_form.rs".to_owned(),
             "work_form_tests.rs".to_owned(),
             "work_discovery.rs".to_owned(),
+            // Rust's own reading of well-known bot-check pages: pure
+            // classification of a look, no provider, effect or native call.
+            "work_challenge.rs".to_owned(),
             // Reviewed decision layer (2af19810, d7c2496e): Terra's typed-decision
             // routing, the Work actor's decision child and their test modules.
             "decision.rs".to_owned(),

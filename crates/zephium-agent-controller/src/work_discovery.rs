@@ -73,6 +73,11 @@ pub trait AgentWorkLocalActionPolicy: Send {
         None
     }
 
+    /// A script bot check gets longer to clear by itself on this page.
+    fn patient_checks(&self) -> bool {
+        false
+    }
+
     /// The first view is judged whole, before any model call, rather than
     /// as the model's fitted look.
     fn whole_first_look(&self) -> bool {
@@ -245,6 +250,11 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         self.local_actions
             .as_ref()
             .and_then(|policy| policy.human_wall(observation))
+    }
+    fn patient_checks(&self) -> bool {
+        self.local_actions
+            .as_ref()
+            .is_some_and(|policy| policy.patient_checks())
     }
     fn whole_first_look(&self) -> bool {
         self.local_actions

@@ -22,6 +22,9 @@ use super::{
 #[path = "work_tests.rs"]
 mod tests;
 
+#[path = "work_challenge.rs"]
+mod challenge;
+use challenge::{known_check, KnownCheck};
 #[path = "work_decision.rs"]
 mod decision;
 #[path = "work_inspection.rs"]
@@ -404,6 +407,12 @@ pub trait AgentWorkTask: Send {
     /// the page agent can raise a wall itself but never clear one.
     fn human_wall(&self, _: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
         None
+    }
+    /// A script bot check is given longer to clear by itself before the
+    /// person is asked: the page is the person's own request, not one
+    /// source among several.
+    fn patient_checks(&self) -> bool {
+        false
     }
     /// The first view is judged whole before any model call.
     fn whole_first_look(&self) -> bool {
@@ -2379,6 +2388,10 @@ impl AgentWorkController {
         locate_only: bool,
     ) -> Result<bool, AgentWorkFailure> {
         state.decision_answers = None;
+        // A well-known check is read by Rust alone: no decision is bought.
+        if known_check(observation).is_some() {
+            return Ok(true);
+        }
         let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
         if session.decisions.is_none() {
             return Ok(looks_like_human_challenge(observation));
@@ -2430,9 +2443,21 @@ impl AgentWorkController {
         {
             return Ok((observation, false));
         }
-        for millis in HUMAN_CHALLENGE_SETTLE_MILLIS {
+        // A widget only a person can pass goes to them from the first look; a
+        // well-known script check is looked at again each second until it
+        // clears, never shown to the person when it does.
+        let known = known_check(&observation);
+        let schedule: &[u64] = match known {
+            Some(KnownCheck::Person) => &[],
+            Some(KnownCheck::Automatic) if state.task.patient_checks() => {
+                &AUTOMATIC_CHECK_SETTLE_MILLIS
+            }
+            Some(KnownCheck::Automatic) => &AUTOMATIC_CHECK_SETTLE_MILLIS[..2],
+            None => &HUMAN_CHALLENGE_SETTLE_MILLIS,
+        };
+        for millis in schedule {
             let wake = Instant::now()
-                .checked_add(Duration::from_millis(millis))
+                .checked_add(Duration::from_millis(*millis))
                 .ok_or(AgentWorkFailure::Deadline)?;
             if wake >= state.native.deadline {
                 break;
@@ -2446,9 +2471,29 @@ impl AgentWorkController {
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
             }
             state.refresh_account(worker, browser)?;
-            observation =
-                Self::fit_model_observation(Self::observe(state, worker, browser).await?)?;
-            if !Self::classify_human_challenge(state, worker, browser, &observation, false).await? {
+            // A check that cleared reloads its page: the new document gets a
+            // first look of its own.
+            observation = match Self::observe(state, worker, browser).await {
+                Err(AgentWorkFailure::Observation(
+                    SemanticRuntimePortFailure::NotReady
+                    | SemanticRuntimePortFailure::Stale
+                    | SemanticRuntimePortFailure::DocumentReplaced,
+                )) => Box::pin(Self::observe_initial_ready(state, worker, browser)).await?,
+                look => look?,
+            };
+            observation = Self::fit_model_observation(observation)?;
+            let still = match known {
+                Some(_) => match known_check(&observation) {
+                    Some(KnownCheck::Person) => break,
+                    Some(KnownCheck::Automatic) => true,
+                    None => looks_like_human_challenge(&observation),
+                },
+                None => {
+                    Self::classify_human_challenge(state, worker, browser, &observation, false)
+                        .await?
+                }
+            };
+            if !still {
                 return Ok((observation, false));
             }
         }
@@ -2777,6 +2822,11 @@ impl AgentWorkController {
                 && !has_dominant_loading_placeholders(&observation)
                 && !(site && unrendered(&observation))
             {
+                return Ok(observation);
+            }
+            // A bot check is not a page still loading: its own settling
+            // decides how long to wait and whether the person is asked.
+            if known_check(&observation).is_some() {
                 return Ok(observation);
             }
             state.refresh_account(worker, browser)?;
@@ -5999,6 +6049,9 @@ const HUMAN_CHALLENGE_PHRASES: [&str; 18] = [
 const MAX_HUMAN_CHALLENGE_NODES: usize = 48;
 /// How long a script-only check gets to pass on its own before a person is asked.
 const HUMAN_CHALLENGE_SETTLE_MILLIS: [u64; 3] = [2_000, 3_000, 4_000];
+/// A well-known script check is looked at again each second: for six on a
+/// page task, for two on a read the lead can replace with other sources.
+const AUTOMATIC_CHECK_SETTLE_MILLIS: [u64; 6] = [1_000; 6];
 /// Refusals in a row, with no action verified and no page reached between
 /// them, after which a page ends as a loop. Every refusal before that goes
 /// back to the model with what to try instead.

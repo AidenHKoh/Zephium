@@ -1307,6 +1307,10 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
         None
     }
 
+    fn patient_checks(&self) -> bool {
+        true
+    }
+
     fn human_wall(&self, observation: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
         let mut state = self.gate.state();
         if state.entry == EntryCheck::Pending {
