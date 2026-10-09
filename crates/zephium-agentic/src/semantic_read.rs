@@ -2343,7 +2343,12 @@ mod tests {
             .unwrap();
             evidence.retain(&read, &ack).unwrap();
         }
-        assert_eq!(evidence.retained_items(), 4);
+        // The broad capture sheds fragments down to the budget; the focused
+        // sources it duplicated stay with their first capture.
+        assert_eq!(
+            evidence.retained_items(),
+            SemanticReadBudget::EXTRACTION.max_items()
+        );
         let empty = retained_observation(4, json!([{"k":1,"r":"document","o":16}]));
         let ack = acknowledgement(&empty);
         let read = read_semantic_observation(
@@ -2367,6 +2372,54 @@ mod tests {
             .unwrap();
         assert_eq!(source.provenance().observation().get(), 1);
         assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
+    }
+
+    #[test]
+    fn retained_pressure_trims_the_largest_look_instead_of_dropping_it() {
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        for (id, label, count) in [(1, "Listing", 200), (2, "Other", 100)] {
+            let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
+            for key in 2..2 + count {
+                nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("{label} {key}")}));
+            }
+            let observation = retained_observation(id, json!(nodes));
+            let ack = acknowledgement(&observation);
+            let read = read_semantic_observation(
+                &observation,
+                SemanticReadAuthority::Acknowledged(&ack),
+                SemanticCaptureInstant::from_millis(id),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::EXTRACTION,
+            )
+            .unwrap();
+            evidence.retain(&read, &ack).unwrap();
+        }
+        assert_eq!(
+            evidence.retained_items(),
+            SemanticReadBudget::EXTRACTION.max_items()
+        );
+        let empty = retained_observation(3, json!([{"k":1,"r":"document","o":16}]));
+        let ack = acknowledgement(&empty);
+        let current = read_semantic_observation(
+            &empty,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(3),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        let merged = evidence.merge_for_extraction(current).unwrap();
+        let listings = merged
+            .fragments()
+            .iter()
+            .filter(|fragment| {
+                fragment
+                    .content()
+                    .text()
+                    .is_some_and(|text| text.as_str().starts_with("Listing"))
+            })
+            .count();
+        assert!(listings >= 150, "{listings}");
     }
 
     #[test]
@@ -2452,13 +2505,18 @@ mod tests {
         detail_read.focused = true;
         evidence.retain(&detail_read, &detail_ack).unwrap();
         let merged = evidence.merge_for_extraction(detail_read).unwrap();
-        assert_eq!(merged.fragments().len(), 255);
-        assert!(!merged.has_retained_evidence());
-        assert!(merged.fragments().iter().all(|fragment| fragment
-            .provenance()
-            .observation()
-            .get()
-            == 2));
+        // Every current fact is kept; old chrome only fills what is left.
+        assert_eq!(
+            merged
+                .fragments()
+                .iter()
+                .filter(|fragment| fragment.provenance().observation().get() == 2)
+                .count(),
+            255
+        );
+        assert!(
+            merged.fragments().len() <= usize::from(SemanticReadBudget::EXTRACTION.max_items())
+        );
         assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
     }
 
@@ -2557,7 +2615,10 @@ mod tests {
         let mut evidence = SemanticRetainedReadEvidence::default();
         evidence.retain(&detail_read, &detail_ack).unwrap();
         evidence.retain(&broad_read, &broad_ack).unwrap();
-        assert_eq!(evidence.retained_items(), 2);
+        assert_eq!(
+            evidence.retained_items(),
+            SemanticReadBudget::EXTRACTION.max_items()
+        );
         let merged = evidence.merge_for_extraction(broad_read).unwrap();
         assert!(merged.matches_acknowledgement(&broad_ack));
         assert_eq!(merged.fragments().len(), 256);
