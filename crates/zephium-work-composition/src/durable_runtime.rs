@@ -802,6 +802,11 @@ impl NativeWorkComposition {
         let mut ready_deadline = original_deadline
             .min(Instant::now() + construction_attempt.budget() + Duration::from_secs(15));
         configure_decisions(&mut invocation, decisions, original_deadline).await?;
+        // Getting ready is timed from the launch, not from loading keys.
+        ready_deadline = ready_deadline.max(
+            original_deadline
+                .min(Instant::now() + construction_attempt.budget() + Duration::from_secs(15)),
+        );
         let view = self
             .launch_retained(shell, invocation)
             .map_err(|_| WorkError::Unavailable)?
@@ -2543,19 +2548,14 @@ async fn configure_decisions(
     }
     let provider = match preference {
         WorkDecisionPreference::Recommended => {
-            let loaded = tokio::time::timeout_at(
-                tokio::time::Instant::from_std(deadline),
-                tokio::task::spawn_blocking(load_development_typesafe_credential),
+            match load_decision_credential(
+                load_development_typesafe_credential,
+                deadline.min(Instant::now() + DECISION_CREDENTIAL_WAIT),
             )
             .await
-            .map_err(|_| WorkError::Capacity)?;
-            match loaded {
-                Ok(Ok(credential)) => AgentBrowserDecisionProvider::TypeSafe(credential),
-                failed => {
-                    let cause = match failed {
-                        Ok(Err(error)) => format!("{error:?}"),
-                        _ => "Join".into(),
-                    };
+            {
+                Ok(credential) => AgentBrowserDecisionProvider::TypeSafe(credential),
+                Err(cause) => {
                     zephium_app::work_trace::record(format_args!(
                         "work: phase=decisions requested=recommended backend=emulation cause={cause}"
                     ));
@@ -2569,6 +2569,43 @@ async fn configure_decisions(
     invocation.input.set_decision_provider(provider);
     Ok(())
 }
+/// How long a page waits for the decision key before reading with the
+/// emulated decisions instead. A Keychain that stalls (a locked keychain, an
+/// access prompt nobody answers) must not spend the page's time to get ready.
+const DECISION_CREDENTIAL_WAIT: Duration = Duration::from_secs(5);
+
+/// A Keychain that stalled once is not waited on again by the pages after it.
+static DECISION_CREDENTIAL_STALLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+async fn load_decision_credential<T, E>(
+    load: fn() -> Result<T, E>,
+    until: Instant,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    E: std::fmt::Debug + Send + 'static,
+{
+    use std::sync::atomic::Ordering;
+    if DECISION_CREDENTIAL_STALLED.load(Ordering::Acquire) {
+        return Err("Stalled".into());
+    }
+    match tokio::time::timeout_at(
+        tokio::time::Instant::from_std(until),
+        tokio::task::spawn_blocking(load),
+    )
+    .await
+    {
+        Ok(Ok(Ok(credential))) => Ok(credential),
+        Ok(Ok(Err(error))) => Err(format!("{error:?}")),
+        Ok(Err(_)) => Err("Join".into()),
+        Err(_) => {
+            DECISION_CREDENTIAL_STALLED.store(true, Ordering::Release);
+            Err("Timeout".into())
+        }
+    }
+}
+
 struct ResumeCompile {
     context: ContextId,
     document_policy: WorkBrowserDocumentPolicy,
@@ -3296,6 +3333,29 @@ fn map_archive(
         });
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod decision_credential_tests {
+    use super::*;
+
+    fn stalls() -> Result<u8, ()> {
+        std::thread::sleep(Duration::from_secs(2));
+        Ok(1)
+    }
+
+    #[tokio::test]
+    async fn a_stalled_keychain_falls_back_at_once_and_is_not_waited_on_again() {
+        let started = Instant::now();
+        let first =
+            load_decision_credential(stalls, Instant::now() + Duration::from_millis(50)).await;
+        assert_eq!(first, Err("Timeout".to_owned()));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let again =
+            load_decision_credential(stalls, Instant::now() + Duration::from_secs(30)).await;
+        assert_eq!(again, Err("Stalled".to_owned()));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 }
 
 #[cfg(test)]
