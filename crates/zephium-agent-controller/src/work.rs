@@ -3313,7 +3313,41 @@ impl AgentWorkController {
                 continue;
             }
             if turn.turn.proposal().kind() == AgentBrowserToolKind::Screenshot {
-                turn = Self::screenshot_current(state, worker, browser, turn, &observation).await?;
+                if Self::screenshot_possible(state, &turn, &observation)? {
+                    turn = Self::screenshot_current(state, worker, browser, turn, &observation)
+                        .await?;
+                    continue;
+                }
+                // A picture refused for this look goes back as a fresh text
+                // look rather than ending the page.
+                let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                let checkpoint = turn
+                    .into_tool_turn()
+                    .into_parts()
+                    .1
+                    .into_screenshot_refresh(&observation, &session.config)
+                    .map_err(|_| {
+                        AgentWorkFailure::Browser(AgentBrowserProviderError::UnsupportedTool(
+                            AgentBrowserToolKind::Screenshot,
+                        ))
+                    })?;
+                let next =
+                    Self::inspect_current(state, worker, browser, checkpoint, &observation).await?;
+                observation = next.0;
+                captured_at = next.1;
+                progress = next.2;
+                let Some(next_turn) = next.3 else {
+                    state.observation = Some(observation);
+                    return Ok(());
+                };
+                turn = next_turn;
+                frames.clear();
+                frames.extend(
+                    observation
+                        .frames()
+                        .iter()
+                        .map(|snapshot| snapshot.frame().clone()),
+                );
                 continue;
             }
             if turn.turn.proposal().kind() == AgentBrowserToolKind::ShowForHuman {
@@ -4425,6 +4459,45 @@ impl AgentWorkController {
             .emit(AgentWorkEventKind::ModelRequestedHuman(reason))?;
         state.model_human_request = Some(request);
         Ok(())
+    }
+
+    /// Whether a viewport picture of this look may be taken at all.
+    fn screenshot_possible(
+        state: &mut WorkState,
+        turn: &AgentBrowserProviderTurn,
+        observation: &SemanticObservation,
+    ) -> Result<bool, AgentWorkFailure> {
+        if !state.viewport_screenshot
+            || state.native.screenshot_pending.is_some()
+            || state
+                .native
+                .retained
+                .as_ref()
+                .is_some_and(|browser| !browser.supports_screenshots())
+        {
+            return Ok(false);
+        }
+        let now = state
+            .session
+            .as_mut()
+            .ok_or(AgentWorkFailure::Contract)?
+            .policy_now()
+            .map_err(AgentWorkFailure::Browser)?;
+        let requested_at = SemanticCaptureInstant::from_millis(now.millis());
+        let deadline = SemanticCaptureInstant::from_millis(
+            now.millis()
+                .checked_add(MAX_SEMANTIC_SCREENSHOT_CAPTURE_MILLIS)
+                .ok_or(AgentWorkFailure::Contract)?,
+        );
+        Ok(prepare_semantic_screenshot(
+            SemanticScreenshotRequestId::new(u64::MAX).ok_or(AgentWorkFailure::Contract)?,
+            observation,
+            turn.turn.continuation().baseline(),
+            requested_at,
+            deadline,
+            SemanticScreenshotBudget::STANDARD,
+        )
+        .is_ok())
     }
 
     async fn screenshot_current(

@@ -82,6 +82,25 @@ pub struct AgentProviderObservationCheckpoint {
 }
 
 impl AgentProviderContinuation {
+    /// A picture the planner asked for cannot be taken of this look (it is
+    /// cut short or shows a private field): the planner gets a fresh text
+    /// look instead, told so.
+    pub fn into_screenshot_refresh(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderObservationCheckpoint, Box<Self>> {
+        if config != &self.config
+            || !AgentProviderObservationCheckpoint::refreshable(&self, observation)
+        {
+            return Err(Box::new(self));
+        }
+        Ok(AgentProviderObservationCheckpoint::refresh(
+            self,
+            "screenshot_unavailable: no picture of this page can be taken now (the look is cut short or shows a private field). This is a fresh text look of the page: work from it, scroll or extract; do not ask for a screenshot of it again.".to_owned(),
+        ))
+    }
+
     /// The host ran the search a planner typed and never ran (it scrolled
     /// instead): the pending step is retired unrun, and the planner gets a
     /// fresh look of the page the search produced, told so.
