@@ -126,7 +126,7 @@ impl fmt::Debug for SemanticLocateId {
 }
 
 /// Validated bounded natural-language lookup query.
-#[derive(Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct SemanticLocateQuery {
     source: String,
     normalized: String,

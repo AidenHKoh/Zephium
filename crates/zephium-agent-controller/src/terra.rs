@@ -2475,22 +2475,19 @@ impl AgentBrowserSession {
             .iter()
             .map(|snapshot| snapshot.frame().clone())
             .collect::<Vec<_>>();
-        let source = query.as_str().to_owned();
+        let query = query.into_locate_query();
         let id = SemanticLocateId::new(locate_id).ok_or(AgentBrowserProviderError::Authority)?;
         let bind = |scope| {
-            zephium_agentic::SemanticLocateQuery::try_new(source.clone())
-                .and_then(|query| {
-                    SemanticLocateRequest::bind(
-                        id,
-                        observation,
-                        continuation.baseline(),
-                        &frames,
-                        query,
-                        scope,
-                        SemanticLocateBudget::STANDARD,
-                    )
-                })
-                .ok()
+            SemanticLocateRequest::bind(
+                id,
+                observation,
+                continuation.baseline(),
+                &frames,
+                query.clone(),
+                scope,
+                SemanticLocateBudget::STANDARD,
+            )
+            .ok()
         };
         // A scope the look cannot hold (a list named as a region) widens to
         // the whole look the model holds rather than ending the page.
