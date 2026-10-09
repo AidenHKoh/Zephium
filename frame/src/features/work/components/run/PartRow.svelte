@@ -45,6 +45,8 @@
   );
   /** The front window, when the run waits on the person there. */
   const waiting = $derived(ordered[0] && waits(ordered[0]) ? ordered[0] : null);
+  /** A middle dot stays with the words before it, so no line starts with one. */
+  const keepDots = (text: string) => text.replaceAll(" · ", "\u00a0· ");
   const siteOf = (url: string) => {
     try {
       return new URL(url).hostname.replace(/^www\./u, "");
@@ -145,7 +147,7 @@
         }}>{needSaid.action}</button
       >
     {:else if part.summary}<p class="summary" class:turn={part.state === "waiting"}>
-        {part.summary}
+        {keepDots(part.summary)}
       </p>{/if}
   </div>
 
