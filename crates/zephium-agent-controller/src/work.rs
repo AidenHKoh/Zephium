@@ -5287,6 +5287,26 @@ mod fruitless_tests {
 }
 
 fn looks_like_human_challenge(observation: &SemanticObservation) -> bool {
+    // A page that is only an embedded frame it cannot read (DataDome's and
+    // similar captcha pages) is a check, whatever the frame says.
+    let all = || {
+        observation
+            .frames()
+            .iter()
+            .flat_map(SemanticSnapshot::nodes)
+    };
+    if all().count() <= 4
+        && all().any(|node| node.role() == SemanticRole::FrameBoundary)
+        && all()
+            .map(|node| {
+                node.text().map_or(0, |text| text.as_str().len())
+                    + node.name().map_or(0, |name| name.as_str().len())
+            })
+            .sum::<usize>()
+            < 64
+    {
+        return true;
+    }
     let mut nodes = 0;
     let mut matched = false;
     for snapshot in observation.frames() {
