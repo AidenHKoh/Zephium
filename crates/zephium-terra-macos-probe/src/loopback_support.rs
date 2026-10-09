@@ -281,6 +281,7 @@ pub(super) fn browser_settings(
         decision_model: None,
         retain_public_responses: true,
         loopback_anonymous: false,
+        refusal_diagnostic: None,
         stage_diagnostic: Some(|stage| {
             let _ = writeln!(
                 std::io::stdout().lock(),

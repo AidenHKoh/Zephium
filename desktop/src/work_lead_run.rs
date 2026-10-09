@@ -267,6 +267,9 @@ impl WorkProviders {
                             super::super::work_decision::selected_choice(profile).await,
                         );
                         settings.decision_model = light;
+                        settings.refusal_diagnostic = Some(|stage| {
+                            record_diagnostic(format_args!("work: phase=agent_browser refused={stage}"));
+                        });
                         #[cfg(feature = "work-development-traces")]
                         let settings = {
                             let mut settings = settings;

@@ -63,6 +63,10 @@ pub struct WorkBrowserAdapterSettings {
     /// Closed stage labels (refused compilation, historical review); no operands.
     #[cfg(feature = "public-qualification")]
     pub stage_diagnostic: Option<fn(&str)>,
+    /// Why a page was refused before it started, as a closed stage and
+    /// sizes: never page, model or person's text, an address or a secret.
+    /// Product builds log it.
+    pub refusal_diagnostic: Option<fn(&str)>,
     /// Qualification only: anonymous reads of a loopback fixture, in the same
     /// isolated storage an anonymous public read gets.
     #[cfg(feature = "public-qualification")]
@@ -93,6 +97,7 @@ impl WorkBrowserAdapterSettings {
             model_diagnostic: None,
             #[cfg(feature = "public-qualification")]
             stage_diagnostic: None,
+            refusal_diagnostic: None,
             #[cfg(feature = "public-qualification")]
             loopback_anonymous: false,
             profile,
@@ -602,7 +607,16 @@ impl NativeWorkComposition {
         // anonymous or in the person's session, each in its own store.
         let signed_in = session_origin(&request);
         let admission = if matches!(request.step, WorkStepKindV1::Read { .. }) {
-            Some(probe.admit_read_page(request.id).await?)
+            Some(
+                probe
+                    .admit_read_page(request.id)
+                    .await
+                    .inspect_err(|error| {
+                        diagnostics
+                            .refusals
+                            .report(&format!("admit_page:{error:?}"))
+                    })?,
+            )
         } else {
             None
         };
@@ -789,8 +803,7 @@ impl NativeWorkComposition {
         let resource_diagnostic = diagnostics.resource_diagnostic;
         #[cfg(feature = "public-qualification")]
         let stage_diagnostic = diagnostics.stage;
-        #[cfg(not(feature = "public-qualification"))]
-        let _ = diagnostics;
+        let refusals = diagnostics.refusals;
         let started = Instant::now();
         let mut measure = ReadMeasure::default();
         let original_spec = invocation
@@ -801,7 +814,9 @@ impl NativeWorkComposition {
         let construction_attempt = invocation.construction_attempt;
         let mut ready_deadline = original_deadline
             .min(Instant::now() + construction_attempt.budget() + Duration::from_secs(15));
-        configure_decisions(&mut invocation, decisions, original_deadline).await?;
+        configure_decisions(&mut invocation, decisions, original_deadline)
+            .await
+            .inspect_err(|error| refusals.report(&format!("decisions:{error:?}")))?;
         // Getting ready is timed from the launch, not from loading keys.
         ready_deadline = ready_deadline.max(
             original_deadline
@@ -810,8 +825,14 @@ impl NativeWorkComposition {
         let work_memory = invocation.input.uses_work_website_data();
         let view = self
             .launch_retained(shell, invocation)
-            .map_err(|_| WorkError::Unavailable)?
-            .ok_or(WorkError::Unavailable)?;
+            .map_err(|failure| {
+                refusals.report(&format!("launch:{failure:?}"));
+                WorkError::Unavailable
+            })?
+            .ok_or_else(|| {
+                refusals.report("launch:not_attached");
+                WorkError::Unavailable
+            })?;
         let guard = NativeGuard(view);
         let registration = page
             .as_ref()
@@ -1323,6 +1344,7 @@ impl NativeWorkComposition {
                         );
                         settings.decisions = plan.decisions;
                         settings.decision_model = plan.decision_model.clone();
+                        settings.refusal_diagnostic = refusals.product;
                         let mut invocation = compile_step(
                             attempt,
                             request,
@@ -2519,14 +2541,10 @@ struct Diagnostics {
     diagnostic: Option<fn(zephium_core::work::WorkAttemptId, zephium_app::RetainedWorkSnapshot)>,
     #[cfg(feature = "public-qualification")]
     stage: Option<fn(&str)>,
+    refusals: Refusals,
 }
 impl From<&WorkBrowserAdapterSettings> for Diagnostics {
     fn from(settings: &WorkBrowserAdapterSettings) -> Self {
-        #[cfg(not(any(
-            feature = "retained-lifetime-diagnostic",
-            feature = "public-qualification"
-        )))]
-        let _ = settings;
         Self {
             #[cfg(feature = "retained-lifetime-diagnostic")]
             resource_diagnostic: settings.resource_diagnostic,
@@ -2536,6 +2554,7 @@ impl From<&WorkBrowserAdapterSettings> for Diagnostics {
             model_diagnostic: settings.model_diagnostic,
             #[cfg(feature = "public-qualification")]
             stage: settings.stage_diagnostic,
+            refusals: Refusals::from(settings),
         }
     }
 }
@@ -3008,6 +3027,8 @@ fn compile_page_step(
             .map_err(|error| refused(&settings, "extraction", error))?,
         None => findings::field_schema().map_err(|error| refused(&settings, "findings", error))?,
     }];
+    let objective_bytes = objective.len();
+    let refusals = Refusals::from(&settings);
     let construction_attempt = request.construction_attempt;
     let continuing = resume.is_some();
     let (context, max_actions, account, max_model_calls, deadline) = match resume {
@@ -3074,22 +3095,16 @@ fn compile_page_step(
     } else {
         invocation
     };
-    #[cfg(feature = "public-qualification")]
-    let diagnostic = settings.stage_diagnostic;
     let request = invocation
         .into_retained_request(settings.profile, context, max_actions)
         .map_err(|failure| {
-            #[cfg(feature = "public-qualification")]
-            if let Some(diagnostic) = diagnostic {
-                let remaining = probe
-                    .deadline()
-                    .saturating_duration_since(Instant::now())
-                    .as_millis();
-                diagnostic(&format!(
-                    "compile:admission:{failure:?} remaining_ms={remaining}"
-                ));
-            }
-            let _ = &failure;
+            let remaining = probe
+                .deadline()
+                .saturating_duration_since(Instant::now())
+                .as_millis();
+            refusals.report(&format!(
+                "compile:admission:{failure:?} remaining_ms={remaining} objective_bytes={objective_bytes}"
+            ));
             WorkError::Unavailable
         })?;
     let request = request
@@ -3176,15 +3191,42 @@ const MAX_HISTORICAL_REVIEWS: u8 = 8;
 /// the controller refuses longer horizons, and a page read should not need them.
 const MAX_STEP_DURATION: Duration = Duration::from_secs(540);
 
-/// Reports one closed compile stage under development traces; the error is unchanged.
+/// Reports one closed compile stage; the error is unchanged.
 fn refused(settings: &WorkBrowserAdapterSettings, stage: &str, error: WorkError) -> WorkError {
-    #[cfg(feature = "public-qualification")]
-    if let Some(diagnostic) = settings.stage_diagnostic {
-        diagnostic(&format!("compile:{stage}"));
-    }
-    #[cfg(not(feature = "public-qualification"))]
-    let _ = (settings, stage);
+    Refusals::from(settings).report(&format!("compile:{stage}"));
     error
+}
+
+/// Where a page's refusal before it starts is reported: the product's log,
+/// else a development trace.
+#[derive(Clone, Copy)]
+struct Refusals {
+    product: Option<fn(&str)>,
+    #[cfg(feature = "public-qualification")]
+    stage: Option<fn(&str)>,
+}
+impl From<&WorkBrowserAdapterSettings> for Refusals {
+    fn from(settings: &WorkBrowserAdapterSettings) -> Self {
+        Self {
+            product: settings.refusal_diagnostic,
+            #[cfg(feature = "public-qualification")]
+            stage: settings.stage_diagnostic,
+        }
+    }
+}
+impl Refusals {
+    fn report(self, label: &str) {
+        if let Some(diagnostic) = self.product {
+            diagnostic(label);
+            return;
+        }
+        #[cfg(feature = "public-qualification")]
+        if let Some(diagnostic) = self.stage {
+            diagnostic(label);
+        }
+        #[cfg(not(feature = "public-qualification"))]
+        let _ = label;
+    }
 }
 
 fn compile(
