@@ -4406,11 +4406,11 @@ fn encode_navigation_checkpoint(
         total_hops: usize,
         next_navigation_target: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        current_document_url: Option<&'a str>,
+        current_document_url: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        requested_document_url: Option<&'a str>,
+        requested_document_url: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        prior_document_urls: Option<Vec<&'a str>>,
+        prior_document_urls: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         current_document_epoch: Option<u64>,
     }
@@ -4420,22 +4420,17 @@ fn encode_navigation_checkpoint(
         .transpose()?;
     let current = checkpoint
         .current_document()
-        .map(provider_navigation_url)
-        .transpose()?;
-    let prior = checkpoint
-        .is_discovery()
-        .then(|| {
-            checkpoint
-                .prior_documents()
-                .map(provider_navigation_url)
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?;
+        .and_then(provider_document_url);
+    let prior = checkpoint.is_discovery().then(|| {
+        checkpoint
+            .prior_documents()
+            .filter_map(provider_document_url)
+            .collect::<Vec<_>>()
+    });
     let requested = checkpoint
         .current_requested_document()
-        .map(provider_navigation_url)
-        .transpose()?
-        .filter(|requested| Some(*requested) != current);
+        .and_then(provider_document_url)
+        .filter(|requested| Some(requested) != current.as_ref());
     let wire = Wire {
         completed_hops: checkpoint.completed_hops(),
         total_hops: checkpoint.total_hops(),
@@ -4472,6 +4467,17 @@ fn provider_navigation_url(
     crate::semantic_wire::model_safe_public_url(target)
         .then(|| target.as_url().as_str())
         .ok_or(AgentProviderRequestError::Encoding)
+}
+
+/// A document the page is on or was on, as the model may see it: a site that
+/// redirects to an address with a session or tracking parameter keeps the
+/// rest of its address, and one that cannot be shown safely is left out.
+fn provider_document_url(target: &crate::ContextNavigationTarget) -> Option<String> {
+    if crate::semantic_wire::model_safe_public_url(target) {
+        return Some(target.as_url().as_str().to_owned());
+    }
+    crate::semantic_wire::public_destination(target.as_url().as_str())
+        .map(|repaired| repaired.as_url().as_str().to_owned())
 }
 
 fn openai_text_message<'a>(role: &'static str, text: &'a str) -> OpenAiInputMessageWire<'a> {
@@ -8792,6 +8798,27 @@ mod tests {
                 "checkpoint substitution changes the counted projection digest"
             );
         }
+    }
+
+    #[test]
+    fn a_document_address_with_session_state_loses_it_instead_of_the_request() {
+        let target = crate::ContextNavigationTarget::parse(
+            "https://www.example.test/?redirectedFrom=www.example.net&userSessionDataId=3a5f95e5-6303-4317-a1d7-8b6477484d43&token=shortsecret",
+        )
+        .unwrap();
+        assert!(provider_navigation_url(&target).is_err());
+        assert_eq!(
+            provider_document_url(&target).as_deref(),
+            Some("https://www.example.test/?redirectedFrom=www.example.net&userSessionDataId=3a5f95e5-6303-4317-a1d7-8b6477484d43")
+        );
+        let callback = crate::ContextNavigationTarget::parse(
+            "https://example.test/callback?code=Qm9VT3F2cW1ROGxobTVoQ2c",
+        )
+        .unwrap();
+        assert_eq!(
+            provider_document_url(&callback).as_deref(),
+            Some("https://example.test/callback")
+        );
     }
 
     #[test]
