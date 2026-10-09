@@ -180,36 +180,79 @@ pub(super) fn run_row(
     ));
 }
 
-/// One closed row per part that ended without doing its job.
+/// One closed row per part: how it ended, what it needs, the site it
+/// worked on and how many objects it placed.
 #[cfg(feature = "durable-runtime")]
 pub(super) fn part_rows(execution: &zephium_core::work::runtime::WorkExecutionFact) {
-    use zephium_core::work::parts::WorkPartStateV1 as State;
+    use zephium_core::work::runtime::WorkStepKindV1;
     for part in &execution.parts {
-        if !matches!(part.state, State::Failed | State::Stopped) && part.need.is_none() {
-            continue;
-        }
         let need = part
             .need
             .as_ref()
             .and_then(|need| serde_json::to_value(need).ok())
             .map(|value| {
-                let kind = value.as_object().and_then(|o| o.keys().next().cloned());
-                let reason = value
-                    .as_object()
-                    .and_then(|o| o.values().next())
-                    .and_then(|inner| inner.get("reason"))
-                    .and_then(|reason| reason.as_str().map(str::to_owned));
-                format!(
-                    "{}/{}",
-                    kind.unwrap_or_default(),
-                    reason.unwrap_or_default()
-                )
+                let field = |key: &str| {
+                    value
+                        .get(key)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_owned()
+                };
+                format!("{}/{}", field("kind"), field("reason"))
             });
+        let objects = execution
+            .steps
+            .iter()
+            .filter(|s| s.part == Some(part.id) && matches!(s.kind, WorkStepKindV1::Publish))
+            .map(|s| s.artifacts.len())
+            .sum::<usize>();
         say(format_args!(
-            "lead-part: helper={:?} state={:?} need={}",
+            "lead-part: helper={:?} state={:?} need={} site={} objects={objects}",
             part.helper,
             part.state,
-            need.as_deref().unwrap_or("none")
+            need.as_deref().unwrap_or("none"),
+            part.service
+                .as_ref()
+                .and_then(|service| service.host.as_deref())
+                .unwrap_or("-"),
+        ));
+    }
+    object_rows(execution);
+}
+
+/// One closed row per object the run placed: its kind, whether a part
+/// placed it, and for picks how many items carry a price, a picture and a
+/// link.
+#[cfg(feature = "durable-runtime")]
+fn object_rows(execution: &zephium_core::work::runtime::WorkExecutionFact) {
+    use zephium_core::work::artifact::WorkArtifactDataV1 as Data;
+    use zephium_core::work::runtime::WorkStepKindV1;
+    for artifact in execution
+        .steps
+        .iter()
+        .filter(|s| matches!(s.kind, WorkStepKindV1::Publish))
+        .flat_map(|s| s.artifacts.iter())
+        .filter_map(|id| execution.artifacts.iter().find(|a| a.id == *id))
+    {
+        let detail = match &artifact.data {
+            Data::Picks { items, .. } => format!(
+                " items={} priced={} pictured={} linked={} sources={}",
+                items.len(),
+                items.iter().filter(|i| i.price.is_some()).count(),
+                items.iter().filter(|i| !i.image_candidates.is_empty()).count(),
+                items.iter().filter(|i| i.url.is_some()).count(),
+                artifact.evidence.len()
+            ),
+            Data::Sheet { rows, columns, .. } => {
+                format!(" rows={} columns={} sources={}", rows.len(), columns.len(), artifact.evidence.len())
+            }
+            _ => format!(" sources={}", artifact.evidence.len()),
+        };
+        say(format_args!(
+            "lead-object: kind={} part={} revised={}{detail}",
+            artifact.data.kind_name(),
+            artifact.part.is_some(),
+            artifact.revises.is_some(),
         ));
     }
 }
