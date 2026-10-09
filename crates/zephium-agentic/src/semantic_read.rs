@@ -553,6 +553,8 @@ pub struct SemanticReadFragment<'a> {
     /// Where on the page it sits, for shedding: 0 the main content, 1 beside
     /// it, 2 the page's chrome (header, navigation, footer, search).
     region: u8,
+    /// How useful it is within its region, for shedding: lower is kept.
+    rank: u8,
 }
 
 impl<'a> SemanticReadFragment<'a> {
@@ -1466,6 +1468,7 @@ impl<'a> SemanticReadBuilder<'a> {
             content,
             provenance,
             region: page_region(node, snapshot),
+            rank: shed_rank(field, node.role(), content),
         });
         self.stats.items = self.stats.items.saturating_add(1);
         self.stats.content_bytes = next_bytes;
@@ -1493,13 +1496,7 @@ impl<'a> SemanticReadBuilder<'a> {
                 .fragments
                 .iter()
                 .enumerate()
-                .max_by_key(|(index, fragment)| {
-                    (
-                        fragment.region,
-                        read_priority(fragment.field, fragment.role),
-                        *index,
-                    )
-                })
+                .max_by_key(|(index, fragment)| (fragment.region, fragment.rank, *index))
                 .map(|(index, _)| index)
             else {
                 break;
@@ -1630,6 +1627,34 @@ fn page_region(node: &SemanticNode, snapshot: &crate::SemanticSnapshot) -> u8 {
         .and_then(|index| nodes.get(usize::from(index)))
         .is_none_or(|parent| parent.parent().is_none());
     u8::from(has_main && !in_main && !top_level)
+}
+
+/// A fragment's usefulness under pressure: its field's and role's, except
+/// that a filter checkbox's state and a bare facet count ("( 858 )") are
+/// shed with the control labels, so a listing keeps its records over them.
+fn shed_rank(field: SemanticReadField, role: SemanticRole, content: SemanticReadContent<'_>) -> u8 {
+    let facet = match content {
+        SemanticReadContent::Boolean(_) => {
+            matches!(role, SemanticRole::Checkbox | SemanticRole::Radio)
+        }
+        SemanticReadContent::Text(text) => text
+            .as_str()
+            .trim()
+            .strip_prefix('(')
+            .and_then(|rest| rest.strip_suffix(')'))
+            .is_some_and(|inner| {
+                !inner.trim().is_empty()
+                    && inner
+                        .chars()
+                        .all(|ch| ch.is_ascii_digit() || matches!(ch, ' ' | ',' | '.' | '\u{a0}'))
+            }),
+        _ => false,
+    };
+    if facet {
+        2
+    } else {
+        read_priority(field, role)
+    }
 }
 
 pub(crate) fn read_priority(field: SemanticReadField, role: SemanticRole) -> u8 {
@@ -2372,6 +2397,38 @@ mod tests {
             .unwrap();
         assert_eq!(source.provenance().observation().get(), 1);
         assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
+    }
+
+    #[test]
+    fn bare_facet_counts_are_shed_before_the_records_after_them() {
+        let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
+        for key in 2..=151 {
+            nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("( {key} )")}));
+        }
+        for key in 152..=301 {
+            nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("Laptop {key} 32 GB")}));
+        }
+        let page = retained_observation(1, json!(nodes));
+        let ack = acknowledgement(&page);
+        let read = read_semantic_observation(
+            &page,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::try_new(160, 48 * 1024).unwrap(),
+        )
+        .unwrap();
+        let laptops = read
+            .fragments()
+            .iter()
+            .filter(|fragment| {
+                fragment
+                    .content()
+                    .text()
+                    .is_some_and(|text| text.as_str().starts_with("Laptop"))
+            })
+            .count();
+        assert_eq!(laptops, 150);
     }
 
     #[test]

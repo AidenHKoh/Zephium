@@ -72,6 +72,7 @@ struct Fragment {
     reference: SemanticReferenceId,
     trust: SemanticTrust,
     region: u8,
+    rank: u8,
 }
 
 struct Capture {
@@ -253,6 +254,7 @@ impl SemanticRetainedReadEvidence {
                         reference: source.reference(),
                         trust: source.trust(),
                         region: fragment.region,
+                        rank: fragment.rank,
                     }
                 })
                 .collect(),
@@ -309,13 +311,7 @@ impl SemanticRetainedReadEvidence {
                     .fragments
                     .iter()
                     .enumerate()
-                    .max_by_key(|(at, fragment)| {
-                        (
-                            fragment.region,
-                            super::read_priority(fragment.field, fragment.role),
-                            *at,
-                        )
-                    })
+                    .max_by_key(|(at, fragment)| (fragment.region, fragment.rank, *at))
                     .map(|(at, _)| at)
                     .expect("nonempty capture");
                 let removed = capture.fragments.remove(shed);
@@ -407,13 +403,7 @@ impl SemanticRetainedReadEvidence {
                 .fragments
                 .iter()
                 .enumerate()
-                .max_by_key(|(index, fragment)| {
-                    (
-                        fragment.region,
-                        super::read_priority(fragment.field, fragment.role),
-                        *index,
-                    )
-                })
+                .max_by_key(|(index, fragment)| (fragment.region, fragment.rank, *index))
                 .map(|(index, _)| index)
                 .expect("nonempty over-budget read");
             let removed = current.fragments.remove(index);
@@ -464,6 +454,7 @@ impl SemanticRetainedReadEvidence {
                     role: source.role,
                     content,
                     region: source.region,
+                    rank: source.rank,
                     provenance: SemanticReadProvenance {
                         fields_complete: source.fields_complete,
                         node_key: source.node_key,
