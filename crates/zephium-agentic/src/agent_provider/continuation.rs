@@ -4981,6 +4981,41 @@ mod tests {
     }
 
     #[test]
+    fn a_second_whole_look_of_an_unchanged_page_is_refused_toward_scrolling() {
+        let previous = observation(context(), 1, 1, 1, "body");
+        let current = observation(context(), 2, 2, 2, "body");
+        let history = AgentInspectionProgress::record(None, &previous, &current).unwrap();
+        let config = config(AgentProviderKind::OpenAiResponses)
+            .restrict_to_navigation_and_extraction()
+            .with_baseline_read()
+            .with_progressive_observation();
+        let transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+            Arc::from("Read the page"),
+            "current observation".into(),
+            None,
+            Some(super::super::request::AgentProviderInspectionContext {
+                text: history.encode(&current).unwrap(),
+                progress: history,
+            }),
+        )
+        .unwrap();
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&current),
+        );
+        let continuation = snapshot_scope_continuation_with_transcript(
+            AgentProviderKind::OpenAiResponses,
+            baseline,
+            config.clone(),
+            json!({"kind":"initial"}),
+            transcript,
+        );
+        assert!(matches!(
+            continuation.resolve_observation(&current, &config),
+            Ok(AgentProviderObservationResolution::Refused(_))
+        ));
+    }
+
+    #[test]
     fn exhausted_scoped_inspection_can_restore_controls_once_without_renewal() {
         let mut previous = observation(context(), 1, 1, 1, "body");
         let mut history = None;

@@ -122,6 +122,22 @@ impl AgentProviderContinuation {
                 AgentProviderObservationRefusal(self, InspectionRefusal::Limit),
             )));
         }
+        // The look the model holds is already a whole look of this page, with
+        // nothing done since: another one would show the same page again.
+        if matches!(
+            self.correlation.snapshot_scope,
+            Some(AgentBrowserScopeProposal::Initial)
+        ) && self
+            .transcript
+            .inspection_checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.progress.captures.last())
+            .is_some_and(|capture| capture.scope == "initial")
+        {
+            return Ok(AgentProviderObservationResolution::Refused(Box::new(
+                AgentProviderObservationRefusal(self, InspectionRefusal::Unchanged),
+            )));
+        }
         let proposed = self
             .correlation
             .snapshot_scope
@@ -256,6 +272,7 @@ enum InspectionRefusal {
     Invalid,
     Repeated,
     Limit,
+    Unchanged,
 }
 
 /// The scope a proposal can actually be captured with on this observation.
@@ -334,6 +351,7 @@ impl AgentProviderObservationRefusal {
         let (code, guidance) = match self.1 {
             InspectionRefusal::Limit => ("inspection_budget_exhausted", "The inspection budget for this document is exhausted. No capture occurred; current refs and retained evidence remain available. Read or extract available evidence, or navigate through an admitted observed link when the remaining navigation budget allows. Do not request another snapshot of this document."),
             InspectionRefusal::Repeated => ("repeated_snapshot_scope", "This scope and query were already inspected. No capture occurred and current refs remain valid. Inspect a different region, use text_search within a current eligible boundary, or follow an observed detail link when allowed. Extract only the evidence actually available; repeating this subtree does not advance truncated content."),
+            InspectionRefusal::Unchanged => ("page_unchanged", "No capture occurred: the observation you hold is already a whole look at this page and nothing was done since, so another initial snapshot shows the same page. To see more of it, scroll the document (act scroll on the document ref, direction down, amount page) or a list region, then look at what it shows; inspect a landmark or list with snapshot(subtree); wait for a semantic change when the page is still loading; or extract what it already shows."),
             InspectionRefusal::Invalid => ("invalid_snapshot_scope", "No capture occurred; this observation and its refs remain current. text_search and region require a current document/landmark/group/dialog ref. A heading is only eligible for surrounding_text or subtree; its subtree excludes following prose. If no eligible search boundary exists here, snapshot(initial) can restore current viewport anchors. You may extract retained evidence instead. Choose another operation within the remaining budget; do not repeat the rejected scope."),
         };
         let result = serde_json::json!({
