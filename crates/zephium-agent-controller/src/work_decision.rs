@@ -762,6 +762,10 @@ impl AgentWorkController {
             }
             current = Self::observe(state, worker, browser).await?;
         }
+        // The model is shown the page an action opened up (a filter panel, a
+        // long results list) by its leading part, as a first look is, and the
+        // action is verified on that same look.
+        let current = Self::fit_model_observation(current)?;
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
         let (_, transition) = session
