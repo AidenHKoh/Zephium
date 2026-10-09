@@ -1567,7 +1567,9 @@ pub(crate) fn step_request(
             if query.contains(';') || query.contains(" | ") {
                 return Err("query is one question: search each question in its own call".into());
             }
-            WorkStepKindV1::Search { query }
+            WorkStepKindV1::Search {
+                query: operator_last(&query),
+            }
         }
         "read" => {
             let url = text("url").ok_or("url is required")?;
@@ -1668,6 +1670,24 @@ pub(crate) fn step_request(
         _ => return Err(format!("{name} is not a tool here")),
     };
     admit_kind(name, kind, run)
+}
+
+/// A search that opens with a `site:` operator reads as an address with a
+/// `site` scheme, which a search never sends: the operator goes last, where
+/// the engine reads it the same.
+fn operator_last(query: &str) -> String {
+    let mut words = query.split_whitespace();
+    match words.next() {
+        Some(first) if first.to_ascii_lowercase().starts_with("site:") => {
+            let rest: Vec<&str> = words.collect();
+            if rest.is_empty() {
+                query.to_owned()
+            } else {
+                format!("{} {first}", rest.join(" "))
+            }
+        }
+        _ => query.to_owned(),
+    }
 }
 
 /// A new plain read of the address a read's first load was redirected to,
@@ -2298,6 +2318,24 @@ mod tests {
         assert!(
             said.brief.starts_with("Find Lisbon hotels") && said.brief.ends_with("Two adults.")
         );
+    }
+
+    #[test]
+    fn a_site_operator_goes_last_so_the_search_is_sent() {
+        assert_eq!(
+            operator_last("site:allegro.pl/oferta LEGO 42115 nowy"),
+            "LEGO 42115 nowy site:allegro.pl/oferta"
+        );
+        assert_eq!(
+            operator_last("LEGO 42115 site:x-kom.pl"),
+            "LEGO 42115 site:x-kom.pl"
+        );
+        assert!(zephium_core::search::SearchEngine::DuckDuckGo
+            .search("site:x-kom.pl LEGO 42115")
+            .is_none());
+        assert!(zephium_core::search::SearchEngine::DuckDuckGo
+            .search(&operator_last("site:x-kom.pl LEGO 42115"))
+            .is_some());
     }
 
     #[test]
