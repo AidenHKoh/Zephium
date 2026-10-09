@@ -2475,19 +2475,31 @@ impl AgentBrowserSession {
             .iter()
             .map(|snapshot| snapshot.frame().clone())
             .collect::<Vec<_>>();
-        let query = query.into_locate_query();
-        let request = SemanticLocateRequest::bind(
-            SemanticLocateId::new(locate_id).ok_or(AgentBrowserProviderError::Authority)?,
-            observation,
-            continuation.baseline(),
-            &frames,
-            query,
-            scope
-                .try_into_locate_scope()
-                .map_err(|_| AgentBrowserProviderError::LocateTool)?,
-            SemanticLocateBudget::STANDARD,
-        )
-        .map_err(|_| AgentBrowserProviderError::Locate)?;
+        let source = query.as_str().to_owned();
+        let id = SemanticLocateId::new(locate_id).ok_or(AgentBrowserProviderError::Authority)?;
+        let bind = |scope| {
+            zephium_agentic::SemanticLocateQuery::try_new(source.clone())
+                .and_then(|query| {
+                    SemanticLocateRequest::bind(
+                        id,
+                        observation,
+                        continuation.baseline(),
+                        &frames,
+                        query,
+                        scope,
+                        SemanticLocateBudget::STANDARD,
+                    )
+                })
+                .ok()
+        };
+        // A scope the look cannot hold (a list named as a region) widens to
+        // the whole look the model holds rather than ending the page.
+        let request = scope
+            .try_into_locate_scope()
+            .ok()
+            .and_then(&bind)
+            .or_else(|| bind(zephium_agentic::SemanticLocateScope::Initial))
+            .ok_or(AgentBrowserProviderError::Locate)?;
         let result = locate_semantic_observation(observation, request)
             .map_err(|_| AgentBrowserProviderError::Locate)?;
         // A miss is a completed inspection of this bounded baseline. Deliver
