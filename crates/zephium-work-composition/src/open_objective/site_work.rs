@@ -485,6 +485,22 @@ pub(crate) fn classify(
 
 /// A sign-in wall on this page: a visible password field, or a small page
 /// asking to sign in with an account field.
+/// Links past which a page with a sign-in form is the site's open page.
+const OPEN_PAGE_LINKS: usize = 30;
+
+/// A site's open landing page (GitHub's, with its sign-up email box) also
+/// offers search and plenty of links; a sign-in or code wall offers neither.
+fn open_page(nodes: &[SemanticNode]) -> bool {
+    nodes.iter().any(|node| {
+        node.role() == SemanticRole::Searchbox
+            || node.landmark_kind() == Some(zephium_agentic::SemanticLandmarkKind::Search)
+    }) || nodes
+        .iter()
+        .filter(|node| node.role() == SemanticRole::Link)
+        .count()
+        >= OPEN_PAGE_LINKS
+}
+
 pub(crate) fn sign_in_wall(observation: &SemanticObservation) -> bool {
     let Some(snapshot) = observation.frames().first() else {
         return false;
@@ -504,6 +520,7 @@ pub(crate) fn sign_in_wall(observation: &SemanticObservation) -> bool {
     }
     nodes.len() <= 160
         && asks
+        && !open_page(nodes)
         && nodes.iter().any(|node| {
             node.role() == SemanticRole::Textbox
                 && (node.sensitivity() != SemanticSensitivity::Public
@@ -582,6 +599,9 @@ const PAYMENT_WORDS: [&str; 5] = ["card", "checkout", "billing", "payment", "pł
 pub(crate) fn secret_entry(observation: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
     let snapshot = observation.frames().first()?;
     let nodes = snapshot.nodes();
+    if open_page(nodes) {
+        return None;
+    }
     nodes
         .iter()
         .any(|node| {
@@ -2148,6 +2168,13 @@ mod tests {
             json!({"k":1,"r":"document","o":16}),
             json!({"k":2,"p":0,"r":"heading","n":"Sign in to Notion","l":1}),
             json!({"k":3,"p":0,"r":"textbox","n":"Email","q":"sensitive","o":2,"b":{"x":10,"y":50,"w":200,"h":30}}),
+        ])));
+        // GitHub's open landing page: a sign-up email box beside its search.
+        assert!(!sign_in_wall(&page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"landmark","lm":"search"}),
+            json!({"k":3,"p":0,"r":"button","n":"Sign in","o":1,"ak":1}),
+            json!({"k":4,"p":0,"r":"textbox","n":"Email address","q":"sensitive","o":2,"b":{"x":10,"y":50,"w":200,"h":30}}),
         ])));
         assert!(!sign_in_wall(&page(vec![
             json!({"k":1,"r":"document","o":16}),

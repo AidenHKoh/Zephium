@@ -193,6 +193,15 @@ pub fn view_home(url: &str) -> Option<&'static str> {
     (host == "linear.app" || host.ends_with(".linear.app")).then_some("https://linear.app/")
 }
 
+/// A daily app that is also the public web: a task about its public pages
+/// (GitHub's projects) starts where it was sent, not on the person's view.
+pub fn public_app(url: &str) -> bool {
+    url::Url::parse(url).ok().is_some_and(|url| {
+        url.host_str()
+            .is_some_and(|host| host.trim_start_matches("www.") == "github.com")
+    })
+}
+
 /// A bare site's own start page for a page task, when the vendor has one.
 pub fn entry_url(url: &str) -> Option<&'static str> {
     let parsed = url::Url::parse(url).ok()?;
@@ -709,6 +718,7 @@ mod tests {
             Some("https://app.slack.com/client")
         );
         assert_eq!(entry_url("https://slack.com/archives"), None);
+        assert!(public_app("https://www.github.com/") && !public_app("https://mail.google.com"));
         assert_eq!(
             entry_url("https://calendar.google.com/"),
             Some("https://calendar.google.com/calendar/u/0/r/day")

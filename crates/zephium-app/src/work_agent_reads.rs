@@ -48,7 +48,10 @@ impl Driver {
                     if let Some(entry) = view
                         .then(|| crate::work_sites::view_home(url))
                         .flatten()
-                        .or_else(|| crate::work_sites::entry_url(url))
+                        .or_else(|| {
+                            crate::work_sites::entry_url(url)
+                                .filter(|_| view || !crate::work_sites::public_app(url))
+                        })
                     {
                         *url = entry.to_owned();
                     }

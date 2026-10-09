@@ -1186,6 +1186,28 @@ fn reads_app(kind: &WorkStepKindV1) -> bool {
         return false;
     }
     let goal = goal.to_lowercase();
+    // GitHub is also the public web: a question about its public projects
+    // (the most-starred frameworks, a repository's releases) is browsed by the
+    // page planner. Only the person's own GitHub is read as a view.
+    const OWN: [&str; 10] = [
+        "my ",
+        "mine",
+        "notification",
+        "inbox",
+        "assigned",
+        "review request",
+        "mention",
+        "user's",
+        "person's",
+        "unread",
+    ];
+    if matches!(kind, WorkStepKindV1::Read { url, .. }
+        if url::Url::parse(url).ok().and_then(|url| url.host_str().and_then(zephium_agentic::DailyApp::of))
+            == Some(zephium_agentic::DailyApp::GitHub))
+        && !OWN.iter().any(|own| goal.contains(own))
+    {
+        return false;
+    }
     !goal
         .split(['.', ';', '\n', '!'])
         .filter(|sentence| !NOT.iter().any(|not| sentence.contains(not)))
@@ -1763,6 +1785,14 @@ mod tests {
                 "List the most-starred repositories"
             )));
         }
+        assert!(!reads_app(&browse(
+            "https://github.com/",
+            "Find the most-starred Rust web frameworks and list the top 5 with their star counts"
+        )));
+        assert!(reads_app(&browse(
+            "https://github.com/",
+            "What is new in my GitHub notifications"
+        )));
         assert!(!reads_app(&WorkStepKindV1::Read {
             url: "https://app.slack.com/client".into(),
             collection: None,
