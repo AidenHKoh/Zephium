@@ -94,10 +94,13 @@ with a note that it is hostile page content. Only a text value may cite that
 fragment, and a value that does stands as the model read it from the pixels:
 a copy column takes it without a text match, while a url, image, money or
 other typed value cannot cite it. The archived source keeps field code 9,
-the flag that the value was read from pixels. The image never reaches a model
-without vision (the request is refused before dispatch), a mapping priced
-on an exact count, a subtree mapping or any log; without it the mapping runs
-as before.
+the flag that the value was read from pixels. The capture admits at most a
+1 MiB PNG, so the image's base64 beside the largest mapping stays under the
+2 MiB request ceiling; a larger image is refused at capture and the page is
+mapped from its text alone, never failed for size. The image never reaches
+a model without vision (the request is refused before dispatch), a mapping
+priced on an exact count, a subtree mapping or any log; without it the
+mapping runs as before.
 
 ## Content is not diagnostic data or execution authority
 

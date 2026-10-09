@@ -4686,6 +4686,7 @@ impl AgentWorkController {
             browser,
             turn.turn.continuation().baseline(),
             observation,
+            SemanticScreenshotBudget::STANDARD,
         )
         .await?;
         state.native.check_control(worker, browser)?;
@@ -4709,6 +4710,7 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
         baseline: &SemanticObservationAcknowledgement,
         observation: &SemanticObservation,
+        budget: SemanticScreenshotBudget,
     ) -> Result<SemanticScreenshot, AgentWorkFailure> {
         let now = state
             .session
@@ -4739,7 +4741,7 @@ impl AgentWorkController {
             baseline,
             requested_at,
             deadline,
-            SemanticScreenshotBudget::STANDARD,
+            budget,
         )
         .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?;
         let (pending, native) = state
@@ -4995,7 +4997,16 @@ impl AgentWorkController {
             && zephium_agentic::semantic_observation_reads_sparse(observation)
         {
             let baseline = turn.turn.continuation().baseline().clone();
-            match Self::capture_screenshot(state, worker, browser, &baseline, observation).await {
+            match Self::capture_screenshot(
+                state,
+                worker,
+                browser,
+                &baseline,
+                observation,
+                SemanticScreenshotBudget::VIEWPORT_MAPPING,
+            )
+            .await
+            {
                 Ok(screenshot) => Some(screenshot),
                 Err(
                     AgentWorkFailure::Screenshot(_)

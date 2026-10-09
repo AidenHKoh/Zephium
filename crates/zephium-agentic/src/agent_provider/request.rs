@@ -68,6 +68,9 @@ pub const MAX_AGENT_PROVIDER_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_AGENT_PROVIDER_INPUT_METRIC_RECEIPT_BYTES: usize = 192;
 /// Maximum canonical PNG bytes admitted to one provider screenshot result.
 pub const MAX_AGENT_PROVIDER_SCREENSHOT_PNG_BYTES: usize = 1_300_000;
+/// Maximum canonical PNG bytes of the viewport image beside a mapping. Its
+/// base64 and the largest mapping body stay under the request ceiling.
+pub const MAX_AGENT_PROVIDER_VIEWPORT_IMAGE_PNG_BYTES: usize = 1024 * 1024;
 /// Maximum prior text transcript retained beside a provider screenshot result.
 pub const MAX_AGENT_PROVIDER_SCREENSHOT_TRANSCRIPT_BYTES: usize = 64 * 1024;
 /// Maximum browser-navigation URL bytes proposed through a provider tool.
@@ -3046,6 +3049,7 @@ impl AgentProviderExtractionRequestDraft {
     ) -> Result<Self, AgentProviderRequestError> {
         if self.request.config.input_accounting_mode()
             != super::AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation
+            || !viewport_image_fits(screenshot)
             || !read
                 .fragments()
                 .iter()
@@ -5453,6 +5457,11 @@ pub(in crate::agent_provider) fn screenshot_result_item_for_test(
     .expect("screenshot item")
 }
 
+/// A viewport screenshot small enough to ride beside any mapping.
+fn viewport_image_fits(screenshot: &crate::SemanticScreenshot) -> bool {
+    screenshot.as_png().len() <= MAX_AGENT_PROVIDER_VIEWPORT_IMAGE_PNG_BYTES
+}
+
 fn encode_png_data_url(png: &[u8]) -> Result<String, AgentProviderRequestError> {
     encode_png_base64_with_prefix(png, "data:image/png;base64,")
 }
@@ -7177,6 +7186,40 @@ mod tests {
     use super::*;
     use crate::{SemanticTokenMeasurementError, SemanticTokenizerRevisionError};
     use std::collections::BTreeSet;
+
+    #[test]
+    fn the_viewport_image_beside_the_largest_mapping_fits_one_request() {
+        let budget = crate::SemanticScreenshotBudget::VIEWPORT_MAPPING;
+        assert_eq!(
+            budget.max_png_bytes() as usize,
+            MAX_AGENT_PROVIDER_VIEWPORT_IMAGE_PNG_BYTES
+        );
+        assert_eq!(
+            crate::SemanticScreenshotBudget::try_new(
+                budget.max_width(),
+                budget.max_height(),
+                budget.max_pixels(),
+                budget.max_png_bytes(),
+            ),
+            Ok(budget)
+        );
+        let image = MAX_AGENT_PROVIDER_VIEWPORT_IMAGE_PNG_BYTES.div_ceil(3) * 4
+            + "data:image/png;base64,".len()
+            + VIEWPORT_IMAGE_NOTE.len();
+        // Every payload byte escaped, plus instructions, schema and framing.
+        let mapping = 2
+            * crate::SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE.max_bytes()
+                as usize
+            + AGENT_EXTRACTION_INSTRUCTIONS_V1.len()
+            + 128 * 1024;
+        assert!(image + mapping <= MAX_AGENT_PROVIDER_REQUEST_BYTES);
+        const {
+            assert!(
+                MAX_AGENT_PROVIDER_VIEWPORT_IMAGE_PNG_BYTES
+                    <= MAX_AGENT_PROVIDER_SCREENSHOT_PNG_BYTES
+            )
+        };
+    }
 
     struct FixedCounter {
         revision: SemanticTokenizerRevision,
