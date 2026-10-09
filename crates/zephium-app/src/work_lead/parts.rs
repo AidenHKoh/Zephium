@@ -437,7 +437,7 @@ where
         if report.objects.is_empty()
             && report.state != WorkPartStateV1::Stopped
             && !report.judged_empty
-            && matches!(self.kit(spec.helper), Kit::Browser)
+            && matches!(self.kit(spec.helper), Kit::Browser | Kit::Research)
         {
             if let Some((id, count)) = self.place_found(fact.id, &spec).await {
                 report.objects.push(id);
