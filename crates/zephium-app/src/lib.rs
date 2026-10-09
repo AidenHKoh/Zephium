@@ -91,6 +91,8 @@ pub use work_authoring_intent::{WorkIntent, WorkUserEdit};
 #[cfg(feature = "work-runtime")]
 pub mod work_agent;
 #[cfg(feature = "work-runtime")]
+mod work_changes;
+#[cfg(feature = "work-runtime")]
 pub mod work_commands;
 #[cfg(feature = "work-runtime")]
 pub mod work_computer;
@@ -110,8 +112,6 @@ pub mod work_models;
 pub mod work_personal;
 #[cfg(feature = "work-planning")]
 pub mod work_planning;
-#[cfg(feature = "work-runtime")]
-mod work_changes;
 #[cfg(feature = "work-runtime")]
 pub mod work_runtime;
 #[cfg(feature = "work-runtime")]
