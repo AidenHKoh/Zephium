@@ -490,22 +490,32 @@ const OPEN_PAGE_LINKS: usize = 30;
 
 /// A site's open landing page (GitHub's, with its sign-up email box) also
 /// offers search and plenty of links; a sign-in or code wall offers neither.
-fn open_page(nodes: &[SemanticNode]) -> bool {
-    nodes.iter().any(|node| {
-        node.role() == SemanticRole::Searchbox
+fn open_page<'a>(nodes: impl IntoIterator<Item = &'a SemanticNode>) -> bool {
+    let mut links = 0;
+    for node in nodes {
+        if node.role() == SemanticRole::Searchbox
             || node.landmark_kind() == Some(zephium_agentic::SemanticLandmarkKind::Search)
-    }) || nodes
-        .iter()
-        .filter(|node| node.role() == SemanticRole::Link)
-        .count()
-        >= OPEN_PAGE_LINKS
+        {
+            return true;
+        }
+        links += usize::from(node.role() == SemanticRole::Link);
+    }
+    links >= OPEN_PAGE_LINKS
 }
 
 pub(crate) fn sign_in_wall(observation: &SemanticObservation) -> bool {
     let Some(snapshot) = observation.frames().first() else {
         return false;
     };
-    let nodes = snapshot.nodes();
+    // An offer to sign in that the page lets the person close is no wall.
+    let offers = super::overlay::dismissable(snapshot);
+    let nodes = snapshot
+        .nodes()
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !offers.iter().any(|(range, _)| range.contains(index)))
+        .map(|(_, node)| node)
+        .collect::<Vec<_>>();
     let asks = nodes.iter().any(|node| {
         matches!(node.role(), SemanticRole::Heading | SemanticRole::Button)
             && names_any(&label(node), &SIGN_IN_PHRASES)
@@ -520,7 +530,7 @@ pub(crate) fn sign_in_wall(observation: &SemanticObservation) -> bool {
     }
     nodes.len() <= 160
         && asks
-        && !open_page(nodes)
+        && !open_page(nodes.iter().copied())
         && nodes.iter().any(|node| {
             node.role() == SemanticRole::Textbox
                 && (node.sensitivity() != SemanticSensitivity::Public
@@ -1205,6 +1215,10 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
 
     fn consent_suspected(&self, observation: &SemanticObservation) -> bool {
         super::consent::suspected(observation)
+    }
+
+    fn overlay_dismissal(&self, observation: &SemanticObservation) -> Option<SemanticReferenceId> {
+        super::overlay::dismissal(observation)
     }
 
     fn consent_pressing(&self, pressing: bool) {
@@ -2253,5 +2267,19 @@ mod tests {
             json!({"k":2,"p":0,"r":"heading","n":"Inbox","l":1}),
             json!({"k":3,"p":0,"r":"button","n":"Log in to another account","o":1,"ak":1}),
         ])));
+        // Skyscanner's sign-in offer over its flight search closes.
+        let offer = |close: &str| {
+            let mut nodes = vec![
+                json!({"k":1,"r":"document","o":16}),
+                json!({"k":2,"p":0,"r":"button","n":"Zaloguj się","o":1,"ak":1}),
+                json!({"k":3,"p":0,"r":"dialog","n":"Zaloguj się lub utwórz konto"}),
+                json!({"k":4,"p":2,"r":"button","n":close,"o":1,"ak":1}),
+                json!({"k":5,"p":2,"r":"textbox","n":"Adres e-mail","q":"sensitive","o":2,"b":{"x":10,"y":50,"w":200,"h":30}}),
+            ];
+            nodes.extend((6..30).map(|k| json!({"k":k,"p":0,"r":"paragraph","t":"Loty"})));
+            page(nodes)
+        };
+        assert!(!sign_in_wall(&offer("Zamknij okno dialogowe")));
+        assert!(sign_in_wall(&offer("Dalej")));
     }
 }

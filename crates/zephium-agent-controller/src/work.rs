@@ -352,6 +352,13 @@ pub trait AgentWorkTask: Send {
         false
     }
 
+    /// The close control of a dialog the site laid over the page unasked (a
+    /// sign-in, newsletter or app offer), picked by the task's own closed
+    /// name list; Rust closes it on a look no model has acted on yet.
+    fn overlay_dismissal(&self, _: &SemanticObservation) -> Option<SemanticReferenceId> {
+        None
+    }
+
     /// Rust presses a cookie banner's refusal (true), and the press came
     /// back (false). A page that saved the choice by loading another document
     /// ends between the two; the task may run the page again once, with the
@@ -2888,6 +2895,25 @@ impl AgentWorkController {
                     Box::pin(Self::dismiss_consent(state, worker, browser, whole, target)).await?;
             }
         }
+        // So is a sign-in, newsletter or app offer the site laid over the
+        // page with its own close control.
+        if state.actions_before_extraction
+            && state
+                .navigation_discovery
+                .as_ref()
+                .is_some_and(AgentNavigationDiscovery::is_site_session)
+        {
+            if let Some(target) = state.task.overlay_dismissal(&observation) {
+                observation = Box::pin(Self::close_overlay(
+                    state,
+                    worker,
+                    browser,
+                    observation,
+                    target,
+                ))
+                .await?;
+            }
+        }
         let mut captured_at = SemanticCaptureInstant::from_millis(
             state
                 .journal_mut()?
@@ -3836,6 +3862,34 @@ impl AgentWorkController {
         state.consent_press = false;
         state.task.consent_pressing(false);
         match pressed? {
+            Some(after) => Self::fit_model_observation(after),
+            None => {
+                state.refresh_account(worker, browser)?;
+                Self::fit_model_observation(Box::pin(Self::observe(state, worker, browser)).await?)
+            }
+        }
+    }
+
+    async fn close_overlay(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        look: SemanticObservation,
+        target: SemanticReferenceId,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        let close = SemanticActionProposal::try_new(
+            SemanticActionIntent::Click { target },
+            SemanticEffectClass::Read,
+            SemanticWaitCondition::MutationQuiet(
+                SemanticMutationQuietPeriod::try_new(100)
+                    .map_err(|_| AgentWorkFailure::Contract)?,
+            ),
+            SemanticVerification::PageChanged,
+            SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS)
+                .map_err(|_| AgentWorkFailure::Contract)?,
+        )
+        .map_err(|_| AgentWorkFailure::Contract)?;
+        match Box::pin(Self::code_owned_read(state, worker, browser, &look, close)).await? {
             Some(after) => Self::fit_model_observation(after),
             None => {
                 state.refresh_account(worker, browser)?;

@@ -42,6 +42,12 @@ pub trait AgentWorkLocalActionPolicy: Send {
         false
     }
 
+    /// The close control of a dialog the site laid over the page unasked (a
+    /// sign-in, newsletter or app offer), by a closed name list.
+    fn overlay_dismissal(&self, _: &SemanticObservation) -> Option<SemanticReferenceId> {
+        None
+    }
+
     /// Rust presses the consent dismissal it chose (true), and the press
     /// came back (false).
     fn consent_pressing(&self, _: bool) {}
@@ -212,6 +218,12 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         self.local_actions
             .as_ref()
             .is_some_and(|policy| policy.consent_suspected(observation))
+    }
+
+    fn overlay_dismissal(&self, observation: &SemanticObservation) -> Option<SemanticReferenceId> {
+        self.local_actions
+            .as_ref()
+            .and_then(|policy| policy.overlay_dismissal(observation))
     }
 
     fn consent_pressing(&self, pressing: bool) {
