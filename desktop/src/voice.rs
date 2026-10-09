@@ -504,7 +504,9 @@ mod product {
         };
         match taken.phase {
             Phase::Listening(capture) => {
-                drop(tauri::async_runtime::spawn_blocking(move || capture.cancel()));
+                drop(tauri::async_runtime::spawn_blocking(move || {
+                    capture.cancel()
+                }));
             }
             Phase::Finishing(Some(handle)) => handle.abort(),
             Phase::Finishing(None) | Phase::Starting { .. } => {}
