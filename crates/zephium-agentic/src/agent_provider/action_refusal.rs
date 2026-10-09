@@ -167,6 +167,7 @@ impl super::super::AgentProviderSettledToolTurn {
                     repeated: false,
                     stuck: false,
                     unsent_search: false,
+                    scrolled_enough: false,
                 },
             ));
         }
@@ -193,6 +194,7 @@ impl super::super::AgentProviderSettledToolTurn {
                             repeated: false,
                             stuck: false,
                             unsent_search: false,
+                            scrolled_enough: false,
                         },
                     ));
                 }
@@ -217,6 +219,7 @@ impl super::super::AgentProviderSettledToolTurn {
                     repeated: false,
                     stuck: false,
                     unsent_search: false,
+                    scrolled_enough: false,
                 },
             )),
             Err(error) => Err(Error::Binding(error)),
@@ -233,6 +236,7 @@ pub struct AgentProviderActionRefusal {
     repeated: bool,
     stuck: bool,
     unsent_search: bool,
+    scrolled_enough: bool,
 }
 
 impl AgentProviderActionRefusal {
@@ -250,6 +254,7 @@ impl AgentProviderActionRefusal {
             repeated: false,
             stuck: false,
             unsent_search: false,
+            scrolled_enough: false,
         }
     }
     /// This control was refused before on an earlier look: the model hears
@@ -262,6 +267,12 @@ impl AgentProviderActionRefusal {
     /// that was never run: the model hears to run it first.
     pub fn unsent_search(mut self) -> Self {
         self.unsent_search = true;
+        self
+    }
+    /// A planner that scrolled the page several times in a row with nothing
+    /// else done hears that its looks already hold what scrolling showed.
+    pub fn scrolled_enough(mut self) -> Self {
+        self.scrolled_enough = true;
         self
     }
     /// The model proposed this exact refused action again and again: it
@@ -441,7 +452,9 @@ impl AgentProviderActionRefusal {
             }
             _ => None,
         };
-        let (code, guidance) = if self.unsent_search {
+        let (code, guidance) = if self.scrolled_enough {
+            ("scrolled_enough", "Nothing executed. You scrolled this page several times in a row: every look you took stays evidence for extract, so extract the records your looks already show now. If they lack what the goal needs, act instead: open the site's search results or listing address with your filters (dates, guests, query, sort) in it, or use a filter or sort control. Do not scroll back and forth.")
+        } else if self.unsent_search {
             ("search_not_run", "Nothing executed. You typed into a search or filter field and have not run it: press Enter in that field now (act press, key enter, effect read, verification page_changed), or click its search button. Scrolling or looking again does not run it.")
         } else {
             (code, guidance)

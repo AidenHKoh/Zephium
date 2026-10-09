@@ -1442,6 +1442,7 @@ impl AgentWorkController {
                     covered_controls: Vec::new(),
                     typed_unsent: false,
                     typed_field: None,
+                    scroll_streak: 0,
                     failure: None,
                     observation: None,
                     native_terminal: None,
@@ -1474,6 +1475,8 @@ struct WorkState {
     /// That field, by role and name digest, once a scroll was refused for
     /// it: a second scroll has the host run the search instead.
     typed_field: Option<u64>,
+    /// Verified scrolls in a row with nothing else done.
+    scroll_streak: u8,
     navigation_target: Option<ContextNavigationTarget>,
     navigation_route: Option<AgentNavigationRoute>,
     navigation_discovery: Option<AgentNavigationDiscovery>,
@@ -3479,6 +3482,19 @@ impl AgentWorkController {
                                 .ok_or(AgentWorkFailure::Contract)?
                                 .unsent_search())
                         }
+                        // Planners scrolled up and down for many calls instead
+                        // of extracting: past three scrolls in a row the
+                        // next is refused, said so, once per streak.
+                        crate::action::AgentBrowserActionBinding::Prepared(proposal)
+                            if state.scroll_streak >= 3
+                                && proposal.action().kind() == SemanticActionKind::Scroll =>
+                        {
+                            state.scroll_streak = 0;
+                            Err(proposal
+                                .into_refusal(SemanticActionBindingError::AssignmentDenied)
+                                .ok_or(AgentWorkFailure::Contract)?
+                                .scrolled_enough())
+                        }
                         // A second scroll: the host runs the search itself
                         // with Enter in the field, a read, and the planner
                         // continues from what it produced.
@@ -3646,6 +3662,7 @@ impl AgentWorkController {
             .flatten();
             state.typed_unsent = false;
             state.typed_field = None;
+            let scrolled = proposal.action().kind() == SemanticActionKind::Scroll;
             let (current, current_at, transition) = match Self::execute_prepared_action(
                 state,
                 worker,
@@ -3784,6 +3801,11 @@ impl AgentWorkController {
             )?;
             state.typed_unsent = typed.is_some();
             state.typed_field = typed;
+            state.scroll_streak = if scrolled {
+                state.scroll_streak.saturating_add(1)
+            } else {
+                0
+            };
             fruitless.progressed();
             if let Some(target) = state.follow.take() {
                 let (continuation, _) =
