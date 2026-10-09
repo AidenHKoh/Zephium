@@ -1108,6 +1108,98 @@ fn work_page_group_closes_after_a_failed_page_and_seats_the_next_read_at_once() 
 }
 
 #[test]
+fn work_timer_wakes_for_the_earliest_page_deadline_not_the_last_polled() {
+    if child("work_timer_wakes_for_the_earliest_page_deadline_not_the_last_polled") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(zephium_store::SqliteStore::open(directory.path()).unwrap());
+    let engine = Arc::new(crate::shell::tests::FakeEngine::default());
+    let queue = crate::actor::CommandQueue::new();
+    let owner = crate::actor::Handle::new(queue.clone());
+    let callback = owner.callback_handle();
+    let mut shell = crate::Shell::new(
+        engine.clone(),
+        store.clone(),
+        Arc::new(crate::shell::tests::FakeChrome),
+        Box::new(|_| {}),
+    );
+    shell.attach_queue(queue.clone());
+    shell.handle(Command::Bootstrap);
+    let profile = selected(&owner, &queue, &mut shell);
+    let factories = Arc::new(AtomicUsize::new(0));
+    let servers = Servers::default();
+    let work = WorkId::generate();
+    let execution = zephium_core::work::WorkExecutionId::generate();
+    let attempt = zephium_core::work::WorkAttemptId::generate();
+    let group_deadline = Instant::now() + Duration::from_secs(90);
+    let attach = |native: Arc<Native>, deadline: Instant| {
+        native.allow_global_shutdown.store(true, Ordering::Release);
+        native.hold_construct.store(true, Ordering::Release);
+        let request = prepared_until_isolated(
+            profile,
+            engine.clone(),
+            store.clone(),
+            native,
+            factories.clone(),
+            servers.clone(),
+            deadline,
+            WorkBrowserDocumentPolicy::Exact,
+            true,
+            None,
+        )
+        .with_work_identity(work)
+        .with_page_admission(crate::RetainedPageAdmission {
+            profile: profile.profile(),
+            work,
+            execution,
+            attempt,
+            step: zephium_core::work::WorkStepId::generate(),
+            workers: 3,
+            deadline: group_deadline,
+        })
+        .unwrap();
+        callback.attach_retained_work(request).unwrap()
+    };
+    // Both pages wait on native construction: their own deadlines are the
+    // only times anything is owed to them, and the sooner one is polled first.
+    let sooner = Instant::now() + Duration::from_secs(30);
+    let later = sooner + Duration::from_secs(30);
+    let natives = [Arc::new(Native::default()), Arc::new(Native::default())];
+    let mut pages = Vec::new();
+    for (native, deadline) in natives.iter().zip([sooner, later]) {
+        pages.push(attach(native.clone(), deadline));
+        pump(&queue, &mut shell, || {
+            native.construction.lock().unwrap().is_some()
+        });
+    }
+    let scheduled = queue.work_deadline().expect("a timed wake is owed");
+    assert!(
+        scheduled <= sooner,
+        "the later page's deadline replaced the sooner one"
+    );
+    for (native, page) in natives.iter().zip(&pages) {
+        assert!(page.close());
+        native.release_construction();
+    }
+    pump(&queue, &mut shell, || {
+        pages.iter().all(|page| page.is_closed())
+    });
+    let shutdown = owner.shutdown_with_deadline(Instant::now() + Duration::from_secs(5));
+    while let Some(command) = queue.try_recv() {
+        let terminal = matches!(command, Command::Shutdown { .. });
+        shell.handle(command);
+        if terminal {
+            break;
+        }
+    }
+    assert!(shutdown.recv().is_ok());
+}
+
+#[test]
 fn work_page_group_admits_a_later_read_after_its_reads_close_cleanly() {
     if child("work_page_group_admits_a_later_read_after_its_reads_close_cleanly") {
         return;

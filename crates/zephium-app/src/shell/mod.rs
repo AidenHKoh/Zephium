@@ -1486,17 +1486,11 @@ impl Shell {
             self.admit_queued_pages();
             for page in &mut self.retained_pages {
                 page.poll();
-                if let Some(queue) = &self.self_queue {
-                    queue.schedule_work(page.next_deadline());
-                }
             }
             self.retire_settled_pages();
             self.retained_graveyard.retain(|work| !work.is_closed());
             for work in &mut self.retained_graveyard {
                 work.poll();
-                if let Some(queue) = &self.self_queue {
-                    queue.schedule_work(work.next_deadline());
-                }
             }
             if self.page_lane_turn() == turn {
                 break;
@@ -1504,16 +1498,25 @@ impl Shell {
         }
         if let Some(work) = &mut self.retained_work {
             work.poll();
-            if let Some(queue) = &self.self_queue {
-                queue.schedule_work(work.next_deadline());
-            }
         }
         if let Some(work) = &mut self.work {
             work.poll();
-            if let Some(queue) = &self.self_queue {
-                queue.schedule_work(work.next_deadline());
-            }
         }
+        // The timer holds one deadline: the earliest any owner still needs.
+        if let Some(queue) = &self.self_queue {
+            queue.schedule_work(self.next_work_deadline());
+        }
+    }
+
+    #[cfg(feature = "work-execution")]
+    fn next_work_deadline(&self) -> Option<std::time::Instant> {
+        self.retained_pages
+            .iter()
+            .chain(&self.retained_graveyard)
+            .chain(self.retained_work.as_deref())
+            .filter_map(crate::work_resources::product::ProductWork::next_deadline)
+            .chain(self.work.as_ref().and_then(|work| work.next_deadline()))
+            .min()
     }
 
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
