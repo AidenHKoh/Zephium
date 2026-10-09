@@ -92,13 +92,27 @@ pub(crate) fn spec(args: &Value) -> Result<PartSpec, String> {
     let goal = text_arg(args, "goal")
         .or_else(|| derived_goal(args, &title))
         .ok_or("goal is required")?;
-    if goal.chars().count() > 200 || goal.contains('\n') {
-        return Err("goal is one line of at most 200 characters; put details in brief".into());
-    }
-    let brief = text_arg(args, "brief").unwrap_or_default();
-    if brief.chars().count() > 1200 {
+    // A goal said at length keeps every word in the brief and a short
+    // first line on the canvas, rather than costing the lead a turn.
+    let (goal, overflow) = if goal.chars().count() > 200 || goal.contains('\n') {
+        let first = goal
+            .split(['\n', '.', ';'])
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_default();
+        (clip(first, 200), Some(goal.clone()))
+    } else {
+        (goal, None)
+    };
+    let brief = text_arg(args, "brief");
+    if brief.as_ref().is_some_and(|b| b.chars().count() > 1200) {
         return Err("brief is at most 1200 characters".into());
     }
+    let brief = match (overflow, brief) {
+        (Some(whole), Some(brief)) => format!("{}\n{brief}", clip(&whole, 600)),
+        (Some(whole), None) => clip(&whole, 600),
+        (None, brief) => brief.unwrap_or_default(),
+    };
     let service = text_arg(args, "service").and_then(|service| {
         let host = service
             .trim_start_matches("https://")
@@ -2272,6 +2286,18 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(briefed.goal, "Visa rules for Polish citizens in the US");
+        let long = format!(
+            "Find Lisbon hotels for 4 to 7 December. {}",
+            "Rated 8 or more. ".repeat(12)
+        );
+        let said = super::spec(&serde_json::json!({
+            "title": "Hotels", "helper": "browser", "goal": long, "brief": "Two adults."
+        }))
+        .unwrap();
+        assert_eq!(said.goal, "Find Lisbon hotels for 4 to 7 December");
+        assert!(
+            said.brief.starts_with("Find Lisbon hotels") && said.brief.ends_with("Two adults.")
+        );
     }
 
     #[test]
