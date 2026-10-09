@@ -267,7 +267,7 @@ impl AgentProviderActionRefusal {
         config: &AgentProviderCallConfig,
     ) -> Result<super::AgentProviderObservationCheckpoint, Box<Self>> {
         let note = match self.error {
-            SemanticActionBindingError::TargetCovered => "target_covered: nothing executed; another element (a cookie or consent banner, a dialog, a popover or a sticky header) covered the target. This is a fresh look at the page: close what covers it with its close, dismiss or reject control, or choose another control, using these refs.",
+            SemanticActionBindingError::TargetCovered => "target_covered: nothing executed; another element (a cookie or consent banner, a dialog, a popover or a sticky header) lay over the target where it would be clicked. This is a fresh look at the page. The control still takes a key: press it with Enter (act press, key enter, on its ref in this look), which reaches it without the pointer. Or close what covers it with its own close, dismiss or reject control. A dialog whose own controls are refused does not block the rest of the page: leave it and use the page's search box, its links, or the site's search results address.",
             SemanticActionBindingError::DispatchRejected => "target_changed: nothing executed; the page changed before the action ran. This is a fresh look at the page: act on these refs; if a dialog opened, work within it first.",
             SemanticActionBindingError::Unverified
                 if self.context.is_some_and(|context| {
@@ -279,7 +279,9 @@ impl AgentProviderActionRefusal {
             SemanticActionBindingError::Unverified => "outcome_not_observed: the action ran, but its declared outcome was not seen. This is a fresh look at the page as it is now: continue from what it shows, and do not repeat the same action unchanged.",
             _ => return Err(Box::new(self)),
         };
-        let note = if self.repeated {
+        let note = if self.repeated && self.error == SemanticActionBindingError::TargetCovered {
+            format!("{note} This control was covered before too: do not click it again. Press it with Enter, or change approach (navigate to another address on this site, such as its search results for your query, or use its search box).")
+        } else if self.repeated {
             format!("{note} This control was refused before: change approach (navigate to another address on this site, such as its search results for your query, use its search box, or scroll).")
         } else {
             note.to_owned()
@@ -381,7 +383,7 @@ impl AgentProviderActionRefusal {
             ),
             SemanticActionBindingError::TargetCovered => (
                 "target_covered",
-                "Nothing executed. The target was covered by another element (a banner, a sticky header, a dialog or a popover) even after it was brought into view. The page has been looked at again: request snapshot(initial) first, then close what covers it (a dialog's close or a banner's reject control) or choose another control, using the fresh refs. Do not repeat the proposal against this observation.",
+                "Nothing executed. The target was covered by another element (a banner, a sticky header, a dialog or a popover) even after it was brought into view. Do not click it again: press it with Enter instead (act press, key enter), which reaches it without the pointer, close what covers it with its own close or reject control, or use the page's search box, its links or the site's search results address. A dialog whose own controls are refused does not block the rest of the page.",
             ),
             _ => return Err(AgentProviderContinuationError::ToolKind),
         };

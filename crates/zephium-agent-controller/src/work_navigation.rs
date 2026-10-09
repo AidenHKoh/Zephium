@@ -103,15 +103,16 @@ impl AgentWorkController {
 
     /// Counts a refusal of a control that ran or reached the page (not
     /// observed, rejected at dispatch, covered) by the control's role and
-    /// name digest: from the second on, the refusal is marked repeated.
-    /// Other refusals pass through.
+    /// name digest: from the second on, the refusal is marked repeated. A
+    /// covered control is kept for its key press only. Other refusals pass
+    /// through.
     pub(super) fn count_refused_control(
         refused: &mut Vec<(u64, u8)>,
+        covered: &mut Vec<u64>,
         refusal: AgentProviderActionRefusal,
         observation: &SemanticObservation,
         frames: &[SemanticFrameJoin],
     ) -> Result<AgentProviderActionRefusal, AgentWorkFailure> {
-        use std::hash::{Hash, Hasher};
         if !matches!(
             refusal.reason(),
             SemanticActionBindingError::Unverified
@@ -129,10 +130,15 @@ impl AgentWorkController {
         }) else {
             return Ok(refusal);
         };
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        format!("{:?}", node.role()).hash(&mut hasher);
-        node.name().map(SemanticText::as_str).hash(&mut hasher);
-        let control = hasher.finish();
+        let control = super::control_digest(node);
+        if refusal.reason() == SemanticActionBindingError::TargetCovered
+            && !covered.contains(&control)
+        {
+            covered
+                .try_reserve(1)
+                .map_err(|_| AgentWorkFailure::Contract)?;
+            covered.push(control);
+        }
         let count = match refused.iter_mut().find(|(known, _)| *known == control) {
             Some((_, count)) => {
                 *count = count.saturating_add(1);
@@ -554,6 +560,7 @@ impl AgentWorkController {
                 })?;
         }
         state.navigation_hops += 1;
+        state.covered_controls.clear();
         let fresh = Self::fit_model_observation(
             Box::pin(Self::observe_after_navigation(state, worker, browser)).await?,
         )?;

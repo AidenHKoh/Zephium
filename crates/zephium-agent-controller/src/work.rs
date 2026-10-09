@@ -1409,6 +1409,7 @@ impl AgentWorkController {
                     retained_read_evidence: SemanticRetainedReadEvidence::default(),
                     follow: zephium_agentic::SemanticActionFollow::default(),
                     consent_press: false,
+                    covered_controls: Vec::new(),
                     failure: None,
                     observation: None,
                     native_terminal: None,
@@ -1430,6 +1431,9 @@ struct WorkState {
     follow: zephium_agentic::SemanticActionFollow,
     /// The action in flight is Rust's press of a cookie banner's refusal.
     consent_press: bool,
+    /// Controls of this document a click found covered, by role and name
+    /// digest: the model is offered them for a key press only.
+    covered_controls: Vec<u64>,
     navigation_target: Option<ContextNavigationTarget>,
     navigation_route: Option<AgentNavigationRoute>,
     navigation_discovery: Option<AgentNavigationDiscovery>,
@@ -1613,6 +1617,8 @@ impl WorkState {
             .flat_map(SemanticSnapshot::nodes)
         {
             let approved = self.task.model_action_operations(node, observation)?;
+            let covered = !self.covered_controls.is_empty()
+                && self.covered_controls.contains(&control_digest(node));
             let operations = [
                 SemanticOperationClass::Click,
                 SemanticOperationClass::Fill,
@@ -1622,7 +1628,9 @@ impl WorkState {
             ]
             .into_iter()
             .filter(|operation| {
-                node.operations().contains(*operation) && approved.contains(*operation)
+                node.operations().contains(*operation)
+                    && approved.contains(*operation)
+                    && !(covered && *operation == SemanticOperationClass::Click)
             })
             .collect::<Vec<_>>();
             let operations =
@@ -3354,6 +3362,7 @@ impl AgentWorkController {
                             let refusal = Self::repeated_refusal(&mut action_refusals, refusal)?;
                             let refusal = Self::count_refused_control(
                                 &mut refused_controls,
+                                &mut state.covered_controls,
                                 refusal,
                                 &observation,
                                 &frames,
@@ -3455,6 +3464,7 @@ impl AgentWorkController {
                     let refusal = Self::repeated_refusal(&mut action_refusals, refusal)?;
                     let refusal = Self::count_refused_control(
                         &mut refused_controls,
+                        &mut state.covered_controls,
                         refusal,
                         &observation,
                         &frames,
@@ -6007,6 +6017,16 @@ impl fmt::Debug for WorkJournal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("WorkJournal([owned, content-free])")
     }
+}
+
+/// A control's identity across looks of one document: a single-page app
+/// re-renders it under a new reference, with the same role and name.
+fn control_digest(node: &SemanticNode) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    format!("{:?}", node.role()).hash(&mut hasher);
+    node.name().map(SemanticText::as_str).hash(&mut hasher);
+    hasher.finish()
 }
 
 fn node_count(observation: &SemanticObservation) -> usize {
