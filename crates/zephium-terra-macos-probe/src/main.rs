@@ -95,6 +95,10 @@ fn main() {
             result
         }
         [argument] if argument == "--live-lead-smoke" => lead_smoke::run(),
+        #[cfg(feature = "durable-runtime")]
+        [argument, body, model, thinking, times] if argument == "--live-page-replay" => {
+            lead_smoke::replay_page(body, model, thinking, times)
+        }
         [argument] if argument == "--live-fixed-click" => run_fixed_click(),
         [argument] if argument == "--live-public-wikipedia-fill" => run_public_wikipedia_fill(),
         [argument] if argument == "--live-two-action" => run_two_action(

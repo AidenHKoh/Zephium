@@ -191,6 +191,49 @@ impl AgentProviderModelClient {
     }
 }
 
+#[cfg(feature = "probe-harness")]
+impl AgentProviderModelClient {
+    /// Replays one recorded page-agent body on this model outside any run,
+    /// for the release-excluded probe. Returns closed facts, never model text.
+    pub async fn probe_replay(&self, body: &[u8], thinking: bool) -> String {
+        let Ok(config) = self.try_call_config(8_192) else {
+            return "config=refused".to_owned();
+        };
+        let Ok((mut request, contract)) =
+            translate_model_client_call(&config, self.model(), self.supports_vision(), body)
+        else {
+            return "translate=refused".to_owned();
+        };
+        if !thinking {
+            request.reasoning = None;
+        }
+        let started = Instant::now();
+        let outcome = match self.client.call(request, &|_| {}).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return format!(
+                    "error={error:?} elapsed_ms={}",
+                    started.elapsed().as_millis()
+                )
+            }
+        };
+        let elapsed = started.elapsed().as_millis();
+        let usage = outcome.usage;
+        let call = crate::AgentProviderCallIdentity::probe_fixture();
+        let decoded = match contract.finish(call, &config, outcome) {
+            Ok(reply) => format!("decoded=ok text={}", reply.text.is_some()),
+            Err(error) => format!("decoded={error:?}"),
+        };
+        format!(
+            "elapsed_ms={elapsed} input={} cached={} output={} reasoning={} {decoded}",
+            usage.input_tokens,
+            usage.cached_input_tokens,
+            usage.output_tokens,
+            usage.reasoning_tokens
+        )
+    }
+}
+
 impl fmt::Debug for AgentProviderModelClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter

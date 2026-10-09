@@ -585,6 +585,18 @@ pub struct AgentProviderCallIdentity {
 }
 
 impl AgentProviderCallIdentity {
+    /// A correlation joined to no run, for probe replays outside any policy.
+    #[cfg(feature = "probe-harness")]
+    pub(crate) fn probe_fixture() -> Self {
+        Self {
+            manifest: crate::AgentRunManifestId::generate(),
+            manifest_guard: [0; 32],
+            call: AgentModelCallId::new(1).expect("nonzero call"),
+            lease: crate::AgentPlanLeaseId::generate(),
+            node: crate::AgentPlanNodeId::generate(),
+        }
+    }
+
     /// Projects non-authorizing correlation from a prepared policy admission.
     pub(crate) fn from_admission(admission: &AgentModelCallAdmission) -> Self {
         Self {
