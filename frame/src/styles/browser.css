@@ -600,9 +600,11 @@
   color: var(--color-faint);
   margin-bottom: 10px;
 }
-.settings-page .ui-settings-group > [data-setting] + [data-setting],
-.settings-page .ui-settings-group > [data-setting] + .ui-settings-row,
-.settings-page .ui-settings-group > .ui-settings-row + [data-setting] {
+/* A row after a row draws its own inset hairline; this rule only joins a row
+   to a section that is not one, so two rows never get two dividers. */
+.settings-page .ui-settings-group > [data-setting]:not(.ui-settings-row) + [data-setting],
+.settings-page .ui-settings-group > [data-setting]:not(.ui-settings-row) + .ui-settings-row,
+.settings-page .ui-settings-group > .ui-settings-row + [data-setting]:not(.ui-settings-row) {
   border-top: 1px solid var(--color-border);
 }
 [data-setting] {
