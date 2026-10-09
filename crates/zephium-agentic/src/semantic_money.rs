@@ -40,77 +40,124 @@ fn spacing_or_symbol(ch: char) -> bool {
     ch.is_whitespace() || matches!(ch, '$' | '€' | '£' | '¥' | '₹' | '₩')
 }
 
-fn normalize_with_decimal(value: &str, decimal: char) -> Option<String> {
-    let value = value.replace(['\u{a0}', '\u{202f}'], " ");
-    let mut parts = value.split(decimal);
-    let whole = parts.next()?;
-    let fraction = parts.next();
-    if parts.next().is_some()
-        || fraction.is_some_and(|part| {
-            part.is_empty() || part.len() > 6 || !part.bytes().all(|byte| byte.is_ascii_digit())
-        })
+/// Currency signs and the codes each may stand for, longest spelling first
+/// so `US$` is read before `$`.
+const CURRENCY_SIGNS: [(&str, &[&str]); 22] = [
+    ("US$", &["USD"]),
+    ("CA$", &["CAD"]),
+    ("AU$", &["AUD"]),
+    ("NZ$", &["NZD"]),
+    ("HK$", &["HKD"]),
+    ("R$", &["BRL"]),
+    ("C$", &["CAD"]),
+    ("A$", &["AUD"]),
+    ("$", &["USD", "CAD", "AUD", "NZD", "MXN", "SGD", "HKD"]),
+    ("€", &["EUR"]),
+    ("£", &["GBP"]),
+    ("zł", &["PLN"]),
+    ("zl", &["PLN"]),
+    ("¥", &["JPY", "CNY"]),
+    ("₹", &["INR"]),
+    ("₩", &["KRW"]),
+    ("₺", &["TRY"]),
+    ("₽", &["RUB"]),
+    ("Kč", &["CZK"]),
+    ("kr", &["SEK", "NOK", "DKK"]),
+    ("Fr.", &["CHF"]),
+    ("Ft", &["HUF"]),
+];
+
+/// Codes the first currency sign in `text` may stand for, most likely first.
+pub(crate) fn sign_currencies(text: &str) -> &'static [&'static str] {
+    CURRENCY_SIGNS
+        .iter()
+        .filter_map(|(sign, codes)| text.find(sign).map(|at| (at, sign.len(), *codes)))
+        .min_by_key(|(at, len, _)| (*at, std::cmp::Reverse(*len)))
+        .map_or(&[], |(_, _, codes)| codes)
+}
+
+/// Markers that show `currency` in page text: its code and every sign that
+/// may stand for it.
+fn currency_markers(currency: &str) -> impl Iterator<Item = &str> {
+    std::iter::once(currency).chain(
+        CURRENCY_SIGNS
+            .iter()
+            .filter(move |(_, codes)| codes.contains(&currency))
+            .map(|(sign, _)| *sign),
+    )
+}
+
+/// One displayed number in canonical decimal form. Spaces and apostrophes
+/// group digits. A lone `,` or `.` before exactly three digits groups
+/// thousands, since prices never show three decimals; of two kinds of mark,
+/// the last is the decimal one.
+pub(crate) fn canonical_amount(token: &str) -> Option<String> {
+    let token: String = token
+        .chars()
+        .filter(|ch| !spacing(*ch) && *ch != '\'')
+        .collect();
+    if !token.starts_with(|ch: char| ch.is_ascii_digit())
+        || !token.ends_with(|ch: char| ch.is_ascii_digit())
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.' || byte == b',')
     {
         return None;
     }
-    let digits = if let Some(separator) = whole.chars().find(|ch| !ch.is_ascii_digit()) {
-        if !matches!(separator, ',' | '.' | ' ') {
-            return None;
-        }
-        let groups: Vec<_> = whole.split(separator).collect();
-        if groups[0].is_empty()
-            || groups[0].len() > 3
-            || groups.iter().skip(1).any(|group| group.len() != 3)
-            || groups
-                .iter()
-                .any(|group| !group.bytes().all(|byte| byte.is_ascii_digit()))
-        {
-            return None;
-        }
-        groups.concat()
-    } else {
-        whole.to_owned()
+    let decimal = token.rfind([',', '.']).filter(|at| {
+        let mark = token.as_bytes()[*at];
+        let other = if mark == b',' { '.' } else { ',' };
+        token.contains(other)
+            || (token.bytes().filter(|byte| *byte == mark).count() == 1
+                && (token.len() - at - 1 != 3 || &token[..*at] == "0"))
+    });
+    let (whole, fraction) = match decimal {
+        Some(at) => (&token[..at], Some(&token[at + 1..])),
+        None => (token.as_str(), None),
     };
-    let normalized = canonical(&match fraction {
+    let groups: Vec<&str> = whole.split([',', '.']).collect();
+    if groups[0].is_empty()
+        || groups.iter().skip(1).any(|group| group.len() != 3)
+        || fraction.is_some_and(|part| part.len() > 6 || part.contains([',', '.']))
+    {
+        return None;
+    }
+    let digits = groups.concat();
+    let value = canonical(&match fraction {
         Some(fraction) => format!("{digits}.{fraction}"),
         None => digits,
     });
-    valid_amount(&normalized).then_some(normalized)
+    valid_amount(&value).then_some(value)
 }
 
-fn unambiguous_amount(token: &str, amount: &str) -> bool {
+fn amount_matches(token: &str, amount: &str) -> bool {
     let token = token.trim();
-    if token.is_empty()
-        || token.len() > 40
-        || !token.chars().next().is_some_and(|ch| ch.is_ascii_digit())
-        || !token.chars().last().is_some_and(|ch| ch.is_ascii_digit())
-    {
-        return false;
-    }
-    let dot = normalize_with_decimal(token, '.');
-    let comma = normalize_with_decimal(token, ',');
-    let normalized = match (dot, comma) {
-        (Some(first), Some(second)) if first == second => first,
-        (Some(value), None) | (None, Some(value)) => value,
-        _ => return false,
-    };
-    normalized == canonical(amount)
+    token.len() <= 40 && canonical_amount(token).is_some_and(|value| value == canonical(amount))
 }
 
+/// True when `text` shows `amount` beside a marker of `currency`: its code,
+/// or a sign that may stand for it (`$` for any dollar, `zł` for PLN).
 pub(crate) fn supports_money(text: &str, amount: &str, currency: &str) -> bool {
     if !valid_amount(amount) || !valid_currency(currency) {
         return false;
     }
-    text.match_indices(currency).any(|(index, _)| {
+    currency_markers(currency).any(|marker| supports_money_marker(text, amount, marker))
+}
+
+fn supports_money_marker(text: &str, amount: &str, marker: &str) -> bool {
+    let word = marker.chars().any(char::is_alphabetic);
+    text.match_indices(marker).any(|(index, _)| {
         let before = &text[..index];
-        let after = &text[index + currency.len()..];
-        if before
-            .chars()
-            .last()
-            .is_some_and(|ch| ch.is_alphabetic() || ch == '_')
-            || after
+        let after = &text[index + marker.len()..];
+        if word
+            && (before
                 .chars()
-                .next()
+                .last()
                 .is_some_and(|ch| ch.is_alphabetic() || ch == '_')
+                || after
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_alphabetic() || ch == '_'))
         {
             return false;
         }
@@ -131,7 +178,7 @@ pub(crate) fn supports_money(text: &str, amount: &str, currency: &str) -> bool {
                 .chars()
                 .last()
                 .is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
-            && unambiguous_amount(&left[start..], amount)
+            && amount_matches(&left[start..], amount)
         {
             return true;
         }
@@ -148,7 +195,7 @@ pub(crate) fn supports_money(text: &str, amount: &str, currency: &str) -> bool {
         let right_boundary = right[end..].chars().next();
         !right_boundary.is_some_and(|ch| {
             ch.is_alphanumeric() || matches!(ch, '_' | '%' | '‰' | '-' | '−' | '–' | '—' | '+')
-        }) && unambiguous_amount(&right[..end], amount)
+        }) && amount_matches(&right[..end], amount)
     })
 }
 
@@ -158,7 +205,7 @@ const CURRENCY_CODES: [&str; 12] = [
 ];
 const CURRENCY_SYMBOLS: [&str; 4] = ["$", "€", "£", "zł"];
 
-fn spacing(ch: char) -> bool {
+pub(crate) fn spacing(ch: char) -> bool {
     matches!(ch, ' ' | '\u{a0}' | '\u{202f}')
 }
 
@@ -270,11 +317,20 @@ mod tests {
             ("1\u{202f}299,50 EUR", "1299.50", "EUR"),
             ("EUR 0,99", "0.99", "EUR"),
             ("20USD", "20", "USD"),
+            ("$20.00", "20", "USD"),
+            ("Was $59.99, now $39.99", "39.99", "USD"),
+            ("1,299 USD", "1299", "USD"),
+            ("Cena 1\u{a0}299,00 zł brutto", "1299", "PLN"),
+            ("od 249 zł", "249", "PLN"),
+            ("1 299,00 PLN", "1299.00", "PLN"),
+            ("12,50 € pro Stück", "12.5", "EUR"),
+            ("£51.77", "51.77", "GBP"),
+            ("C$ 20", "20", "CAD"),
         ] {
             assert!(supports_money(text, amount, currency), "{text}");
         }
         for (text, amount, currency) in [
-            ("$20.00", "20", "USD"),
+            ("€20.00", "20", "USD"),
             ("USD 20", "21", "USD"),
             ("20 EUR", "20", "USD"),
             ("-20 USD", "20", "USD"),
@@ -283,8 +339,8 @@ mod tests {
             ("-$20 USD", "20", "USD"),
             ("-USD 20", "20", "USD"),
             ("(20 USD)", "20", "USD"),
-            ("1,299 USD", "1299", "USD"),
             ("1,299 USD", "1.299", "USD"),
+            ("20 zloty", "20", "PLN"),
             ("USD 1,29,900", "129900", "USD"),
             ("USD 20_000", "20", "USD"),
             ("USD 20%", "20", "USD"),

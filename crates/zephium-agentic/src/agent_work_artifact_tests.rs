@@ -445,7 +445,7 @@ fn money_archive_revalidates_amount_currency_version_and_citations() {
     assert!(d.validate().is_err());
     d.version = 6;
     d.sources[0].content = ArchivedSourceContent::Text {
-        value: "$20.00".into(),
+        value: "€20.00".into(),
     };
     assert!(d.validate().is_err());
     d.sources[0].content = ArchivedSourceContent::Text {
