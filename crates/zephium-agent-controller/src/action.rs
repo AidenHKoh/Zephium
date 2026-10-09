@@ -653,6 +653,11 @@ impl AgentBrowserAction {
         let reason = match failed.failure() {
             SemanticActionFailure::TargetOccluded => SemanticActionBindingError::TargetCovered,
             SemanticActionFailure::NeedsHuman => SemanticActionBindingError::Unverified,
+            // The page's control cannot take this operation (a scroll into
+            // view of the whole document): the model chooses another.
+            SemanticActionFailure::UnsupportedInteraction => {
+                SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied)
+            }
             _ => SemanticActionBindingError::DispatchRejected,
         };
         match this.proposal.batch.fail(&this.proposal.action, failed) {
@@ -1114,5 +1119,6 @@ pub(crate) const fn refused_before_acting(failure: SemanticActionFailure) -> boo
             | SemanticActionFailure::TargetChanged
             | SemanticActionFailure::TargetDisabled
             | SemanticActionFailure::StaleReference
+            | SemanticActionFailure::UnsupportedInteraction
     )
 }
