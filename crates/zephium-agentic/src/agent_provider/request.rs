@@ -4600,16 +4600,18 @@ fn encode_decision_budget(
     // A page whose money covers this call and one more of its size makes
     // this its last decision, so the mapping call still fits. Spending it on
     // browsing would leave cited evidence that no call can map.
-    let this_call = conservative_request_measurement(config, &body)
-        .ok()
-        .and_then(|measured| {
-            config.cost_ceiling(
-                u64::from(measured.tokens()) + DECISION_BUDGET_FACT_BYTES,
-                config.max_output_tokens(),
-            )
-        })
+    let measured = conservative_request_measurement(config, &body)
+        .map(|measured| u64::from(measured.tokens()) + DECISION_BUDGET_FACT_BYTES)
+        .map_err(|_| AgentProviderRequestError::Encoding)?;
+    let this_call = config
+        .cost_ceiling(measured, config.max_output_tokens())
         .ok_or(AgentProviderRequestError::Encoding)?;
-    if remaining_cost_micro_usd < this_call.saturating_mul(2) {
+    // The same holds for the run's tokens: a mapping reserves at least what
+    // this call does, so one that would not fit after it is mapped now.
+    let this_tokens = measured.saturating_add(u64::from(config.max_output_tokens()));
+    if remaining_cost_micro_usd < this_call.saturating_mul(2)
+        || remaining_model_tokens < this_tokens.saturating_mul(2)
+    {
         remaining = 1;
     }
     let text = format!(
@@ -7560,6 +7562,24 @@ mod tests {
             )
             .is_err());
         }
+        // Too few run tokens for this call and a mapping of its size: the
+        // planner maps now instead of browsing on into an unmappable page.
+        let body = encode_decision_budget(
+            encode_openai_body(&config, "objective", "current evidence").unwrap(),
+            &config,
+            first,
+            u32::MAX,
+            1_000,
+            u64::MAX,
+        )
+        .unwrap();
+        let wire: Value = serde_json::from_slice(&body).unwrap();
+        assert!(wire["input"][2]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("decision_calls_remaining_including_this=1"));
+        assert_eq!(wire["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(wire["tools"][0]["name"], "extract");
         let handoff = config.clone().with_human_request();
         let body = encode_decision_budget(
             encode_openai_body(&handoff, "objective", "evidence").unwrap(),
