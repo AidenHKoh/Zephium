@@ -148,6 +148,7 @@ base64.workspace = true
 minisign-verify = "=0.2.5"
 tempfile.workspace = true
 zephium-webext = { path = "../crates/zephium-webext", version = "=0.1.0" }
+zephium-voice.workspace = true
 
 [dev-dependencies]
 async-io = "=2.6.0"

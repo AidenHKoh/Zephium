@@ -74,6 +74,23 @@ export const commands = {
 	workMoreModels: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkMoreModelsV1_Serialize>("work_more_models", { expectedProfile, provider }),
 	/**  Ollama and LM Studio on their default ports, for one-click setup. */
 	workLocalServers: () => __TAURI_INVOKE<WorkLocalServerV1[]>("work_local_servers"),
+	voiceStatus: () => __TAURI_INVOKE<VoiceStatusV1>("voice_status"),
+	voiceChooseEngine: (engine: "on_device" | "zephium" | "open_ai" | "groq" | null) => __TAURI_INVOKE<VoiceStatusV1>("voice_choose_engine", { engine }),
+	voiceChooseLanguage: (language: string | null) => __TAURI_INVOKE<VoiceStatusV1>("voice_choose_language", { language }),
+	/**
+	 *  Opens the microphone and starts a take. On first use this waits while
+	 *  the system asks for permission.
+	 */
+	voiceStart: () => __TAURI_INVOKE<VoiceStartV1>("voice_start"),
+	/**  Stops listening; the words arrive as a `done` change. */
+	voiceStop: (take: number) => __TAURI_INVOKE<boolean>("voice_stop", { take }),
+	/**  Discards the current take, whatever its phase. */
+	voiceCancel: () => __TAURI_INVOKE<boolean>("voice_cancel"),
+	/**
+	 *  Opens the system's privacy settings for the microphone or speech
+	 *  recognition, after the person declined one.
+	 */
+	voiceOpenPrivacy: (kind: VoicePrivacyV1) => __TAURI_INVOKE<boolean>("voice_open_privacy", { kind }),
 	/**
 	 *  The account now, refreshing what is stale in the background. Asks no
 	 *  server unless the person is signed in or chose one.
@@ -455,6 +472,8 @@ export const events = {
 	zephiumAccountChanged: makeEvent<AccountChanged>("zephium:account-changed"),
 	zephiumImportProgress: makeEvent<ImportJobView>("zephium:import-progress"),
 	zephiumKeymapChanged: makeEvent<KeymapChanged>("zephium:keymap-changed"),
+	zephiumVoiceChanged: makeEvent<VoiceChanged>("zephium:voice-changed"),
+	zephiumVoiceLevels: makeEvent<VoiceLevels>("zephium:voice-levels"),
 	zephiumWorkDecisionPreferenceChanged: makeEvent<WorkDecisionPreferenceChanged>("zephium:work-decision-preference-changed"),
 	zephiumWorkHumanChanged: makeEvent<WorkHumanChanged>("zephium:work-human-changed"),
 	zephiumWorkModelsChanged: makeEvent<WorkModelsChanged>("zephium:work-models-changed"),
@@ -2192,6 +2211,65 @@ export type UpdateStatus = UpdateStatus_Serialize | UpdateStatus_Deserialize;
 export type UpdateStatus_Deserialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
 
 export type UpdateStatus_Serialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
+
+/**  A take moved on. `text` is set once, when it is done. */
+export type VoiceChanged = {
+	take: number,
+	phase: VoicePhaseV1,
+	engine: VoiceEngineV1 | null,
+	/**  The words so far, while listening, when the engine streams them. */
+	partial: string | null,
+	text: string | null,
+	fault: VoiceFaultV1 | null,
+};
+
+export type VoiceEngineV1 = "on_device" | "zephium" | "open_ai" | "groq";
+
+/**  Why a take could not start or produce words. Closed; no system text. */
+export type VoiceFaultV1 = "microphone_denied" | "recognition_denied" | "no_microphone" | "language_unavailable" | 
+/**  No engine can run: nothing on this device and no account or key. */
+"no_engine" | "key_refused" | "signed_out" | "out_of_credit" | "rate_limited" | "offline" | "provider_down" | "too_long" | "busy" | "unavailable";
+
+/**
+ *  Input levels in percent, one per 40 ms of audio, oldest first; they
+ *  arrive about ten times a second.
+ */
+export type VoiceLevels = {
+	take: number,
+	levels: number[],
+};
+
+export type VoicePermissionV1 = "granted" | "undetermined" | "denied";
+
+export type VoicePhaseV1 = "listening" | "transcribing" | "done" | "failed" | "cancelled";
+
+export type VoicePrivacyV1 = "microphone" | "recognition";
+
+export type VoiceStartV1 = {
+	/**  The take's id, which its events carry; null when it did not start. */
+	take: number | null,
+	engine: VoiceEngineV1 | null,
+	fault: VoiceFaultV1 | null,
+};
+
+export type VoiceStatusV1 = {
+	version: number,
+	/**  Engines usable now, this device's first. */
+	engines: VoiceEngineV1[],
+	chosen: VoiceEngineV1 | null,
+	/**  What a take uses now; null when nothing can. */
+	effective: VoiceEngineV1 | null,
+	/**  The dictation language the person chose; null follows the system. */
+	language: string | null,
+	/**  The system's preferred languages, most preferred first. */
+	languages: string[],
+	/**
+	 *  The on-device recognizer's locale for the language; null when this
+	 *  device cannot recognize it.
+	 */
+	on_device: string | null,
+	microphone: VoicePermissionV1,
+};
 
 /**  An extension's run-time request for access, awaiting the user's answer. */
 export type WebExtensionAccessRequestView = {
