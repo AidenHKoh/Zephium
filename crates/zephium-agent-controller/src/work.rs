@@ -1512,10 +1512,17 @@ impl WorkState {
         let capability = WorkBrowserObservationCapability::for_navigation_discovery(
             self.navigation_discovery.as_ref(),
         );
+        // A site task's looks hold a listing's records below the fold too,
+        // after everything in view, so the planner extracts from its look
+        // instead of asking for the list region by region.
         if self
             .extraction_schema
             .as_ref()
             .is_some_and(SemanticExtractionSchema::reads_whole_page)
+            || self
+                .navigation_discovery
+                .as_ref()
+                .is_some_and(AgentNavigationDiscovery::is_site_session)
         {
             capability.for_whole_page_read()
         } else {

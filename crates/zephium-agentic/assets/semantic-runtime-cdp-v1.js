@@ -11,6 +11,7 @@ const MIN_WIRE_BYTES = 1024;
 const MAX_WIRE_BYTES = 262144;
 const MAX_VISITED_NODES = 32768;
 const MAX_TREE_DEPTH = 32;
+const MAX_DEFERRED_RECORDS = 64;
 const MAX_NAME_BYTES = 512;
 const MAX_NODE_TEXT_BYTES = 4096;
 const MAX_VALUE_BYTES = 4096;
@@ -31,6 +32,7 @@ const CHANNEL_STOP = "S1";
 const CHANNEL_PARK = "K1";
 const CHANNEL_PARKED = "K1:A";
 const CHANNEL_EXHAUSTED = "X1";
+const objectCreate = Object.create;
 const objectDefineProperty = Object.defineProperty;
 const objectFreeze = Object.freeze;
 const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
@@ -1964,6 +1966,7 @@ return records.length - 1;
 function traverse(root, state, anchored) {
 const records = [];
 const headings = [];
+const deferred = [];
 const focused = focusedElements();
 const stack = [];
 if (!anchored) {
@@ -2038,8 +2041,16 @@ const admitted = visible && (
 ? optionOfAdmittedSelect || descriptor.headMeta === true || (rect !== null && (initialPriority || inViewport(rect)))
 : true
 );
+if (!anchored && !admitted && visible && rect !== null && item.main === true &&
+(descriptor.role === "list_item" || descriptor.role === "row" ||
+(descriptor.role === "document" && descriptor.tag === "article")) &&
+deferred.length < MAX_DEFERRED_RECORDS &&
+!deferred.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {
+deferred.push({ element: item.node, parent });
+}
 if (!anchored && !admitted && visible &&
 (descriptor.role === "heading" || summaryDetails(item.node) !== null) &&
+!deferred.some(anchor => apply(nodeContains, anchor.element, [item.node])) &&
 !headings.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {
 const details = summaryDetails(item.node);
 const priority = details === null ? 0 : read(detailsOpenGetter, details) ? 1 : 2;
@@ -2085,10 +2096,12 @@ sink = null;
 }
 }
 if (!state.stopped) {
+const main = item.main === true ||
+(descriptor !== null && descriptor.role === "landmark" && descriptor.landmark === "main");
 pushChildren(
 stack,
 item.node,
-{ parent, sink, depth: item.depth + 1, disabled, nameAncestors },
+{ parent, sink, depth: item.depth + 1, disabled, nameAncestors, main },
 state
 );
 }
@@ -2103,6 +2116,36 @@ index = records[index].wire.p === undefined ? null : records[index].wire.p, dept
 if (unfinished.has(index)) break;
 unfinished.add(index);
 if (records[index].sink !== null && records[index].sink !== undefined) records[index].wire.fc = false;
+}
+}
+}
+if (!anchored && !state.stopped && deferred.length !== 0) {
+const known = objectCreate(null);
+for (const record of records) known[record.wire.k] = true;
+const original = state.request;
+for (const anchor of deferred) {
+const room = original.b.n - records.length;
+if (state.stopped || room <= 0) {
+if (!state.stopped) mark(state, "node_limit", false);
+break;
+}
+state.request = { ...original, b: { ...original.b, n: room } };
+const scoped = traverse(anchor.element, state, true);
+state.request = original;
+if (scoped.length === 0 || scoped.some(record => known[record.wire.k] === true)) continue;
+const offset = records.length;
+const parentDepth = anchor.parent === null ? -1 : records[anchor.parent].depth;
+if (parentDepth + 1 + scoped.reduce((deepest, record) => mathMax(deepest, record.depth), 0) > MAX_TREE_DEPTH) continue;
+for (const record of scoped) {
+if (record.wire.p === undefined) {
+if (anchor.parent === null) delete record.wire.p;
+else record.wire.p = anchor.parent;
+} else {
+record.wire.p += offset;
+}
+record.depth += parentDepth + 1;
+known[record.wire.k] = true;
+records.push(record);
 }
 }
 }

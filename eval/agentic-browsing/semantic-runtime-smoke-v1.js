@@ -1716,6 +1716,28 @@ async function finish() {
   const crowded = JSON.parse(invoke(113, 113, { k: "initial" }, { n: 8, t: 1024 }));
   assert(crowded.n.some((node) => node.n === "Visible final action") && crowded.n.some((node) => node.t === "Visible final evidence"), "offscreen heading inventory starved later viewport content");
   assert(crowded.n.length <= 8 && crowded.c === "node_limit", "structural inventory escaped its bound or hid omission");
+  // A results list below the fold fills the look's spare room, after every
+  // visible record, in document order, under its own list.
+  const listing = new Element("main");
+  listing.append(new Element("button")).append(new CharacterData("Visible filter"));
+  const results = listing.append(new Element("ul"));
+  for (let index = 0; index < 30; index += 1) {
+    const item = results.append(new Element("li"));
+    item.rect = { x: 10, y: index === 0 ? 100 : 900 + index * 80, width: 400, height: 60 };
+    const line = item.append(new Element("p"));
+    line.rect = { ...item.rect };
+    line.append(new CharacterData("Result " + index + " 19.99 PLN"));
+  }
+  document._root = listing; setOwner(listing, document);
+  const listed = JSON.parse(invoke(114, 114, { k: "initial" }, { n: 24 }));
+  const texts = listed.n.map((node) => node.t).filter(Boolean);
+  assert(texts.includes("Result 0 19.99 PLN") && texts.includes("Result 5 19.99 PLN"), "records below the fold stayed out of the look");
+  assert(texts.indexOf("Result 0 19.99 PLN") < texts.indexOf("Result 1 19.99 PLN"), "deferred records overtook a visible one");
+  assert(listed.n.length <= 24 && listed.c === "node_limit", "deferred records escaped the look's bound or hid omission");
+  assert(new Set(listed.n.map((node) => node.k)).size === listed.n.length, "a record was read twice");
+  assert(listed.n.every((node, index) => node.p === undefined || node.p < index), "a deferred record lost its parent");
+  const list = listed.n.findIndex((node) => node.r === "list");
+  assert(listed.n.filter((node) => node.r === "list_item").every((node) => node.p === list), "a deferred record left its list");
   // A look cut inside a control leaves that control's name unfinished; the
   // records read whole before it stay usable for actions.
   const cut = new Element("main");
