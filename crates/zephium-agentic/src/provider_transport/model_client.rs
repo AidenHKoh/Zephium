@@ -432,7 +432,7 @@ impl AgentProviderAttempt {
             Ok(reply) => reply,
             Err(error) => return self.finish_terminal(protocol_decoder_failure(error, None)),
         };
-        self.model_reply = Some(reply.facts);
+        self.model_reply = Some(reply.facts.with_asked_again(reasks));
         if let Some(text) = reply.text {
             let batch = AgentProviderStreamBatch::new(call, vec![text]);
             let disposition =

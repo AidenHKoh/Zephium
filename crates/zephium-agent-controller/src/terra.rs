@@ -3121,6 +3121,17 @@ impl AgentBrowserSession {
                     .map_err(|_| AgentBrowserProviderError::Journal)?;
             }
         }
+        if let Some(times) = result
+            .model_reply()
+            .map(|facts| facts.asked_again())
+            .filter(|times| *times != 0)
+        {
+            if let Some(journal) = &self.journal {
+                journal
+                    .emit(work::AgentWorkEventKind::ModelAskedAgain(times))
+                    .map_err(|_| AgentBrowserProviderError::Journal)?;
+            }
+        }
         let input = result.input_metric_receipt();
         let disclosure = result.disclosure_stage();
         let terminal = settle_browser_terminal(

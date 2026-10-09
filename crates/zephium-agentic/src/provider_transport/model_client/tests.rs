@@ -471,6 +471,10 @@ async fn a_malformed_call_is_asked_again_told_why_and_charged_as_reported() {
         Some(WorkModelMessage::Assistant(parts))
             if parts.iter().any(|part| matches!(part, WorkModelPart::ToolCall(call) if call.name == "act"))
     ));
+    assert_eq!(
+        result.model_reply().map(|facts| facts.asked_again()),
+        Some(1)
+    );
     let AgentProviderPolicySettlement::PricingRequired(settlement) =
         result.into_policy_settlement()
     else {
@@ -511,6 +515,10 @@ async fn a_reply_without_a_call_or_with_an_unoffered_tool_is_asked_again() {
     let unoffered = reasked_reason(&calls[2]);
     assert!(unoffered.contains("`click_element` is not a tool offered"));
     assert!(unoffered.contains("locate"));
+    assert_eq!(
+        result.model_reply().map(|facts| facts.asked_again()),
+        Some(2)
+    );
     let AgentProviderPolicySettlement::PricingRequired(settlement) =
         result.into_policy_settlement()
     else {

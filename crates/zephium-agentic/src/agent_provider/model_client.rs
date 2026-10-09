@@ -46,6 +46,7 @@ pub(crate) struct ModelClientReplyContract {
 pub struct AgentProviderModelReplyFacts {
     dropped_tool_calls: u16,
     dropped_text_bytes: u32,
+    asked_again: u8,
 }
 
 impl AgentProviderModelReplyFacts {
@@ -57,6 +58,16 @@ impl AgentProviderModelReplyFacts {
     /// Text that came beside a tool call and was dropped.
     pub const fn dropped_text_bytes(self) -> u32 {
         self.dropped_text_bytes
+    }
+
+    /// Times the model was told why its reply was unusable and asked again.
+    pub const fn asked_again(self) -> u8 {
+        self.asked_again
+    }
+
+    pub(crate) const fn with_asked_again(mut self, times: u8) -> Self {
+        self.asked_again = times;
+        self
     }
 }
 
@@ -490,6 +501,7 @@ impl ModelClientReplyContract {
         let mut facts = AgentProviderModelReplyFacts {
             dropped_tool_calls: u16::try_from(calls.len().saturating_sub(1)).unwrap_or(u16::MAX),
             dropped_text_bytes: 0,
+            asked_again: 0,
         };
         let first = calls.into_iter().next();
         let bounded = |bytes: usize, limit: u32| {
