@@ -3732,7 +3732,11 @@ impl AgentWorkController {
                     // A link whose click went nowhere (a new-window link, a
                     // covered or script-only one) is followed to its observed
                     // destination rather than handed back to the model.
-                    if let Some(target) = state.follow.take().or(link) {
+                    let diverted = state
+                        .follow
+                        .take()
+                        .and_then(|target| Self::followable(state, target));
+                    if let Some(target) = diverted.or(link) {
                         let next = Self::navigate_current(
                             state,
                             worker,
@@ -3841,7 +3845,11 @@ impl AgentWorkController {
                 0
             };
             fruitless.progressed();
-            if let Some(target) = state.follow.take() {
+            if let Some(target) = state
+                .follow
+                .take()
+                .and_then(|target| Self::followable(state, target))
+            {
                 let (continuation, _) =
                     transition.into_parts().ok_or(AgentWorkFailure::Contract)?;
                 let next = Self::navigate_current(
@@ -3981,7 +3989,11 @@ impl AgentWorkController {
         .await;
         state.keep_follow = false;
         let ran = ran?.is_some();
-        if let Some(target) = state.follow.take() {
+        if let Some(target) = state
+            .follow
+            .take()
+            .and_then(|target| Self::followable(state, target))
+        {
             return Self::navigate_current(
                 state,
                 worker,
@@ -4018,6 +4030,37 @@ impl AgentWorkController {
         count >= 3
     }
 
+    /// A diverted load the run can follow as its own navigation: a section
+    /// anchor loads its page, a link to an anchor of the page it is on is
+    /// only a scroll, and a load the site session would not admit is not
+    /// followed.
+    fn followable(
+        state: &WorkState,
+        target: ContextNavigationTarget,
+    ) -> Option<ContextNavigationTarget> {
+        let scope = state
+            .navigation_discovery
+            .as_ref()
+            .filter(|scope| scope.is_site_session())?;
+        let target = match target.as_url().fragment() {
+            Some(fragment) if !fragment.starts_with(['/', '!']) => {
+                let mut page = target.as_url().clone();
+                page.set_fragment(None);
+                ContextNavigationTarget::parse(&String::from(page)).ok()?
+            }
+            _ => target,
+        };
+        let here = state
+            .native
+            .retained
+            .as_ref()
+            .is_some_and(|browser| browser.binding().document() == &target);
+        (!here
+            && scope.admits(&target)
+            && zephium_agentic::WorkBrowserDocumentPolicy::SiteSession.admits_request(&target))
+        .then_some(target)
+    }
+
     /// A same-site load the page started by itself since the last look, when
     /// the run can still afford to follow it; otherwise it is dropped.
     fn page_load(state: &WorkState) -> Option<ContextNavigationTarget> {
@@ -4025,7 +4068,7 @@ impl AgentWorkController {
             .navigation_discovery
             .as_ref()
             .filter(|scope| scope.is_site_session())?;
-        let target = state.follow.take()?;
+        let target = Self::followable(state, state.follow.take()?)?;
         let session = state.session.as_ref()?;
         let headroom = usize::from(session.turns) + 2 <= usize::from(session.max_model_calls)
             && session
