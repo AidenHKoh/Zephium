@@ -87,16 +87,10 @@ pub(crate) fn spec(args: &Value) -> Result<PartSpec, String> {
         Some("connection") => WorkHelperV1::Connection,
         _ => return Err("helper is one of browser, research, computer, connection".into()),
     };
-    // A part sent with its search but no goal still says what it is for.
+    // A part sent with its search or brief but no goal still says what it
+    // is for.
     let goal = text_arg(args, "goal")
-        .or_else(|| {
-            let query = args
-                .pointer("/search/query")
-                .and_then(Value::as_str)?
-                .trim();
-            let site = text_arg(args, "service").unwrap_or_else(|| title.clone());
-            (!query.is_empty()).then(|| clip(&format!("Find {query} on {site}"), 200))
-        })
+        .or_else(|| derived_goal(args, &title))
         .ok_or("goal is required")?;
     if goal.chars().count() > 200 || goal.contains('\n') {
         return Err("goal is one line of at most 200 characters; put details in brief".into());
@@ -151,6 +145,33 @@ pub(crate) fn spec(args: &Value) -> Result<PartSpec, String> {
         search,
         declined: None,
     })
+}
+
+/// A goal from a part's search or brief, when the lead left it out.
+fn derived_goal(args: &Value, title: &str) -> Option<String> {
+    let search = |key: &str| {
+        args.get("search")
+            .and_then(|search| search.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let site = text_arg(args, "service").unwrap_or_else(|| title.to_owned());
+    let goal = if let Some(query) = search("query") {
+        format!("Find {query} on {site}")
+    } else if let (Some(from), Some(to)) = (search("from"), search("to")) {
+        format!("Find flights from {from} to {to} on {site}")
+    } else if let Some(place) = search("place") {
+        format!("Find stays in {place} on {site}")
+    } else {
+        let brief = text_arg(args, "brief")?;
+        let first = brief
+            .split(['\n', '.'])
+            .map(str::trim)
+            .find(|line| !line.is_empty())?;
+        first.to_owned()
+    };
+    Some(clip(&goal, 200))
 }
 
 /// How a part ended, for its fact and the lead.
@@ -2171,6 +2192,18 @@ mod tests {
         .unwrap();
         assert_eq!(spec.goal, "Find LEGO 42115 on allegro.pl");
         assert!(super::spec(&serde_json::json!({"title": "Notes", "helper": "research"})).is_err());
+        let stay = super::spec(&serde_json::json!({
+            "title": "Lisbon hotels", "helper": "browser", "service": "booking.com",
+            "search": {"place": "Lisbon", "checkin": "2026-12-04", "checkout": "2026-12-07"}
+        }))
+        .unwrap();
+        assert_eq!(stay.goal, "Find stays in Lisbon on booking.com");
+        let briefed = super::spec(&serde_json::json!({
+            "title": "Entry", "helper": "research",
+            "brief": "Visa rules for Polish citizens in the US. Passport validity too."
+        }))
+        .unwrap();
+        assert_eq!(briefed.goal, "Visa rules for Polish citizens in the US");
     }
 
     #[test]
