@@ -2900,18 +2900,17 @@ impl AgentWorkController {
             .iter()
             .map(|snapshot| snapshot.frame().clone())
             .collect::<Vec<_>>();
-        // One corrective model decision is allowed for each exact rejected
-        // operation/target/baseline. Retaining only content-free keys prevents
-        // secret fill values from entering controller state while ensuring a
-        // weak model cannot consume the rest of a run repeating an impossible
-        // proposal. Fresh observations carry distinct identities.
+        // Exact rejected operation/target/baseline keys, content-free so no
+        // fill value enters controller state. A repeat is told to change
+        // approach; it is not the end of the page by itself.
         let mut action_refusals = Vec::<AgentProviderActionRefusalKey>::new();
         // A control a single-page app re-renders comes back under a new
         // reference: counted by a digest of its role and name, a second
-        // refusal tells the model to change approach and a third ends the loop.
+        // refusal tells the model to change approach.
         let mut refused_controls = Vec::<(u64, u8)>::new();
-        let mut refused_navigations = 0u8;
-        let mut refused_inspections = 0u8;
+        // Refusals in a row with nothing done between them. Only a long run of
+        // them ends the page: every refusal reaches the model as feedback.
+        let mut fruitless = Fruitless::default();
         loop {
             state.check_task_contract()?;
             // Deliver acknowledged audit batches while idle so long runs keep
@@ -3000,17 +2999,8 @@ impl AgentWorkController {
                         state
                             .journal_mut()?
                             .emit(AgentWorkEventKind::InspectionRefused)?;
-                        refused_inspections = refused_inspections.saturating_add(1);
+                        fruitless.refused()?;
                         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-                        // A page that has already refused this many inspections
-                        // yields nothing more from snapshots. Narrow the
-                        // remaining allowance to the extract and mapping pair
-                        // instead of spending the read on refusals.
-                        if refused_inspections >= MAX_REFUSED_INSPECTIONS {
-                            session.max_model_calls = session
-                                .max_model_calls
-                                .min(session.turns.saturating_add(REMAINING_EXTRACTION_CALLS));
-                        }
                         turn = Self::provider(
                             &mut state.native,
                             worker,
@@ -3111,14 +3101,7 @@ impl AgentWorkController {
                 state
                     .journal_mut()?
                     .emit(AgentWorkEventKind::NavigationRefused(reason))?;
-                // A model that keeps proposing refused moves ends its page
-                // instead of spending the rest of its calls on them.
-                refused_navigations = refused_navigations.saturating_add(1);
-                if refused_navigations > MAX_REFUSED_NAVIGATIONS {
-                    return Err(AgentWorkFailure::Browser(
-                        AgentBrowserProviderError::ActionProposalLoop,
-                    ));
-                }
+                fruitless.refused()?;
                 let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
                 if session.turns.saturating_add(2) > session.max_model_calls {
                     return Err(AgentWorkFailure::Browser(
@@ -3160,6 +3143,7 @@ impl AgentWorkController {
                     progress,
                 )
                 .await?;
+                fruitless.progressed();
                 observation = next.0;
                 captured_at = next.1;
                 progress = next.2;
@@ -3275,17 +3259,8 @@ impl AgentWorkController {
                                 state.observation = Some(observation);
                                 return Ok(());
                             }
-                            if let Some(key) = refusal.key() {
-                                if action_refusals.contains(&key) {
-                                    return Err(AgentWorkFailure::Browser(
-                                        AgentBrowserProviderError::ActionProposalLoop,
-                                    ));
-                                }
-                                action_refusals
-                                    .try_reserve(1)
-                                    .map_err(|_| AgentWorkFailure::Contract)?;
-                                action_refusals.push(key);
-                            }
+                            fruitless.refused()?;
+                            let refusal = Self::repeated_refusal(&mut action_refusals, refusal)?;
                             let refusal = Self::count_refused_control(
                                 &mut refused_controls,
                                 refusal,
@@ -3363,6 +3338,7 @@ impl AgentWorkController {
                             progress,
                         )
                         .await?;
+                        fruitless.progressed();
                         let next_turn;
                         (observation, captured_at, progress, next_turn) = next;
                         let Some(next_turn) = next_turn else {
@@ -3384,23 +3360,51 @@ impl AgentWorkController {
                     state
                         .journal_mut()?
                         .emit(AgentWorkEventKind::ActionProposalRefused(refusal.reason()))?;
-                    if let Some(key) = refusal.key() {
-                        if action_refusals.contains(&key) {
-                            return Err(AgentWorkFailure::Browser(
-                                AgentBrowserProviderError::ActionProposalLoop,
-                            ));
-                        }
-                        action_refusals
-                            .try_reserve(1)
-                            .map_err(|_| AgentWorkFailure::Contract)?;
-                        action_refusals.push(key);
-                    }
+                    fruitless.refused()?;
+                    let refusal = Self::repeated_refusal(&mut action_refusals, refusal)?;
                     let refusal = Self::count_refused_control(
                         &mut refused_controls,
                         refusal,
                         &observation,
                         &frames,
                     )?;
+                    // The step reached the page: the model gets the page as
+                    // it is now with the refusal, not a stale look and a
+                    // request to ask for a new one.
+                    let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                    let refusal = if state.progressive_observation {
+                        match refusal.into_refresh(&observation, &session.config) {
+                            Ok(checkpoint) => {
+                                let next = Self::inspect_current(
+                                    state,
+                                    worker,
+                                    browser,
+                                    checkpoint,
+                                    &observation,
+                                )
+                                .await?;
+                                observation = next.0;
+                                captured_at = next.1;
+                                progress = next.2;
+                                let Some(next_turn) = next.3 else {
+                                    state.observation = Some(observation);
+                                    return Ok(());
+                                };
+                                turn = next_turn;
+                                frames.clear();
+                                frames.extend(
+                                    observation
+                                        .frames()
+                                        .iter()
+                                        .map(|snapshot| snapshot.frame().clone()),
+                                );
+                                continue;
+                            }
+                            Err(refusal) => *refusal,
+                        }
+                    } else {
+                        refusal
+                    };
                     let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
                     turn = Self::provider(
                         &mut state.native,
@@ -3420,6 +3424,7 @@ impl AgentWorkController {
                     .ok_or(AgentWorkFailure::Contract)?,
                 &current,
             )?;
+            fruitless.progressed();
             if let Some(target) = state.follow.take() {
                 let (continuation, _) =
                     transition.into_parts().ok_or(AgentWorkFailure::Contract)?;
@@ -3433,6 +3438,7 @@ impl AgentWorkController {
                     progress,
                 )
                 .await?;
+                fruitless.progressed();
                 let next_turn;
                 (observation, captured_at, progress, next_turn) = next;
                 let Some(next_turn) = next_turn else {
@@ -5174,13 +5180,52 @@ const HUMAN_CHALLENGE_PHRASES: [&str; 18] = [
 const MAX_HUMAN_CHALLENGE_NODES: usize = 48;
 /// How long a script-only check gets to pass on its own before a person is asked.
 const HUMAN_CHALLENGE_SETTLE_MILLIS: [u64; 3] = [2_000, 3_000, 4_000];
-/// Refused inspections one read tolerates before snapshots stop being worth a
-/// model call. Two lets the planner correct one genuinely wrong scope; beyond
-/// that the recorded runs only repeated unchanged captures.
-const MAX_REFUSED_INSPECTIONS: u8 = 2;
-/// Calls kept for the extract proposal and its mapping turn after the planner's
-/// snapshot allowance is narrowed.
-const REMAINING_EXTRACTION_CALLS: u8 = 2;
+/// Refusals in a row, with no action verified and no page reached between
+/// them, after which a page ends as a loop. Every refusal before that goes
+/// back to the model with what to try instead.
+const MAX_FRUITLESS_STEPS: u8 = 8;
+
+/// Counts refusals since the page last moved forward.
+#[derive(Default)]
+struct Fruitless(u8);
+
+impl Fruitless {
+    fn refused(&mut self) -> Result<(), AgentWorkFailure> {
+        self.0 = self.0.saturating_add(1);
+        if self.0 >= MAX_FRUITLESS_STEPS {
+            return Err(AgentWorkFailure::Browser(
+                AgentBrowserProviderError::ActionProposalLoop,
+            ));
+        }
+        Ok(())
+    }
+    fn progressed(&mut self) {
+        self.0 = 0;
+    }
+}
+
+#[cfg(test)]
+mod fruitless_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_long_run_of_refusals_with_nothing_done_ends_a_page() {
+        let mut fruitless = Fruitless::default();
+        for _ in 1..MAX_FRUITLESS_STEPS {
+            assert!(fruitless.refused().is_ok());
+        }
+        fruitless.progressed();
+        for _ in 1..MAX_FRUITLESS_STEPS {
+            assert!(fruitless.refused().is_ok());
+        }
+        assert_eq!(
+            fruitless.refused(),
+            Err(AgentWorkFailure::Browser(
+                AgentBrowserProviderError::ActionProposalLoop
+            ))
+        );
+    }
+}
 
 fn looks_like_human_challenge(observation: &SemanticObservation) -> bool {
     let mut nodes = 0;
@@ -5333,9 +5378,6 @@ pub enum AgentWorkEventKind {
 const NOT_READY_PATIENCE: Duration = Duration::from_secs(30);
 /// Extra looks at a document still parsing before its first look gives up.
 const DOCUMENT_LOADING_LOOKS: u32 = 3;
-
-/// Refused Navigate proposals one page task may make before it ends.
-const MAX_REFUSED_NAVIGATIONS: u8 = 4;
 
 /// Stable content-free correlation for a product event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -256,6 +256,40 @@ impl AgentProviderActionRefusal {
         self.error
     }
 
+    /// Retires this refusal into a fresh whole look the host takes for the
+    /// model, the refusal told alongside it. Only a step that reached the
+    /// page (covered, changed, or run without its outcome) has a page worth
+    /// looking at again; any other refusal stays with its observation.
+    pub fn into_refresh(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<super::AgentProviderObservationCheckpoint, Box<Self>> {
+        let note = match self.error {
+            SemanticActionBindingError::TargetCovered => "target_covered: nothing executed; another element (a cookie or consent banner, a dialog, a popover or a sticky header) covered the target. This is a fresh look at the page: close what covers it with its close, dismiss or reject control, or choose another control, using these refs.",
+            SemanticActionBindingError::DispatchRejected => "target_changed: nothing executed; the page changed before the action ran. This is a fresh look at the page: act on these refs; if a dialog opened, work within it first.",
+            SemanticActionBindingError::Unverified => "outcome_not_observed: the action ran, but its declared outcome was not seen. This is a fresh look at the page as it is now: continue from what it shows, and do not repeat the same action unchanged.",
+            _ => return Err(Box::new(self)),
+        };
+        let note = if self.repeated {
+            format!("{note} This control was refused before: change approach (navigate to another address on this site, such as its search results for your query, use its search box, or scroll).")
+        } else {
+            note.to_owned()
+        };
+        if config != &self.continuation.config
+            || !super::AgentProviderObservationCheckpoint::refreshable(
+                &self.continuation,
+                observation,
+            )
+        {
+            return Err(Box::new(self));
+        }
+        Ok(super::AgentProviderObservationCheckpoint::refresh(
+            self.continuation,
+            note,
+        ))
+    }
+
     /// The pending Act continuation, for a site-session follow that retires
     /// it instead of reporting the refusal.
     pub fn into_continuation(self) -> AgentProviderContinuation {
@@ -337,7 +371,7 @@ impl AgentProviderActionRefusal {
         };
         let executed = self.error == SemanticActionBindingError::Unverified;
         let guidance = if self.repeated {
-            format!("{guidance} This control was already refused on an earlier look, so trying it again will not work: change approach. Follow a link to the same view with navigate, use the site's own search or filter box, or scroll the list and read what it already shows.")
+            format!("{guidance} This control was already refused on an earlier look, so trying it again will not work: change approach. Navigate to another address on this site that shows what you need (a link's destination, or the site's own search results address with your query), use the site's search or filter box, close what covers the page, or scroll and read what it already shows.")
         } else {
             guidance.to_owned()
         };

@@ -82,10 +82,29 @@ impl AgentWorkController {
             })
     }
 
+    /// A refusal of the exact proposal refused before is marked repeated,
+    /// so the model hears to change approach.
+    pub(super) fn repeated_refusal(
+        refused: &mut Vec<AgentProviderActionRefusalKey>,
+        refusal: AgentProviderActionRefusal,
+    ) -> Result<AgentProviderActionRefusal, AgentWorkFailure> {
+        let Some(key) = refusal.key() else {
+            return Ok(refusal);
+        };
+        if refused.contains(&key) {
+            return Ok(refusal.repeated());
+        }
+        refused
+            .try_reserve(1)
+            .map_err(|_| AgentWorkFailure::Contract)?;
+        refused.push(key);
+        Ok(refusal)
+    }
+
     /// Counts a refusal of a control that ran or reached the page (not
     /// observed, rejected at dispatch, covered) by the control's role and
-    /// name digest: the second marks the refusal repeated, the third ends
-    /// the page's loop. Other refusals pass through.
+    /// name digest: from the second on, the refusal is marked repeated.
+    /// Other refusals pass through.
     pub(super) fn count_refused_control(
         refused: &mut Vec<(u64, u8)>,
         refusal: AgentProviderActionRefusal,
@@ -127,13 +146,11 @@ impl AgentWorkController {
                 1
             }
         };
-        match count {
-            1 => Ok(refusal),
-            2 => Ok(refusal.repeated()),
-            _ => Err(AgentWorkFailure::Browser(
-                AgentBrowserProviderError::ActionProposalLoop,
-            )),
-        }
+        Ok(if count == 1 {
+            refusal
+        } else {
+            refusal.repeated()
+        })
     }
 
     pub(super) async fn navigate_current(

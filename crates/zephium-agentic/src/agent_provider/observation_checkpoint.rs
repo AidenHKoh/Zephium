@@ -76,6 +76,8 @@ pub struct AgentProviderObservationCheckpoint {
     action_progress: Option<AgentActionProgress>,
     anchor_lost: bool,
     host_projected_actions: bool,
+    /// What happened to the step this fresh look follows, for the model.
+    note: Option<String>,
 }
 
 impl AgentProviderContinuation {
@@ -240,6 +242,7 @@ impl AgentProviderContinuation {
                 action_progress: self.transcript.action_progress,
                 anchor_lost: false,
                 host_projected_actions,
+                note: None,
             },
         )))
     }
@@ -339,6 +342,52 @@ impl fmt::Debug for AgentProviderObservationRefusal {
 }
 
 impl AgentProviderObservationCheckpoint {
+    /// A fresh whole look the host takes for the model after a step the page
+    /// refused or did not confirm, instead of the model asking for it. The
+    /// refused proposal's call, baseline and budgets carry over unchanged.
+    pub(in crate::agent_provider) fn refreshable(
+        continuation: &AgentProviderContinuation,
+        observation: &SemanticObservation,
+    ) -> bool {
+        continuation.baseline.matches(observation)
+            && observation.frames().len() == 1
+            && continuation.config.permits_progressive_observation()
+            && continuation
+                .transcript
+                .inspection_checkpoint
+                .as_ref()
+                .is_none_or(|checkpoint| {
+                    checkpoint.progress.matches(observation)
+                        && (checkpoint.progress.captures.len() < MAX_AGENT_INSPECTION_CAPTURES
+                            || checkpoint.progress.can_restore_viewport(observation))
+                })
+    }
+
+    /// Callers check [`Self::refreshable`] first.
+    pub(in crate::agent_provider) fn refresh(
+        continuation: AgentProviderContinuation,
+        note: String,
+    ) -> Self {
+        let host_projected_actions = continuation
+            .transcript
+            .action_targets()
+            .is_some_and(AgentProviderActionTargets::is_host_projected);
+        Self {
+            prior_call: continuation.prior_call,
+            config: continuation.config,
+            baseline: continuation.baseline,
+            scope: AgentBrowserScopeProposal::Initial,
+            inspections: continuation
+                .transcript
+                .inspection_checkpoint
+                .map(|checkpoint| checkpoint.progress),
+            action_progress: continuation.transcript.action_progress,
+            anchor_lost: false,
+            host_projected_actions,
+            note: Some(note),
+        }
+    }
+
     /// Retire one exact native anchored capture that reported AnchorMissing.
     /// The trusted host must first account that callback and recheck its live
     /// lease/document. This permits one initial refresh, never a scope replay.
@@ -400,14 +449,17 @@ impl AgentProviderObservationCheckpoint {
             return Err(crate::AgentPolicyError::Authority.into());
         }
         let inspections = self.inspections.take();
+        let note = self.note.take();
         let anchor_lost = self.anchor_lost;
         self.validate_successor(previous, current, request, &config)
             .map_err(|_| crate::AgentPolicyError::Authority)?;
-        let inspections = Some(if anchor_lost {
+        let mut inspections = if anchor_lost {
             AgentInspectionProgress::record_with_anchor_loss(inspections, previous, current, true)?
         } else {
             AgentInspectionProgress::record(inspections, previous, current)?
-        });
+        };
+        inspections.note = note;
+        let inspections = Some(inspections);
         crate::AgentPreparedObservationRequest::try_for_config_with_inspections_and_action_authority(
             policy,
             request,
@@ -636,6 +688,8 @@ pub(in crate::agent_provider) struct AgentInspectionProgress {
     context: crate::ContextJoin,
     captures: Vec<InspectionCapture>,
     recall: InspectionRecall,
+    /// Host words on the step before this look; shown with it once.
+    note: Option<String>,
 }
 struct InspectionCapture {
     snapshot: u64,
@@ -720,7 +774,9 @@ impl AgentInspectionProgress {
             context: current.request().context(),
             captures: Vec::new(),
             recall: InspectionRecall::default(),
+            note: None,
         });
+        progress.note = None;
         if progress.captures.len() >= MAX_AGENT_INSPECTION_CAPTURES
             && !(progress.can_restore_viewport(previous)
                 && matches!(current.request().scope(), crate::SemanticScope::Initial))
@@ -800,10 +856,11 @@ impl AgentInspectionProgress {
             .collect();
         // What the tag and its fields mean stands once in the instructions.
         let mut text = "\nZEPHIUM_HOST_INSPECTION_PROGRESS_V1\n".to_owned();
-        text.push_str(
-            &serde_json::json!({"completed_inspections": captures.len(), "remaining_inspections": MAX_AGENT_INSPECTION_CAPTURES.saturating_sub(captures.len()), "viewport_restore_available": self.can_restore_viewport(current), "captures": captures})
-                .to_string(),
-        );
+        let mut progress = serde_json::json!({"completed_inspections": captures.len(), "remaining_inspections": MAX_AGENT_INSPECTION_CAPTURES.saturating_sub(captures.len()), "viewport_restore_available": self.can_restore_viewport(current), "captures": captures});
+        if let Some(note) = &self.note {
+            progress["last_step"] = serde_json::json!(note);
+        }
+        text.push_str(&progress.to_string());
         Ok(text)
     }
 }
@@ -844,6 +901,42 @@ mod action_history_tests {
             correlation,
             transcript,
         }
+    }
+
+    #[test]
+    fn a_step_the_page_refused_is_answered_with_a_fresh_whole_look() {
+        let config = config(AgentProviderKind::OpenAiResponses).with_progressive_observation();
+        let result = crate::semantic_action_result::tests::scroll_provider_fixture(1, false);
+        let observation = result.fresh_snapshot().unwrap();
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            crate::semantic_diff::SemanticObservationFingerprint::from_observation(observation),
+        );
+        let refusal = |error| {
+            let transcript =
+                AgentProviderTranscript::try_initial(Arc::from("Search"), "page".into()).unwrap();
+            crate::AgentProviderActionRefusal::unissued(
+                turn(
+                    1,
+                    "act",
+                    r#"{"actions":[{"kind":"scroll","target":"@a1","direction":"down","amount":"page","effect":"read","wait":{"kind":"immediate"},"verification":{"kind":"scroll_position_changed"},"settle_millis":250}]}"#,
+                    baseline.clone(),
+                    config.clone(),
+                    transcript,
+                ),
+                error,
+                None,
+            )
+        };
+        let covered = refusal(crate::SemanticActionBindingError::TargetCovered)
+            .repeated()
+            .into_refresh(observation, &config)
+            .unwrap();
+        assert_eq!(covered.expansion(), None);
+        let note = covered.note.as_deref().unwrap();
+        assert!(note.starts_with("target_covered") && note.contains("change approach"));
+        // A refusal decided before the page saw anything keeps its look.
+        let unseen = refusal(crate::SemanticActionBindingError::TargetIncomplete);
+        assert!(unseen.into_refresh(observation, &config).is_err());
     }
 
     #[test]

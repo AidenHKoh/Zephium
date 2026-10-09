@@ -390,13 +390,7 @@ impl NavigationFault {
             }
             Self::DiscoveryMissingLink => 6,
             Self::DiscoveryAction(_) => 8,
-            Self::DiscoveryActionRefusal(repeat, _) => {
-                if repeat {
-                    4
-                } else {
-                    10
-                }
-            }
+            Self::DiscoveryActionRefusal(..) => 10,
             Self::DiscoveryScopeRefusal(_) => 10,
             Self::DiscoveryEvidence(_) => 8,
             Self::DiscoveryBudget(limit, refusal, operations) => {
@@ -1416,11 +1410,16 @@ pub(super) fn assert_outcome(
             let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
                 panic!("{outcome:?}");
             };
-            assert_eq!(
+            // Every repeat reaches the model as feedback: the page ends on its
+            // own budget, or on a long run of refusals with nothing done.
+            assert!(matches!(
                 closed.failure(),
-                AgentWorkFailure::Browser(AgentBrowserProviderError::ActionProposalLoop)
-            );
-            assert_eq!(closed.policy_settlement().closure().model_calls(), 2);
+                AgentWorkFailure::Browser(
+                    AgentBrowserProviderError::ActionProposalLoop
+                        | AgentBrowserProviderError::TurnLimit
+                )
+            ));
+            assert!(closed.policy_settlement().closure().model_calls() > 2);
             assert_eq!(closed.policy_settlement().closure().effects(), 0);
             assert!(!calls.contains(&7), "invalid actions never dispatch");
             assert!(!calls.contains(&9), "invalid actions never navigate");
@@ -1443,7 +1442,7 @@ pub(super) fn assert_outcome(
                     AgentWorkEventKind::ActionProposalRefused(_)
                 ))
                 .count(),
-            if repeat { 2 } else { 1 }
+            if repeat { 4 } else { 1 }
         );
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
         return;
