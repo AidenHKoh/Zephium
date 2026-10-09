@@ -15,6 +15,7 @@
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import AiProviderRow from "../AiProviderRow.svelte";
+  import AiVoiceRow from "../AiVoiceRow.svelte";
   import AiZephiumRow from "../AiZephiumRow.svelte";
   import WorkDecisions from "../WorkDecisions.svelte";
 
@@ -127,6 +128,7 @@
         {m.ai_more_failed()}
       </p>{/if}
   </SettingsGroup>
+  <AiVoiceRow />
   <WorkDecisions profile={profile.id} />
 {/if}
 

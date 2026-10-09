@@ -77,8 +77,8 @@
       "css": 6544
     },
     "lazy:features/settings/components/sections/AiPage.svelte": {
-      "js": 167586,
-      "css": 11288
+      "js": 187863,
+      "css": 12243
     },
     "lazy:features/settings/components/sections/ConnectionsPage.svelte": {
       "js": 154775,
@@ -371,6 +371,10 @@
     "lazy:features/account/index.ts": {
       "js": 149,
       "css": 0
+    },
+    "lazy:features/work/components/bar/VoiceView.svelte": {
+      "js": 14759,
+      "css": 4685
     }
   },
   "onboarding": {

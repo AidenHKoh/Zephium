@@ -11,6 +11,16 @@ vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   const { models } = await import("$shared/testing/work-models");
   return mockBindings({
+    voiceStatus: async () => ({
+      version: 1,
+      engines: ["on_device", "open_ai"],
+      chosen: null,
+      effective: "on_device",
+      language: null,
+      languages: ["en-US"],
+      on_device: "en_US",
+      microphone: "granted",
+    }),
     workDecisionPreference: async () => ({
       version: 1,
       profile: "00000000000000000000000001",
