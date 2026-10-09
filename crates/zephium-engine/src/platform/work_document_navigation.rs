@@ -251,14 +251,25 @@ fn log_brand_move(requested: Option<&ContextNavigationTarget>, current: &str) {
     }
 }
 
-/// The same page again, its query aside: what a bot check reloads.
+/// The same page again, its query aside: what a bot check reloads, or what
+/// a brand's page loads on its country domain (yelp.com to yelp.pl).
 fn reloads(effective: Option<&ContextNavigationTarget>, raw: &str) -> bool {
     let Ok(target) = ContextNavigationTarget::parse(raw) else {
         return false;
     };
     effective.is_some_and(|effective| {
         let (a, b) = (effective.as_url(), target.as_url());
-        a.scheme() == b.scheme() && a.host() == b.host() && a.path() == b.path()
+        let same_host = a.host() == b.host()
+            || match (
+                zephium_agentic::registrable_site(effective),
+                zephium_agentic::registrable_site(&target),
+            ) {
+                (Some(from), Some(to)) => {
+                    zephium_agentic::brand_family(from.as_bytes(), to.as_bytes()).is_some()
+                }
+                _ => false,
+            };
+        a.scheme() == b.scheme() && same_host && a.path() == b.path()
     })
 }
 
@@ -1635,6 +1646,24 @@ mod tests {
         // Another site, or another page of it, is never followed.
         assert!(!gate.allows("https://elsewhere.example.org/"));
         assert!(!gate.allows("https://www.example.com/account"));
+    }
+
+    #[test]
+    fn a_first_page_its_script_moves_to_the_brand_s_country_domain_is_followed() {
+        let start = "https://www.yelp.com/";
+        let gate = site_gate(start);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        assert!(gate.allows("https://www.yelp.pl/"));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(2, phase, "https://www.yelp.pl/"))
+                .unwrap();
+        }
+        settle(&gate, "https://www.yelp.pl/");
+        assert!(gate.ready(Some("https://www.yelp.pl/")));
+        assert!(!gate.allows("https://www.yelpish.pl/"));
     }
 
     #[test]

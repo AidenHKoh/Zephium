@@ -53,11 +53,13 @@ fn shared_sign_in(host: &str, domain: &[u8]) -> bool {
 /// skyscanner.net and skyscanner.pl, amazon.com and amazon.de. A closed
 /// list, matched on the whole label before an ICANN suffix, never a
 /// substring.
-const BRAND_FAMILIES: [&str; 23] = [
+const BRAND_FAMILIES: [&str; 28] = [
     "airbnb",
+    "aliexpress",
     "amazon",
     "agoda",
     "booking",
+    "decathlon",
     "ebay",
     "expedia",
     "google",
@@ -65,6 +67,7 @@ const BRAND_FAMILIES: [&str; 23] = [
     "ikea",
     "kayak",
     "lego",
+    "mediamarkt",
     "momondo",
     "notion",
     "opodo",
@@ -76,7 +79,9 @@ const BRAND_FAMILIES: [&str; 23] = [
     "vrbo",
     "wizzair",
     "ryanair",
+    "yelp",
     "zalando",
+    "zara",
 ];
 
 /// The brand two registrable domains share when both are that brand's own
