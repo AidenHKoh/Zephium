@@ -57,7 +57,7 @@ pub const MAX_AGENT_PENDING_MODEL_CALLS: usize = 4;
 /// Maximum distinct profile/account/origin taint cohorts retained per run.
 pub const MAX_AGENT_TAINT_COHORTS: usize = 128;
 /// Maximum opaque actionable references retained across committed model input.
-pub const MAX_AGENT_TAINT_REFERENCES: usize = 4_096;
+pub const MAX_AGENT_TAINT_REFERENCES: usize = 16_384;
 /// Maximum age of an account attestation at model-input admission (30 seconds).
 pub const MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS: u64 = 30_000;
 /// Maximum byte size of one copyable clean policy-settlement value.
@@ -9203,7 +9203,7 @@ mod tests {
             &[SemanticEffectClass::Read],
             run_budget(10, 1_000, 10_000),
         );
-        fixture.policy.taints = (0..8_u128)
+        fixture.policy.taints = (0..32_u128)
             .map(|index| AgentTaintCohort {
                 context: make_context(147, 148, 1_000 + index),
                 observation: SemanticObservationId::new(1).expect("observation"),
