@@ -1644,6 +1644,12 @@ impl NativeWorkComposition {
                 }
                 let snapshot = guard.0.snapshot();
                 failure_trace.report(&snapshot, &measure);
+                // The page stopped answering a look or a load: nothing but
+                // that read was in flight, so the page failed as too slow
+                // rather than with an unknown outcome.
+                let stalled = snapshot.failure == Some(AgentWorkFailure::Deadline)
+                    && !model_in_flight
+                    && disposition.is_none();
                 // Closed usage comes from the original policy/drain/resource and
                 // terminal ACK join, never the lossy public progress stream.
                 let usage = Some(
@@ -1655,16 +1661,17 @@ impl NativeWorkComposition {
                             .and_then(|usage| add_usage(prior_usage, usage))
                     }
                     .filter(|usage| usage.within(limits))
-                    // A signed-in read wrote nothing: like an anonymous one it
-                    // is charged what its model calls settled.
+                    // A signed-in read wrote nothing, and a page whose look
+                    // or load stalled had nothing but that look in flight:
+                    // each is charged what its model calls settled.
                     .or_else(|| {
-                        signed_in.and_then(|_| {
+                        (signed_in.is_some() || stalled).then(|| {
                             add_usage(
                                 prior_usage,
                                 uncertain_usage(settled, model_in_flight, limits),
                             )
                             .filter(|usage| usage.within(limits))
-                        })
+                        })?
                     })
                     .unwrap_or(WorkUsage {
                         model_tokens: limits.model_tokens,
@@ -1704,7 +1711,7 @@ impl NativeWorkComposition {
                         Some(AgentWorkDisposition::Failed | AgentWorkDisposition::WaitingForHuman),
                         _,
                     ) => Ok((WorkAttemptStatus::Failed, vec![])),
-                    _ if signed_in.is_some() => Ok((WorkAttemptStatus::Failed, vec![])),
+                    _ if signed_in.is_some() || stalled => Ok((WorkAttemptStatus::Failed, vec![])),
                     _ => Err(WorkError::OutcomeUnknown),
                 };
                 // The engine refuses a load that leaves the approved document
