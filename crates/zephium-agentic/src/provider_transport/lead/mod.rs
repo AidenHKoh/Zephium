@@ -7,6 +7,7 @@
 
 mod anthropic;
 mod chat;
+mod cloud;
 mod gemini;
 pub mod keys;
 mod listing;
@@ -26,6 +27,7 @@ use serde_json::Value;
 use zephium_core::work::model::*;
 use zeroize::Zeroizing;
 
+pub use cloud::{LeadCloudAccounting, LeadCloudObserver, LeadCloudRecord};
 pub use listing::{
     check_key, detect_local_servers, fetch_cloud_catalog, list_models, LeadKeyCheck, LocalServer,
     LocalServerKind,
@@ -49,6 +51,8 @@ const MAX_RETRIES: u32 = 2;
 /// A longer Retry-After goes back to the caller instead of holding the call.
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(20);
 const MAX_PAUSE_CONTINUATIONS: u32 = 3;
+/// How long a finished Cloud stream is read on for its accounting trailer.
+const TRAILER_WAIT: Duration = Duration::from_secs(10);
 const MAX_ERROR_BODY_BYTES: usize = 16 * 1024;
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SECRET_BYTES: usize = 4 * 1024;
@@ -330,6 +334,7 @@ pub struct LeadClient {
     credential: Arc<dyn LeadCredential>,
     price: Option<WorkModelPrice>,
     search_fee_micros: u64,
+    cloud_observer: Option<LeadCloudObserver>,
     #[cfg(test)]
     backoff: Duration,
 }
@@ -346,9 +351,16 @@ impl LeadClient {
             target,
             credential,
             price,
+            cloud_observer: None,
             #[cfg(test)]
             backoff: Duration::from_millis(1),
         }
+    }
+
+    /// Reports every Cloud call's accounting record when the call ends.
+    pub fn with_cloud_observer(mut self, observer: LeadCloudObserver) -> Self {
+        self.cloud_observer = Some(observer);
+        self
     }
 
     /// The endpoint this client calls.
@@ -439,6 +451,9 @@ impl LeadClient {
         let url = self.target.call_url(model)?;
         let client = http(url.scheme() == "http")?;
         let mut retries = 0;
+        // One key per logical generation. It changes only when Cloud admitted
+        // an attempt and released it unspent; see `cloud::refusal`.
+        let mut key = idempotency_key()?;
         loop {
             let secret = self.credential.secret().await?;
             let mut headers = HeaderMap::new();
@@ -448,9 +463,7 @@ impl LeadClient {
             self.target.authorize(&mut headers, &secret)?;
             drop(secret);
             if self.target.cloud {
-                // Cloud refuses a reused key without replaying it, so every
-                // attempt, retries included, is its own logical call.
-                headers.insert("idempotency-key", idempotency_key()?);
+                headers.insert("idempotency-key", key.clone());
             }
             let failure = match client
                 .post(url.clone())
@@ -459,15 +472,52 @@ impl LeadClient {
                 .send()
                 .await
             {
+                // Sent, maybe received: a Cloud call is never sent again blind.
+                Err(error) if self.target.cloud && !error.is_connect() => {
+                    let answered = cloud::Answered::default();
+                    self.record(&key, answered, None, LeadCloudAccounting::Unknown);
+                    return Err(WorkModelError::Protocol);
+                }
                 Err(error) => Failure::from_transport(&error),
                 Ok(response) if response.status().is_success() => {
-                    match self.stream(response, events).await {
+                    let answered = self
+                        .target
+                        .cloud
+                        .then(|| cloud::Answered::read(response.headers()));
+                    let (result, trailer) = self.stream(response, events).await;
+                    if let Some(answered) = answered {
+                        return self.settle_cloud(&key, answered, trailer.as_deref(), result);
+                    }
+                    match result {
                         Ok(decoded) => return Ok(decoded),
                         Err(StreamFailure::AfterOutput(error)) => return Err(error),
                         Err(StreamFailure::BeforeOutput(error)) => Failure::retryable(error),
                     }
                 }
-                Ok(response) => Failure::from_response(response, self.target.cloud).await,
+                Ok(response) if self.target.cloud => {
+                    let status = response.status();
+                    let answered = cloud::Answered::read(response.headers());
+                    let (failure, body) = Failure::from_response(response, true).await;
+                    let request_id = cloud::error_request_id(&body, &answered);
+                    let admitted = request_id.is_some();
+                    match cloud::refusal(status, request_id.as_deref()) {
+                        cloud::Refusal::Again => {}
+                        cloud::Refusal::AgainWithNewKey => {
+                            self.record(&key, answered, request_id, LeadCloudAccounting::Refused);
+                            key = idempotency_key()?;
+                        }
+                        cloud::Refusal::Final if admitted => {
+                            self.record(&key, answered, request_id, LeadCloudAccounting::Refused);
+                        }
+                        cloud::Refusal::Final => {}
+                        cloud::Refusal::Uncertain => {
+                            self.record(&key, answered, request_id, LeadCloudAccounting::Unknown);
+                            return Err(WorkModelError::Protocol);
+                        }
+                    }
+                    failure
+                }
+                Ok(response) => Failure::from_response(response, false).await.0,
             };
             if failure.error == WorkModelError::Unauthorized {
                 self.credential.rejected();
@@ -483,17 +533,95 @@ impl LeadClient {
         }
     }
 
+    /// The Cloud call's record, and its result as the caller should see it:
+    /// a dispatched call that failed is never read as worth retrying.
+    fn settle_cloud(
+        &self,
+        key: &HeaderValue,
+        answered: cloud::Answered,
+        trailer: Option<&str>,
+        result: Result<Decoded, StreamFailure>,
+    ) -> Result<Decoded, WorkModelError> {
+        let trailer = trailer.and_then(cloud::Trailer::parse);
+        let (request_id, accounting) = match trailer {
+            Some(trailer) => (trailer.request_id, trailer.accounting),
+            None => (
+                None,
+                answered
+                    .usage
+                    .clone()
+                    .unwrap_or(LeadCloudAccounting::Unknown),
+            ),
+        };
+        let request_id = request_id.or_else(|| answered.request_id.clone());
+        self.record(key, answered, request_id, accounting);
+        result.map_err(|failure| match failure {
+            StreamFailure::AfterOutput(error) | StreamFailure::BeforeOutput(error) => {
+                cloud::dispatched(error)
+            }
+        })
+    }
+
+    fn record(
+        &self,
+        key: &HeaderValue,
+        answered: cloud::Answered,
+        request_id: Option<String>,
+        accounting: LeadCloudAccounting,
+    ) {
+        let Some(observer) = &self.cloud_observer else {
+            return;
+        };
+        observer(LeadCloudRecord {
+            idempotency_key: key.to_str().unwrap_or_default().to_owned(),
+            request_id: request_id.or(answered.request_id),
+            policy_revision: answered.policy_revision,
+            accounting,
+        });
+    }
+
+    /// Decodes a stream; for Cloud, then reads on to its end for the
+    /// accounting trailer, which follows the provider's last event.
     async fn stream(
         &self,
         response: reqwest::Response,
         events: &(dyn Fn(WorkModelEvent) + Send + Sync),
-    ) -> Result<Decoded, StreamFailure> {
-        let mut decoder = WireDecoder::new(self.target.wire);
+    ) -> (Result<Decoded, StreamFailure>, Option<String>) {
         let mut framer = sse::SseFramer::default();
+        let mut body = response.bytes_stream();
+        let result = self.decode_stream(&mut body, &mut framer, events).await;
+        if !self.target.cloud {
+            return (result, None);
+        }
+        let drain = async {
+            let mut ignored = Vec::new();
+            while let Some(Ok(chunk)) = body.next().await {
+                if framer.push(&chunk, &mut ignored).is_err() {
+                    return;
+                }
+                ignored.clear();
+            }
+            let _ = framer.finish(&mut ignored);
+        };
+        let _ = tokio::time::timeout(TRAILER_WAIT, drain).await;
+        let trailer = framer.trailer().map(str::to_owned);
+        (result, trailer)
+    }
+
+    async fn decode_stream<S, B>(
+        &self,
+        body: &mut S,
+        framer: &mut sse::SseFramer,
+        events: &(dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> Result<Decoded, StreamFailure>
+    where
+        S: futures_util::Stream<Item = Result<B, reqwest::Error>> + Unpin,
+        B: AsRef<[u8]>,
+    {
+        let mut decoder = WireDecoder::new(self.target.wire);
         let mut frames = Vec::new();
         let mut out = Vec::new();
         let mut emitted = false;
-        let mut body = response.bytes_stream();
         let fail = |emitted: bool, error: WorkModelError| {
             if emitted {
                 StreamFailure::AfterOutput(error)
@@ -511,7 +639,7 @@ impl LeadClient {
                 None => break,
             };
             framer
-                .push(&chunk, &mut frames)
+                .push(chunk.as_ref(), &mut frames)
                 .map_err(|error| fail(emitted, error))?;
             for frame in frames.drain(..) {
                 match decoder.event(&frame, &mut out) {
@@ -581,7 +709,8 @@ impl Failure {
         })
     }
 
-    async fn from_response(response: reqwest::Response, cloud: bool) -> Self {
+    /// The failure, and the bounded body it was read from.
+    async fn from_response(response: reqwest::Response, cloud: bool) -> (Self, Vec<u8>) {
         let status = response.status();
         let retry_after = retry_after(response.headers());
         let body = bounded_body(response).await;
@@ -596,7 +725,7 @@ impl Failure {
             },
             other => other,
         };
-        Self { error, retry_after }
+        (Self { error, retry_after }, body)
     }
 
     fn retry_wait(&self, retries: u32) -> Option<Duration> {

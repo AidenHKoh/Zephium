@@ -6,6 +6,7 @@ const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_STREAM_BYTES: usize = 48 * 1024 * 1024;
 const MAX_EVENTS: u32 = 200_000;
+const MAX_TRAILER_BYTES: usize = 4 * 1024;
 
 pub(crate) struct SseEvent {
     pub(crate) event: String,
@@ -21,6 +22,7 @@ pub(crate) struct SseFramer {
     skip_lf: bool,
     bytes: usize,
     events: u32,
+    trailer: Option<String>,
 }
 
 impl SseFramer {
@@ -65,13 +67,22 @@ impl SseFramer {
         self.dispatch(out)
     }
 
+    /// The last `: zephium` comment seen, if any.
+    pub(crate) fn trailer(&self) -> Option<&str> {
+        self.trailer.as_deref()
+    }
+
     fn line_end(&mut self, out: &mut Vec<SseEvent>) -> Result<(), WorkModelError> {
         if self.line.is_empty() {
             return self.dispatch(out);
         }
         let line = std::mem::take(&mut self.line);
         let line = std::str::from_utf8(&line).map_err(|_| WorkModelError::Protocol)?;
-        if line.starts_with(':') {
+        if let Some(comment) = line.strip_prefix(':') {
+            // Zephium Cloud's accounting comment; never a provider event.
+            if comment.trim_start().starts_with("zephium") && line.len() <= MAX_TRAILER_BYTES {
+                self.trailer = Some(line.to_owned());
+            }
             return Ok(());
         }
         let (field, value) = match line.split_once(':') {
@@ -145,6 +156,18 @@ mod tests {
                 (String::new(), "tail".into()),
             ]
         );
+    }
+
+    #[test]
+    fn the_zephium_comment_is_kept_apart_from_events() {
+        let mut framer = SseFramer::default();
+        let mut out = Vec::new();
+        let stream = "data: {\"a\":1}\n\ndata: [DONE]\n\n\n\n: zephium {\"usage\":\"pending\"}\n\n";
+        framer.push(stream.as_bytes(), &mut out).unwrap();
+        framer.finish(&mut out).unwrap();
+        let data: Vec<_> = out.iter().map(|e| e.data.as_str()).collect();
+        assert_eq!(data, vec!["{\"a\":1}", "[DONE]"]);
+        assert_eq!(framer.trailer(), Some(": zephium {\"usage\":\"pending\"}"));
     }
 
     #[test]
