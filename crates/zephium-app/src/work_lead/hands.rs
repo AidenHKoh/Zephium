@@ -1215,14 +1215,58 @@ pub(crate) fn collection(value: Option<&Value>) -> Result<Option<WorkBrowseColle
     let Some(value) = value.filter(|v| !v.is_null()) else {
         return Ok(None);
     };
-    let mut collection: WorkBrowseCollection = serde_json::from_value(value.clone())
+    use zephium_core::work::artifact::{MAX_ARTIFACT_CRITERIA, MAX_ARTIFACT_SUBJECTS};
+    use zephium_core::work::collection::{WorkBrowseExtraction, WorkBrowseValue};
+    // What a helper means is clear even when it leaves out the title or
+    // the count: they take their usual values rather than costing a turn.
+    let mut value = value.clone();
+    if let Value::Object(map) = &mut value {
+        if !map.get("title").is_some_and(Value::is_string) {
+            map.insert("title".into(), Value::String("Records".into()));
+        }
+        if !map.get("max_items").is_some_and(Value::is_u64) {
+            map.insert("max_items".into(), Value::from(12));
+        }
+    }
+    let mut collection: WorkBrowseCollection = serde_json::from_value(value)
         .map_err(|error| format!("records does not match its shape: {error}"))?;
+    // Every row already has its name, and a column name is a plain
+    // identifier: a "name" column, a "Product link" or a fourth picture
+    // column is the same request said loosely.
+    let mut names: Vec<String> = Vec::new();
+    let mut pictures = 0;
+    collection.columns.retain_mut(|column| {
+        let name: String = column
+            .name
+            .trim()
+            .to_ascii_lowercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let name = name.trim_matches('_').to_owned();
+        let picture = column.value == WorkBrowseValue::ImageUrl;
+        if !name.starts_with(|c: char| c.is_ascii_alphabetic())
+            || matches!(name.as_str(), "name" | "title")
+            || names.contains(&name)
+            || (picture && pictures == 3)
+        {
+            return false;
+        }
+        pictures += usize::from(picture);
+        names.push(name.clone());
+        column.name = name;
+        true
+    });
+    collection.columns.truncate(MAX_ARTIFACT_CRITERIA);
+    let fits = (256 / (collection.columns.len() + 1)).min(MAX_ARTIFACT_SUBJECTS);
+    collection.max_items = collection
+        .max_items
+        .clamp(1, u8::try_from(fits).unwrap_or(u8::MAX).max(1));
     // A row missing a price or a picture is still a find the lead can use;
     // only a link is ever required. A price is kept as the page shows it:
     // most sites print "$" without a currency code, which a money value
     // never admits, and the lead reads records as text either way.
     for column in &mut collection.columns {
-        use zephium_core::work::collection::{WorkBrowseExtraction, WorkBrowseValue};
         if matches!(column.value, WorkBrowseValue::Money { .. }) {
             column.value = WorkBrowseValue::Text;
             column.extraction = WorkBrowseExtraction::Generate;
@@ -1412,6 +1456,28 @@ mod tests {
             WorkBrowseExtraction::Generate
         );
         assert!(!collection.columns[0].required && collection.columns[1].required);
+    }
+
+    #[test]
+    fn records_said_loosely_are_the_same_request() {
+        let records = serde_json::json!({
+            "columns": [
+                {"name": "name", "value": {"kind": "text"}, "required": true},
+                {"name": "Product link", "value": {"kind": "url"}, "required": true},
+                {"name": "price", "value": {"kind": "text"}, "required": true},
+                {"name": "price", "value": {"kind": "text"}, "required": false},
+                {"name": "a", "value": {"kind": "image_url"}, "required": false},
+                {"name": "b", "value": {"kind": "image_url"}, "required": false},
+                {"name": "c", "value": {"kind": "image_url"}, "required": false},
+                {"name": "d", "value": {"kind": "image_url"}, "required": false}
+            ],
+            "max_items": 40
+        });
+        let collection = collection(Some(&records)).unwrap().unwrap();
+        let names: Vec<&str> = collection.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["product_link", "price", "a", "b", "c"]);
+        assert_eq!(collection.title, "Records");
+        assert_eq!(collection.max_items, 32);
     }
 
     #[test]
