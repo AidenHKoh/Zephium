@@ -2937,52 +2937,7 @@ impl AgentWorkController {
                 Box::pin(Self::observe(state, worker, browser)).await?,
             )?;
         }
-        // A cookie banner on a page worked for the person is refused by Rust
-        // before any model sees the page. Rust presses on a whole look of the
-        // page: the model's fitted look may shorten the banner's fields or cut
-        // its buttons off, and a press needs them whole.
-        if state.actions_before_extraction
-            && state
-                .navigation_discovery
-                .as_ref()
-                .is_some_and(AgentNavigationDiscovery::is_site_session)
-            && (state.task.consent_dismissal(&observation).is_some()
-                || state.task.consent_suspected(&observation))
-        {
-            state.refresh_account(worker, browser)?;
-            let initial = Box::pin(Self::observe(state, worker, browser)).await?;
-            let whole = Box::pin(Self::whole_page_capture(
-                state,
-                worker,
-                browser,
-                initial,
-                SemanticExpansionKind::Subtree,
-            ))
-            .await?;
-            if let Some(target) = state.task.consent_dismissal(&whole) {
-                observation =
-                    Box::pin(Self::dismiss_consent(state, worker, browser, whole, target)).await?;
-            }
-        }
-        // So is a sign-in, newsletter or app offer the site laid over the
-        // page with its own close control.
-        if state.actions_before_extraction
-            && state
-                .navigation_discovery
-                .as_ref()
-                .is_some_and(AgentNavigationDiscovery::is_site_session)
-        {
-            if let Some(target) = state.task.overlay_dismissal(&observation) {
-                observation = Box::pin(Self::close_overlay(
-                    state,
-                    worker,
-                    browser,
-                    observation,
-                    target,
-                ))
-                .await?;
-            }
-        }
+        observation = Box::pin(Self::clear_offers(state, worker, browser, observation)).await?;
         let mut captured_at = SemanticCaptureInstant::from_millis(
             state
                 .journal_mut()?
@@ -3012,6 +2967,9 @@ impl AgentWorkController {
             observation = Self::fit_model_observation(
                 Box::pin(Self::observe(state, worker, browser)).await?,
             )?;
+            // A banner or offer the page put up after its first look (a
+            // consent dialog its scripts add late) is cleared the same way.
+            observation = Box::pin(Self::clear_offers(state, worker, browser, observation)).await?;
             captured_at = SemanticCaptureInstant::from_millis(
                 state
                     .journal_mut()?
@@ -4370,6 +4328,63 @@ impl AgentWorkController {
 
     /// Clicks a consent banner's refusal as a read. A page that refuses the
     /// click or does not change keeps the model's ordinary first look.
+    /// Refuses a cookie banner and closes a site's own offer on a page worked
+    /// for the person, before the planner spends a call on either.
+    async fn clear_offers(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        mut observation: SemanticObservation,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        // A cookie banner on a page worked for the person is refused by Rust
+        // before any model sees the page. Rust presses on a whole look of the
+        // page: the model's fitted look may shorten the banner's fields or cut
+        // its buttons off, and a press needs them whole.
+        if state.actions_before_extraction
+            && state
+                .navigation_discovery
+                .as_ref()
+                .is_some_and(AgentNavigationDiscovery::is_site_session)
+            && (state.task.consent_dismissal(&observation).is_some()
+                || state.task.consent_suspected(&observation))
+        {
+            state.refresh_account(worker, browser)?;
+            let initial = Box::pin(Self::observe(state, worker, browser)).await?;
+            let whole = Box::pin(Self::whole_page_capture(
+                state,
+                worker,
+                browser,
+                initial,
+                SemanticExpansionKind::Subtree,
+            ))
+            .await?;
+            if let Some(target) = state.task.consent_dismissal(&whole) {
+                observation =
+                    Box::pin(Self::dismiss_consent(state, worker, browser, whole, target)).await?;
+            }
+        }
+        // So is a sign-in, newsletter or app offer the site laid over the
+        // page with its own close control.
+        if state.actions_before_extraction
+            && state
+                .navigation_discovery
+                .as_ref()
+                .is_some_and(AgentNavigationDiscovery::is_site_session)
+        {
+            if let Some(target) = state.task.overlay_dismissal(&observation) {
+                observation = Box::pin(Self::close_overlay(
+                    state,
+                    worker,
+                    browser,
+                    observation,
+                    target,
+                ))
+                .await?;
+            }
+        }
+        Ok(observation)
+    }
+
     async fn dismiss_consent(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
