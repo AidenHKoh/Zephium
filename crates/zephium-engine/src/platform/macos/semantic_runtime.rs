@@ -1639,6 +1639,16 @@ impl AgentSemanticRuntimeRegistration {
         Ok(())
     }
 
+    /// A live document whose runtime no history entry holds yet: one a
+    /// hand-on load put in place rather than an admitted navigation.
+    pub(crate) fn active_unbound(&self) -> bool {
+        !self.retired
+            && self
+                .epochs
+                .try_borrow()
+                .is_ok_and(|epochs| epochs.active.is_some() && epochs.active_runtime.is_none())
+    }
+
     pub(crate) fn active_parked(&self) -> bool {
         if self.retired || !self.channel.parked_for_history() {
             return false;

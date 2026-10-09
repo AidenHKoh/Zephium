@@ -739,6 +739,21 @@ impl EngineHost {
                 Some(_) => {}
             }
         }
+        // A document a hand-on load put in place (a saved consent, a bot
+        // check that reloaded its page) was never enrolled by a navigation.
+        #[cfg(target_os = "macos")]
+        if dispatched {
+            let settled = resource
+                .view
+                .as_ref()
+                .and_then(|view| view.work_navigation())
+                .and_then(|gate| gate.settled_target());
+            if let (Some(view), Some(target)) = (resource.view.as_mut(), settled) {
+                if view.enroll_handed_on_document(target).is_err() {
+                    dispatched = false;
+                }
+            }
+        }
         if dispatched {
             if let Some(view) = resource.view.as_mut() {
                 let parked_guard = guard.clone();

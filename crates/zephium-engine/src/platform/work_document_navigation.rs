@@ -50,6 +50,9 @@ struct State {
     superseded: Option<wry::NavigationId>,
     /// The gate let an action's own load replace the ready document.
     handed_on: bool,
+    /// No action or successor load has run yet: the first document may still
+    /// load itself again once (a bot check that clears itself).
+    first_document: bool,
     /// That load still needs the page's semantic runtime prepared for it.
     hand_on_pending: bool,
     /// When the current load committed.
@@ -205,6 +208,7 @@ impl Default for WorkDocumentNavigation {
             site_loads: 0,
             superseded: None,
             handed_on: false,
+            first_document: true,
             hand_on_pending: false,
             committed_at: None,
             redirect: None,
@@ -247,6 +251,21 @@ fn log_brand_move(requested: Option<&ContextNavigationTarget>, current: &str) {
     }
 }
 
+/// The same page again, its query aside: what a bot check reloads.
+fn reloads(effective: Option<&ContextNavigationTarget>, raw: &str) -> bool {
+    let Ok(target) = ContextNavigationTarget::parse(raw) else {
+        return false;
+    };
+    effective.is_some_and(|effective| {
+        let (a, b) = (effective.as_url(), target.as_url());
+        a.scheme() == b.scheme() && a.host() == b.host() && a.path() == b.path()
+    })
+}
+
+/// How soon after its document committed a ready site-session page may load
+/// itself again and be followed.
+const SELF_LOAD_WINDOW: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Script redirects one site-session load may follow before it settles.
 const MAX_SITE_LOADS: u8 = 6;
 
@@ -271,8 +290,10 @@ impl State {
         }
     }
     /// A site-session GET the gate follows: the tracked load's own server
-    /// redirect, or a script redirect before the document settles. After it
-    /// is ready, page-initiated loads are cancelled and the page stays.
+    /// redirect, a script redirect before the document settles, or a first
+    /// page that reloads itself moments after it settled (a bot check that
+    /// clears itself). Other page-initiated loads are cancelled and the page
+    /// stays.
     fn site_follows(&mut self, raw: &str) -> bool {
         let Some(requested) = self.target.as_ref() else {
             return false;
@@ -304,6 +325,38 @@ impl State {
                 self.phase = Phase::Armed;
                 // The committed document's semantic runtime ends with it; the
                 // policy callback prepares the runtime for the new one.
+                self.hand_on_pending = true;
+                true
+            }
+            Phase::Ready
+                if policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+                    && self.site_loads < MAX_SITE_LOADS
+                    && self.first_document
+                    && reloads(self.effective.as_ref(), raw)
+                    && self.operation.is_none()
+                    && self.follow.is_none()
+                    && self.human.is_none()
+                    && self
+                        .committed_at
+                        .is_some_and(|at| at.elapsed() <= SELF_LOAD_WINDOW) =>
+            {
+                let (Some(generation), Some(loads)) = (
+                    self.finalization_generation.checked_add(1),
+                    self.site_loads.checked_add(1),
+                ) else {
+                    return false;
+                };
+                self.site_loads = loads;
+                self.superseded = self.native_id.take();
+                self.effective = None;
+                self.finalization_generation = generation;
+                self.clear_write_navigation();
+                self.location_revision = 0;
+                self.requested = true;
+                self.phase = Phase::Armed;
+                // Settled like an action's own load: reads wait for the new
+                // document, which the host finalizes as it does a hand-on.
+                self.handed_on = true;
                 self.hand_on_pending = true;
                 true
             }
@@ -445,6 +498,7 @@ impl WorkDocumentNavigation {
     ) {
         if let Ok(mut state) = self.0.lock() {
             state.handed_on = false;
+            state.first_document = false;
             state.clear_write_navigation();
             #[cfg(target_os = "windows")]
             {
@@ -480,6 +534,11 @@ impl WorkDocumentNavigation {
     /// The document is being replaced by a load the gate let an action's
     /// page start (a saved consent, a confirmed commit): reads and actions
     /// of the old document end without leaving the resource uncertain.
+    /// The settled document's own address, whatever is armed after it.
+    pub(crate) fn settled_target(&self) -> Option<ContextNavigationTarget> {
+        let state = self.0.lock().ok()?;
+        state.effective.clone()
+    }
     pub(crate) fn handed_on(&self) -> bool {
         self.0.lock().is_ok_and(|state| state.handed_on)
     }
@@ -604,6 +663,7 @@ impl WorkDocumentNavigation {
         }
         state.follow = None;
         state.operation = Some(request.operation());
+        state.first_document = false;
         state.target = Some(request.target().clone());
         state.effective = None;
         state.policy = request.document_policy();
@@ -645,6 +705,7 @@ impl WorkDocumentNavigation {
         }
         state.follow = None;
         state.operation = Some(operation);
+        state.first_document = false;
         state.target = Some(target);
         state.effective = None;
         state.policy = zephium_agentic::WorkBrowserDocumentPolicy::Exact;
@@ -1553,6 +1614,29 @@ mod tests {
         assert!(gate.ready(Some("https://app.slack.com/client/T1")));
         assert!(!gate.failed());
     }
+    #[test]
+    fn a_first_page_that_loads_itself_again_soon_after_it_settled_is_followed() {
+        let start = "https://www.example.com/";
+        let gate = site_gate(start);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        assert!(gate.ready(Some(start)));
+        // A bot check that cleared itself reloads the page.
+        assert!(gate.allows("https://www.example.com/?checked=1"));
+        assert!(gate.handed_on());
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(2, phase, "https://www.example.com/?checked=1"))
+                .unwrap();
+        }
+        settle(&gate, "https://www.example.com/?checked=1");
+        assert!(gate.ready(Some("https://www.example.com/?checked=1")));
+        // Another site, or another page of it, is never followed.
+        assert!(!gate.allows("https://elsewhere.example.org/"));
+        assert!(!gate.allows("https://www.example.com/account"));
+    }
+
     #[test]
     fn a_site_load_that_reuses_a_superseded_load_id_is_still_followed() {
         let start = "https://www.example.com/";

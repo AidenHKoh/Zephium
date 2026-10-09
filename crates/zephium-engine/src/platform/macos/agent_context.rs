@@ -305,6 +305,22 @@ impl AgentOwnedView {
         self.semantic.as_mut().ok_or(())?.park_active(completion)
     }
 
+    /// Enrolls a document a hand-on load put in place, so a later admitted
+    /// navigation can park its runtime like any navigated document's.
+    pub(crate) fn enroll_handed_on_document(
+        &mut self,
+        target: zephium_agentic::ContextNavigationTarget,
+    ) -> Result<(), ()> {
+        if !self
+            .semantic
+            .as_ref()
+            .is_some_and(AgentSemanticRuntimeRegistration::active_unbound)
+        {
+            return Ok(());
+        }
+        self.enroll_current_work_history_get(target)
+    }
+
     pub(crate) fn semantic_runtime_parked(&self) -> bool {
         self.semantic
             .as_ref()
