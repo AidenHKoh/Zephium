@@ -481,7 +481,11 @@ export type AccountFaultV1 = "offline" |
 /**  Nothing has been bought, so there is nothing to manage. */
 "no_billing_account" | "server" | 
 /**  The Keychain or Credential Manager refused. */
-"vault" | "invalid";
+"vault" | "invalid" | 
+/**  The change needs a fresh sign-in; the session itself is still valid. */
+"reauth_required" | 
+/**  Another account already uses that address. */
+"email_taken" | "not_found";
 
 export type AccountNoticeV1 = {
 	id: string,

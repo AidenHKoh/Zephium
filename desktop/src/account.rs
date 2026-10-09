@@ -27,6 +27,11 @@ pub(crate) enum AccountFaultV1 {
     /// The Keychain or Credential Manager refused.
     Vault,
     Invalid,
+    /// The change needs a fresh sign-in; the session itself is still valid.
+    ReauthRequired,
+    /// Another account already uses that address.
+    EmailTaken,
+    NotFound,
 }
 
 impl From<AccountError> for AccountFaultV1 {
@@ -42,6 +47,9 @@ impl From<AccountError> for AccountFaultV1 {
             AccountError::Server | AccountError::Protocol => Self::Server,
             AccountError::Vault => Self::Vault,
             AccountError::Invalid => Self::Invalid,
+            AccountError::ReauthRequired => Self::ReauthRequired,
+            AccountError::EmailTaken => Self::EmailTaken,
+            AccountError::NotFound => Self::NotFound,
         }
     }
 }
@@ -192,6 +200,7 @@ pub(crate) fn install(app: &tauri::AppHandle) {
         Arc::new(AppSettings),
         Arc::new(SystemVault),
         &device_label(app),
+        &app.package_info().version.to_string(),
     ) {
         Ok(service) => Arc::new(service),
         Err(error) => {
@@ -212,6 +221,10 @@ pub(crate) fn install(app: &tauri::AppHandle) {
     }));
     if SERVICE.set(service.clone()).is_err() {
         return;
+    }
+    const SCOPED_KEY: &str = "account.vault.scoped";
+    if AppSettings.get(SCOPED_KEY).is_none() && AppSettings.set(SCOPED_KEY.into(), "1".into()) {
+        std::thread::spawn(|| SystemVault.drop_unscoped());
     }
     #[cfg(feature = "work-product")]
     hosted::install(service.clone());

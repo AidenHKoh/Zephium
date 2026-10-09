@@ -3,21 +3,30 @@
 
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
+use reqwest::header::{
+    HeaderMap, HeaderValue, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, ETAG, IF_NONE_MATCH,
+    RETRY_AFTER,
+};
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use url::Url;
 
-use crate::wire::{self, Billing, ClientConfig, Profile, Purchase, Session, Usage};
+use crate::wire::{
+    self, Billing, ClientConfig, Profile, Purchase, Receipt, Session, Usage, UsageHistory,
+};
 use crate::{AccountError, AccountToken};
 
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const TIMEOUT: Duration = Duration::from_secs(25);
 const MAX_RETRY_AFTER: u32 = 15 * 60;
-const DEVICE_HEADER: &str = "x-zephium-device";
 const TOKEN_HEADER: &str = "set-auth-token";
+/// The contract's ceiling on how long client config may be reused.
+pub(crate) const CONFIG_MAX_AGE: Duration = Duration::from_secs(300);
+const MAX_ETAG_BYTES: usize = 256;
+const MAX_CURSOR_BYTES: usize = 200;
+const MAX_EXPORT_BYTES: usize = 512 * 1024;
 /// Checkout and the billing portal must open on the billing provider itself.
 const BILLING_HOSTS: [&str; 2] = ["polar.sh", "sandbox.polar.sh"];
 
@@ -60,6 +69,18 @@ impl Origin {
     }
 }
 
+/// What `GET /v1/client-config` answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigReply {
+    Fresh {
+        config: ClientConfig,
+        etag: Option<String>,
+        max_age: Duration,
+    },
+    /// 304: the copy held is still current.
+    Unchanged { max_age: Duration },
+}
+
 pub struct Client {
     origin: Origin,
     http: reqwest::Client,
@@ -81,9 +102,31 @@ impl Client {
         &self.origin
     }
 
-    pub async fn client_config(&self) -> Result<ClientConfig, AccountError> {
-        self.json(Method::GET, "/v1/client-config", None, None)
-            .await
+    /// `etag` is the validator of the copy already held; a 304 keeps it.
+    pub async fn client_config(&self, etag: Option<&str>) -> Result<ConfigReply, AccountError> {
+        let mut headers = HeaderMap::new();
+        if let Some(value) = etag.and_then(|etag| HeaderValue::from_str(etag).ok()) {
+            headers.insert(IF_NONE_MATCH, value);
+        }
+        let reply = self
+            .request(Method::GET, "/v1/client-config", None, None, headers)
+            .await?;
+        let max_age = max_age(&reply.headers);
+        if reply.status == StatusCode::NOT_MODIFIED {
+            return Ok(ConfigReply::Unchanged { max_age });
+        }
+        let config = serde_json::from_slice(&reply.body).map_err(|_| AccountError::Protocol)?;
+        let etag = reply
+            .headers
+            .get(ETAG)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| value.len() <= MAX_ETAG_BYTES)
+            .map(str::to_owned);
+        Ok(ConfigReply::Fresh {
+            config,
+            etag,
+            max_age,
+        })
     }
 
     pub async fn send_code(&self, email: &str) -> Result<(), AccountError> {
@@ -98,24 +141,23 @@ impl Client {
         .map(drop)
     }
 
+    /// Signs in; `device` names this install in the account's session list.
     pub async fn verify_code(
         &self,
         email: &str,
         code: &str,
         device: &str,
     ) -> Result<AccountToken, AccountError> {
-        let body = json!({ "email": email, "otp": code });
-        let mut headers = HeaderMap::new();
-        if let Ok(value) = HeaderValue::from_str(device) {
-            headers.insert(DEVICE_HEADER, value);
+        let mut body = json!({ "email": email, "otp": code });
+        if !device.trim().is_empty() {
+            body["device"] = Value::String(device.to_owned());
         }
         let reply = self
-            .request(
+            .call(
                 Method::POST,
                 "/api/auth/sign-in/email-otp",
                 None,
                 Some(body),
-                headers,
             )
             .await?;
         let token = reply
@@ -129,6 +171,57 @@ impl Client {
     pub async fn profile(&self, token: &AccountToken) -> Result<Profile, AccountError> {
         self.json(Method::GET, "/v1/account", Some(token), None)
             .await
+    }
+
+    pub async fn set_name(
+        &self,
+        token: &AccountToken,
+        name: Option<&str>,
+    ) -> Result<Option<String>, AccountError> {
+        let body = json!({ "name": name });
+        let reply: wire::Name = self
+            .json(Method::PATCH, "/v1/account", Some(token), Some(body))
+            .await?;
+        Ok(reply.name)
+    }
+
+    pub async fn send_email_change_code(
+        &self,
+        token: &AccountToken,
+        email: &str,
+    ) -> Result<(), AccountError> {
+        let body = json!({ "email": email });
+        self.call(
+            Method::POST,
+            "/v1/account/email/code",
+            Some(token),
+            Some(body),
+        )
+        .await
+        .map(drop)
+    }
+
+    pub async fn change_email(
+        &self,
+        token: &AccountToken,
+        email: &str,
+        code: &str,
+    ) -> Result<(), AccountError> {
+        let body = json!({ "email": email, "otp": code });
+        self.call(Method::PATCH, "/v1/account/email", Some(token), Some(body))
+            .await
+            .map(drop)
+    }
+
+    /// The server's export, checked to be the document it promises.
+    pub async fn export(&self, token: &AccountToken) -> Result<Value, AccountError> {
+        let export: Value = self
+            .json(Method::GET, "/v1/account/export", Some(token), None)
+            .await?;
+        let ok = export.get("schemaVersion").and_then(Value::as_u64) == Some(1)
+            && export.get("account").is_some_and(Value::is_object)
+            && serde_json::to_vec(&export).is_ok_and(|bytes| bytes.len() <= MAX_EXPORT_BYTES);
+        ok.then_some(export).ok_or(AccountError::Protocol)
     }
 
     pub async fn sessions(&self, token: &AccountToken) -> Result<Vec<Session>, AccountError> {
@@ -158,6 +251,12 @@ impl Client {
             .map(drop)
     }
 
+    pub async fn sign_out_everywhere(&self, token: &AccountToken) -> Result<(), AccountError> {
+        self.call(Method::POST, "/v1/logout-all", Some(token), None)
+            .await
+            .map(drop)
+    }
+
     pub async fn billing(&self, token: &AccountToken) -> Result<Billing, AccountError> {
         self.json(Method::GET, "/v1/billing", Some(token), None)
             .await
@@ -170,6 +269,39 @@ impl Client {
 
     pub async fn usage(&self, token: &AccountToken) -> Result<Usage, AccountError> {
         self.json(Method::GET, "/v1/usage", Some(token), None).await
+    }
+
+    /// One page of request history, newest first; `cursor` is the previous
+    /// page's, passed back unchanged.
+    pub async fn usage_history(
+        &self,
+        token: &AccountToken,
+        cursor: Option<&str>,
+    ) -> Result<UsageHistory, AccountError> {
+        if cursor.is_some_and(|cursor| cursor.is_empty() || cursor.len() > MAX_CURSOR_BYTES) {
+            return Err(AccountError::Invalid);
+        }
+        let mut url = self.origin.join("/v1/usage/requests");
+        if let Some(cursor) = cursor {
+            url.query_pairs_mut().append_pair("cursor", cursor);
+        }
+        let reply = self
+            .send(Method::GET, url, Some(token), None, HeaderMap::new())
+            .await?;
+        serde_json::from_slice(&reply.body).map_err(|_| AccountError::Protocol)
+    }
+
+    /// The accounting of one request this account made.
+    pub async fn receipt(&self, token: &AccountToken, id: &str) -> Result<Receipt, AccountError> {
+        if !uuid(id) {
+            return Err(AccountError::Invalid);
+        }
+        let path = format!("/v1/usage/requests/{id}");
+        let receipt: Receipt = self.json(Method::GET, &path, Some(token), None).await?;
+        if !receipt.id.eq_ignore_ascii_case(id) {
+            return Err(AccountError::Protocol);
+        }
+        Ok(receipt)
     }
 
     pub async fn checkout(
@@ -249,15 +381,24 @@ impl Client {
         path: &str,
         token: Option<&AccountToken>,
         body: Option<Value>,
+        headers: HeaderMap,
+    ) -> Result<Reply, AccountError> {
+        self.send(method, self.origin.join(path), token, body, headers)
+            .await
+    }
+
+    async fn send(
+        &self,
+        method: Method,
+        url: Url,
+        token: Option<&AccountToken>,
+        body: Option<Value>,
         mut headers: HeaderMap,
     ) -> Result<Reply, AccountError> {
         if let Some(token) = token {
             headers.insert(AUTHORIZATION, token.header()?);
         }
-        let mut request = self
-            .http
-            .request(method, self.origin.join(path))
-            .headers(headers);
+        let mut request = self.http.request(method, url).headers(headers);
         if let Some(body) = body {
             let bytes = serde_json::to_vec(&body).map_err(|_| AccountError::Invalid)?;
             request = request.header(CONTENT_TYPE, "application/json").body(bytes);
@@ -278,14 +419,19 @@ impl Client {
             }
             body.extend_from_slice(&chunk);
         }
-        if status.is_success() {
-            return Ok(Reply { headers, body });
+        if status.is_success() || status == StatusCode::NOT_MODIFIED {
+            return Ok(Reply {
+                status,
+                headers,
+                body,
+            });
         }
         Err(classify(status, &headers, &body))
     }
 }
 
 struct Reply {
+    status: StatusCode,
     headers: HeaderMap,
     body: Vec<u8>,
 }
@@ -299,6 +445,36 @@ fn billing_link(text: &str) -> Result<Url, AccountError> {
     Ok(url)
 }
 
+/// How long the answer may be reused: the server's `max-age`, never past
+/// the contract's ceiling, and not at all if the server says so.
+fn max_age(headers: &HeaderMap) -> Duration {
+    let Some(value) = headers.get(CACHE_CONTROL).and_then(|v| v.to_str().ok()) else {
+        return CONFIG_MAX_AGE;
+    };
+    let mut age = CONFIG_MAX_AGE;
+    for directive in value.split(',').map(str::trim) {
+        let directive = directive.to_ascii_lowercase();
+        if directive == "no-store" || directive == "no-cache" {
+            return Duration::ZERO;
+        }
+        if let Some(seconds) = directive.strip_prefix("max-age=") {
+            if let Ok(seconds) = seconds.trim_matches('"').parse::<u64>() {
+                age = age.min(Duration::from_secs(seconds));
+            }
+        }
+    }
+    age
+}
+
+fn uuid(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
+}
+
 fn classify(status: StatusCode, headers: &HeaderMap, body: &[u8]) -> AccountError {
     let code = serde_json::from_slice::<wire::ErrorBody>(body)
         .map(|body| body.error.code)
@@ -307,6 +483,9 @@ fn classify(status: StatusCode, headers: &HeaderMap, body: &[u8]) -> AccountErro
         (_, "invalid_code" | "invalid_otp" | "otp_expired" | "too_many_attempts") => {
             AccountError::InvalidCode
         }
+        // A valid session that is too old for this change; never a sign-out.
+        (_, "reauthentication_required") => AccountError::ReauthRequired,
+        (409, "email_unavailable") => AccountError::EmailTaken,
         (_, "signup_closed" | "signup_disabled") => AccountError::SignupClosed,
         (_, "no_billing_account") => AccountError::NoBillingAccount,
         (_, "billing_not_enabled" | "cloud_disabled") => AccountError::Unavailable,
@@ -314,7 +493,8 @@ fn classify(status: StatusCode, headers: &HeaderMap, body: &[u8]) -> AccountErro
         (429, _) => AccountError::RateLimited {
             retry_after: retry_after(headers),
         },
-        (400 | 404 | 405 | 409 | 413 | 415 | 422, _) => AccountError::Invalid,
+        (404, _) => AccountError::NotFound,
+        (400 | 405 | 409 | 413 | 415 | 422, _) => AccountError::Invalid,
         (503, _) => AccountError::Unavailable,
         _ => AccountError::Server,
     }
@@ -386,5 +566,41 @@ mod tests {
             classify(StatusCode::BAD_GATEWAY, &HeaderMap::new(), b"<html>"),
             AccountError::Server
         );
+        let reauth = br#"{"error":{"code":"reauthentication_required"},"request_id":null}"#;
+        assert_eq!(
+            classify(StatusCode::UNAUTHORIZED, &HeaderMap::new(), reauth),
+            AccountError::ReauthRequired
+        );
+        let taken = br#"{"error":{"code":"email_unavailable"},"request_id":null}"#;
+        assert_eq!(
+            classify(StatusCode::CONFLICT, &HeaderMap::new(), taken),
+            AccountError::EmailTaken
+        );
+        assert_eq!(
+            classify(StatusCode::SERVICE_UNAVAILABLE, &HeaderMap::new(), taken),
+            AccountError::Unavailable
+        );
+    }
+
+    #[test]
+    fn config_reuse_never_exceeds_five_minutes() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(max_age(&headers), CONFIG_MAX_AGE);
+        headers.insert(
+            CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=60, must-revalidate"),
+        );
+        assert_eq!(max_age(&headers), Duration::from_secs(60));
+        headers.insert(CACHE_CONTROL, HeaderValue::from_static("max-age=86400"));
+        assert_eq!(max_age(&headers), CONFIG_MAX_AGE);
+        headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        assert_eq!(max_age(&headers), Duration::ZERO);
+    }
+
+    #[test]
+    fn receipt_ids_must_be_uuids() {
+        assert!(uuid("0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c"));
+        assert!(!uuid("0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6"));
+        assert!(!uuid("0b3c6a3e/8f7d-4a59-9a3c-1d2e3f4a5b6c"));
     }
 }
