@@ -14,6 +14,8 @@
   const MAX_TREE_DEPTH = 32;
   const MAX_DEFERRED_RECORDS = 64;
   const MAX_DEFERRED_ANCHORS = 192;
+  const FIGURE_TEXT = /\d/u;
+  const CURRENCY_TEXT = /[$\u20ac\u00a3\u00a5\u20b9\u20a9\u20bd\u20ba\u20aa\u0e3f\u20ab]|(?:^|[^\p{L}])(?:z\u0142|pln|usd|eur|gbp|chf|sek|nok|dkk|czk|k\u010d|kr|huf|ft|ron|lei|aud|cad|nzd|jpy|inr|brl|mxn)(?=$|[^\p{L}])/iu;
   const MAX_NAME_BYTES = 512;
   const MAX_NODE_TEXT_BYTES = 4096;
   const MAX_VALUE_BYTES = 4096;
@@ -1029,8 +1031,31 @@
       (tag === "link" && !isPageAddressMeta(element, tag)) ||
       has(element, "hidden") ||
       has(element, "inert") ||
-      (lower(attribute(element, "aria-hidden", 16) || "") === "true" && !isRenderedPhoto(element, tag))
+      (lower(attribute(element, "aria-hidden", 16) || "") === "true" && !isRenderedPhoto(element, tag) &&
+        !isShownPrice(element, tag))
     );
+  }
+
+  // A price shown to people but hidden from assistive technology, which
+  // reads a clipped copy instead (Booking hides that copy too): a rendered
+  // element whose own short text is a figure with a currency.
+  function isShownPrice(element, tag) {
+    if (tag === "svg" || tag === "img") return false;
+    const children = childNodes(element);
+    const count = listLength(children);
+    if (count === 0 || count > 4) return false;
+    let text = "";
+    for (let index = 0; index < count; index += 1) {
+      const child = listItem(children, index);
+      if (child === null || nodeType(child) !== 3) return false;
+      const raw = read(characterDataGetter, child);
+      if (typeof raw !== "string") return false;
+      text += raw;
+      if (text.length > 64) return false;
+    }
+    const rect = elementRect(element);
+    return rect !== null && rect.width > 4 && rect.height > 4 && styleIsVisible(element) &&
+      FIGURE_TEXT.test(text) && CURRENCY_TEXT.test(text);
   }
 
   // The page's own picture (og:image) is the one image every product or

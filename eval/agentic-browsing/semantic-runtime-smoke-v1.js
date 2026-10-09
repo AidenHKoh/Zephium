@@ -1811,6 +1811,22 @@ async function finish() {
   const shopTexts = shopLook.n.map((node) => node.t).filter(Boolean);
   assert(shopTexts.includes("Laptop 0") && shopTexts.includes("Laptop 3"), "a filter panel's facets crowded out the products");
   assert(!shopTexts.includes("( 107 )"), "facets were read before the products filled the look");
+  // A price shown to people but hidden from assistive technology is read;
+  // other hidden text stays out.
+  const stays = new Element("main");
+  const stay = stays.append(new Element("li"));
+  stay.rect = { x: 10, y: 100, width: 600, height: 120 };
+  stay.append(new CharacterData("Old Town Residence "));
+  const shownPrice = stay.append(new Element("span", { "aria-hidden": "true" }));
+  shownPrice.rect = { x: 400, y: 180, width: 80, height: 24 };
+  shownPrice.append(new CharacterData("512 zł"));
+  const hiddenBadge = stay.append(new Element("span", { "aria-hidden": "true" }));
+  hiddenBadge.rect = { x: 500, y: 180, width: 80, height: 24 };
+  hiddenBadge.append(new CharacterData("Hidden badge 4"));
+  document._root = stays; setOwner(stays, document);
+  const staysWire = invoke(118, 118, { k: "initial" }, { n: 20 });
+  assert(staysWire.includes("512 zł") || staysWire.includes("512 zł"), "a price hidden from assistive technology was not read");
+  assert(!staysWire.includes("Hidden badge"), "other text hidden from assistive technology was read");
   // A look cut inside a control leaves that control's name unfinished; the
   // records read whole before it stay usable for actions.
   const cut = new Element("main");
