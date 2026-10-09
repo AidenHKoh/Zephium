@@ -176,7 +176,8 @@ pub(super) enum AdmissionPhase {
 }
 
 /// Original request and callback slot stay owned even after timeout/refusal.
-/// There is no read-back shortcut, automatic retry or decoded-record admission.
+/// There is no read-back shortcut or decoded-record admission. An uncertain
+/// flight is resent only as the same exact request, after `deadline`.
 struct JournalFlight {
     request: DurableRequest,
     result: Arc<Mutex<Option<Result<DurableReply, AgentWorkJournalError>>>>,
@@ -977,6 +978,8 @@ impl RetainedWork {
                     self.persistence_failure.get_or_insert(error);
                     self.fail(AgentWorkFailure::Contract);
                     flight.uncertain = true;
+                    flight.deadline =
+                        Instant::now() + reconciliation_backoff(flight.reconciliations);
                     // Retain the exact unsettled request even after a malformed ACK.
                     retain = true;
                 }
@@ -987,6 +990,17 @@ impl RetainedWork {
                 self.persistence_failure = None;
             }
         }
+        // A late reply to the original request still settles it until the
+        // resend is due. The resend is the same exact idempotent request; it
+        // keeps the sticky stop and never lets native proof precede its ACK.
+        if self
+            .flight
+            .as_ref()
+            .is_some_and(|flight| flight.uncertain && Instant::now() >= flight.deadline)
+        {
+            self.reconcile();
+        }
+
         if let Some(mut acquisition) = self.acquisition.take() {
             match acquisition.poll(now) {
                 Ok(None) => self.acquisition = Some(acquisition),
@@ -1458,14 +1472,15 @@ impl RetainedWork {
         }
     }
 
-    /// Explicit bounded reconciliation of the original exact idempotent request.
-    /// Old callbacks retain their own disconnected slots; none can select a new
-    /// worker or clear the sticky stop. A Store read is not used as an ACK.
+    /// Bounded reconciliation of the original exact idempotent request, due
+    /// on its own after a backoff or asked for explicitly. Old callbacks keep
+    /// their own disconnected slots; none can select a new worker or clear the
+    /// sticky stop. A Store read is not used as an ACK.
     pub(super) fn reconcile(&mut self) -> bool {
         let Some(flight) = self.flight.take() else {
             return false;
         };
-        if !flight.uncertain || flight.reconciliations >= 4 {
+        if !flight.uncertain || flight.reconciliations >= MAX_RECONCILIATIONS {
             self.flight = Some(flight);
             return false;
         }
@@ -1747,7 +1762,7 @@ impl RetainedWork {
     pub(super) fn next_deadline(&self) -> Option<Instant> {
         self.flight
             .as_ref()
-            .filter(|flight| !flight.uncertain)
+            .filter(|flight| !flight.uncertain || flight.reconciliations < MAX_RECONCILIATIONS)
             .map(|flight| flight.deadline)
             .into_iter()
             .chain(self.staged.as_ref().map(|staged| staged.deadline))
@@ -1760,8 +1775,14 @@ impl RetainedWork {
     }
 }
 
-/// A fresh native resource may coexist with explicitly reviewed historical
-/// uncertainty. This predicate never permits reuse of an active execution owner.
+const MAX_RECONCILIATIONS: u8 = 4;
+
+/// Half a second, doubling: the last resend leaves within about 15 s of the
+/// first uncertainty, past a Store that is only slow, not one that is gone.
+fn reconciliation_backoff(reconciliations: u8) -> Duration {
+    Duration::from_millis(500) * (1 << reconciliations.min(MAX_RECONCILIATIONS))
+}
+
 /// A record whose actor is gone and whose debt stays historical: a prior
 /// process's interruption, or this process's own scoped recovery.
 pub(super) fn reviewable(disposition: AgentWorkDisposition) -> bool {
@@ -1770,6 +1791,8 @@ pub(super) fn reviewable(disposition: AgentWorkDisposition) -> bool {
         AgentWorkDisposition::Interrupted | AgentWorkDisposition::RecoveryRequired
     )
 }
+/// A fresh native resource may coexist with explicitly reviewed historical
+/// uncertainty. This predicate never permits reuse of an active execution owner.
 fn historical_record_admissible(record: AgentWorkRecord) -> bool {
     record.disposition().is_terminal()
         && (record.debt() == AgentWorkDebt::NONE

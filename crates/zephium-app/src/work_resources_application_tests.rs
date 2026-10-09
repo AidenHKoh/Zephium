@@ -248,6 +248,9 @@ struct GatedStore {
     store: Arc<zephium_store::SqliteStore>,
     hold: Arc<AtomicU8>,
     pending: Arc<Mutex<Option<Held>>>,
+    resent: Arc<Mutex<Vec<Held>>>,
+    // Answers the first CAS to this disposition Uncertain without writing it.
+    refuse_once: AtomicU8,
     pending_artifact: Arc<Mutex<Option<HeldArtifact>>>,
     refuse_artifact_read: AtomicBool,
     wakes: Arc<AtomicUsize>,
@@ -296,6 +299,17 @@ impl AgentWorkJournalPort for GatedStore {
         request: AgentWorkJournalRequest,
         completion: AgentWorkJournalCompletion,
     ) -> Result<(), AgentWorkJournalError> {
+        if let AgentWorkJournalRequest::CompareAndSet(mutation) = &request {
+            let disposition = mutation.next().disposition() as u8;
+            if self
+                .refuse_once
+                .compare_exchange(disposition, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                completion(Err(AgentWorkJournalError::Uncertain));
+                return Ok(());
+            }
+        }
         let held = match &request {
             AgentWorkJournalRequest::CompareAndSet(mutation) => {
                 self.hold.load(Ordering::Acquire) == mutation.next().disposition() as u8
@@ -303,16 +317,20 @@ impl AgentWorkJournalPort for GatedStore {
             _ => false,
         };
         let pending = self.pending.clone();
+        let resent = self.resent.clone();
         let held_signal = self.held_signal.clone();
         self.store.dispatch(
             request,
             Box::new(move |reply| {
                 if held {
-                    assert!(pending
-                        .lock()
-                        .unwrap()
-                        .replace((reply, completion))
-                        .is_none());
+                    let mut slot = pending.lock().unwrap();
+                    // The coordinator resends an uncertain request on its own.
+                    if slot.is_some() {
+                        resent.lock().unwrap().push((reply, completion));
+                    } else {
+                        *slot = Some((reply, completion));
+                    }
+                    drop(slot);
                     if let Some(signal) = held_signal.lock().unwrap().as_ref() {
                         signal.send(()).unwrap();
                     }
@@ -371,6 +389,8 @@ fn coordinator_with_storage(
         store: Arc::new(zephium_store::SqliteStore::open(directory).unwrap()),
         hold: Arc::new(AtomicU8::new(0)),
         pending: Arc::new(Mutex::new(None)),
+        resent: Arc::new(Mutex::new(Vec::new())),
+        refuse_once: AtomicU8::new(0),
         pending_artifact: Arc::new(Mutex::new(None)),
         refuse_artifact_read: AtomicBool::new(false),
         wakes: Arc::new(AtomicUsize::new(0)),
@@ -1226,8 +1246,12 @@ fn mismatched_original_acknowledgement_cannot_start_worker_and_cleanup_stays_own
     });
     assert_eq!(native.destructions.load(Ordering::Acquire), 1);
     assert!(!work.ready(), "cleanup does not clear durable uncertainty");
+    // The exact Running CAS is resent on its own once its backoff is due;
+    // it may already be held by the fixture.
     store.hold.store(0, Ordering::Release);
-    assert!(work.reconcile());
+    if store.pending.lock().unwrap().is_some() {
+        store.release(0);
+    }
     poll_until(&mut work, |work| {
         work.record()
             .is_some_and(|record| record.disposition() == AgentWorkDisposition::FailedClosed)
@@ -1239,6 +1263,56 @@ fn mismatched_original_acknowledgement_cannot_start_worker_and_cleanup_stays_own
     assert!(!work.reconcile(), "original exact CAS has now settled");
     for server in servers.lock().unwrap().drain(..) {
         assert_eq!(server.join().unwrap(), 0);
+    }
+}
+
+#[test]
+fn refused_terminal_write_is_resent_until_acknowledged_and_the_page_closes() {
+    if child("refused_terminal_write_is_resent_until_acknowledged_and_the_page_closes") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, store) = coordinator(directory.path());
+    let servers = Servers::default();
+    poll_until(&mut work, RetainedWork::ready);
+    // The Store answers the terminal write Uncertain and never again: the
+    // original callback is spent, so only a resend can settle the row.
+    store
+        .refuse_once
+        .store(AgentWorkDisposition::Succeeded as u8, Ordering::Release);
+    assert!(work
+        .submit(
+            request(
+                ContextRunId::generate(),
+                vec![response_stream(1), response_stream(2)],
+                servers.clone()
+            ),
+            now()
+        )
+        .is_ok());
+    poll_until(&mut work, |work| {
+        work.failures().1 == Some(AgentWorkJournalError::Uncertain)
+    });
+    assert!(work.next_deadline().is_some(), "the resend is owed a wake");
+    poll_until(&mut work, |work| work.phase() == AdmissionPhase::Terminal);
+    assert_eq!(
+        work.record().unwrap().disposition(),
+        AgentWorkDisposition::Succeeded
+    );
+    assert_eq!(work.failures(), (Some(AgentWorkFailure::Contract), None));
+    assert!(!work.ready(), "a resend keeps the sticky execution stop");
+    assert!(work.take_extraction().is_none());
+    native.join();
+    assert!(work.shutdown_until(
+        &Clock(AtomicU64::new(2)),
+        Instant::now() + Duration::from_secs(2)
+    ));
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 1);
+    for server in servers.lock().unwrap().drain(..) {
+        assert_eq!(server.join().unwrap(), 2);
     }
 }
 
@@ -1290,13 +1364,20 @@ fn timed_out_terminal_acknowledgement_never_reopens_retained_execution() {
         work.resource_destroyed()
     });
     assert_eq!(native.destructions.load(Ordering::Acquire), 1);
-    store.hold.store(0, Ordering::Release);
+    // Production resends the exact terminal CAS on its own once its backoff
+    // is due; nothing asks for it.
+    wait_until(|| {
+        assert!(!work.poll_shutdown(now()).unwrap());
+        !store.resent.lock().unwrap().is_empty()
+    });
     assert_eq!(
         native.global_audits.load(Ordering::Acquire),
         0,
-        "native global seal cannot precede the unresolved original terminal ACK"
+        "native global seal cannot precede the unresolved terminal ACK, even resent"
     );
-    assert!(work.reconcile());
+    store.hold.store(0, Ordering::Release);
+    let (reply, completion) = store.resent.lock().unwrap().remove(0);
+    completion(reply);
     poll_until(&mut work, |work| work.phase() == AdmissionPhase::Terminal);
     assert!(
         !work.ready(),

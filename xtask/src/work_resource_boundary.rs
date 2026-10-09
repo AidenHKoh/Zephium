@@ -510,7 +510,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "policy==Some(drained.policy())",
             "active.extraction.is_none()", "!active.handle.has_pending_events()",
             "prior.as_bytes()[48..64]==request.run.bytes()",
-            "staged.lease.deadline()<=now", "flight.reconciliations>=4",
+            "staged.lease.deadline()<=now", "flight.reconciliations>=MAX_RECONCILIATIONS",
             "self.dispatch_attempt(flight.request,flight.phase,flight.reconciliations+1)",
             "self.owner.locally_retired()", "self.flight.is_none()", "self.unstarted.is_none()",
             "self.destruction_settled=true", "Err(Refusal::Busy)=>returnOk(false)",
