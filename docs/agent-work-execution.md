@@ -216,15 +216,21 @@ gets its below-the-fold list items, rows, articles, tables and paragraphs the
 same way. Such a record that holds a landmark the look already took (named
 sections inside one article of results) is read child by child rather than
 skipped, and records in a narrow column holding several checkboxes or radios
-(a filter panel) come after the rest. A dialog the site lays over the page unasked with its own short close
-control (a sign-in, newsletter or app offer) is closed by Rust as a read on the
-first look, like a cookie banner, and is never read as a sign-in wall. A
+(a filter panel) come after the rest, with an allowance of their own. A price
+shown on screen but hidden from assistive technology (a short rendered text
+that is a figure with a currency) is read despite `aria-hidden`. A dialog the
+site lays over the page unasked with its own short close control (a sign-in,
+newsletter or app offer) is closed by Rust as a read on the first look, like a
+cookie banner, and is never read as a sign-in wall; a look taken inside a
+focused modal offer counts as one with the page behind it. A
 control a click found covered loses click and keeps press in the next looks of
 its document: the refusal tells the planner to press it with Enter, and Enter
 on a button, link, menu item or tab is judged as that control's click. The
 third identical refused proposal in a row gets a fresh look of the page
 instead of the same refusal again, and so does the third refused look in a
-row, a moment later. The first scroll proposed right after a verified fill of
+row, a moment later. Six refusals in a row with nothing done, two before the
+loop would end the page, the next model call is offered extraction alone, so
+what the looks already hold becomes the result. The first scroll proposed right after a verified fill of
 a field that commits nothing (a search, filter or place box) is refused unrun
 and the planner is told to run the search first; a second such scroll has Rust
 press Enter in that field as its own read and hand the planner the page it
