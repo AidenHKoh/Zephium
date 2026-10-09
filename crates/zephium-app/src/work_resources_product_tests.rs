@@ -953,6 +953,161 @@ fn work_page_group_keeps_a_sibling_read_when_a_page_fails_before_admission() {
 }
 
 #[test]
+fn work_page_group_closes_after_a_failed_page_and_seats_the_next_read_at_once() {
+    if child("work_page_group_closes_after_a_failed_page_and_seats_the_next_read_at_once") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(zephium_store::SqliteStore::open(directory.path()).unwrap());
+    let engine = Arc::new(crate::shell::tests::FakeEngine::default());
+    let queue = crate::actor::CommandQueue::new();
+    let owner = crate::actor::Handle::new(queue.clone());
+    let callback = owner.callback_handle();
+    let mut shell = crate::Shell::new(
+        engine.clone(),
+        store.clone(),
+        Arc::new(crate::shell::tests::FakeChrome),
+        Box::new(|_| {}),
+    );
+    shell.attach_queue(queue.clone());
+    shell.handle(Command::Bootstrap);
+    let profile = selected(&owner, &queue, &mut shell);
+    let factories = Arc::new(AtomicUsize::new(0));
+    let servers = Servers::default();
+    let work = WorkId::generate();
+    let execution = zephium_core::work::WorkExecutionId::generate();
+    let attempt = zephium_core::work::WorkAttemptId::generate();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let attach = |native: Arc<Native>| {
+        native.allow_global_shutdown.store(true, Ordering::Release);
+        let request = prepared_until_isolated(
+            profile,
+            engine.clone(),
+            store.clone(),
+            native,
+            factories.clone(),
+            servers.clone(),
+            deadline,
+            WorkBrowserDocumentPolicy::Exact,
+            true,
+            None,
+        )
+        .with_work_identity(work)
+        .with_page_admission(crate::RetainedPageAdmission {
+            profile: profile.profile(),
+            work,
+            execution,
+            attempt,
+            step: zephium_core::work::WorkStepId::generate(),
+            workers: 3,
+            deadline,
+        })
+        .unwrap();
+        callback.attach_retained_work(request).unwrap()
+    };
+    // The first page is admitted and reading; its sibling is still loading.
+    let failing_native = Arc::new(Native::default());
+    failing_native.hold_read.store(true, Ordering::Release);
+    let failing = attach(failing_native.clone());
+    pump(&queue, &mut shell, || {
+        failing_native.read.lock().unwrap().is_some()
+    });
+    let refused_native = Arc::new(Native::default());
+    refused_native.hold_construct.store(true, Ordering::Release);
+    let refused = attach(refused_native.clone());
+    pump(&queue, &mut shell, || {
+        refused_native.construction.lock().unwrap().is_some()
+    });
+    // The first page loses its document mid-read: its run's group fails.
+    failing_native
+        .reporters
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()
+        .invalidate();
+    pump(&queue, &mut shell, || {
+        failing
+            .snapshot()
+            .record
+            .is_some_and(|record| record.disposition() == AgentWorkDisposition::RecoveryRequired)
+    });
+    let recovery = failing.snapshot().record.unwrap();
+    // The sibling accepts that row as history, as the durable runtime does,
+    // but the failed group refuses to admit its staged actor.
+    refused_native.release_construction();
+    pump(&queue, &mut shell, || {
+        refused.snapshot().phase == RetainedWorkPhase::NeedsReview
+    });
+    assert!(refused.review(
+        recovery,
+        crate::AgentWorkReviewDecision::AcceptFreshAdmission
+    ));
+    pump(&queue, &mut shell, || {
+        refused.snapshot().phase == RetainedWorkPhase::Uncertain
+    });
+    let snapshot = refused.snapshot();
+    assert_eq!(snapshot.failure, Some(AgentWorkFailure::Contract));
+    assert_eq!(snapshot.persistence_failure, None);
+    assert!(snapshot.record.is_none());
+    assert_eq!(refused_native.reads.load(Ordering::Acquire), 0);
+    // Both settle: the refused page closes cleanly, the failed one ends
+    // lost once its late read returns, and neither keeps a seat.
+    assert!(failing.close() && refused.close());
+    let (read, completion) = failing_native.read.lock().unwrap().take().unwrap();
+    Native::read_result(read, completion);
+    pump(&queue, &mut shell, || {
+        refused.is_closed() && failing.is_lost()
+    });
+    assert!(!failing.is_closed());
+    // The next read of the run sits down without waiting out its turn.
+    let later_native = Arc::new(Native::default());
+    let started = Instant::now();
+    let later = attach(later_native.clone());
+    pump(&queue, &mut shell, || {
+        while later.take_event().is_some() {}
+        matches!(
+            later.snapshot().phase,
+            RetainedWorkPhase::Terminal | RetainedWorkPhase::Refused | RetainedWorkPhase::Uncertain
+        )
+    });
+    assert_eq!(later.snapshot().phase, RetainedWorkPhase::Terminal);
+    assert!(later
+        .snapshot()
+        .record
+        .is_some_and(|record| record.disposition() == AgentWorkDisposition::Succeeded));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(later.close());
+    pump(&queue, &mut shell, || later.is_closed());
+    assert_eq!(factories.load(Ordering::Acquire), 3);
+    // Only the later read asked the model; the listeners the other two
+    // staged time out on their own.
+    let servers = std::mem::take(&mut *servers.lock().unwrap());
+    assert_eq!(servers.len(), 3);
+    for server in servers.into_iter().skip(2) {
+        assert_eq!(server.join().unwrap(), 2);
+    }
+    let shutdown = owner.shutdown_with_deadline(Instant::now() + Duration::from_secs(5));
+    while let Some(command) = queue.try_recv() {
+        let terminal = matches!(command, Command::Shutdown { .. });
+        shell.handle(command);
+        if terminal {
+            break;
+        }
+    }
+    assert!(shutdown.recv().is_ok());
+    for native in [failing_native, refused_native, later_native] {
+        native.join();
+        assert_eq!(native.destructions.load(Ordering::Acquire), 1);
+        assert!(native.global_sealed.load(Ordering::Acquire));
+    }
+}
+
+#[test]
 fn work_page_group_admits_a_later_read_after_its_reads_close_cleanly() {
     if child("work_page_group_admits_a_later_read_after_its_reads_close_cleanly") {
         return;

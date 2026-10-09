@@ -170,6 +170,9 @@ mod work_pane;
 /// Pages a run may queue for a seat in its page group at once.
 #[cfg(feature = "work-execution")]
 const MAX_QUEUED_PAGES: usize = 8;
+/// Passes one wake makes over the page lane while its turns keep moving.
+#[cfg(feature = "work-execution")]
+const MAX_PAGE_LANE_PASSES: usize = 4;
 
 #[cfg(feature = "work-execution")]
 fn trace_refusal(
@@ -1455,25 +1458,51 @@ impl Shell {
         }
     }
 
+    /// What one pass over the page lane can change that lets another pass
+    /// hand on the audit turn or seat a queued page.
+    #[cfg(feature = "work-execution")]
+    fn page_lane_turn(&self) -> (usize, usize, usize, usize, bool) {
+        (
+            self.retained_pages.len(),
+            self.retained_graveyard.len(),
+            self.queued_pages.len(),
+            self.retained_pages
+                .iter()
+                .chain(&self.retained_graveyard)
+                .filter(|work| work.holds_native_audit() || work.holds_seat())
+                .count(),
+            self.retained_page_runtime.is_some(),
+        )
+    }
+
     #[cfg(feature = "work-execution")]
     fn poll_work(&mut self) {
-        self.grant_native_audit();
-        self.admit_queued_pages();
-        for page in &mut self.retained_pages {
-            page.poll();
-            if let Some(queue) = &self.self_queue {
-                queue.schedule_work(page.next_deadline());
+        // A member whose audit ends during a pass hands the turn on, and a
+        // group that closes seats the pages queued behind it, in this same
+        // wake: no later wake is owed to the lane, so none may be waited for.
+        for _ in 0..MAX_PAGE_LANE_PASSES {
+            let turn = self.page_lane_turn();
+            self.grant_native_audit();
+            self.admit_queued_pages();
+            for page in &mut self.retained_pages {
+                page.poll();
+                if let Some(queue) = &self.self_queue {
+                    queue.schedule_work(page.next_deadline());
+                }
+            }
+            self.retire_settled_pages();
+            self.retained_graveyard.retain(|work| !work.is_closed());
+            for work in &mut self.retained_graveyard {
+                work.poll();
+                if let Some(queue) = &self.self_queue {
+                    queue.schedule_work(work.next_deadline());
+                }
+            }
+            if self.page_lane_turn() == turn {
+                break;
             }
         }
-        self.retire_settled_pages();
         if let Some(work) = &mut self.retained_work {
-            work.poll();
-            if let Some(queue) = &self.self_queue {
-                queue.schedule_work(work.next_deadline());
-            }
-        }
-        self.retained_graveyard.retain(|work| !work.is_closed());
-        for work in &mut self.retained_graveyard {
             work.poll();
             if let Some(queue) = &self.self_queue {
                 queue.schedule_work(work.next_deadline());
