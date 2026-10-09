@@ -1,8 +1,14 @@
 <script lang="ts">
-  import type { Snippet } from "svelte";
+  import { untrack, type Snippet } from "svelte";
   import Icon from "$shared/ui/Icon";
+  import { keymap } from "$domain/keymap";
+  import { uiCommands } from "$domain/ui-commands";
+  import { acceleratorKeys } from "$shared/lib/accelerator";
+  import { IS_MAC } from "$shared/platform";
   import { ArrowUp02Icon, Mic01Icon } from "../../lib/icons";
   import * as m from "$shared/i18n/messages";
+
+  const loadVoice = () => import("./VoiceView.svelte");
 
   let {
     value = $bindable(""),
@@ -60,7 +66,10 @@
     observer.observe(element, { subtree: true, attributeFilter: ["aria-expanded"] });
     return () => observer.disconnect();
   });
-  const engaged = $derived(focused || menu || !!value.trim() || holding);
+  /** Dictating: the row is the live voice view until the words land. */
+  let dictating = $state(false);
+  let voice = $state<{ toggle(): void }>();
+  const engaged = $derived(focused || menu || !!value.trim() || holding || dictating);
   /**
    * WebKit does not focus a button it clicks: a press inside the bar blurs
    * the field with nowhere named to go. The bar holds through its own
@@ -80,8 +89,40 @@
     grow();
   });
   function submit() {
-    if (value.trim() && !disabled) onsubmit();
+    if (value.trim() && !disabled && !dictating) onsubmit();
   }
+
+  function dictate() {
+    if (dictating) voice?.toggle();
+    else if (!disabled) dictating = true;
+  }
+
+  /** The words join what is already there, ready to read over and send. */
+  function commit(text: string) {
+    const before = value.trimEnd();
+    value = before ? `${before} ${text}` : text;
+    dictating = false;
+    requestAnimationFrame(() => {
+      const element = textarea;
+      if (!element) return;
+      element.focus();
+      element.setSelectionRange(element.value.length, element.value.length);
+    });
+  }
+
+  let handledCommand = untrack(() => uiCommands.uiCommand().seq);
+  $effect(() => {
+    const command = uiCommands.uiCommand();
+    if (command.seq === handledCommand) return;
+    handledCommand = command.seq;
+    if (command.id === "work.dictate") untrack(dictate);
+  });
+
+  const dictateHint = $derived.by(() => {
+    const accelerator = keymap.all().find((entry) => entry.id === "work.dictate")?.accelerator;
+    const keys = accelerator ? acceleratorKeys(accelerator, IS_MAC) : [];
+    return keys.length ? `${m.voice_start()} (${keys.join(IS_MAC ? "" : "+")})` : m.voice_start();
+  });
   function keydown(event: KeyboardEvent) {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
@@ -139,7 +180,14 @@
         submit();
       }}
     >
-      <div class="row">
+      {#if dictating}<div class="row">
+          {#await loadVoice() then view}<view.default
+              bind:this={voice}
+              oncommit={commit}
+              onclose={() => (dictating = false)}
+            />{/await}
+        </div>{/if}
+      <div class="row" hidden={dictating}>
         {#if attach}<div class="side lead" inert={!engaged}>
             <div class="side-inner">{@render attach()}</div>
           </div>{/if}
@@ -159,6 +207,16 @@
           {#if trailing && engaged}{@render trailing()}
           {:else if model && engaged}<span class="model" title={m.work_bar_model()}>{model}</span
             >{/if}
+          <button
+            type="button"
+            class="mic"
+            aria-label={m.voice_start()}
+            title={dictateHint}
+            {disabled}
+            onclick={dictate}
+          >
+            <Icon icon={Mic01Icon} size={17} strokeWidth={1.6} />
+          </button>
           {#if value.trim()}<button
               type="submit"
               class="send"
@@ -166,9 +224,7 @@
               disabled={disabled || busy}
             >
               <Icon icon={ArrowUp02Icon} size={16} strokeWidth={2.2} />
-            </button>{:else}<span class="mic" aria-hidden="true"
-              ><Icon icon={Mic01Icon} size={17} strokeWidth={1.6} /></span
-            >{/if}
+            </button>{/if}
         </div>
       </div>
     </form>
@@ -360,10 +416,37 @@
 
   .mic {
     display: grid;
+    flex: none;
     place-items: center;
-    inline-size: 34px;
-    block-size: 34px;
+    inline-size: 30px;
+    block-size: 30px;
+    margin: 2px;
+    border: 0;
+    border-radius: var(--radius-capsule);
+    background: transparent;
     color: var(--color-muted);
+    cursor: default;
+    transition:
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out);
+  }
+
+  .mic:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  .mic:disabled {
+    color: var(--color-faint);
+  }
+
+  .mic:hover:not(:disabled) {
+    background: var(--color-fill-hover);
+    color: var(--color-text);
+  }
+
+  .row[hidden] {
+    display: none;
   }
 
   .send {
