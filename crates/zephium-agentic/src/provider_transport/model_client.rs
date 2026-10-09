@@ -288,6 +288,8 @@ fn label(id: &str) -> String {
 
 /// Asks again after a reply with no usable browser call, per model call.
 const MAX_REASKS: u8 = 2;
+/// Output a browser turn keeps back for one re-ask after a runaway reply.
+const RUNAWAY_REASK_OUTPUT: u64 = 512;
 /// Tokens the reason and the model's own failed turn may add to a re-ask's
 /// input beyond the last call's input and output.
 const REASK_INPUT_ALLOWANCE: u64 = 1_024;
@@ -391,6 +393,18 @@ impl AgentProviderAttempt {
         // alone is decoded.
         let events = |_: WorkModelEvent| {};
         let max_output = u64::from(config.max_output_tokens());
+        // A browser turn keeps part of its output allowance back, so a reply
+        // that runs past the rest can be asked once more inside the call's
+        // own reservation instead of ending the page.
+        let runaway_reserve = if contract.is_structured() {
+            0
+        } else {
+            RUNAWAY_REASK_OUTPUT.min(max_output / 4)
+        };
+        request.max_output_tokens = request
+            .max_output_tokens
+            .min(u32::try_from(max_output - runaway_reserve).unwrap_or(u32::MAX));
+        let mut ran_away = false;
         let mut spent = WorkModelUsage::default();
         let mut reasks = 0_u8;
         let outcome = loop {
@@ -422,6 +436,29 @@ impl AgentProviderAttempt {
                 ));
             }
             outcome.usage = spent;
+            // DeepSeek can think past the whole allowance and say nothing.
+            // That reply is asked once more, told to be brief, with thinking
+            // off and only the kept-back output; it is charged as reported.
+            if !ran_away
+                && runaway_reserve > 0
+                && max_output - spent.output_tokens >= runaway_reserve
+                && spent
+                    .input_tokens
+                    .saturating_add(last.input_tokens)
+                    .saturating_add(REASK_INPUT_ALLOWANCE)
+                    <= reserved
+            {
+                if let Some(messages) = contract.reask_runaway(&outcome) {
+                    ran_away = true;
+                    reasks += 1;
+                    request.messages.extend(messages);
+                    request.volatile_tail = 0;
+                    request.reasoning = None;
+                    request.max_output_tokens =
+                        u32::try_from(max_output - spent.output_tokens).unwrap_or(u32::MAX);
+                    continue;
+                }
+            }
             // A provider without strict tool calling may answer with no call
             // or a malformed one. It is told exactly why and asked again,
             // inside this call's own reservation; every ask is charged as
