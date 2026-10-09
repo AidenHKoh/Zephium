@@ -428,8 +428,22 @@ any action or successor navigation, and within the same six loads. Bot checks
 that reloads itself once the check clears; cancelling that reload left the
 task on an empty shell. The reload settles like an action's hand-on load, and a
 document a hand-on load put in place is enrolled in Work history before the
-next admitted navigation parks its runtime. Any other page-started load after
-ready is still cancelled and the page stays.
+next admitted navigation parks its runtime. The same early self-reload, or the
+same path on the brand's country domain (yelp.com to yelp.pl, from the closed
+brand list), is followed the same way.
+
+Any other same-site GET a ready site-session page starts by itself, with no
+action of the model's in flight (a bot check that cleared after a navigation,
+a timed refresh, a script redirect), is cancelled and kept for the controller
+in the run's follow slot, which the gate learns with the run's first action.
+The controller follows it through the policy as its own navigation before the
+page agent's next step: the pending step is retired unexecuted, the load gets
+its own navigation receipt, and the account and context move to the new
+document exactly as after an admitted navigation. Following the load in the
+gate instead (as the first page's reload is) left the session bound to the
+old document and ended the page with `Account(ContextChanged)`. A page that
+reloads itself may be followed to its own address; a model navigation there
+is still refused as already open. Cross-site loads stay cancelled.
 
 WebKit navigation ids are object addresses and can be reused by a later load.
 A load starting while the gate waits for its armed load is that load, even when

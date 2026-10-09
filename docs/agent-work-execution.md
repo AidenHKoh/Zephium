@@ -201,7 +201,25 @@ agent's own navigation; a same-site form POST passes only for an approved
 commitment. A clicked link whose click changes nothing (a new-window link, a
 covered or script-only one) is followed to its observed destination the same
 way. After any navigation the arrival gets up to four bounded looks (4 s) to
-fill in a loading shell before the next model call.
+fill in a loading shell before the next model call, and up to 8 s while a
+status or progress line says it is still loading its results. A load the page
+starts by itself on its own site is followed the same way (see
+[resources](agent-work-resources.md)). One look or page load waits at most 90 s
+before the page ends as too slow, instead of the run's whole deadline.
+
+A site task's looks use the whole-page budget (320 nodes, 32 KiB): a first
+look holds everything in view, then the main landmark's records below the fold
+(list items, rows, articles) in document order, then the headings below, so a
+results page reaches the planner with its records rather than its header and
+filters. A dialog the site lays over the page unasked with its own short close
+control (a sign-in, newsletter or app offer) is closed by Rust as a read on the
+first look, like a cookie banner, and is never read as a sign-in wall. A
+control a click found covered loses click and keeps press in the next looks of
+its document: the refusal tells the planner to press it with Enter, and Enter
+on a button, link, menu item or tab is judged as that control's click. The
+third identical refused proposal in a row gets a fresh look of the page
+instead of the same refusal again. A chosen page model replies within 4,096
+output tokens, and a lost or runaway reply is charged at that ceiling.
 
 Page-agent requests keep an append-only prefix for provider prompt caches:
 instructions, tools, objective and the first observation, then the turns;
