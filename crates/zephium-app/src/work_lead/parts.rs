@@ -447,6 +447,19 @@ where
         } else if report.state != WorkPartStateV1::Done {
             out.push_str("Build the result only from what was found; make no object, figure, pick or task for what it could not do.\n");
         }
+        // A site whose search or listings would not read often still serves
+        // its product and listing pages, which a search finds.
+        let public_retry = matches!(fact.need, None | Some(WorkPartNeedV1::Retry { .. }));
+        if let (Some(site), true, true, true) = (
+            &site,
+            report.objects.is_empty(),
+            report.state == WorkPartStateV1::Failed,
+            public_retry && !self.run.browser_down(),
+        ) {
+            out.push_str(&format!(
+                "Before you settle for nothing from {site}: search the web once for what the part looked for there, and read the one to three best {site} pages the search lists; a product or listing page often reads where the site's search did not.\n"
+            ));
+        }
         if !report.objects.is_empty() {
             let projection = self.run.probe.runtime_projection().await.ok();
             let canvas = projection
