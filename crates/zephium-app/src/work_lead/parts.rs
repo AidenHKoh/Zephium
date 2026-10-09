@@ -540,7 +540,7 @@ where
                 .as_ref()
                 .map(|p| objects::canvas(p, self.run.probe.execution()))
                 .unwrap_or_default();
-            out.push_str("Objects it placed, which stand in the result as they are (never place another object of the same things):\n");
+            out.push_str("Objects it placed, which stand in the result as they are (never place another object of the same things; to line up offers of the same thing from several sites, create one new picks with them side by side and leave this one as it is):\n");
             out.push_str(&objects::view(
                 &canvas
                     .into_iter()

@@ -865,9 +865,14 @@ pub(crate) fn part_holds<'a>(
     if parts.len() >= 2 {
         return None;
     }
-    objects
-        .iter()
-        .find(|object| held(object) > 0 && held(object) * 2 >= names.len())
+    // Picks that add offers to a part's own are the comparison, not a copy.
+    let count = |object: &CanvasObject| match &object.artifact.data {
+        WorkArtifactDataV1::Picks { items, .. } => items.len(),
+        _ => 0,
+    };
+    objects.iter().find(|object| {
+        held(object) > 0 && held(object) * 2 >= names.len() && names.len() <= count(object)
+    })
 }
 
 /// Removes picture addresses `shown` does not know from the pictures the
@@ -918,6 +923,42 @@ mod tests {
             items[0].image_candidates,
             ["https://img.example.com/loft.jpg"]
         );
+    }
+
+    #[test]
+    fn the_leads_offers_side_by_side_are_no_copy_of_a_parts_picks() {
+        let picks = |id: &str, part: &str, names: &[&str]| {
+            CanvasObject {
+            artifact: serde_json::from_value(serde_json::json!({
+                "version": 1, "id": id, "execution": "01M3RV9DBTWYS7770BES8YYKT1",
+                "node": "01M3RV9DBSG3ZRK3M2H2P2HZ0R", "attempt": "01M3RV9DBTWYS7770BES8YYKT2",
+                "output": "result", "title": "Offers on Amazon.de", "evidence": [],
+                "review": "mechanical", "presentation": "automatic", "part": part,
+                "data": {"kind": "picks", "facet": "product",
+                    "items": names.iter().map(|n| serde_json::json!({"name": n})).collect::<Vec<_>>()}
+            }))
+            .unwrap(),
+            current: true,
+            in_this_run: true,
+            part_title: None,
+        }
+        };
+        let amazon = [picks(
+            "01M3RV9DBTWYS7770BES8YYKT3",
+            "01M3RV9DBTWYS7770BES8YYKT4",
+            &["LEGO Technic 42115", "LEGO Technic 42115 green"],
+        )];
+        let names = |list: &[&str]| list.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        assert!(part_holds(&amazon, &names(&["LEGO Technic 42115"])).is_some());
+        assert!(part_holds(
+            &amazon,
+            &names(&[
+                "LEGO Technic 42115",
+                "LEGO Technic 42115",
+                "LEGO Technic 42115"
+            ])
+        )
+        .is_none());
     }
 
     #[test]
