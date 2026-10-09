@@ -239,12 +239,20 @@ fn object_rows(execution: &zephium_core::work::runtime::WorkExecutionFact) {
                 " items={} priced={} pictured={} linked={} sources={}",
                 items.len(),
                 items.iter().filter(|i| i.price.is_some()).count(),
-                items.iter().filter(|i| !i.image_candidates.is_empty()).count(),
+                items
+                    .iter()
+                    .filter(|i| !i.image_candidates.is_empty())
+                    .count(),
                 items.iter().filter(|i| i.url.is_some()).count(),
                 artifact.evidence.len()
             ),
             Data::Sheet { rows, columns, .. } => {
-                format!(" rows={} columns={} sources={}", rows.len(), columns.len(), artifact.evidence.len())
+                format!(
+                    " rows={} columns={} sources={}",
+                    rows.len(),
+                    columns.len(),
+                    artifact.evidence.len()
+                )
             }
             _ => format!(" sources={}", artifact.evidence.len()),
         };
