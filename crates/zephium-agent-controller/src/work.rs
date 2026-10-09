@@ -3354,6 +3354,55 @@ impl AgentWorkController {
                 state.observation = Some(observation);
                 return Ok(());
             }
+            if turn.turn.proposal().kind() == AgentBrowserToolKind::Wait
+                && !matches!(observation.request().scope(), SemanticScope::Initial)
+            {
+                // A wait compares whole looks of the page; after a look of
+                // one section (Skyscanner's results loading) it ended the
+                // page. It is answered with a fresh whole look a moment later.
+                let pause = match turn.turn.proposal() {
+                    AgentBrowserToolProposal::Wait { timeout, .. } => {
+                        Duration::from_millis(u64::from(timeout.millis()).min(3000))
+                    }
+                    _ => return Err(AgentWorkFailure::Contract),
+                };
+                let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                let checkpoint = turn
+                    .into_tool_turn()
+                    .into_parts()
+                    .1
+                    .into_wait_refresh(&observation, &session.config)
+                    .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?;
+                let wake = Instant::now() + pause;
+                if wake < state.native.deadline {
+                    tokio::select! {
+                        biased;
+                        event = state.native.next_event(worker, browser) => {
+                            state.native.retain(event?)?;
+                            return Err(AgentWorkFailure::Mailbox);
+                        }
+                        () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+                    }
+                }
+                let next =
+                    Self::inspect_current(state, worker, browser, checkpoint, &observation).await?;
+                observation = next.0;
+                captured_at = next.1;
+                progress = next.2;
+                let Some(next_turn) = next.3 else {
+                    state.observation = Some(observation);
+                    return Ok(());
+                };
+                turn = next_turn;
+                frames.clear();
+                frames.extend(
+                    observation
+                        .frames()
+                        .iter()
+                        .map(|snapshot| snapshot.frame().clone()),
+                );
+                continue;
+            }
             if turn.turn.proposal().kind() == AgentBrowserToolKind::Wait {
                 let next = Self::wait_current(state, worker, browser, turn, observation).await?;
                 observation = next.0;

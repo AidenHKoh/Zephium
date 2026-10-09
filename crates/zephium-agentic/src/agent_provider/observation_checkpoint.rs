@@ -101,6 +101,26 @@ impl AgentProviderContinuation {
         ))
     }
 
+    /// A wait asked for while the planner holds a look of one section has
+    /// no whole page to compare: it is answered with a fresh whole look
+    /// taken a moment later, told so.
+    pub fn into_wait_refresh(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderObservationCheckpoint, Box<Self>> {
+        if config != &self.config
+            || self.correlation.kind() != AgentBrowserToolKind::Wait
+            || !AgentProviderObservationCheckpoint::refreshable(&self, observation)
+        {
+            return Err(Box::new(self));
+        }
+        Ok(AgentProviderObservationCheckpoint::refresh(
+            self,
+            "waited: the page was given a moment. This is a fresh whole look of it: extract now if it or your earlier looks show what you need; otherwise continue from it.".to_owned(),
+        ))
+    }
+
     /// The host ran the search a planner typed and never ran (it scrolled
     /// instead): the pending step is retired unrun, and the planner gets a
     /// fresh look of the page the search produced, told so.
@@ -1119,6 +1139,33 @@ mod action_history_tests {
         )
         .refuse_whole_look(observation, &config)
         .is_err());
+    }
+
+    #[test]
+    fn a_wait_without_a_whole_look_is_answered_with_a_fresh_one() {
+        let config = config(AgentProviderKind::OpenAiResponses).with_progressive_observation();
+        let result = crate::semantic_action_result::tests::scroll_provider_fixture(1, false);
+        let observation = result.fresh_snapshot().unwrap();
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            crate::semantic_diff::SemanticObservationFingerprint::from_observation(observation),
+        );
+        let transcript =
+            AgentProviderTranscript::try_initial(Arc::from("Search"), "page".into()).unwrap();
+        let checkpoint = turn(
+            1,
+            "wait",
+            r#"{"condition":{"kind":"semantic_change"},"timeout_millis":30000}"#,
+            baseline,
+            config.clone(),
+            transcript,
+        )
+        .into_wait_refresh(observation, &config)
+        .unwrap();
+        assert_eq!(checkpoint.expansion(), None);
+        assert!(checkpoint
+            .note
+            .as_deref()
+            .is_some_and(|note| note.starts_with("waited")));
     }
 
     #[test]
