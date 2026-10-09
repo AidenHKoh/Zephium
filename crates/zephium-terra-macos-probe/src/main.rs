@@ -211,6 +211,9 @@ fn main() {
         [argument] if argument == "--live-agent-trip-work" => work_durable::run_agent_trip(),
         #[cfg(feature = "durable-runtime")]
         [argument, scenario] if argument == "--live-lead" => work_durable::run_lead(scenario),
+        [argument, request, answer] if argument == "--live-lead-request" => {
+            work_durable::run_lead_request(request, answer)
+        }
         #[cfg(feature = "durable-runtime")]
         [argument, start, goal] if argument == "--live-site" => work_durable::run_site(start, goal),
         #[cfg(feature = "durable-runtime")]

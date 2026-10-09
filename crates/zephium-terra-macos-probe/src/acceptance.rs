@@ -288,6 +288,19 @@ pub(super) fn site_scenario(start: &str, goal: &str) -> &'static LeadScenario {
     }))
 }
 
+/// A request of the person's own, through the whole lead.
+pub(super) fn request_scenario(request: &str, answer: &str) -> &'static LeadScenario {
+    let request: &'static str = Box::leak(request.to_owned().into_boxed_str());
+    let answer: &'static str = Box::leak(answer.to_owned().into_boxed_str());
+    Box::leak(Box::new(LeadScenario {
+        name: "request",
+        requests: Box::leak(vec![request].into_boxed_slice()),
+        answer,
+        folder: false,
+        site: None,
+    }))
+}
+
 /// The lead and helper turns of a page check: start one browser part, browse
 /// the start page toward the goal with records, then finish.
 pub(super) use super::loopback_support::Scripted;

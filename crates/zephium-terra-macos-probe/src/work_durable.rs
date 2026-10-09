@@ -177,6 +177,22 @@ pub(super) fn run_lead(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure
     run_mode(Mode::Lead)
 }
 
+/// One request of the person's own through the whole lead, as the app runs
+/// it, with the stand-in's answer to any question it asks.
+pub(super) fn run_lead_request(
+    request: &std::ffi::OsStr,
+    answer: &std::ffi::OsStr,
+) -> Result<(), super::ProbeFailure> {
+    let (Some(request), Some(answer)) = (request.to_str(), answer.to_str()) else {
+        return Err(super::ProbeFailure::Authority);
+    };
+    if request.is_empty() || request.len() > 600 || answer.len() > 600 {
+        return Err(super::ProbeFailure::Authority);
+    }
+    let _ = LEAD_SCENARIO.set(super::acceptance::request_scenario(request, answer));
+    run_mode(Mode::Lead)
+}
+
 /// One page task on a named start page through the lead's Browser helper,
 /// with scripted lead and helper turns: only the page agent calls a model.
 pub(super) fn run_site(
