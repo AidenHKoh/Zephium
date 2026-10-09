@@ -1,12 +1,22 @@
 //! The optional Zephium account, as the frame sees it. The bearer stays in
 //! native code; the frame gets the account's state and closed faults only.
 use super::*;
-use zephium_account::wire::{Billing, Purchase};
+use zephium_account::wire::{self, Billing, Purchase, Receipt, Usage};
 use zephium_account::{AccountError, AccountSettings, Service, SystemVault, View};
 
-const CHECKOUT_POLL: std::time::Duration = std::time::Duration::from_secs(10);
+/// Four a minute, under the service's six, so a refresh by hand still fits.
+const CHECKOUT_POLL: std::time::Duration = std::time::Duration::from_secs(15);
 const MAX_EMAIL_INPUT_BYTES: usize = 320;
 const MAX_SERVER_INPUT_BYTES: usize = 512;
+const MAX_NAME_INPUT_BYTES: usize = 512;
+const MAX_CURSOR_INPUT_BYTES: usize = 256;
+/// When to read an unconfirmed hosted call's receipt again: soon, then after
+/// the service's recovery has had time to settle or refund it.
+const RECEIPT_CHECKS: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(3),
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(180),
+];
 
 static SERVICE: OnceLock<Arc<Service>> = OnceLock::new();
 
@@ -54,14 +64,64 @@ impl From<AccountError> for AccountFaultV1 {
     }
 }
 
+/// Usage as the server counts it. Amounts are decimal strings of integer
+/// units, `unit_scale` to one credit; they are shown divided, never summed
+/// into a charge. Held units are for calls still running.
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
 pub(crate) struct AccountUsageV1 {
-    /// Share of the plan's allowance used, 0–100; null without an allowance.
+    /// Share of the plan's allowance used or held, 0–100; null without an allowance.
     pub(crate) used_percent: Option<u8>,
     /// When the allowance renews, as the server states it (ISO 8601).
     pub(crate) resets_at: Option<String>,
     /// Bought usage remains beyond the plan's allowance.
     pub(crate) extra: bool,
+    pub(crate) unit_scale: u32,
+    pub(crate) remaining: Option<String>,
+    pub(crate) allowance_total: Option<String>,
+    pub(crate) allowance_used: Option<String>,
+    pub(crate) held: Option<String>,
+    pub(crate) bonus_remaining: Option<String>,
+    pub(crate) bonus_expires_at: Option<String>,
+    pub(crate) purchased_remaining: Option<String>,
+    pub(crate) spent_today: Option<String>,
+    /// The daily cap; null when there is none.
+    pub(crate) daily_limit: Option<String>,
+}
+
+/// One hosted request's accounting; never its content.
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
+pub(crate) struct AccountRequestV1 {
+    pub(crate) id: String,
+    pub(crate) model_id: Option<String>,
+    /// `settled` is final; anything else is still held or being checked.
+    pub(crate) state: String,
+    /// Charged, in units; final only when settled.
+    pub(crate) charged: Option<String>,
+    pub(crate) reserved: Option<String>,
+    pub(crate) started_at: Option<String>,
+    pub(crate) finished_at: Option<String>,
+    pub(crate) error_class: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
+pub(crate) struct AccountHistoryV1 {
+    pub(crate) requests: Vec<AccountRequestV1>,
+    /// Opaque; passed back unchanged for the next page.
+    pub(crate) next_cursor: Option<String>,
+    pub(crate) fault: Option<AccountFaultV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
+pub(crate) struct AccountReceiptV1 {
+    pub(crate) request: Option<AccountRequestV1>,
+    pub(crate) fault: Option<AccountFaultV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
+pub(crate) struct AccountExportV1 {
+    /// The export was written where the person chose.
+    pub(crate) saved: bool,
+    pub(crate) fault: Option<AccountFaultV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
@@ -92,6 +152,9 @@ pub(crate) enum AccountOfferV1 {
     },
     TopUp {
         id: String,
+        name: Option<String>,
+        /// Credit it adds, in units of the usage's scale.
+        units: Option<String>,
         price: Option<AccountPriceV1>,
         expires_days: Option<u32>,
     },
@@ -113,8 +176,11 @@ pub(crate) struct AccountV1 {
     pub(crate) custom_server: bool,
     /// What the server offers; null until it has answered once.
     pub(crate) hosted_models: Option<bool>,
+    /// Purchases and the billing portal are offered here.
     pub(crate) billing: Option<bool>,
     pub(crate) signup_open: Option<bool>,
+    /// The server asks for a newer Zephium than this one.
+    pub(crate) update_required: bool,
     pub(crate) signed_in: bool,
     /// The address a sign-in code was sent to, while waiting for it.
     pub(crate) pending_email: Option<String>,
@@ -128,6 +194,8 @@ pub(crate) struct AccountV1 {
     /// A checkout was opened and is being watched for completion.
     pub(crate) checkout_open: bool,
     pub(crate) notice: Option<AccountNoticeV1>,
+    /// Hosted calls whose charge was not confirmed when they ended.
+    pub(crate) unsettled: Vec<AccountRequestV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
@@ -250,7 +318,7 @@ fn contacted(service: &Service) -> bool {
 #[cfg(feature = "work-product")]
 mod hosted {
     use super::*;
-    use zephium_agentic::lead::{LeadCredential, LeadSecret, LeadSecretFuture};
+    use zephium_agentic::lead::{LeadCloudRecord, LeadCredential, LeadSecret, LeadSecretFuture};
     use zephium_app::work_models::{self, WorkCloudSession};
     use zephium_core::work::model::WorkModelError;
 
@@ -270,6 +338,25 @@ mod hosted {
         }
         fn credential(&self) -> Arc<dyn LeadCredential> {
             Arc::new(Bearer(self.0.clone()))
+        }
+        fn recorded(&self, record: LeadCloudRecord) {
+            self.0.usage_changed();
+            let unsettled = record.unsettled();
+            let Some(id) = record.request_id.filter(|_| unsettled) else {
+                return;
+            };
+            let service = self.0.clone();
+            // Read the receipt; a hosted call is never sent again on its own.
+            tauri::async_runtime::spawn(async move {
+                for wait in RECEIPT_CHECKS {
+                    tokio::time::sleep(wait).await;
+                    match service.confirm_request(&id).await {
+                        Ok(receipt) if receipt.settled() => return,
+                        Err(AccountError::SignedOut | AccountError::NotFound) => return,
+                        _ => {}
+                    }
+                }
+            });
         }
     }
 
@@ -331,32 +418,46 @@ fn project(view: View) -> AccountV1 {
     let billing = view.billing.as_ref();
     // Until Zephium's own server has been asked, what it offers is known.
     let ours = (!view.custom_server).then_some(true);
+    // The signed-in account's own answers outrank the public hints.
+    let hosted_models = view
+        .usage
+        .as_ref()
+        .map(|usage| usage.cloud_enabled)
+        .or(billing
+            .map(|billing| billing.capabilities.hosted_ai)
+            .filter(|on| *on))
+        .or(config.map(|c| c.cloud_enabled))
+        .or(ours);
+    let sells = config
+        .map(|c| c.billing_enabled)
+        .or(ours)
+        .map(|on| on && billing.is_none_or(Billing::sells));
     AccountV1 {
         version: 1,
         available: available(),
         server: view.server,
         custom_server: view.custom_server,
-        hosted_models: config.map(|c| c.cloud_enabled).or(ours),
-        billing: config.map(|c| c.billing_enabled).or(ours),
+        hosted_models,
+        billing: sells,
         signup_open: config.map(|c| c.signup_open).or(ours),
+        update_required: view.update_required,
         signed_in: view.signed_in,
         pending_email: view.pending_email,
         resend_in: view.resend_in,
         email: view.profile.as_ref().map(|p| p.email.clone()),
         name: view.profile.as_ref().and_then(|p| p.name.clone()),
         plan: view.usage.as_ref().and_then(|u| u.plan.clone()),
-        usage: view.usage.as_ref().map(|usage| AccountUsageV1 {
-            used_percent: usage.used_percent(),
-            resets_at: usage.period_end.clone(),
-            extra: usage.has_extra(),
-        }),
+        usage: view.usage.as_ref().map(usage),
         subscription: billing.map(|billing| AccountSubscriptionV1 {
             status: billing.subscription.status.clone(),
             interval: billing.subscription.interval.clone(),
             paid_until: billing.subscription.paid_until.clone(),
             cancel_at_period_end: billing.subscription.cancel_at_period_end,
         }),
-        offers: billing.map(offers).unwrap_or_default(),
+        offers: billing
+            .filter(|billing| billing.sells())
+            .map(offers)
+            .unwrap_or_default(),
         checkout_open: view.checkout_open,
         notice: config
             .and_then(|c| c.notice.as_ref())
@@ -365,6 +466,39 @@ fn project(view: View) -> AccountV1 {
                 text: notice.text.clone(),
                 warning: notice.severity.as_deref() == Some("warning"),
             }),
+        unsettled: view.unsettled.iter().map(request).collect(),
+    }
+}
+
+fn usage(usage: &Usage) -> AccountUsageV1 {
+    let units = |value: &Option<String>| wire::amount(value.as_deref());
+    AccountUsageV1 {
+        used_percent: usage.used_percent(),
+        resets_at: usage.period_end.clone(),
+        extra: usage.has_extra(),
+        unit_scale: u32::try_from(usage.scale()).unwrap_or(1_000_000),
+        remaining: units(&usage.credits_remaining),
+        allowance_total: units(&usage.allowance.total_units),
+        allowance_used: units(&usage.allowance.used_units),
+        held: units(&usage.reserved_units).or_else(|| units(&usage.allowance.reserved_units)),
+        bonus_remaining: units(&usage.bonus_remaining),
+        bonus_expires_at: usage.bonus_expires_at.clone(),
+        purchased_remaining: units(&usage.purchased_remaining),
+        spent_today: units(&usage.spent_today),
+        daily_limit: units(&usage.daily_limit_units),
+    }
+}
+
+fn request(receipt: &Receipt) -> AccountRequestV1 {
+    AccountRequestV1 {
+        id: receipt.id.clone(),
+        model_id: receipt.model_id.clone(),
+        state: receipt.state.clone(),
+        charged: wire::amount(receipt.charged.as_deref()),
+        reserved: wire::amount(receipt.reserved.as_deref()),
+        started_at: receipt.started_at.clone(),
+        finished_at: receipt.finished_at.clone(),
+        error_class: receipt.error_class.clone(),
     }
 }
 
@@ -392,6 +526,8 @@ fn offers(billing: &Billing) -> Vec<AccountOfferV1> {
         });
     let topups = offers.topups.iter().map(|offer| AccountOfferV1::TopUp {
         id: offer.id.clone(),
+        name: offer.product_name.clone(),
+        units: wire::amount(offer.units.as_deref()),
         price: price(&offer.price),
         expires_days: offer.expires_days,
     });
@@ -407,6 +543,7 @@ fn unavailable_view() -> AccountV1 {
         hosted_models: None,
         billing: None,
         signup_open: None,
+        update_required: false,
         signed_in: false,
         pending_email: None,
         resend_in: None,
@@ -418,6 +555,7 @@ fn unavailable_view() -> AccountV1 {
         offers: Vec::new(),
         checkout_open: false,
         notice: None,
+        unsettled: Vec::new(),
     }
 }
 
@@ -697,6 +835,204 @@ pub(crate) async fn account_delete(caller: WebviewWindow, code: String) -> Accou
     reply(result)
 }
 
+/// Renames the account; null or blank clears the name.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn account_set_name(
+    caller: WebviewWindow,
+    name: Option<String>,
+) -> AccountReplyV1 {
+    let result = match admitted(&caller, "account_set_name") {
+        Ok(_)
+            if name
+                .as_ref()
+                .is_some_and(|n| n.len() > MAX_NAME_INPUT_BYTES) =>
+        {
+            Err(AccountError::Invalid)
+        }
+        Ok(service) => service.set_name(name.as_deref()).await,
+        Err(error) => Err(error),
+    };
+    log("set_name", &result);
+    reply(result)
+}
+
+/// Sends a sign-in code to the account's own address, for a change that
+/// needs a session from the last few minutes.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn account_reauth_code(caller: WebviewWindow) -> AccountReplyV1 {
+    let result = match admitted(&caller, "account_reauth_code") {
+        Ok(service) => service.send_reauth_code().await,
+        Err(error) => Err(error),
+    };
+    log("reauth_code", &result);
+    reply(result)
+}
+
+/// Sends a code to the address the account would move to.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn account_email_code(caller: WebviewWindow, email: String) -> AccountReplyV1 {
+    let result = match admitted(&caller, "account_email_code") {
+        Ok(_) if email.len() > MAX_EMAIL_INPUT_BYTES => Err(AccountError::Invalid),
+        Ok(service) => service.send_email_change_code(&email).await,
+        Err(error) => Err(error),
+    };
+    log("email_code", &result);
+    reply(result)
+}
+
+/// Moves the account to `email`. Every session ends, this one included.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn account_change_email(
+    caller: WebviewWindow,
+    email: String,
+    code: String,
+) -> AccountReplyV1 {
+    let result = match admitted(&caller, "account_change_email") {
+        Ok(_) if email.len() > MAX_EMAIL_INPUT_BYTES || code.len() > 16 => {
+            Err(AccountError::Invalid)
+        }
+        Ok(service) => service.change_email(&email, &code).await,
+        Err(error) => Err(error),
+    };
+    log("change_email", &result);
+    reply(result)
+}
+
+/// Ends every session of the account, on every device.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn account_sign_out_everywhere(caller: WebviewWindow) -> AccountReplyV1 {
+    let result = match admitted(&caller, "account_sign_out_everywhere") {
+        Ok(service) => service.sign_out_everywhere().await,
+        Err(error) => Err(error),
+    };
+    log("sign_out_everywhere", &result);
+    reply(result)
+}
+
+/// Saves the server's account export where the person chooses. The file
+/// holds what the server sent: no bearer, no browsing data.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn account_export(caller: WebviewWindow) -> AccountExportV1 {
+    use tauri_plugin_dialog::DialogExt;
+    let refused = |error: AccountError| AccountExportV1 {
+        saved: false,
+        fault: Some(error.into()),
+    };
+    let service = match admitted(&caller, "account_export") {
+        Ok(service) => service,
+        Err(error) => return refused(error),
+    };
+    let export = match service.export().await {
+        Ok(export) => export,
+        Err(error) => {
+            log("export", &Err(error));
+            return refused(error);
+        }
+    };
+    let Ok(bytes) = serde_json::to_vec_pretty(&export) else {
+        return refused(AccountError::Server);
+    };
+    let app = caller.app_handle().clone();
+    let picked = tokio::task::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_file_name("Zephium account.json")
+            .add_filter("JSON", &["json"])
+            .blocking_save_file()
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(path) = picked.and_then(|picked| picked.into_path().ok()) else {
+        return AccountExportV1 {
+            saved: false,
+            fault: None,
+        };
+    };
+    match tokio::task::spawn_blocking(move || std::fs::write(path, bytes)).await {
+        Ok(Ok(())) => AccountExportV1 {
+            saved: true,
+            fault: None,
+        },
+        _ => refused(AccountError::Invalid),
+    }
+}
+
+/// One page of the account's hosted requests, newest first.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn account_usage_history(
+    caller: WebviewWindow,
+    cursor: Option<String>,
+) -> AccountHistoryV1 {
+    let result = match admitted(&caller, "account_usage_history") {
+        Ok(_)
+            if cursor
+                .as_ref()
+                .is_some_and(|c| c.len() > MAX_CURSOR_INPUT_BYTES) =>
+        {
+            Err(AccountError::Invalid)
+        }
+        Ok(service) => service.usage_history(cursor.as_deref()).await,
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(page) => AccountHistoryV1 {
+            requests: page
+                .requests
+                .into_iter()
+                .map(|row| AccountRequestV1 {
+                    id: row.id,
+                    model_id: row.model_id,
+                    state: row.state,
+                    charged: wire::amount(row.units.as_deref()),
+                    reserved: wire::amount(row.reserved.as_deref()),
+                    started_at: row.started_at,
+                    finished_at: row.finished_at,
+                    error_class: None,
+                })
+                .collect(),
+            next_cursor: page.next_cursor,
+            fault: None,
+        },
+        Err(error) => {
+            log("usage_history", &Err(error));
+            AccountHistoryV1 {
+                requests: Vec::new(),
+                next_cursor: None,
+                fault: Some(error.into()),
+            }
+        }
+    }
+}
+
+/// One hosted request's receipt.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn account_receipt(caller: WebviewWindow, id: String) -> AccountReceiptV1 {
+    let result = match admitted(&caller, "account_receipt") {
+        Ok(_) if id.len() > 64 => Err(AccountError::Invalid),
+        Ok(service) => service.receipt(&id).await,
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(receipt) => AccountReceiptV1 {
+            request: Some(request(&receipt)),
+            fault: None,
+        },
+        Err(error) => AccountReceiptV1 {
+            request: None,
+            fault: Some(error.into()),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -709,6 +1045,8 @@ mod tests {
         );
         let offer = AccountOfferV1::TopUp {
             id: "small".into(),
+            name: None,
+            units: Some("5000000".into()),
             price: Some(AccountPriceV1 {
                 amount_minor: 500,
                 currency: "usd".into(),
@@ -718,7 +1056,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(offer).unwrap(),
             serde_json::json!({
-                "kind": "top_up", "id": "small",
+                "kind": "top_up", "id": "small", "name": null, "units": "5000000",
                 "price": {"amount_minor": 500, "currency": "usd"},
                 "expires_days": 365
             })
@@ -728,5 +1066,45 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(purchase, AccountPurchaseV1::Plan { .. }));
+    }
+
+    #[test]
+    fn a_server_that_sells_nothing_offers_no_purchase_but_may_host_models() {
+        let billing: Billing = serde_json::from_value(serde_json::json!({
+            "subscription": {"status": "not_applicable", "paidUntil": null, "cancelAtPeriodEnd": false},
+            "paid": false,
+            "capabilities": {"hostedAI": true, "synchronization": false},
+            "offers": {"subscriptions": [{"plan": "pro", "interval": "monthly"}], "topups": []}
+        }))
+        .unwrap();
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "cloud_enabled": true, "unit_scale": 1_000_000, "credits_remaining": "2500000",
+            "reserved_units": "120000", "bonus_remaining": "1000000",
+            "bonus_expires_at": "2026-10-20T00:00:00.000Z", "daily_limit_units": null,
+            "allowance": {"total_units": "2000000", "used_units": "300000", "reserved_units": "120000"}
+        }))
+        .unwrap();
+        let view = View {
+            server: "http://127.0.0.1:8787".into(),
+            custom_server: true,
+            config: Some(wire::ClientConfig {
+                cloud_enabled: false,
+                billing_enabled: true,
+                ..Default::default()
+            }),
+            signed_in: true,
+            billing: Some(billing),
+            usage: Some(usage),
+            ..Default::default()
+        };
+        let account = project(view);
+        assert_eq!(account.billing, Some(false));
+        assert!(account.offers.is_empty());
+        assert_eq!(account.hosted_models, Some(true));
+        let usage = account.usage.unwrap();
+        assert_eq!(usage.held.as_deref(), Some("120000"));
+        assert_eq!(usage.remaining.as_deref(), Some("2500000"));
+        assert_eq!(usage.daily_limit, None);
+        assert_eq!(usage.unit_scale, 1_000_000);
     }
 }

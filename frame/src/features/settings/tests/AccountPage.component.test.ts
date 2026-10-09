@@ -3,6 +3,7 @@ import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
 import type { AccountReplyV1, AccountV1 } from "$shared/ipc/bindings";
+import { accountFixture as account, usageFixture } from "$shared/testing/account";
 import AccountPage from "../components/sections/AccountPage.svelte";
 
 const native = vi.hoisted(() => ({
@@ -25,30 +26,6 @@ vi.mock("$shared/ipc/bindings", async () => {
   });
 });
 
-function account(overrides: Partial<AccountV1> = {}): AccountV1 {
-  return {
-    version: 1,
-    available: true,
-    server: "https://api.zephium.app",
-    custom_server: false,
-    hosted_models: true,
-    billing: true,
-    signup_open: true,
-    signed_in: false,
-    pending_email: null,
-    resend_in: null,
-    email: null,
-    name: null,
-    plan: null,
-    usage: null,
-    subscription: null,
-    offers: [],
-    checkout_open: false,
-    notice: null,
-    ...overrides,
-  };
-}
-
 const reply = (value: AccountV1, fault: AccountReplyV1["fault"] = null): AccountReplyV1 => ({
   account: value,
   fault,
@@ -59,7 +36,7 @@ const signedIn = account({
   signed_in: true,
   email: "ada@example.com",
   plan: "free",
-  usage: { used_percent: 42, resets_at: "2026-10-14T00:00:00Z", extra: false },
+  usage: usageFixture(),
   subscription: {
     status: "inactive",
     interval: null,

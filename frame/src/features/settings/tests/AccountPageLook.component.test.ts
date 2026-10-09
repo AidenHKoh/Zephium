@@ -3,6 +3,7 @@ import { test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import type { AccountV1 } from "$shared/ipc/bindings";
+import { accountFixture, usageFixture } from "$shared/testing/account";
 import AccountPageStage from "./AccountPageStage.svelte";
 
 const state = vi.hoisted(() => ({ account: null as AccountV1 | null }));
@@ -13,26 +14,7 @@ vi.mock("$shared/ipc/bindings", async () => {
   });
 });
 
-const base: AccountV1 = {
-  version: 1,
-  available: true,
-  server: "https://api.zephium.app",
-  custom_server: false,
-  hosted_models: true,
-  billing: true,
-  signup_open: true,
-  signed_in: false,
-  pending_email: null,
-  resend_in: null,
-  email: null,
-  name: null,
-  plan: null,
-  usage: null,
-  subscription: null,
-  offers: [],
-  checkout_open: false,
-  notice: null,
-};
+const base = accountFixture();
 
 const shots = "../../../../../target/account";
 const settle = () => new Promise((done) => setTimeout(done, 400));
@@ -59,7 +41,7 @@ test("Settings → Account signed out, waiting for a code, and signed in", async
     email: "ada@example.com",
     name: "Ada Lovelace",
     plan: "free",
-    usage: { used_percent: 62, resets_at: "2026-10-14T00:00:00Z", extra: true },
+    usage: usageFixture({ used_percent: 62, purchased_remaining: "5000000", extra: true }),
     subscription: {
       status: "inactive",
       interval: null,
@@ -86,6 +68,8 @@ test("Settings → Account signed out, waiting for a code, and signed in", async
       {
         kind: "top_up",
         id: "ten",
+        name: null,
+        units: null,
         price: { amount_minor: 1000, currency: "usd" },
         expires_days: 365,
       },

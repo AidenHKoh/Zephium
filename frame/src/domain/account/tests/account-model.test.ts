@@ -51,6 +51,15 @@ describe("account model", () => {
         features: [],
       }),
     ).toBe("plan:pro:yearly");
-    expect(offerKey({ kind: "top_up", id: "s", price: null, expires_days: null })).toBe("topup:s");
+    expect(
+      offerKey({
+        kind: "top_up",
+        id: "s",
+        name: null,
+        units: null,
+        price: null,
+        expires_days: null,
+      }),
+    ).toBe("topup:s");
   });
 });
