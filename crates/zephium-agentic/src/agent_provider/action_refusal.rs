@@ -377,6 +377,28 @@ impl AgentProviderActionRefusal {
             _ => return Err(AgentProviderContinuationError::ToolKind),
         };
         let executed = self.error == SemanticActionBindingError::Unverified;
+        // The one confusion planners repeat: a text field with suggestions
+        // (a place or search combobox) is typed into, not chosen from.
+        let hint = match (self.error, self.context) {
+            (
+                SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied),
+                Some(context),
+            ) if context.kind == SemanticActionKind::Select
+                && context.operations.contains(SemanticOperationClass::Fill) =>
+            {
+                Some(" This control is a text field with suggestions: it takes fill, not select. Fill it with the text you want; then, in the fresh look, click the matching suggestion if one appears.")
+            }
+            (
+                SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied),
+                Some(context),
+            ) if context.kind == SemanticActionKind::Fill
+                && context.operations.contains(SemanticOperationClass::Click) =>
+            {
+                Some(" This control cannot be typed into: click it to open its field or picker, then fill the field it opens.")
+            }
+            _ => None,
+        };
+        let guidance = format!("{guidance}{}", hint.unwrap_or_default());
         let guidance = if self.repeated {
             format!("{guidance} This control was already refused on an earlier look, so trying it again will not work: change approach. Navigate to another address on this site that shows what you need (a link's destination, or the site's own search results address with your query), use the site's search or filter box, close what covers the page, or scroll and read what it already shows.")
         } else {
