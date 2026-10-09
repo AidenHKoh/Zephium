@@ -58,6 +58,7 @@ export const commands = {
 	workHumanPresent: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1, region: WorkHumanRegionV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_present", { expectedProfile, work, page, region }),
 	workHumanContinue: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1, account: WorkHumanAccountV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_continue", { expectedProfile, work, page, account }),
 	workHumanRelease: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_release", { expectedProfile, work, page }),
+	workHumanExtend: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_extend", { expectedProfile, work, page }),
 	workDecisionPreference: (expectedProfile: string) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_decision_preference", { expectedProfile }),
 	workSetDecisionPreference: (expectedProfile: string, choice: WorkDecisionChoiceV1) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_set_decision_preference", { expectedProfile, choice }),
 	/**  Inbound-only Jev key setup, authorized against the current regular profile. */
@@ -4174,6 +4175,13 @@ export type WorkHumanPageV1 = {
 	remaining_millis: number,
 	document_revision: string,
 	can_continue: boolean,
+	/**  The person may keep a short wait (a bot check's) going a while longer. */
+	can_extend: boolean,
+	/**
+	 *  The page runs in Work's own website data, so a check solved here
+	 *  usually carries to later pages and runs.
+	 */
+	work_memory: boolean,
 };
 
 export type WorkHumanPhaseV1 = "reading" | "waiting_for_human" | "presenting" | "presented" | "continuing" | "released";

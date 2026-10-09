@@ -13,6 +13,7 @@ enum Operation {
     Present(WorkHumanPageIdV1, WorkHumanRegionV1),
     Continue(WorkHumanPageIdV1, WorkHumanAccountV1),
     Release(WorkHumanPageIdV1),
+    Extend(WorkHumanPageIdV1),
 }
 async fn human_command(
     caller: WebviewWindow,
@@ -45,6 +46,10 @@ async fn human_command(
                 }
                 Operation::Release(id) => {
                     browser.release_human_page(profile, work, id)?;
+                    true
+                }
+                Operation::Extend(id) => {
+                    browser.extend_human_page(profile, work, id)?;
                     true
                 }
             };
@@ -138,4 +143,15 @@ pub(crate) async fn work_human_release(
         Operation::Release(page),
     )
     .await
+}
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_human_extend(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    work: WorkId,
+    page: WorkHumanPageIdV1,
+) -> WorkHumanResponseV1 {
+    human_command(caller, app, expected_profile, work, Operation::Extend(page)).await
 }

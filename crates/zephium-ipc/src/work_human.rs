@@ -38,6 +38,11 @@ pub struct WorkHumanPageV1 {
     pub remaining_millis: u32,
     pub document_revision: String,
     pub can_continue: bool,
+    /// The person may keep a short wait (a bot check's) going a while longer.
+    pub can_extend: bool,
+    /// The page runs in Work's own website data, so a check solved here
+    /// usually carries to later pages and runs.
+    pub work_memory: bool,
 }
 /// Logical points relative to the native content view's top-left corner.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]

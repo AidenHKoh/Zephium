@@ -807,6 +807,7 @@ impl NativeWorkComposition {
             original_deadline
                 .min(Instant::now() + construction_attempt.budget() + Duration::from_secs(15)),
         );
+        let work_memory = invocation.input.uses_work_website_data();
         let view = self
             .launch_retained(shell, invocation)
             .map_err(|_| WorkError::Unavailable)?
@@ -815,10 +816,14 @@ impl NativeWorkComposition {
         let registration = page
             .as_ref()
             .filter(|_| resume_plan.is_some())
-            .map(|(step, _)| {
+            .map(|(step, url)| {
                 self.human_pages.register(
                     (attempt.profile(), attempt.work(), attempt.attempt(), *step),
                     guard.0.clone(),
+                    crate::human::HumanPageFacts {
+                        site: zephium_app::work_sites::site_of(url),
+                        work_memory,
+                    },
                 )
             })
             .transpose()?;
@@ -1559,7 +1564,10 @@ impl NativeWorkComposition {
                                 port.needs_you(Some(wait));
                             }
                         }
-                        if human_wait_expired(now, since, original_deadline, human, cap) {
+                        let held_for = registration
+                            .as_ref()
+                            .map_or(cap, |registration| registration.wait_for(since, cap));
+                        if human_wait_expired(now, since, original_deadline, human, held_for) {
                             gave_up_on_person = cap < MAX_WORK_HUMAN_WAIT_MILLIS;
                             // Nobody took the page within the wait: release it
                             // and settle the read with the page's own words.
