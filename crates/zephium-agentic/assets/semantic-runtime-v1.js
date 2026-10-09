@@ -2133,6 +2133,10 @@
     // before the headings: a listing page then shows its records in one
     // look instead of its header and filters, a reference page its text.
     const deferred = [];
+    // A page with no main landmark (x-kom's product grid is plain divs)
+    // defers its content below the fold in document order instead.
+    const loose = [];
+    let sawMain = false;
     const focused = focusedElements();
     const stack = [];
 
@@ -2216,18 +2220,26 @@
               ? optionOfAdmittedSelect || descriptor.headMeta === true || (rect !== null && (initialPriority || inViewport(rect)))
               : true
           );
+          if (!anchored && descriptor.role === "landmark" && descriptor.landmark === "main") sawMain = true;
+          const recordLike = descriptor.role === "list_item" || descriptor.role === "row" ||
+            (descriptor.role === "document" && descriptor.tag === "article");
           if (!anchored && !admitted && visible && rect !== null && item.main === true &&
-              (descriptor.role === "list_item" || descriptor.role === "row" ||
-               descriptor.role === "list" || descriptor.role === "table" ||
-               descriptor.role === "paragraph" ||
-               (descriptor.role === "document" && descriptor.tag === "article")) &&
+              (recordLike || descriptor.role === "list" || descriptor.role === "table" ||
+               descriptor.role === "paragraph") &&
               deferred.length < MAX_DEFERRED_RECORDS &&
               !deferred.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {
             deferred.push({ element: item.node, parent });
+          } else if (!anchored && !admitted && visible && rect !== null && item.main !== true &&
+              (recordLike || descriptor.role === "list" || descriptor.role === "table" ||
+               descriptor.role === "paragraph" || descriptor.role === "link") &&
+              loose.length < MAX_DEFERRED_RECORDS &&
+              !loose.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {
+            loose.push({ element: item.node, parent });
           }
           if (!anchored && !admitted && visible &&
               (descriptor.role === "heading" || summaryDetails(item.node) !== null) &&
               !deferred.some(anchor => apply(nodeContains, anchor.element, [item.node])) &&
+              !loose.some(anchor => apply(nodeContains, anchor.element, [item.node])) &&
               !headings.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {
             const details = summaryDetails(item.node);
             const priority = details === null ? 0 : read(detailsOpenGetter, details) ? 1 : 2;
@@ -2305,11 +2317,12 @@
         }
       }
     }
-    if (!anchored && !state.stopped && deferred.length !== 0) {
-      const known = objectCreate(null);
+    const known = objectCreate(null);
+    const anchors = sawMain ? deferred : loose;
+    if (!anchored && !state.stopped && anchors.length !== 0) {
       for (const record of records) known[record.wire.k] = true;
       const original = state.request;
-      for (const anchor of deferred) {
+      for (const anchor of anchors) {
         const room = original.b.n - records.length;
         if (state.stopped || room <= 0) {
           if (!state.stopped) mark(state, "node_limit", false);
@@ -2348,7 +2361,7 @@
         // credential descendants), not a textContent/flat-text shortcut.
         const scoped = traverse(heading.element, state, true);
         const record = scoped[0];
-        if (record === undefined) continue;
+        if (record === undefined || known[record.wire.k] === true) continue;
         if (heading.parent !== null) record.wire.p = heading.parent;
         record.depth = heading.parent === null ? 0 : records[heading.parent].depth + 1;
         if (record.depth > MAX_TREE_DEPTH) { mark(state, "depth_limit"); break; }

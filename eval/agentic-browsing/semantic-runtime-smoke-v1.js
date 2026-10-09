@@ -1742,6 +1742,26 @@ async function finish() {
   assert(listed.n.every((node, index) => node.p === undefined || node.p < index), "a deferred record lost its parent");
   const list = listed.n.findIndex((node) => node.r === "list");
   assert(listed.n.filter((node) => node.r === "list_item").every((node) => node.p === list), "a deferred record left its list");
+  // A page with no main landmark still shows its content below the fold,
+  // in document order.
+  const plain = new Element("div");
+  const offers = plain.append(new Element("ul"));
+  for (let index = 0; index < 6; index += 1) {
+    const item = offers.append(new Element("li"));
+    item.rect = { x: 10, y: index === 0 ? 100 : 900 + index * 80, width: 400, height: 60 };
+    const line = item.append(new Element("p"));
+    line.rect = { ...item.rect };
+    line.append(new CharacterData("Offer " + index));
+  }
+  const footer = plain.append(new Element("p"));
+  footer.rect = { x: 10, y: 2400, width: 400, height: 20 };
+  footer.append(new CharacterData("Loose footer prose"));
+  document._root = plain; setOwner(plain, document);
+  const plainLook = JSON.parse(invoke(115, 115, { k: "initial" }, { n: 40 }));
+  const plainTexts = plainLook.n.map((node) => node.t).filter(Boolean);
+  assert(plainTexts.includes("Offer 0") && plainTexts.includes("Offer 5"), "a page without main lost its records below the fold");
+  assert(plainTexts.indexOf("Offer 5") < plainTexts.indexOf("Loose footer prose"), "a page without main read its footer before its records");
+  assert(new Set(plainLook.n.map((node) => node.k)).size === plainLook.n.length, "a record was read twice without main");
   // A look cut inside a control leaves that control's name unfinished; the
   // records read whole before it stay usable for actions.
   const cut = new Element("main");
