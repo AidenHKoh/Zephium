@@ -6535,7 +6535,7 @@ fn build_browser_tool_definitions(snapshot_only: bool) -> Vec<BrowserToolDefinit
 fn tool_description(kind: AgentBrowserToolKind) -> &'static str {
     match kind {
         AgentBrowserToolKind::Navigate => {
-            "Propose navigation to the exact link_destination of a currently observed public link, or an exact host-approved route target. On a site task you may also open another address on that same site formed from what its pages show, such as its search results address with your query. Never guess another site's address, and never shorten, decode or reconstruct an observed URL."
+            "Propose navigation to the exact link_destination of a currently observed public link, or an exact host-approved route target. On a site task you may also open another address on that same site formed from what its pages show, such as its search results address with your query and the goal's filters (dates, guests, sort) as parameters, rather than driving a long date or filter form. Never guess another site's address, and never shorten, decode or reconstruct an observed URL."
         }
         AgentBrowserToolKind::Back => {
             "Return to the exact previous page visited by this run. Use when the objective requires going back or returning to an earlier page; the host selects the target."
@@ -9236,7 +9236,7 @@ mod tests {
         assert_eq!(
             sizes,
             vec![
-                (AgentBrowserToolKind::Navigate, 588),
+                (AgentBrowserToolKind::Navigate, 695),
                 (AgentBrowserToolKind::Back, 313),
                 (AgentBrowserToolKind::Forward, 197),
                 (AgentBrowserToolKind::Reload, 201),
@@ -9251,7 +9251,7 @@ mod tests {
                 (AgentBrowserToolKind::ResumeAfterHuman, 204),
             ]
         );
-        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 22_901);
+        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 23_008);
     }
 
     #[test]
