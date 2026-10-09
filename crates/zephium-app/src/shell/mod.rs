@@ -180,8 +180,8 @@ fn trace_refusal(
     lane: crate::work_resources::product::RetainedLaneFacts,
 ) {
     crate::work_trace::record(format_args!(
-        "work: phase=page_lane event=refused cause={cause:?} live={} settled={} lost={} queued={} group_failed={} group_sealed={}",
-        lane.live, lane.settled, lane.lost, lane.queued, lane.group_failed, lane.group_sealed
+        "work: phase=page_lane event=refused cause={cause:?} live={} settled={} lost={} queued={} unsettled={} group_failed={} group_sealed={}",
+        lane.live, lane.settled, lane.lost, lane.queued, lane.unsettled, lane.group_failed, lane.group_sealed
     ));
 }
 
@@ -1291,15 +1291,21 @@ impl Shell {
         // A page without a seat waits for one, in order, within its own
         // bounded wait: a full or sealed group of its run, or another run's
         // pages still closing, give way once their members have closed.
+        // A member whose record cannot be saved never closes, so nothing
+        // waiting behind it would sit down: it is refused at once instead.
         if !seated {
-            if self.queued_pages.len() < MAX_QUEUED_PAGES {
+            if lane.unsettled > 0 {
+                trace_refusal(Refusal::Unsettled, lane);
+                work.refuse(Refusal::Unsettled, lane);
+            } else if self.queued_pages.len() < MAX_QUEUED_PAGES {
                 if work.begin_wait() {
                     crate::work_trace::record(format_args!(
-                        "work: phase=page_lane event=waiting live={} settled={} lost={} queued={} group_failed={} group_sealed={}",
+                        "work: phase=page_lane event=waiting live={} settled={} lost={} queued={} unsettled={} group_failed={} group_sealed={}",
                         lane.live,
                         lane.settled,
                         lane.lost,
                         lane.queued,
+                        lane.unsettled,
                         lane.group_failed,
                         lane.group_sealed
                     ));
@@ -1349,6 +1355,7 @@ impl Shell {
                     .count(),
             ),
             queued: count(self.queued_pages.len()),
+            unsettled: count(self.unsettled_pages()),
             group_failed: self
                 .retained_page_runtime
                 .as_ref()
@@ -1358,6 +1365,16 @@ impl Shell {
                 .as_ref()
                 .is_some_and(|group| group.is_sealed()),
         }
+    }
+
+    /// Live and graveyarded pages whose record cannot be saved.
+    #[cfg(feature = "work-execution")]
+    fn unsettled_pages(&self) -> usize {
+        self.retained_pages
+            .iter()
+            .chain(&self.retained_graveyard)
+            .filter(|work| work.durably_unsettled())
+            .count()
     }
 
     /// Queued pages take seats in order as they free; a page that can sit
@@ -1461,7 +1478,7 @@ impl Shell {
     /// What one pass over the page lane can change that lets another pass
     /// hand on the audit turn or seat a queued page.
     #[cfg(feature = "work-execution")]
-    fn page_lane_turn(&self) -> (usize, usize, usize, usize, bool) {
+    fn page_lane_turn(&self) -> (usize, usize, usize, usize, usize, bool) {
         (
             self.retained_pages.len(),
             self.retained_graveyard.len(),
@@ -1471,6 +1488,7 @@ impl Shell {
                 .chain(&self.retained_graveyard)
                 .filter(|work| work.holds_native_audit() || work.holds_seat())
                 .count(),
+            self.unsettled_pages(),
             self.retained_page_runtime.is_some(),
         )
     }

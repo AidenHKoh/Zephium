@@ -1,6 +1,6 @@
 //! Actual Shell queue + original Store + retained native/controller composition.
 use super::*;
-use crate::work_resources::application::{ActorRequest, StagedActor};
+use crate::work_resources::application::{ActorRequest, StagedActor, UNCONFIRMED_TERMINALS};
 use crate::{Command, PreparedRetainedWork, RetainedWorkPhase};
 
 fn child(name: &str) -> bool {
@@ -1310,6 +1310,136 @@ fn work_page_group_admits_a_later_read_after_its_reads_close_cleanly() {
         assert_eq!(native.destructions.load(Ordering::Acquire), 1);
         assert!(native.global_sealed.load(Ordering::Acquire));
     }
+}
+
+#[test]
+fn pages_behind_an_unsettled_page_are_refused_at_once_not_after_their_wait() {
+    if child("pages_behind_an_unsettled_page_are_refused_at_once_not_after_their_wait") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(zephium_store::SqliteStore::open(directory.path()).unwrap());
+    let engine = Arc::new(crate::shell::tests::FakeEngine::default());
+    let queue = crate::actor::CommandQueue::new();
+    let owner = crate::actor::Handle::new(queue.clone());
+    let callback = owner.callback_handle();
+    let mut shell = crate::Shell::new(
+        engine.clone(),
+        store.clone(),
+        Arc::new(crate::shell::tests::FakeChrome),
+        Box::new(|_| {}),
+    );
+    shell.attach_queue(queue.clone());
+    shell.handle(Command::Bootstrap);
+    let profile = selected(&owner, &queue, &mut shell);
+    let factories = Arc::new(AtomicUsize::new(0));
+    let servers = Servers::default();
+    let work = WorkId::generate();
+    let execution = zephium_core::work::WorkExecutionId::generate();
+    let attempt = zephium_core::work::WorkAttemptId::generate();
+    // Long enough that a page waiting out its seat would fail the pump.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut natives = Vec::new();
+    let mut attach = || {
+        let native = Arc::new(Native::default());
+        native.allow_global_shutdown.store(true, Ordering::Release);
+        natives.push(native.clone());
+        let request = prepared_until_isolated(
+            profile,
+            engine.clone(),
+            store.clone(),
+            native,
+            factories.clone(),
+            servers.clone(),
+            deadline,
+            WorkBrowserDocumentPolicy::Exact,
+            true,
+            None,
+        )
+        .with_work_identity(work)
+        .with_page_admission(crate::RetainedPageAdmission {
+            profile: profile.profile(),
+            work,
+            execution,
+            attempt,
+            step: zephium_core::work::WorkStepId::generate(),
+            workers: 3,
+            deadline,
+        })
+        .unwrap();
+        callback.attach_retained_work(request).unwrap()
+    };
+    // The Store never confirms the first page's terminal write.
+    UNCONFIRMED_TERMINALS.store(true, Ordering::Release);
+    let unsettled = attach();
+    pump(&queue, &mut shell, || {
+        while unsettled.take_event().is_some() {}
+        unsettled.snapshot().failure.is_some()
+    });
+    // A page arriving now waits for a seat in the failed group, then is
+    // refused as soon as the first page has no resend left.
+    let started = Instant::now();
+    let waiting = attach();
+    // The resends are timed: stand in for the actor's timer thread.
+    let timer = |queue: &crate::actor::CommandQueue| {
+        if queue
+            .work_deadline()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            queue.try_push(Command::WorkWake).ok();
+        }
+    };
+    pump(&queue, &mut shell, || {
+        timer(&queue);
+        waiting.snapshot().phase == RetainedWorkPhase::Refused
+    });
+    let snapshot = unsettled.snapshot();
+    assert_eq!(
+        (
+            snapshot.phase,
+            snapshot.failure,
+            snapshot.persistence_failure
+        ),
+        (
+            RetainedWorkPhase::Uncertain,
+            Some(AgentWorkFailure::Contract),
+            Some(AgentWorkJournalError::Uncertain)
+        )
+    );
+    let refusal = waiting.snapshot().refusal.unwrap();
+    assert_eq!(refusal.0, crate::RetainedRefusal::Unsettled);
+    assert_eq!(refusal.1.unsettled, 1);
+    // Once its owner closes it, it keeps its seat; a later page is refused
+    // on arrival.
+    assert!(unsettled.close());
+    let later = attach();
+    pump(&queue, &mut shell, || {
+        later.snapshot().phase == RetainedWorkPhase::Refused
+    });
+    assert_eq!(
+        later.snapshot().refusal.map(|(cause, _)| cause),
+        Some(crate::RetainedRefusal::Unsettled)
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(!unsettled.is_closed());
+    assert_eq!(factories.load(Ordering::Acquire), 1);
+    UNCONFIRMED_TERMINALS.store(false, Ordering::Release);
+    for server in servers.lock().unwrap().drain(..) {
+        server.join().unwrap();
+    }
+    let shutdown = owner.shutdown_with_deadline(Instant::now() + Duration::from_secs(5));
+    while let Some(command) = queue.try_recv() {
+        let terminal = matches!(command, Command::Shutdown { .. });
+        shell.handle(command);
+        if terminal {
+            break;
+        }
+    }
+    assert!(shutdown.recv().is_ok());
+    natives[0].join();
 }
 #[test]
 fn selected_shell_retains_page_after_durable_result_and_owns_global_shutdown() {

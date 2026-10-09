@@ -320,6 +320,9 @@ pub enum RetainedRefusal {
     Expired,
     /// The Shell dropped it unprocessed, or the app is quitting.
     Discarded,
+    /// An earlier page's record could not be saved, so its seat cannot
+    /// free in this process: waiting for one would only run out its time.
+    Unsettled,
 }
 
 /// The Shell's page lane when a page was refused.
@@ -333,6 +336,8 @@ pub struct RetainedLaneFacts {
     pub lost: u8,
     /// Pages waiting for a seat.
     pub queued: u8,
+    /// Pages whose record could not be saved, holding their seat for good.
+    pub unsettled: u8,
     pub group_failed: bool,
     pub group_sealed: bool,
 }
@@ -811,6 +816,15 @@ impl ProductWork {
                 .coordinator
                 .as_ref()
                 .is_some_and(RetainedWork::native_audit_settled)
+    }
+    /// An unclosed page whose record cannot be classified in this process:
+    /// it keeps its seat, and its group cannot close around it.
+    pub(crate) fn durably_unsettled(&self) -> bool {
+        !self.is_closed()
+            && self
+                .coordinator
+                .as_ref()
+                .is_some_and(RetainedWork::durably_unsettled)
     }
     /// Marks it waiting for a seat; true the first time.
     pub(crate) fn begin_wait(&mut self) -> bool {
