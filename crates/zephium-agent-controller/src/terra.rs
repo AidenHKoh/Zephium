@@ -2787,7 +2787,7 @@ impl AgentBrowserSession {
             },
             captured_at,
             SemanticReadSensitivityLimit::PublicOnly,
-            SemanticReadBudget::STANDARD,
+            SemanticReadBudget::EXTRACTION,
             schema,
         )
         .map_err(AgentBrowserProviderError::Read)?;

@@ -150,6 +150,13 @@ impl SemanticReadBudget {
         max_bytes: 32 * 1024,
     };
 
+    /// A terminal mapping read: a listing page's visible records with their
+    /// links and pictures, after control labels are shed.
+    pub const EXTRACTION: Self = Self {
+        max_items: MAX_SEMANTIC_READ_ITEMS,
+        max_bytes: 48 * 1024,
+    };
+
     /// Validates nonzero ceilings under process-wide hard limits.
     pub const fn try_new(max_items: u16, max_bytes: u32) -> Result<Self, SemanticReadBudgetError> {
         if max_items == 0
@@ -923,7 +930,7 @@ pub(crate) fn read_located_semantic_observation_at<'a>(
         SemanticReadAuthority::Acknowledged(acknowledgement),
         captured_at,
         SemanticReadSensitivityLimit::PublicOnly,
-        SemanticReadBudget::STANDARD,
+        SemanticReadBudget::EXTRACTION,
         schema.source_roles(),
         schema.url_sources(),
         Some(references),
@@ -1292,7 +1299,9 @@ impl<'a> SemanticReadBuilder<'a> {
             self.stats.omitted_items = self.stats.omitted_items.saturating_add(1);
             return;
         }
-        if self.stats.items >= self.budget.max_items() {
+        // Collect past the budget, up to a fixed bound, so `shed` can keep a
+        // listing's facts over the page chrome that precedes them.
+        if self.stats.items >= COLLECTED_READ_ITEMS {
             self.omissions.insert(SemanticReadOmission::ItemLimit);
             self.stats.omitted_items = self.stats.omitted_items.saturating_add(1);
             return;
@@ -1303,7 +1312,7 @@ impl<'a> SemanticReadBuilder<'a> {
             self.stats.omitted_items = self.stats.omitted_items.saturating_add(1);
             return;
         };
-        if next_bytes > self.budget.max_bytes() {
+        if next_bytes > COLLECTED_READ_BYTES {
             self.omissions.insert(SemanticReadOmission::ByteLimit);
             self.stats.omitted_items = self.stats.omitted_items.saturating_add(1);
             return;
@@ -1349,7 +1358,50 @@ impl<'a> SemanticReadBuilder<'a> {
         }
     }
 
-    fn finish(self, subtree: Option<SemanticReadSubtreeProof>) -> SemanticReadResult<'a> {
+    /// Brings the collected read within its budget: the least useful
+    /// fragment goes first (control labels, then addresses, then facts), the
+    /// latest of equals first, and every kept fragment keeps source order.
+    fn shed(&mut self) {
+        while self.stats.items > self.budget.max_items()
+            || self.stats.content_bytes > self.budget.max_bytes()
+        {
+            self.omissions
+                .insert(if self.stats.items > self.budget.max_items() {
+                    SemanticReadOmission::ItemLimit
+                } else {
+                    SemanticReadOmission::ByteLimit
+                });
+            let Some(index) = self
+                .fragments
+                .iter()
+                .enumerate()
+                .max_by_key(|(index, fragment)| {
+                    (read_priority(fragment.field, fragment.role), *index)
+                })
+                .map(|(index, _)| index)
+            else {
+                break;
+            };
+            let removed = self.fragments.remove(index);
+            self.stats.items -= 1;
+            self.stats.content_bytes -= removed.content.retained_bytes();
+            if removed.provenance.sensitivity == SemanticSensitivity::Public {
+                self.stats.public_items -= 1;
+            } else {
+                self.stats.sensitive_items -= 1;
+            }
+            self.stats.omitted_items = self.stats.omitted_items.saturating_add(1);
+        }
+        for (index, fragment) in self.fragments.iter_mut().enumerate() {
+            fragment.id = u16::try_from(index + 1)
+                .ok()
+                .and_then(SemanticReadFragmentId::new)
+                .expect("bounded nonzero fragment");
+        }
+    }
+
+    fn finish(mut self, subtree: Option<SemanticReadSubtreeProof>) -> SemanticReadResult<'a> {
+        self.shed();
         let fingerprint = SemanticObservationFingerprint::from_observation(self.observation);
         let mut guard = read_guard(
             &fingerprint,
@@ -1414,6 +1466,45 @@ impl<'a> SemanticReadBuilder<'a> {
             guard,
             historical: Vec::new(),
         }
+    }
+}
+
+/// Fragments a read collects before shedding to its budget.
+const COLLECTED_READ_ITEMS: u16 = 4 * MAX_SEMANTIC_READ_ITEMS;
+const COLLECTED_READ_BYTES: u32 = 4 * MAX_SEMANTIC_READ_BYTES;
+
+/// How readily a fragment is shed from an over-budget read, lowest kept
+/// longest: stated facts and form values, then addresses and picture text,
+/// then the names of controls and list options.
+pub(crate) fn read_priority(field: SemanticReadField, role: SemanticRole) -> u8 {
+    match field {
+        SemanticReadField::TextValue | SemanticReadField::BooleanValue => 0,
+        SemanticReadField::OrdinalValue if role != SemanticRole::Option => 0,
+        SemanticReadField::VisibleText | SemanticReadField::AccessibleName
+            if matches!(
+                role,
+                SemanticRole::Heading
+                    | SemanticRole::Paragraph
+                    | SemanticRole::Document
+                    | SemanticRole::Cell
+                    | SemanticRole::CellHeader
+                    | SemanticRole::Status
+                    | SemanticRole::ListItem
+                    | SemanticRole::Link
+                    | SemanticRole::Row
+            ) =>
+        {
+            0
+        }
+        SemanticReadField::LinkDestination
+        | SemanticReadField::ImageSource
+        | SemanticReadField::DocumentAddress => 1,
+        SemanticReadField::VisibleText | SemanticReadField::AccessibleName
+            if role == SemanticRole::Image =>
+        {
+            1
+        }
+        _ => 2,
     }
 }
 
@@ -1703,7 +1794,7 @@ mod tests {
             crate::SemanticObservationRequest::initial(
                 SemanticObservationId::new(id).unwrap(),
                 context,
-                SemanticObservationBudget::INITIAL_FILTERED,
+                SemanticObservationBudget::try_new(512, 64 * 1024, 4).unwrap(),
             ),
             snapshot(frame, id, id, "complete", nodes),
         )
@@ -2007,12 +2098,75 @@ mod tests {
     }
 
     #[test]
+    fn over_budget_reads_keep_listing_facts_over_the_controls_before_them() {
+        // Shaped like the recorded x-kom.pl listing: filter controls and sort
+        // options fill the page before the products.
+        let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
+        for key in 2..=201 {
+            nodes.push(json!({"k":key,"p":0,"r":"option","n":format!("Filter {key}"),"o":1}));
+        }
+        for key in 202..=261 {
+            nodes.push(
+                json!({"k":key,"p":0,"r":"link","n":format!("Laptop {key} 32 GB"),
+                "u":format!("https://shop.example.test/laptop-{key}")}),
+            );
+            nodes.push(json!({"k":key + 100,"p":0,"r":"paragraph","t":format!("{key} zł")}));
+        }
+        let observation = retained_observation(1, json!(nodes));
+        let ack = acknowledgement(&observation);
+        let roles = SemanticReadRoleSelection::ALL;
+        let read = read_projection(
+            &observation,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+            roles,
+            1,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            read.stats().items(),
+            SemanticReadBudget::EXTRACTION.max_items()
+        );
+        assert!(read.omissions().contains(SemanticReadOmission::ItemLimit));
+        let texts: Vec<_> = read
+            .fragments()
+            .iter()
+            .filter_map(|fragment| fragment.content().text().map(|text| text.as_str()))
+            .collect();
+        for key in [202, 230, 261] {
+            assert!(
+                texts.contains(&format!("Laptop {key} 32 GB").as_str()),
+                "{key}"
+            );
+            assert!(texts.contains(&format!("{key} zł").as_str()), "{key}");
+        }
+        let links = read
+            .fragments()
+            .iter()
+            .filter(|fragment| fragment.field() == SemanticReadField::LinkDestination)
+            .count();
+        assert_eq!(links, 60);
+        // Sheds keep source order and contiguous result-local identities.
+        for (index, fragment) in read.fragments().iter().enumerate() {
+            assert_eq!(usize::from(fragment.id().get()), index + 1);
+        }
+        assert!(
+            texts.iter().position(|text| *text == "Laptop 202 32 GB")
+                < texts.iter().position(|text| *text == "Laptop 261 32 GB")
+        );
+    }
+
+    #[test]
     fn broad_duplicate_capture_cannot_erase_the_focused_source_it_replaces() {
         let mut evidence = SemanticRetainedReadEvidence::default();
         for (id, keys) in [
             (1, vec![2, 3]),
-            (2, vec![129, 130]),
-            (3, (2..=128).collect()),
+            (2, vec![257, 258]),
+            (3, (2..=256).collect()),
         ] {
             let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
             for key in keys {
@@ -2025,7 +2179,7 @@ mod tests {
                 SemanticReadAuthority::Acknowledged(&ack),
                 SemanticCaptureInstant::from_millis(id),
                 SemanticReadSensitivityLimit::PublicOnly,
-                SemanticReadBudget::STANDARD,
+                SemanticReadBudget::EXTRACTION,
             )
             .unwrap();
             evidence.retain(&read, &ack).unwrap();
@@ -2063,11 +2217,11 @@ mod tests {
             json!([
                 {"k":1,"r":"document","o":16},
                 {"k":2,"p":0,"r":"paragraph","t":"Navigation banner"},
-            {"k":131,"p":0,"r":"paragraph","t":"Navigation footer"}
+            {"k":259,"p":0,"r":"paragraph","t":"Navigation footer"}
             ]),
         );
         let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
-        for key in 3..=129 {
+        for key in 3..=257 {
             nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("Product fact {key}")}));
         }
         let detail = retained_observation(2, json!(nodes));
@@ -2077,7 +2231,7 @@ mod tests {
                 SemanticReadAuthority::Acknowledged(ack),
                 SemanticCaptureInstant::from_millis(1),
                 SemanticReadSensitivityLimit::PublicOnly,
-                SemanticReadBudget::STANDARD,
+                SemanticReadBudget::EXTRACTION,
             )
             .unwrap()
         };
@@ -2091,7 +2245,7 @@ mod tests {
         detail_read.focused = true;
         evidence.retain(&detail_read, &detail_ack).unwrap();
         let merged = evidence.merge_for_extraction(detail_read).unwrap();
-        assert_eq!(merged.fragments().len(), 127);
+        assert_eq!(merged.fragments().len(), 255);
         assert!(!merged.has_retained_evidence());
         assert!(merged.fragments().iter().all(|fragment| fragment
             .provenance()
@@ -2104,20 +2258,20 @@ mod tests {
     #[test]
     fn extraction_pressure_keeps_late_facts_ahead_of_gallery_controls() {
         let mut history_nodes = vec![json!({"k":1,"r":"document","o":16})];
-        for key in 2..=65 {
+        for key in 2..=129 {
             history_nodes
                 .push(json!({"k":key,"p":0,"r":"paragraph","t":format!("Earlier detail {key}")}));
         }
         let history = retained_observation(1, json!(history_nodes));
         let mut current_nodes = vec![json!({"k":1,"r":"document","o":16})];
-        for key in 2..=81 {
+        for key in 2..=161 {
             current_nodes.push(
                 json!({"k":key,"p":0,"r":"button","n":format!("Gallery thumbnail {key}"),"o":1}),
             );
         }
-        current_nodes.push(json!({"k":82,"p":0,"r":"heading","l":1,"n":"Example product"}));
-        current_nodes.push(json!({"k":83,"p":0,"r":"paragraph","t":"$349.99"}));
-        current_nodes.push(json!({"k":84,"p":0,"r":"paragraph","t":"Width 89 cm"}));
+        current_nodes.push(json!({"k":162,"p":0,"r":"heading","l":1,"n":"Example product"}));
+        current_nodes.push(json!({"k":163,"p":0,"r":"paragraph","t":"$349.99"}));
+        current_nodes.push(json!({"k":164,"p":0,"r":"paragraph","t":"Width 89 cm"}));
         let current = retained_observation(2, json!(current_nodes));
         let history_ack = acknowledgement(&history);
         let current_ack = acknowledgement(&current);
@@ -2127,7 +2281,7 @@ mod tests {
                 SemanticReadAuthority::Acknowledged(ack),
                 SemanticCaptureInstant::from_millis(100),
                 SemanticReadSensitivityLimit::PublicOnly,
-                SemanticReadBudget::STANDARD,
+                SemanticReadBudget::EXTRACTION,
             )
             .unwrap()
         };
@@ -2151,7 +2305,7 @@ mod tests {
                 .unwrap();
             assert_eq!(fragment.provenance().observation(), current.request().id());
         }
-        assert_eq!(merged.fragments().len(), 128);
+        assert_eq!(merged.fragments().len(), 256);
         assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
         for (index, fragment) in merged.fragments().iter().enumerate() {
             assert_eq!(usize::from(fragment.id().get()), index + 1);
@@ -2174,7 +2328,7 @@ mod tests {
             ]),
         );
         let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
-        for key in 2..=128 {
+        for key in 2..=256 {
             nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("Catalog entry {key}")}));
         }
         let broad = retained_observation(2, json!(nodes));
@@ -2186,7 +2340,7 @@ mod tests {
                 SemanticReadAuthority::Acknowledged(ack),
                 SemanticCaptureInstant::from_millis(100),
                 SemanticReadSensitivityLimit::PublicOnly,
-                SemanticReadBudget::STANDARD,
+                SemanticReadBudget::EXTRACTION,
             )
             .unwrap()
         };
@@ -2199,7 +2353,7 @@ mod tests {
         assert_eq!(evidence.retained_items(), 2);
         let merged = evidence.merge_for_extraction(broad_read).unwrap();
         assert!(merged.matches_acknowledgement(&broad_ack));
-        assert_eq!(merged.fragments().len(), 128);
+        assert_eq!(merged.fragments().len(), 256);
         assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
         let price = merged
             .fragments()
