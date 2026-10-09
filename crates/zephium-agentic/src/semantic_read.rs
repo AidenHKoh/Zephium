@@ -319,7 +319,15 @@ pub enum SemanticReadField {
     /// The read's own document address as the one-document gate admitted it,
     /// attributed to the main frame's document node; never text from the page.
     DocumentAddress,
+    /// The viewport screenshot the host attached to this mapping, attributed
+    /// to the main frame's document node. Only a text value may cite it, and
+    /// a value that does was read by the model from pixels, never from text.
+    ViewportImage,
 }
+
+/// What a viewport-image fragment says in place of page text.
+pub const SEMANTIC_VIEWPORT_IMAGE_TEXT: &str =
+    "the viewport screenshot attached to this request; cite this ref for a value read only from its pixels";
 
 /// Non-actionable model-facing identity for one read fragment.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -950,6 +958,33 @@ fn read_projection<'a>(
     references: Option<&std::collections::BTreeSet<SemanticReferenceId>>,
     document: Option<&'a crate::ContextNavigationTarget>,
 ) -> Result<SemanticReadResult<'a>, SemanticReadError> {
+    read_projection_with(
+        observation,
+        authority,
+        captured_at,
+        sensitivity,
+        budget,
+        roles,
+        url_sources,
+        references,
+        document,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_projection_with<'a>(
+    observation: &'a SemanticObservation,
+    authority: SemanticReadAuthority<'_>,
+    captured_at: SemanticCaptureInstant,
+    sensitivity: SemanticReadSensitivityLimit,
+    budget: SemanticReadBudget,
+    roles: SemanticReadRoleSelection,
+    url_sources: u8,
+    references: Option<&std::collections::BTreeSet<SemanticReferenceId>>,
+    document: Option<&'a crate::ContextNavigationTarget>,
+    viewport_image: bool,
+) -> Result<SemanticReadResult<'a>, SemanticReadError> {
     let subtree = validate_authority(observation, authority)?;
     let mut builder = SemanticReadBuilder::new(observation, captured_at, budget, roles);
     builder.url_sources = url_sources;
@@ -979,10 +1014,59 @@ fn read_projection<'a>(
     if let Some(document) = document {
         builder.admit_document_address(document);
     }
+    if viewport_image {
+        builder.admit_viewport_image();
+    }
     let mut read = builder.finish(subtree);
     read.focused |= references.is_some();
     Ok(read)
 }
+
+/// A read of the newest observation that also carries one viewport-image
+/// fragment, for a mapping the host attaches the viewport screenshot to. The
+/// fragment is admitted only on a page whose look holds nothing sensitive or
+/// secret, so pixels never carry what the text read would withhold.
+pub fn read_semantic_observation_for_schema_with_viewport_image<'a>(
+    observation: &'a SemanticObservation,
+    authority: SemanticReadAuthority<'_>,
+    captured_at: SemanticCaptureInstant,
+    sensitivity: SemanticReadSensitivityLimit,
+    budget: SemanticReadBudget,
+    schema: &crate::SemanticExtractionSchema,
+) -> Result<SemanticReadResult<'a>, SemanticReadError> {
+    read_projection_with(
+        observation,
+        authority,
+        captured_at,
+        sensitivity,
+        budget,
+        schema.source_roles(),
+        schema.url_sources(),
+        None,
+        None,
+        true,
+    )
+}
+
+/// The look shows too little text to read its records from: an app drawn on
+/// a canvas, a gallery of pictures, prices rendered as images. Only such a
+/// page is worth a viewport image for its mapping.
+pub fn semantic_observation_reads_sparse(observation: &SemanticObservation) -> bool {
+    let (mut text, mut images) = (0_usize, 0_usize);
+    for node in observation.frames().iter().flat_map(|frame| frame.nodes()) {
+        if node.role() == SemanticRole::Image {
+            images += 1;
+        }
+        text += node.text().map_or(0, |text| text.as_str().len());
+    }
+    text < SPARSE_TEXT_BYTES || (images >= SPARSE_IMAGES && text / images < SPARSE_TEXT_PER_IMAGE)
+}
+
+/// Below this much visible text a look reads as sparse.
+const SPARSE_TEXT_BYTES: usize = 1_200;
+/// A gallery: this many pictures, each with this little text beside it.
+const SPARSE_IMAGES: usize = 6;
+const SPARSE_TEXT_PER_IMAGE: usize = 80;
 
 fn validate_authority(
     observation: &SemanticObservation,
@@ -1286,6 +1370,36 @@ impl<'a> SemanticReadBuilder<'a> {
         );
     }
 
+    /// One viewport-image fragment on the main frame's public document
+    /// node, when nothing in the look is sensitive or secret.
+    fn admit_viewport_image(&mut self) {
+        let Some(snapshot) = self.observation.frames().first() else {
+            return;
+        };
+        let Some(node) = snapshot.nodes().first() else {
+            return;
+        };
+        let private = self
+            .observation
+            .frames()
+            .iter()
+            .flat_map(|frame| frame.nodes())
+            .any(|node| node.sensitivity() != SemanticSensitivity::Public);
+        if node.role() != SemanticRole::Document || private {
+            return;
+        }
+        self.admit(
+            snapshot,
+            node,
+            SemanticReadField::ViewportImage,
+            SemanticReadContent::ValuePreview(SemanticValuePreview::retained(
+                SEMANTIC_VIEWPORT_IMAGE_TEXT,
+                SEMANTIC_VIEWPORT_IMAGE_TEXT.len(),
+                false,
+            )),
+        );
+    }
+
     fn admit(
         &mut self,
         snapshot: &'a crate::SemanticSnapshot,
@@ -1478,7 +1592,9 @@ const COLLECTED_READ_BYTES: u32 = 4 * MAX_SEMANTIC_READ_BYTES;
 /// then the names of controls and list options.
 pub(crate) fn read_priority(field: SemanticReadField, role: SemanticRole) -> u8 {
     match field {
-        SemanticReadField::TextValue | SemanticReadField::BooleanValue => 0,
+        SemanticReadField::TextValue
+        | SemanticReadField::BooleanValue
+        | SemanticReadField::ViewportImage => 0,
         SemanticReadField::OrdinalValue if role != SemanticRole::Option => 0,
         SemanticReadField::VisibleText | SemanticReadField::AccessibleName
             if matches!(
@@ -1607,6 +1723,7 @@ const fn read_field_code(field: SemanticReadField) -> u8 {
         SemanticReadField::LinkDestination => 6,
         SemanticReadField::ImageSource => 7,
         SemanticReadField::DocumentAddress => 8,
+        SemanticReadField::ViewportImage => 9,
     }
 }
 

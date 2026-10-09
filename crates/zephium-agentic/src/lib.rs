@@ -582,12 +582,14 @@ pub use semantic_probe_evidence::{
 };
 pub use semantic_read::{
     read_selected_semantic_observation, read_semantic_observation,
-    read_semantic_observation_for_schema, SemanticCaptureInstant, SemanticReadAuthority,
+    read_semantic_observation_for_schema, read_semantic_observation_for_schema_with_viewport_image,
+    semantic_observation_reads_sparse, SemanticCaptureInstant, SemanticReadAuthority,
     SemanticReadBudget, SemanticReadBudgetError, SemanticReadContent, SemanticReadError,
     SemanticReadField, SemanticReadFragment, SemanticReadFragmentId, SemanticReadOmission,
     SemanticReadOmissions, SemanticReadProvenance, SemanticReadResult, SemanticReadRoleSelection,
     SemanticReadRoleSelectionError, SemanticReadSensitivityLimit, SemanticReadStats,
     SemanticRetainedReadEvidence, MAX_SEMANTIC_READ_BYTES, MAX_SEMANTIC_READ_ITEMS,
+    SEMANTIC_VIEWPORT_IMAGE_TEXT,
 };
 pub use semantic_read_model::{
     encode_semantic_read, SemanticEncodedRead, SemanticReadDeliveryReceipt,
