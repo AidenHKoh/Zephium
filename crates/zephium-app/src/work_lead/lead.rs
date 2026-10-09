@@ -417,7 +417,7 @@ where
                     match parts::step_request("web_search", &args, self.run) {
                         Ok(_) if !self.spend(true) => {
                             answers[index] = Some((
-                                "You have searched enough for this request: build the result from what you have, or start a research part for a new thread.".into(),
+                                "You have searched enough for this request: read the best pages your searches already listed with web_fetch and build the result from them; start a research part only for a subject you have not searched.".into(),
                                 true,
                             ))
                         }
