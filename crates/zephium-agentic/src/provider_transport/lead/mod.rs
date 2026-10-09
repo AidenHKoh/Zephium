@@ -335,6 +335,7 @@ pub struct LeadClient {
     price: Option<WorkModelPrice>,
     search_fee_micros: u64,
     cloud_observer: Option<LeadCloudObserver>,
+    max_request_bytes: Option<u64>,
     #[cfg(test)]
     backoff: Duration,
 }
@@ -352,6 +353,7 @@ impl LeadClient {
             credential,
             price,
             cloud_observer: None,
+            max_request_bytes: None,
             #[cfg(test)]
             backoff: Duration::from_millis(1),
         }
@@ -360,6 +362,12 @@ impl LeadClient {
     /// Reports every Cloud call's accounting record when the call ends.
     pub fn with_cloud_observer(mut self, observer: LeadCloudObserver) -> Self {
         self.cloud_observer = Some(observer);
+        self
+    }
+
+    /// Refuses, before sending, a body larger than the endpoint admits.
+    pub fn with_request_limit(mut self, max_bytes: u64) -> Self {
+        self.max_request_bytes = Some(max_bytes);
         self
     }
 
@@ -381,6 +389,12 @@ impl LeadClient {
         let mut total = Decoded::default();
         for continuation in 0..=MAX_PAUSE_CONTINUATIONS {
             let body = self.body(&request)?;
+            if self
+                .max_request_bytes
+                .is_some_and(|max| body.len() as u64 > max)
+            {
+                return Err(WorkModelError::ContextTooLong);
+            }
             let decoded = self.attempt(&request.model.model, &body, events).await?;
             total.absorb(decoded);
             if total.stop != DecodedStop::Paused || continuation == MAX_PAUSE_CONTINUATIONS {
