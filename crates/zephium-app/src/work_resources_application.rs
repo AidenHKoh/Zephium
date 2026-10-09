@@ -1791,14 +1791,22 @@ pub(super) fn reviewable(disposition: AgentWorkDisposition) -> bool {
         AgentWorkDisposition::Interrupted | AgentWorkDisposition::RecoveryRequired
     )
 }
-/// A fresh native resource may coexist with explicitly reviewed historical
+/// A fresh native resource may coexist with explicitly classified historical
 /// uncertainty. This predicate never permits reuse of an active execution owner.
+///
+/// FailedClosed is the no-replay classification of an actor the journal
+/// admitted but never started: stopped or out of time between the Admitted
+/// and Running acknowledgements, or refused at spawn. It is terminal, so no
+/// review can follow it, and its UNKNOWN debt stays history like a reviewed
+/// row's. Refusing it would refuse every later claim in this Store for good.
 fn historical_record_admissible(record: AgentWorkRecord) -> bool {
     record.disposition().is_terminal()
         && (record.debt() == AgentWorkDebt::NONE
             || matches!(
                 record.disposition(),
-                AgentWorkDisposition::FreshAdmissionRequired | AgentWorkDisposition::Rejected
+                AgentWorkDisposition::FreshAdmissionRequired
+                    | AgentWorkDisposition::Rejected
+                    | AgentWorkDisposition::FailedClosed
             ))
 }
 

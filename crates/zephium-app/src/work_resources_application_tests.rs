@@ -118,9 +118,12 @@ fn reviewed_history_allows_fresh_resources_but_unreviewed_or_foreign_history_doe
     let prior = AgentWorkIncarnation::generate();
     let current = AgentWorkIncarnation::generate();
     let interrupted = interrupted_record(prior, 1);
+    // FailedClosed is the coordinator's own terminal classification of an
+    // actor that never started; no review can follow it.
     for disposition in [
         AgentWorkDisposition::FreshAdmissionRequired,
         AgentWorkDisposition::Rejected,
+        AgentWorkDisposition::FailedClosed,
     ] {
         let reviewed = interrupted.transition(disposition).unwrap();
         let (work, native, _) = review_coordinator(vec![reviewed], current);
@@ -132,7 +135,6 @@ fn reviewed_history_allows_fresh_resources_but_unreviewed_or_foreign_history_doe
     for disposition in [
         AgentWorkDisposition::Interrupted,
         AgentWorkDisposition::RecoveryRequired,
-        AgentWorkDisposition::FailedClosed,
         AgentWorkDisposition::NeedsApproval,
     ] {
         let mut bytes = *interrupted.as_bytes();
@@ -367,6 +369,20 @@ fn child(test: &str) -> bool {
         "retained admission child: {result:?}"
     );
     true
+}
+
+/// A second page claiming from the same open Store, as a later page does.
+fn coordinator_beside(store: &Arc<GatedStore>) -> (RetainedWork, Arc<Native>) {
+    let (owner, native, resource) = construct_fixture_with_wake(
+        ContextProfileStorageClass::Ephemeral,
+        WorkBrowserDocumentPolicy::Exact,
+        None,
+        Arc::new(|| true),
+    );
+    native.allow_global_shutdown.store(true, Ordering::Release);
+    let work = RetainedWork::new(owner, resource, store.clone(), store.clone())
+        .unwrap_or_else(|_| panic!("original owner and Store join"));
+    (work, native)
 }
 
 fn coordinator(directory: &std::path::Path) -> (RetainedWork, Arc<Native>, Arc<GatedStore>) {
@@ -1263,6 +1279,123 @@ fn mismatched_original_acknowledgement_cannot_start_worker_and_cleanup_stays_own
     assert!(!work.reconcile(), "original exact CAS has now settled");
     for server in servers.lock().unwrap().drain(..) {
         assert_eq!(server.join().unwrap(), 0);
+    }
+}
+
+/// Runs a fresh read to its acknowledged success.
+fn run_fresh_read(work: &mut RetainedWork, servers: &Servers) {
+    poll_until(work, RetainedWork::ready);
+    assert!(work
+        .submit(
+            request(
+                ContextRunId::generate(),
+                vec![response_stream(1), response_stream(2)],
+                servers.clone()
+            ),
+            now()
+        )
+        .is_ok());
+    poll_until(work, |work| {
+        matches!(
+            work.phase(),
+            AdmissionPhase::Terminal | AdmissionPhase::Uncertain
+        )
+    });
+    assert_eq!(work.phase(), AdmissionPhase::Terminal);
+    assert_eq!(
+        work.record().unwrap().disposition(),
+        AgentWorkDisposition::Succeeded
+    );
+    drain_events(work);
+    assert!(work.take_extraction().is_some());
+}
+
+#[test]
+fn fail_closed_admission_never_refuses_later_claims_or_a_reopened_store() {
+    const PHASE: &str = "ZEPHIUM_FAIL_CLOSED_PHASE";
+    const DIRECTORY: &str = "ZEPHIUM_FAIL_CLOSED_DIRECTORY";
+    let Some(phase) = std::env::var_os(PHASE) else {
+        // The Store fences one claimant per process: reopening it takes a
+        // second process, as a relaunch does.
+        let directory = tempfile::tempdir().unwrap();
+        for phase in ["create", "reopen"] {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "work_resources::controller::tests::application_tests::fail_closed_admission_never_refuses_later_claims_or_a_reopened_store",
+                    "--nocapture",
+                ])
+                .env(PHASE, phase)
+                .env(DIRECTORY, directory.path())
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{phase}: {result:?}");
+        }
+        return;
+    };
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = std::path::PathBuf::from(std::env::var_os(DIRECTORY).unwrap());
+    let servers = Servers::default();
+    if phase == "reopen" {
+        let (mut work, _native, _store) = coordinator(&directory);
+        run_fresh_read(&mut work, &servers);
+        let history: Vec<_> = work
+            .records()
+            .iter()
+            .map(|record| (record.disposition(), record.debt()))
+            .collect();
+        assert!(history.contains(&(AgentWorkDisposition::FailedClosed, AgentWorkDebt::UNKNOWN)));
+        assert_eq!(history.len(), 3);
+        assert!(work.shutdown_until(
+            &Clock(AtomicU64::new(2)),
+            Instant::now() + Duration::from_secs(2)
+        ));
+        for server in servers.lock().unwrap().drain(..) {
+            assert_eq!(server.join().unwrap(), 2);
+        }
+        return;
+    }
+    let (mut work, native, store) = coordinator(&directory);
+    poll_until(&mut work, RetainedWork::ready);
+    store
+        .hold
+        .store(AgentWorkDisposition::Running as u8, Ordering::Release);
+    assert!(work
+        .submit(
+            request(ContextRunId::generate(), vec![], servers.clone()),
+            now()
+        )
+        .is_ok());
+    poll_until(&mut work, |_| store.pending.lock().unwrap().is_some());
+    // Stopped between the Admitted and Running acknowledgements.
+    work.cancel();
+    store.release(0);
+    poll_until(&mut work, |work| {
+        work.record()
+            .is_some_and(|record| record.disposition() == AgentWorkDisposition::FailedClosed)
+    });
+    let closed = work.record().unwrap();
+    assert_eq!(closed.debt(), AgentWorkDebt::UNKNOWN);
+    assert_eq!(native.reads.load(Ordering::Acquire), 0);
+    // A later page of this process claims beside the row and runs.
+    let (mut later, _later_native) = coordinator_beside(&store);
+    run_fresh_read(&mut later, &servers);
+    assert!(later.records().contains(&closed));
+    assert!(later.shutdown_until(
+        &Clock(AtomicU64::new(2)),
+        Instant::now() + Duration::from_secs(2)
+    ));
+    assert!(
+        !work.shutdown_until(
+            &Clock(AtomicU64::new(2)),
+            Instant::now() + Duration::from_secs(2)
+        ),
+        "a never-started actor still ends unclean"
+    );
+    for server in servers.lock().unwrap().drain(..) {
+        server.join().unwrap();
     }
 }
 
