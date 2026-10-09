@@ -1812,6 +1812,7 @@
   "work_line_writing": "Writing",
   "work_line_waiting": "Waiting",
   "work_line_waiting_for_you": "Waiting for you",
+  "work_part_needs_you_on": "Needs you on {site}",
   "work_line_stopping": "Stopping",
   "work_line_finishing": "Finishing",
   "work_line_ready": "Ready",

@@ -82,7 +82,7 @@
 
   .window.live {
     box-shadow:
-      0 0 0 1.5px var(--color-accent),
+      0 0 0 1px var(--color-ring),
       var(--shadow-float);
   }
 

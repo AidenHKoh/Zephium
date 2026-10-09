@@ -746,9 +746,15 @@ export function environmentParts(
         };
       });
       const rect = stage.lane.rects[part.id]!;
-      const needs = !!part.ask || entries.some((page) => page.human?.phase === "waiting_for_human");
+      const waitingPage = entries.find((page) => page.human?.phase === "waiting_for_human");
+      const needs = !!part.ask || !!waitingPage;
       const state = needs ? "waiting" : part.state;
-      const summary = needs ? m.work_line_waiting_for_you() : partSummary(part, stage);
+      // The helper's own label already says it is waiting; the summary says where.
+      const summary = waitingPage
+        ? m.work_part_needs_you_on({ site: host(waitingPage.url).replace(/^www\./u, "") })
+        : needs
+          ? m.work_turn_waiting()
+          : partSummary(part, stage);
       const rows: NonNullable<CanvasItem["sources"]> =
         part.helper === "research" && !part.pages.length
           ? part.sources.slice(0, SOURCE_ROWS).map((row) => ({
