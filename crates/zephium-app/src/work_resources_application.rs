@@ -493,7 +493,7 @@ impl RetainedWork {
             || self.staged.is_some()
             || self.unstarted.is_some()
             || !self.events.is_empty()
-            || self.inventory.len() == MAX_DURABLE_AGENT_WORK_RUNS
+            || self.storage_full()
         {
             return false;
         }
@@ -661,7 +661,7 @@ impl RetainedWork {
     ) -> Result<(), AgentWorkJournalError> {
         match (request, reply) {
             (AgentWorkJournalRequest::Claim, AgentWorkJournalReply::Claimed { owner, records }) => {
-                if records.len() > MAX_DURABLE_AGENT_WORK_RUNS
+                if records.len() > zephium_agentic::MAX_AGENT_WORK_INVENTORY
                     || records
                         .windows(2)
                         .any(|pair| pair[0].key() >= pair[1].key())
@@ -713,15 +713,7 @@ impl RetainedWork {
                 if let Some(group) = &self.runtime_group {
                     group.remember(self.resource.identity().context(), record)?;
                 }
-                if let Some(previous) = self
-                    .inventory
-                    .iter_mut()
-                    .find(|old| old.key() == record.key())
-                {
-                    *previous = record;
-                } else if self.inventory.len() < MAX_DURABLE_AGENT_WORK_RUNS {
-                    self.inventory.push(record);
-                } else {
+                if !zephium_agentic::remember_agent_work_record(&mut self.inventory, record) {
                     return Err(AgentWorkJournalError::Capacity);
                 }
                 if phase == AdmissionPhase::Reviewing {
@@ -1308,6 +1300,12 @@ impl RetainedWork {
         self.phase
     }
 
+    /// Live and debt-bearing runs fill the Store: no page may be admitted
+    /// until the person settles recovery history.
+    fn storage_full(&self) -> bool {
+        zephium_agentic::outstanding_agent_work_runs(&self.inventory) >= MAX_DURABLE_AGENT_WORK_RUNS
+    }
+
     pub(super) fn failures(&self) -> (Option<AgentWorkFailure>, Option<AgentWorkJournalError>) {
         // A proved unsuccessful actor outcome is not coordinator uncertainty.
         // Project its original cause without calling fail(), changing phase,
@@ -1318,7 +1316,11 @@ impl RetainedWork {
                 AgentWorkRetainedOutcome::ClosedUnsuccessfully(closed) => Some(closed.failure()),
                 _ => None,
             });
-        (failure, self.persistence_failure)
+        let persistence = self.persistence_failure.or_else(|| {
+            self.storage_full()
+                .then_some(AgentWorkJournalError::Capacity)
+        });
+        (failure, persistence)
     }
 
     pub(super) fn record(&self) -> Option<AgentWorkRecord> {

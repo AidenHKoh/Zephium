@@ -2419,3 +2419,33 @@ fn human_handoff_contract(cancel: bool) {
         assert_eq!(native.destructions.load(Ordering::Acquire), 1);
     }
 }
+
+#[test]
+fn clean_history_never_fills_admission_and_full_recovery_history_says_so() {
+    let prior = AgentWorkIncarnation::generate();
+    let current = AgentWorkIncarnation::generate();
+    let row = |key: u16, disposition: AgentWorkDisposition, debt: AgentWorkDebt| {
+        let mut bytes = [0; AGENT_WORK_RECORD_BYTES];
+        bytes[0] = 1;
+        bytes[1] = disposition as u8;
+        bytes[2] = debt.bits();
+        bytes[15] = 3;
+        bytes[16..32].copy_from_slice(&prior.bytes());
+        bytes[46..48].copy_from_slice(&key.to_be_bytes());
+        AgentWorkRecord::decode(bytes).unwrap()
+    };
+    let clean = (0..zephium_agentic::MAX_AGENT_WORK_INVENTORY as u16)
+        .map(|key| row(key, AgentWorkDisposition::Failed, AgentWorkDebt::NONE))
+        .collect();
+    let (work, _, _) = review_coordinator(clean, current);
+    assert!(work.ready());
+    assert_eq!(work.failures().1, None);
+
+    let debt = (0..MAX_DURABLE_AGENT_WORK_RUNS as u16)
+        .map(|key| row(key, AgentWorkDisposition::Rejected, AgentWorkDebt::UNKNOWN))
+        .collect();
+    let (work, native, _) = review_coordinator(debt, current);
+    assert!(!work.ready());
+    assert_eq!(work.failures().1, Some(AgentWorkJournalError::Capacity));
+    assert_eq!(native.acquisitions.load(Ordering::Acquire), 0);
+}
