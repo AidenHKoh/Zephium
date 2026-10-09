@@ -2842,6 +2842,15 @@ impl AgentBrowserSession {
                 self.map_after_refusal(refusal, &baseline, schema, &read)
                     .await
             }
+            // Nothing mapped from evidence the planner chose to extract
+            // from: the mapper is told so and maps once more.
+            Ok(result) if !subtree && result.is_empty() => {
+                match self.map_told(None, &baseline, schema, &read).await {
+                    Ok(retried) => Ok(retried),
+                    Err(_) if self.failure.is_none() => Ok(result),
+                    Err(error) => Err(error),
+                }
+            }
             mapped => mapped.map_err(AgentBrowserProviderError::Extraction),
         }
     }
@@ -2858,11 +2867,29 @@ impl AgentBrowserSession {
         schema: &zephium_agentic::SemanticExtractionSchema,
         read: &zephium_agentic::SemanticReadResult<'a>,
     ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
+        self.map_told(Some(refusal), baseline, schema, read).await
+    }
+
+    /// One corrective mapping, told why: after Rust refused the first
+    /// output (`refusal`), or after it admitted nothing at all (`None`).
+    async fn map_told<'a>(
+        &mut self,
+        refusal: Option<zephium_agentic::SemanticExtractionError>,
+        baseline: &zephium_agentic::SemanticObservationAcknowledgement,
+        schema: &zephium_agentic::SemanticExtractionSchema,
+        read: &zephium_agentic::SemanticReadResult<'a>,
+    ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
         use zephium_agentic::*;
-        let refused = AgentBrowserProviderError::Extraction(
-            AgentProviderExtractionOutputError::Extraction(refusal),
-        );
-        if self.extraction_corrected || !semantic_extraction_refusal_is_retryable(refusal) {
+        let refused = match refusal {
+            Some(refusal) => AgentBrowserProviderError::Extraction(
+                AgentProviderExtractionOutputError::Extraction(refusal),
+            ),
+            None => AgentBrowserProviderError::NoExtractionEvidence,
+        };
+        if self.extraction_corrected
+            || refusal.is_some_and(|refusal| !semantic_extraction_refusal_is_retryable(refusal))
+            || read.fragments().is_empty()
+        {
             return Err(refused);
         }
         self.extraction_corrected = true;
@@ -2884,18 +2911,30 @@ impl AgentBrowserSession {
         let Some(objective) = self.objective.as_ref() else {
             return Err(refused);
         };
-        let Ok(prepared) = AgentProviderExtractionRequestDraft::try_after_refusal(
-            baseline,
-            prior,
-            request,
-            &self.config,
-            objective,
-            payload,
-            schema,
-            read,
-            refusal,
-        )
-        .and_then(|draft| {
+        let draft = match refusal {
+            Some(refusal) => AgentProviderExtractionRequestDraft::try_after_refusal(
+                baseline,
+                prior,
+                request,
+                &self.config,
+                objective,
+                payload,
+                schema,
+                read,
+                refusal,
+            ),
+            None => AgentProviderExtractionRequestDraft::try_after_empty(
+                baseline,
+                prior,
+                request,
+                &self.config,
+                objective,
+                payload,
+                schema,
+                read,
+            ),
+        };
+        let Ok(prepared) = draft.and_then(|draft| {
             draft.try_prepare_for_provider_exact_count(&mut self.policy, request, schema, read)
         }) else {
             return Err(refused);

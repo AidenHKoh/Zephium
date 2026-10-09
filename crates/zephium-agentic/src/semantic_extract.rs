@@ -1029,6 +1029,13 @@ impl<'a> SemanticExtractionResult<'a> {
     pub const fn read_omissions(&self) -> crate::SemanticReadOmissions {
         self.read_omissions
     }
+    /// The mapping admitted nothing: no scalar value and no record.
+    pub fn is_empty(&self) -> bool {
+        self.fields.iter().all(|field| match field.value() {
+            SemanticExtractedValue::Rows(rows) => rows.items().is_empty(),
+            _ => false,
+        })
+    }
     /// Original delivered-read counts, including uncited admitted fragments.
     pub const fn read_stats(&self) -> crate::SemanticReadStats {
         self.read_stats
@@ -1406,6 +1413,9 @@ pub const fn semantic_extraction_refusal_is_retryable(error: SemanticExtractionE
             | SemanticExtractionError::Sensitivity
     )
 }
+
+/// Told to a mapper whose first mapping admitted no record at all.
+pub const SEMANTIC_EXTRACTION_EMPTY_NOTE: &str = "Your previous mapping returned no records and no values, but the browsing model extracted because this evidence answers the request. Map what the evidence supports: for a request about one thing (a function, a product, a page), one record naming it with the details the evidence states; for a list, each record the evidence shows. Cite each value's own fragments. Return no records only if nothing in the evidence relates to the request.";
 
 /// Trusted, content-free text telling the mapper why Rust refused its last
 /// output, for the one corrective mapping call.
@@ -3352,6 +3362,18 @@ mod tests {
              "price":{"k":"text","sources":[token("1 299,00 zł")]},
              "url":{"k":"url","sources":[card]}}
         ]}}]});
+        // A mapping that admits no record is told so once; one that admits
+        // any is not.
+        let empty = json!({"fields":[{"name":"output_0","value":{"k":"rows","items":[]}}]});
+        assert!(extract_semantic_read(
+            &schema,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&empty).unwrap(),
+        )
+        .unwrap()
+        .is_empty());
         let result = extract_semantic_read(
             &schema,
             &read,
@@ -3359,9 +3381,9 @@ mod tests {
             SemanticReadSensitivityLimit::PublicOnly,
             &serde_json::to_vec(&output).unwrap(),
         )
-        .unwrap()
-        .into_owned()
         .unwrap();
+        assert!(!result.is_empty());
+        let result = result.into_owned().unwrap();
         let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
             panic!("rows");
         };

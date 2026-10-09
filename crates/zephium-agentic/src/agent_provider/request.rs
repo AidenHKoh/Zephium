@@ -3100,6 +3100,51 @@ impl AgentProviderExtractionRequestDraft {
         read: &SemanticReadResult<'_>,
         refusal: crate::SemanticExtractionError,
     ) -> Result<Self, AgentProviderRequestError> {
+        let note = crate::semantic_extraction_refusal_note(refusal);
+        Self::try_told(
+            baseline, prior, call, config, objective, payload, schema, read, &note,
+        )
+    }
+
+    /// One more mapping of the same delivered schema and read after a
+    /// mapping that admitted no record from evidence the browsing model chose
+    /// to extract from, telling the model so.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_after_empty(
+        baseline: &SemanticObservationAcknowledgement,
+        prior: AgentProviderInputMetricReceipt,
+        call: AgentModelCallRequest,
+        config: &AgentProviderCallConfig,
+        objective: &AgentProviderObjective,
+        payload: crate::SemanticExtractionModelPayload,
+        schema: &SemanticExtractionSchema,
+        read: &SemanticReadResult<'_>,
+    ) -> Result<Self, AgentProviderRequestError> {
+        Self::try_told(
+            baseline,
+            prior,
+            call,
+            config,
+            objective,
+            payload,
+            schema,
+            read,
+            crate::SEMANTIC_EXTRACTION_EMPTY_NOTE,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_told(
+        baseline: &SemanticObservationAcknowledgement,
+        prior: AgentProviderInputMetricReceipt,
+        call: AgentModelCallRequest,
+        config: &AgentProviderCallConfig,
+        objective: &AgentProviderObjective,
+        payload: crate::SemanticExtractionModelPayload,
+        schema: &SemanticExtractionSchema,
+        read: &SemanticReadResult<'_>,
+        note: &str,
+    ) -> Result<Self, AgentProviderRequestError> {
         if prior.lease != call.lease()
             || prior.call >= call.id()
             || !payload.matches(schema, read)
@@ -3109,12 +3154,11 @@ impl AgentProviderExtractionRequestDraft {
             return Err(AgentPolicyError::Authority.into());
         }
         let (text, semantic_stats, delivery) = payload.into_provider_parts();
-        let note = crate::semantic_extraction_refusal_note(refusal);
         let body = encode_openai_extraction_messages(
             config,
             objective.as_str(),
             &text,
-            Some(&note),
+            Some(note),
             &bound_extraction_output_schema(schema, Some(read)),
         )?;
         let continuation_transcript =
