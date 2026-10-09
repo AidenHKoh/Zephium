@@ -1487,6 +1487,8 @@
   "account_export": "Export…",
   "account_export_saved": "Saved",
   "account_update_required": "This server asks for a newer version of Zephium. Update Zephium to keep using your account here.",
+  "ai_model_locked": "{model} · not in your plan",
+  "work_model_locked": "Not in your plan",
   "account_fault_reauth": "For your security, confirm it’s you with a new sign-in code first.",
   "account_fault_email_taken": "Another account already uses that address.",
   "account_fault_not_found": "The server has no record of that.",

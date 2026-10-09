@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { WorkModelEntry, WorkModelsV1 } from "$shared/ipc/bindings";
-import { pickerGroups, shortName, usable } from "../catalog";
+import { locked, pickerGroups, shortName, usable } from "../catalog";
 import { entry, models } from "$shared/testing/work-models";
 
 describe("the picker's list", () => {
@@ -31,6 +31,13 @@ describe("the picker's list", () => {
     );
     expect(signedOut.ready.map((group) => group.provider)).toEqual(["anthropic", "open_ai"]);
     expect(signedOut.needsKey).not.toContain("cloud");
+    // A plan-locked hosted model stays listed to explain the plan, but a
+    // catalog of only locked models cannot run anything.
+    const id = view.entries.find((item) => item.model.provider === "cloud")!.id;
+    const lockedView = { ...view, cloud: { ...view.cloud, locked: [id] } };
+    expect(locked(lockedView, id)).toBe(true);
+    expect(usable(lockedView, "cloud")).toBe(false);
+    expect(usable(view, "cloud")).toBe(true);
   });
 
   test("a custom server adds the models it serves", () => {

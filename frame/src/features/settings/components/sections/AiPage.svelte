@@ -6,6 +6,7 @@
     ModelsSession,
     entryOf,
     keyedProviders,
+    locked,
     pickerGroups,
     providerName,
     usable,
@@ -79,7 +80,14 @@
       ...(session?.endpoint ?? []),
       ...(expanded ? (session?.more ?? []) : []),
     ]).ready.flatMap((group) => group.entries);
-    return [automatic, ...offered.map((entry) => ({ value: entry.id, label: label(entry) }))];
+    return [
+      automatic,
+      ...offered.map((entry) =>
+        locked(models, entry.id)
+          ? { value: entry.id, label: m.ai_model_locked({ model: label(entry) }), disabled: true }
+          : { value: entry.id, label: label(entry) },
+      ),
+    ];
   }
 </script>
 

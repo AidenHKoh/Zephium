@@ -3,6 +3,7 @@ export {
   entryOf,
   keyState,
   keyedProviders,
+  locked,
   pickerGroups,
   providerName,
   shortName,
