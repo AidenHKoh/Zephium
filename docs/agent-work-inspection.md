@@ -28,7 +28,11 @@ source incompleteness and item/byte omissions remain explicit.
 The standard projection admits at most 128 fragments and 32 KiB content (a
 terminal mapping read 256 and 48 KiB), shedding control labels and options
 before facts when a page holds more; the
-shipping encoding additionally caps its entire semantic payload at 16 KiB.
+shipping encoding additionally caps its entire semantic payload at 32 KiB
+(16 KiB before: a results page lost most of its list to its own filter
+sidebar). A whole filtered capture (128 nodes, 16 KiB of text) always fits;
+a larger whole-page or post-action look is shown by its leading part, and the
+action after it is verified on that same fitted look.
 An oversized encoded projection refuses rather than truncating a serialized
 result or silently broadening a budget. Its conservative UTF-8 preflight is not
 an exact token count: the existing authenticated full-request count and policy
@@ -147,8 +151,18 @@ and still-unsupported scope classes return an authenticated
 `invalid_snapshot_scope` tool result and let the model select another
 operation within the original call, operation, token and time budgets. No rejected
 capture runs, no generation advances, and the trusted capture timestamp and
-retained evidence remain unchanged. Repeated invalid choices stop at the
-existing limit, preserving the terminal mapper reservation.
+retained evidence remain unchanged. A refused inspection no longer narrows the
+remaining calls to the extract pair; like every refusal it counts toward the
+page's refusal streak, which ends the page only after eight refusals in a row
+with no verified action and no page reached between them.
+
+A `snapshot(initial)` requested while the model already holds a whole look of
+the page, with nothing done since, is refused as `page_unchanged` with what
+moves the page instead (scroll the document or a list, a landmark's subtree, a
+wait, or extract). A step the page refused after it reached it (covered,
+changed under it, run without its outcome) is answered with a fresh whole look
+the host takes itself; the refusal reaches the model as `last_step` in the
+inspection facts.
 
 `AgentProviderObservationResolution` separates an admitted capture checkpoint
 from a move-only refusal bound to the exact settled proposal and observation.

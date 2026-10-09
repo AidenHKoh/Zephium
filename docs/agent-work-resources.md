@@ -421,6 +421,20 @@ prepares the semantic runtime for the new document, as an action's own load
 does, so the next commit is not a replaced-document invariant; site sessions
 share this.
 
+A site session's first document may also reload itself once it is ready:
+the same scheme, host and path (any query), within 20 s of its commit, before
+any action or successor navigation, and within the same six loads. Bot checks
+(AWS WAF, DataDome's device check, Amazon's interstitial) serve an empty page
+that reloads itself once the check clears; cancelling that reload left the
+task on an empty shell. The reload settles like an action's hand-on load, and a
+document a hand-on load put in place is enrolled in Work history before the
+next admitted navigation parks its runtime. Any other page-started load after
+ready is still cancelled and the page stays.
+
+WebKit navigation ids are object addresses and can be reused by a later load.
+A load starting while the gate waits for its armed load is that load, even when
+its id equals the superseded one's.
+
 `construct_document_with_policy` additionally offers the explicit trusted
 `InitialQueryFinalization` startup policy. `Exact` remains the default (and the
 synthetic retained fixture policy). This opt-in accepts only an initially
