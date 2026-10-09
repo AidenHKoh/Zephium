@@ -80,6 +80,7 @@ test("a page is named by its title, a thing taken from it, or its address, never
     "lego architecture",
   );
   expect(pageName([run], "https://github.com/acme/app/issues/123")).toBe("Issues 123");
+  expect(pageName([run], "https://cli.github.com/manual/gh-repo-fork")).toBe("gh repo fork");
   expect(pageName([run], "https://example.com/")).toBe("");
 });
 

@@ -65,6 +65,9 @@ function addressName(url: string): string {
       ? `${words(segments.at(-2)!)} ${last}`
       : words(last.replace(/\.[a-z0-9]{2,5}$/iu, "")).replace(/(?:\s\d{3,})+$/u, "");
     if (!segment || /^\d+$/u.test(segment) || segment.length < 3) return "";
+    // A short first word is a name or a command ("gh repo fork", "npm"), not
+    // the start of a sentence: capitalizing it would misspell it.
+    if (/^[a-z0-9]{1,3}\b/u.test(segment)) return segment;
     return segment.charAt(0).toLocaleUpperCase() + segment.slice(1);
   } catch {
     return "";
