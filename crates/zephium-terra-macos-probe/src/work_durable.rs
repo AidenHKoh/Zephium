@@ -571,11 +571,11 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         | Mode::AgentCodeReview
         | Mode::AgentConceptComparison => 720,
         // Each follow-up of a scenario gets a request's own time.
-        Mode::Lead => {
-            860 * LEAD_SCENARIO
+        Mode::Lead => (860
+            * LEAD_SCENARIO
                 .get()
-                .map_or(1, |scenario| scenario.requests.len().max(1)) as u64
-        }
+                .map_or(1, |scenario| scenario.requests.len().max(1)) as u64)
+            .min(3500),
         Mode::Public => 160,
         _ => 240,
     });

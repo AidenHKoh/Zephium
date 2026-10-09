@@ -3444,7 +3444,7 @@ fn run_work_host(
     ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
 ) -> Result<(), &'static str> {
     use zephium_core::ports::engine::Engine as _;
-    if timeout.is_zero() || timeout > Duration::from_secs(900) {
+    if timeout.is_zero() || timeout > Duration::from_secs(3600) {
         return Err("actor_host_timeout");
     }
     let application_policy = events.is_some();
