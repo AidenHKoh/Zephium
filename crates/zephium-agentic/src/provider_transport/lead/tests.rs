@@ -426,7 +426,7 @@ fn targets_build_exact_urls_for_direct_and_cloud() {
 }
 
 /// A loopback server answering each connection with the next canned reply.
-fn serve(replies: Vec<String>) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
+pub(super) fn serve(replies: Vec<String>) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = format!("http://{}/v1", listener.local_addr().unwrap());
     let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -461,7 +461,7 @@ fn serve(replies: Vec<String>) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
     (address, seen)
 }
 
-fn http_reply(status: &str, headers: &str, body: &str) -> String {
+pub(super) fn http_reply(status: &str, headers: &str, body: &str) -> String {
     format!(
         "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n{headers}\r\n{body}",
         body.len()

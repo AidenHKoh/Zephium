@@ -203,18 +203,22 @@ pub async fn list_models(
     Ok(parse_list(target, &body))
 }
 
-/// Fetches Zephium Cloud's `GET /v1/models` for a signed-in session: the
-/// models, and the server's per-role defaults when it states them.
+/// A signed-in session's hosted catalog.
+#[derive(Clone, Debug, Default)]
+pub struct CloudCatalog {
+    /// Chat models for the Work roles.
+    pub models: Vec<super::models::CloudModel>,
+    /// The server's per-role defaults, when it states them.
+    pub defaults: Option<super::models::CloudDefaults>,
+    /// The speech-to-text model, when the account has one.
+    pub transcriber: Option<super::models::CloudTranscriber>,
+}
+
+/// Fetches Zephium Cloud's `GET /v1/models` for a signed-in session.
 pub async fn fetch_cloud_catalog(
     base: &str,
     secret: &LeadSecret,
-) -> Result<
-    (
-        Vec<super::models::CloudModel>,
-        Option<super::models::CloudDefaults>,
-    ),
-    WorkModelError,
-> {
+) -> Result<CloudCatalog, WorkModelError> {
     let root = reqwest::Url::parse(base).map_err(|_| WorkModelError::BadRequest)?;
     let target = LeadTarget {
         wire: WorkModelWire::ChatCompletions,
@@ -229,10 +233,11 @@ pub async fn fetch_cloud_catalog(
         _ => return Err(WorkModelError::Protocol),
     }
     let body: Value = serde_json::from_slice(&body).map_err(|_| WorkModelError::Protocol)?;
-    Ok((
-        super::models::parse_cloud(&body),
-        super::models::parse_cloud_defaults(&body),
-    ))
+    Ok(CloudCatalog {
+        models: super::models::parse_cloud(&body),
+        defaults: super::models::parse_cloud_defaults(&body),
+        transcriber: super::models::parse_cloud_transcriber(&body),
+    })
 }
 
 pub(super) fn parse_list(target: &LeadTarget, body: &Value) -> Vec<WorkModelEntry> {

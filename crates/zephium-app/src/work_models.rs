@@ -113,6 +113,7 @@ pub fn cloud_session_changed() {
         if !signed_in {
             state.cloud.clear();
             state.cloud_defaults = None;
+            state.transcriber = None;
             state.cloud_loaded = true;
         }
     }
@@ -128,17 +129,17 @@ fn notify() {
     }
 }
 
-fn setting(key: &str) -> Option<String> {
+pub(crate) fn setting(key: &str) -> Option<String> {
     let settings = SETTINGS.read().ok()?.clone()?;
     settings.get(key).filter(|value| !value.is_empty())
 }
 
-fn store_setting(key: String, value: String) -> bool {
+pub(crate) fn store_setting(key: String, value: String) -> bool {
     let settings = SETTINGS.read().ok().and_then(|slot| slot.clone());
     settings.is_some_and(|settings| settings.set(key, value))
 }
 
-fn cloud() -> Option<Arc<dyn WorkCloudSession>> {
+pub(crate) fn cloud() -> Option<Arc<dyn WorkCloudSession>> {
     CLOUD
         .read()
         .ok()?
@@ -263,6 +264,7 @@ struct State {
     cloud: Vec<models::CloudModel>,
     /// The server's per-role defaults; `None` from a server that sends none.
     cloud_defaults: Option<models::CloudDefaults>,
+    transcriber: Option<models::CloudTranscriber>,
     cloud_loaded: bool,
     cloud_fetched: Option<Instant>,
     /// Choices kept in memory when no settings store is installed.
@@ -291,12 +293,14 @@ fn choice_key(profile: ProfileId, role: WorkModelRole) -> String {
     format!("work.models.{profile}.{role}")
 }
 
-async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+pub(crate) async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
     tokio::task::spawn_blocking(work).await.ok()
 }
 
 /// Reads which keys exist, from Keychain attributes only, once per process.
-async fn ensure_presence() {
+pub(crate) async fn ensure_presence() {
     let missing: Vec<_> = {
         let mut state = state();
         load_cloud_cache(&mut state);
@@ -366,6 +370,7 @@ fn load_cloud_cache(state: &mut State) {
         if let Ok(body) = serde_json::from_str(&stored) {
             state.cloud = models::parse_cloud(&body);
             state.cloud_defaults = models::parse_cloud_defaults(&body);
+            state.transcriber = models::parse_cloud_transcriber(&body);
         }
     }
 }
@@ -387,10 +392,11 @@ pub async fn refresh_cloud_catalog() {
     let Ok(secret) = session.credential().secret().await else {
         return;
     };
-    let Ok((fetched, defaults)) = lead::fetch_cloud_catalog(&session.base(), &secret).await else {
+    let Ok(fetched) = lead::fetch_cloud_catalog(&session.base(), &secret).await else {
         return;
     };
-    let raw: Vec<serde_json::Value> = fetched
+    let mut raw: Vec<serde_json::Value> = fetched
+        .models
         .iter()
         .map(|model| {
             serde_json::json!({
@@ -411,7 +417,16 @@ pub async fn refresh_cloud_catalog() {
             })
         })
         .collect();
-    let stored = match &defaults {
+    if let Some(transcriber) = &fetched.transcriber {
+        raw.push(serde_json::json!({
+            "id": transcriber.id,
+            "provider": "openai",
+            "upstream_model": transcriber.upstream_model,
+            "roles": ["transcribe"],
+            "limits": {"max_request_bytes": transcriber.max_request_bytes},
+        }));
+    }
+    let stored = match &fetched.defaults {
         Some(defaults) => {
             let id = |role: WorkModelRole| {
                 defaults
@@ -437,8 +452,9 @@ pub async fn refresh_cloud_catalog() {
     }
     {
         let mut state = state();
-        state.cloud = fetched;
-        state.cloud_defaults = defaults;
+        state.cloud = fetched.models;
+        state.transcriber = fetched.transcriber;
+        state.cloud_defaults = fetched.defaults;
         state.cloud_fetched = Some(Instant::now());
     }
     notify();
@@ -685,6 +701,35 @@ impl LeadCredential for CompatibleCredential {
     }
 
     fn rejected(&self) {}
+}
+
+/// Whether the person's own key for `provider` can be used now.
+pub(crate) async fn key_usable(provider: WorkModelProvider) -> bool {
+    ensure_presence().await;
+    let state = state();
+    provider != P::Cloud && usable(&state, provider)
+}
+
+/// The key for `provider`, read from the vault for one call.
+pub(crate) fn key_credential(provider: WorkModelProvider) -> Arc<dyn LeadCredential> {
+    Arc::new(VaultCredential {
+        provider,
+        generation: generation(provider),
+    })
+}
+
+/// The signed-in session and its hosted speech model, when both exist.
+pub(crate) async fn hosted_transcriber(
+) -> Option<(Arc<dyn WorkCloudSession>, models::CloudTranscriber)> {
+    let session = cloud()?;
+    ensure_presence().await;
+    let transcriber = state().transcriber.clone()?;
+    Some((session, transcriber))
+}
+
+/// A provider refused its key during a call outside the model clients.
+pub(crate) fn key_refused(provider: WorkModelProvider) {
+    record_failure(provider, generation(provider), Some(WorkKeyFault::WrongKey));
 }
 
 fn client(

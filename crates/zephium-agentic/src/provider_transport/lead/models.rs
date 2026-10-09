@@ -676,6 +676,62 @@ fn cloud_row(row: &Value) -> Option<CloudModel> {
     })
 }
 
+/// A hosted speech-to-text model: a catalog row whose roles name
+/// `transcribe`. It travels OpenAI's `audio/transcriptions` wire.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloudTranscriber {
+    /// The catalog id, sent as the upload's `model`.
+    pub id: String,
+    /// The upstream model, for display and the stored catalog.
+    pub upstream_model: String,
+    /// The row's `limits.max_request_bytes`, when it states one.
+    pub max_request_bytes: Option<u64>,
+}
+
+/// The transcriber in `GET /v1/models`: `defaults.transcribe` when it names
+/// an available row, else the first available one. Locked rows
+/// (`available: false`) and non-OpenAI upstreams are skipped.
+pub fn parse_cloud_transcriber(body: &Value) -> Option<CloudTranscriber> {
+    let rows = body
+        .get("data")
+        .or_else(|| body.get("models"))
+        .unwrap_or(body)
+        .as_array()?;
+    let preferred = body
+        .get("defaults")
+        .and_then(|defaults| defaults.get("transcribe"))
+        .and_then(Value::as_str);
+    let usable: Vec<CloudTranscriber> = rows
+        .iter()
+        .take(MAX_CLOUD_MODELS)
+        .filter_map(|row| {
+            let text = |key: &str| row.get(key).and_then(Value::as_str);
+            let transcribes = row
+                .get("roles")?
+                .as_array()?
+                .iter()
+                .any(|role| role.as_str() == Some("transcribe"));
+            let available = row.get("available").and_then(Value::as_bool) != Some(false);
+            if !transcribes || !available || text("provider")? != "openai" {
+                return None;
+            }
+            Some(CloudTranscriber {
+                id: text("id").filter(|id| valid_text(id, 100))?.to_owned(),
+                upstream_model: text("upstream_model")
+                    .filter(|model| valid_text(model, 128))?
+                    .to_owned(),
+                max_request_bytes: row
+                    .get("limits")
+                    .and_then(|limits| limits.get("max_request_bytes"))
+                    .and_then(Value::as_u64),
+            })
+        })
+        .collect();
+    preferred
+        .and_then(|id| usable.iter().find(|row| row.id == id).cloned())
+        .or_else(|| usable.into_iter().next())
+}
+
 pub(crate) fn valid_text(text: &str, max: usize) -> bool {
     !text.trim().is_empty() && text.len() <= max && !text.chars().any(char::is_control)
 }
@@ -731,6 +787,39 @@ mod tests {
                 .unwrap()
                 .input,
             4_000_000
+        );
+    }
+
+    #[test]
+    fn the_hosted_transcriber_is_the_default_or_the_first_available_row() {
+        let catalog = json!({
+            "defaults": {"lead": "sonnet", "transcribe": "listen-pro"},
+            "models": [
+                {"id": "sonnet", "provider": "anthropic", "upstream_model": "claude-sonnet-5-5",
+                 "roles": ["lead"]},
+                {"id": "listen", "provider": "openai", "upstream_model": "gpt-4o-mini-transcribe",
+                 "roles": ["transcribe"], "available": true,
+                 "limits": {"max_request_bytes": 8388608}},
+                {"id": "listen-pro", "provider": "openai", "upstream_model": "gpt-4o-transcribe",
+                 "roles": ["transcribe"], "available": false}
+            ]
+        });
+        let transcriber = parse_cloud_transcriber(&catalog).unwrap();
+        assert_eq!(transcriber.id, "listen");
+        assert_eq!(transcriber.upstream_model, "gpt-4o-mini-transcribe");
+        assert_eq!(transcriber.max_request_bytes, Some(8_388_608));
+        assert!(parse_cloud(&catalog)
+            .iter()
+            .all(|model| model.entry.id != "zephium/listen"));
+
+        let mut unlocked = catalog.clone();
+        unlocked["models"][2]["available"] = json!(true);
+        assert_eq!(parse_cloud_transcriber(&unlocked).unwrap().id, "listen-pro");
+        assert_eq!(parse_cloud_transcriber(&json!({"models": []})), None);
+        assert_eq!(
+            parse_cloud_transcriber(&json!({"models": [{"id": "g", "provider": "google",
+                "upstream_model": "chirp", "roles": ["transcribe"]}]})),
+            None
         );
     }
 

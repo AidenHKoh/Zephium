@@ -88,6 +88,8 @@ mod work_authoring_intent;
 pub use work_authoring::{WorkDocumentProjection, WorkDocumentRequest, WorkDocumentSubmission};
 pub use work_authoring_intent::{WorkIntent, WorkUserEdit};
 
+#[cfg(feature = "work-planning")]
+pub mod voice;
 #[cfg(feature = "work-runtime")]
 pub mod work_agent;
 #[cfg(feature = "work-runtime")]

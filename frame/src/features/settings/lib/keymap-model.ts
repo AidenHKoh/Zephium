@@ -38,6 +38,7 @@ const TITLES: Record<string, () => string> = {
   "browser.notes": m.command_browser_notes,
   "settings.shortcuts": m.command_settings_shortcuts,
   "tab.select.last": m.command_tab_select_last,
+  "work.dictate": m.command_work_dictate,
   "theme.system": m.command_theme_system,
   "theme.light": m.command_theme_light,
   "theme.dark": m.command_theme_dark,
@@ -68,6 +69,7 @@ const SECTIONS: { id: string; title: () => string; holds: (entry: KeymapEntry) =
   },
   { id: "view", title: m.keymap_group_view, holds: (entry) => entry.group === "view" },
   { id: "history", title: m.keymap_group_history, holds: (entry) => entry.group === "history" },
+  { id: "work", title: m.keymap_group_work, holds: (entry) => entry.id.startsWith("work.") },
   {
     id: "appearance",
     title: m.keymap_group_appearance,
