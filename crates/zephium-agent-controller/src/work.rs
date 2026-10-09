@@ -1443,6 +1443,7 @@ impl AgentWorkController {
                     typed_unsent: false,
                     typed_field: None,
                     scroll_streak: 0,
+                    look_streak: 0,
                     failure: None,
                     observation: None,
                     native_terminal: None,
@@ -1477,6 +1478,8 @@ struct WorkState {
     typed_field: Option<u64>,
     /// Verified scrolls in a row with nothing else done.
     scroll_streak: u8,
+    /// Whole looks of this page in a row with nothing done between them.
+    look_streak: u8,
     navigation_target: Option<ContextNavigationTarget>,
     navigation_route: Option<AgentNavigationRoute>,
     navigation_discovery: Option<AgentNavigationDiscovery>,
@@ -3159,6 +3162,41 @@ impl AgentWorkController {
                         AgentBrowserProviderError::TurnLimit,
                     ));
                 }
+                let whole = whole_look(turn.turn.proposal(), &observation);
+                // Planners swung between the whole page and itself for many
+                // calls (sidebar-heavy listings): a third whole look in a
+                // row with nothing done between is refused unrun, once per
+                // streak, and pointed at narrower looks, extract or acting.
+                if whole && state.look_streak >= 2 {
+                    state.look_streak = 0;
+                    state.native.check_control(worker, browser)?;
+                    state.refresh_account(worker, browser)?;
+                    state.journal_mut()?.emit(AgentWorkEventKind::ToolProposed(
+                        AgentBrowserToolKind::Snapshot,
+                    ))?;
+                    state
+                        .journal_mut()?
+                        .emit(AgentWorkEventKind::InspectionRefused)?;
+                    fruitless.refused()?;
+                    let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                    let refusal = turn
+                        .into_tool_turn()
+                        .into_parts()
+                        .1
+                        .refuse_whole_look(&observation, &session.config)
+                        .map_err(|_| {
+                            AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
+                        })?;
+                    turn = Self::provider(
+                        &mut state.native,
+                        worker,
+                        browser,
+                        session.cancellation.clone(),
+                        session.continue_after_scope_refusal(refusal, &observation),
+                    )
+                    .await?;
+                    continue;
+                }
                 let resolution = turn
                     .into_tool_turn()
                     .into_parts()
@@ -3268,6 +3306,9 @@ impl AgentWorkController {
                     }
                 };
                 refused_looks = 0;
+                if whole {
+                    state.look_streak = state.look_streak.saturating_add(1);
+                }
                 let next =
                     Self::inspect_current(state, worker, browser, checkpoint, &observation).await?;
                 observation = next.0;
@@ -3839,6 +3880,7 @@ impl AgentWorkController {
             )?;
             state.typed_unsent = typed.is_some();
             state.typed_field = typed;
+            state.look_streak = 0;
             state.scroll_streak = if scrolled {
                 state.scroll_streak.saturating_add(1)
             } else {
@@ -5927,6 +5969,27 @@ mod fruitless_tests {
             ))
         );
     }
+}
+
+/// A snapshot of the whole page: the initial look, or a region or subtree
+/// of the document itself.
+fn whole_look(proposal: &AgentBrowserToolProposal, observation: &SemanticObservation) -> bool {
+    let target = match proposal {
+        AgentBrowserToolProposal::Snapshot(AgentBrowserScopeProposal::Initial) => return true,
+        AgentBrowserToolProposal::Snapshot(
+            AgentBrowserScopeProposal::Region(target) | AgentBrowserScopeProposal::Subtree(target),
+        ) => *target,
+        _ => return false,
+    };
+    observation
+        .frames()
+        .iter()
+        .flat_map(|frame| frame.nodes())
+        .any(|node| {
+            node.reference() == target
+                && node.role() == SemanticRole::Document
+                && node.parent().is_none()
+        })
 }
 
 fn looks_like_human_challenge(observation: &SemanticObservation) -> bool {
