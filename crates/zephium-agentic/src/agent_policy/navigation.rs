@@ -56,6 +56,8 @@ pub enum AgentNavigationLedgerRefusal {
     AlreadyHere,
     /// The target was visited as often as the scope allows.
     Revisited,
+    /// The site already answered this exact address with another document.
+    Redirected,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -619,6 +621,20 @@ impl AgentRunPolicy {
         };
         if current == target {
             return Some(AgentNavigationLedgerRefusal::AlreadyHere);
+        }
+        // Planners asked again and again for a results address the site sent
+        // to its home page; asking again lands there again.
+        if self
+            .navigation_destinations
+            .iter()
+            .zip(&self.navigation_effective_destinations)
+            .take(hop)
+            .any(|(requested, landed)| {
+                requested.as_ref() == Some(target)
+                    && landed.as_ref().is_some_and(|landed| landed != target)
+            })
+        {
+            return Some(AgentNavigationLedgerRefusal::Redirected);
         }
         if self
             .navigation_destinations

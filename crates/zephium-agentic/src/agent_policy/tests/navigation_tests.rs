@@ -982,6 +982,16 @@ fn trusted_finalization_preserves_requested_progress_and_binds_effective_documen
             .unwrap();
         assert_eq!(checkpoint.current_document(), Some(&effective));
         assert_eq!(checkpoint.current_requested_document(), Some(&destination));
+        // The site answered this address with another document: asking for
+        // it again is refused before authority, the landed one stays open.
+        assert_eq!(
+            f.policy.navigation_ledger_refusal(f.lease, &destination),
+            Some(AgentNavigationLedgerRefusal::Redirected)
+        );
+        assert_eq!(
+            f.policy.navigation_ledger_refusal(f.lease, &effective),
+            Some(AgentNavigationLedgerRefusal::AlreadyHere)
+        );
         f.policy.navigation_effective_destinations[0] = Some(destination.clone());
         assert!(
             f.policy

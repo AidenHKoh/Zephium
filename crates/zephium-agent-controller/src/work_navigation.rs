@@ -79,6 +79,7 @@ impl AgentWorkController {
                 AgentNavigationLedgerRefusal::HopsSpent => Reason::HopsSpent,
                 AgentNavigationLedgerRefusal::AlreadyHere => Reason::AlreadyHere,
                 AgentNavigationLedgerRefusal::Revisited => Reason::Revisited,
+                AgentNavigationLedgerRefusal::Redirected => Reason::Redirected,
             })
     }
 
