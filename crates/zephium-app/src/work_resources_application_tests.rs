@@ -1810,6 +1810,159 @@ fn refused_scoped_worker_persists_failed_closed_after_running_ack() {
     }
 }
 
+/// Another page of the same Store, as the Shell seats one in a page group.
+fn peer_coordinator(store: &Arc<GatedStore>) -> (RetainedWork, Arc<Native>) {
+    let (owner, native, resource) = construct_fixture(
+        ContextProfileStorageClass::Ephemeral,
+        WorkBrowserDocumentPolicy::Exact,
+        None,
+    );
+    native.allow_global_shutdown.store(true, Ordering::Release);
+    let work = RetainedWork::new(owner, resource, store.clone(), store.clone())
+        .unwrap_or_else(|_| panic!("original owner and Store join"));
+    (work, native)
+}
+
+/// Admits the group's first page, then fails it before its actor starts:
+/// its Running row is committed but unacknowledged, so the group fails.
+fn fail_first_member(
+    first: &mut RetainedWork,
+    store: &GatedStore,
+    group: &RetainedWorkGroup,
+    servers: &Servers,
+) {
+    poll_until(first, RetainedWork::ready);
+    store
+        .hold
+        .store(AgentWorkDisposition::Running as u8, Ordering::Release);
+    assert!(first
+        .submit(
+            request(ContextRunId::generate(), vec![], servers.clone()),
+            now()
+        )
+        .is_ok());
+    poll_until(first, |_| store.pending.lock().unwrap().is_some());
+    assert!(!group.is_failed());
+    first.cancel();
+    assert!(group.is_failed());
+}
+
+/// A grouped page that settled takes the group's native audit turn and
+/// finishes it, so the Shell can free its seat and close the group.
+fn audit_grouped(work: &mut RetainedWork, clean: bool) {
+    work.begin_shutdown();
+    wait_until(|| {
+        assert!(!work.poll_shutdown(now()).unwrap());
+        work.resource_destroyed()
+    });
+    assert!(
+        work.awaits_group_audit(),
+        "a settled page asks for its turn"
+    );
+    work.allow_group_shutdown();
+    wait_until(|| match work.poll_shutdown(now()) {
+        Ok(closed) => closed,
+        Err(_) => !clean,
+    });
+    assert!(work.native_audit_settled());
+    assert_eq!(work.locally_closed(), clean);
+}
+
+#[test]
+fn failed_group_refuses_a_later_claim_and_both_pages_still_end() {
+    if child("failed_group_refuses_a_later_claim_and_both_pages_still_end") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut first, first_native, store) = coordinator(directory.path());
+    let servers = Servers::default();
+    let group = RetainedWorkGroup::try_new(WorkId::generate(), 3).unwrap();
+    first.set_runtime_group(group.clone());
+    fail_first_member(&mut first, &store, &group, &servers);
+
+    // The next page claims while the failed peer's row is still Running.
+    let (mut second, second_native) = peer_coordinator(&store);
+    second.set_runtime_group(group.clone());
+    poll_until(&mut second, |work| {
+        work.phase() == AdmissionPhase::Uncertain
+    });
+    assert_eq!(
+        second.failures(),
+        (Some(AgentWorkFailure::Contract), None),
+        "a settled claim the page may not run beside is a refusal, not an unsettled write"
+    );
+    assert!(second.record().is_none());
+    assert!(!second.reconcile(), "no Store request is left to reconcile");
+    assert_eq!(second_native.acquisitions.load(Ordering::Acquire), 0);
+    audit_grouped(&mut second, true);
+    assert!(second_native.global_sealed.load(Ordering::Acquire));
+
+    // The failed page classifies its never-started actor and ends unclean.
+    store.release(0);
+    poll_until(&mut first, |work| {
+        work.record()
+            .is_some_and(|record| record.disposition() == AgentWorkDisposition::FailedClosed)
+    });
+    assert_eq!(first_native.reads.load(Ordering::Acquire), 0);
+    audit_grouped(&mut first, false);
+    assert_ne!(first.record().unwrap().debt(), AgentWorkDebt::NONE);
+    assert!(first_native.global_sealed.load(Ordering::Acquire));
+    for server in servers.lock().unwrap().drain(..) {
+        assert_eq!(server.join().unwrap(), 0);
+    }
+}
+
+#[test]
+fn failed_group_refuses_a_staged_peer_and_releases_its_unadmitted_actor() {
+    if child("failed_group_refuses_a_staged_peer_and_releases_its_unadmitted_actor") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut first, _, store) = coordinator(directory.path());
+    let servers = Servers::default();
+    let group = RetainedWorkGroup::try_new(WorkId::generate(), 3).unwrap();
+    first.set_runtime_group(group.clone());
+    let (mut second, second_native) = peer_coordinator(&store);
+    second.set_runtime_group(group.clone());
+    poll_until(&mut second, RetainedWork::ready);
+    fail_first_member(&mut first, &store, &group, &servers);
+
+    // Its actor is staged on an acquired lease, then the failed group
+    // refuses its admission: the journal never hears of it.
+    assert!(second
+        .submit(
+            request(ContextRunId::generate(), vec![], servers.clone()),
+            now()
+        )
+        .is_ok());
+    poll_until(&mut second, |work| {
+        work.phase() == AdmissionPhase::Uncertain
+    });
+    assert_eq!(second.failures(), (Some(AgentWorkFailure::Contract), None));
+    assert!(second.record().is_none());
+    assert_eq!(second_native.acquisitions.load(Ordering::Acquire), 1);
+    assert_eq!(second_native.reads.load(Ordering::Acquire), 0);
+    audit_grouped(&mut second, true);
+    assert_eq!(second_native.destructions.load(Ordering::Acquire), 1);
+    assert!(second_native.global_sealed.load(Ordering::Acquire));
+
+    store.release(0);
+    poll_until(&mut first, |work| {
+        work.record()
+            .is_some_and(|record| record.disposition() == AgentWorkDisposition::FailedClosed)
+    });
+    audit_grouped(&mut first, false);
+    for server in servers.lock().unwrap().drain(..) {
+        assert_eq!(server.join().unwrap(), 0);
+    }
+}
+
 #[test]
 fn pre_dispatch_failure_releases_unused_budget_only_after_exact_terminal_ack() {
     if child("pre_dispatch_failure_releases_unused_budget_only_after_exact_terminal_ack") {

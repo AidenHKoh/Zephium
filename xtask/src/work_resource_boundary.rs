@@ -515,7 +515,14 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "self.owner.locally_retired()", "self.flight.is_none()", "self.unstarted.is_none()",
             "self.destruction_settled=true", "Err(Refusal::Busy)=>returnOk(false)",
             // 24832e90: readiness moved into native_audit_ready and grouped pages wait for their turn.
-            "fnnative_audit_ready(&self)->bool{self.local_shutdown_settled()||(self.destroyed&&self.owner.locally_retired()&&self.unexpected_native.is_none()&&self.unstarted.is_none()&&self.final_scoped_recovery_is_classified())}",
+            // A never-started actor whose row is classified, or that never had one, now takes
+            // its audit and ends unclean like a classified scoped recovery: holding it forever
+            // kept its group's native seat, so the run's later pages waited out their turn.
+            "fnnative_audit_ready(&self)->bool{self.local_shutdown_settled()||(self.destroyed&&self.owner.locally_retired()&&self.unexpected_native.is_none()&&self.finally_unclean())}",
+            "fnfinally_unclean(&self)->bool{ifself.unstarted.is_some(){self.final_unstarted_is_classified()}else{self.final_scoped_recovery_is_classified()}}",
+            // Only an actor the journal never admitted, with nothing in its audit ledger, is released.
+            "ifself.record.is_some()||self.flight.is_some()||self.persistence_failure.is_some(){return;}",
+            ".is_ok_and(|status|status.pending()==0&&status.in_flight()==0)",
             "ifself.grouped&&!self.group_shutdown{returnOk(false);}ifdeadline.is_some_and(|deadline|Instant::now()>=deadline)||!self.native_audit_ready(){returnOk(false);}",
             "RetainedNativeShutdown::new(&self.owner)?", "shutdown.settle(event)",
             "and_then(RetainedNativeShutdown::next_deadline)",

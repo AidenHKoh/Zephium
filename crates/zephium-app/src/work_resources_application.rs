@@ -664,20 +664,30 @@ impl RetainedWork {
                     || records
                         .windows(2)
                         .any(|pair| pair[0].key() >= pair[1].key())
-                    || records.iter().any(|record| {
-                        !(historical_record_admissible(*record)
-                            || self
-                                .runtime_group
-                                .as_ref()
-                                .is_some_and(|group| group.owns_running(owner, *record))
-                            || (reviewable(record.disposition()) && record.incarnation() == owner))
-                    })
                 {
-                    // Malformed or unreviewable recovery facts cannot admit work.
+                    // A malformed inventory leaves the claim itself unsettled.
                     self.inventory = records;
                     #[cfg(feature = "work-execution-probe")]
                     self.public_claim_refusal_diagnostic();
                     return Err(AgentWorkJournalError::Conflict);
+                }
+                if records.iter().any(|record| {
+                    !(historical_record_admissible(*record)
+                        || self
+                            .runtime_group
+                            .as_ref()
+                            .is_some_and(|group| group.owns_running(owner, *record))
+                        || (reviewable(record.disposition()) && record.incarnation() == owner))
+                }) {
+                    // Unreviewable recovery facts, or a failed group's rows,
+                    // refuse this page. The claim itself settled and the page
+                    // wrote nothing, so it closes like any page refused before
+                    // admission instead of holding an unsettled Store request.
+                    self.inventory = records;
+                    #[cfg(feature = "work-execution-probe")]
+                    self.public_claim_refusal_diagnostic();
+                    self.fail(AgentWorkFailure::Contract);
+                    return Ok(());
                 }
                 self.incarnation = Some(owner);
                 self.inventory = records;
@@ -1202,6 +1212,7 @@ impl RetainedWork {
                 }
             }
         }
+        self.release_unadmitted_recovery();
         // A hard-deadline/spawn refusal can occur after Running ACK but before
         // an ActiveActor exists. Persist no-replay classification, not success
         // or revocation, from that exact acknowledged predecessor too.
@@ -1224,6 +1235,24 @@ impl RetainedWork {
                         self.persistence_failure = Some(error);
                     }
                 }
+            }
+        }
+    }
+
+    /// A staged actor the journal never admitted leaves only its dormant
+    /// controller's recovery: no row to classify, no native operation and,
+    /// when its ledger recorded nothing, no audit to deliver. Holding it would
+    /// keep the page from ever settling, and with it the group's native seat.
+    fn release_unadmitted_recovery(&mut self) {
+        if self.record.is_some() || self.flight.is_some() || self.persistence_failure.is_some() {
+            return;
+        }
+        if let Some(AgentWorkRetainedOutcome::Recovery(recovery)) = self.unstarted.as_mut() {
+            if recovery
+                .audit_status()
+                .is_ok_and(|status| status.pending() == 0 && status.in_flight() == 0)
+            {
+                drop(self.unstarted.take());
             }
         }
     }
@@ -1478,7 +1507,7 @@ impl RetainedWork {
         self.owner.drain_abandoned(now)?;
         if self.destroyed {
             let native_clean = self.poll_native_shutdown(deadline)?;
-            if native_clean && self.final_scoped_recovery_is_classified() {
+            if native_clean && self.finally_unclean() {
                 self.diagnose_classified_recovery_shutdown(deadline);
                 return Err(Refusal::Uncertain);
             }
@@ -1520,7 +1549,7 @@ impl RetainedWork {
         self.owner.seal_resources()?;
         self.destroyed = true;
         let native_clean = self.poll_native_shutdown(deadline)?;
-        if native_clean && self.final_scoped_recovery_is_classified() {
+        if native_clean && self.finally_unclean() {
             self.diagnose_classified_recovery_shutdown(deadline);
             return Err(Refusal::Uncertain);
         }
@@ -1558,6 +1587,27 @@ impl RetainedWork {
             })
     }
 
+    /// A staged actor that never ran keeps its recovery owner once the
+    /// journal holds no unsettled request for it: either no row, or its row
+    /// classified FailedClosed. Like a classified scoped recovery, nothing in
+    /// this process can make it clean, so the page ends unclean, not never.
+    fn final_unstarted_is_classified(&self) -> bool {
+        self.unstarted.is_some()
+            && self.flight.is_none()
+            && self.persistence_failure.is_none()
+            && self
+                .record
+                .is_none_or(|record| record.disposition().is_terminal())
+    }
+
+    fn finally_unclean(&self) -> bool {
+        if self.unstarted.is_some() {
+            self.final_unstarted_is_classified()
+        } else {
+            self.final_scoped_recovery_is_classified()
+        }
+    }
+
     fn local_shutdown_settled(&self) -> bool {
         self.destroyed
             && self.owner.locally_retired()
@@ -1589,8 +1639,7 @@ impl RetainedWork {
             || (self.destroyed
                 && self.owner.locally_retired()
                 && self.unexpected_native.is_none()
-                && self.unstarted.is_none()
-                && self.final_scoped_recovery_is_classified())
+                && self.finally_unclean())
     }
     /// A grouped page that could start its native audit once given the turn.
     pub(super) fn awaits_group_audit(&self) -> bool {
