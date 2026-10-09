@@ -119,11 +119,39 @@ impl AgentProviderContinuation {
                 AgentProviderObservationRefusal(self, InspectionRefusal::Limit),
             )));
         }
-        let scope = self
+        let mut scope = self
             .correlation
             .snapshot_scope
-            .as_ref()
+            .clone()
             .ok_or(AgentProviderContinuationError::Scope)?;
+        // A table is read as its subtree; a region asked of a container a
+        // region cannot anchor (a table, a list) is read the same way.
+        if let AgentBrowserScopeProposal::Table(target) = scope {
+            scope = AgentBrowserScopeProposal::Subtree(target);
+        }
+        if let AgentBrowserScopeProposal::Region(target) = scope {
+            if let Some(id) = observation
+                .request()
+                .id()
+                .get()
+                .checked_add(1)
+                .and_then(SemanticObservationId::new)
+            {
+                if matches!(
+                    observation.begin_expansion(
+                        id,
+                        target,
+                        observation.frames()[0].frame(),
+                        SemanticExpansionKind::Region,
+                        SemanticObservationBudget::INITIAL_FILTERED,
+                    ),
+                    Err(crate::SemanticObservationError::ScopeIncompatible)
+                ) {
+                    scope = AgentBrowserScopeProposal::Subtree(target);
+                }
+            }
+        }
+        let scope = &scope;
         if self
             .transcript
             .inspection_checkpoint
@@ -173,6 +201,11 @@ impl AgentProviderContinuation {
                 Err(crate::SemanticObservationError::RepeatedScope) => {
                     return Ok(AgentProviderObservationResolution::Refused(Box::new(
                         AgentProviderObservationRefusal(self, InspectionRefusal::Repeated),
+                    )));
+                }
+                Err(crate::SemanticObservationError::ExpansionLimit) => {
+                    return Ok(AgentProviderObservationResolution::Refused(Box::new(
+                        AgentProviderObservationRefusal(self, InspectionRefusal::Limit),
                     )));
                 }
                 Err(
