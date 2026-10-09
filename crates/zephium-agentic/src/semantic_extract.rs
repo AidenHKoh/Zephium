@@ -4646,4 +4646,70 @@ mod tests {
             SemanticExtractionError::SourceLimit
         );
     }
+
+    #[test]
+    fn a_read_over_budget_keeps_each_kept_record_s_link_for_a_link_column() {
+        // Airbnb's listing: cards in the main region, then a map repeating
+        // every price, all over the read's item budget.
+        let mut nodes = vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"landmark","lm":"main"}),
+        ];
+        for card in 0..20 {
+            let url = format!("https://www.airbnb.com/rooms/{card}?adults=1&check_in=2027-01-01");
+            nodes.push(
+                json!({"k":3 + card * 4,"p":1,"r":"link","n":format!("Condo {card}"),"u":url}),
+            );
+            nodes.push(
+                json!({"k":4 + card * 4,"p":1,"r":"paragraph","t":format!("Stylish home {card}")}),
+            );
+            nodes.push(json!({"k":5 + card * 4,"p":1,"r":"paragraph","t":"1 bath"}));
+            nodes.push(
+                json!({"k":6 + card * 4,"p":1,"r":"paragraph","t":format!("${},000", card + 3)}),
+            );
+        }
+        for marker in 0..40 {
+            nodes.push(
+                json!({"k":100 + marker,"p":1,"r":"paragraph","t":format!("Condo, ${marker},500")}),
+            );
+        }
+        let observation = observation_with_nodes(json!(nodes));
+        let row = vec![
+            SemanticExtractionFieldSchema::try_text("name".into(), true, 512).unwrap(),
+            SemanticExtractionFieldSchema::try_url("url".into(), true, 2048).unwrap(),
+        ];
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![
+                SemanticExtractionFieldSchema::try_rows("output_0".into(), true, row, 12).unwrap(),
+            ],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::try_new(80, 48 * 1024).unwrap(),
+            &schema,
+        )
+        .unwrap();
+        let fields = |field| {
+            read.fragments()
+                .iter()
+                .filter(|fragment| fragment.field() == field)
+                .count()
+        };
+        let links = fields(crate::SemanticReadField::LinkDestination);
+        assert!(links >= 10, "{links}");
+        let named = read
+            .fragments()
+            .iter()
+            .filter(|fragment| {
+                fragment.field() == crate::SemanticReadField::AccessibleName
+                    && fragment_text(**fragment).is_some_and(|text| text.starts_with("Condo "))
+            })
+            .count();
+        assert_eq!(named, links);
+    }
 }

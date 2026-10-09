@@ -1468,7 +1468,15 @@ impl<'a> SemanticReadBuilder<'a> {
             content,
             provenance,
             region: page_region(node, snapshot),
-            rank: shed_rank(field, node.role(), content),
+            // A link's address is the record itself when the schema asks
+            // for links: shed with the record's text, not before it (an
+            // Airbnb listing kept every price and lost every address, so a
+            // required link column mapped no record at all).
+            rank: if field == SemanticReadField::LinkDestination && self.url_sources & 1 != 0 {
+                0
+            } else {
+                shed_rank(field, node.role(), content)
+            },
         });
         self.stats.items = self.stats.items.saturating_add(1);
         self.stats.content_bytes = next_bytes;
