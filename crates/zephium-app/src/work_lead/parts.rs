@@ -462,7 +462,7 @@ where
         out.push('\n');
         if let Some(need) = &fact.need {
             out.push_str(&format!(
-                "It needs {}; its row shows the fix. Build the result only from what was found, make no object, figure, pick or task for what it could not do, and when nothing was found say so in the reply in one sentence.\n",
+                "It needs {}; its row shows the fix. Build the result only from what was found, make no object, figure, pick or task for what it could not do, and when nothing was found say so in the reply in one sentence: that the site could not be read, never that nothing there matches.\n",
                 need_words(need)
             ));
         } else if report.state != WorkPartStateV1::Done {
