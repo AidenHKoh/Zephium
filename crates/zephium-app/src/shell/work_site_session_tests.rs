@@ -220,16 +220,15 @@ async fn work_page_tasks_ask_once_per_site_and_keep_the_answer() {
             ("https://app.slack.com/client", true),
         ]
     );
-    let SiteSession::Yours { site, account } = &opened[0].2 else {
+    let SiteSession::Yours { site, .. } = &opened[0].2 else {
         panic!("Slack opens in the person's session");
     };
     assert_eq!(site, "slack.com");
-    // One key per site for the whole run; a site with no session asks nothing.
+    // One key per site for the whole run; a site with no session asks
+    // nothing and opens in Work's own website data.
     assert_eq!(opened[2].2, opened[0].2);
     assert_eq!(opened[3].2, opened[0].2);
-    assert!(
-        matches!(&opened[1].2, SiteSession::Yours { site, account: other } if site == "example.com" && other != account)
-    );
+    assert_eq!(opened[1].2, SiteSession::Private);
     let badges: Vec<Option<&str>> = execution
         .steps
         .iter()
@@ -240,7 +239,7 @@ async fn work_page_tasks_ask_once_per_site_and_keep_the_answer() {
         badges,
         [
             Some("app.slack.com"),
-            Some("fresh.example.com"),
+            None,
             Some("app.slack.com"),
             Some("app.slack.com"),
         ]

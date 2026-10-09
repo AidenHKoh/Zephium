@@ -481,7 +481,9 @@ impl RunSites {
             // session rather than asking to use it.
             (true, true) => Entry::Private(PrivateBecause::Public),
             (true, false) => Entry::Ask,
-            (false, _) => Entry::Session(self.yours(site)),
+            // Nothing of the person's to use: the page opens in Work's own
+            // website data, which keeps what the site remembers for Work.
+            (false, _) => Entry::Private(PrivateBecause::Public),
         }
     }
     /// Records the person's answer; Always also needs the standing write.
@@ -595,10 +597,10 @@ mod tests {
             ],
         );
         assert_eq!(run.entry("slack.com", true), Entry::Ask);
-        assert!(matches!(
+        assert_eq!(
             run.entry("fresh.com", false),
-            Entry::Session(SiteSession::Yours { .. })
-        ));
+            Entry::Private(PrivateBecause::Public)
+        );
         assert!(matches!(
             run.entry("notion.so", true),
             Entry::Session(SiteSession::Yours { .. })
@@ -637,10 +639,10 @@ mod tests {
             Entry::Private(PrivateBecause::Public)
         );
         run.public("kayak.com");
-        assert!(matches!(
+        assert_eq!(
             run.entry("kayak.com", false),
-            Entry::Session(SiteSession::Yours { .. })
-        ));
+            Entry::Private(PrivateBecause::Public)
+        );
         assert!(matches!(
             run.entry("notion.so", true),
             Entry::Session(SiteSession::Yours { .. })
@@ -657,8 +659,6 @@ mod tests {
             run.view(),
             [
                 ("figma.com".to_owned(), "private"),
-                ("fresh.com".to_owned(), "yours"),
-                ("kayak.com".to_owned(), "yours"),
                 ("notion.so".to_owned(), "yours"),
                 ("slack.com".to_owned(), "yours"),
             ]
