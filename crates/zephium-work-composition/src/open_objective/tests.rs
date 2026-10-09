@@ -731,6 +731,41 @@ fn human_account_attestation_keeps_isolated_storage_and_single_page_scope() {
 
 #[cfg(feature = "durable-runtime")]
 #[test]
+fn work_memory_is_isolated_from_the_profile_and_absent_for_a_private_profile() {
+    for (storage, remembered) in [
+        (ContextProfileStorageClass::Durable, true),
+        (ContextProfileStorageClass::Ephemeral, false),
+    ] {
+        let (input, _) = assemble(
+            identity(),
+            storage,
+            objective(),
+            settings(PublicReadWorkAccount::Anonymous),
+        )
+        .unwrap();
+        let input = input.with_work_website_data();
+        assert_eq!(input.uses_work_website_data(), remembered);
+        let spec = input.retained_resource_spec().unwrap();
+        assert!(spec.isolated_public);
+        assert_eq!(spec.work_website_data, remembered);
+        assert_eq!(spec.storage, storage);
+    }
+    let (input, _) = assemble(
+        identity(),
+        ContextProfileStorageClass::Durable,
+        objective(),
+        settings(PublicReadWorkAccount::Anonymous),
+    )
+    .unwrap();
+    let spec = input
+        .with_isolated_website_data()
+        .retained_resource_spec()
+        .unwrap();
+    assert!(spec.isolated_public && !spec.work_website_data);
+}
+
+#[cfg(feature = "durable-runtime")]
+#[test]
 fn a_recorded_consent_dialog_is_dismissed_by_its_refusing_control_only_by_recipe() {
     use serde_json::json;
     let policy = read_interactions::ReadingInteractionPolicy;

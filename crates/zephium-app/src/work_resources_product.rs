@@ -152,6 +152,7 @@ impl PreparedRetainedWork {
         session: zephium_agentic::WorkBrowserSession,
     ) -> Result<Self, AgentWorkFailure> {
         if !self.spec.isolated_public
+            || self.spec.work_website_data
             || !self
                 .work
                 .is_some_and(|work| session.admits(self.profile.profile(), work))
@@ -888,6 +889,7 @@ impl ProductWork {
             prepared.spec.target,
             prepared.spec.document_policy,
             prepared.spec.isolated_public,
+            prepared.spec.work_website_data,
             prepared.anonymous_session,
             prepared.redirect.clone(),
             Some((prepared.construction_attempt, prepared.spec.deadline)),
