@@ -1587,7 +1587,12 @@ pub(crate) fn step_request(
         }
         "browse" => {
             let start = text("start").ok_or("start is required")?;
-            let goal = text("goal").ok_or("goal is required")?;
+            // A goal is one line of plain text: a helper writing it over
+            // several lines must not cost the page its start.
+            let goal = text("goal")
+                .map(|goal| goal.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|goal| !goal.is_empty())
+                .ok_or("goal is required")?;
             if goal.len() > MAX_WORK_PAGE_GOAL_BYTES {
                 return Err("goal is at most 600 bytes".into());
             }

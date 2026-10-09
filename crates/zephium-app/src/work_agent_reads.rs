@@ -160,6 +160,18 @@ impl Driver {
                 }
                 let id = match self.begin(step, vec![], None).await {
                     Ok(id) => id,
+                    // One page the Store will not record is that page's
+                    // problem, not the run's: the others still read.
+                    Err(WorkError::Invalid) => {
+                        crate::work_trace::record(format_args!(
+                            "work: phase=page event=begin_refused error=Invalid"
+                        ));
+                        self.notice(&format!(
+                            "A page could not start and was skipped: {}",
+                            crate::work_sites::host_of(url).unwrap_or_default()
+                        ));
+                        continue;
+                    }
                     Err(error) => {
                         crate::work_trace::record(format_args!(
                             "work: phase=page event=begin_refused error={error:?}"
