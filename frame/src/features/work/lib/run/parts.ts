@@ -144,6 +144,9 @@ function addLine(part: RunPart, kind: Step["kind"]) {
 }
 
 /** A step a connection part draws as a row: a call (a read, before calls were their own) or a confirmation. */
+/** A part in one of these states is done working, for better or worse. */
+const ENDED: readonly string[] = ["done", "failed", "stopped"];
+
 const callRow = (step: Step) =>
   step.kind.kind === "confirm" ||
   ((step.kind.kind === "call" || step.kind.kind === "read") && !!step.note);
@@ -191,7 +194,8 @@ function factParts(
         ...(fact.summary ? { summary: fact.summary } : {}),
         ...(fact.goal?.trim() ? { goal: fact.goal.trim() } : {}),
         ...(going && state === "running" && nowOf(steps) ? { now: nowOf(steps)! } : {}),
-        ...(fact.need && !going ? { need: fact.need } : {}),
+        // A part that ended short offers its remedy at once, even while the run goes on.
+        ...(fact.need && (!going || ENDED.includes(state)) ? { need: fact.need } : {}),
         ...(fact.service?.connection ? { connection: fact.service.connection } : {}),
         ...(fact.helper === "computer"
           ? { steps: [...ids], lines: [] }
