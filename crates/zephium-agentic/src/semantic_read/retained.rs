@@ -426,6 +426,7 @@ impl SemanticRetainedReadEvidence {
                     field: source.field,
                     role: source.role,
                     content,
+                    region: 0,
                     provenance: SemanticReadProvenance {
                         fields_complete: source.fields_complete,
                         node_key: source.node_key,
