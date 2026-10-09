@@ -1160,3 +1160,38 @@ fn anonymous_session_attachment_requires_exact_owner_and_isolated_construction()
         .unwrap();
     assert!(request.with_anonymous_session(session).is_err());
 }
+
+#[test]
+fn work_website_data_is_isolated_construction_only_and_excludes_run_storage() {
+    use std::time::{Duration, Instant};
+    let profile = ProfileId::from(2_u128);
+    let work = WorkId::from(1_u128);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let construct = |rows: &mut WorkBrowserResources, isolated| {
+        rows.construct_document_with_isolation(
+            WorkBrowserResourceId::generate(),
+            ContextId::generate(),
+            ContextProfileStorageClass::Durable,
+            ContextNavigationTarget::parse("https://example.test/").unwrap(),
+            crate::WorkBrowserDocumentPolicy::Exact,
+            isolated,
+            tick(1),
+        )
+        .unwrap()
+    };
+    let mut rows = registry();
+    assert!(construct(&mut rows, false)
+        .with_work_website_data()
+        .is_err());
+    let request = construct(&mut rows, true).with_work_website_data().unwrap();
+    assert!(request.work_website_data());
+    let session = crate::WorkBrowserSession::new(profile, work, deadline);
+    let request = request.with_anonymous_session(session.clone()).unwrap_err();
+    assert!(request.anonymous_session().is_none());
+    assert!(request.with_work_website_data().is_err());
+    let sessioned = construct(&mut rows, true)
+        .with_anonymous_session(session)
+        .unwrap();
+    let refused = sessioned.with_work_website_data().unwrap_err();
+    assert!(!refused.work_website_data());
+}

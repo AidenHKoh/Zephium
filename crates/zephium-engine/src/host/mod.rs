@@ -593,6 +593,11 @@ pub(crate) struct EngineHost {
     #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
     anonymous_work_stores:
         HashMap<zephium_agentic::ContextRunId, work_resource::AnonymousWorkStore>,
+    /// Work's own persistent store per durable profile, shared by every Work
+    /// page that opens without the person's session. Never removed on page
+    /// teardown; profile erasure and clearing own its data.
+    #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
+    work_data_stores: HashMap<ProfileId, crate::platform::imp::WebsiteDataStore>,
     /// Finished page loads per profile and host in ordinary tabs: a count,
     /// never a URL, path or page fact.
     #[cfg(any(target_os = "macos", target_os = "windows"))]

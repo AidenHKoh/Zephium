@@ -106,6 +106,7 @@ pub(crate) struct WorkResourceGuard {
     storage: ContextProfileStorageClass,
     isolated_public: bool,
     anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
+    work_website_data: bool,
     document: Option<ContextNavigationTarget>,
     document_policy: zephium_agentic::WorkBrowserDocumentPolicy,
     construction_window: Option<(zephium_agentic::WorkBrowserConstructionAttempt, Instant)>,
@@ -159,6 +160,7 @@ impl WorkResourceGuard {
             storage: request.storage(),
             isolated_public: request.isolated_public(),
             anonymous_session: request.anonymous_session().cloned(),
+            work_website_data: request.work_website_data(),
             document: request.document().cloned(),
             document_policy: request.document_policy(),
             construction_window: request.construction_window(),
@@ -324,6 +326,10 @@ impl WorkResourceGuard {
     }
     pub(crate) fn isolated_public(&self) -> bool {
         self.isolated_public
+    }
+    /// Work's own persistent store for the profile, never the profile's own.
+    pub(crate) fn work_website_data(&self) -> bool {
+        self.isolated_public && self.work_website_data
     }
     pub(crate) fn storage(&self) -> ContextProfileStorageClass {
         self.storage

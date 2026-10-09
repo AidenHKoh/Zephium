@@ -105,11 +105,117 @@ fn new_owned_agent_configuration(
             }
             Ok(configuration)
         }
-        (ContextProfileStorageClass::Durable, Some(_))
-        | (ContextProfileStorageClass::Ephemeral, None) => {
+        // A durable class with its own store is Work's persistent store.
+        (ContextProfileStorageClass::Durable, Some(store)) => {
+            let mtm = MainThreadMarker::new().ok_or(AgentOwnedViewConstructionError::Native)?;
+            if !work_store_matches(profile, store) {
+                return Err(AgentOwnedViewConstructionError::Storage);
+            }
+            // SAFETY: `mtm` proves main-thread WebKit access; the retained
+            // store and configuration stay live for these calls.
+            let (configuration, actual_store) = unsafe {
+                let configuration = WKWebViewConfiguration::new(mtm);
+                configuration.setWebsiteDataStore(store);
+                let actual_store = configuration.websiteDataStore();
+                (configuration, actual_store)
+            };
+            if Retained::as_ptr(&actual_store) != Retained::as_ptr(store) {
+                return Err(AgentOwnedViewConstructionError::Storage);
+            }
+            Ok(configuration)
+        }
+        (ContextProfileStorageClass::Ephemeral, None) => {
             Err(AgentOwnedViewConstructionError::Storage)
         }
     }
+}
+
+/// The profile's persistent Work store, created by WebKit on first use.
+pub(crate) fn work_data_store(profile: ProfileId) -> Result<WebsiteDataStore, &'static str> {
+    use objc2_foundation::{MainThreadMarker, NSUUID};
+    use objc2_web_kit::WKWebsiteDataStore;
+
+    let mtm = MainThreadMarker::new().ok_or("WKWebsiteDataStore requires the main thread")?;
+    let identifier = NSUUID::from_bytes(crate::work_website_data::identifier(profile));
+    // SAFETY: `mtm` proves main-thread WebKit access; the UUID outlives the call.
+    let store = unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm) };
+    if !work_store_matches(profile, &store) {
+        return Err("Work website data store identity mismatch");
+    }
+    Ok(store)
+}
+
+/// Removes every kind of data from the profile's Work store, if one exists,
+/// and replies whether a fresh fetch then finds none. Live Work pages keep
+/// running on the emptied store.
+pub(crate) fn clear_work_data_store(profile: ProfileId, reply: std::sync::mpsc::Sender<bool>) {
+    use wry::WebViewExtDarwin;
+
+    if super::initialize_data_store_enumeration().is_err() {
+        let _ = reply.send(false);
+        return;
+    }
+    let identifier = crate::work_website_data::identifier(profile);
+    let fallback = reply.clone();
+    let listed =
+        <wry::WebView as WebViewExtDarwin>::fetch_data_store_identifiers(move |identifiers| {
+            if !identifiers.contains(&identifier) {
+                let _ = reply.send(true);
+                return;
+            }
+            match work_data_store(profile) {
+                Ok(store) => clear_data_store(store, reply),
+                Err(_) => {
+                    let _ = reply.send(false);
+                }
+            }
+        });
+    if listed.is_err() {
+        let _ = fallback.send(false);
+    }
+}
+
+fn clear_data_store(store: WebsiteDataStore, reply: std::sync::mpsc::Sender<bool>) {
+    use objc2_foundation::{MainThreadMarker, NSArray, NSDate};
+    use objc2_web_kit::{WKWebsiteDataRecord, WKWebsiteDataStore};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        let _ = reply.send(false);
+        return;
+    };
+    // SAFETY: `mtm` proves main-thread WebKit access for every call below;
+    // each block keeps its retained store and types alive until WebKit calls it.
+    unsafe {
+        let types = WKWebsiteDataStore::allWebsiteDataTypes(mtm);
+        let epoch = NSDate::dateWithTimeIntervalSince1970(0.0);
+        let verify_store = store.clone();
+        let verify_types = types.clone();
+        let removed = block2::RcBlock::new(move || {
+            let reply = reply.clone();
+            let retained = verify_store.clone();
+            let fetched = block2::RcBlock::new(
+                move |records: std::ptr::NonNull<NSArray<WKWebsiteDataRecord>>| {
+                    let _ = &retained;
+                    let _ = reply.send(records.as_ref().count() == 0);
+                },
+            );
+            verify_store.fetchDataRecordsOfTypes_completionHandler(&verify_types, &fetched);
+        });
+        store.removeDataOfTypes_modifiedSince_completionHandler(&types, &epoch, &removed);
+    }
+}
+
+/// Whether a store is exactly the profile's persistent Work store.
+pub(crate) fn work_store_matches(profile: ProfileId, store: &WebsiteDataStore) -> bool {
+    let expected = crate::work_website_data::identifier(profile);
+    // SAFETY: callers run on the main thread; the retained store stays live.
+    let (persistent, identifier) = unsafe {
+        (
+            store.isPersistent(),
+            store.identifier().map(|id| id.as_bytes()),
+        )
+    };
+    persistent && identifier == Some(expected) && identifier != Some(profile.bytes())
 }
 
 /// Exact native page and its closed navigation policy handle.
@@ -906,9 +1012,13 @@ pub(crate) fn attest_owned_agent_view(
         (actual_store, persistent, identifier)
     };
     let storage_valid = match storage_class {
-        ContextProfileStorageClass::Durable => {
-            ephemeral_store.is_none() && persistent && identifier == Some(profile.bytes())
-        }
+        ContextProfileStorageClass::Durable => match ephemeral_store {
+            None => persistent && identifier == Some(profile.bytes()),
+            Some(expected) => {
+                work_store_matches(profile, &actual_store)
+                    && Retained::as_ptr(&actual_store) == Retained::as_ptr(expected)
+            }
+        },
         ContextProfileStorageClass::Ephemeral => {
             let Some(expected) = ephemeral_store else {
                 return Err(AgentOwnedViewConstructionError::Storage);
