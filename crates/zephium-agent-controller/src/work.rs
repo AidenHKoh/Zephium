@@ -408,6 +408,11 @@ pub trait AgentWorkTask: Send {
     fn human_wall(&self, _: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
         None
     }
+    /// The page shows no sign-in form of its own: a page agent's request
+    /// that the person sign in is refused, and it carries on as a guest.
+    fn sign_in_optional(&self, _: &SemanticObservation) -> bool {
+        false
+    }
     /// A script bot check is given longer to clear by itself before the
     /// person is asked: the page is the person's own request, not one
     /// source among several.
@@ -1453,6 +1458,7 @@ impl AgentWorkController {
                     typed_field: None,
                     scroll_streak: 0,
                     look_streak: 0,
+                    sign_in_refusals: 0,
                     failure: None,
                     observation: None,
                     native_terminal: None,
@@ -1489,6 +1495,8 @@ struct WorkState {
     scroll_streak: u8,
     /// Whole looks of this page in a row with nothing done between them.
     look_streak: u8,
+    /// Requests that the person sign in refused on pages with no sign-in form.
+    sign_in_refusals: u8,
     navigation_target: Option<ContextNavigationTarget>,
     navigation_route: Option<AgentNavigationRoute>,
     navigation_discovery: Option<AgentNavigationDiscovery>,
@@ -3048,7 +3056,9 @@ impl AgentWorkController {
             session.start_initial_with_action_authority(&observation, action_authority.as_ref()),
         )
         .await?;
-        if turn.turn.proposal().kind() == AgentBrowserToolKind::ShowForHuman {
+        if turn.turn.proposal().kind() == AgentBrowserToolKind::ShowForHuman
+            && !Self::sign_in_optional(state, &turn, &observation)
+        {
             Self::accept_model_human_request(state, turn, &observation)?;
             state.observation = Some(observation);
             return Ok(());
@@ -3404,6 +3414,38 @@ impl AgentWorkController {
                 continue;
             }
             if turn.turn.proposal().kind() == AgentBrowserToolKind::ShowForHuman {
+                if Self::sign_in_optional(state, &turn, &observation) {
+                    state.sign_in_refusals = state.sign_in_refusals.saturating_add(1);
+                    let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                    let checkpoint = turn
+                        .into_tool_turn()
+                        .into_parts()
+                        .1
+                        .into_optional_sign_in_refresh(&observation, &session.config)
+                        .map_err(|_| {
+                            AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
+                        })?;
+                    fruitless.refused(state)?;
+                    let next =
+                        Self::inspect_current(state, worker, browser, checkpoint, &observation)
+                            .await?;
+                    observation = next.0;
+                    captured_at = next.1;
+                    progress = next.2;
+                    let Some(next_turn) = next.3 else {
+                        state.observation = Some(observation);
+                        return Ok(());
+                    };
+                    turn = next_turn;
+                    frames.clear();
+                    frames.extend(
+                        observation
+                            .frames()
+                            .iter()
+                            .map(|snapshot| snapshot.frame().clone()),
+                    );
+                    continue;
+                }
                 Self::accept_model_human_request(state, turn, &observation)?;
                 state.observation = Some(observation);
                 return Ok(());
@@ -4631,6 +4673,22 @@ impl AgentWorkController {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// A page agent's request that the person sign in, on a page worked
+    /// toward its goal that shows no sign-in form, is refused a couple of
+    /// times: an optional account offer is no reason to hold the page.
+    fn sign_in_optional(
+        state: &WorkState,
+        turn: &AgentBrowserProviderTurn,
+        observation: &SemanticObservation,
+    ) -> bool {
+        matches!(
+            turn.turn.proposal(),
+            AgentBrowserToolProposal::ShowForHuman(AgentBrowserHumanReason::SignIn)
+        ) && state.actions_before_extraction
+            && state.sign_in_refusals < MAX_SIGN_IN_REFUSALS
+            && state.task.sign_in_optional(observation)
     }
 
     fn accept_model_human_request(
@@ -6049,6 +6107,8 @@ const HUMAN_CHALLENGE_PHRASES: [&str; 18] = [
 const MAX_HUMAN_CHALLENGE_NODES: usize = 48;
 /// How long a script-only check gets to pass on its own before a person is asked.
 const HUMAN_CHALLENGE_SETTLE_MILLIS: [u64; 3] = [2_000, 3_000, 4_000];
+/// Requests that the person sign in refused on one page before one is taken.
+const MAX_SIGN_IN_REFUSALS: u8 = 2;
 /// A well-known script check is looked at again each second: for six on a
 /// page task, for two on a read the lead can replace with other sources.
 const AUTOMATIC_CHECK_SETTLE_MILLIS: [u64; 6] = [1_000; 6];

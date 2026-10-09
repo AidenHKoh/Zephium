@@ -1307,6 +1307,10 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
         None
     }
 
+    fn sign_in_optional(&self, observation: &SemanticObservation) -> bool {
+        !sign_in_wall(observation) && secret_entry(observation).is_none()
+    }
+
     fn patient_checks(&self) -> bool {
         true
     }

@@ -73,6 +73,11 @@ pub trait AgentWorkLocalActionPolicy: Send {
         None
     }
 
+    /// The page shows no sign-in form: signing in is optional on it.
+    fn sign_in_optional(&self, _: &SemanticObservation) -> bool {
+        false
+    }
+
     /// A script bot check gets longer to clear by itself on this page.
     fn patient_checks(&self) -> bool {
         false
@@ -250,6 +255,11 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         self.local_actions
             .as_ref()
             .and_then(|policy| policy.human_wall(observation))
+    }
+    fn sign_in_optional(&self, observation: &SemanticObservation) -> bool {
+        self.local_actions
+            .as_ref()
+            .is_some_and(|policy| policy.sign_in_optional(observation))
     }
     fn patient_checks(&self) -> bool {
         self.local_actions

@@ -101,6 +101,26 @@ impl AgentProviderContinuation {
         ))
     }
 
+    /// A planner that asked the person to sign in on a page with no sign-in
+    /// form of its own is told that signing in is optional there, nothing
+    /// was asked of anyone, and given a fresh look to carry on as a guest.
+    pub fn into_optional_sign_in_refresh(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderObservationCheckpoint, Box<Self>> {
+        if config != &self.config
+            || self.correlation.kind() != AgentBrowserToolKind::ShowForHuman
+            || !AgentProviderObservationCheckpoint::refreshable(&self, observation)
+        {
+            return Err(Box::new(self));
+        }
+        Ok(AgentProviderObservationCheckpoint::refresh(
+            self,
+            "sign_in_optional: nobody was asked to sign in. This page shows no sign-in form, so signing in is optional here: searching, filtering, sorting and reading prices, offers and details never need an account. Close any sign-in, account or discount offer with its close or dismiss control and continue as a guest from this fresh look. Ask for sign-in only when the page itself shows a sign-in form that stands between you and the goal.".to_owned(),
+        ))
+    }
+
     /// A wait asked for while the planner holds a look of one section has
     /// no whole page to compare: it is answered with a fresh whole look
     /// taken a moment later, told so.
