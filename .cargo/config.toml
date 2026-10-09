@@ -9,3 +9,11 @@ rustflags = ["-C", "control-flow-guard=yes"]
 
 [target.aarch64-pc-windows-msvc]
 rustflags = ["-C", "control-flow-guard=yes"]
+
+# Debug executables keep one signature across rebuilds, so the Keychain stops
+# asking for the login password after every build (see the script).
+[target.aarch64-apple-darwin]
+runner = "scripts/dev-sign-run.sh"
+
+[target.x86_64-apple-darwin]
+runner = "scripts/dev-sign-run.sh"
