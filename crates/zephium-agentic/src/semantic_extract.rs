@@ -2454,38 +2454,62 @@ fn address_in_text(
         return None;
     }
     let text = fragment_text(fragment)?;
-    let mut offset = 0;
-    let addresses: Vec<(usize, &str)> = text
-        .split(|ch: char| ch.is_whitespace() || matches!(ch, '|' | '"' | '\'' | '<' | '>'))
-        .filter_map(|token| {
-            let at = offset;
-            offset += token.len() + 1;
-            let token = token.trim_end_matches([',', ';', '.', ')']);
-            ((token.starts_with('/') && !token.starts_with("//")) || token.starts_with("https://"))
-                .then_some((at, token))
-        })
-        .collect();
+    let addresses = printed_addresses(text, fragment.provenance().origin().as_url());
     let chosen = match (proposed, subject) {
-        (Some(proposed), _) => {
-            addresses
-                .iter()
-                .find(|(_, address)| *address == proposed || proposed.ends_with(*address))?
-                .1
-        }
+        (Some(proposed), _) => addresses.into_iter().find(|(_, printed, resolved)| {
+            proposed == printed || proposed == resolved || proposed.ends_with(printed.as_str())
+        })?,
         (None, Some(subject)) => {
             let lower = text.to_ascii_lowercase();
             let at = lower.find(&subject.trim().to_ascii_lowercase())?;
-            addresses.iter().find(|(start, _)| *start > at)?.1
+            addresses.into_iter().find(|(start, _, _)| *start > at)?
         }
-        (None, None) => match addresses.as_slice() {
-            [(_, only)] => only,
-            _ => return None,
-        },
+        (None, None) => {
+            let mut addresses = addresses.into_iter();
+            match (addresses.next(), addresses.next()) {
+                (Some(only), None) => only,
+                _ => return None,
+            }
+        }
     };
-    let resolved = fragment.provenance().origin().as_url().join(chosen).ok()?;
-    let target = crate::ContextNavigationTarget::parse(resolved.as_str()).ok()?;
-    let value = target.as_url().as_str();
-    exact_public_url(value).then(|| (value.to_owned(), fragment.id().model_token()))
+    Some((chosen.2, fragment.id().model_token()))
+}
+
+/// The page addresses a text prints, absolute or site-relative, each with
+/// where it starts, as printed, and resolved against the page's origin into
+/// an exact public address. Other tokens are not addresses.
+pub(crate) fn printed_addresses(text: &str, origin: &url::Url) -> Vec<(usize, String, String)> {
+    let separator = |ch: char| ch.is_whitespace() || matches!(ch, '|' | '"' | '\'' | '<' | '>');
+    let mut found = Vec::new();
+    let mut start = None;
+    for (index, ch) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), ' ')))
+    {
+        if !separator(ch) {
+            start.get_or_insert(index);
+            continue;
+        }
+        let Some(from) = start.take() else {
+            continue;
+        };
+        let printed = text[from..index].trim_end_matches([',', ';', '.', ')']);
+        if !((printed.starts_with('/') && !printed.starts_with("//"))
+            || printed.starts_with("https://"))
+        {
+            continue;
+        }
+        let resolved = origin
+            .join(printed)
+            .ok()
+            .and_then(|url| crate::ContextNavigationTarget::parse(url.as_str()).ok())
+            .map(|target| target.as_url().as_str().to_owned())
+            .filter(|value| exact_public_url(value));
+        if let Some(resolved) = resolved {
+            found.push((from, printed.to_owned(), resolved));
+        }
+    }
+    found
 }
 
 pub(crate) fn exact_public_url(value: &str) -> bool {
