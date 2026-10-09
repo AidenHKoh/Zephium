@@ -63,6 +63,10 @@ struct State {
     redirect_reported: bool,
     /// Open while an admitted action runs on a ready site-session page.
     follow: Option<Follow>,
+    /// Where a ready site-session page's own same-site loads are kept, with
+    /// no action of the model's in flight, for the controller to follow as
+    /// its own navigation; handed over with the run's first action.
+    page_loads: Option<zephium_agentic::SemanticActionFollow>,
     #[cfg(target_os = "windows")]
     write_dispatched: bool,
     #[cfg(target_os = "windows")]
@@ -214,6 +218,7 @@ impl Default for WorkDocumentNavigation {
             redirect: None,
             redirect_reported: false,
             follow: None,
+            page_loads: None,
             #[cfg(target_os = "windows")]
             write_dispatched: false,
             #[cfg(target_os = "windows")]
@@ -377,6 +382,37 @@ impl State {
 }
 
 impl State {
+    /// A same-site GET a ready site-session page starts by itself (a bot
+    /// check that cleared, a timed refresh, a script redirect) while no
+    /// action of the model's runs: cancelled, and kept for the controller,
+    /// which loads it as its own navigation. Whether it was kept.
+    fn keep_page_load(&mut self, raw: &str) -> bool {
+        if self.policy != zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+            || self.phase != Phase::Ready
+            || self.follow.is_some()
+            || self.operation.is_some()
+            || self.human.is_some()
+        {
+            return false;
+        }
+        let Some(slot) = self.page_loads.as_ref() else {
+            return false;
+        };
+        let Ok(target) = ContextNavigationTarget::parse(raw) else {
+            return false;
+        };
+        if !self
+            .target
+            .as_ref()
+            .is_some_and(|requested| zephium_agentic::same_work_site(requested, &target))
+            || !self.policy.admits_request(&target)
+        {
+            return false;
+        }
+        slot.record(target);
+        true
+    }
+
     /// A public first load sent elsewhere before its document is ready: a
     /// server redirect, or the page's own script replacing it. The load is
     /// refused like any unsolicited one, and the document with it; the
@@ -514,6 +550,9 @@ impl WorkDocumentNavigation {
             #[cfg(target_os = "windows")]
             {
                 state.write_dispatched = false;
+            }
+            if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession {
+                state.page_loads = Some(slot.clone());
             }
             state.follow = (state.policy
                 == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
@@ -843,7 +882,9 @@ impl WorkDocumentNavigation {
         }
         // A refused unsolicited navigation grants no replacement document.
         // WebView2 asks again for each server redirect of the main frame.
-        state.refuse_redirect(target);
+        if !state.keep_page_load(target) {
+            state.refuse_redirect(target);
+        }
         false
     }
     #[cfg(target_os = "windows")]
@@ -1006,7 +1047,10 @@ impl WorkDocumentNavigation {
             state.requested = true;
             return true;
         }
-        if action.target_is_main_frame == Some(true) && action.is_get {
+        if action.target_is_main_frame == Some(true)
+            && action.is_get
+            && !state.keep_page_load(target)
+        {
             state.refuse_redirect(target);
         }
         false
@@ -1894,7 +1938,15 @@ mod tests {
         );
         assert_eq!(slot.take(), None);
         gate.close_follow();
+        // With no action in flight, the page's own same-site load is still
+        // cancelled, and kept for the controller to follow; another site's
+        // is not.
         assert!(!gate.allows_apple_action(search, apple_action(T::Other, true)));
+        assert_eq!(
+            slot.take().map(|t| t.as_url().to_string()),
+            Some(search.to_owned())
+        );
+        assert!(!gate.allows_apple_action("https://evil.test/", apple_action(T::Other, true)));
         assert_eq!(slot.take(), None);
 
         let gate = ready();

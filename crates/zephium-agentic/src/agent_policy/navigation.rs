@@ -783,7 +783,9 @@ impl AgentRunPolicy {
                     .as_ref()
                     .ok_or(AgentPolicyError::Navigation)?
             };
-            if current == target {
+            // A page that reloads itself (a bot check that cleared) is
+            // followed to the same address; a model never loads it again.
+            if current == target && !follow {
                 return Err(AgentPolicyError::Navigation);
             }
         }

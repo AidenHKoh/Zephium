@@ -3077,6 +3077,50 @@ impl AgentWorkController {
                     AgentBrowserProviderError::TurnLimit,
                 ));
             }
+            // A page that loaded another address of its own site by itself (a
+            // bot check that cleared, a timed refresh, a script redirect) is
+            // followed as this run's own navigation before the model works on
+            // the document that page left.
+            if matches!(
+                turn.turn.proposal().kind(),
+                AgentBrowserToolKind::Act
+                    | AgentBrowserToolKind::Snapshot
+                    | AgentBrowserToolKind::Locate
+                    | AgentBrowserToolKind::Read
+                    | AgentBrowserToolKind::Wait
+                    | AgentBrowserToolKind::Screenshot
+            ) {
+                if let Some(target) = Self::page_load(state) {
+                    let continuation = turn.into_tool_turn().into_parts().1;
+                    let next = Self::navigate_current(
+                        state,
+                        worker,
+                        browser,
+                        navigation::NavigationStart::Follow(Box::new((continuation, target))),
+                        &observation,
+                        captured_at,
+                        progress,
+                    )
+                    .await?;
+                    fruitless.progressed();
+                    let next_turn;
+                    (observation, captured_at, progress, next_turn) = next;
+                    let Some(next_turn) = next_turn else {
+                        state.observation = Some(observation);
+                        return Ok(());
+                    };
+                    turn = next_turn;
+                    frames.clear();
+                    frames.extend(
+                        observation
+                            .frames()
+                            .iter()
+                            .map(|snapshot| snapshot.frame().clone()),
+                    );
+                    continue;
+                }
+            }
+            let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
             if turn.turn.proposal().kind() == AgentBrowserToolKind::Snapshot {
                 if session.turns.saturating_add(2) > session.max_model_calls
                     || session
@@ -3688,6 +3732,23 @@ impl AgentWorkController {
         };
         *last = Some((key, count));
         count >= 3
+    }
+
+    /// A same-site load the page started by itself since the last look, when
+    /// the run can still afford to follow it; otherwise it is dropped.
+    fn page_load(state: &WorkState) -> Option<ContextNavigationTarget> {
+        let scope = state
+            .navigation_discovery
+            .as_ref()
+            .filter(|scope| scope.is_site_session())?;
+        let target = state.follow.take()?;
+        let session = state.session.as_ref()?;
+        let headroom = usize::from(session.turns) + 2 <= usize::from(session.max_model_calls)
+            && session
+                .policy
+                .remaining_operations(session.lease.lease())
+                .is_ok_and(|operations| operations >= 3);
+        (headroom && scope.admits(&target)).then_some(target)
     }
 
     /// The in-scope observed destination of a link this action clicks, for

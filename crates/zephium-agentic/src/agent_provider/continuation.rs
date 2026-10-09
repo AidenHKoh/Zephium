@@ -1093,7 +1093,17 @@ impl AgentProviderContinuation {
         if config != &self.config {
             return Err(AgentProviderContinuationError::Config);
         }
-        if self.correlation.kind() != AgentBrowserToolKind::Act {
+        // An action's own load, or one the page started by itself while the
+        // model looked or read: either way the document it saw is gone.
+        if !matches!(
+            self.correlation.kind(),
+            AgentBrowserToolKind::Act
+                | AgentBrowserToolKind::Snapshot
+                | AgentBrowserToolKind::Locate
+                | AgentBrowserToolKind::Read
+                | AgentBrowserToolKind::Wait
+                | AgentBrowserToolKind::Screenshot
+        ) {
             return Err(AgentProviderContinuationError::ToolKind);
         }
         if !self.baseline.matches(observation) {
