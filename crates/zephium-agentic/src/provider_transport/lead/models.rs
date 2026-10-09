@@ -184,6 +184,8 @@ const SPECS: &[Spec] = &[
         search: true,
         price: (0.3, 0.03, 2.5),
     },
+    // https://api-docs.deepseek.com/quick_start/pricing, checked 2026-10-09:
+    // deepseek-flash (V4.1 Flash) takes images, deepseek-v4-pro does not.
     // DeepSeek bills a lower off-peak rate; the peak rate keeps cost caps honest.
     Spec {
         provider: P::DeepSeek,

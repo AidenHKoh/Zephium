@@ -82,6 +82,12 @@ pub use work::{
 /// output ceiling. Keeping its own 8k ceiling bounds wasted generation and
 /// the conservative reservation without widening catalog authority.
 const TERRA_CONTROLLER_MAX_OUTPUT_TOKENS: u32 = 8_192;
+/// A chosen page model's reply ceiling, for its decisions and its mappings.
+/// Decisions measured 50-900 output tokens on GPT-6 Luna and up to about
+/// 1,600 with DeepSeek's reasoning; a mapping of a long list stays near 1,000.
+/// A runaway or lost reply is charged at this ceiling, so it stays well
+/// under the 8k the fixed-model paths keep.
+const CHOSEN_PAGE_MAX_OUTPUT_TOKENS: u32 = 4_096;
 /// Fixed Terra worst-case model-call reservation, in micro-USD.
 const TERRA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD: u64 = 778_304;
 /// Controller-level cap aligned with the transport's fixed request ceiling.
@@ -2196,7 +2202,7 @@ impl AgentBrowserSession {
         };
         let config = match (&chosen, model) {
             (Some(chosen), _) => chosen
-                .try_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
+                .try_call_config(CHOSEN_PAGE_MAX_OUTPUT_TOKENS)
                 .map_err(|_| AgentBrowserProviderError::Catalog)?,
             (None, AgentBrowserModel::Terra) => {
                 try_terra_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
