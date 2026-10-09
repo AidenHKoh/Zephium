@@ -230,7 +230,9 @@ third identical refused proposal in a row gets a fresh look of the page
 instead of the same refusal again, and so does the third refused look in a
 row, a moment later. Six refusals in a row with nothing done, two before the
 loop would end the page, the next model call is offered extraction alone, so
-what the looks already hold becomes the result. The first scroll proposed right after a verified fill of
+what the looks already hold becomes the result. A wait proposed while the
+planner holds a look of one section pauses for up to three seconds and is
+answered with a fresh whole look. The first scroll proposed right after a verified fill of
 a field that commits nothing (a search, filter or place box) is refused unrun
 and the planner is told to run the search first; a second such scroll has Rust
 press Enter in that field as its own read and hand the planner the page it
