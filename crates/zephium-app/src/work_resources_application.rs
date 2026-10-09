@@ -1163,6 +1163,14 @@ impl RetainedWork {
                                             terminal, profile, result,
                                         )
                                     });
+                                #[cfg(test)]
+                                let publication = publication.and_then(|publication| {
+                                    if REFUSE_PUBLICATION.swap(false, Ordering::AcqRel) {
+                                        Err(AgentWorkJournalError::Uncertain)
+                                    } else {
+                                        Ok(publication)
+                                    }
+                                });
                                 match publication {
                                     Ok(publication) => self.dispatch_attempt(
                                         DurableRequest::Artifact(
@@ -1173,9 +1181,28 @@ impl RetainedWork {
                                         self.phase,
                                         0,
                                     ),
-                                    Err(error) => {
-                                        self.persistence_failure = Some(error);
+                                    // Nothing reached the Store: the result cannot be
+                                    // archived, so the run is no success. Classify its
+                                    // exact Running row like a run stopped before it
+                                    // could finish, through the same resent CAS.
+                                    Err(_) => {
                                         self.fail(AgentWorkFailure::Contract);
+                                        match AgentWorkJournalMutation::transition(
+                                            record,
+                                            AgentWorkDisposition::FailedClosed,
+                                        ) {
+                                            Ok(mutation) => {
+                                                self.phase = AdmissionPhase::Closing;
+                                                self.dispatch(
+                                                    AgentWorkJournalRequest::CompareAndSet(
+                                                        mutation,
+                                                    ),
+                                                );
+                                            }
+                                            Err(error) => {
+                                                self.persistence_failure = Some(error);
+                                            }
+                                        }
                                     }
                                 }
                             } else {
@@ -1776,6 +1803,11 @@ impl RetainedWork {
             .min()
     }
 }
+
+/// Refuses the next terminal publication before it reaches the Store.
+#[cfg(test)]
+pub(in crate::work_resources) static REFUSE_PUBLICATION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 const MAX_RECONCILIATIONS: u8 = 4;
 
