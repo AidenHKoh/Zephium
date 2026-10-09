@@ -268,6 +268,13 @@ impl AgentProviderActionRefusal {
         let note = match self.error {
             SemanticActionBindingError::TargetCovered => "target_covered: nothing executed; another element (a cookie or consent banner, a dialog, a popover or a sticky header) covered the target. This is a fresh look at the page: close what covers it with its close, dismiss or reject control, or choose another control, using these refs.",
             SemanticActionBindingError::DispatchRejected => "target_changed: nothing executed; the page changed before the action ran. This is a fresh look at the page: act on these refs; if a dialog opened, work within it first.",
+            SemanticActionBindingError::Unverified
+                if self.context.is_some_and(|context| {
+                    matches!(
+                        context.kind,
+                        SemanticActionKind::Fill | SemanticActionKind::Select
+                    )
+                }) => "field_rewritten: the text was typed, but the field did not keep it exactly as typed: the page rewrote it or is offering suggestions (an autocomplete, a place or date picker). This is a fresh look at the page as it is now, with the field's current value and any suggestion list or calendar it opened. If a suggestion matches what you meant, click it; if the field already holds an acceptable value, go on (search, apply, or the next field); otherwise fill it again with a shorter or different value.",
             SemanticActionBindingError::Unverified => "outcome_not_observed: the action ran, but its declared outcome was not seen. This is a fresh look at the page as it is now: continue from what it shows, and do not repeat the same action unchanged.",
             _ => return Err(Box::new(self)),
         };

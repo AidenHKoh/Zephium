@@ -2024,6 +2024,9 @@ pub struct AgentBrowserSession {
     /// A site session hands an unverified draft step back to the model
     /// instead of ending the page task.
     pub(crate) unverified_local_writes: bool,
+    /// The pending fill types into a field that commits nothing: the page
+    /// rewriting it is the model's to see, not the person's to resolve.
+    pub(crate) rewritable_fill: bool,
     failure: Option<AgentBrowserProviderError>,
     deadline: Instant,
     turns: u8,
@@ -2274,6 +2277,7 @@ impl AgentBrowserSession {
             action_terminal: None,
             rejected_refusal: None,
             unverified_local_writes: false,
+            rewritable_fill: false,
             failure: None,
             deadline,
             turns: 0,
@@ -3711,7 +3715,9 @@ impl AgentBrowserSession {
             );
         match result {
             Err(error @ crate::AgentBrowserActionError::Failed(failure))
-                if crate::action::refused_before_acting(failure) =>
+                if crate::action::refused_before_acting(failure)
+                    || (self.rewritable_fill
+                        && failure == zephium_agentic::SemanticActionFailure::NeedsHuman) =>
             {
                 if let Some(refusal) = self.covered_refusal()? {
                     self.rejected_refusal = Some(refusal);
@@ -3772,7 +3778,7 @@ impl AgentBrowserSession {
         let Some(action) = self.action.take() else {
             return Ok(None);
         };
-        let (terminal, refusal) = match action.into_covered_refusal() {
+        let (terminal, refusal) = match action.into_covered_refusal(self.rewritable_fill) {
             Ok(parts) => parts,
             Err(action) => {
                 self.action = Some(*action);

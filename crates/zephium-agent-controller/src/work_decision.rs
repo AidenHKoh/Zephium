@@ -595,7 +595,9 @@ impl AgentWorkController {
         AgentWorkFailure,
     > {
         state.refresh_account(worker, browser)?;
+        let rewritable = state.task.rewritable_field(proposal.action(), baseline);
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        session.rewritable_fill = rewritable;
         let id = state.native.identity.id();
         let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
         let automation = if let Some(retained) = &state.native.retained {

@@ -393,6 +393,13 @@ pub trait AgentWorkTask: Send {
     fn results_page(&self, _: &SemanticObservation) -> Vec<Vec<SemanticReferenceId>> {
         Vec::new()
     }
+    /// The field this fill or choice types into commits nothing by itself
+    /// (a search box, a place or date picker, a filter): the page may rewrite
+    /// what was typed, and an unverified result is shown to the model as the
+    /// field now is rather than held for the person.
+    fn rewritable_field(&self, _: &SemanticPreparedAction, _: &SemanticObservation) -> bool {
+        false
+    }
     /// Supplies independently sourced current account facts for this exact
     /// context. Called at startup and before each provider/effect admission,
     /// including nonterminal inspection and extraction mapping. It must be

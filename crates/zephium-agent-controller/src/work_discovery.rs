@@ -97,6 +97,12 @@ pub trait AgentWorkLocalActionPolicy: Send {
         None
     }
 
+    /// A field whose fill commits nothing by itself, so the page rewriting
+    /// it (an autocomplete, a date picker) is the model's to follow up.
+    fn rewritable_field(&self, _: &SemanticPreparedAction, _: &SemanticObservation) -> bool {
+        false
+    }
+
     /// Resolves the model-selected proposal against fresh semantic evidence and
     /// classifies its destination and expected effect within task scope, or refuses.
     fn assess(
@@ -293,6 +299,15 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         self.local_actions
             .as_ref()
             .and_then(|policy| policy.model_action_effect())
+    }
+    fn rewritable_field(
+        &self,
+        action: &SemanticPreparedAction,
+        observation: &SemanticObservation,
+    ) -> bool {
+        self.local_actions
+            .as_ref()
+            .is_some_and(|policy| policy.rewritable_field(action, observation))
     }
     fn accept_verified_action(
         &mut self,
