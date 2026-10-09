@@ -199,6 +199,7 @@ impl Driver {
                             .is_some_and(|site| self.typing_held.contains(&site)),
                     results: None,
                     redirected_from: None,
+                    private_run: self.grant.private,
                 };
                 chains.push((id, vec![url.clone()]));
                 let future = Box::pin(browser(self.probe.clone(), request.clone()));

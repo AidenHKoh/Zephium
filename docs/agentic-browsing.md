@@ -313,8 +313,9 @@ profile's user-data environment. The digest binds the approved registrable
 site, scheme and port. Pages for that site share the person's Work sign-in and
 origin storage across parts and runs, while independent apps can run in
 parallel. Each construction still verifies the extension-free inventory.
-Anonymous public Work sessions use separate ephemeral environments and never
-seed from the person's profile.
+Pages without the person's session use Work's own website data (4.3) and never
+seed from the person's profile. Private runs and loopback qualification
+fixtures use separate ephemeral environments.
 
 The retained Work cookie bridge keeps existing destination-origin cookies.
 Initial seeding is serialized per site store; a new origin waits for that
@@ -330,7 +331,46 @@ previously used HTTP and custom-port stores, within one bounded request.
 This preserves Work sign-ins without claiming full Browse origin-storage
 equivalence or cross-site Work storage sharing with macOS.
 
-### 4.3 Profile leasing
+### 4.3 Work's own website data
+
+Pages Work opens without the person's session (public reads, page tasks on
+sites the person is not signed in to through Work, sites marked Never or
+declined for the run, and search results pages) use **Work's own website
+data**: one persistent store per durable Zephium profile, separate from the
+profile's own store and from every other profile's. It remembers what a
+person-free browser would remember between visits: solved bot checks such as
+DataDome or Cloudflare clearance cookies, consent choices such as Google's EU
+consent, and site preferences. Earlier Work kept these pages in per-run
+ephemeral storage, so every run met the same consent wall and bot check again
+and failed on sites that only let a returning browser through. Work's store
+holds no session of the person's: it is signed in somewhere only if the person
+signs in inside a Work page.
+
+- macOS: a persistent `WKWebsiteDataStore` from `dataStoreForIdentifier:` with
+  an identifier derived from the profile (SHA-256 of a domain tag and the
+  profile id, shaped as a version 8 UUID), never equal to the profile's own
+  identifier. Construction and every attestation check that the page's store
+  is persistent, carries exactly that identifier, and is the host's one
+  retained object for the profile.
+- Windows: a dedicated WebView2 user-data folder under the profiles root,
+  keyed by the same derived identifier, with one non-private named profile
+  `work-<identifier>`. Its environment never enables extensions and is never
+  seeded from the person's cookies.
+
+Every page of a run and of parallel runs shares the profile's one store, as
+ordinary tabs share a profile's; page teardown never removes it. Deleting the
+Zephium profile erases it with the profile's own data (macOS removes the named
+store and verifies it is gone; Windows removes and verifies the folder).
+Settings → Work → Privacy clears it on request
+(`work_clear_website_data`). A private profile has no Work store; its Work
+pages keep run-scoped ephemeral storage. A private run keeps the run's own
+empty storage for every page. The signed-in path (the person's session for a
+site, including the sign-in handoff) is unchanged and uses the profile's
+storage as before. Content policy, tracking protection and the ad blocker
+apply to Work's store as to every other Work context, and no extension ever
+loads in it.
+
+### 4.4 Profile leasing
 
 Every probe or production context names a profile explicitly. Test tooling
 never falls back to the default profile.
@@ -612,9 +652,13 @@ cited findings (1,024 bytes each), mapped directly to finding artifacts. Scalar
 node outputs remain compatible. A collection-level citation never substitutes
 for a finding's own sources; empty findings return unavailable.
 Symbol-only `locate` queries match literal retained substrings.
-URL fields require an exact public link destination from the native semantic
-observation; prose containing a URL is insufficient. The existing URL screen
-rejects credentials and sensitive embedded state. Schema-driven reads include
+A URL value is always an address the page itself shows, never model text: a
+cited link destination, that field of a cited node, the one observed
+destination the model's copy names, the link named like the record's subject,
+or an address a cited text prints (a page-facts summary's `/p/123-...`),
+resolved against that source's own origin. A destination whose query or
+fragment carries credentials or opaque state keeps the page and loses only
+those parameters; one whose user, host or path looks secret is omitted. Schema-driven reads include
 `link_destination` fragments only when a URL field is declared, within the
 same fragment and byte budgets. The field selection is bound to read guards,
 retention and extraction admission. Version 4 archives independently revalidate
@@ -630,8 +674,11 @@ can populate host-selected Work subject image candidates; readers retain version
 
 Money fields carry a bounded nonnegative decimal string and one of up to 16
 host-approved three-letter currency codes. A cited, complete text/name/value
-fragment must show the matching amount beside an explicit currency code. Bare
-symbols, ambiguous separators and clipped prefixes do not establish a price. Field completeness survives read guards and retained
+fragment must show the matching amount beside its code or a sign that may stand
+for it (`$` for a dollar, `zł` for PLN, `€`, `£`). A lone separator before three
+digits groups thousands; signed amounts, ranges and clipped prefixes do not
+establish a price. A copied price column may take any one amount its cited
+text shows. Field completeness survives read guards and retained
 evidence; version 6 archives recheck it with amount, currency and citations.
 Readers retain versions 1–6. Work money cells preserve the decimal string and
 identity/price citations. `observed_at` remains absent: capture ticks are
@@ -700,10 +747,10 @@ Inspection checkpoints expose remaining capture capacity. Repeated subtree and
 exhausted-inspection refusals have distinct codes; the eight-capture limit is
 checked before native dispatch, preserving current evidence for extraction.
 
-Terminal extraction has its own 112-KiB conservative encoding envelope instead
-of reusing the 16-KiB initial-observation envelope: the existing STANDARD read
-can contain 32 KiB of values, which require up to 64 KiB after escaping, plus
-128 bounded rows, already-admitted frame provenance and the closed schema.
+Terminal extraction has its own conservative encoding envelope instead of
+reusing the 16-KiB initial-observation envelope: the EXTRACTION read can
+contain 48 KiB of values, which require up to 96 KiB after escaping, plus 256
+bounded rows, already-admitted frame provenance and the closed schema.
 This is not additional page disclosure or a larger native/read/turn/run budget.
 Only actual encoded bytes enter the original whole-request provider-exact
 counting path. The mapper receives the whole selected read, never an implicit
@@ -724,10 +771,20 @@ remains authoritative as its guidance requires.
 A purpose-bound collector retains at most 64 KiB from the exact provider call,
 poisons and clears itself on a wrong-call or tool event, and admits output only
 after an exact `Completed` terminal with matching text-byte accounting and no
-tool output. Rust then reapplies schema identity and definition, ordered field
-semantics, value/aggregate bounds, secret screening, sensitivity, and exact
-`@rN` provenance. Refusal, incomplete output, cancellation, byte mismatch, or
-schema/read substitution fails closed. Extraction proof is content-free and
+tool output. Providers that turn the schema into a forced tool call do not
+enforce it, so Rust first rewrites harmless forms into the canonical envelope
+(a missing version, fields in another order or as a map, a citation spelled
+`r12` or as a number, a scalar without its kind tag) and leaves out fields the
+schema lacks. It then reapplies schema identity and definition, value/aggregate
+bounds, secret screening, sensitivity, and `@rN` provenance per value: a
+missing citation is dropped, a value with none left is cited where the read
+shows it verbatim, a text left without a value copies its cited fragment, and
+an optional value, list item or record whose own evidence fails is left out
+and counted. A required value without evidence, a secret, or a sensitivity
+breach still refuses; such a refusal is answered once by a second mapping of
+the same delivered schema and read with a content-free note naming the
+refusal, as the run's single call past its allowance. Incomplete output,
+cancellation, byte mismatch, or schema/read substitution fails closed. Extraction proof is content-free and
 terminal: it cannot seed a diff, another browser-tool turn, or browser
 authority. No live provider request was made for this implementation evidence.
 

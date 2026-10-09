@@ -826,6 +826,8 @@ impl EngineHost {
         #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
         let completion = self.prepare_windows_anonymous_erasure(profile, completion);
         #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+        let completion = self.prepare_windows_work_store_erasure(profile, completion);
+        #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
         self.work_site_stores
             .retain(|(selected, _), _| *selected != profile);
         // Durable erasure tombstones the profile and synchronously retires
@@ -959,6 +961,9 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         self.environments.remove(&profile);
 
+        // WebKit removes a named store only once nothing holds it.
+        #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
+        self.work_data_stores.remove(&profile);
         #[cfg(target_os = "macos")]
         crate::platform::imp::erase_profile_data(profile, ephemeral_stores, completion);
         #[cfg(all(unix, not(target_os = "macos")))]

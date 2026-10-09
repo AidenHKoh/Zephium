@@ -474,7 +474,11 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         .map_err(|_| Error::Runtime)?;
     let store =
         Arc::new(zephium_store::SqliteStore::open(data.path()).map_err(|_| Error::Runtime)?);
-    let profile = ProfileId::generate();
+    // A named profile lets two probe processes share Work's memory.
+    let profile = std::env::var("ZEPHIUM_PROBE_PROFILE")
+        .ok()
+        .and_then(|id| ProfileId::parse(&id))
+        .unwrap_or_else(ProfileId::generate);
     let space = SpaceId::generate();
     store.save_session(SessionState {
         profiles: vec![PersistedProfile {
@@ -581,6 +585,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             *relay.lock().map_err(|_| "durable_events")? = Some(shell.callback_handle());
             if mode == Mode::LoopbackSite {
                 super::work_site::install_presence(engine.clone());
+            } else {
+                super::work_site::remember_engine(engine.clone());
             }
             let composition = MacosWorkComposition::new(engine, owner_store);
             if !shell.admit_startup() {

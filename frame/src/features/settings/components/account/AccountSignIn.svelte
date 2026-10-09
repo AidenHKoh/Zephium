@@ -196,7 +196,7 @@
   .mark {
     display: flex;
     margin-block-end: 18px;
-    filter: drop-shadow(0 6px 14px rgb(0 0 0 / 0.18));
+    filter: var(--shadow-brand-lift);
   }
 
   h2 {

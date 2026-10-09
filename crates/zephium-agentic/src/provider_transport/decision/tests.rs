@@ -953,7 +953,7 @@ fn incomplete_reads_retain_only_confident_located_evidence_for_later_mapping() {
         .is_none());
 
     let mut later_nodes = vec![json!({"k":1,"r":"document","n":"New section","fc":true})];
-    later_nodes.extend((2..=128).map(|key| json!({
+    later_nodes.extend((2..=256).map(|key| json!({
         "k":key + 100,"p":0,"r":"paragraph","t":format!("Unrelated current fact {key}"),"fc":true,
     })));
     let snapshot = decode_semantic_snapshot(
@@ -972,7 +972,7 @@ fn incomplete_reads_retain_only_confident_located_evidence_for_later_mapping() {
         SemanticObservationRequest::initial(
             SemanticObservationId::new(2).unwrap(),
             call.account().context(),
-            SemanticObservationBudget::try_new(128, 32768, 1).unwrap(),
+            SemanticObservationBudget::try_new(256, 65536, 1).unwrap(),
         ),
         snapshot,
     )
@@ -987,13 +987,13 @@ fn incomplete_reads_retain_only_confident_located_evidence_for_later_mapping() {
         SemanticReadAuthority::Acknowledged(&ack),
         SemanticCaptureInstant::from_millis(102),
         SemanticReadSensitivityLimit::PublicOnly,
-        SemanticReadBudget::STANDARD,
+        SemanticReadBudget::EXTRACTION,
         &schema,
     )
     .unwrap();
-    assert_eq!(current.fragments().len(), 128);
+    assert_eq!(current.fragments().len(), 256);
     let merged = retained.merge_for_extraction(current).unwrap();
-    assert_eq!(merged.fragments().len(), 128);
+    assert_eq!(merged.fragments().len(), 256);
     assert!(merged.fragments().iter().any(|fragment| fragment
         .content()
         .text()

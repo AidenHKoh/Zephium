@@ -74,6 +74,23 @@ export const commands = {
 	workMoreModels: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkMoreModelsV1_Serialize>("work_more_models", { expectedProfile, provider }),
 	/**  Ollama and LM Studio on their default ports, for one-click setup. */
 	workLocalServers: () => __TAURI_INVOKE<WorkLocalServerV1[]>("work_local_servers"),
+	voiceStatus: () => __TAURI_INVOKE<VoiceStatusV1>("voice_status"),
+	voiceChooseEngine: (engine: "on_device" | "zephium" | "open_ai" | "groq" | null) => __TAURI_INVOKE<VoiceStatusV1>("voice_choose_engine", { engine }),
+	voiceChooseLanguage: (language: string | null) => __TAURI_INVOKE<VoiceStatusV1>("voice_choose_language", { language }),
+	/**
+	 *  Opens the microphone and starts a take. On first use this waits while
+	 *  the system asks for permission.
+	 */
+	voiceStart: () => __TAURI_INVOKE<VoiceStartV1>("voice_start"),
+	/**  Stops listening; the words arrive as a `done` change. */
+	voiceStop: (take: number) => __TAURI_INVOKE<boolean>("voice_stop", { take }),
+	/**  Discards the current take, whatever its phase. */
+	voiceCancel: () => __TAURI_INVOKE<boolean>("voice_cancel"),
+	/**
+	 *  Opens the system's privacy settings for the microphone or speech
+	 *  recognition, after the person declined one.
+	 */
+	voiceOpenPrivacy: (kind: VoicePrivacyV1) => __TAURI_INVOKE<boolean>("voice_open_privacy", { kind }),
 	/**
 	 *  The account now, refreshing what is stale in the background. Asks no
 	 *  server unless the person is signed in or chose one.
@@ -97,8 +114,35 @@ export const commands = {
 	accountSetServer: (server: string | null) => __TAURI_INVOKE<AccountReplyV1>("account_set_server", { server }),
 	accountDeletionCode: () => __TAURI_INVOKE<AccountReplyV1>("account_deletion_code"),
 	accountDelete: (code: string) => __TAURI_INVOKE<AccountReplyV1>("account_delete", { code }),
+	/**  Renames the account; null or blank clears the name. */
+	accountSetName: (name: string | null) => __TAURI_INVOKE<AccountReplyV1>("account_set_name", { name }),
+	/**
+	 *  Sends a sign-in code to the account's own address, for a change that
+	 *  needs a session from the last few minutes.
+	 */
+	accountReauthCode: () => __TAURI_INVOKE<AccountReplyV1>("account_reauth_code"),
+	/**  Sends a code to the address the account would move to. */
+	accountEmailCode: (email: string) => __TAURI_INVOKE<AccountReplyV1>("account_email_code", { email }),
+	/**  Moves the account to `email`. Every session ends, this one included. */
+	accountChangeEmail: (email: string, code: string) => __TAURI_INVOKE<AccountReplyV1>("account_change_email", { email, code }),
+	/**  Ends every session of the account, on every device. */
+	accountSignOutEverywhere: () => __TAURI_INVOKE<AccountReplyV1>("account_sign_out_everywhere"),
+	/**
+	 *  Saves the server's account export where the person chooses. The file
+	 *  holds what the server sent: no bearer, no browsing data.
+	 */
+	accountExport: () => __TAURI_INVOKE<AccountExportV1>("account_export"),
+	/**  One page of the account's hosted requests, newest first. */
+	accountUsageHistory: (cursor: string | null) => __TAURI_INVOKE<AccountHistoryV1>("account_usage_history", { cursor }),
+	/**  One hosted request's receipt. */
+	accountReceipt: (id: string) => __TAURI_INVOKE<AccountReceiptV1>("account_receipt", { id }),
 	workSites: (expectedProfile: string) => __TAURI_INVOKE<WorkSiteAccessResponseV1>("work_sites", { expectedProfile }),
 	workSetSite: (expectedProfile: string, change: WorkSiteChangeV1) => __TAURI_INVOKE<WorkSiteAccessResponseV1>("work_set_site", { expectedProfile, change }),
+	/**
+	 *  Clears Work's website data for the profile. The profile's own browsing
+	 *  data is untouched. True when Work's store is empty afterwards.
+	 */
+	workClearWebsiteData: (expectedProfile: string) => __TAURI_INVOKE<boolean>("work_clear_website_data", { expectedProfile }),
 	/**  The tools found on this Mac and the servers this profile added. */
 	workConnections: (expectedProfile: string) => __TAURI_INVOKE<WorkConnectionsResponseV1_Serialize>("work_connections", { expectedProfile }),
 	/**  Adds or replaces a server; new secrets go to the Keychain. */
@@ -455,6 +499,8 @@ export const events = {
 	zephiumAccountChanged: makeEvent<AccountChanged>("zephium:account-changed"),
 	zephiumImportProgress: makeEvent<ImportJobView>("zephium:import-progress"),
 	zephiumKeymapChanged: makeEvent<KeymapChanged>("zephium:keymap-changed"),
+	zephiumVoiceChanged: makeEvent<VoiceChanged>("zephium:voice-changed"),
+	zephiumVoiceLevels: makeEvent<VoiceLevels>("zephium:voice-levels"),
 	zephiumWorkDecisionPreferenceChanged: makeEvent<WorkDecisionPreferenceChanged>("zephium:work-decision-preference-changed"),
 	zephiumWorkHumanChanged: makeEvent<WorkHumanChanged>("zephium:work-human-changed"),
 	zephiumWorkModelsChanged: makeEvent<WorkModelsChanged>("zephium:work-models-changed"),
@@ -473,6 +519,12 @@ export type AccountChanged = {
 	version: number,
 };
 
+export type AccountExportV1 = {
+	/**  The export was written where the person chose. */
+	saved: boolean,
+	fault: AccountFaultV1 | null,
+};
+
 export type AccountFaultV1 = "offline" | 
 /**  The session ended; sign in again. */
 "signed_out" | "rate_limited" | "invalid_code" | "signup_closed" | 
@@ -481,7 +533,18 @@ export type AccountFaultV1 = "offline" |
 /**  Nothing has been bought, so there is nothing to manage. */
 "no_billing_account" | "server" | 
 /**  The Keychain or Credential Manager refused. */
-"vault" | "invalid";
+"vault" | "invalid" | 
+/**  The change needs a fresh sign-in; the session itself is still valid. */
+"reauth_required" | 
+/**  Another account already uses that address. */
+"email_taken" | "not_found";
+
+export type AccountHistoryV1 = {
+	requests: AccountRequestV1[],
+	/**  Opaque; passed back unchanged for the next page. */
+	next_cursor: string | null,
+	fault: AccountFaultV1 | null,
+};
 
 export type AccountNoticeV1 = {
 	id: string,
@@ -489,7 +552,9 @@ export type AccountNoticeV1 = {
 	warning: boolean,
 };
 
-export type AccountOfferV1 = { kind: "plan"; plan: string; interval: string; name: string | null; price: AccountPriceV1 | null; features: string[] } | { kind: "top_up"; id: string; price: AccountPriceV1 | null; expires_days: number | null };
+export type AccountOfferV1 = { kind: "plan"; plan: string; interval: string; name: string | null; price: AccountPriceV1 | null; features: string[] } | { kind: "top_up"; id: string; name: string | null; 
+/**  Credit it adds, in units of the usage's scale. */
+units: string | null; price: AccountPriceV1 | null; expires_days: number | null };
 
 export type AccountPriceV1 = {
 	/**  In the currency's minor unit, as the billing provider states it. */
@@ -499,11 +564,30 @@ export type AccountPriceV1 = {
 
 export type AccountPurchaseV1 = { kind: "plan"; plan: string; interval: string } | { kind: "top_up"; id: string };
 
+export type AccountReceiptV1 = {
+	request: AccountRequestV1 | null,
+	fault: AccountFaultV1 | null,
+};
+
 export type AccountReplyV1 = {
 	account: AccountV1,
 	fault: AccountFaultV1 | null,
 	/**  Seconds to wait before trying again, with `rate_limited`. */
 	retry_after: number | null,
+};
+
+/**  One hosted request's accounting; never its content. */
+export type AccountRequestV1 = {
+	id: string,
+	model_id: string | null,
+	/**  `settled` is final; anything else is still held or being checked. */
+	state: string,
+	/**  Charged, in units; final only when settled. */
+	charged: string | null,
+	reserved: string | null,
+	started_at: string | null,
+	finished_at: string | null,
+	error_class: string | null,
 };
 
 export type AccountSessionV1 = {
@@ -527,13 +611,29 @@ export type AccountSubscriptionV1 = {
 	cancel_at_period_end: boolean,
 };
 
+/**
+ *  Usage as the server counts it. Amounts are decimal strings of integer
+ *  units, `unit_scale` to one credit; they are shown divided, never summed
+ *  into a charge. Held units are for calls still running.
+ */
 export type AccountUsageV1 = {
-	/**  Share of the plan's allowance used, 0–100; null without an allowance. */
+	/**  Share of the plan's allowance used or held, 0–100; null without an allowance. */
 	used_percent: number | null,
 	/**  When the allowance renews, as the server states it (ISO 8601). */
 	resets_at: string | null,
 	/**  Bought usage remains beyond the plan's allowance. */
 	extra: boolean,
+	unit_scale: number,
+	remaining: string | null,
+	allowance_total: string | null,
+	allowance_used: string | null,
+	held: string | null,
+	bonus_remaining: string | null,
+	bonus_expires_at: string | null,
+	purchased_remaining: string | null,
+	spent_today: string | null,
+	/**  The daily cap; null when there is none. */
+	daily_limit: string | null,
 };
 
 export type AccountV1 = {
@@ -544,8 +644,11 @@ export type AccountV1 = {
 	custom_server: boolean,
 	/**  What the server offers; null until it has answered once. */
 	hosted_models: boolean | null,
+	/**  Purchases and the billing portal are offered here. */
 	billing: boolean | null,
 	signup_open: boolean | null,
+	/**  The server asks for a newer Zephium than this one. */
+	update_required: boolean,
 	signed_in: boolean,
 	/**  The address a sign-in code was sent to, while waiting for it. */
 	pending_email: string | null,
@@ -559,6 +662,8 @@ export type AccountV1 = {
 	/**  A checkout was opened and is being watched for completion. */
 	checkout_open: boolean,
 	notice: AccountNoticeV1 | null,
+	/**  Hosted calls whose charge was not confirmed when they ended. */
+	unsettled: AccountRequestV1[],
 };
 
 /**
@@ -2193,6 +2298,65 @@ export type UpdateStatus_Deserialize = ({ state: "unavailable" }) & { retry_reas
 
 export type UpdateStatus_Serialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
 
+/**  A take moved on. `text` is set once, when it is done. */
+export type VoiceChanged = {
+	take: number,
+	phase: VoicePhaseV1,
+	engine: VoiceEngineV1 | null,
+	/**  The words so far, while listening, when the engine streams them. */
+	partial: string | null,
+	text: string | null,
+	fault: VoiceFaultV1 | null,
+};
+
+export type VoiceEngineV1 = "on_device" | "zephium" | "open_ai" | "groq";
+
+/**  Why a take could not start or produce words. Closed; no system text. */
+export type VoiceFaultV1 = "microphone_denied" | "recognition_denied" | "no_microphone" | "language_unavailable" | 
+/**  No engine can run: nothing on this device and no account or key. */
+"no_engine" | "key_refused" | "signed_out" | "out_of_credit" | "rate_limited" | "offline" | "provider_down" | "too_long" | "busy" | "unavailable";
+
+/**
+ *  Input levels in percent, one per 40 ms of audio, oldest first; they
+ *  arrive about ten times a second.
+ */
+export type VoiceLevels = {
+	take: number,
+	levels: number[],
+};
+
+export type VoicePermissionV1 = "granted" | "undetermined" | "denied";
+
+export type VoicePhaseV1 = "listening" | "transcribing" | "done" | "failed" | "cancelled";
+
+export type VoicePrivacyV1 = "microphone" | "recognition";
+
+export type VoiceStartV1 = {
+	/**  The take's id, which its events carry; null when it did not start. */
+	take: number | null,
+	engine: VoiceEngineV1 | null,
+	fault: VoiceFaultV1 | null,
+};
+
+export type VoiceStatusV1 = {
+	version: number,
+	/**  Engines usable now, this device's first. */
+	engines: VoiceEngineV1[],
+	chosen: VoiceEngineV1 | null,
+	/**  What a take uses now; null when nothing can. */
+	effective: VoiceEngineV1 | null,
+	/**  The dictation language the person chose; null follows the system. */
+	language: string | null,
+	/**  The system's preferred languages, most preferred first. */
+	languages: string[],
+	/**
+	 *  The on-device recognizer's locale for the language; null when this
+	 *  device cannot recognize it.
+	 */
+	on_device: string | null,
+	microphone: VoicePermissionV1,
+};
+
 /**  An extension's run-time request for access, awaiting the user's answer. */
 export type WebExtensionAccessRequestView = {
 	profile_id: string,
@@ -2965,6 +3129,11 @@ export type WorkCliStatusV1 = "signed_in" | "signed_out" |
 export type WorkCloudStatusV1 = {
 	signed_in: boolean,
 	plan: string | null,
+	/**
+	 *  Hosted entries listed for this account but locked by its plan: shown
+	 *  to explain the plan, never choosable.
+	 */
+	locked: string[],
 };
 
 /**  Lines `from..=to` of the code text, counted from 1. */

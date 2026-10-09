@@ -426,7 +426,7 @@ fn targets_build_exact_urls_for_direct_and_cloud() {
 }
 
 /// A loopback server answering each connection with the next canned reply.
-fn serve(replies: Vec<String>) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
+pub(super) fn serve(replies: Vec<String>) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = format!("http://{}/v1", listener.local_addr().unwrap());
     let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -461,7 +461,7 @@ fn serve(replies: Vec<String>) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
     (address, seen)
 }
 
-fn http_reply(status: &str, headers: &str, body: &str) -> String {
+pub(super) fn http_reply(status: &str, headers: &str, body: &str) -> String {
     format!(
         "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n{headers}\r\n{body}",
         body.len()
@@ -594,39 +594,35 @@ fn cloud_refusals_never_read_as_a_bad_session_unless_they_are() {
     ));
 }
 
-#[tokio::test]
-async fn cloud_calls_send_the_bearer_and_a_fresh_idempotency_key_per_attempt() {
-    let stream = sse(&[(
+fn completed_stream() -> String {
+    sse(&[(
         "response.completed",
         json!({"type": "response.completed", "response": {"usage": {
         "input_tokens": 10, "output_tokens": 1}}}),
-    )]);
-    let (base, seen) = serve(vec![
-        http_reply(
-            "429 Too Many Requests",
-            "retry-after: 0\r\n",
-            "{\"error\":{\"code\":\"concurrency_limited\"}}",
-        ),
-        http_reply("200 OK", "content-type: text/event-stream\r\n", &stream),
-    ]);
+    )])
+}
+
+type Records = std::sync::Arc<Mutex<Vec<LeadCloudRecord>>>;
+
+fn cloud_client(base: &str) -> (LeadClient, Records) {
     let root = base.trim_end_matches("/v1");
     let target = LeadTarget::cloud(root, WorkModelProvider::OpenAi).unwrap();
+    let records: Records = Default::default();
+    let log = records.clone();
     let client = LeadClient::new(
         target,
         Arc::new(LeadStaticCredential::new(
             LeadSecret::new("session-token".into()).unwrap(),
         )),
         None,
-    );
-    client
-        .call(
-            request(WorkModelWire::OpenAiResponses, "gpt-6-luna"),
-            &|_| {},
-        )
-        .await
-        .unwrap();
-    let seen = seen.lock().unwrap();
-    let keys: Vec<String> = seen
+    )
+    .with_cloud_observer(Arc::new(move |record| log.lock().unwrap().push(record)));
+    (client, records)
+}
+
+fn idempotency_keys(seen: &Mutex<Vec<String>>) -> Vec<String> {
+    seen.lock()
+        .unwrap()
         .iter()
         .map(|request| {
             let request = request.to_ascii_lowercase();
@@ -642,9 +638,197 @@ async fn cloud_calls_send_the_bearer_and_a_fresh_idempotency_key_per_attempt() {
             assert!(matches!(&line[19..20], "8" | "9" | "a" | "b"));
             line
         })
-        .collect();
+        .collect()
+}
+
+#[tokio::test]
+async fn cloud_keeps_one_key_per_generation_unless_an_attempt_was_admitted() {
+    let (base, seen) = serve(vec![
+        http_reply(
+            "429 Too Many Requests",
+            "retry-after: 0\r\n",
+            "{\"error\":{\"code\":\"concurrency_limited\",\"retry_after\":1},\"request_id\":null}",
+        ),
+        http_reply(
+            "200 OK",
+            "content-type: text/event-stream\r\n",
+            &completed_stream(),
+        ),
+    ]);
+    let (client, _) = cloud_client(&base);
+    let call = request(WorkModelWire::OpenAiResponses, "gpt-6-luna");
+    client.call(call.clone(), &|_| {}).await.unwrap();
+    let keys = idempotency_keys(&seen);
     assert_eq!(keys.len(), 2);
+    assert_eq!(
+        keys[0], keys[1],
+        "nothing was admitted, so it is the same call"
+    );
+
+    // The provider's own 429 came after admission and was released unspent:
+    // trying again is a new logical call with its own key.
+    let (base, seen) = serve(vec![
+        http_reply(
+            "429 Too Many Requests",
+            "retry-after: 0\r\nx-zephium-request-id: 0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c\r\n",
+            "{\"error\":{\"code\":\"provider_rate_limited\"},\"request_id\":\"0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c\"}",
+        ),
+        http_reply(
+            "200 OK",
+            "content-type: text/event-stream\r\n",
+            &completed_stream(),
+        ),
+    ]);
+    let (client, records) = cloud_client(&base);
+    client.call(call, &|_| {}).await.unwrap();
+    let keys = idempotency_keys(&seen);
     assert_ne!(keys[0], keys[1]);
+    let records = records.lock().unwrap();
+    assert_eq!(records[0].accounting, LeadCloudAccounting::Refused);
+    assert_eq!(records[0].idempotency_key, keys[0]);
+}
+
+#[tokio::test]
+async fn a_cloud_stream_is_read_to_its_end_for_the_accounting_trailer() {
+    let stream = format!(
+        "{}: zephium {{\"request_id\":\"0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c\",\"usage\":\"settled\",\"charged\":\"812\"}}\n\n",
+        sse(&[
+            (
+                "response.output_text.delta",
+                json!({"type": "response.output_text.delta", "delta": "Hi"}),
+            ),
+            (
+                "response.output_item.done",
+                json!({"type": "response.output_item.done", "item": {
+                "type": "message", "content": [{"type": "output_text", "text": "Hi", "annotations": []}]}}),
+            ),
+            (
+                "response.completed",
+                json!({"type": "response.completed", "response": {"usage": {
+                "input_tokens": 10, "output_tokens": 1}}}),
+            ),
+        ])
+    );
+    let (base, _) = serve(vec![http_reply(
+        "200 OK",
+        "content-type: text/event-stream\r\nx-zephium-request-id: 0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c\r\nx-zephium-policy-revision: 7\r\n",
+        &stream,
+    )]);
+    let (client, records) = cloud_client(&base);
+    let texts = Mutex::new(String::new());
+    let sink = |event: WorkModelEvent| {
+        if let WorkModelEvent::Text(text) = event {
+            texts.lock().unwrap().push_str(&text);
+        }
+    };
+    let outcome = client
+        .call(request(WorkModelWire::OpenAiResponses, "gpt-6-luna"), &sink)
+        .await
+        .unwrap();
+    assert_eq!(outcome.stop, WorkModelStop::EndTurn);
+    assert_eq!(
+        *texts.lock().unwrap(),
+        "Hi",
+        "the trailer is not model text"
+    );
+    let records = records.lock().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].request_id.as_deref(),
+        Some("0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c")
+    );
+    assert_eq!(records[0].policy_revision.as_deref(), Some("7"));
+    assert_eq!(
+        records[0].accounting,
+        LeadCloudAccounting::Settled {
+            charged: Some("812".into())
+        }
+    );
+    assert!(!records[0].unsettled());
+}
+
+#[tokio::test]
+async fn a_cloud_call_that_may_have_run_is_never_sent_again() {
+    let id = "0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c";
+    // The provider failed after admission: the server holds the charge open.
+    let (base, seen) = serve(vec![
+        http_reply(
+            "502 Bad Gateway",
+            &format!("x-zephium-request-id: {id}\r\n"),
+            &format!(
+                "{{\"error\":{{\"code\":\"provider_request_failed\"}},\"request_id\":\"{id}\"}}"
+            ),
+        ),
+        http_reply(
+            "200 OK",
+            "content-type: text/event-stream\r\n",
+            &completed_stream(),
+        ),
+    ]);
+    let (client, records) = cloud_client(&base);
+    let call = request(WorkModelWire::OpenAiResponses, "gpt-6-luna");
+    let error = client.call(call.clone(), &|_| {}).await.err();
+    assert_eq!(error, Some(WorkModelError::Protocol));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    let record = records.lock().unwrap()[0].clone();
+    assert_eq!(record.accounting, LeadCloudAccounting::Unknown);
+    assert!(record.unsettled());
+
+    // A stream cut after admission, before any output, is not retried either,
+    // and its interruption trailer still reaches the record.
+    let cut = format!(
+        "event: response.created\ndata: {}\n\n: zephium {{\"request_id\":\"{id}\",\"error\":\"provider_idle_timeout\"}}\n\n",
+        json!({"type": "response.created", "response": {}})
+    );
+    let (base, seen) = serve(vec![
+        http_reply("200 OK", "content-type: text/event-stream\r\n", &cut),
+        http_reply(
+            "200 OK",
+            "content-type: text/event-stream\r\n",
+            &completed_stream(),
+        ),
+    ]);
+    let (client, records) = cloud_client(&base);
+    let error = client.call(call.clone(), &|_| {}).await.err();
+    assert_eq!(error, Some(WorkModelError::Protocol));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert_eq!(
+        records.lock().unwrap()[0].accounting,
+        LeadCloudAccounting::Interrupted
+    );
+
+    // A 409 on the key means an earlier send was recorded: nothing replays.
+    let (base, seen) = serve(vec![http_reply(
+        "409 Conflict",
+        "",
+        "{\"error\":{\"code\":\"request_in_progress\"},\"request_id\":null}",
+    )]);
+    let (client, _) = cloud_client(&base);
+    assert_eq!(
+        client.call(call, &|_| {}).await.err(),
+        Some(WorkModelError::Protocol)
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn cloud_credit_and_cap_refusals_are_over_budget_and_final() {
+    let (base, seen) = serve(vec![http_reply(
+        "402 Payment Required",
+        "",
+        "{\"error\":{\"code\":\"insufficient_credits\"},\"request_id\":null}",
+    )]);
+    let (client, records) = cloud_client(&base);
+    let error = client
+        .call(
+            request(WorkModelWire::OpenAiResponses, "gpt-6-luna"),
+            &|_| {},
+        )
+        .await
+        .err();
+    assert_eq!(error, Some(WorkModelError::OverBudget));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert!(records.lock().unwrap().is_empty());
 }
 
 #[test]

@@ -55,6 +55,9 @@ pub(crate) struct WorkModelRolesV1 {
 pub(crate) struct WorkCloudStatusV1 {
     pub(crate) signed_in: bool,
     pub(crate) plan: Option<String>,
+    /// Hosted entries listed for this account but locked by its plan: shown
+    /// to explain the plan, never choosable.
+    pub(crate) locked: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
@@ -205,6 +208,7 @@ mod product {
             cloud: WorkCloudStatusV1 {
                 signed_in: view.cloud_signed_in,
                 plan: view.cloud_plan,
+                locked: view.cloud_locked,
             },
             fault,
         }

@@ -4380,12 +4380,18 @@ mod tests {
                     .retire_for_observation(&previous, &config)
                     .unwrap()
             };
-            assert!(
+            // A search inside a node that is no search boundary searches the
+            // document instead of refusing the inspection.
+            let redirected =
                 continuation(json!({"kind":"text_search","target":"@a2","query":"width"}))
                     .retire_for_observation(&previous, &config)
-                    .is_err()
-            );
-            for target in ["@a2", "@a99"] {
+                    .unwrap();
+            assert!(matches!(
+                redirected.expansion(),
+                Some((target, crate::SemanticExpansionKind::TextSearch(_))) if target.model_token() == "@a1"
+            ));
+            {
+                let target = "@a99";
                 let refused = || match continuation(
                     json!({"kind":"text_search","target":target,"query":"$"}),
                 )

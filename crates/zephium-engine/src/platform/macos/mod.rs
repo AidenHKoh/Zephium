@@ -85,8 +85,9 @@ use std::{cell::Cell, rc::Rc};
 
 #[cfg(feature = "agentic-browser")]
 pub(crate) use agent_context::{
-    build_owned_agent_view, build_owned_work_view, AgentNavigationCommit, AgentNavigationTerminal,
-    AgentOwnedView, AgentOwnedViewCallbacks, AgentOwnedViewConstructionError,
+    build_owned_agent_view, build_owned_work_view, clear_work_data_store, work_data_store,
+    AgentNavigationCommit, AgentNavigationTerminal, AgentOwnedView, AgentOwnedViewCallbacks,
+    AgentOwnedViewConstructionError,
 };
 #[cfg(feature = "native-agentic-input-probe")]
 pub(crate) use agentic_input_probe::run as run_agentic_input_matrix;
@@ -557,46 +558,47 @@ fn clear_and_verify_ephemeral_store(
 }
 
 fn erase_named_profile_data(erasure: ProfileErasure) {
-    use wry::WebViewExtDarwin;
-
     if initialize_data_store_enumeration().is_err() {
         erasure.finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
         return;
     }
-    let identifier = erasure.profile.bytes();
-    let initial_erasure = erasure.clone();
+    // The profile's own store, then Work's own store for the profile.
+    let identifiers = vec![
+        erasure.profile.bytes(),
+        crate::work_website_data::identifier(erasure.profile),
+    ];
+    remove_named_stores(identifiers, Vec::new(), erasure);
+}
+
+/// Removes each present named store in turn. Every step re-enumerates the
+/// app's identifiers, so a removed store still listed fails the erasure.
+fn remove_named_stores(pending: Vec<[u8; 16]>, removed: Vec<[u8; 16]>, erasure: ProfileErasure) {
+    use wry::WebViewExtDarwin;
+
+    let listed_erasure = erasure.clone();
     let result =
         <wry::WebView as WebViewExtDarwin>::fetch_data_store_identifiers(move |identifiers| {
-            if !identifiers.contains(&identifier) {
-                initial_erasure
-                    .finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Verified);
+            if removed.iter().any(|id| identifiers.contains(id)) {
+                listed_erasure
+                    .finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
                 return;
             }
-
-            let removed_erasure = initial_erasure.clone();
-            <wry::WebView as WebViewExtDarwin>::remove_data_store(&identifier, move |removed| {
-                if removed.is_err() {
-                    removed_erasure
+            let mut present = pending.into_iter().filter(|id| identifiers.contains(id));
+            let Some(identifier) = present.next() else {
+                listed_erasure
+                    .finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Verified);
+                return;
+            };
+            let rest: Vec<_> = present.collect();
+            let mut removed = removed;
+            <wry::WebView as WebViewExtDarwin>::remove_data_store(&identifier, move |result| {
+                if result.is_err() {
+                    listed_erasure
                         .finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
                     return;
                 }
-
-                let verified_erasure = removed_erasure.clone();
-                if <wry::WebView as WebViewExtDarwin>::fetch_data_store_identifiers(
-                    move |identifiers| {
-                        let outcome = if identifiers.contains(&identifier) {
-                            zephium_core::ports::engine::ProfileDataErasureOutcome::Failed
-                        } else {
-                            zephium_core::ports::engine::ProfileDataErasureOutcome::Verified
-                        };
-                        verified_erasure.finish(outcome);
-                    },
-                )
-                .is_err()
-                {
-                    removed_erasure
-                        .finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
-                }
+                removed.push(identifier);
+                remove_named_stores(rest, removed, listed_erasure);
             });
         });
     if result.is_err() {

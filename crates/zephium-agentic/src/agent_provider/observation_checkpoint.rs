@@ -1,8 +1,9 @@
 //! Same-document inspection checkpoint; never an ordinary read continuation.
 use super::*;
 use crate::{
-    AgentBrowserScopeProposal, SemanticExpansionKind, SemanticFrameJoin, SemanticObservation,
-    SemanticObservationBudget, SemanticObservationRequest, SemanticReferenceId,
+    AgentBrowserScopeProposal, SemanticExpansionKind, SemanticFrameJoin, SemanticNode,
+    SemanticObservation, SemanticObservationBudget, SemanticObservationRequest,
+    SemanticReferenceId, SemanticRole,
 };
 
 // Inspection metadata has its own retention bound. Increasing a run's model
@@ -121,39 +122,13 @@ impl AgentProviderContinuation {
                 AgentProviderObservationRefusal(self, InspectionRefusal::Limit),
             )));
         }
-        let mut scope = self
+        let proposed = self
             .correlation
             .snapshot_scope
-            .clone()
+            .as_ref()
             .ok_or(AgentProviderContinuationError::Scope)?;
-        // A table is read as its subtree; a region asked of a container a
-        // region cannot anchor (a table, a list) is read the same way.
-        if let AgentBrowserScopeProposal::Table(target) = scope {
-            scope = AgentBrowserScopeProposal::Subtree(target);
-        }
-        if let AgentBrowserScopeProposal::Region(target) = scope {
-            if let Some(id) = observation
-                .request()
-                .id()
-                .get()
-                .checked_add(1)
-                .and_then(SemanticObservationId::new)
-            {
-                if matches!(
-                    observation.begin_expansion(
-                        id,
-                        target,
-                        observation.frames()[0].frame(),
-                        SemanticExpansionKind::Region,
-                        SemanticObservationBudget::INITIAL_FILTERED,
-                    ),
-                    Err(crate::SemanticObservationError::ScopeIncompatible)
-                ) {
-                    scope = AgentBrowserScopeProposal::Subtree(target);
-                }
-            }
-        }
-        let scope = &scope;
+        let adapted = admissible_scope(proposed, observation);
+        let scope = &adapted;
         if self
             .transcript
             .inspection_checkpoint
@@ -281,6 +256,63 @@ enum InspectionRefusal {
     Invalid,
     Repeated,
     Limit,
+}
+
+/// The scope a proposal can actually be captured with on this observation.
+/// A table, or a region on a node that is not a region,
+/// is read as that node's subtree, and a text search inside an ineligible
+/// node searches the document: refusing them cost whole reads of plain
+/// articles and tables, while the capture stays bounded by the same budget.
+fn admissible_scope(
+    proposed: &AgentBrowserScopeProposal,
+    observation: &SemanticObservation,
+) -> AgentBrowserScopeProposal {
+    let Some(frame) = observation.frames().first() else {
+        return proposed.clone();
+    };
+    let role = |target: &SemanticReferenceId| {
+        frame
+            .nodes()
+            .iter()
+            .find(|node| node.reference() == *target)
+            .map(SemanticNode::role)
+    };
+    let region = |role: SemanticRole| {
+        matches!(
+            role,
+            SemanticRole::Document
+                | SemanticRole::Landmark
+                | SemanticRole::Group
+                | SemanticRole::Dialog
+        )
+    };
+    match proposed {
+        AgentBrowserScopeProposal::Table(target)
+            if role(target).is_some_and(|role| role != SemanticRole::FrameBoundary) =>
+        {
+            AgentBrowserScopeProposal::Subtree(*target)
+        }
+        AgentBrowserScopeProposal::Region(target)
+            if role(target)
+                .is_some_and(|role| !region(role) && role != SemanticRole::FrameBoundary) =>
+        {
+            AgentBrowserScopeProposal::Subtree(*target)
+        }
+        AgentBrowserScopeProposal::TextSearch { target, query }
+            if role(target).is_some_and(|role| !region(role)) =>
+        {
+            match frame.nodes().first() {
+                Some(root) if root.role() == SemanticRole::Document => {
+                    AgentBrowserScopeProposal::TextSearch {
+                        target: root.reference(),
+                        query: query.clone(),
+                    }
+                }
+                _ => proposed.clone(),
+            }
+        }
+        _ => proposed.clone(),
+    }
 }
 
 impl AgentProviderObservationRefusal {

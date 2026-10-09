@@ -516,6 +516,40 @@ pub struct CloudModel {
     pub upstream: WorkModelProvider,
     /// Smallest plan that may use it, as the server names it.
     pub plan_min: Option<String>,
+    /// False when listed for this account but locked by its plan: shown,
+    /// never called.
+    pub available: bool,
+    /// One line about the model, as the server states it.
+    pub description: Option<String>,
+    /// `fast`, `balanced` or `frontier`.
+    pub tier: Option<String>,
+    /// The largest request body the server admits for it.
+    pub max_request_bytes: Option<u64>,
+}
+
+/// The server's model per role for this account; `None` where it names none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CloudDefaults {
+    /// The lead agent.
+    pub lead: Option<String>,
+    /// Page agents.
+    pub page: Option<String>,
+    /// Light work: titles, summaries, picks.
+    pub light: Option<String>,
+    /// Typed decisions.
+    pub decision: Option<String>,
+}
+
+impl CloudDefaults {
+    /// The entry id of the default for `role`.
+    pub fn get(&self, role: WorkModelRole) -> Option<&str> {
+        match role {
+            R::Lead => self.lead.as_deref(),
+            R::Page => self.page.as_deref(),
+            R::Light => self.light.as_deref(),
+            R::Decision => self.decision.as_deref(),
+        }
+    }
 }
 
 const MAX_CLOUD_MODELS: usize = 200;
@@ -535,6 +569,25 @@ pub fn parse_cloud(body: &Value) -> Vec<CloudModel> {
         .filter_map(cloud_row)
         .take(MAX_CLOUD_MODELS)
         .collect()
+}
+
+/// The catalog's `defaults`, as entry ids. `None` when the answer has none
+/// (an older server); a role the server leaves null stays empty.
+pub fn parse_cloud_defaults(body: &Value) -> Option<CloudDefaults> {
+    let defaults = body.get("defaults")?.as_object()?;
+    let role = |key: &str| {
+        defaults
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|id| valid_text(id, 128))
+            .map(|id| format!("zephium/{id}"))
+    };
+    Some(CloudDefaults {
+        lead: role("lead"),
+        page: role("page"),
+        light: role("light"),
+        decision: role("decision"),
+    })
 }
 
 fn cloud_row(row: &Value) -> Option<CloudModel> {
@@ -604,7 +657,79 @@ fn cloud_row(row: &Value) -> Option<CloudModel> {
         plan_min: text("plan_min")
             .filter(|plan| valid_text(plan, 32))
             .map(str::to_owned),
+        // A server from before the flag listed only what the account may use.
+        available: row
+            .get("available")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        description: text("description")
+            .filter(|line| valid_text(line, 300))
+            .map(str::to_owned),
+        tier: text("tier")
+            .filter(|tier| matches!(*tier, "fast" | "balanced" | "frontier"))
+            .map(str::to_owned),
+        max_request_bytes: row
+            .get("limits")
+            .and_then(|limits| limits.get("max_request_bytes"))
+            .and_then(Value::as_u64)
+            .filter(|bytes| *bytes > 0),
     })
+}
+
+/// A hosted speech-to-text model: a catalog row whose roles name
+/// `transcribe`. It travels OpenAI's `audio/transcriptions` wire.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloudTranscriber {
+    /// The catalog id, sent as the upload's `model`.
+    pub id: String,
+    /// The upstream model, for display and the stored catalog.
+    pub upstream_model: String,
+    /// The row's `limits.max_request_bytes`, when it states one.
+    pub max_request_bytes: Option<u64>,
+}
+
+/// The transcriber in `GET /v1/models`: `defaults.transcribe` when it names
+/// an available row, else the first available one. Locked rows
+/// (`available: false`) and non-OpenAI upstreams are skipped.
+pub fn parse_cloud_transcriber(body: &Value) -> Option<CloudTranscriber> {
+    let rows = body
+        .get("data")
+        .or_else(|| body.get("models"))
+        .unwrap_or(body)
+        .as_array()?;
+    let preferred = body
+        .get("defaults")
+        .and_then(|defaults| defaults.get("transcribe"))
+        .and_then(Value::as_str);
+    let usable: Vec<CloudTranscriber> = rows
+        .iter()
+        .take(MAX_CLOUD_MODELS)
+        .filter_map(|row| {
+            let text = |key: &str| row.get(key).and_then(Value::as_str);
+            let transcribes = row
+                .get("roles")?
+                .as_array()?
+                .iter()
+                .any(|role| role.as_str() == Some("transcribe"));
+            let available = row.get("available").and_then(Value::as_bool) != Some(false);
+            if !transcribes || !available || text("provider")? != "openai" {
+                return None;
+            }
+            Some(CloudTranscriber {
+                id: text("id").filter(|id| valid_text(id, 100))?.to_owned(),
+                upstream_model: text("upstream_model")
+                    .filter(|model| valid_text(model, 128))?
+                    .to_owned(),
+                max_request_bytes: row
+                    .get("limits")
+                    .and_then(|limits| limits.get("max_request_bytes"))
+                    .and_then(Value::as_u64),
+            })
+        })
+        .collect();
+    preferred
+        .and_then(|id| usable.iter().find(|row| row.id == id).cloned())
+        .or_else(|| usable.into_iter().next())
 }
 
 pub(crate) fn valid_text(text: &str, max: usize) -> bool {
@@ -666,6 +791,39 @@ mod tests {
     }
 
     #[test]
+    fn the_hosted_transcriber_is_the_default_or_the_first_available_row() {
+        let catalog = json!({
+            "defaults": {"lead": "sonnet", "transcribe": "listen-pro"},
+            "models": [
+                {"id": "sonnet", "provider": "anthropic", "upstream_model": "claude-sonnet-5-5",
+                 "roles": ["lead"]},
+                {"id": "listen", "provider": "openai", "upstream_model": "gpt-4o-mini-transcribe",
+                 "roles": ["transcribe"], "available": true,
+                 "limits": {"max_request_bytes": 8388608}},
+                {"id": "listen-pro", "provider": "openai", "upstream_model": "gpt-4o-transcribe",
+                 "roles": ["transcribe"], "available": false}
+            ]
+        });
+        let transcriber = parse_cloud_transcriber(&catalog).unwrap();
+        assert_eq!(transcriber.id, "listen");
+        assert_eq!(transcriber.upstream_model, "gpt-4o-mini-transcribe");
+        assert_eq!(transcriber.max_request_bytes, Some(8_388_608));
+        assert!(parse_cloud(&catalog)
+            .iter()
+            .all(|model| model.entry.id != "zephium/listen"));
+
+        let mut unlocked = catalog.clone();
+        unlocked["models"][2]["available"] = json!(true);
+        assert_eq!(parse_cloud_transcriber(&unlocked).unwrap().id, "listen-pro");
+        assert_eq!(parse_cloud_transcriber(&json!({"models": []})), None);
+        assert_eq!(
+            parse_cloud_transcriber(&json!({"models": [{"id": "g", "provider": "google",
+                "upstream_model": "chirp", "roles": ["transcribe"]}]})),
+            None
+        );
+    }
+
+    #[test]
     fn the_cloud_catalog_keeps_known_rows_and_skips_the_rest() {
         let parsed = parse_cloud(&json!({"data": [
             {"id": "sonnet", "provider": "anthropic", "upstream_model": "claude-sonnet-5-5",
@@ -683,5 +841,34 @@ mod tests {
         assert_eq!(model.upstream, P::Anthropic);
         assert!(model.entry.supports.native_search);
         assert_eq!(model.entry.price.as_ref().unwrap().output, 10_000_000);
+        assert!(model.available);
+    }
+
+    #[test]
+    fn the_cloud_catalog_reads_locks_limits_and_null_defaults() {
+        let body = json!({
+            "schema_version": 1, "policy_revision": 4, "cloud_enabled": true,
+            "defaults": {"lead": "fast", "page": null, "light": "fast", "decision": "gone/../x\u{7}"},
+            "models": [
+                {"id": "fast", "provider": "openai", "upstream_model": "gpt-6-luna",
+                 "display_name": "Fast", "description": "Quick everyday work.", "tier": "fast",
+                 "available": true, "roles": ["lead", "light"],
+                 "limits": {"max_request_bytes": 1048576, "max_search_calls": 2,
+                            "idle_timeout_ms": 90000, "max_duration_ms": 600000}},
+                {"id": "deep", "provider": "anthropic", "upstream_model": "claude-opus-5-5",
+                 "display_name": "Deep", "tier": "frontier", "available": false, "roles": ["lead"]}
+            ]
+        });
+        let parsed = parse_cloud(&body);
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed[0].available);
+        assert_eq!(parsed[0].max_request_bytes, Some(1_048_576));
+        assert_eq!(parsed[0].tier.as_deref(), Some("fast"));
+        assert!(!parsed[1].available);
+        let defaults = parse_cloud_defaults(&body).unwrap();
+        assert_eq!(defaults.get(R::Lead), Some("zephium/fast"));
+        assert_eq!(defaults.get(R::Page), None);
+        assert_eq!(defaults.get(R::Decision), None);
+        assert_eq!(parse_cloud_defaults(&json!({"data": []})), None);
     }
 }

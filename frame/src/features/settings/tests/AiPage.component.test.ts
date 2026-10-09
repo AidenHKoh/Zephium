@@ -28,6 +28,16 @@ vi.mock("$shared/ipc/bindings", async () => {
     accountGet: native.account,
     workLocalServers: native.local,
     workSetModelEndpoint: native.endpoint,
+    voiceStatus: async () => ({
+      version: 1,
+      engines: ["on_device", "open_ai"],
+      chosen: null,
+      effective: "on_device",
+      language: null,
+      languages: ["en-US"],
+      on_device: "en_US",
+      microphone: "granted",
+    }),
     workDecisionPreference: async () => ({
       version: 1,
       profile: PROFILE,

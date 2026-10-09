@@ -2228,6 +2228,8 @@ fn provider_fixture_with_discovery_account(
             ) => 4,
             ProviderFault::Combined(CombinedFault::CancelMapCount) => 5,
             ProviderFault::Combined(CombinedFault::Ceiling) => 16,
+            // A refused mapping is mapped once more, told why.
+            ProviderFault::Combined(CombinedFault::ForeignSource) => 8,
             ProviderFault::Combined(_) => 6,
             ProviderFault::Ceiling => 16,
             ProviderFault::CountRefused | ProviderFault::CancelCount => 1,
@@ -2237,6 +2239,9 @@ fn provider_fixture_with_discovery_account(
                 | ExtractionFault::ExpandedScope
                 | ExtractionFault::EmptyEvidence,
             ) => 2,
+            ProviderFault::Extraction(
+                ExtractionFault::WrongKind | ExtractionFault::ForeignSource,
+            ) => 6,
             ProviderFault::Extraction(_) => 4,
             _ => 2,
         }
@@ -2933,6 +2938,11 @@ fn provider_fixture_with_discovery_account(
                     | ExtractionFault::EmptyEvidence
             ) {
                 1
+            } else if matches!(
+                fault,
+                ExtractionFault::WrongKind | ExtractionFault::ForeignSource
+            ) {
+                3
             } else {
                 2
             }
@@ -3399,6 +3409,9 @@ fn extraction_stream(fault: ExtractionFault) -> String {
     };
     let value = if fault == ExtractionFault::WrongKind {
         format!(r#"{{"k":"boolean","value":true,"sources":["{source}"]}}"#)
+    } else if fault == ExtractionFault::ForeignSource {
+        // A value the page never shows: no citation can be repaired for it.
+        format!(r#"{{"k":"text","value":"Elsewhere","sources":["{source}"]}}"#)
     } else {
         format!(r#"{{"k":"text","value":"Field","sources":["{source}"]}}"#)
     };

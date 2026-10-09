@@ -253,8 +253,23 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "invoke_owned_unit_callback(navigation_invariant_failure.as_ref(),navigation_callback_panicked.as_ref(),);navigation_semantic.cancel();",
             "ifwork_location.as_ref().is_some_and(|gate|gate.failed()){",
             "work_location_semantic.revoke_document_authority();",
+            // Work's own store is persistent, carries exactly the identifier
+            // derived for its profile, and is never the profile's own store.
+            "persistent&&identifier==Some(expected)&&identifier!=Some(profile.bytes())",
+            "Some(expected)=>{work_store_matches(profile,&actual_store)&&Retained::as_ptr(&actual_store)==Retained::as_ptr(expected)}",
         ],
         &[],
+    ),
+    (
+        // Work's own website data replaces per-run ephemeral storage for pages
+        // without the person's session (2026-10-09): a stable, hash-derived
+        // identifier per profile that can never equal the profile's own.
+        "crates/zephium-engine/src/work_website_data.rs",
+        &[
+            "Sha256::new().chain_update(DOMAIN).chain_update(profile.bytes())",
+            "ifid==profile.bytes(){id[15]^=1;}",
+        ],
+        &["dataStoreForIdentifier", "ProfileId::generate()"],
     ),
     (
         "crates/zephium-app/src/work_resources_probe.rs",
@@ -859,6 +874,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "native_resource.reclassify(NativeResourceClass::AgentContext)",
             "retirement_clean:false",
             "crate::platform::imp::build_owned_work_view(",
+            "letstore=ifguard.work_website_data(){Some(self.work_data_store(profile)?)}",
+            "!=Some(&super::profiles::ProfilePersistenceClass::Durable)",
             "resource_retained:true",
             "guard.lease_drained(lease)",
             "guard.callbacks_drained()",

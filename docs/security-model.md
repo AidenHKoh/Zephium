@@ -601,8 +601,10 @@ types afterward before removing the canonical profile directory. Opaque native-b
 failure, manager mismatch, or failed clear/fetch creates sticky process-lifetime proof
 debt; no later empty retry may authorize disk deletion, and successful handles are
 released only for the exact attempt that verified disk absence. macOS clears and
-fetch-verifies ephemeral stores and removes a named store before re-enumerating its
-identifier. Windows closes the profile's controllers, requests an opportunistic
+fetch-verifies ephemeral stores and removes each named store (the profile's own, then
+Work's own website data store for the profile) before re-enumerating identifiers; a
+removed identifier still listed fails the erasure. Windows erases Work's own store
+folder for the profile through the same process-exit-proven path. Windows closes the profile's controllers, requests an opportunistic
 `ICoreWebView2Profile2` all-data clear, and requires the matching
 `Environment5.BrowserProcessExited` event for the exact PID and monotonic environment
 generation before deletion. The clear callback is not authoritative because WebView2

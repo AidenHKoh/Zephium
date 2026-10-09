@@ -931,6 +931,7 @@ impl NativeWorkComposition {
                         | AgentWorkEventKind::ActionProposalRefused(_)
                         | AgentWorkEventKind::AppliedOnPageChange
                         | AgentWorkEventKind::ExtractionDropped { .. }
+                        | AgentWorkEventKind::ExtractionCorrected
                         | AgentWorkEventKind::Verified
                         | AgentWorkEventKind::ModelRequestedHuman(_)
                         | AgentWorkEventKind::DecisionSettled(_)
@@ -2885,6 +2886,7 @@ fn compile_page_step(
     let hops = usize::from(request.hops.clamp(1, 8));
     let signed_in = session_account(&request)?;
     let task = page_task(&request);
+    let private_run = request.private_run;
     #[cfg(feature = "public-qualification")]
     let loopback = settings.loopback_anonymous && signed_in.is_none() && !task;
     #[cfg(not(feature = "public-qualification"))]
@@ -3083,23 +3085,27 @@ fn compile_page_step(
     let request = request
         .with_construction_attempt(construction_attempt)
         .with_work_identity(probe.work());
-    // The person's session shares the profile's website data; every other
-    // page keeps the run's own anonymous storage.
+    // The person's session shares the profile's website data. Every other
+    // page opens in Work's own memory, so solved checks and cookie choices
+    // carry across pages and runs; private runs and loopback fixtures keep
+    // the run's own storage.
     if signed_in.is_some() {
         return Ok(request);
     }
     let mut request = request;
-    if continuing || loopback || task || reads_results {
-        request.input = request.input.with_isolated_website_data();
-    }
+    request.input = if loopback || private_run {
+        request.input.with_isolated_website_data()
+    } else {
+        request.input.with_work_website_data()
+    };
     // An anonymous public page whose first load is redirected fails naming
     // where; its owner decides whether to read that address.
     if public && !continuing && !loopback && !task {
         request = request.with_redirect(WorkBrowserRedirect::default());
     }
-    // A results page keeps nothing from the run's other pages: without the
-    // run's session it opens in a fresh store of its own.
-    if reads_results {
+    // Without Work memory (a private run or profile, a fixture) a results page keeps
+    // nothing from the run's other pages: it opens in a fresh store.
+    if request.input.uses_work_website_data() || reads_results {
         return Ok(request);
     }
     Ok(request.with_anonymous_session(probe.browser_session().clone()))

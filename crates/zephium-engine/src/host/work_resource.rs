@@ -126,6 +126,43 @@ impl EngineHost {
         );
         Ok(store)
     }
+
+    /// Work's persistent store for a durable profile. Pages of one run and of
+    /// parallel runs share the one retained object, as tabs share a profile's.
+    pub(super) fn work_data_store(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<crate::platform::imp::WebsiteDataStore, ContextPortFailure> {
+        if self.erasure_tombstones.contains(&profile)
+            || self.profile_persistence_classes.get(&profile)
+                != Some(&super::profiles::ProfilePersistenceClass::Durable)
+        {
+            return Err(ContextPortFailure::ProfileUnavailable);
+        }
+        if let Some(store) = self.work_data_stores.get(&profile) {
+            return Ok(store.clone());
+        }
+        if self.work_data_stores.len() >= MAX_PROFILE_PERSISTENCE_BINDINGS {
+            return Err(ContextPortFailure::ResourceExhausted);
+        }
+        let store = crate::platform::imp::work_data_store(profile)
+            .map_err(|_| ContextPortFailure::NativeRefused)?;
+        self.work_data_stores.insert(profile, store.clone());
+        Ok(store)
+    }
+
+    /// Empties the profile's Work store; its pages keep running on it.
+    pub(crate) fn clear_work_website_data(
+        &mut self,
+        profile: ProfileId,
+        reply: std::sync::mpsc::Sender<bool>,
+    ) {
+        if self.erasure_tombstones.contains(&profile) {
+            let _ = reply.send(false);
+            return;
+        }
+        crate::platform::imp::clear_work_data_store(profile, reply);
+    }
 }
 
 pub(super) struct WorkNativeResource {
@@ -1247,7 +1284,9 @@ impl EngineHost {
             .map_err(|_| ContextPortFailure::ResourceExhausted)?;
         // Anonymous sessions never borrow the user's profile cookie store.
         #[cfg(target_os = "macos")]
-        let store = if guard.isolated_public() {
+        let store = if guard.work_website_data() {
+            Some(self.work_data_store(profile)?)
+        } else if guard.isolated_public() {
             Some(match guard.anonymous_session() {
                 Some(session) if session.admits(profile, guard.resource().identity().work()) => {
                     self.anonymous_work_store(session)?
@@ -1398,7 +1437,9 @@ impl EngineHost {
             &self.parent,
             ContextOwnedViewport::STANDARD,
             profile,
-            if guard.isolated_public() {
+            if guard.work_website_data() {
+                ContextProfileStorageClass::Durable
+            } else if guard.isolated_public() {
                 ContextProfileStorageClass::Ephemeral
             } else {
                 guard.storage()

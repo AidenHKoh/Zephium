@@ -105,6 +105,7 @@ mod startup_alert;
 #[cfg(feature = "work-development-traces")]
 mod startup_styles;
 mod updates;
+mod voice;
 mod webext;
 #[cfg(all(target_os = "windows", feature = "webext-qa"))]
 mod webext_qa;
@@ -126,6 +127,7 @@ mod work_product;
 #[cfg(feature = "work-product")]
 mod work_provider;
 mod work_sites;
+mod work_website_data;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -1565,6 +1567,13 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_models::work_set_model_endpoint,
             work_models::work_more_models,
             work_models::work_local_servers,
+            voice::voice_status,
+            voice::voice_choose_engine,
+            voice::voice_choose_language,
+            voice::voice_start,
+            voice::voice_stop,
+            voice::voice_cancel,
+            voice::voice_open_privacy,
             account::account_get,
             account::account_send_code,
             account::account_verify,
@@ -1578,8 +1587,17 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             account::account_set_server,
             account::account_deletion_code,
             account::account_delete,
+            account::account_set_name,
+            account::account_reauth_code,
+            account::account_email_code,
+            account::account_change_email,
+            account::account_sign_out_everywhere,
+            account::account_export,
+            account::account_usage_history,
+            account::account_receipt,
             work_sites::work_sites,
             work_sites::work_set_site,
+            work_website_data::work_clear_website_data,
             work_connections::work_connections,
             work_connections::work_save_connection,
             work_connections::work_preview_connection,
@@ -1715,6 +1733,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             WorkHumanChanged,
             WorkDecisionPreferenceChanged,
             work_models::WorkModelsChanged,
+            voice::VoiceChanged,
+            voice::VoiceLevels,
             account::AccountChanged,
             ItemsChanged,
             FaviconsChanged,
@@ -3273,7 +3293,7 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     // authoritative URL of the page it shows.
     if matches!(
         id,
-        "note.new" | "page.copyLink" | "find.show" | "find.next" | "find.previous"
+        "note.new" | "page.copyLink" | "find.show" | "find.next" | "find.previous" | "work.dictate"
     ) {
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
             accepted_ui_operation()
@@ -6301,6 +6321,7 @@ pub fn run() {
                     // an OS-minimized window hides all content views.
                     tauri::WindowEvent::Focused(false) => {
                         resize_shell.dispatch(Command::SetWindowFocused(false));
+                        voice::window_blurred(resize_window.app_handle());
                         if resize_window.is_minimized().unwrap_or(false) {
                             resize_shell.dispatch(Command::SetWindowVisible(false));
                         }
@@ -8128,8 +8149,11 @@ mod tests {
         assert!(
             plist.contains("Zephium uses the camera only when you allow a website to access it.")
         );
-        assert!(plist
-            .contains("Zephium uses the microphone only when you allow a website to access it."));
+        assert!(plist.contains(
+            "Zephium uses the microphone while you dictate in Work, and for a website only when you allow it."
+        ));
+        assert!(plist.contains("<key>NSSpeechRecognitionUsageDescription</key>"));
+        assert!(plist.contains("Zephium turns what you dictate in Work into text on this Mac."));
     }
 
     #[test]

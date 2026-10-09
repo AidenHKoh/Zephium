@@ -28,6 +28,8 @@ import type {
   SearchChanged,
   TabChanged,
   UiCommand,
+  VoiceChanged,
+  VoiceLevels,
   WebExtensionAccessRequested,
 } from "./bindings";
 
@@ -84,6 +86,8 @@ export const nativeEventNames = {
   runtimeStatusChanged: "zephium:runtime-status",
   blockerStatusChanged: "zephium:blocker-status",
   focusChanged: "zephium:focus",
+  voiceChanged: "zephium:voice-changed",
+  voiceLevels: "zephium:voice-levels",
 } as const;
 
 export const events = {
@@ -137,4 +141,6 @@ export const events = {
   runtimeStatusChanged: scopedEvent<RuntimeStatusChanged>(nativeEventNames.runtimeStatusChanged),
   blockerStatusChanged: scopedEvent<BlockerStatusChanged>(nativeEventNames.blockerStatusChanged),
   focusChanged: scopedEvent<FocusChanged>(nativeEventNames.focusChanged),
+  voiceChanged: scopedEvent<VoiceChanged>(nativeEventNames.voiceChanged),
+  voiceLevels: scopedEvent<VoiceLevels>(nativeEventNames.voiceLevels),
 };

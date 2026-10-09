@@ -493,6 +493,7 @@ pub struct AgentWorkRunInput {
     settings: AgentWorkRunSettings,
     durable_result: bool,
     isolated_store: bool,
+    work_store: bool,
 }
 
 impl AgentWorkRunInput {
@@ -518,6 +519,17 @@ impl AgentWorkRunInput {
         self.isolated_store = true;
         self
     }
+    /// Opens the page in Work's own persistent website data, never the
+    /// profile's. A private profile has none: its pages keep isolated storage.
+    pub fn with_work_website_data(mut self) -> Self {
+        self.isolated_store = true;
+        self.work_store = self.context.storage == ContextProfileStorageClass::Durable;
+        self
+    }
+    /// Whether the page opens in Work's own persistent website data.
+    pub const fn uses_work_website_data(&self) -> bool {
+        self.work_store
+    }
     /// Descriptive original resource construction operands for the trusted
     /// application. These do not mint a browser, account or execution lease.
     pub fn retained_resource_spec(
@@ -534,6 +546,7 @@ impl AgentWorkRunInput {
                         node.navigation_discovery()
                             .is_some_and(|scope| scope.is_public_web())
                     }),
+            work_website_data: self.work_store,
             target: self.context.target.clone(),
             document_policy: self.context.document_policy,
             clock: self.settings.clock.clone(),
@@ -632,6 +645,7 @@ impl AgentWorkRunInput {
             settings,
             durable_result: false,
             isolated_store: false,
+            work_store: false,
         })
     }
     /// Explicitly opts a trusted extraction task into profile-owned result
@@ -668,6 +682,8 @@ pub struct AgentWorkRetainedResourceSpec {
     pub storage: ContextProfileStorageClass,
     /// Frozen public discovery must never inherit profile cookies.
     pub isolated_public: bool,
+    /// Work's own persistent store for the profile, set only with isolation.
+    pub work_website_data: bool,
     /// Exact approved initial document, not navigation authority.
     pub target: ContextNavigationTarget,
     /// Trusted initial-document construction policy, frozen before native work.
@@ -2973,7 +2989,7 @@ impl AgentWorkController {
                                 SemanticReadAuthority::Acknowledged(checkpoint.baseline()),
                                 captured_at,
                                 SemanticReadSensitivityLimit::PublicOnly,
-                                SemanticReadBudget::STANDARD,
+                                SemanticReadBudget::EXTRACTION,
                                 schema,
                             )
                             .map_err(|error| {
@@ -5357,6 +5373,9 @@ pub enum AgentWorkEventKind {
         /// Records and fields left out.
         values: u16,
     },
+    /// Rust refused a mapping and the model mapped the same read once more,
+    /// told why.
+    ExtractionCorrected,
     /// A read's own target re-rendered while its page visibly changed; the
     /// change proved the action (a channel, thread or date opened).
     AppliedOnPageChange,

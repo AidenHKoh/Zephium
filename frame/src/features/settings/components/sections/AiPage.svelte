@@ -6,6 +6,7 @@
     ModelsSession,
     entryOf,
     keyedProviders,
+    locked,
     pickerGroups,
     providerName,
     usable,
@@ -15,6 +16,7 @@
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import AiProviderRow from "../AiProviderRow.svelte";
+  import AiVoiceRow from "../AiVoiceRow.svelte";
   import AiZephiumRow from "../AiZephiumRow.svelte";
   import WorkDecisions from "../WorkDecisions.svelte";
 
@@ -79,7 +81,14 @@
       ...(session?.endpoint ?? []),
       ...(expanded ? (session?.more ?? []) : []),
     ]).ready.flatMap((group) => group.entries);
-    return [automatic, ...offered.map((entry) => ({ value: entry.id, label: label(entry) }))];
+    return [
+      automatic,
+      ...offered.map((entry) =>
+        locked(models, entry.id)
+          ? { value: entry.id, label: m.ai_model_locked({ model: label(entry) }), disabled: true }
+          : { value: entry.id, label: label(entry) },
+      ),
+    ];
   }
 </script>
 
@@ -127,6 +136,7 @@
         {m.ai_more_failed()}
       </p>{/if}
   </SettingsGroup>
+  <AiVoiceRow />
   <WorkDecisions profile={profile.id} />
 {/if}
 

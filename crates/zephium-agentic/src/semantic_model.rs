@@ -91,19 +91,20 @@ impl SemanticModelEncodingBudget {
     };
 
     /// Terminal extraction has a different representation contract from an
-    /// initial observation. Preserve the full STANDARD read: up to 64 KiB for
-    /// escaped values (2 * 32 KiB), 16 KiB for its 128 rows, the original 16-KiB
-    /// admitted frame-provenance envelope, and 16 KiB for the bounded schema /
-    /// framing. This changes no capture/read/request/run limit. Actual encoded
-    /// bytes are only a conservative preflight to whole-request exact counting,
-    /// never an allocation, charge or token-count claim for the ceiling itself.
+    /// initial observation. Preserve the full EXTRACTION read: its escaped
+    /// values (twice its content bytes), 128 bytes for each of its rows, the
+    /// original 16-KiB admitted frame-provenance envelope, and 16 KiB for the
+    /// bounded schema / framing. This changes no capture/request/run limit.
+    /// Actual encoded bytes are only a conservative preflight to whole-request
+    /// exact counting, never an allocation, charge or token-count claim for
+    /// the ceiling itself.
     pub const EXTRACTION_PROVIDER_EXACT_CONSERVATIVE: Self = Self {
-        max_bytes: 2 * crate::SemanticReadBudget::STANDARD.max_bytes()
-            + 128 * crate::SemanticReadBudget::STANDARD.max_items() as u32
+        max_bytes: 2 * crate::SemanticReadBudget::EXTRACTION.max_bytes()
+            + 128 * crate::SemanticReadBudget::EXTRACTION.max_items() as u32
             + INITIAL_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING
             + 16 * 1024,
-        max_tokens: 2 * crate::SemanticReadBudget::STANDARD.max_bytes()
-            + 128 * crate::SemanticReadBudget::STANDARD.max_items() as u32
+        max_tokens: 2 * crate::SemanticReadBudget::EXTRACTION.max_bytes()
+            + 128 * crate::SemanticReadBudget::EXTRACTION.max_items() as u32
             + INITIAL_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING
             + 16 * 1024,
         token_requirement: SemanticTokenCountRequirement::ConservativeAllowed,

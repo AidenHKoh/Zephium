@@ -19,6 +19,8 @@ mod motion_curve;
 mod navigation_epoch;
 mod pane_geometry;
 mod platform;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod work_website_data;
 
 #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
 pub use platform::windows::{install_work_rendering_backing, remove_work_rendering_backing};
@@ -1730,6 +1732,39 @@ impl WebviewEngine {
         let (reply, answer) = std::sync::mpsc::channel();
         self.run(move || {
             host::try_with(move |engine| engine.work_sessions_present(profile, hosts, reply));
+        });
+        answer
+    }
+
+    /// For each host, whether Work's own store for the profile holds cookies
+    /// for its site: closed facts, as for the profile's own store.
+    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    pub fn work_store_sessions_present(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+        hosts: Vec<String>,
+    ) -> std::sync::mpsc::Receiver<Vec<bool>> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            host::try_with(move |engine| engine.work_store_sessions_present(profile, hosts, reply));
+        });
+        answer
+    }
+
+    /// Clears Work's own website data for the profile: cookies, storage and
+    /// caches of the pages Work opened without the person's session. The
+    /// profile's own store is untouched. Yields whether the store is empty.
+    #[cfg(all(
+        feature = "agentic-browser",
+        any(target_os = "macos", target_os = "windows")
+    ))]
+    pub fn clear_work_website_data(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+    ) -> std::sync::mpsc::Receiver<bool> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            host::try_with(move |engine| engine.clear_work_website_data(profile, reply));
         });
         answer
     }

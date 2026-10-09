@@ -8,6 +8,7 @@
     ModelsSession,
     entryOf,
     keyState,
+    locked,
     pickerGroups,
     providerMark,
     providerName,
@@ -133,10 +134,11 @@
       class="ui-menu-item model-row"
       data-model-row
       aria-current={entry.id === chosen ? "true" : undefined}
-      disabled={!!session?.busy}
+      disabled={!!session?.busy || locked(models, entry.id)}
       onclick={() => void choose(entry)}
     >
       <span class="name">{entry.display_name}</span>
+      {#if locked(models, entry.id)}<span class="locked">{m.work_model_locked()}</span>{/if}
       <span class="ui-menu-mark" aria-hidden="true"
         >{#if entry.id === chosen}<Icon icon={Tick02Icon} size={14} strokeWidth={2} />{/if}</span
       >
@@ -395,6 +397,12 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .locked {
+    flex: none;
+    color: var(--color-muted);
+    font-size: var(--text-label);
   }
 
   .keyless .name {

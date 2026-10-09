@@ -475,6 +475,8 @@ pub(crate) fn install(
             macos_ephemeral_data_stores: HashMap::new(),
             #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
             anonymous_work_stores: HashMap::new(),
+            #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
+            work_data_stores: HashMap::new(),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             work_site_loads: HashMap::new(),
             #[cfg(target_os = "macos")]

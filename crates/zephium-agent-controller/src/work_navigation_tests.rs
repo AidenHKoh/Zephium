@@ -392,7 +392,8 @@ impl NavigationFault {
             Self::DiscoveryAction(_) => 8,
             Self::DiscoveryActionRefusal(..) => 10,
             Self::DiscoveryScopeRefusal(_) => 10,
-            Self::DiscoveryEvidence(_) => 8,
+            // The foreign mapping is refused and mapped once more, told why.
+            Self::DiscoveryEvidence(foreign) => 8 + 2 * u8::from(foreign),
             Self::DiscoveryBudget(limit, refusal, operations) => {
                 2 * (limit.min((operations - 1) as u8) - u8::from(refusal))
             }
@@ -405,10 +406,10 @@ impl NavigationFault {
             Self::DepartureMissing | Self::TargetMutation | Self::AccountMutation => 0,
             Self::None
             | Self::Discovery
-            | Self::ForeignSource
             | Self::OldCitation
             | Self::ResultMutation
             | Self::AuditLost => 6,
+            Self::ForeignSource => 8,
             Self::Repeat => 4,
             Self::CancelMapCount => 5,
             _ => 2,

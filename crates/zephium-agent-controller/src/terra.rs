@@ -1996,6 +1996,8 @@ pub struct AgentBrowserSession {
     attempt: Option<AgentProviderAttempt>,
     retained_terminal: Option<BrowserUnsettledTerminal>,
     extraction_output: Option<zephium_agentic::AgentProviderExtractionOutputCollector>,
+    /// The one corrective mapping call a run may make was spent.
+    extraction_corrected: bool,
     model_receipts: Vec<(
         AgentModelCallReceipt,
         zephium_agentic::AgentProviderInputMetricReceipt,
@@ -2247,6 +2249,7 @@ impl AgentBrowserSession {
             attempt: None,
             retained_terminal: None,
             extraction_output: None,
+            extraction_corrected: false,
             model_receipts: Vec::with_capacity(usize::from(max_model_calls)),
             config,
             objective: Some(objective),
@@ -2784,7 +2787,7 @@ impl AgentBrowserSession {
             },
             captured_at,
             SemanticReadSensitivityLimit::PublicOnly,
-            SemanticReadBudget::STANDARD,
+            SemanticReadBudget::EXTRACTION,
             schema,
         )
         .map_err(AgentBrowserProviderError::Read)?;
@@ -2808,6 +2811,8 @@ impl AgentBrowserSession {
         .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
         .map_err(AgentBrowserProviderError::InitialEncoding)?;
         let request = self.next_model_call_request()?;
+        let baseline = continuation.baseline().clone();
+        let subtree = previous.is_some();
         let bound = continuation
             .bind_extraction_request(request, &self.config, schema, &read, payload)
             .map_err(|_| AgentBrowserProviderError::Continuation)?;
@@ -2818,13 +2823,94 @@ impl AgentBrowserSession {
             .map_err(AgentBrowserProviderError::from_request)?;
         let (input, output) = prepared.into_transport_parts();
         let (terminal, _, _) = self.drive_terminal(input, Some(output)).await?;
-        self.extraction_output
+        let mapped = self
+            .extraction_output
             .take()
             .ok_or(AgentBrowserProviderError::Authority)?
             .finish(
                 &terminal,
                 schema,
                 &read,
+                SemanticReadSensitivityLimit::PublicOnly,
+            );
+        match mapped {
+            Err(AgentProviderExtractionOutputError::Extraction(refusal)) if !subtree => {
+                self.map_after_refusal(refusal, &baseline, schema, &read)
+                    .await
+            }
+            mapped => mapped.map_err(AgentBrowserProviderError::Extraction),
+        }
+    }
+
+    /// One corrective mapping of the same delivered schema and read after
+    /// Rust refused the first output, telling the model exactly why. An
+    /// unusable mapping is a model slip, not a page failure. The call is the
+    /// run's single call past its allowance, priced and admitted like any
+    /// other; when it cannot be admitted, the first refusal stands.
+    async fn map_after_refusal<'a>(
+        &mut self,
+        refusal: zephium_agentic::SemanticExtractionError,
+        baseline: &zephium_agentic::SemanticObservationAcknowledgement,
+        schema: &zephium_agentic::SemanticExtractionSchema,
+        read: &zephium_agentic::SemanticReadResult<'a>,
+    ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
+        use zephium_agentic::*;
+        let refused = AgentBrowserProviderError::Extraction(
+            AgentProviderExtractionOutputError::Extraction(refusal),
+        );
+        if self.extraction_corrected || !semantic_extraction_refusal_is_retryable(refusal) {
+            return Err(refused);
+        }
+        self.extraction_corrected = true;
+        self.check_live()?;
+        let Some(prior) = self.model_receipts.last().map(|(_, input)| *input) else {
+            return Err(refused);
+        };
+        let Ok(payload) = encode_semantic_extraction_request(
+            schema,
+            read,
+            SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer())) else {
+            return Err(refused);
+        };
+        let Ok(request) = self.next_model_call_request() else {
+            return Err(refused);
+        };
+        let Some(objective) = self.objective.as_ref() else {
+            return Err(refused);
+        };
+        let Ok(prepared) = AgentProviderExtractionRequestDraft::try_after_refusal(
+            baseline,
+            prior,
+            request,
+            &self.config,
+            objective,
+            payload,
+            schema,
+            read,
+            refusal,
+        )
+        .and_then(|draft| {
+            draft.try_prepare_for_provider_exact_count(&mut self.policy, request, schema, read)
+        }) else {
+            return Err(refused);
+        };
+        if let Some(journal) = &self.journal {
+            journal
+                .emit(work::AgentWorkEventKind::ExtractionCorrected)
+                .map_err(|_| AgentBrowserProviderError::Journal)?;
+        }
+        self.max_model_calls = self.max_model_calls.max(self.turns.saturating_add(1));
+        let (input, output) = prepared.into_transport_parts();
+        let (terminal, _, _) = self.drive_terminal(input, Some(output)).await?;
+        self.extraction_output
+            .take()
+            .ok_or(AgentBrowserProviderError::Authority)?
+            .finish(
+                &terminal,
+                schema,
+                read,
                 SemanticReadSensitivityLimit::PublicOnly,
             )
             .map_err(AgentBrowserProviderError::Extraction)
@@ -2869,18 +2955,23 @@ impl AgentBrowserSession {
             .map_err(AgentBrowserProviderError::from_request)?;
             let (input, output) = prepared.into_transport_parts();
             let (terminal, _, _) = self.drive_terminal(input, Some(output)).await?;
-            Some(
-                self.extraction_output
-                    .take()
-                    .ok_or(AgentBrowserProviderError::Authority)?
-                    .finish(
-                        &terminal,
-                        schema,
-                        read,
-                        SemanticReadSensitivityLimit::PublicOnly,
-                    )
-                    .map_err(AgentBrowserProviderError::Extraction)?,
-            )
+            let mapped = self
+                .extraction_output
+                .take()
+                .ok_or(AgentBrowserProviderError::Authority)?
+                .finish(
+                    &terminal,
+                    schema,
+                    read,
+                    SemanticReadSensitivityLimit::PublicOnly,
+                );
+            Some(match mapped {
+                Err(AgentProviderExtractionOutputError::Extraction(refusal)) => {
+                    self.map_after_refusal(refusal, located.baseline(), schema, read)
+                        .await?
+                }
+                mapped => mapped.map_err(AgentBrowserProviderError::Extraction)?,
+            })
         } else {
             None
         };

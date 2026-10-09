@@ -241,6 +241,7 @@ impl WorkBrowserConstructionAttempt {
 #[derive(Debug, Default)]
 struct ConstructionSettings {
     anonymous_session: Option<crate::WorkBrowserSession>,
+    work_website_data: bool,
     redirect: Option<crate::WorkBrowserRedirect>,
     window: Option<(WorkBrowserConstructionAttempt, std::time::Instant)>,
 }
@@ -296,6 +297,7 @@ impl WorkBrowserResourceRequest {
         if self.operation() != WorkBrowserResourceOperation::Construct
             || !self.isolated_public
             || self.anonymous_session().is_some()
+            || self.work_website_data()
             || !session.admits(identity.profile(), identity.work())
         {
             return Err(Box::new(self));
@@ -310,6 +312,28 @@ impl WorkBrowserResourceRequest {
         self.construction
             .as_ref()
             .and_then(|settings| settings.anonymous_session.as_ref())
+    }
+
+    /// Opens the page in Work's own persistent website data for its profile:
+    /// separate from the profile's store and from every run's anonymous one.
+    pub fn with_work_website_data(mut self) -> Result<Self, Box<Self>> {
+        if self.operation() != WorkBrowserResourceOperation::Construct
+            || !self.isolated_public
+            || self.anonymous_session().is_some()
+            || self.work_website_data()
+        {
+            return Err(Box::new(self));
+        }
+        self.construction
+            .get_or_insert_with(Default::default)
+            .work_website_data = true;
+        Ok(self)
+    }
+    /// Whether construction uses Work's own persistent website data.
+    pub fn work_website_data(&self) -> bool {
+        self.construction
+            .as_ref()
+            .is_some_and(|settings| settings.work_website_data)
     }
 
     /// Where the native gate keeps a public document's refused redirect,
@@ -368,7 +392,8 @@ impl WorkBrowserResourceRequest {
     pub const fn storage(&self) -> ContextProfileStorageClass {
         self.storage
     }
-    /// Anonymous nonpersistent storage, separate from profile cookies.
+    /// Storage separate from the profile's cookies: a run's anonymous store,
+    /// a fresh one, or Work's own (`work_website_data`).
     pub const fn isolated_public(&self) -> bool {
         self.isolated_public
     }

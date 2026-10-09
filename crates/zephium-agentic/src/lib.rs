@@ -125,6 +125,7 @@ mod semantic_execute;
 mod semantic_execute_coordinator;
 mod semantic_extract;
 mod semantic_extract_model;
+mod semantic_extract_repair;
 mod semantic_locate;
 mod semantic_locate_model;
 mod semantic_model;
@@ -522,20 +523,22 @@ pub use semantic_execute_coordinator::{
     SemanticModelClickQualificationExecution,
 };
 pub use semantic_extract::{
-    extract_delivered_semantic_read, extract_semantic_read, SemanticExtractedBoolean,
-    SemanticExtractedField, SemanticExtractedMoney, SemanticExtractedRow, SemanticExtractedRows,
-    SemanticExtractedText, SemanticExtractedTextList, SemanticExtractedUnsigned,
-    SemanticExtractedValue, SemanticExtractionError, SemanticExtractionFieldSchema,
-    SemanticExtractionResult, SemanticExtractionSchema, SemanticExtractionSchemaError,
-    SemanticExtractionSchemaId, SemanticExtractionSource, SemanticExtractionSourceSpan,
-    SemanticExtractionStats, SemanticExtractionTrust, SemanticExtractionValueKind,
-    SemanticOwnedExtractionResult, SemanticOwnedExtractionSource, SemanticOwnedReadContent,
-    MAX_SEMANTIC_EXTRACTION_FIELDS, MAX_SEMANTIC_EXTRACTION_FIELD_NAME_BYTES,
-    MAX_SEMANTIC_EXTRACTION_INPUT_BYTES, MAX_SEMANTIC_EXTRACTION_LIST_ITEMS,
-    MAX_SEMANTIC_EXTRACTION_LIST_ITEM_BYTES, MAX_SEMANTIC_EXTRACTION_SCHEMA_NAME_BYTES,
-    MAX_SEMANTIC_EXTRACTION_SOURCES_PER_VALUE, MAX_SEMANTIC_EXTRACTION_SOURCE_EDGES,
-    MAX_SEMANTIC_EXTRACTION_TEXT_BYTES, MAX_SEMANTIC_EXTRACTION_TOTAL_TEXT_BYTES,
-    MAX_SEMANTIC_EXTRACTION_VALUES, SEMANTIC_EXTRACTION_SCHEMA_VERSION,
+    extract_delivered_semantic_read, extract_semantic_read,
+    semantic_extraction_refusal_is_retryable, semantic_extraction_refusal_note,
+    SemanticExtractedBoolean, SemanticExtractedField, SemanticExtractedMoney, SemanticExtractedRow,
+    SemanticExtractedRows, SemanticExtractedText, SemanticExtractedTextList,
+    SemanticExtractedUnsigned, SemanticExtractedValue, SemanticExtractionError,
+    SemanticExtractionFieldSchema, SemanticExtractionResult, SemanticExtractionSchema,
+    SemanticExtractionSchemaError, SemanticExtractionSchemaId, SemanticExtractionSource,
+    SemanticExtractionSourceSpan, SemanticExtractionStats, SemanticExtractionTrust,
+    SemanticExtractionValueKind, SemanticOwnedExtractionResult, SemanticOwnedExtractionSource,
+    SemanticOwnedReadContent, MAX_SEMANTIC_EXTRACTION_FIELDS,
+    MAX_SEMANTIC_EXTRACTION_FIELD_NAME_BYTES, MAX_SEMANTIC_EXTRACTION_INPUT_BYTES,
+    MAX_SEMANTIC_EXTRACTION_LIST_ITEMS, MAX_SEMANTIC_EXTRACTION_LIST_ITEM_BYTES,
+    MAX_SEMANTIC_EXTRACTION_SCHEMA_NAME_BYTES, MAX_SEMANTIC_EXTRACTION_SOURCES_PER_VALUE,
+    MAX_SEMANTIC_EXTRACTION_SOURCE_EDGES, MAX_SEMANTIC_EXTRACTION_TEXT_BYTES,
+    MAX_SEMANTIC_EXTRACTION_TOTAL_TEXT_BYTES, MAX_SEMANTIC_EXTRACTION_VALUES,
+    SEMANTIC_EXTRACTION_SCHEMA_VERSION,
 };
 pub use semantic_extract_model::{
     encode_semantic_extraction_request, SemanticEncodedExtractionRequest,

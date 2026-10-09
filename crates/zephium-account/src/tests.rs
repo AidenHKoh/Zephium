@@ -26,23 +26,42 @@ impl AccountSettings for MemorySettings {
 }
 
 #[derive(Default)]
-struct MemoryVault(Mutex<Option<String>>);
+struct MemoryVault(Mutex<HashMap<String, String>>);
+
+impl MemoryVault {
+    fn with(origin: &str, token: &str) -> Arc<Self> {
+        let vault = Arc::new(Self::default());
+        vault
+            .store(origin, &AccountToken::new(token.into()).unwrap())
+            .unwrap();
+        vault
+    }
+}
 
 impl AccountVault for MemoryVault {
-    fn load(&self) -> Result<AccountToken, VaultFault> {
-        let token = self.0.lock().unwrap().clone().ok_or(VaultFault::Missing)?;
+    fn load(&self, origin: &str) -> Result<AccountToken, VaultFault> {
+        let token = self
+            .0
+            .lock()
+            .unwrap()
+            .get(origin)
+            .cloned()
+            .ok_or(VaultFault::Missing)?;
         AccountToken::new(token).map_err(|_| VaultFault::Inaccessible)
     }
-    fn store(&self, token: &AccountToken) -> Result<(), VaultFault> {
-        *self.0.lock().unwrap() = Some(token.expose().to_owned());
+    fn store(&self, origin: &str, token: &AccountToken) -> Result<(), VaultFault> {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(origin.to_owned(), token.expose().to_owned());
         Ok(())
     }
-    fn clear(&self) -> Result<(), VaultFault> {
-        *self.0.lock().unwrap() = None;
+    fn clear(&self, origin: &str) -> Result<(), VaultFault> {
+        self.0.lock().unwrap().remove(origin);
         Ok(())
     }
-    fn present(&self) -> Result<bool, VaultFault> {
-        Ok(self.0.lock().unwrap().is_some())
+    fn present(&self, origin: &str) -> Result<bool, VaultFault> {
+        Ok(self.0.lock().unwrap().contains_key(origin))
     }
 }
 
@@ -53,10 +72,17 @@ struct Seen {
     body: String,
 }
 
+impl Seen {
+    fn is(&self, method_path: &str) -> bool {
+        self.line.starts_with(&format!("{method_path} "))
+    }
+}
+
 type Route = Box<dyn Fn(&Seen) -> (u16, String, String) + Send + Sync>;
+type Log = Arc<Mutex<Vec<Seen>>>;
 
 /// A loopback account server answering each request with `route`.
-async fn server(route: Route) -> (String, Arc<Mutex<Vec<Seen>>>) {
+async fn server(route: Route) -> (String, Log) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -112,6 +138,19 @@ async fn server(route: Route) -> (String, Arc<Mutex<Vec<Seen>>>) {
     (origin, seen)
 }
 
+fn requests(log: &Log, method_path: &str) -> Vec<Seen> {
+    log.lock()
+        .unwrap()
+        .iter()
+        .filter(|seen| seen.is(method_path))
+        .cloned()
+        .collect()
+}
+
+fn ok(body: &str) -> (u16, String, String) {
+    (200, String::new(), body.to_owned())
+}
+
 fn account_routes(seen: &Seen) -> (u16, String, String) {
     let line = seen.line.as_str();
     let signed = seen.headers.contains("authorization: bearer token-1");
@@ -123,19 +162,42 @@ fn account_routes(seen: &Seen) -> (u16, String, String) {
             r#"{"user":{}}"#.into(),
         ),
         ["POST", "/api/auth/sign-in/email-otp"] => (401, "".into(), r#"{"error":{"code":"invalid_code"}}"#.into()),
-        [_, path] if path.starts_with("/v1/") && !signed => (401, "".into(), r#"{"error":{"code":"unauthorized"}}"#.into()),
-        ["GET", "/v1/account"] => (200, "".into(), r#"{"id":"u1","email":"a@b.co","emailVerified":true}"#.into()),
-        ["GET", "/v1/billing"] => (200, "".into(), r#"{"subscription":{"status":"inactive"},"paid":false,"offers":{"subscriptions":[{"plan":"pro","interval":"monthly"}],"topups":[]}}"#.into()),
-        ["GET", "/v1/usage"] => (200, "".into(), r#"{"plan":"free","allowance":{"total_units":"100","used_units":"25","reserved_units":"0"},"purchased_remaining":"0"}"#.into()),
-        ["POST", "/v1/billing/checkout"] => (200, "".into(), r#"{"url":"https://sandbox.polar.sh/checkout/x"}"#.into()),
-        ["POST", "/v1/logout"] => (204, "".into(), String::new()),
-        _ => (404, "".into(), r#"{"error":{"code":"not_found"}}"#.into()),
+        ["GET", "/v1/client-config"] if seen.headers.contains("if-none-match: \"v1\"") => {
+            (304, "etag: \"v1\"\r\ncache-control: public, max-age=300, must-revalidate\r\n".into(), String::new())
+        }
+        ["GET", "/v1/client-config"] => (
+            200,
+            "etag: \"v1\"\r\ncache-control: public, max-age=0, must-revalidate\r\n".into(),
+            r#"{"schema_version":1,"cloud_enabled":true,"signup_open":true,"min_client_version":"2.0.0","billing_enabled":false,"notice":null}"#.into(),
+        ),
+        [_, path] if path.starts_with("/v1/") && !signed => (401, "".into(), r#"{"error":{"code":"unauthorized"},"request_id":null}"#.into()),
+        ["GET", "/v1/account"] => ok(r#"{"id":"u1","email":"a@b.co","name":null,"emailVerified":true,"createdAt":"2026-10-01T00:00:00.000Z"}"#),
+        ["PATCH", "/v1/account"] => ok(r#"{"name":"Ada"}"#),
+        ["GET", "/v1/billing"] => ok(r#"{"subscription":{"status":"inactive","paidUntil":null,"cancelAtPeriodEnd":false},"paid":false,"capabilities":{"hostedAI":true,"synchronization":false},"offers":{"subscriptions":[{"plan":"pro","interval":"monthly","product_name":"Pro","price":{"amount_minor":900,"currency":"EUR"}}],"topups":[],"unit_scale":1000000}}"#),
+        ["GET", "/v1/usage"] => ok(r#"{"plan":"free","unit_scale":1000000,"credits_remaining":"75","reserved_units":"0","allowance":{"total_units":"100","used_units":"25","reserved_units":"0"},"purchased_remaining":"0","bonus_remaining":"0","bonus_expires_at":null,"daily_limit_units":null,"by_model":[]}"#),
+        ["POST", "/v1/billing/checkout"] => ok(r#"{"url":"https://sandbox.polar.sh/checkout/x"}"#),
+        ["POST", "/v1/account/email/code"] => (401, "".into(), r#"{"error":{"code":"reauthentication_required"},"request_id":null}"#.into()),
+        ["PATCH", "/v1/account/email"] => ok(r#"{"updated":true,"reauthentication_required":true}"#),
+        ["GET", "/v1/account/export"] => ok(r#"{"schemaVersion":1,"account":{"id":"u1","email":"a@b.co","name":null,"createdAt":"2026-10-01T00:00:00.000Z"},"billing":{},"usage":null,"usage_history_url":"/v1/usage/requests","sessions":[]}"#),
+        ["GET", path] if path.starts_with("/v1/usage/requests?cursor=") => ok(r#"{"requests":[],"next_cursor":null}"#),
+        ["GET", "/v1/usage/requests"] => ok(r#"{"requests":[{"id":"0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c","model_id":"fast","state":"pending","units":"0","reserved":"1200","started_at":"2026-10-09T10:00:00.000Z","finished_at":null}],"next_cursor":"eyJ0Ijo/MX0+"}"#),
+        ["GET", "/v1/usage/requests/0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c"] => ok(r#"{"id":"0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c","state":"settled","model_id":"fast","policy_revision":3,"reserved":"1200","charged":"800","error_class":null,"started_at":"2026-10-09T10:00:00.000Z","finished_at":"2026-10-09T10:00:05.000Z"}"#),
+        ["POST", "/v1/logout" | "/v1/logout-all"] => (204, "".into(), String::new()),
+        _ => (404, "".into(), r#"{"error":{"code":"not_found"},"request_id":null}"#.into()),
     }
 }
 
 fn service(origin: &str, vault: Arc<MemoryVault>, settings: Arc<MemorySettings>) -> Service {
     settings.set("account.server".into(), origin.into());
-    Service::new(settings, vault, "Zephium 1.0 · macOS").unwrap()
+    Service::new(settings, vault, "Zephium 1.0 · macOS", "1.0.0").unwrap()
+}
+
+async fn signed_in() -> (Service, Arc<MemoryVault>, Log, String) {
+    let (origin, seen) = server(Box::new(account_routes)).await;
+    let vault = MemoryVault::with(&origin, "token-1");
+    let account = service(&origin, vault.clone(), Arc::new(MemorySettings::default()));
+    account.refresh(true).await.unwrap();
+    (account, vault, seen, origin)
 }
 
 #[tokio::test]
@@ -170,22 +232,21 @@ async fn email_code_signs_in_stores_the_bearer_and_loads_the_plan() {
     assert_eq!(view.profile.unwrap().email, "a@b.co");
     assert_eq!(view.usage.as_ref().unwrap().used_percent(), Some(25));
     assert_eq!(account.plan().as_deref(), Some("free"));
-    assert_eq!(vault.load().unwrap().expose(), "token-1");
+    assert_eq!(vault.load(&origin).unwrap().expose(), "token-1");
 
-    let requests = seen.lock().unwrap().clone();
-    let sign_in = requests
-        .iter()
-        .find(|r| {
-            r.line.starts_with("POST /api/auth/sign-in/email-otp") && r.body.contains("123456")
-        })
+    let sign_in = requests(&seen, "POST /api/auth/sign-in/email-otp")
+        .into_iter()
+        .find(|r| r.body.contains("123456"))
         .unwrap();
-    assert!(sign_in
-        .headers
-        .contains("x-zephium-device: zephium 1.0 · macos"));
+    let body: serde_json::Value = serde_json::from_str(&sign_in.body).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({"email": "a@b.co", "otp": "123456", "device": "Zephium 1.0 · macOS"})
+    );
     assert!(!sign_in.headers.contains("authorization"));
 
     // A restart finds the session from the vault and the cached account.
-    let again = Service::new(settings.clone(), vault.clone(), "x").unwrap();
+    let again = Service::new(settings.clone(), vault.clone(), "x", "1.0.0").unwrap();
     assert!(again.signed_in());
     assert_eq!(again.view().profile.unwrap().email, "a@b.co");
 }
@@ -193,29 +254,68 @@ async fn email_code_signs_in_stores_the_bearer_and_loads_the_plan() {
 #[tokio::test]
 async fn a_refused_bearer_ends_the_session_everywhere() {
     let (origin, _) = server(Box::new(account_routes)).await;
-    let vault = Arc::new(MemoryVault::default());
-    vault
-        .store(&AccountToken::new("revoked".into()).unwrap())
-        .unwrap();
+    let vault = MemoryVault::with(&origin, "revoked");
     let settings = Arc::new(MemorySettings::default());
     let account = service(&origin, vault.clone(), settings.clone());
     assert!(account.signed_in());
 
     assert_eq!(account.refresh(true).await, Err(AccountError::SignedOut));
     assert!(!account.signed_in());
-    assert_eq!(vault.present(), Ok(false));
+    assert_eq!(vault.present(&origin), Ok(false));
     assert_eq!(settings.get("account.cache"), None);
     assert_eq!(account.bearer().err(), Some(AccountError::SignedOut));
 }
 
 #[tokio::test]
-async fn checkout_opens_only_on_the_billing_provider_and_is_watched() {
+async fn bearers_are_scoped_to_the_origin_that_issued_them() {
+    let (one, one_seen) = server(Box::new(account_routes)).await;
+    let (two, two_seen) = server(Box::new(account_routes)).await;
+    let vault = MemoryVault::with(&one, "token-1");
+    let settings = Arc::new(MemorySettings::default());
+    let account = service(&one, vault.clone(), settings.clone());
+    account.refresh(true).await.unwrap();
+
+    account.set_server(Some(&two)).await.unwrap();
+    assert!(!account.signed_in());
+    assert_eq!(account.bearer().err(), Some(AccountError::SignedOut));
+    assert_eq!(account.refresh(true).await, Ok(()));
+    assert!(two_seen.lock().unwrap().is_empty());
+    // Nothing was revoked on the first server, and its session waits there.
+    assert!(requests(&one_seen, "POST /v1/logout").is_empty());
+    assert_eq!(vault.load(&one).unwrap().expose(), "token-1");
+
+    account.set_server(Some(&one)).await.unwrap();
+    assert!(account.signed_in());
+    account.refresh(true).await.unwrap();
+    assert_eq!(account.view().profile.unwrap().email, "a@b.co");
+}
+
+#[tokio::test]
+async fn client_config_is_revalidated_by_etag_and_flags_old_builds() {
     let (origin, seen) = server(Box::new(account_routes)).await;
-    let vault = Arc::new(MemoryVault::default());
-    vault
-        .store(&AccountToken::new("token-1".into()).unwrap())
-        .unwrap();
-    let account = service(&origin, vault, Arc::new(MemorySettings::default()));
+    let account = service(
+        &origin,
+        Arc::new(MemoryVault::default()),
+        Arc::new(MemorySettings::default()),
+    );
+    let config = account.load_config().await.unwrap();
+    assert!(config.cloud_enabled);
+    assert!(account.view().update_required);
+    // max-age=0 on the first answer: the next read revalidates and gets a 304.
+    let again = account.load_config().await.unwrap();
+    assert_eq!(again, config);
+    let reads = requests(&seen, "GET /v1/client-config");
+    assert_eq!(reads.len(), 2);
+    assert!(!reads[0].headers.contains("if-none-match"));
+    assert!(reads[1].headers.contains("if-none-match: \"v1\""));
+    // The 304 allowed five minutes, so a third read stays local.
+    account.load_config().await.unwrap();
+    assert_eq!(requests(&seen, "GET /v1/client-config").len(), 2);
+}
+
+#[tokio::test]
+async fn checkout_opens_only_on_the_billing_provider_and_is_watched() {
+    let (account, _, seen, _) = signed_in().await;
 
     let url = account
         .checkout(&Purchase::Plan {
@@ -226,14 +326,7 @@ async fn checkout_opens_only_on_the_billing_provider_and_is_watched() {
         .unwrap();
     assert_eq!(url.host_str(), Some("sandbox.polar.sh"));
     assert!(account.checkout_open());
-    let body = seen
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|r| r.line.starts_with("POST /v1/billing/checkout"))
-        .unwrap()
-        .body
-        .clone();
+    let body = requests(&seen, "POST /v1/billing/checkout")[0].body.clone();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&body).unwrap(),
         serde_json::json!({"plan": "pro", "interval": "monthly"})
@@ -242,27 +335,144 @@ async fn checkout_opens_only_on_the_billing_provider_and_is_watched() {
     // Without the on-demand refresh route, billing falls back to a plain read.
     let billing = account.refresh_billing().await.unwrap();
     assert!(!billing.paid);
+    assert!(billing.sells());
+}
+
+#[tokio::test]
+async fn billing_refresh_stays_within_six_a_minute() {
+    let (account, _, seen, _) = signed_in().await;
+    for _ in 0..6 {
+        account.refresh_billing().await.unwrap();
+    }
+    assert!(matches!(
+        account.refresh_billing().await,
+        Err(AccountError::RateLimited { retry_after }) if retry_after <= 60
+    ));
+    assert_eq!(requests(&seen, "POST /v1/billing/refresh").len(), 6);
+}
+
+#[tokio::test]
+async fn an_email_change_on_an_old_session_asks_to_sign_in_again_without_signing_out() {
+    let (account, vault, seen, origin) = signed_in().await;
+    assert_eq!(
+        account.send_email_change_code("a@b.co").await,
+        Err(AccountError::Invalid)
+    );
+    assert_eq!(
+        account.send_email_change_code("new@b.co").await,
+        Err(AccountError::ReauthRequired)
+    );
+    assert!(account.signed_in());
+    assert!(vault.present(&origin).unwrap());
+
+    // Signing in again replaces the old session and revokes it on the server.
+    account.send_reauth_code().await.unwrap();
+    assert_eq!(account.view().pending_email.as_deref(), Some("a@b.co"));
+    account.verify("123456").await.unwrap();
+    assert_eq!(requests(&seen, "POST /v1/logout").len(), 1);
+    assert!(account.signed_in());
+}
+
+#[tokio::test]
+async fn a_completed_email_change_ends_the_session_here() {
+    let (account, vault, seen, origin) = signed_in().await;
+    assert_eq!(
+        account.change_email("new@b.co", "12").await,
+        Err(AccountError::InvalidCode)
+    );
+    account.change_email(" new@b.co ", "654321").await.unwrap();
+    assert!(!account.signed_in());
+    assert_eq!(vault.present(&origin), Ok(false));
+    let body = requests(&seen, "PATCH /v1/account/email")[0].body.clone();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"email": "new@b.co", "otp": "654321"})
+    );
+}
+
+#[tokio::test]
+async fn name_export_history_and_receipts_follow_the_contract() {
+    let (account, _, seen, _) = signed_in().await;
+
+    account.set_name(Some("  Ada ")).await.unwrap();
+    assert_eq!(account.view().profile.unwrap().name.as_deref(), Some("Ada"));
+    let body = requests(&seen, "PATCH /v1/account")[0].body.clone();
+    assert_eq!(body, r#"{"name":"Ada"}"#);
+    account.set_name(None).await.unwrap();
+    assert_eq!(
+        requests(&seen, "PATCH /v1/account")[1].body,
+        r#"{"name":null}"#
+    );
+    assert_eq!(
+        account.set_name(Some(&"x".repeat(101))).await,
+        Err(AccountError::Invalid)
+    );
+
+    let export = account.export().await.unwrap();
+    assert_eq!(export["schemaVersion"], 1);
+
+    let page = account.usage_history(None).await.unwrap();
+    assert_eq!(page.requests[0].state, "pending");
+    let cursor = page.next_cursor.unwrap();
+    account.usage_history(Some(&cursor)).await.unwrap();
+    // The opaque cursor goes back exactly, percent-encoded only as a query.
+    let next = &requests(&seen, "GET /v1/usage/requests?cursor=eyJ0Ijo%2FMX0%2B")[0];
+    assert!(next.line.contains("cursor=eyJ0Ijo%2FMX0%2B"));
+    assert_eq!(
+        account.usage_history(Some(&"c".repeat(201))).await.err(),
+        Some(AccountError::Invalid)
+    );
+
+    let receipt = account
+        .confirm_request("0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c")
+        .await
+        .unwrap();
+    assert!(receipt.settled());
+    assert_eq!(receipt.charged.as_deref(), Some("800"));
+    assert_eq!(account.view().unsettled.len(), 1);
+    assert_eq!(
+        account
+            .receipt("0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6d")
+            .await,
+        Err(AccountError::NotFound)
+    );
+    assert!(account.signed_in());
+}
+
+#[tokio::test]
+async fn signing_out_everywhere_needs_the_servers_word() {
+    let vault = MemoryVault::with("http://127.0.0.1:9", "token-1");
+    let account = service(
+        "http://127.0.0.1:9",
+        vault.clone(),
+        Arc::new(MemorySettings::default()),
+    );
+    assert_eq!(
+        account.sign_out_everywhere().await,
+        Err(AccountError::Offline)
+    );
+    assert!(account.signed_in());
+
+    let (account, vault, seen, origin) = signed_in().await;
+    account.sign_out_everywhere().await.unwrap();
+    assert!(!account.signed_in());
+    assert_eq!(vault.present(&origin), Ok(false));
+    assert_eq!(requests(&seen, "POST /v1/logout-all").len(), 1);
 }
 
 #[tokio::test]
 async fn sign_out_clears_locally_even_when_the_server_is_gone() {
-    let vault = Arc::new(MemoryVault::default());
-    vault
-        .store(&AccountToken::new("token-1".into()).unwrap())
-        .unwrap();
+    let vault = MemoryVault::with("http://127.0.0.1:9", "token-1");
     let settings = Arc::new(MemorySettings::default());
     let account = service("http://127.0.0.1:9", vault.clone(), settings);
     account.sign_out().await.unwrap();
     assert!(!account.signed_in());
-    assert_eq!(vault.present(), Ok(false));
+    assert_eq!(vault.present("http://127.0.0.1:9"), Ok(false));
 }
 
 #[tokio::test]
-async fn changing_server_ends_the_session_and_remembers_only_custom_servers() {
-    let vault = Arc::new(MemoryVault::default());
-    vault
-        .store(&AccountToken::new("token-1".into()).unwrap())
-        .unwrap();
+async fn changing_server_remembers_only_custom_servers() {
+    let vault = MemoryVault::with("http://127.0.0.1:9", "token-1");
     let settings = Arc::new(MemorySettings::default());
     let account = service("http://127.0.0.1:9", vault.clone(), settings.clone());
 
@@ -277,4 +487,5 @@ async fn changing_server_ends_the_session_and_remembers_only_custom_servers() {
     assert_eq!(account.origin(), crate::DEFAULT_ORIGIN);
     assert_eq!(settings.get("account.server"), None);
     assert!(!account.view().custom_server);
+    assert!(vault.present("http://127.0.0.1:9").unwrap());
 }

@@ -12,6 +12,12 @@
   let devices = $state.raw<AccountSessionV1[]>([]);
   let failure = $state<AccountFaultV1 | null>(null);
   let revoking = $state<string | null>(null);
+  let confirming = $state(false);
+  const busy = $derived(session.pending());
+  const fault = $derived(session.fault());
+  const signOutAllFault = $derived(
+    fault?.action === "sign_out_all" ? explainAccountFault(fault.fault, fault.retryAfter) : null,
+  );
 
   async function load() {
     shown = true;
@@ -66,6 +72,20 @@
     {:else}<p class="empty">{m.account_devices_empty()}</p>
     {/each}
   {/if}
+  <SettingsRow title={m.account_sign_out_all_title()} description={m.account_sign_out_all_desc()}>
+    {#if confirming}<Button size="compact" variant="ghost" onclick={() => (confirming = false)}
+        >{m.action_cancel()}</Button
+      ><Button
+        size="compact"
+        variant="danger"
+        pending={busy === "sign_out_all"}
+        onclick={() => void session.signOutEverywhere()}>{m.account_sign_out_all_confirm()}</Button
+      >
+    {:else}<Button size="compact" disabled={!!busy} onclick={() => (confirming = true)}
+        >{m.account_sign_out_all()}</Button
+      >{/if}
+  </SettingsRow>
+  {#if signOutAllFault}<p class="empty error" role="alert">{signOutAllFault}</p>{/if}
 </SettingsGroup>
 
 <style>
@@ -74,5 +94,10 @@
     padding: 14px 18px;
     color: var(--color-muted);
     font-size: var(--text-label);
+  }
+
+  .error {
+    padding-block-start: 0;
+    color: var(--color-danger);
   }
 </style>

@@ -329,6 +329,13 @@ pub const REGISTRY: &[CommandSpec] = &[
         Keys::same("CmdOrCtrl+Shift+Return"),
         Group::Work,
     ),
+    // Starts and stops dictation in the Work bar; elsewhere it does nothing.
+    command(
+        "work.dictate",
+        "Dictate",
+        Keys::same("CmdOrCtrl+Shift+D"),
+        Group::Keys,
+    ),
     command(
         "launcher.toggle",
         "Toggle Launcher",

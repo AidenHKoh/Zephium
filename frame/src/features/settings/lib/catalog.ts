@@ -430,6 +430,18 @@ export const fields = {
     description: m.pref_performance_exceptions_help,
     initial: "",
   },
+  "voice.engine": {
+    section: "ai",
+    label: m.voice_engine_title,
+    description: m.voice_group_note,
+    initial: "",
+  },
+  "voice.language": {
+    section: "ai",
+    label: m.voice_language_title,
+    description: m.voice_language_desc,
+    initial: "",
+  },
   "work.decisions": {
     section: "ai",
     label: m.settings_decisions,
