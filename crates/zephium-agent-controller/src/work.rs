@@ -1439,6 +1439,7 @@ impl AgentWorkController {
                     follow: zephium_agentic::SemanticActionFollow::default(),
                     consent_press: false,
                     covered_controls: Vec::new(),
+                    typed_unsent: false,
                     failure: None,
                     observation: None,
                     native_terminal: None,
@@ -1463,6 +1464,9 @@ struct WorkState {
     /// Controls of this document a click found covered, by role and name
     /// digest: the model is offered them for a key press only.
     covered_controls: Vec<u64>,
+    /// The last verified step typed into a field that commits nothing (a
+    /// search or filter box) and nothing has run it since.
+    typed_unsent: bool,
     navigation_target: Option<ContextNavigationTarget>,
     navigation_route: Option<AgentNavigationRoute>,
     navigation_discovery: Option<AgentNavigationDiscovery>,
@@ -3395,6 +3399,18 @@ impl AgentWorkController {
                     // that cannot afford them, or an action the assignment
                     // does not permit, is refused to the model, not failed.
                     let admitted = match binding {
+                        // Planners typed a query and then scrolled instead of
+                        // running it: the first such scroll is refused, said so.
+                        crate::action::AgentBrowserActionBinding::Prepared(proposal)
+                            if state.typed_unsent
+                                && proposal.action().kind() == SemanticActionKind::Scroll =>
+                        {
+                            state.typed_unsent = false;
+                            Err(proposal
+                                .into_refusal(SemanticActionBindingError::AssignmentDenied)
+                                .ok_or(AgentWorkFailure::Contract)?
+                                .unsent_search())
+                        }
                         crate::action::AgentBrowserActionBinding::Prepared(proposal) => {
                             let starved = state.navigation_discovery.is_some()
                                 && session
@@ -3508,6 +3524,9 @@ impl AgentWorkController {
             };
             Self::retain_action_read_evidence(state, &proposal, &observation, captured_at)?;
             let link = Self::clicked_link(state, proposal.action(), &observation);
+            let typed = proposal.action().kind() == SemanticActionKind::Fill
+                && state.task.rewritable_field(proposal.action(), &observation);
+            state.typed_unsent = false;
             let (current, current_at, transition) = match Self::execute_prepared_action(
                 state,
                 worker,
@@ -3644,6 +3663,7 @@ impl AgentWorkController {
                     .ok_or(AgentWorkFailure::Contract)?,
                 &current,
             )?;
+            state.typed_unsent = typed;
             fruitless.progressed();
             if let Some(target) = state.follow.take() {
                 let (continuation, _) =

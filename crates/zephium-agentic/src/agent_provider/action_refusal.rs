@@ -166,6 +166,7 @@ impl super::super::AgentProviderSettledToolTurn {
                     context: Some(context),
                     repeated: false,
                     stuck: false,
+                    unsent_search: false,
                 },
             ));
         }
@@ -191,6 +192,7 @@ impl super::super::AgentProviderSettledToolTurn {
                             context: refusal_context,
                             repeated: false,
                             stuck: false,
+                            unsent_search: false,
                         },
                     ));
                 }
@@ -214,6 +216,7 @@ impl super::super::AgentProviderSettledToolTurn {
                     context: refusal_context,
                     repeated: false,
                     stuck: false,
+                    unsent_search: false,
                 },
             )),
             Err(error) => Err(Error::Binding(error)),
@@ -229,6 +232,7 @@ pub struct AgentProviderActionRefusal {
     context: Option<AgentProviderActionRefusalContext>,
     repeated: bool,
     stuck: bool,
+    unsent_search: bool,
 }
 
 impl AgentProviderActionRefusal {
@@ -245,12 +249,19 @@ impl AgentProviderActionRefusal {
             context,
             repeated: false,
             stuck: false,
+            unsent_search: false,
         }
     }
     /// This control was refused before on an earlier look: the model hears
     /// to change approach instead of trying it again.
     pub fn repeated(mut self) -> Self {
         self.repeated = true;
+        self
+    }
+    /// A scroll proposed right after typing into a search or filter field
+    /// that was never run: the model hears to run it first.
+    pub fn unsent_search(mut self) -> Self {
+        self.unsent_search = true;
         self
     }
     /// The model proposed this exact refused action again and again: it
@@ -429,6 +440,11 @@ impl AgentProviderActionRefusal {
                 Some(" Only a ref listed for scroll scrolls. A click, fill or press brings its control into view by itself, so act on the control directly; to see more of the page, scroll the document ref by a page; to read records already in your looks, extract.")
             }
             _ => None,
+        };
+        let (code, guidance) = if self.unsent_search {
+            ("search_not_run", "Nothing executed. You typed into a search or filter field and have not run it: press Enter in that field now (act press, key enter, effect read, verification page_changed), or click its search button. Scrolling or looking again does not run it.")
+        } else {
+            (code, guidance)
         };
         let guidance = format!("{guidance}{}", hint.unwrap_or_default());
         let guidance = if self.repeated {

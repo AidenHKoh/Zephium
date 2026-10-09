@@ -561,6 +561,7 @@ impl AgentWorkController {
         }
         state.navigation_hops += 1;
         state.covered_controls.clear();
+        state.typed_unsent = false;
         let fresh = Self::fit_model_observation(
             Box::pin(Self::observe_after_navigation(state, worker, browser)).await?,
         )?;
