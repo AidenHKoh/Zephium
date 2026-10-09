@@ -253,12 +253,13 @@ fn validate_account_refresh(
         // Pinned across the actor's two files; new admission paths (discovery,
         // waits, screenshots, decisions, a site's whole first look, the whole
         // look a consent press is made on, an app view's look and each
-        // landmark it opens, each view an app read switches to, and a results
-        // page's read) each sample once more.
+        // landmark it opens, each view an app read switches to, a results
+        // page's read, and the look after Rust closes a site's own overlay
+        // offer) each sample once more.
         || format!("{work}\n{decision}")
             .matches("state.refresh_account(worker, browser)?")
             .count()
-            != 29
+            != 30
         || !policy.contains("MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS: u64 = 30_000;")
     {
         return Err("Work lost per-admission sampling, control or original expiry boundary".into());
@@ -1194,7 +1195,9 @@ fn validate_work(work: &str, decision: &str) -> Result<(), String> {
             return Err(format!("Work actor lost boundary: {required}"));
         }
     }
-    let scanned = without_loading_classifier(&without_challenge_detector(source)?)?;
+    let scanned = without_announced_loading(&without_loading_classifier(
+        &without_challenge_detector(source)?,
+    )?)?;
     for forbidden in FORBIDDEN_TERRA_TOKENS.into_iter().chain([
         "SemanticModelActionQualificationExecution",
         "for_execution_qualification",
@@ -1241,6 +1244,38 @@ fn without_loading_classifier(source: &str) -> Result<String, String> {
     Ok(source.replacen(
         LOADING_CLASSIFIER,
         &LOADING_CLASSIFIER.replace(".as_str()", ""),
+        1,
+    ))
+}
+
+// Admits one more boolean content read: after a navigation a site page whose
+// status or progress line opens with a fixed loading phrase (rome2rio's
+// "Loading trip planner") is looked at again for a few more seconds instead of
+// being handed to the planner half-built. Only short lines of two scheduling
+// roles are read, against a closed phrase list, and only a bool leaves it, so
+// it grants no authority. Pinned whole like the classifier above.
+const ANNOUNCED_LOADING_CLASSIFIER: &str = r#"fn announces_loading(observation: &SemanticObservation) -> bool {
+    observation
+        .frames()
+        .iter()
+        .flat_map(SemanticSnapshot::nodes)
+        .filter(|node| matches!(node.role(), SemanticRole::Status | SemanticRole::Progress))
+        .flat_map(|node| [node.name(), node.text()].into_iter().flatten())
+        .any(|words| {
+            let words = words.as_str().trim().to_lowercase();
+            words.len() <= 64 && LOADING_WORDS.iter().any(|lead| words.starts_with(lead))
+        })
+}"#;
+
+fn without_announced_loading(source: &str) -> Result<String, String> {
+    if source.matches(ANNOUNCED_LOADING_CLASSIFIER).count() != 1 {
+        return Err(
+            "Work announced-loading classifier changed its exact bounded content read".to_owned(),
+        );
+    }
+    Ok(source.replacen(
+        ANNOUNCED_LOADING_CLASSIFIER,
+        &ANNOUNCED_LOADING_CLASSIFIER.replace(".as_str()", ""),
         1,
     ))
 }
