@@ -1131,6 +1131,30 @@ impl SiteGate {
     }
 }
 
+/// A short line that reports something just done: its done word opens or
+/// closes it ("Message sent", "Booking confirmed", "Deleted 3 items"), or it
+/// says so outright ("Your order has been placed", "Thank you for your
+/// order"). A listing heading that only uses the word ("Most booked hotels
+/// in Krakow") is not a report.
+fn says_done(line: &str) -> bool {
+    let line = words(line);
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.is_empty() || parts.len() > 8 || !names_any(&line, &DONE_WORDS) {
+        return false;
+    }
+    let edge = |word: &str| {
+        DONE_WORDS
+            .iter()
+            .any(|done| !done.contains(' ') && *done == word)
+    };
+    edge(parts[0])
+        || edge(parts[parts.len() - 1])
+        || DONE_WORDS
+            .iter()
+            .any(|done| done.contains(' ') && line.contains(&format!(" {done} ")))
+        || names_any(&line, &["has been", "have been", "was", "were", "is now"])
+}
+
 fn status_lines(observation: &SemanticObservation) -> Vec<String> {
     observation
         .frames()
@@ -1491,7 +1515,7 @@ impl SiteWorkPolicy {
         let before = std::mem::take(&mut state.status_before);
         if let Some(line) = status_lines(observation)
             .into_iter()
-            .find(|line| !before.contains(line) && names_any(line, &DONE_WORDS))
+            .find(|line| !before.contains(line) && says_done(line))
         {
             state.unconfirmed = Some(line);
         }
@@ -2092,6 +2116,20 @@ mod tests {
             .is_ok());
         policy.after_step(&after);
         assert_eq!(gate.unconfirmed().as_deref(), Some("Message sent"));
+        for (line, done) in [
+            ("Message sent", true),
+            ("Booking confirmed", true),
+            ("Your order has been placed and paid", true),
+            ("Thank you for your order", true),
+            (
+                "Most booked hotels in Krakow and surrounding area in the past month",
+                false,
+            ),
+            ("Recently ordered together", false),
+            ("Sent", true),
+        ] {
+            assert_eq!(says_done(line), done, "{line}");
+        }
         assert_eq!(
             policy.human_wall(&after),
             Some(AgentBrowserHumanReason::Verification)
