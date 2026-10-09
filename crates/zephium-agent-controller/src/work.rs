@@ -3389,7 +3389,7 @@ impl AgentWorkController {
                     // A link whose click went nowhere (a new-window link, a
                     // covered or script-only one) is followed to its observed
                     // destination rather than handed back to the model.
-                    if let Some(target) = state.follow.take().or(link) {
+                    if let Some(target) = state.follow.close().or(link) {
                         let next = Self::navigate_current(
                             state,
                             worker,
@@ -3490,7 +3490,9 @@ impl AgentWorkController {
                 &current,
             )?;
             fruitless.progressed();
-            if let Some(target) = state.follow.take() {
+            // The action's look is done: a load the page starts from here on
+            // is its own, and becomes the next document.
+            if let Some(target) = state.follow.close() {
                 let (continuation, _) =
                     transition.into_parts().ok_or(AgentWorkFailure::Contract)?;
                 let next = Self::navigate_current(
