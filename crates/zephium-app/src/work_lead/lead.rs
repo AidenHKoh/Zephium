@@ -616,6 +616,9 @@ where
         let Some(kind) = args.get("kind").and_then(Value::as_str) else {
             return ("kind is required".into(), true);
         };
+        // The reply answers the whole request on top of the result, never
+        // from the end of one part's row.
+        let part = part.filter(|_| kind != "reply" || helper);
         if helper && !matches!(kind, "picks" | "sheet") {
             return (
                 "A part places at most one compact object, picks or a small sheet, and hands every other fact to the lead in finish's digest".into(),
