@@ -28,13 +28,16 @@ describe("keymap model", () => {
       entry("tool.downloads", "window"),
       entry("launcher.toggle", "global", false),
       entry("work.pane.close", "work", false),
+      entry("work.dictate", "keys"),
     ]);
-    expect(sections.map((section) => section.id)).toEqual(["browser", "tabs"]);
+    expect(sections.map((section) => section.id)).toEqual(["browser", "tabs", "work"]);
     expect(sections[0]!.entries.map((e) => e.id)).toEqual([
       "browser.settings",
       "tab.new",
       "tool.downloads",
     ]);
     expect(sections[1]!.entries.map((e) => e.id)).toEqual(["tab.select.1", "tab.next"]);
+    expect(sections[2]!.entries.map((e) => e.id)).toEqual(["work.dictate"]);
+    expect(commandTitle(sections[2]!.entries[0]!)).toBe("Dictate in Work");
   });
 });
