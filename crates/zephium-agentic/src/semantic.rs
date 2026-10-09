@@ -1308,18 +1308,18 @@ impl SemanticSnapshot {
             .sum::<usize>() as u32;
     }
 
-    /// Local positive evidence can survive unrelated field clipping. Any
-    /// structural/global truncation still refuses action evidence, and legacy
-    /// records without an explicit local witness remain closed on FieldLimit.
+    /// Local positive evidence survives truncation elsewhere in the look: a
+    /// big page is always cut somewhere, and the runtime marks every record it
+    /// clipped or left gathering text as incomplete. Records without an
+    /// explicit local witness stay closed on any truncation.
     pub(crate) fn has_complete_node_fields(&self, key: SemanticNodeKey) -> bool {
         match self.completeness {
             SemanticCompleteness::Complete => true,
-            SemanticCompleteness::Truncated(SemanticTruncation::FieldLimit) => self
+            SemanticCompleteness::Truncated(_) => self
                 .nodes
                 .iter()
                 .find(|node| node.key == key)
                 .is_some_and(|node| node.fields_complete == Some(true)),
-            SemanticCompleteness::Truncated(_) => false,
         }
     }
     /// Exact native invocation correlation.

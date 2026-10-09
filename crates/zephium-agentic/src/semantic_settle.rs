@@ -971,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn target_state_settlement_requires_local_completeness_on_field_clipping() {
+    fn target_state_settlement_requires_local_completeness_on_any_truncation() {
         let (observation, _) = observation();
         let action = action(
             &observation,
@@ -1023,11 +1023,7 @@ mod tests {
                     SemanticSettleInstant::from_millis(75),
                     &snapshot,
                 );
-                assert_eq!(
-                    result.is_ok(),
-                    status == "field_limit" && local == Some(true),
-                    "{status}/{local:?}"
-                );
+                assert_eq!(result.is_ok(), local == Some(true), "{status}/{local:?}");
                 if result.is_err() {
                     assert_eq!(tracker.event_count(), 0);
                 }

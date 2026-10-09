@@ -2548,13 +2548,13 @@ mod tests {
     }
 
     #[test]
-    fn scroll_uses_complete_local_fields_without_relaxing_click_completeness() {
+    fn partial_looks_act_on_targets_with_a_whole_local_witness() {
         let original = observation();
         let frame = original.frames()[0].frame().clone();
         for complete in [true, false] {
             let bytes = serde_json::to_vec(&json!({"v":1,"i":7,"g":9,"c":"node_limit","n":[
                 {"k":1,"r":"document","o":16,"fc":complete,"b":{"x":0,"y":0,"w":1280,"h":800}},
-                {"k":2,"p":0,"r":"button","o":1,"fc":true,"b":{"x":10,"y":10,"w":100,"h":30}}
+                {"k":2,"p":0,"r":"button","o":1,"fc":complete,"b":{"x":10,"y":10,"w":100,"h":30}}
             ]}))
             .unwrap();
             let snapshot = decode_semantic_snapshot(
@@ -2592,7 +2592,7 @@ mod tests {
                         target: SemanticReferenceId::new(2).unwrap(),
                     },
                     SemanticVerification::PageDialogOpened,
-                    false,
+                    complete,
                 ),
             ] {
                 let batch = SemanticActionBatch::bind(
@@ -2611,7 +2611,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_snapshot_disclosure_requires_complete_target_and_read_expansion() {
+    fn partial_snapshot_click_requires_a_whole_target() {
         let original = observation();
         let frame = original.frames()[0].frame().clone();
         let expanded = SemanticVerification::TargetState {
@@ -2621,10 +2621,18 @@ mod tests {
         for (complete, activation, effect, verification, accepted) in [
             (true, 6, SemanticEffectClass::Read, expanded, true),
             (false, 6, SemanticEffectClass::Read, expanded, false),
-            (true, 1, SemanticEffectClass::Read, expanded, false),
-            (true, 6, SemanticEffectClass::LocalWrite, expanded, false),
+            (true, 1, SemanticEffectClass::Read, expanded, true),
+            (false, 1, SemanticEffectClass::Read, expanded, false),
+            (true, 6, SemanticEffectClass::LocalWrite, expanded, true),
             (
                 true,
+                6,
+                SemanticEffectClass::Read,
+                SemanticVerification::PageDialogOpened,
+                true,
+            ),
+            (
+                false,
                 6,
                 SemanticEffectClass::Read,
                 SemanticVerification::PageDialogOpened,

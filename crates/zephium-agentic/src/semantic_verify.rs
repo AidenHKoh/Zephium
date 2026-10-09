@@ -1312,7 +1312,7 @@ mod tests {
                 )
                 .unwrap();
                 let prepared = batch.actions()[0].prepare(&observation.frames()[0]);
-                let allowed = status == "field_limit" && local == Some(true);
+                let allowed = local == Some(true);
                 assert_eq!(prepared.is_ok(), allowed, "preparation: {status}/{local:?}");
                 if !allowed {
                     // A later complete checkpoint cannot repair an incomplete
@@ -1357,7 +1357,7 @@ mod tests {
                             verify_semantic_action(&immediate(&action, 1), &action, evidence);
                         assert_eq!(
                             verified.is_ok(),
-                            after_status == "field_limit" && after_local == Some(true),
+                            after_local == Some(true),
                             "verification: {after_status}/{after_local:?}"
                         );
                     }
@@ -2394,7 +2394,7 @@ mod tests {
             (Some(true), 2, 1, true),
             (Some(false), 2, 1, false),
             (None, 2, 1, false),
-            (Some(true), 3, 1, false),
+            (Some(true), 3, 1, true),
             (Some(true), 2, 0, false),
         ] {
             let mut node = json!({"k":4,"p":0,"r":"checkbox","n":"Private toggle","s":state,"o":1});

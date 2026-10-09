@@ -702,7 +702,10 @@
   }
 
   function mark(state, completeness, stop = true) {
-    if (completeness === "field_limit") state.fieldTruncations = (state.fieldTruncations || 0) + 1;
+    // Text exhaustion also clips the record being read: it is no longer whole.
+    if (completeness === "field_limit" || completeness === "text_limit") {
+      state.fieldTruncations = (state.fieldTruncations || 0) + 1;
+    }
     if (state.completeness === "complete" || completeness === "text_limit" ||
         (state.completeness === "field_limit" && completeness !== "field_limit")) {
       state.completeness = completeness;
@@ -2143,8 +2146,10 @@
       stack.push({ node: root, parent: null, sink: null, depth: 0, disabled: false });
     }
 
+    let current = null;
     while (stack.length !== 0 && !state.stopped) {
       const item = stack.pop();
+      current = item;
       if (!visit(state)) break;
       const type = nodeType(item.node);
       if (type === 3) {
@@ -2260,6 +2265,22 @@
           { parent, sink, depth: item.depth + 1, disabled, nameAncestors },
           state
         );
+      }
+    }
+    // A look cut short leaves the records still collecting descendant text
+    // unfinished; every other record it holds was read whole.
+    if (state.stopped) {
+      const open = current === null ? stack : [...stack, current];
+      const unfinished = new Set();
+      for (const item of open) {
+        for (let index = item.parent, depth = 0;
+          index !== null && index !== undefined && records[index] !== undefined && depth <= MAX_TREE_DEPTH;
+          index = records[index].wire.p === undefined ? null : records[index].wire.p, depth += 1) {
+          if (unfinished.has(index)) break;
+          unfinished.add(index);
+          // Only a record that gathers descendant text can be left unfinished.
+          if (records[index].sink !== null && records[index].sink !== undefined) records[index].wire.fc = false;
+        }
       }
     }
     if (!anchored && !state.stopped) {

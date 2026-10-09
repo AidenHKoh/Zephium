@@ -1712,6 +1712,20 @@ async function finish() {
   const crowded = JSON.parse(invoke(113, 113, { k: "initial" }, { n: 8, t: 1024 }));
   assert(crowded.n.some((node) => node.n === "Visible final action") && crowded.n.some((node) => node.t === "Visible final evidence"), "offscreen heading inventory starved later viewport content");
   assert(crowded.n.length <= 8 && crowded.c === "node_limit", "structural inventory escaped its bound or hid omission");
+  // A look cut inside a control leaves that control's name unfinished; the
+  // records read whole before it stay usable for actions.
+  const cut = new Element("main");
+  cut.append(new Element("p")).append(new CharacterData("Whole evidence"));
+  const cutButton = cut.append(new Element("button"));
+  cutButton.append(new Element("img", { alt: "Cart" }));
+  cutButton.append(new CharacterData("Buy now"));
+  document._root = cut; setOwner(cut, document);
+  const cutLook = JSON.parse(invoke(140, 140, { k: "initial" }, { n: 4, t: 1024 }));
+  const cutRecord = cutLook.n.find((node) => node.r === "button");
+  const wholeRecord = cutLook.n.find((node) => node.t === "Whole evidence");
+  assert(cutLook.c === "node_limit" && cutRecord && cutRecord.fc === false, "a control cut mid-read was marked whole");
+  assert(wholeRecord && wholeRecord.fc === true && cutLook.n[0].fc === true, "records read whole lost their witness");
+  document._root = crowd; setOwner(crowd, document);
   const tight = JSON.parse(invoke(114, 114, { k: "initial" }, { t: 64 }));
   assert(tight.n.some((node) => node.n === "Visible final action"), "offscreen headings spent visible content's text budget");
   crowd._parent = document; crowd._scrollHeight = 12000;
