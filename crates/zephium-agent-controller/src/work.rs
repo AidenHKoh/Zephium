@@ -3264,9 +3264,13 @@ impl AgentWorkController {
                     }
                 };
                 refused_looks = 0;
-                if whole {
-                    state.look_streak = state.look_streak.saturating_add(1);
-                }
+                // A narrower look between them breaks the streak: the whole
+                // page is then the way back from a section.
+                state.look_streak = if whole {
+                    state.look_streak.saturating_add(1)
+                } else {
+                    0
+                };
                 let next =
                     Self::inspect_current(state, worker, browser, checkpoint, &observation).await?;
                 observation = next.0;
