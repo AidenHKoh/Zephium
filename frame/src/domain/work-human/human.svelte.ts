@@ -118,6 +118,10 @@ export class WorkHumanSession {
   release(work: string, page: WorkHumanPageIdV1) {
     return this.act(work, commands.workHumanRelease(this.profile, work, page));
   }
+  /** Keeps a short wait (a bot check's) going a while longer; Rust bounds it. */
+  extend(work: string, page: WorkHumanPageIdV1) {
+    return this.act(work, commands.workHumanExtend(this.profile, work, page));
+  }
   private async act(
     work: string,
     request: Promise<WorkHumanResponseV1>,

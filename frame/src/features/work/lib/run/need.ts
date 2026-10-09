@@ -80,6 +80,13 @@ export function needWords(
         action: m.work_need_connect_action({ service: need.target }),
       };
     case "retry":
-      return { text: said(need.target, need.reason), action: m.work_need_again() };
+      return {
+        text: said(need.target, need.reason),
+        // The island names the site the check is met on again; the row already does.
+        action:
+          where === "island" && need.reason === "blocked_by_check" && need.target
+            ? m.work_need_again_site({ site: need.target })
+            : m.work_need_again(),
+      };
   }
 }

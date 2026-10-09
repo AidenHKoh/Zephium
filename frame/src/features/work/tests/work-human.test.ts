@@ -1,6 +1,14 @@
 import { expect, test } from "vitest";
 import type { WorkHumanPageV1, WorkHumanPhaseV1 } from "$shared/ipc/bindings";
-import { cardCountdown, heldPage, regionOf, sameRegion, MIN_REGION } from "../lib/work-human";
+import {
+  cardCountdown,
+  heldPage,
+  needTitle,
+  regionOf,
+  remembers,
+  sameRegion,
+  MIN_REGION,
+} from "../lib/work-human";
 
 const page = (step: string, phase: WorkHumanPhaseV1, attempt = "attempt"): WorkHumanPageV1 => ({
   id: { attempt, step, generation: 3 },
@@ -9,6 +17,8 @@ const page = (step: string, phase: WorkHumanPhaseV1, attempt = "attempt"): WorkH
   remaining_millis: 120_000,
   document_revision: "7",
   can_continue: true,
+  can_extend: false,
+  work_memory: false,
 });
 
 test("the furthest-along held page wins and a page the agent has back is not held", () => {
@@ -17,10 +27,11 @@ test("the furthest-along held page wins and a page the agent has back is not hel
   expect(heldPage([])).toBeNull();
 });
 
-test("the countdown appears only near the end of the wait", () => {
+test("the countdown reads as a clock and appears only in a wait's last two minutes", () => {
   expect(cardCountdown(120_000)).toBeNull();
-  expect(cardCountdown(59_400)).toBe("60s left");
-  expect(cardCountdown(12_100)).toBe("13s left");
+  expect(cardCountdown(89_200)).toBe("1:30 left");
+  expect(cardCountdown(59_400)).toBe("1:00 left");
+  expect(cardCountdown(12_100)).toBe("0:13 left");
   expect(cardCountdown(0)).toBeNull();
 });
 
@@ -61,4 +72,13 @@ test("an unchanged placement is not torn down to be rebuilt", () => {
   expect(sameRegion(region, { ...region, width: 641 })).toBe(false);
   expect(sameRegion(region, null)).toBe(false);
   expect(sameRegion(null, null)).toBe(false);
+});
+
+test("a waiting page says what to do and where; only a solved check in Work's own data is kept", () => {
+  expect(needTitle("challenge", "allegro.pl")).toBe("Solve the check on allegro.pl");
+  expect(needTitle("verification", "allegro.pl")).toBe("Solve the check on allegro.pl");
+  expect(needTitle("sign_in", "notion.so")).toBe("Sign in to notion.so");
+  expect(remembers({ reason: "challenge", workMemory: true })).toBe(true);
+  expect(remembers({ reason: "challenge", workMemory: false })).toBe(false);
+  expect(remembers({ reason: "sign_in", workMemory: true })).toBe(false);
 });

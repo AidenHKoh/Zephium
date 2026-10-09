@@ -103,7 +103,7 @@
   import { artifactView } from "../lib/project-work";
   import RequestLift from "./lift/RequestLift.svelte";
   import SourcesLift from "./lift/SourcesLift.svelte";
-  import { failureLine, humanPage, regionOf, sameRegion } from "../lib/work-human";
+  import { failureLine, humanPage, regionOf, sameRegion, type HumanPage } from "../lib/work-human";
   import { openOver, type PaneRect } from "../lib/pane-geometry";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
   import { CanvasPlacing } from "../lib/workspace/placing.svelte";
@@ -457,8 +457,17 @@
     const need = part?.need;
     const current = objectiveSession;
     if (!part || !need || !current || current.projection?.work.id !== part.objective) return;
-    const again = (text = m.work_need_again_request({ part: part.title })) =>
-      void current.continueWith(text);
+    // After a check nobody solved in time, the next try names the site the person will solve it on.
+    const checked = need.kind === "retry" && need.reason === "blocked_by_check" && !!need.target;
+    const again = (
+      text = checked
+        ? m.work_need_again_site_request({ part: part.title, site: need.target })
+        : m.work_need_again_request({ part: part.title }),
+    ) => {
+      // While the run goes on, the lead takes the retry now, or next if it cannot mid-step.
+      if (activeExecution) void current.steer(text).then((taken) => taken || current.enqueue(text));
+      else void current.continueWith(text);
+    };
     if (how === "again") return again();
     switch (need.kind) {
       case "sign_in":
@@ -554,6 +563,31 @@
     });
     takeoverQueue = next.catch(() => undefined);
   }
+  /** The work a held page belongs to, by its id. */
+  function heldWork(state: HumanPage) {
+    return [...human.pages].find(([, pages]) =>
+      pages.some(
+        (candidate) =>
+          candidate.id.attempt === state.attempt &&
+          candidate.id.step === state.step &&
+          candidate.id.generation === state.generation,
+      ),
+    )?.[0];
+  }
+  /** A page the run is waiting on keeps waiting a while longer, at the person's word. */
+  function extendWait(page: string) {
+    const state =
+      pageEntries.get(page)?.page.human ??
+      items.find((candidate) => candidate.id === page)?.page?.human;
+    if (!state || state.phase !== "waiting_for_human" || !state.canExtend) return;
+    const work = heldWork(state);
+    if (work)
+      void human.extend(work, {
+        attempt: state.attempt,
+        step: state.step,
+        generation: state.generation,
+      });
+  }
   function openTakeover(page: string) {
     const entry = pageEntries.get(page);
     const item = entry ? undefined : items.find((candidate) => candidate.id === page);
@@ -562,14 +596,7 @@
     const card = entry?.part ?? page;
     const url = entry?.page.url ?? item?.page?.url ?? "";
     if (!state || state.phase !== "waiting_for_human") return;
-    const work = [...human.pages].find(([, pages]) =>
-      pages.some(
-        (candidate) =>
-          candidate.id.attempt === state.attempt &&
-          candidate.id.step === state.step &&
-          candidate.id.generation === state.generation,
-      ),
-    )?.[0];
+    const work = heldWork(state);
     if (!work) return;
     panel = null;
     lifted = null;
@@ -941,6 +968,7 @@
         host: host(page.url),
         reason: state.reason,
         remaining: state.remaining,
+        canExtend: state.canExtend,
       };
     }
     return null;
@@ -2120,6 +2148,8 @@
         onfocusagent={(id) => canvasRef?.center(id)}
         onsteered={() => (session.composer = "")}
         onsignin={(card: string) => signIn(card)}
+        onwaitingopen={(card: string) => openTakeover(card)}
+        onwaitingextend={(card: string) => extendWait(card)}
         {human}
         onopenstep={openStep}
       />{/snippet}</LazyView
@@ -2214,6 +2244,10 @@
                 }
                 if (action === "help") {
                   openTakeover(id);
+                  return;
+                }
+                if (action === "wait" || action?.startsWith("wait:")) {
+                  extendWait(action === "wait" ? id : action.slice("wait:".length));
                   return;
                 }
                 if (action === "expand-request") {

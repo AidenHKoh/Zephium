@@ -5,7 +5,7 @@
   import type { WorkHumanReasonV1, WorkModelFaultV1 } from "$shared/ipc/bindings";
   import { currentActivity } from "$domain/work";
   import { agentLine, endingFault, endingNote, isLive } from "../lib/agent-steps";
-  import { cardCountdown, reasonSentence } from "../lib/work-human";
+  import { cardCountdown, needTitle } from "../lib/work-human";
   import type { WorkHumanSession } from "$domain/work-human";
   import RunAsks from "./asks/RunAsks.svelte";
   import { asksOf, openAsks } from "./asks/asks";
@@ -33,6 +33,8 @@
     writeup,
     onfocusagent,
     onwaitingpage,
+    onwaitingopen,
+    onwaitingextend,
     onreview,
     onsteered,
     onsignin,
@@ -64,6 +66,8 @@
       host: string;
       reason: WorkHumanReasonV1;
       remaining: number;
+      /** The wait is a short one the person may keep going. */
+      canExtend?: boolean;
     } | null;
     /** One line about something the person asked for that did not land. */
     problem?: string | null;
@@ -73,6 +77,10 @@
     onfocusagent?: (id: string) => void;
     /** Pans to the waiting page card and focuses it. */
     onwaitingpage?: (card: string) => void;
+    /** Opens the waiting page for the person to take over. */
+    onwaitingopen?: (card: string) => void;
+    /** Keeps the run waiting on the page a while longer. */
+    onwaitingextend?: (card: string) => void;
     /** Opens the change the run is proposing, so the person can read it whole. */
     onreview?: (step: string) => void;
     /** The draft was handed to the agent or queued; clear the composer. */
@@ -237,7 +245,7 @@
   };
   /** Two or three words while it works; one quiet sentence once it stops. */
   const headline = $derived.by(() => {
-    if (waiting) return reasonSentence(waiting.reason, waiting.host);
+    if (waiting) return needTitle(waiting.reason, waiting.host);
     if (intervention) return interventionLabel;
     const refused = failure ?? session.failure;
     if (refused) return refusals[refused]?.() ?? m.work_line_failed();
@@ -395,6 +403,8 @@
     computer: "working",
     connection: "working",
   };
+  /** The island offers more time only once the wait is nearly over; the card always does. */
+  const EXTEND_OFFER = 45_000;
   const signInWall = $derived(waiting?.reason === "sign_in" && !!onsignin);
   const followups = $derived(settled && newest ? session.followups.slice(0, 3) : []);
   const writeupOffer = $derived(settled && newest ? writeup : undefined);
@@ -624,8 +634,8 @@
               class="words waiting"
               onclick={() => onwaitingpage?.(waiting.card)}
             >
-              {headline}{#if cardCountdown(waiting.remaining)}<span class="left"
-                  >{cardCountdown(waiting.remaining)}</span
+              <span class="said-title">{headline}</span>{#if cardCountdown(waiting.remaining)}<span
+                  class="left">{cardCountdown(waiting.remaining)}</span
                 >{/if}
             </button>
           {:else if problem}
@@ -674,8 +684,17 @@
               type="button"
               class="action"
               disabled={blocked}
-              onclick={() => onsignin?.(waiting.card)}
-              >{m.work_line_sign_in({ host: waiting.host })}</button
+              onclick={() => onsignin?.(waiting.card)}>{m.work_ask_sign_in()}</button
+            >
+          {:else if waiting && onwaitingopen}
+            {#if waiting.canExtend && onwaitingextend && waiting.remaining < EXTEND_OFFER}<button
+                type="button"
+                class="action second"
+                title={m.work_human_extend_hint()}
+                onclick={() => onwaitingextend?.(waiting.card)}>{m.work_human_extend()}</button
+              >{/if}
+            <button type="button" class="action" onclick={() => onwaitingopen?.(waiting.card)}
+              >{m.work_human_open()}</button
             >
           {:else if proposal}
             <button
@@ -886,6 +905,8 @@
   /* A line that points somewhere reads as a link, not as another button. */
   button.waiting {
     display: inline-flex;
+    min-inline-size: 0;
+    max-inline-size: 100%;
     align-items: baseline;
     gap: 6px;
     padding: 0;
@@ -894,14 +915,22 @@
     color: var(--color-text);
     font: inherit;
     font-size: var(--text-label);
-    text-decoration: underline;
-    text-decoration-color: var(--color-border-strong);
-    text-underline-offset: 3px;
     cursor: default;
   }
 
-  button.waiting:hover {
-    text-decoration-color: var(--color-lit);
+  /* It pans to the page; the lit button beside it is the action. */
+  .said-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-decoration: underline;
+    text-decoration-color: transparent;
+    text-underline-offset: 3px;
+    transition: text-decoration-color var(--motion-fast) var(--ease-out);
+  }
+
+  button.waiting:hover .said-title {
+    text-decoration-color: var(--color-border-strong);
   }
 
   /* What the person asked for and did not land: said once, gone when read. */
@@ -929,8 +958,8 @@
 
   button.waiting .left {
     color: var(--color-muted);
+    flex: none;
     font-variant-numeric: tabular-nums;
-    text-decoration: none;
   }
 
   .draft {
@@ -977,6 +1006,16 @@
 
   .action:hover:not(:disabled) {
     background: var(--color-lit-hover);
+  }
+
+  /* A second choice beside the lit one: present, never competing with it. */
+  .action.second {
+    background: var(--color-control);
+    color: var(--color-text);
+  }
+
+  .action.second:hover:not(:disabled) {
+    background: var(--color-control-hover);
   }
 
   /* Next opens the capsule upward: its chevron points where the rows will be. */

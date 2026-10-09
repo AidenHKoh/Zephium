@@ -397,11 +397,11 @@ test("the line says why a page waits for you, in one sentence, and links to its 
     onwaitingpage,
   });
   const link = screen.getByRole("button", {
-    name: /Sign in to ferry.example so the agent can continue/,
+    name: /^Sign in to ferry.example/,
   });
   await expect.element(link).toBeVisible();
   // A long wait stays quiet; the countdown belongs to the last minute.
-  expect(screen.container.textContent).not.toContain("s left");
+  expect(screen.container.textContent).not.toContain(" left");
   await screen.rerender({
     session,
     waiting: {
@@ -412,7 +412,7 @@ test("the line says why a page waits for you, in one sentence, and links to its 
     },
     onwaitingpage,
   });
-  await expect.element(screen.getByText("18s left")).toBeVisible();
+  await expect.element(screen.getByText("0:18 left")).toBeVisible();
   await link.click();
   expect(onwaitingpage).toHaveBeenCalledExactlyOnceWith("page:execution:read-1");
   await screen.unmount();
@@ -568,7 +568,10 @@ test("a sign-in wall offers to sign in, and the run goes on by itself once the p
   };
   const onsignin = vi.fn();
   const screen = await render(AgentLine, { session, waiting, onsignin });
-  await screen.getByRole("button", { name: "Sign in to jobs.example.com", exact: true }).click();
+  await expect
+    .element(screen.getByText("Sign in to jobs.example.com", { exact: true }))
+    .toBeVisible();
+  await screen.getByRole("button", { name: "Sign in", exact: true }).click();
   expect(onsignin).toHaveBeenCalledExactlyOnceWith("page:execution:read-1");
   // No "as me" retry: the run itself resumes after the sign-in.
   expect(screen.container.textContent).not.toContain("Try again as me");

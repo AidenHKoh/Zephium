@@ -53,11 +53,12 @@ test("a page the run is holding says why it needs you, and the countdown only ne
     reason: "sign_in",
     remaining: 120_000,
     canContinue: false,
+    canExtend: false,
+    workMemory: false,
   };
   const screen = await render(PageCard, { item: waiting, selected: false });
-  // A short label and one sentence, person first.
-  await expect.element(screen.getByText("Sign in", { exact: true })).toBeVisible();
-  await expect.element(screen.getByText(/so the agent can continue/)).toBeVisible();
+  // What to do and where, action first.
+  await expect.element(screen.getByText(/^Sign in to /)).toBeVisible();
   expect(screen.container.querySelector(".needs .left")).toBeNull();
   await screen.rerender({
     item: {
@@ -66,7 +67,7 @@ test("a page the run is holding says why it needs you, and the countdown only ne
     },
     selected: false,
   });
-  await expect.element(screen.getByText("24s left")).toBeVisible();
+  await expect.element(screen.getByText("0:24 left")).toBeVisible();
   // Presented: the header carries that state and the card stops asking.
   await screen.rerender({
     item: {

@@ -109,7 +109,7 @@
   <div class="bar" role="toolbar" aria-label={data.title} style:--scale={scale}>
     <button type="button" onclick={() => (waiting ? action(id, "help") : open(id))}>
       <Icon icon={ArrowUpRight01Icon} size={14} />{waiting
-        ? m.work_human_help()
+        ? m.work_human_open()
         : type === "block" && data.block?.open
           ? m.work_board_close()
           : m.work_env_open()}
@@ -164,7 +164,12 @@
       />
     {:else if type === "subject"}<SubjectCard item={data} {selected} />
     {:else if type === "folder"}<FolderCard item={data} {selected} />
-    {:else if type === "page"}<PageCard item={data} {selected} onhelp={() => action(id, "help")} />
+    {:else if type === "page"}<PageCard
+        item={data}
+        {selected}
+        onhelp={() => action(id, "help")}
+        onwait={() => action(id, "wait")}
+      />
     {:else if type === "note"}<NoteCard item={data} {selected} />
     {:else if type === "media"}<MediaCard item={data} {selected} />
     {:else if type === "objective" || type === "request"}<RequestText
@@ -181,6 +186,7 @@
         {selected}
         onopen={(page) => action(id, `page:${page}`)}
         onneed={(how) => action(id, `need:${how}`)}
+        onwait={(page) => action(id, `wait:${page}`)}
         onlist={() => open(id)}
       />
     {:else if data.artifact?.content.kind === "matrix"}<CompareCard item={data} {selected} />

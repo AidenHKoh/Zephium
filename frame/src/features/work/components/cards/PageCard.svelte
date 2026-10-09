@@ -5,15 +5,23 @@
   import AccountBadge from "./AccountBadge.svelte";
   import { thumbnail } from "../../lib/frame-thumbs";
   import type { CanvasItem } from "../../lib/canvas-model";
-  import { cardCountdown, reasonBadge, reasonSentence } from "../../lib/work-human";
-  import * as m from "$shared/i18n/messages";
-  let { item, selected, onhelp }: { item: CanvasItem; selected: boolean; onhelp?: () => void } =
-    $props();
+  import NeedsYou from "../run/NeedsYou.svelte";
+  let {
+    item,
+    selected,
+    onhelp,
+    onwait,
+  }: {
+    item: CanvasItem;
+    selected: boolean;
+    onhelp?: () => void;
+    /** Keeps the run waiting on this page a while longer. */
+    onwait?: () => void;
+  } = $props();
   /** Set while the run is holding this page open for a person. */
   const human = $derived(item.page?.human ?? null);
   /** Only a page still waiting asks for a person; the rest say so under the host. */
   const waiting = $derived(human?.phase === "waiting_for_human");
-  const countdown = $derived(waiting && human ? cardCountdown(human.remaining) : null);
   const url = $derived(item.page?.url ?? item.detail);
   const host = $derived(item.page?.host || item.title);
   /** Where on the site, until the read gives up or a person holds it: then why. */
@@ -62,21 +70,7 @@
       {/if}
       {#if waiting && human}
         <div class="needs">
-          <p class="sentence">{reasonSentence(human.reason, item.page?.host ?? "")}</p>
-          <p class="ask">
-            <span class="why">{reasonBadge(human.reason)}</span>
-            <span class="act">
-              {#if countdown}<span class="left">{countdown}</span>{/if}
-              {#if onhelp}<button
-                  type="button"
-                  class="help nodrag nopan"
-                  onclick={(event) => {
-                    event.stopPropagation();
-                    onhelp?.();
-                  }}>{m.work_human_help()}</button
-                >{/if}
-            </span>
-          </p>
+          <NeedsYou page={human} {host} {url} onopen={onhelp} {onwait} />
         </div>
       {/if}
     </div>
@@ -206,85 +200,9 @@
     line-height: 13px;
   }
 
-  /* A person is needed: one band over the frame's foot, the reason on the lit rung. */
+  /* A person is needed: the band floats over the frame's foot, the frame still seen above it. */
   .needs {
     position: absolute;
-    inset-inline: 0;
-    inset-block-end: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 8px;
-    border-block-start: 1px solid var(--color-border);
-    background: var(--color-surface);
-    font-size: var(--text-caption);
-    line-height: 16px;
-  }
-
-  .sentence {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    margin: 0;
-    overflow: hidden;
-    color: var(--color-text);
-    font-weight: 500;
-    line-height: 14px;
-    text-wrap: pretty;
-  }
-
-  .ask {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    margin: 0;
-  }
-
-  .why {
-    overflow: hidden;
-    padding: 2px 8px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-lit-soft);
-    color: var(--color-text);
-    font-weight: 600;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .act {
-    display: inline-flex;
-    flex: none;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .left {
-    color: var(--color-muted);
-    font-variant-numeric: tabular-nums;
-  }
-
-  .help {
-    block-size: 24px;
-    padding: 0 12px;
-    border: 0;
-    border-radius: var(--radius-capsule);
-    background: var(--color-lit);
-    color: var(--color-on-lit);
-    font: inherit;
-    font-size: var(--text-caption);
-    font-weight: 600;
-    cursor: default;
-    transition: background-color var(--motion-fast) var(--ease-out);
-  }
-
-  .help:hover {
-    background: var(--color-lit-hover);
-  }
-
-  .help:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: 2px;
+    inset: auto 8px 8px;
   }
 </style>

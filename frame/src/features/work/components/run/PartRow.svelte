@@ -2,7 +2,6 @@
   import Icon from "$shared/ui/Icon";
   import type { CanvasItem, PartPage } from "../../lib/canvas-model";
   import { PART, partLead, rowKey, stackSize } from "../../lib/run/part-size";
-  import { reasonBadge } from "../../lib/work-human";
   import { CommandLineIcon, FileEditIcon, File01Icon, Search01Icon } from "../../lib/icons";
   import { askCard, partContent } from "./slots";
   import { needWords } from "../../lib/run/need";
@@ -10,6 +9,7 @@
   import { canvasBoard, type BoardActions } from "../../lib/canvas-context";
   import HostGlyph from "../cards/HostGlyph.svelte";
   import PageFace from "./PageFace.svelte";
+  import NeedsYou from "./NeedsYou.svelte";
   import PartMark from "../presence/PartMark.svelte";
   import PartAgent from "../presence/PartAgent.svelte";
   import * as m from "$shared/i18n/messages";
@@ -20,6 +20,7 @@
     onopen,
     onlist,
     onneed,
+    onwait,
   }: {
     item: CanvasItem;
     selected: boolean;
@@ -29,14 +30,28 @@
     onlist: () => void;
     /** Meets the part's need: `sign_in` opens the site, `again` runs the part again. */
     onneed?: (how: "meet" | "again") => void;
+    /** Keeps the run waiting on one of the part's pages a while longer. */
+    onwait?: (page: string) => void;
   } = $props();
 
   const part = $derived(item.part!);
   const shape = $derived(part.shape);
-  /** The page it is on now leads, then the newest. */
+  const waits = (page: PartPage) => page.human?.phase === "waiting_for_human";
+  /** A page waiting on the person leads, then the page it is on now, then the newest. */
   const ordered = $derived(
-    [...part.pages].reverse().sort((a, b) => Number(b.live) - Number(a.live)),
+    [...part.pages]
+      .reverse()
+      .sort((a, b) => Number(waits(b)) - Number(waits(a)) || Number(b.live) - Number(a.live)),
   );
+  /** The front window, when the run waits on the person there. */
+  const waiting = $derived(ordered[0] && waits(ordered[0]) ? ordered[0] : null);
+  const siteOf = (url: string) => {
+    try {
+      return new URL(url).hostname.replace(/^www\./u, "");
+    } catch {
+      return (part.host ?? "").replace(/^www\./u, "");
+    }
+  };
   const shown = $derived(ordered.slice(0, PART.shown));
   const stack = $derived(stackSize(part.pages.length));
   const working = $derived(part.state === "running" || part.state === "waiting");
@@ -170,6 +185,19 @@
       {#each shown as page, index (page.id)}
         {@render window(page, index)}
       {/each}
+      {#if waiting?.human}<div
+          class="waiting"
+          style:inline-size="{PART.window - 16}px"
+          style:inset-block-end="{stack.height - PART.bar - PART.frame + 8}px"
+        >
+          <NeedsYou
+            page={waiting.human}
+            host={siteOf(waiting.url)}
+            url={waiting.url}
+            onopen={() => onopen(waiting.id)}
+            onwait={onwait ? () => onwait?.(waiting.id) : undefined}
+          />
+        </div>{/if}
       {#if part.pages.length > 1}<span class="count" style:inset-inline-start="{stack.width}px"
           >{part.pages.length}</span
         >{/if}
@@ -224,12 +252,6 @@
       host={part.host ?? ""}
       live={page.live}
     />
-    {#if page.human?.phase === "waiting_for_human"}<span class="needs"
-        ><span class="why">{reasonBadge(page.human.reason)}</span><span
-          class="help"
-          role="presentation">{m.work_human_help()}</span
-        ></span
-      >{/if}
   </button>
 {/snippet}
 
@@ -420,28 +442,22 @@
     opacity: 0;
   }
 
-  .needs {
+  /* Over the front window's foot, outside its button: its actions are its own. */
+  .waiting {
     position: absolute;
-    inset: auto 8px 8px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-    padding: 4px 4px 4px 10px;
-    border-radius: var(--radius-control-compact);
-    background: var(--color-float);
-    box-shadow: var(--shadow-menu);
-    color: var(--color-text);
-    font-size: var(--text-label);
-    font-weight: 600;
-    line-height: 16px;
+    inset-inline-start: 8px;
+    z-index: 5;
   }
 
-  .help {
-    padding: 3px 10px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-lit);
-    color: var(--color-on-lit);
+  /* The windows stay folded while the run waits: the band speaks for the front one. */
+  .stack:has(.waiting) .page,
+  .stack:has(.waiting) .page:hover {
+    transform: var(--place);
+    translate: none;
+  }
+
+  .stack:has(.waiting) .count {
+    opacity: 1;
   }
 
   .lines {
