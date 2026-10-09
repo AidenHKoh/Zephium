@@ -2854,6 +2854,14 @@ impl AgentWorkController {
                 Ok(page)
             }
             Err(AgentWorkFailure::InspectionAnchorLost) => Ok(initial),
+            // The page replaced itself while it was read whole (Allegro's bot
+            // check reloads its page twice): its new document gets a first
+            // look of its own, waited for like any first page.
+            Err(AgentWorkFailure::Observation(
+                SemanticRuntimePortFailure::NotReady
+                | SemanticRuntimePortFailure::Stale
+                | SemanticRuntimePortFailure::DocumentReplaced,
+            )) => Box::pin(Self::observe_initial_ready(state, worker, browser)).await,
             Err(error) => Err(error),
         }
     }
