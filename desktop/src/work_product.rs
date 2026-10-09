@@ -66,6 +66,7 @@ pub(crate) fn install(
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let app = app.clone();
+        let alerts = alerts::WorkAlerts::default();
         providers
             .browser
             .set_human_page_observer(std::sync::Arc::new(move |change| {
@@ -75,6 +76,7 @@ pub(crate) fn install(
                     "zephium:work-human-changed",
                     &change,
                 );
+                alerts.refresh(&app);
             }));
     }
     app.manage(WorkProductState {
@@ -457,6 +459,12 @@ fn call_name(call: &WorkCallV1) -> &'static str {
     }
 }
 
+#[cfg(all(
+    feature = "work-product",
+    any(target_os = "macos", target_os = "windows")
+))]
+#[path = "work_alerts.rs"]
+mod alerts;
 #[path = "work_human.rs"]
 pub(crate) mod human;
 

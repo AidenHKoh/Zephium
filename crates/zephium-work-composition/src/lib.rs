@@ -94,3 +94,5 @@ pub mod retained_qualification;
 
 #[cfg(feature = "durable-runtime")]
 mod human;
+#[cfg(feature = "durable-runtime")]
+pub use human::WaitingHumanPage;
