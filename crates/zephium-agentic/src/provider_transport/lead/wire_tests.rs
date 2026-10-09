@@ -670,7 +670,7 @@ fn new_providers_reach_their_own_endpoints() {
         ),
     ] {
         let target = LeadTarget::direct(provider).unwrap();
-        assert_eq!(target.call_url("model").unwrap().as_str(), url);
+        assert_eq!(target.call_url("model", false).unwrap().as_str(), url);
         assert!(LeadTarget::cloud(ZEPHIUM_CLOUD_BASE, provider).is_err());
     }
     let xai = openai::body(
@@ -820,4 +820,28 @@ fn openai_routes_one_conversation_to_one_cache_and_xai_gets_no_key() {
         .unwrap()
         .get("prompt_cache_key")
         .is_none());
+}
+
+#[test]
+fn deepseek_holds_strict_tools_to_their_schemas_on_its_beta_path() {
+    let deepseek = LeadTarget::direct(WorkModelProvider::DeepSeek).unwrap();
+    let mut strict = request(WorkModelWire::ChatCompletions, "deepseek-flash");
+    strict.tools[0].strict = true;
+    assert!(deepseek.strict_tools(&strict));
+    assert_eq!(
+        deepseek.call_url("deepseek-flash", true).unwrap().as_str(),
+        "https://api.deepseek.com/beta/chat/completions"
+    );
+    let body = chat::body(&strict, &deepseek).unwrap();
+    assert_eq!(body["tools"][0]["function"]["strict"], true);
+    // Loose tools, other providers and Cloud keep the ordinary path and body.
+    let loose = request(WorkModelWire::ChatCompletions, "deepseek-flash");
+    assert!(!deepseek.strict_tools(&loose));
+    assert!(chat::body(&loose, &deepseek).unwrap()["tools"][0]["function"]
+        .get("strict")
+        .is_none());
+    let mistral = LeadTarget::direct(WorkModelProvider::Mistral).unwrap();
+    assert!(!mistral.strict_tools(&strict));
+    let cloud = LeadTarget::cloud(ZEPHIUM_CLOUD_BASE, WorkModelProvider::DeepSeek).unwrap();
+    assert!(!cloud.strict_tools(&strict));
 }

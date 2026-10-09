@@ -223,10 +223,20 @@ impl LeadTarget {
         }
     }
 
-    fn call_url(&self, model: &str) -> Result<Url, WorkModelError> {
+    /// Whether this endpoint holds calls to tools marked strict to their
+    /// schema: DeepSeek does on its beta path, which takes the same requests.
+    pub(super) fn strict_tools(&self, request: &WorkModelRequest) -> bool {
+        self.upstream == WorkModelProvider::DeepSeek
+            && !self.cloud
+            && !request.tools.is_empty()
+            && request.tools.iter().all(|tool| tool.strict)
+    }
+
+    fn call_url(&self, model: &str, strict: bool) -> Result<Url, WorkModelError> {
         match self.wire {
             WorkModelWire::OpenAiResponses => join(&self.base, "responses"),
             WorkModelWire::AnthropicMessages => join(&self.base, "messages"),
+            WorkModelWire::ChatCompletions if strict => join(&self.base, "beta/chat/completions"),
             WorkModelWire::ChatCompletions => join(&self.base, "chat/completions"),
             WorkModelWire::Gemini => {
                 if model.is_empty()
@@ -397,7 +407,10 @@ impl LeadClient {
             {
                 return Err(WorkModelError::ContextTooLong);
             }
-            let decoded = self.attempt(&request.model.model, &body, events).await?;
+            let strict = self.target.strict_tools(&request);
+            let decoded = self
+                .attempt(&request.model.model, &body, strict, events)
+                .await?;
             total.absorb(decoded);
             if total.stop != DecodedStop::Paused || continuation == MAX_PAUSE_CONTINUATIONS {
                 break;
@@ -462,9 +475,10 @@ impl LeadClient {
         &self,
         model: &str,
         body: &[u8],
+        strict: bool,
         events: &(dyn Fn(WorkModelEvent) + Send + Sync),
     ) -> Result<Decoded, WorkModelError> {
-        let url = self.target.call_url(model)?;
+        let url = self.target.call_url(model, strict)?;
         let client = http(url.scheme() == "http")?;
         let mut retries = 0;
         // One key per logical generation. It changes only when Cloud admitted
