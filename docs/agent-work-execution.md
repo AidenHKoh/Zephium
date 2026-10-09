@@ -218,8 +218,21 @@ control a click found covered loses click and keeps press in the next looks of
 its document: the refusal tells the planner to press it with Enter, and Enter
 on a button, link, menu item or tab is judged as that control's click. The
 third identical refused proposal in a row gets a fresh look of the page
-instead of the same refusal again. A chosen page model replies within 4,096
-output tokens, and a lost or runaway reply is charged at that ceiling.
+instead of the same refusal again, and so does the third refused look in a
+row, a moment later. The first scroll proposed right after a verified fill of
+a field that commits nothing (a search, filter or place box) is refused unrun
+and the planner is told to run the search first. A native select offers only
+select: a click or key would open WebKit's own menu, whose modal loop holds
+the page. A locate scope the look cannot hold searches the whole look. A
+chosen page model replies within 4,096 output tokens, and a lost or runaway
+reply is charged at that ceiling. A page that ends on a stalled look with no
+model call in flight fails as too slow and is charged its settled calls, not
+the page's whole reservation.
+
+After a navigation settles, the session takes the arrival's fresh account
+sample (settled after the load, a new attestation, the same account) before
+the arrival is checked for a wall, so a bot check a page loads on arrival is
+judged under the new document's account.
 
 Page-agent requests keep an append-only prefix for provider prompt caches:
 instructions, tools, objective and the first observation, then the turns;
