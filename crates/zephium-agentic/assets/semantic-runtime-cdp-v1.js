@@ -2044,6 +2044,8 @@ const admitted = visible && (
 );
 if (!anchored && !admitted && visible && rect !== null && item.main === true &&
 (descriptor.role === "list_item" || descriptor.role === "row" ||
+descriptor.role === "list" || descriptor.role === "table" ||
+descriptor.role === "paragraph" ||
 (descriptor.role === "document" && descriptor.tag === "article")) &&
 deferred.length < MAX_DEFERRED_RECORDS &&
 !deferred.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {

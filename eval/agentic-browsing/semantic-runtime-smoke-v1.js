@@ -1702,7 +1702,9 @@ async function finish() {
   const inventoryWire = invoke(110, 110, { k: "initial" });
   const inventory = JSON.parse(inventoryWire);
   const sectionRef = inventory.n.find((node) => node.r === "heading" && node.n === "Detailed behavior");
-  assert(sectionRef && !inventoryWire.includes("New scoped evidence") && !inventoryWire.includes("editable-heading-secret"), "offscreen anchor leaked its body/credential descendants or was undiscoverable");
+  // The main landmark's prose below the fold fills spare room; hidden text
+  // and a heading's credential descendants never do.
+  assert(sectionRef && inventoryWire.includes("New scoped evidence") && !inventoryWire.includes("hidden-section-body") && !inventoryWire.includes("editable-heading-secret"), "offscreen anchor leaked hidden or credential descendants, or its prose or heading went missing");
   const sectionWire = invoke(111, 111, { k: "surrounding_text", a: sectionRef.k, p: 0, n: 1024 });
   assert(sectionWire.includes("New scoped evidence from a following sibling.") && !sectionWire.includes("hidden-section-body"), "exact heading expansion omitted the body or included hidden text");
   const subtreeWire = invoke(112, 112, { k: "subtree", a: sectionRef.k });

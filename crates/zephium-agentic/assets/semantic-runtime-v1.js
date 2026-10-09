@@ -2129,8 +2129,9 @@
     // visible control or prose record that appears later in document order.
     const headings = [];
     // So do the main content's records below the fold (a results list's
-    // items, a table's rows, articles), before the headings: a listing page
-    // then shows its records in one look instead of its header and filters.
+    // items, a table's rows, articles, a document's prose),
+    // before the headings: a listing page then shows its records in one
+    // look instead of its header and filters, a reference page its text.
     const deferred = [];
     const focused = focusedElements();
     const stack = [];
@@ -2217,6 +2218,8 @@
           );
           if (!anchored && !admitted && visible && rect !== null && item.main === true &&
               (descriptor.role === "list_item" || descriptor.role === "row" ||
+               descriptor.role === "list" || descriptor.role === "table" ||
+               descriptor.role === "paragraph" ||
                (descriptor.role === "document" && descriptor.tag === "article")) &&
               deferred.length < MAX_DEFERRED_RECORDS &&
               !deferred.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {
