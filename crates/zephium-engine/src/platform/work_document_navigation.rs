@@ -50,8 +50,9 @@ struct State {
     superseded: Option<wry::NavigationId>,
     /// The gate let an action's own load replace the ready document.
     handed_on: bool,
-    /// No action or successor load has run yet: the first document may still
-    /// load itself again once (a bot check that clears itself).
+    /// No action has run on the current document yet: a document the run
+    /// opened may still load itself again soon after it commits (a bot check
+    /// that clears itself), wherever it was opened from.
     first_document: bool,
     /// That load still needs the page's semantic runtime prepared for it.
     hand_on_pending: bool,
@@ -741,7 +742,7 @@ impl WorkDocumentNavigation {
         }
         state.follow = None;
         state.operation = Some(request.operation());
-        state.first_document = false;
+        state.first_document = true;
         state.page_loads_unstarted = 0;
         state.target = Some(request.target().clone());
         state.effective = None;
@@ -784,7 +785,7 @@ impl WorkDocumentNavigation {
         }
         state.follow = None;
         state.operation = Some(operation);
-        state.first_document = false;
+        state.first_document = true;
         state.page_loads_unstarted = 0;
         state.target = Some(target);
         state.effective = None;
@@ -1733,6 +1734,40 @@ mod tests {
         // Another site, or another page of it, is never followed.
         assert!(!gate.allows("https://elsewhere.example.org/"));
         assert!(!gate.allows("https://www.example.com/account"));
+    }
+
+    #[test]
+    fn a_page_the_run_opened_that_reloads_itself_behind_a_bot_check_is_followed() {
+        let start = "https://www.yelp.pl/";
+        let gate = site_gate(start);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        // The run opened the search, which DataDome's device check covers
+        // and reloads once it passes.
+        let search = "https://www.yelp.pl/search?find_desc=pizza";
+        {
+            let mut state = gate.0.lock().unwrap();
+            state.first_document = true;
+            state.target = Some(ContextNavigationTarget::parse(search).unwrap());
+            state.effective = state.target.clone();
+            state.committed_at = Some(Instant::now());
+        }
+        assert!(gate.allows(search));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(2, phase, search)).unwrap();
+        }
+        settle(&gate, search);
+        assert!(gate.ready(Some(search)));
+        // Once an action ran on the page, its own loads are the action's.
+        gate.open_follow(
+            false,
+            false,
+            zephium_agentic::SemanticActionFollow::default(),
+        );
+        gate.close_follow();
+        assert!(!gate.allows(search));
     }
 
     #[test]
