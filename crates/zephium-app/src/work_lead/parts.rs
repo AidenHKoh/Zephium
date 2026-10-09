@@ -1156,8 +1156,13 @@ fn daily_app(kind: &WorkStepKindV1) -> bool {
     url::Url::parse(url)
         .ok()
         .is_some_and(|url| match url.host() {
+            // GitHub is an app only on the person's own views; its search,
+            // repositories and code are public pages with their own planner.
             Some(url::Host::Domain(host)) => {
-                zephium_agentic::DailyApp::of(host).is_some() || host.ends_with(".test")
+                (zephium_agentic::DailyApp::of(host).is_some()
+                    && (host.trim_start_matches("www.") != "github.com"
+                        || crate::work_sites::personal_page(url.as_str())))
+                    || host.ends_with(".test")
             }
             Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
             _ => false,
@@ -1744,6 +1749,20 @@ mod tests {
             "Create an issue for the crash"
         )));
         assert!(!reads_app(&browse("https://www.airbnb.com/", "Find stays")));
+        assert!(reads_app(&browse(
+            "https://github.com/notifications",
+            "Read my notifications"
+        )));
+        // GitHub's public search and repositories keep their page planner.
+        for url in [
+            "https://github.com/search?q=rust+web+framework&type=repositories",
+            "https://github.com/tokio-rs/axum",
+        ] {
+            assert!(!reads_app(&browse(
+                url,
+                "List the most-starred repositories"
+            )));
+        }
         assert!(!reads_app(&WorkStepKindV1::Read {
             url: "https://app.slack.com/client".into(),
             collection: None,
