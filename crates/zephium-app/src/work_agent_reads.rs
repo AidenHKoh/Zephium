@@ -30,6 +30,7 @@ impl Driver {
         // Page tasks whose entry question waits on their start page.
         let mut entries: Vec<String> = Vec::new();
         let mut viewing: Vec<String> = Vec::new();
+        let behind_check = self.sites_behind_check().await;
         for kind in browses {
             if matches!(kind, WorkStepKindV1::Discover { .. }) {
                 self.notice("Native discovery is not available in this run: provider search covers the web. Use search for facts and read for exact URLs listed in sources.");
@@ -42,6 +43,13 @@ impl Driver {
             let Some(site) = crate::work_sites::site_of(url) else {
                 continue;
             };
+            if behind_check.contains(&site) {
+                let name = crate::work_sites::site_name(&site);
+                self.notice(&format!(
+                    "{name} is behind a human check the person has not passed: its pages are not opened again in this run. Use other sources, and say in the reply that {name} needs the person to pass its check."
+                ));
+                continue;
+            }
             let session = match goal.clone() {
                 Some(goal) => {
                     let view = self.views.contains(url);
@@ -191,7 +199,9 @@ impl Driver {
                     },
                     output: self.output.clone(),
                     session: session.clone(),
-                    confirm: task.then(WorkConfirmPort::default),
+                    // Every page says when it waits on the person; only a
+                    // task's page asks anything through its port.
+                    confirm: Some(WorkConfirmPort::default()),
                     entry: task && entries.contains(&url.clone()),
                     view: task && viewing.contains(url),
                     allow_edits: task
@@ -344,6 +354,23 @@ impl Driver {
 }
 
 impl Driver {
+    /// Sites whose last settled page in this run, in any part, ended behind
+    /// a bot check the person did not pass; a page of the site that later
+    /// read cleanly clears it.
+    async fn sites_behind_check(&self) -> Vec<String> {
+        let Ok(state) = self.probe.runtime_projection().await else {
+            return Vec::new();
+        };
+        let Some(execution) = state
+            .executions
+            .iter()
+            .find(|execution| execution.id == self.probe.execution())
+        else {
+            return Vec::new();
+        };
+        behind_check(&execution.steps)
+    }
+
     /// A new read of the address a plain public read's first load was
     /// redirected to on its own site: its own step citing that address,
     /// within what the first read left of its share, never an address the
@@ -415,6 +442,32 @@ impl Driver {
             ..request.clone()
         }))
     }
+}
+
+fn behind_check(steps: &[WorkStepFact]) -> Vec<String> {
+    let mut sites: Vec<String> = Vec::new();
+    for step in steps {
+        let WorkStepKindV1::Read { url, .. } = &step.kind else {
+            continue;
+        };
+        let Some(site) = crate::work_sites::site_of(url) else {
+            continue;
+        };
+        match step.status {
+            WorkStepStatus::Succeeded => sites.retain(|known| *known != site),
+            WorkStepStatus::Failed
+                if step
+                    .note
+                    .as_deref()
+                    .is_some_and(zephium_core::work::runtime::read_note::is_human_check)
+                    && !sites.contains(&site) =>
+            {
+                sites.push(site)
+            }
+            _ => {}
+        }
+    }
+    sites
 }
 
 /// A held step's Confirm step while its page task runs.
@@ -984,6 +1037,59 @@ pub(super) fn combined_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_site_stays_closed_after_a_check_nobody_passed_until_a_page_of_it_reads() {
+        let read = |url: &str, status, note: Option<&str>| WorkStepFact {
+            id: WorkStepId::generate(),
+            turn: 1,
+            kind: WorkStepKindV1::Read {
+                url: url.into(),
+                collection: None,
+                goal: None,
+            },
+            status,
+            usage: None,
+            artifacts: vec![],
+            evidence: None,
+            note: note.map(str::to_owned),
+            measurements: None,
+            local: None,
+            account: None,
+            part: None,
+            model_fault: None,
+        };
+        let skipped = Some("state.gov asks for a human check; its page was skipped");
+        let mut steps = vec![
+            read(
+                "https://travel.state.gov/visas.html",
+                WorkStepStatus::Failed,
+                skipped,
+            ),
+            read(
+                "https://www.cbp.gov/travel",
+                WorkStepStatus::Failed,
+                Some("The page could not be read"),
+            ),
+            read(
+                "https://www.airbnb.com/s/x/homes",
+                WorkStepStatus::Failed,
+                Some("Airbnb needs you to continue"),
+            ),
+            read(
+                "https://travel.state.gov/other.html",
+                WorkStepStatus::Running,
+                None,
+            ),
+        ];
+        assert_eq!(behind_check(&steps), ["state.gov", "airbnb.com"]);
+        steps.push(read(
+            "https://travel.state.gov/other.html",
+            WorkStepStatus::Succeeded,
+            None,
+        ));
+        assert_eq!(behind_check(&steps), ["airbnb.com"]);
+    }
 
     #[test]
     fn work_job_boards_read_their_listings_as_records() {

@@ -2006,11 +2006,7 @@ fn note_reason(note: Option<&str>, search: bool) -> Option<WorkPartReasonV1> {
         | "The browser was not ready for this page"
         | "The browsing profile was not available"
         | "Too many pages were already open" => return None,
-        // "state.gov asks for a human check; its page was skipped", and a
-        // page left waiting on the person: "Airbnb needs you to continue".
-        _ if note.contains("human check") || note.ends_with("needs you to continue") => {
-            R::BlockedByCheck
-        }
+        _ if read_note::is_human_check(note) => R::BlockedByCheck,
         _ if search => return None,
         _ => R::CouldntRead,
     })

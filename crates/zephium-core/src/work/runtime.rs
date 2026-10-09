@@ -984,6 +984,15 @@ pub mod read_note {
         "The page did not become ready within its loading window";
     pub const SLOW_SITE: &str =
         "The site is slowing us down; the page did not become ready after two attempts";
+
+    /// A page that ended behind a bot check or waiting on the person:
+    /// "state.gov asks for a human check; its page was skipped", "Airbnb
+    /// needs you to continue".
+    pub fn is_human_check(note: &str) -> bool {
+        note == HUMAN_CHECK
+            || note.contains("human check")
+            || note.ends_with("needs you to continue")
+    }
 }
 
 pub(crate) fn validate_public_reference_url(value: &str) -> Result<url::Url, WorkError> {

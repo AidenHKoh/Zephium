@@ -34,6 +34,8 @@ struct Page {
     released: bool,
     short: Option<ShortWait>,
     facts: HumanPageFacts,
+    /// This page puts its site's bot check to the person.
+    check_claimed: bool,
 }
 /// What the page was opened as, for the person's words about it.
 pub(crate) struct HumanPageFacts {
@@ -89,6 +91,7 @@ impl HumanPages {
                 released: false,
                 short: None,
                 facts,
+                check_claimed: false,
             },
         );
         Ok(HumanRegistration { pages: self, key })
@@ -124,6 +127,42 @@ impl HumanRegistration<'_> {
     }
 }
 impl HumanRegistration<'_> {
+    /// Whether this page puts its bot check to the person: the first of
+    /// this work's pages on a site to claim it does, while it still waits;
+    /// any other page of the site meeting the check meanwhile does not.
+    pub(crate) fn claim_site_check(&self) -> bool {
+        let Ok(mut pages) = self.pages.0.lock() else {
+            return true;
+        };
+        let Some(site) = pages
+            .entries
+            .get(&self.key)
+            .and_then(|page| page.facts.site.clone())
+        else {
+            return true;
+        };
+        let taken = pages.entries.iter().any(|(key, page)| {
+            *key != self.key
+                && (key.0, key.1) == (self.key.0, self.key.1)
+                && page.check_claimed
+                && !page.released
+                && page.facts.site.as_deref() == Some(site.as_str())
+                && page.handle.human_snapshot().is_some_and(|human| {
+                    human.reason == AgentBrowserHumanReason::HumanChallenge
+                        && matches!(
+                            human.phase,
+                            RetainedHumanPhase::WaitingForHuman
+                                | RetainedHumanPhase::Presenting
+                                | RetainedHumanPhase::Presented
+                        )
+                })
+        });
+        if let Some(page) = pages.entries.get_mut(&self.key) {
+            page.check_claimed = !taken;
+        }
+        !taken
+    }
+
     /// How long a short wait lasts now, from `since`: the run's cap plus what
     /// the person added. A long wait, or none, is left as it is; a wait that
     /// starts again starts without the additions.

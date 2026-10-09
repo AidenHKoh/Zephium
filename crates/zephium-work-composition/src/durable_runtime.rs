@@ -867,6 +867,9 @@ impl NativeWorkComposition {
         let mut human_wait: Option<Instant> = None;
         // A bot check nobody took ended the page within its short wait.
         let mut gave_up_on_person = false;
+        // Another page of the site already waited on the person for a check
+        // when this one began to.
+        let mut check_elsewhere: Option<bool> = None;
         // ...at once, for a research page: it was skipped, not waited on.
         let mut skipped = false;
         // The part was told its page waits on the person.
@@ -1566,7 +1569,15 @@ impl NativeWorkComposition {
                         let task = resume_plan
                             .as_ref()
                             .is_some_and(|plan| page_task(&plan.request));
-                        let cap = human_wait_cap(intervention.as_ref(), task, anonymous);
+                        let elsewhere = *check_elsewhere.get_or_insert_with(|| {
+                            intervention.as_ref().is_some_and(|intervention| {
+                                intervention.kind
+                                    == zephium_core::work::runtime::WorkInterventionKindV1::Challenge
+                            }) && registration
+                                .as_ref()
+                                .is_some_and(|registration| !registration.claim_site_check())
+                        });
+                        let cap = human_wait_cap(intervention.as_ref(), task, anonymous, elsewhere);
                         skipped = cap == 0;
                         let wait = if skipped {
                             None
@@ -1851,17 +1862,23 @@ fn refusal_line(snapshot: &zephium_app::RetainedWorkSnapshot, yours: bool) -> St
 /// waits briefly for the person: the part then ends with what it has. A
 /// sign-in or a decision keeps the long wait.
 const HUMAN_CHECK_WAIT_MILLIS: u64 = 90_000;
-/// A research read (one page, no task) behind a bot check is skipped at
-/// once, and so is an anonymous read that wants anything of a person: its
-/// part reads its other sources instead of waiting.
-fn human_wait_cap(intervention: Option<&WorkInterventionV1>, task: bool, anonymous: bool) -> u64 {
+/// A research read (one page, no task) behind a bot check waits for the
+/// person like a page task, since only they can pass it; another of its
+/// site's pages that meets the check while one already waits is skipped at
+/// once. An anonymous research read that wants anything else of a person is
+/// skipped at once: its part reads its other sources instead of waiting.
+fn human_wait_cap(
+    intervention: Option<&WorkInterventionV1>,
+    task: bool,
+    anonymous: bool,
+    check_waiting_elsewhere: bool,
+) -> u64 {
     use zephium_core::work::runtime::WorkInterventionKindV1 as Kind;
     match intervention.map(|intervention| intervention.kind) {
+        Some(Kind::Challenge) if !task && check_waiting_elsewhere => 0,
+        Some(Kind::Challenge) => HUMAN_CHECK_WAIT_MILLIS,
         _ if !task && anonymous => 0,
-        Some(Kind::Challenge) if !task => 0,
-        Some(Kind::Challenge | Kind::Permission | Kind::UnsupportedInteraction) => {
-            HUMAN_CHECK_WAIT_MILLIS
-        }
+        Some(Kind::Permission | Kind::UnsupportedInteraction) => HUMAN_CHECK_WAIT_MILLIS,
         _ => MAX_WORK_HUMAN_WAIT_MILLIS,
     }
 }
@@ -2302,17 +2319,28 @@ mod closed_result_tests {
             origin: None,
         };
         assert_eq!(
-            human_wait_cap(Some(&check), true, false),
+            human_wait_cap(Some(&check), true, false, false),
             HUMAN_CHECK_WAIT_MILLIS
         );
-        assert_eq!(human_wait_cap(Some(&check), false, false), 0);
+        // A research read's check goes to the person too, once per site.
+        for anonymous in [false, true] {
+            assert_eq!(
+                human_wait_cap(Some(&check), false, anonymous, false),
+                HUMAN_CHECK_WAIT_MILLIS
+            );
+            assert_eq!(human_wait_cap(Some(&check), false, anonymous, true), 0);
+        }
         assert_eq!(
-            human_wait_cap(Some(&sign_in), false, false),
+            human_wait_cap(Some(&check), true, true, true),
+            HUMAN_CHECK_WAIT_MILLIS
+        );
+        assert_eq!(
+            human_wait_cap(Some(&sign_in), false, false, false),
             MAX_WORK_HUMAN_WAIT_MILLIS
         );
-        assert_eq!(human_wait_cap(Some(&sign_in), false, true), 0);
+        assert_eq!(human_wait_cap(Some(&sign_in), false, true, false), 0);
         assert_eq!(
-            human_wait_cap(Some(&sign_in), true, true),
+            human_wait_cap(Some(&sign_in), true, true, false),
             MAX_WORK_HUMAN_WAIT_MILLIS
         );
         let since = Instant::now();
@@ -2322,7 +2350,7 @@ mod closed_result_tests {
             since,
             late,
             None,
-            human_wait_cap(Some(&check), true, false)
+            human_wait_cap(Some(&check), true, false, false)
         ));
         assert!(human_wait_expired(since, since, late, None, 0));
         assert_eq!(
