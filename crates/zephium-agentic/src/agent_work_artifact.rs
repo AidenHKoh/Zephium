@@ -689,6 +689,20 @@ impl ArchivedDocument {
                     }
                     source_bytes += value.len();
                 }
+                // The viewport screenshot a mapping carried: it stands in
+                // for pixels and holds no page text.
+                ArchivedSourceContent::Preview {
+                    value,
+                    source_bytes: original,
+                    truncated,
+                } if source.field == 9 && self.version >= 2 && source.role == "document" => {
+                    if *truncated
+                        || *original != value.len() as u64
+                        || value != crate::SEMANTIC_VIEWPORT_IMAGE_TEXT
+                    {
+                        return Err(invalid);
+                    }
+                }
                 ArchivedSourceContent::Boolean { .. } if source.field == 4 => {}
                 ArchivedSourceContent::Ordinal { .. } if source.field == 5 => {}
                 _ => return Err(invalid),
@@ -699,11 +713,16 @@ impl ArchivedDocument {
         }
         let (mut text_bytes, mut edges, mut values) = (0, 0, 0);
         let mut names = std::collections::BTreeSet::new();
-        let mut cite = |ids: &[u16]| -> Result<(), AgentWorkJournalError> {
+        // Only a text value may stand as read from the viewport image.
+        let mut cite = |ids: &[u16], pixels: bool| -> Result<(), AgentWorkJournalError> {
             if ids.is_empty()
                 || ids.len() > MAX_SEMANTIC_EXTRACTION_SOURCES_PER_VALUE
                 || ids.iter().enumerate().any(|(index, id)| {
-                    ids[..index].contains(id) || !self.sources.iter().any(|source| source.id == *id)
+                    ids[..index].contains(id)
+                        || !self
+                            .sources
+                            .iter()
+                            .any(|source| source.id == *id && (pixels || source.field != 9))
                 })
             {
                 return Err(invalid);
@@ -750,7 +769,7 @@ impl ArchivedDocument {
                         valid_text(value, MAX_SEMANTIC_EXTRACTION_TEXT_BYTES)?;
                         text_bytes += value.len();
                         values += 1;
-                        cite(sources)?;
+                        cite(sources, true)?;
                     }
                     ArchivedValue::Url { value, sources }
                     | ArchivedValue::ImageUrl { value, sources } => {
@@ -776,7 +795,7 @@ impl ArchivedDocument {
                         valid_text(value, crate::semantic::MAX_SEMANTIC_LINK_DESTINATION_BYTES)?;
                         text_bytes += value.len();
                         values += 1;
-                        cite(sources)?;
+                        cite(sources, false)?;
                     }
                     ArchivedValue::Money {
                         amount,
@@ -815,23 +834,23 @@ impl ArchivedDocument {
                         }
                         text_bytes += amount.len() + currency.len();
                         values += 1;
-                        cite(sources)?;
+                        cite(sources, false)?;
                     }
                     ArchivedValue::Boolean { sources, .. }
                     | ArchivedValue::Unsigned { sources, .. } => {
                         values += 1;
-                        cite(sources)?;
+                        cite(sources, false)?;
                     }
                     ArchivedValue::TextList { items, sources } => {
                         if items.len() > MAX_SEMANTIC_EXTRACTION_LIST_ITEMS {
                             return Err(invalid);
                         }
-                        cite(sources)?;
+                        cite(sources, false)?;
                         for item in items {
                             valid_text(&item.value, MAX_SEMANTIC_EXTRACTION_LIST_ITEM_BYTES)?;
                             text_bytes += item.value.len();
                             values += 1;
-                            cite(&item.sources)?;
+                            cite(&item.sources, false)?;
                         }
                     }
                 }
