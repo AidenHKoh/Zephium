@@ -831,27 +831,38 @@ pub(crate) fn part_holds<'a>(
     if names.is_empty() {
         return None;
     }
-    objects.iter().find(|object| {
+    let held = |object: &CanvasObject| -> usize {
         let WorkArtifactDataV1::Picks { items, .. } = &object.artifact.data else {
-            return false;
+            return 0;
         };
-        object.current
-            && object.in_this_run
-            && object.artifact.part.is_some()
-            && names
-                .iter()
-                .filter(|name| {
-                    items.iter().any(|item| {
-                        let held = item.name.trim().to_lowercase();
-                        held == **name
-                            || (name.len() >= 4 && held.contains(name.as_str()))
-                            || (held.len() >= 4 && name.contains(held.as_str()))
-                    })
+        if !(object.current && object.in_this_run && object.artifact.part.is_some()) {
+            return 0;
+        }
+        names
+            .iter()
+            .filter(|name| {
+                items.iter().any(|item| {
+                    let held = item.name.trim().to_lowercase();
+                    held == **name
+                        || (name.len() >= 4 && held.contains(name.as_str()))
+                        || (held.len() >= 4 && name.contains(held.as_str()))
                 })
-                .count()
-                * 2
-                >= names.len()
-    })
+            })
+            .count()
+    };
+    // The same thing found by parts on several sites is the offers side by
+    // side: the lead's one picks of them is the result, not a copy.
+    let parts: std::collections::BTreeSet<WorkPartId> = objects
+        .iter()
+        .filter(|object| held(object) > 0)
+        .filter_map(|object| object.artifact.part)
+        .collect();
+    if parts.len() >= 2 {
+        return None;
+    }
+    objects
+        .iter()
+        .find(|object| held(object) > 0 && held(object) * 2 >= names.len())
 }
 
 /// Removes picture addresses `shown` does not know from the pictures the
