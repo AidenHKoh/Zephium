@@ -3177,7 +3177,7 @@ impl AgentWorkController {
                     state
                         .journal_mut()?
                         .emit(AgentWorkEventKind::InspectionRefused)?;
-                    fruitless.refused()?;
+                    fruitless.refused(state)?;
                     let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
                     let refusal = turn
                         .into_tool_turn()
@@ -3243,7 +3243,7 @@ impl AgentWorkController {
                         state
                             .journal_mut()?
                             .emit(AgentWorkEventKind::InspectionRefused)?;
-                        fruitless.refused()?;
+                        fruitless.refused(state)?;
                         refused_looks = refused_looks.saturating_add(1);
                         let refusal = if refused_looks >= 3 && state.progressive_observation {
                             let session =
@@ -3432,7 +3432,7 @@ impl AgentWorkController {
                 state
                     .journal_mut()?
                     .emit(AgentWorkEventKind::NavigationRefused(reason))?;
-                fruitless.refused()?;
+                fruitless.refused(state)?;
                 let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
                 if session.turns.saturating_add(2) > session.max_model_calls {
                     return Err(AgentWorkFailure::Browser(
@@ -3657,7 +3657,7 @@ impl AgentWorkController {
                                 state.observation = Some(observation);
                                 return Ok(());
                             }
-                            fruitless.refused()?;
+                            fruitless.refused(state)?;
                             let stuck = Self::refused_again(&mut last_refused, &refusal);
                             let refusal = Self::repeated_refusal(&mut action_refusals, refusal)?;
                             let refusal = Self::count_refused_control(
@@ -3813,7 +3813,7 @@ impl AgentWorkController {
                     state
                         .journal_mut()?
                         .emit(AgentWorkEventKind::ActionProposalRefused(refusal.reason()))?;
-                    fruitless.refused()?;
+                    fruitless.refused(state)?;
                     let refusal = Self::repeated_refusal(&mut action_refusals, refusal)?;
                     let refusal = Self::count_refused_control(
                         &mut refused_controls,
@@ -5934,7 +5934,19 @@ const MAX_FRUITLESS_STEPS: u8 = 8;
 struct Fruitless(u8);
 
 impl Fruitless {
-    fn refused(&mut self) -> Result<(), AgentWorkFailure> {
+    /// Two refusals before the end, the planner is offered extraction
+    /// alone: what its looks already hold becomes the page's result instead
+    /// of a loop that ends it with nothing.
+    fn refused(&mut self, state: &mut WorkState) -> Result<(), AgentWorkFailure> {
+        self.count()?;
+        if self.0 == MAX_FRUITLESS_STEPS - 2 && state.extraction_schema.is_some() {
+            if let Some(session) = state.session.as_mut() {
+                session.decide_last();
+            }
+        }
+        Ok(())
+    }
+    fn count(&mut self) -> Result<(), AgentWorkFailure> {
         self.0 = self.0.saturating_add(1);
         if self.0 >= MAX_FRUITLESS_STEPS {
             return Err(AgentWorkFailure::Browser(
@@ -5956,14 +5968,14 @@ mod fruitless_tests {
     fn only_a_long_run_of_refusals_with_nothing_done_ends_a_page() {
         let mut fruitless = Fruitless::default();
         for _ in 1..MAX_FRUITLESS_STEPS {
-            assert!(fruitless.refused().is_ok());
+            assert!(fruitless.count().is_ok());
         }
         fruitless.progressed();
         for _ in 1..MAX_FRUITLESS_STEPS {
-            assert!(fruitless.refused().is_ok());
+            assert!(fruitless.count().is_ok());
         }
         assert_eq!(
-            fruitless.refused(),
+            fruitless.count(),
             Err(AgentWorkFailure::Browser(
                 AgentBrowserProviderError::ActionProposalLoop
             ))

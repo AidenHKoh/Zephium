@@ -2017,6 +2017,8 @@ pub struct AgentBrowserSession {
     account: AgentContextAccountBinding,
     account_attestations: Vec<zephium_agentic::AgentAccountAttestationId>,
     next_call: u64,
+    /// The next model call is the page's last decision: extraction alone.
+    last_decision: bool,
     clock: Arc<dyn TerraControllerClock>,
     last_policy_at: AgentPolicyInstant,
     cancellation: AgentProviderCancellation,
@@ -2270,6 +2272,7 @@ impl AgentBrowserSession {
             account,
             account_attestations,
             next_call,
+            last_decision: false,
             max_model_calls,
             max_actions,
             max_account_attestations,
@@ -2553,13 +2556,22 @@ impl AgentBrowserSession {
             .checked_add(1)
             .ok_or(AgentBrowserProviderError::Authority)?;
         let now = self.policy_now()?;
-        Ok(
+        let request =
             AgentModelCallRequest::new(call_id, self.lease.lease(), self.account, budget, now)
                 .with_remaining_native_actions(
                     self.max_actions
                         .saturating_sub(self.next_action.saturating_sub(1)),
-                ),
-        )
+                );
+        Ok(if std::mem::take(&mut self.last_decision) {
+            request.with_last_decision()
+        } else {
+            request
+        })
+    }
+
+    /// Offers the next model call extraction alone.
+    pub(crate) fn decide_last(&mut self) {
+        self.last_decision = true;
     }
 
     /// Continues one settled read proposal against the exact already-delivered

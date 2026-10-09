@@ -179,6 +179,7 @@ pub struct AgentModelCallRequest {
     budget: AgentModelCallBudget,
     now: AgentPolicyInstant,
     remaining_native_actions: Option<u64>,
+    last_decision: bool,
 }
 
 impl AgentModelCallRequest {
@@ -197,6 +198,7 @@ impl AgentModelCallRequest {
             budget,
             now,
             remaining_native_actions: None,
+            last_decision: false,
         }
     }
 
@@ -208,6 +210,17 @@ impl AgentModelCallRequest {
 
     pub(crate) const fn remaining_native_actions(self) -> Option<u64> {
         self.remaining_native_actions
+    }
+
+    /// Offers this call extraction alone, as the page's last decision. It
+    /// only narrows what the model is offered; it grants nothing.
+    pub const fn with_last_decision(mut self) -> Self {
+        self.last_decision = true;
+        self
+    }
+
+    pub(crate) const fn last_decision(self) -> bool {
+        self.last_decision
     }
 
     /// Monotonic exact call identity.

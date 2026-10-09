@@ -505,7 +505,7 @@ impl AgentProviderRequest {
                 std::mem::take(&mut self.body),
                 &self.config,
                 request.id(),
-                policy.remaining_operations(request.lease())?,
+                decision_operations(policy, request)?,
                 policy.remaining_model_tokens(request.lease())?,
                 policy.remaining_cost_micro_usd(request.lease())?,
             )?;
@@ -1871,7 +1871,7 @@ impl AgentPreparedObservationRequest {
             body,
             &config,
             call_request.id(),
-            policy.remaining_operations(call_request.lease())?,
+            decision_operations(policy, call_request)?,
             policy.remaining_model_tokens(call_request.lease())?,
             policy.remaining_cost_micro_usd(call_request.lease())?,
         )?;
@@ -2193,7 +2193,7 @@ impl AgentPreparedObservationRequest {
             body,
             &config,
             call_request.id(),
-            policy.remaining_operations(call_request.lease())?,
+            decision_operations(policy, call_request)?,
             policy.remaining_model_tokens(call_request.lease())?,
             policy.remaining_cost_micro_usd(call_request.lease())?,
         )?;
@@ -4584,6 +4584,20 @@ fn append_act_targets(
         .ok_or(AgentProviderRequestError::Encoding)?
         .push(json!({"role":"developer","content":[{"type":"input_text","text":text}]}));
     encode_bounded_provider_body(&wire)
+}
+
+/// Operations the decision budget may advertise for this call: a call the
+/// host made the page's last decision advertises only the mapping's.
+fn decision_operations(
+    policy: &AgentRunPolicy,
+    request: AgentModelCallRequest,
+) -> Result<u32, AgentProviderRequestError> {
+    let remaining = policy.remaining_operations(request.lease())?;
+    Ok(if request.last_decision() {
+        remaining.min(2)
+    } else {
+        remaining
+    })
 }
 
 /// Bytes the decision-budget fact and its envelope add to a request.
