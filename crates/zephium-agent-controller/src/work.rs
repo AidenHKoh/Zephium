@@ -3946,7 +3946,7 @@ impl AgentWorkController {
         ))
         .await;
         state.keep_follow = false;
-        ran?;
+        let ran = ran?.is_some();
         if let Some(target) = state.follow.take() {
             return Self::navigate_current(
                 state,
@@ -3961,7 +3961,7 @@ impl AgentWorkController {
         }
         let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
         let checkpoint = continuation
-            .into_search_refresh(observation, &session.config)
+            .into_search_refresh(observation, &session.config, ran)
             .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation))?;
         Self::inspect_current(state, worker, browser, checkpoint, observation).await
     }

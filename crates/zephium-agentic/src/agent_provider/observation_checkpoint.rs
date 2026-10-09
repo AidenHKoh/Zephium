@@ -89,6 +89,7 @@ impl AgentProviderContinuation {
         self,
         observation: &SemanticObservation,
         config: &AgentProviderCallConfig,
+        ran: bool,
     ) -> Result<AgentProviderObservationCheckpoint, Box<Self>> {
         if config != &self.config
             || !AgentProviderObservationCheckpoint::refreshable(&self, observation)
@@ -97,7 +98,12 @@ impl AgentProviderContinuation {
         }
         Ok(AgentProviderObservationCheckpoint::refresh(
             self,
-            "search_run: your last step did not run. You typed into a search or filter field and kept scrolling instead of running it, so the host pressed Enter in that field for you. This is a fresh look at the page it produced: extract the records if they are here, otherwise continue from it.".to_owned(),
+            if ran {
+                "search_run: your last step did not run. You typed into a search or filter field and kept scrolling instead of running it, so the host pressed Enter in that field for you. This is a fresh look at the page it produced: extract the records if they are here, otherwise continue from it."
+            } else {
+                "search_not_run: your last step did not run. You typed into a search or filter field and kept scrolling instead of running it, and Enter in that field could not run here. This is a fresh look: click the field's search button, or open the site's search results address with your query."
+            }
+            .to_owned(),
         ))
     }
 
