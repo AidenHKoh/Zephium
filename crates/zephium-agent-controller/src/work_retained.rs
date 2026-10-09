@@ -3,6 +3,13 @@
 use super::*;
 use std::task::Waker;
 
+/// How long one look may stay unanswered, queued behind other pages' looks
+/// included, before the page ends as too slow instead of waiting out the
+/// run's whole deadline.
+const OBSERVATION_STALL: Duration = Duration::from_secs(90);
+/// How long a page load may stay unsettled; slow sites settle well inside.
+const NAVIGATION_STALL: Duration = Duration::from_secs(90);
+
 /// Narrow application-owned lease adapter. The implementation retains original
 /// operation slots outside the worker; no native port or registry is exposed.
 /// Registration is immutable, bounded and precedes every native dispatch.
@@ -762,7 +769,9 @@ impl WorkNative {
                 .ok_or(AgentWorkFailure::Contract)?
                 .min(self.deadline)
         } else {
-            self.deadline
+            Instant::now()
+                .checked_add(NAVIGATION_STALL)
+                .map_or(self.deadline, |stall| stall.min(self.deadline))
         };
         let result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
             let event = worker.next_event();
@@ -875,32 +884,33 @@ impl WorkNative {
                 )?,
             None => browser.begin_observation_with_capability(capability, now)?,
         }
-        let result =
-            tokio::time::timeout_at(tokio::time::Instant::from_std(self.deadline), async {
-                let event = worker.next_event();
-                tokio::pin!(event);
-                std::future::poll_fn(|cx| {
-                    if let std::task::Poll::Ready(event) =
-                        std::future::Future::poll(event.as_mut(), cx)
-                    {
-                        return std::task::Poll::Ready(Err(event));
-                    }
-                    let result = clock
-                        .now()
-                        .map_err(|_| AgentWorkFailure::Contract)
-                        .and_then(|now| {
-                            browser.check_health(now)?;
-                            browser.poll_observation(now)
-                        });
-                    match result {
-                        Ok(None) => std::task::Poll::Pending,
-                        Ok(Some(observation)) => std::task::Poll::Ready(Ok(Ok(observation))),
-                        Err(error) => std::task::Poll::Ready(Ok(Err(error))),
-                    }
-                })
-                .await
+        let stall = Instant::now()
+            .checked_add(OBSERVATION_STALL)
+            .map_or(self.deadline, |stall| stall.min(self.deadline));
+        let result = tokio::time::timeout_at(tokio::time::Instant::from_std(stall), async {
+            let event = worker.next_event();
+            tokio::pin!(event);
+            std::future::poll_fn(|cx| {
+                if let std::task::Poll::Ready(event) = std::future::Future::poll(event.as_mut(), cx)
+                {
+                    return std::task::Poll::Ready(Err(event));
+                }
+                let result = clock
+                    .now()
+                    .map_err(|_| AgentWorkFailure::Contract)
+                    .and_then(|now| {
+                        browser.check_health(now)?;
+                        browser.poll_observation(now)
+                    });
+                match result {
+                    Ok(None) => std::task::Poll::Pending,
+                    Ok(Some(observation)) => std::task::Poll::Ready(Ok(Ok(observation))),
+                    Err(error) => std::task::Poll::Ready(Ok(Err(error))),
+                }
             })
-            .await;
+            .await
+        })
+        .await;
         match result {
             Ok(Ok(result)) => result,
             Ok(Err(Ok(
