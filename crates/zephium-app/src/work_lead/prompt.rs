@@ -73,6 +73,7 @@ fn tool(name: &str, description: &str, schema: Value) -> WorkModelTool {
         name: name.to_owned(),
         description: description.to_owned(),
         schema,
+        strict: false,
     }
 }
 fn object(properties: Value, required: &[&str]) -> Value {

@@ -636,6 +636,7 @@ fn groq_and_cerebras_take_effort_only_where_their_models_accept_it() {
             name: "read".into(),
             description: "Read a page.".into(),
             schema: json!({"type": "object"}),
+            strict: false,
         }];
         chat::body(&call, &LeadTarget::direct(provider).unwrap()).unwrap()
     };

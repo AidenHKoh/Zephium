@@ -73,6 +73,7 @@ async fn round_trip(
             name: "add".into(),
             description: "Adds two integers.".into(),
             schema: json!({"type": "object", "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}}, "required": ["a", "b"]}),
+            strict: false,
         }],
         messages: vec![WorkModelMessage::User(vec![WorkModelPart::Text(
             "Call the add tool twice in parallel: 2+3 and 10+20. Then reply with both sums.".into(),

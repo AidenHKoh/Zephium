@@ -51,6 +51,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
         name: name.into(),
         description: description.into(),
         schema,
+        strict: false,
     }
 }
 

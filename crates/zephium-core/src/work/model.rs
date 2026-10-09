@@ -84,6 +84,9 @@ pub struct WorkModelTool {
     pub description: String,
     /// JSON Schema of the arguments object.
     pub schema: Value,
+    /// The schema is closed and complete: a provider that can hold a call to
+    /// it exactly (OpenAI's strict function calling) is asked to.
+    pub strict: bool,
 }
 
 #[derive(Clone)]

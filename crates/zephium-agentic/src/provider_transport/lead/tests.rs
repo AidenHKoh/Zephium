@@ -59,6 +59,7 @@ pub(super) fn request(wire: WorkModelWire, model: &str) -> WorkModelRequest {
             name: "web_fetch".into(),
             description: "Read a page.".into(),
             schema: json!({"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
+            strict: false,
         }],
         messages: vec![WorkModelMessage::User(vec![
             WorkModelPart::Text("Plan my trip".into()),

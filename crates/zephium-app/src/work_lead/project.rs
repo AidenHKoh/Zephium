@@ -88,6 +88,7 @@ impl LeadToolSet for ProjectTools {
                 },
                 "additionalProperties": false
             }),
+            strict: false,
         }]
     }
 

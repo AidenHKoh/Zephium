@@ -53,6 +53,7 @@ pub fn definitions() -> Vec<WorkModelTool> {
         name: name.into(),
         description: description.into(),
         schema,
+        strict: false,
     };
     let path = json!({"type": "string", "description": "Relative to the working folder, or absolute inside a granted folder."});
     vec![
@@ -972,6 +973,7 @@ pub(super) fn delegate_tool(delegates: &[Delegate]) -> WorkModelTool {
             "agent": {"type": "string", "enum": names},
             "task": {"type": "string", "description": "A complete, self-contained brief in one paragraph of at most 3000 characters: the goal, the files involved, constraints and how to verify."}
         }, "required": ["agent", "task"], "additionalProperties": false}),
+        strict: false,
     }
 }
 

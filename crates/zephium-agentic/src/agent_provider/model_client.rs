@@ -216,6 +216,7 @@ pub(crate) fn translate(
                     name: STRUCTURED_OUTPUT_TOOL.to_owned(),
                     description: STRUCTURED_OUTPUT_DESCRIPTION.to_owned(),
                     schema: schema?,
+                    strict: false,
                 }],
                 Vec::new(),
                 WorkModelToolChoice::Named(STRUCTURED_OUTPUT_TOOL.to_owned()),
@@ -239,6 +240,10 @@ pub(crate) fn translate(
                     name,
                     description: string(tool, "description")?,
                     schema: tool.get("parameters").cloned().ok_or_else(invalid)?,
+                    // The browser tools are written for strict calling: a
+                    // provider that holds calls to them exactly cannot send a
+                    // malformed action that ends the page.
+                    strict: tool.get("strict") == Some(&Value::Bool(true)),
                 });
             }
             let choice = match wire.get("tool_choice").and_then(Value::as_str) {

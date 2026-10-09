@@ -76,6 +76,11 @@ pub(super) fn body(
             }
         }
     }
+    // Only OpenAI's own endpoints are known to hold a call to a strict schema.
+    let strict_provider = matches!(
+        request.model.provider,
+        WorkModelProvider::OpenAi | WorkModelProvider::Cloud
+    );
     let mut tools: Vec<Value> = request
         .tools
         .iter()
@@ -85,7 +90,7 @@ pub(super) fn body(
                 "name": tool.name,
                 "description": tool.description,
                 "parameters": tool.schema,
-                "strict": false,
+                "strict": tool.strict && strict_provider,
             })
         })
         .collect();

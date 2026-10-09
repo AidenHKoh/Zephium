@@ -128,6 +128,7 @@ impl LeadToolSet for PersonalTools {
                     }),
                     &["text", "kind"],
                 ),
+                strict: false,
             },
             WorkModelTool {
                 name: "recall".into(),
@@ -136,6 +137,7 @@ impl LeadToolSet for PersonalTools {
                     json!({"query": {"type": "string", "maxLength": 200, "description": "Words to look for."}}),
                     &["query"],
                 ),
+                strict: false,
             },
             WorkModelTool {
                 name: "search_history".into(),
@@ -148,6 +150,7 @@ impl LeadToolSet for PersonalTools {
                     }),
                     &[],
                 ),
+                strict: false,
             },
             WorkModelTool {
                 name: "search_notes".into(),
@@ -159,6 +162,7 @@ impl LeadToolSet for PersonalTools {
                     }),
                     &["query"],
                 ),
+                strict: false,
             },
             WorkModelTool {
                 name: "read_note".into(),
@@ -170,6 +174,7 @@ impl LeadToolSet for PersonalTools {
                     }),
                     &["id"],
                 ),
+                strict: false,
             },
             WorkModelTool {
                 name: "list_tasks".into(),
@@ -181,11 +186,13 @@ impl LeadToolSet for PersonalTools {
                     }),
                     &[],
                 ),
+                strict: false,
             },
             WorkModelTool {
                 name: "day_sources".into(),
                 description: "Where the person's day lives, for planning their day or what they have to do today: the apps and connections to read and how (one part each), and whether to read their Zephium tasks. Remembered after the person's first answer; call it before starting those parts.".into(),
                 schema: schema(json!({}), &[]),
+                strict: false,
             },
             WorkModelTool {
                 name: "list_tabs".into(),
@@ -194,6 +201,7 @@ impl LeadToolSet for PersonalTools {
                     json!({"why": {"type": "string", "maxLength": MAX_WHY_CHARS, "description": WHY}}),
                     &[],
                 ),
+                strict: false,
             },
         ]
     }

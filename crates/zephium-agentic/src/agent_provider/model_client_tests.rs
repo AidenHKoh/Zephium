@@ -151,6 +151,10 @@ fn an_observation_becomes_one_user_turn_under_the_fixed_instructions() {
     for (tool, wire) in request.tools.iter().zip(body["tools"].as_array().unwrap()) {
         assert_eq!(tool.schema, wire["parameters"]);
         assert_eq!(tool.description, wire["description"].as_str().unwrap());
+        // The browser tools are strict, so a strict-capable provider is asked
+        // to hold its calls to them exactly.
+        assert_eq!(tool.strict, wire["strict"] == serde_json::json!(true));
+        assert!(tool.strict);
     }
     let [WorkModelMessage::User(parts)] = request.messages.as_slice() else {
         panic!("one user turn");

@@ -71,6 +71,7 @@ impl<'a> ModelDecisionCall<'a> {
                 name: DECISION_TOOL.to_owned(),
                 description: DECISION_TOOL_DESCRIPTION.to_owned(),
                 schema: request.answer_schema(),
+                strict: false,
             }],
             messages: vec![WorkModelMessage::User(vec![WorkModelPart::Text(content)])],
             max_output_tokens: self.output_tokens(),
