@@ -1661,6 +1661,49 @@ fn startup_loading_signal_distinguishes_skeletons_from_usable_progress_pages() {
                         .unwrap();
                 assert_eq!(has_dominant_loading_placeholders(&candidate), expected);
             }
+            // An empty shell (an app booting, a bot check about to reload)
+            // is not yet a page; a page with words on it is.
+            for (children, expected) in [
+                (vec![], true),
+                (vec![serde_json::json!({"r":"paragraph", "t":"Hi"})], true),
+                (
+                    vec![
+                        serde_json::json!({"r":"paragraph", "t":"Hotels in Krakow from 120 zł a night"});
+                        2
+                    ],
+                    false,
+                ),
+                (
+                    vec![serde_json::json!({"r":"button", "n":"Open", "o":1}); 4],
+                    false,
+                ),
+            ] {
+                let mut nodes = vec![serde_json::json!({"k":1,"r":"document","o":16})];
+                for (index, mut node) in children.into_iter().enumerate() {
+                    node["k"] = (index + 2).into();
+                    node["p"] = 0.into();
+                    nodes.push(node);
+                }
+                let frame = &source.frames()[0];
+                let wire = serde_json::to_vec(&serde_json::json!({
+                    "v":1,"i":frame.invocation().get(),"g":frame.generation().get(),"c":"complete","n":nodes
+                })).unwrap();
+                let snapshot = decode_semantic_snapshot(
+                    SemanticDecodeContext::new(
+                        frame.invocation(),
+                        frame.frame().clone(),
+                        frame.generation(),
+                    ),
+                    &wire,
+                )
+                .unwrap();
+                let candidate =
+                    SemanticObservationAssembler::new(source.request().clone(), snapshot)
+                        .unwrap()
+                        .finish()
+                        .unwrap();
+                assert_eq!(super::unrendered(&candidate), expected);
+            }
             Ok(AgentWorkTaskProgress::Complete)
         }
         fn assess(

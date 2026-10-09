@@ -125,6 +125,38 @@ fn says_loading(observation: &SemanticObservation) -> bool {
         })
 }
 
+/// A page with next to nothing rendered yet: a client-side app still
+/// booting, or a bot check's empty shell about to reload. Frames count as
+/// content: a challenge widget is judged by its own frame.
+fn unrendered(observation: &SemanticObservation) -> bool {
+    let nodes = || {
+        observation
+            .frames()
+            .iter()
+            .flat_map(SemanticSnapshot::nodes)
+    };
+    nodes().count() <= 3
+        && nodes().all(|node| node.role() != SemanticRole::FrameBoundary)
+        && nodes()
+            .map(|node| {
+                node.text().map_or(0, |text| text.as_str().len())
+                    + node.name().map_or(0, |name| name.as_str().len())
+            })
+            .sum::<usize>()
+            < 64
+}
+
+/// The same context's main frame now holds another document.
+fn replaced_document(prior: &SemanticObservation, next: &SemanticObservation) -> bool {
+    prior.request().context() == next.request().context()
+        && prior.frames().len() == next.frames().len()
+        && prior
+            .frames()
+            .first()
+            .zip(next.frames().first())
+            .is_some_and(|(a, b)| a.frame() != b.frame())
+}
+
 fn finish_initial_readiness_wait(
     observation: SemanticObservation,
     readiness: AgentWorkInitialReadiness,
@@ -2656,6 +2688,12 @@ impl AgentWorkController {
             .ok_or(AgentWorkFailure::Deadline)?
             .min(state.native.deadline);
         let mut delays = DELAYS_MS.into_iter();
+        // A site task's first page may still be an empty shell: an app
+        // booting, or a bot check about to reload its page.
+        let site = state
+            .navigation_discovery
+            .as_ref()
+            .is_some_and(AgentNavigationDiscovery::is_site_session);
         loop {
             state.check_task_contract()?;
             let readiness = state.task.initial_readiness(&observation)?;
@@ -2663,6 +2701,7 @@ impl AgentWorkController {
             state.native.check_control(worker, browser)?;
             if readiness == AgentWorkInitialReadiness::Ready
                 && !has_dominant_loading_placeholders(&observation)
+                && !(site && unrendered(&observation))
             {
                 return Ok(observation);
             }
@@ -2694,7 +2733,11 @@ impl AgentWorkController {
             }
             state.refresh_account(worker, browser)?;
             let next = Self::observe(state, worker, browser).await?;
-            validate_initial_readiness_successor(&observation, &next)?;
+            // A first page that reloaded itself (a bot check that cleared)
+            // is a new document: its look continues the wait.
+            if !replaced_document(&observation, &next) {
+                validate_initial_readiness_successor(&observation, &next)?;
+            }
             if Instant::now() >= deadline {
                 state.check_task_contract()?;
                 let readiness = state.task.initial_readiness(&next)?;
