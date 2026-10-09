@@ -422,6 +422,12 @@ impl AgentProviderActionRefusal {
             {
                 Some(" This control cannot be typed into: click it to open its field or picker, then fill the field it opens.")
             }
+            (
+                SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied),
+                Some(context),
+            ) if context.kind == SemanticActionKind::Scroll => {
+                Some(" Only a ref listed for scroll scrolls. A click, fill or press brings its control into view by itself, so act on the control directly; to see more of the page, scroll the document ref by a page; to read records already in your looks, extract.")
+            }
             _ => None,
         };
         let guidance = format!("{guidance}{}", hint.unwrap_or_default());
