@@ -431,7 +431,7 @@ impl AgentProviderActionRefusal {
             ),
             SemanticActionBindingError::SelectionTarget => (
                 "selection_target_invalid",
-                "Nothing executed. select needs a target that is a native select or listbox the look lists for select, and an option ref that is an r=option inside that target. A text field with suggestions takes fill, then a click on the suggestion; a custom dropdown opens with click, and its option is clicked.",
+                "Nothing executed. select needs a target that is a native select or listbox the look lists for select, and an option ref that is an r=option inside that target, never the select itself. When the select says option_refs=locate, call locate with the option's words first: it returns that option's ref. A text field with suggestions takes fill, then a click on the suggestion; a custom dropdown opens with click, and its option is clicked. A choice you do not need (a search box's category) can be left as it is: run the search instead.",
             ),
             SemanticActionBindingError::TaskEffectMismatch(_) => (
                 "task_effect_mismatch",
