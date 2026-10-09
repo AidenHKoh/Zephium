@@ -326,49 +326,21 @@ impl fmt::Debug for SemanticActionExecutionPending {
 /// cancels it and records the target; the controller may then load it as
 /// its own navigation.
 #[derive(Clone, Debug, Default)]
-pub struct SemanticActionFollow(std::sync::Arc<std::sync::Mutex<FollowSlot>>);
-
-#[derive(Debug, Default)]
-struct FollowSlot {
-    target: Option<crate::ContextNavigationTarget>,
-    /// The controller has taken what the action's own loads left: a load
-    /// the page starts after that is the page's, not the action's.
-    closed: bool,
-}
+pub struct SemanticActionFollow(
+    std::sync::Arc<std::sync::Mutex<Option<crate::ContextNavigationTarget>>>,
+);
 
 impl SemanticActionFollow {
     /// Records the latest diverted load; a later one replaces it.
     pub fn record(&self, target: crate::ContextNavigationTarget) {
         if let Ok(mut slot) = self.0.lock() {
-            slot.target = Some(target);
+            *slot = Some(target);
         }
     }
 
     /// Takes the diverted load, leaving the slot empty.
     pub fn take(&self) -> Option<crate::ContextNavigationTarget> {
-        self.0.lock().ok().and_then(|mut slot| slot.target.take())
-    }
-
-    /// Takes the diverted load once the action's own look is done, and
-    /// ends the window: later loads are the page's own.
-    pub fn close(&self) -> Option<crate::ContextNavigationTarget> {
-        self.0.lock().ok().and_then(|mut slot| {
-            slot.closed = true;
-            slot.target.take()
-        })
-    }
-
-    /// Opens the window again for the next action.
-    pub fn reopen(&self) {
-        if let Ok(mut slot) = self.0.lock() {
-            slot.closed = false;
-            slot.target = None;
-        }
-    }
-
-    /// Whether the controller has closed this action's window.
-    pub fn closed(&self) -> bool {
-        self.0.lock().is_ok_and(|slot| slot.closed)
+        self.0.lock().ok().and_then(|mut slot| slot.take())
     }
 }
 

@@ -50,6 +50,9 @@ struct State {
     superseded: Option<wry::NavigationId>,
     /// The gate let an action's own load replace the ready document.
     handed_on: bool,
+    /// No action or successor load has run yet: the first document may still
+    /// load itself again once (a bot check that clears itself).
+    first_document: bool,
     /// That load still needs the page's semantic runtime prepared for it.
     hand_on_pending: bool,
     /// When the current load committed.
@@ -205,6 +208,7 @@ impl Default for WorkDocumentNavigation {
             site_loads: 0,
             superseded: None,
             handed_on: false,
+            first_document: true,
             hand_on_pending: false,
             committed_at: None,
             redirect: None,
@@ -247,6 +251,21 @@ fn log_brand_move(requested: Option<&ContextNavigationTarget>, current: &str) {
     }
 }
 
+/// The same page again, its query aside: what a bot check reloads.
+fn reloads(effective: Option<&ContextNavigationTarget>, raw: &str) -> bool {
+    let Ok(target) = ContextNavigationTarget::parse(raw) else {
+        return false;
+    };
+    effective.is_some_and(|effective| {
+        let (a, b) = (effective.as_url(), target.as_url());
+        a.scheme() == b.scheme() && a.host() == b.host() && a.path() == b.path()
+    })
+}
+
+/// How soon after its document committed a ready site-session page may load
+/// itself again and be followed.
+const SELF_LOAD_WINDOW: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Script redirects one site-session load may follow before it settles.
 const MAX_SITE_LOADS: u8 = 6;
 
@@ -271,12 +290,10 @@ impl State {
         }
     }
     /// A site-session GET the gate follows: the tracked load's own server
-    /// redirect, a script redirect before the document settles, or, once it
-    /// is ready with no action of the model's in flight, the page loading
-    /// another address of its own site by itself (a bot check that cleared,
-    /// a timed refresh, a script redirect). That load becomes the document
-    /// the model continues on, as an action's hand-on load does; a load to
-    /// another site is cancelled and the page stays.
+    /// redirect, a script redirect before the document settles, or a first
+    /// page that reloads itself moments after it settled (a bot check that
+    /// clears itself). Other page-initiated loads are cancelled and the page
+    /// stays.
     fn site_follows(&mut self, raw: &str) -> bool {
         let Some(requested) = self.target.as_ref() else {
             return false;
@@ -314,12 +331,14 @@ impl State {
             Phase::Ready
                 if policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
                     && self.site_loads < MAX_SITE_LOADS
+                    && self.first_document
+                    && reloads(self.effective.as_ref(), raw)
                     && self.operation.is_none()
+                    && self.follow.is_none()
+                    && self.human.is_none()
                     && self
-                        .follow
-                        .as_ref()
-                        .is_none_or(|follow| follow.slot.closed())
-                    && self.human.is_none() =>
+                        .committed_at
+                        .is_some_and(|at| at.elapsed() <= SELF_LOAD_WINDOW) =>
             {
                 let (Some(generation), Some(loads)) = (
                     self.finalization_generation.checked_add(1),
@@ -392,14 +411,6 @@ impl State {
     /// follows it like a script redirect; a same-site GET is kept for the
     /// controller and cancelled; anything else is cancelled.
     fn follow_from_action(&mut self, raw: &str, get: bool) -> bool {
-        // The action's window is over: this load is the page's own.
-        if self
-            .follow
-            .as_ref()
-            .is_some_and(|follow| follow.slot.closed())
-        {
-            return get && self.site_follows(raw);
-        }
         let same_site = self.target.as_ref().is_some_and(|requested| {
             ContextNavigationTarget::parse(raw)
                 .is_ok_and(|target| zephium_agentic::same_work_site(requested, &target))
@@ -487,12 +498,12 @@ impl WorkDocumentNavigation {
     ) {
         if let Ok(mut state) = self.0.lock() {
             state.handed_on = false;
+            state.first_document = false;
             state.clear_write_navigation();
             #[cfg(target_os = "windows")]
             {
                 state.write_dispatched = false;
             }
-            slot.reopen();
             state.follow = (state.policy
                 == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
                 && state.phase == Phase::Ready)
@@ -652,6 +663,7 @@ impl WorkDocumentNavigation {
         }
         state.follow = None;
         state.operation = Some(request.operation());
+        state.first_document = false;
         state.target = Some(request.target().clone());
         state.effective = None;
         state.policy = request.document_policy();
@@ -693,6 +705,7 @@ impl WorkDocumentNavigation {
         }
         state.follow = None;
         state.operation = Some(operation);
+        state.first_document = false;
         state.target = Some(target);
         state.effective = None;
         state.policy = zephium_agentic::WorkBrowserDocumentPolicy::Exact;
@@ -1602,28 +1615,6 @@ mod tests {
         assert!(!gate.failed());
     }
     #[test]
-    fn a_ready_page_that_loads_its_own_site_mid_task_becomes_the_next_document() {
-        let start = "https://www.example.com/s?q=lego";
-        let gate = site_gate(start);
-        for phase in [E::Started, E::Committed, E::Finished] {
-            gate.observe(event(1, phase, start)).unwrap();
-        }
-        settle(&gate, start);
-        assert!(gate.ready(Some(start)));
-        // A script redirect to another page of the site, long after ready.
-        assert!(gate.allows("https://www.example.com/s/results?q=lego"));
-        assert!(gate.handed_on());
-        for phase in [E::Started, E::Committed, E::Finished] {
-            gate.observe(event(2, phase, "https://www.example.com/s/results?q=lego"))
-                .unwrap();
-        }
-        settle(&gate, "https://www.example.com/s/results?q=lego");
-        assert!(gate.ready(Some("https://www.example.com/s/results?q=lego")));
-        assert!(!gate.allows("https://elsewhere.example.org/"));
-        assert!(!gate.failed());
-    }
-
-    #[test]
     fn a_first_page_that_loads_itself_again_soon_after_it_settled_is_followed() {
         let start = "https://www.example.com/";
         let gate = site_gate(start);
@@ -1641,8 +1632,9 @@ mod tests {
         }
         settle(&gate, "https://www.example.com/?checked=1");
         assert!(gate.ready(Some("https://www.example.com/?checked=1")));
-        // Another site is never followed.
+        // Another site, or another page of it, is never followed.
         assert!(!gate.allows("https://elsewhere.example.org/"));
+        assert!(!gate.allows("https://www.example.com/account"));
     }
 
     #[test]
@@ -1801,7 +1793,7 @@ mod tests {
         assert!(gate.ready(Some(&last)));
     }
     #[test]
-    fn site_session_routes_in_place_and_cancels_cross_site_loads_without_losing_the_page() {
+    fn site_session_routes_in_place_and_cancels_page_loads_without_losing_the_page() {
         let start = "https://app.slack.com/client";
         let gate = site_gate(start);
         for phase in [E::Started, E::Committed, E::Finished] {
@@ -1811,22 +1803,19 @@ mod tests {
         let route = "https://app.slack.com/client/T1/C2";
         assert_eq!(gate.location_changed(Some(route)), Ok(false));
         assert!(gate.ready(Some(route)));
-        assert!(!gate.allows("https://evil.test/"));
+        for foreign in [
+            "https://evil.test/",
+            "https://app.slack.com/other",
+            "https://files.slack.com/x",
+        ] {
+            assert!(!gate.allows(foreign), "{foreign}");
+        }
         gate.observe(event(7, E::Cancelled, "https://evil.test/"))
             .unwrap();
         assert!(gate.ready(Some(route)));
         assert!(!gate.failed());
         assert_eq!(gate.location_changed(Some("https://evil.test/x")), Ok(true));
         assert!(gate.failed());
-        // A load the page starts within its own site becomes the next
-        // document rather than being cancelled.
-        let gate = site_gate(start);
-        for phase in [E::Started, E::Committed, E::Finished] {
-            gate.observe(event(1, phase, start)).unwrap();
-        }
-        settle(&gate, start);
-        assert!(gate.allows("https://files.slack.com/x"));
-        assert!(gate.handed_on());
     }
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     #[test]
@@ -1863,12 +1852,8 @@ mod tests {
         let gate = ready();
         let slot = zephium_agentic::SemanticActionFollow::default();
         let search = "https://app.slack.com/search?q=design";
-        // Without an action in flight the page's own load is followed and
-        // becomes the next document; nothing is kept for the controller.
-        let own = ready();
-        assert!(own.allows_apple_action(search, apple_action(T::Other, true)));
-        assert!(own.handed_on());
-        assert_eq!(slot.take(), None);
+        // Without an action in flight nothing is kept.
+        assert!(!gate.allows_apple_action(search, apple_action(T::Other, true)));
         gate.open_follow(false, false, slot.clone());
         assert!(!gate.allows_apple_action(search, apple_action(T::FormSubmitted, true)));
         assert!(!gate.allows_apple_action(search, apple_action(T::FormSubmitted, false)));
@@ -1880,7 +1865,7 @@ mod tests {
         );
         assert_eq!(slot.take(), None);
         gate.close_follow();
-        assert!(gate.allows_apple_action(search, apple_action(T::Other, true)));
+        assert!(!gate.allows_apple_action(search, apple_action(T::Other, true)));
         assert_eq!(slot.take(), None);
 
         let gate = ready();
@@ -1901,43 +1886,6 @@ mod tests {
         assert!(gate.ready(Some(book)));
         assert!(!gate.failed());
     }
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    #[test]
-    fn a_load_the_page_starts_after_the_action_window_closed_becomes_the_next_document() {
-        use wry::AppleNavigationType as T;
-        let start = "https://www.example.com/s?q=lego";
-        let gate = site_gate(start);
-        for phase in [E::Started, E::Committed, E::Finished] {
-            gate.observe(event(1, phase, start)).unwrap();
-        }
-        settle(&gate, start);
-        let slot = zephium_agentic::SemanticActionFollow::default();
-        gate.open_follow(false, false, slot.clone());
-        // While the action's window is open its loads are kept for the
-        // controller; once it took them, the page's own load is followed.
-        let sorted = "https://www.example.com/s?q=lego&sort=price";
-        assert!(!gate.allows_apple_action(sorted, apple_action(T::Other, true)));
-        assert_eq!(
-            slot.close().map(|target| target.as_url().to_string()),
-            Some(sorted.to_owned())
-        );
-        let refreshed = "https://www.example.com/s/refreshed?q=lego";
-        assert!(!gate.allows_apple_action("https://evil.test/", apple_action(T::Other, true)));
-        assert!(gate.allows_apple_action(refreshed, apple_action(T::Other, true)));
-        assert!(gate.handed_on());
-        assert_eq!(slot.take(), None);
-        // The next action opens a fresh window.
-        let next = zephium_agentic::SemanticActionFollow::default();
-        next.close();
-        let gate = site_gate(start);
-        for phase in [E::Started, E::Committed, E::Finished] {
-            gate.observe(event(1, phase, start)).unwrap();
-        }
-        settle(&gate, start);
-        gate.open_follow(false, false, next.clone());
-        assert!(!next.closed());
-    }
-
     #[test]
     fn a_committed_site_page_that_never_finishes_is_taken_as_loaded_once() {
         let start = "https://www.airbnb.com/rooms/1";
