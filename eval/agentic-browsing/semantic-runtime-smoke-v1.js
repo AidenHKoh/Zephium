@@ -1762,6 +1762,71 @@ async function finish() {
   assert(plainTexts.includes("Offer 0") && plainTexts.includes("Offer 5"), "a page without main lost its records below the fold");
   assert(plainTexts.indexOf("Offer 5") < plainTexts.indexOf("Loose footer prose"), "a page without main read its footer before its records");
   assert(new Set(plainLook.n.map((node) => node.k)).size === plainLook.n.length, "a record was read twice without main");
+  // Results in an article below the fold whose named sections the viewport
+  // pass already took as landmarks are still read (Rome2Rio's routes).
+  const routesMain = new Element("main");
+  const routes = routesMain.append(new Element("article"));
+  routes.rect = { x: 10, y: 900, width: 800, height: 1400 };
+  const routeList = routes.append(new Element("ul"));
+  routeList.rect = { x: 10, y: 950, width: 800, height: 400 };
+  for (let index = 0; index < 3; index += 1) {
+    const item = routeList.append(new Element("li"));
+    item.rect = { x: 10, y: 960 + index * 100, width: 800, height: 80 };
+    item.append(new CharacterData("Route " + index));
+  }
+  const faq = routes.append(new Element("section", { "aria-label": "Travel questions" }));
+  faq.rect = { x: 10, y: 1500, width: 800, height: 200 };
+  const question = faq.append(new Element("p"));
+  question.rect = { x: 10, y: 1520, width: 800, height: 20 };
+  question.append(new CharacterData("How long is the trip?"));
+  document._root = routesMain; setOwner(routesMain, document);
+  const routesLook = JSON.parse(invoke(116, 116, { k: "initial" }, { n: 40 }));
+  const routeTexts = routesLook.n.map((node) => node.t).filter(Boolean);
+  assert(routeTexts.includes("Route 0") && routeTexts.includes("Route 2"), "results beside a landmark the look took were lost");
+  assert(routesLook.n.some((node) => node.r === "landmark" && node.n === "Travel questions"), "the out-of-view section was not kept as a landmark");
+  assert(new Set(routesLook.n.map((node) => node.k)).size === routesLook.n.length, "a record was read twice around a landmark");
+  assert(routesLook.n.every((node, index) => node.p === undefined || node.p < index), "a split record lost its parent");
+  // A filter panel's facets below the fold come after the products.
+  const shop = new Element("div");
+  const facets = shop.append(new Element("div"));
+  facets.rect = { x: 0, y: 100, width: 260, height: 3000 };
+  for (let index = 0; index < 4; index += 1) {
+    const choice = facets.append(new HTMLInputElement({ type: "checkbox", "aria-label": "Facet " + index }, ""));
+    choice.rect = { x: 10, y: 120 + index * 40, width: 20, height: 20 };
+  }
+  for (let index = 0; index < 240; index += 1) {
+    const count = facets.append(new Element("p"));
+    count.rect = { x: 40, y: 900 + index * 40, width: 200, height: 20 };
+    count.append(new CharacterData("( " + (100 + index) + " )"));
+  }
+  const grid = shop.append(new Element("div"));
+  grid.rect = { x: 280, y: 100, width: 980, height: 3000 };
+  for (let index = 0; index < 4; index += 1) {
+    const tile = grid.append(new Element("p"));
+    tile.rect = { x: 300, y: 900 + index * 200, width: 300, height: 150 };
+    tile.append(new CharacterData("Laptop " + index));
+  }
+  document._root = shop; setOwner(shop, document);
+  const shopLook = JSON.parse(invoke(117, 117, { k: "initial" }, { n: 12 }));
+  const shopTexts = shopLook.n.map((node) => node.t).filter(Boolean);
+  assert(shopTexts.includes("Laptop 0") && shopTexts.includes("Laptop 3"), "a filter panel's facets crowded out the products");
+  assert(!shopTexts.includes("( 107 )"), "facets were read before the products filled the look");
+  // A price shown to people but hidden from assistive technology is read;
+  // other hidden text stays out.
+  const stays = new Element("main");
+  const stay = stays.append(new Element("li"));
+  stay.rect = { x: 10, y: 100, width: 600, height: 120 };
+  stay.append(new CharacterData("Old Town Residence "));
+  const shownPrice = stay.append(new Element("span", { "aria-hidden": "true" }));
+  shownPrice.rect = { x: 400, y: 180, width: 80, height: 24 };
+  shownPrice.append(new CharacterData("512 zł"));
+  const hiddenBadge = stay.append(new Element("span", { "aria-hidden": "true" }));
+  hiddenBadge.rect = { x: 500, y: 180, width: 80, height: 24 };
+  hiddenBadge.append(new CharacterData("Hidden badge 4"));
+  document._root = stays; setOwner(stays, document);
+  const staysWire = invoke(118, 118, { k: "initial" }, { n: 20 });
+  assert(staysWire.includes("512 zł") || staysWire.includes("512 zł"), "a price hidden from assistive technology was not read");
+  assert(!staysWire.includes("Hidden badge"), "other text hidden from assistive technology was read");
   // A look cut inside a control leaves that control's name unfinished; the
   // records read whole before it stay usable for actions.
   const cut = new Element("main");

@@ -101,6 +101,26 @@ impl AgentProviderContinuation {
         ))
     }
 
+    /// A wait asked for while the planner holds a look of one section has
+    /// no whole page to compare: it is answered with a fresh whole look
+    /// taken a moment later, told so.
+    pub fn into_wait_refresh(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderObservationCheckpoint, Box<Self>> {
+        if config != &self.config
+            || self.correlation.kind() != AgentBrowserToolKind::Wait
+            || !AgentProviderObservationCheckpoint::refreshable(&self, observation)
+        {
+            return Err(Box::new(self));
+        }
+        Ok(AgentProviderObservationCheckpoint::refresh(
+            self,
+            "waited: the page was given a moment. This is a fresh whole look of it: extract now if it or your earlier looks show what you need; otherwise continue from it.".to_owned(),
+        ))
+    }
+
     /// The host ran the search a planner typed and never ran (it scrolled
     /// instead): the pending step is retired unrun, and the planner gets a
     /// fresh look of the page the search produced, told so.
@@ -289,6 +309,26 @@ impl AgentProviderContinuation {
         )))
     }
 
+    /// A planner that took whole looks of this page again and again with
+    /// nothing done between them is refused the next one, unrun, and pointed
+    /// at a narrower look, extraction or an action.
+    pub fn refuse_whole_look(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderObservationRefusal, Box<Self>> {
+        if config != &self.config
+            || self.correlation.kind() != AgentBrowserToolKind::Snapshot
+            || !self.baseline.matches(observation)
+        {
+            return Err(Box::new(self));
+        }
+        Ok(AgentProviderObservationRefusal(
+            self,
+            InspectionRefusal::Streak,
+        ))
+    }
+
     /// Retires the exact acknowledged Snapshot turn before native dispatch.
     pub fn retire_for_observation(
         self,
@@ -324,6 +364,7 @@ enum InspectionRefusal {
     Repeated,
     Limit,
     Unchanged,
+    Streak,
 }
 
 /// The scope a proposal can actually be captured with on this observation.
@@ -421,6 +462,7 @@ impl AgentProviderObservationRefusal {
             InspectionRefusal::Limit => ("inspection_budget_exhausted", "The inspection budget for this document is exhausted. No capture occurred; current refs and retained evidence remain available. Read or extract available evidence, or navigate through an admitted observed link when the remaining navigation budget allows. Do not request another snapshot of this document."),
             InspectionRefusal::Repeated => ("repeated_snapshot_scope", "This scope and query were already inspected. No capture occurred and current refs remain valid. Inspect a different region, use text_search within a current eligible boundary, or follow an observed detail link when allowed. Extract only the evidence actually available; repeating this subtree does not advance truncated content."),
             InspectionRefusal::Unchanged => ("page_unchanged", "No capture occurred: you already took a whole look at this page and nothing was done since, so another initial snapshot shows the same page. Every look you took on this page stays evidence for extract, so you never need one back in view: if the requested values appeared in any of them, extract now. If the look shows a dialog or banner over the page (a sign-in offer, a cookie notice, a promotion), close it with its close, dismiss or reject control first. If the look shows next to nothing (a blank, blocked or rate-limited page), another look will not fill it: go back, open another address of the site, or extract what earlier pages showed. To see more of the page, scroll the document (act scroll on the document ref, direction down, amount page) or a list region, then look at what it shows; inspect a landmark or list with snapshot(subtree); or wait for a semantic change when the page is still loading."),
+            InspectionRefusal::Streak => ("looked_enough", "No capture occurred. You took whole looks at this page several times in a row with nothing done between them; another shows the same page. Every look you took stays evidence for extract: if the requested values appeared in any of them, extract now. Otherwise take a narrower look or act: snapshot text_search on the document ref for the words or figures you need, snapshot subtree of the one list, table or region that holds the records, scroll the document down a page, or use a search, filter, sort or next-page control. Do not ask for the whole page again."),
             InspectionRefusal::Invalid => ("invalid_snapshot_scope", "No capture occurred; this observation and its refs remain current. text_search and region require a current document/landmark/group/dialog ref. A heading is only eligible for surrounding_text or subtree; its subtree excludes following prose. If no eligible search boundary exists here, snapshot(initial) can restore current viewport anchors. You may extract retained evidence instead. Choose another operation within the remaining budget; do not repeat the rejected scope."),
         };
         let result = serde_json::json!({
@@ -1056,6 +1098,74 @@ mod action_history_tests {
         // A refusal decided before the page saw anything keeps its look.
         let unseen = refusal(crate::SemanticActionBindingError::TargetIncomplete);
         assert!(unseen.into_refresh(observation, &config).is_err());
+    }
+
+    #[test]
+    fn a_whole_look_refused_for_its_streak_points_at_narrower_looks() {
+        let config = config(AgentProviderKind::OpenAiResponses).with_progressive_observation();
+        let result = crate::semantic_action_result::tests::scroll_provider_fixture(1, false);
+        let observation = result.fresh_snapshot().unwrap();
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            crate::semantic_diff::SemanticObservationFingerprint::from_observation(observation),
+        );
+        let look = |name: &str, arguments: &str| {
+            let transcript =
+                AgentProviderTranscript::try_initial(Arc::from("Search"), "page".into()).unwrap();
+            turn(
+                1,
+                name,
+                arguments,
+                baseline.clone(),
+                config.clone(),
+                transcript,
+            )
+        };
+        let refusal = look("snapshot", r#"{"scope":{"kind":"initial"}}"#)
+            .refuse_whole_look(observation, &config)
+            .unwrap();
+        let (_, bound) = refusal
+            .bind(observation, &config, "current observation".into())
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_str(bound.latest().tool_result()).unwrap();
+        assert_eq!(result["code"], "looked_enough");
+        assert_eq!(result["executed"], false);
+        assert!(result["guidance"].as_str().is_some_and(|guidance| guidance
+            .contains("text_search")
+            && guidance.contains("extract")));
+        // Only a look can be refused as one.
+        assert!(look(
+            "act",
+            r#"{"actions":[{"kind":"scroll","target":"@a1","direction":"down","amount":"page","effect":"read","wait":{"kind":"immediate"},"verification":{"kind":"scroll_position_changed"},"settle_millis":250}]}"#,
+        )
+        .refuse_whole_look(observation, &config)
+        .is_err());
+    }
+
+    #[test]
+    fn a_wait_without_a_whole_look_is_answered_with_a_fresh_one() {
+        let config = config(AgentProviderKind::OpenAiResponses).with_progressive_observation();
+        let result = crate::semantic_action_result::tests::scroll_provider_fixture(1, false);
+        let observation = result.fresh_snapshot().unwrap();
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            crate::semantic_diff::SemanticObservationFingerprint::from_observation(observation),
+        );
+        let transcript =
+            AgentProviderTranscript::try_initial(Arc::from("Search"), "page".into()).unwrap();
+        let checkpoint = turn(
+            1,
+            "wait",
+            r#"{"condition":{"kind":"semantic_change"},"timeout_millis":30000}"#,
+            baseline,
+            config.clone(),
+            transcript,
+        )
+        .into_wait_refresh(observation, &config)
+        .unwrap();
+        assert_eq!(checkpoint.expansion(), None);
+        assert!(checkpoint
+            .note
+            .as_deref()
+            .is_some_and(|note| note.starts_with("waited")));
     }
 
     #[test]

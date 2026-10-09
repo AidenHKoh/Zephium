@@ -33,9 +33,11 @@ separate trusted opt-in described below. After a fresh actual
 native observation, the session validates the current frame cohort and consumes
 the exact provider tool continuation. The read uses `PublicOnly` sensitivity and
 admits at most 256 readable fragments and 48 KiB of source values, collected
-past that and shed least useful first (control labels and list options, then
-addresses and picture text), so a listing's records survive the page chrome
-before them. Compact `ZREAD3` preserves every admitted fragment and its
+past that and shed least useful first: the header, navigation, footer and
+search landmarks, then what sits beside the main landmark, then within each
+control labels, list options, filter checkbox states and bare facet counts
+such as "( 858 )", then addresses and picture text, so a listing's records
+survive the page chrome and filters before them. Compact `ZREAD3` preserves every admitted fragment and its
 provenance inside a separate terminal-extraction encoding envelope derived
 from worst-case escaping,
 bounded rows, frame provenance and the closed schema. This does not increase

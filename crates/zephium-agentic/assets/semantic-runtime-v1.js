@@ -13,6 +13,9 @@
   const MAX_VISITED_NODES = 32768;
   const MAX_TREE_DEPTH = 32;
   const MAX_DEFERRED_RECORDS = 64;
+  const MAX_DEFERRED_ANCHORS = 192;
+  const FIGURE_TEXT = /\d/u;
+  const CURRENCY_TEXT = /[$\u20ac\u00a3\u00a5\u20b9\u20a9\u20bd\u20ba\u20aa\u0e3f\u20ab]|(?:^|[^\p{L}])(?:z\u0142|pln|usd|eur|gbp|chf|sek|nok|dkk|czk|k\u010d|kr|huf|ft|ron|lei|aud|cad|nzd|jpy|inr|brl|mxn)(?=$|[^\p{L}])/iu;
   const MAX_NAME_BYTES = 512;
   const MAX_NODE_TEXT_BYTES = 4096;
   const MAX_VALUE_BYTES = 4096;
@@ -1028,8 +1031,31 @@
       (tag === "link" && !isPageAddressMeta(element, tag)) ||
       has(element, "hidden") ||
       has(element, "inert") ||
-      (lower(attribute(element, "aria-hidden", 16) || "") === "true" && !isRenderedPhoto(element, tag))
+      (lower(attribute(element, "aria-hidden", 16) || "") === "true" && !isRenderedPhoto(element, tag) &&
+        !isShownPrice(element, tag))
     );
+  }
+
+  // A price shown to people but hidden from assistive technology, which
+  // reads a clipped copy instead (Booking hides that copy too): a rendered
+  // element whose own short text is a figure with a currency.
+  function isShownPrice(element, tag) {
+    if (tag === "svg" || tag === "img") return false;
+    const children = childNodes(element);
+    const count = listLength(children);
+    if (count === 0 || count > 4) return false;
+    let text = "";
+    for (let index = 0; index < count; index += 1) {
+      const child = listItem(children, index);
+      if (child === null || nodeType(child) !== 3) return false;
+      const raw = read(characterDataGetter, child);
+      if (typeof raw !== "string") return false;
+      text += raw;
+      if (text.length > 64) return false;
+    }
+    const rect = elementRect(element);
+    return rect !== null && rect.width > 4 && rect.height > 4 && styleIsVisible(element) &&
+      FIGURE_TEXT.test(text) && CURRENCY_TEXT.test(text);
   }
 
   // The page's own picture (og:image) is the one image every product or
@@ -1223,6 +1249,26 @@
     const width = numberIsFinite(Number(globalThis.innerWidth)) ? Number(globalThis.innerWidth) : 0;
     const height = numberIsFinite(Number(globalThis.innerHeight)) ? Number(globalThis.innerHeight) : 0;
     return rect.x + rect.width > 0 && rect.y + rect.height > 0 && rect.x < width && rect.y < height;
+  }
+
+  // An anchor inside a narrow column that also holds several checkboxes or
+  // radios: a listing's filter panel, not its results.
+  function facetPanel(anchor, choices) {
+    const width = numberIsFinite(Number(globalThis.innerWidth)) ? Number(globalThis.innerWidth) : 0;
+    if (width <= 0 || choices.length < 3 || anchor.rect === null || anchor.rect === undefined ||
+        anchor.rect.width >= width * 0.35) return false;
+    let current = anchor.element;
+    for (let depth = 0; depth < 12 && current !== null && current !== undefined; depth += 1) {
+      if (nodeType(current) !== 1) return false;
+      const rect = elementRect(current);
+      if (rect !== null && rect.width >= width * 0.35) return false;
+      let held = 0;
+      for (const choice of choices) {
+        if (apply(nodeContains, current, [choice]) && (held += 1) >= 3) return true;
+      }
+      current = read(nodeParentGetter, current);
+    }
+    return false;
   }
 
   function wireRect(rect) {
@@ -2136,6 +2182,8 @@
     // A page with no main landmark (x-kom's product grid is plain divs)
     // defers its content below the fold in document order instead.
     const loose = [];
+    // Checkboxes and radios the pass met, to tell a filter panel by.
+    const choices = [];
     let sawMain = false;
     const focused = focusedElements();
     const stack = [];
@@ -2223,18 +2271,23 @@
           if (!anchored && descriptor.role === "landmark" && descriptor.landmark === "main") sawMain = true;
           const recordLike = descriptor.role === "list_item" || descriptor.role === "row" ||
             (descriptor.role === "document" && descriptor.tag === "article");
-          if (!anchored && !admitted && visible && rect !== null && item.main === true &&
+          if (!anchored && (descriptor.role === "checkbox" || descriptor.role === "radio") &&
+              choices.length < MAX_DEFERRED_RECORDS) {
+            choices.push(item.node);
+          }
+          if (!anchored && !admitted && visible && rect !== null &&
               (recordLike || descriptor.role === "list" || descriptor.role === "table" ||
-               descriptor.role === "paragraph") &&
-              deferred.length < MAX_DEFERRED_RECORDS &&
-              !deferred.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {
-            deferred.push({ element: item.node, parent });
-          } else if (!anchored && !admitted && visible && rect !== null && item.main !== true &&
-              (recordLike || descriptor.role === "list" || descriptor.role === "table" ||
-               descriptor.role === "paragraph" || descriptor.role === "link") &&
-              loose.length < MAX_DEFERRED_RECORDS &&
-              !loose.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {
-            loose.push({ element: item.node, parent });
+               descriptor.role === "paragraph" || (item.main !== true && descriptor.role === "link"))) {
+            const into = item.main === true ? deferred : loose;
+            if (!into.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {
+              // A filter panel's anchors have their own smaller allowance, so
+              // a long facet list cannot crowd the results out of the list.
+              const aside = facetPanel({ element: item.node, rect }, choices);
+              if (into.filter(anchor => anchor.aside === aside).length <
+                  (aside ? MAX_DEFERRED_RECORDS : MAX_DEFERRED_ANCHORS)) {
+                into.push({ element: item.node, parent, rect, aside });
+              }
+            }
           }
           if (!anchored && !admitted && visible &&
               (descriptor.role === "heading" || summaryDetails(item.node) !== null) &&
@@ -2322,11 +2375,37 @@
     if (!anchored && !state.stopped && anchors.length !== 0) {
       for (const record of records) known[record.wire.k] = true;
       const original = state.request;
-      for (const anchor of anchors) {
+      // A filter panel's records (a listing's facet counts) come after the
+      // rest, each in document order: otherwise the facets fill the room
+      // before the first product.
+      for (const anchor of anchors) anchor.aside = facetPanel(anchor, choices);
+      const work = [...anchors.filter(anchor => !anchor.aside),
+        ...anchors.filter(anchor => anchor.aside)];
+      for (let at = 0; at < work.length; at += 1) {
+        const anchor = work[at];
         const room = original.b.n - records.length;
         if (state.stopped || room <= 0) {
           if (!state.stopped) mark(state, "node_limit", false);
           break;
+        }
+        // An anchor holding a record the viewport pass took (a region
+        // landmark admitted out of view inside an article of results) is
+        // read child by child instead, under that record when it is one.
+        const own = records.findIndex(record => record.element === anchor.element);
+        if (own >= 0 || records.some(record => record.element !== anchor.element &&
+            nodeType(record.element) === 1 &&
+            apply(nodeContains, anchor.element, [record.element]))) {
+          const list = childNodes(anchor.element);
+          const children = [];
+          for (let index = 0; index < listLength(list) &&
+              work.length + children.length < MAX_DEFERRED_RECORDS * 4; index += 1) {
+            const child = listItem(list, index);
+            if (child !== null && nodeType(child) === 1) {
+              children.push({ element: child, parent: own >= 0 ? own : anchor.parent, aside: anchor.aside });
+            }
+          }
+          work.splice(at + 1, 0, ...children);
+          continue;
         }
         state.request = { ...original, b: { ...original.b, n: room } };
         const scoped = traverse(anchor.element, state, true);

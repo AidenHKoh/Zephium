@@ -3335,6 +3335,77 @@ mod tests {
     }
 
     #[test]
+    fn a_select_on_a_checkbox_or_a_suggestion_binds_as_a_click_on_the_option() {
+        let observed = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document"},
+                {"k":2,"p":0,"r":"checkbox","n":"32 GB","o":9},
+                {"k":3,"p":0,"r":"combobox","n":"From","o":11},
+                {"k":4,"p":0,"r":"option","n":"Krakow, Poland","o":9},
+                {"k":5,"p":0,"r":"paragraph","t":"Vienna, Austria"}
+            ]),
+        );
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let frames = [observed.frames()[0].frame().clone()];
+        let select = |target: &str, option: &str| {
+            json!({"actions":[{
+                "kind":"select","target":target,"option":option,"effect":"local_write",
+                "settle_millis":2000,"wait":{"kind":"immediate"},
+                "verification":{"kind":"target_selection_matches_option"}
+            }]})
+        };
+        for (target, option, clicked) in [("@a2", "@a2", 2), ("@a3", "@a4", 4)] {
+            let targets = AgentProviderActionTargets::try_from_observation(&observed).unwrap();
+            let resolution = action_turn_with_targets(
+                &observed,
+                config.clone(),
+                targets,
+                select(target, option),
+            )
+            .resolve_action(
+                crate::SemanticActionBatchId::new(1).unwrap(),
+                &observed,
+                &frames,
+                &config,
+            )
+            .unwrap();
+            let AgentProviderActionResolution::Bound(batch, _, _) = resolution else {
+                panic!("select on {target} was not bound as a click")
+            };
+            let action = &batch.actions()[0];
+            assert_eq!(action.kind(), crate::SemanticActionKind::Click);
+            assert_eq!(
+                action.target_reference(),
+                SemanticReferenceId::new(clicked).unwrap()
+            );
+            assert_eq!(
+                action.verification(),
+                crate::SemanticVerification::PageChanged
+            );
+            assert_eq!(action.effect(), crate::SemanticEffectClass::LocalWrite);
+        }
+        // A suggestion the page made no clickable control stays refused.
+        let targets = AgentProviderActionTargets::try_from_observation(&observed).unwrap();
+        let resolution =
+            action_turn_with_targets(&observed, config.clone(), targets, select("@a3", "@a5"))
+                .resolve_action(
+                    crate::SemanticActionBatchId::new(1).unwrap(),
+                    &observed,
+                    &frames,
+                    &config,
+                )
+                .unwrap();
+        assert!(matches!(
+            resolution,
+            AgentProviderActionResolution::Refused(_)
+        ));
+    }
+
+    #[test]
     fn incompatible_click_outcome_returns_unissued_recovery_without_losing_target() {
         let observed = observation_with_nodes(
             context(),

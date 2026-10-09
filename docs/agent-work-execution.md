@@ -213,20 +213,37 @@ look holds everything in view, then the main landmark's records below the fold
 then the headings below, so a results page reaches the planner with its
 records rather than its header and filters. A page with no main landmark
 gets its below-the-fold list items, rows, articles, tables and paragraphs the
-same way. A dialog the site lays over the page unasked with its own short close
-control (a sign-in, newsletter or app offer) is closed by Rust as a read on the
-first look, like a cookie banner, and is never read as a sign-in wall. A
+same way. Such a record that holds a landmark the look already took (named
+sections inside one article of results) is read child by child rather than
+skipped, and records in a narrow column holding several checkboxes or radios
+(a filter panel) come after the rest, with an allowance of their own. A price
+shown on screen but hidden from assistive technology (a short rendered text
+that is a figure with a currency) is read despite `aria-hidden`. A dialog the
+site lays over the page unasked with its own short close control (a sign-in,
+newsletter or app offer) is closed by Rust as a read on the first look, like a
+cookie banner, and is never read as a sign-in wall; a look taken inside a
+focused modal offer counts as one with the page behind it. A
 control a click found covered loses click and keeps press in the next looks of
 its document: the refusal tells the planner to press it with Enter, and Enter
 on a button, link, menu item or tab is judged as that control's click. The
 third identical refused proposal in a row gets a fresh look of the page
 instead of the same refusal again, and so does the third refused look in a
-row, a moment later. The first scroll proposed right after a verified fill of
+row, a moment later. Six refusals in a row with nothing done, two before the
+loop would end the page, the next model call is offered extraction alone, so
+what the looks already hold becomes the result. A wait proposed while the
+planner holds a look of one section pauses for up to three seconds and is
+answered with a fresh whole look. The first scroll proposed right after a verified fill of
 a field that commits nothing (a search, filter or place box) is refused unrun
 and the planner is told to run the search first; a second such scroll has Rust
 press Enter in that field as its own read and hand the planner the page it
 produced. A fourth scroll in a row is refused and the planner is pointed at
-extract or at the site's results address with the goal's filters. A
+extract or at the site's results address with the goal's filters. A third
+whole look in a row (the initial look, or a region or subtree of the
+document) with nothing done between is refused once per streak and the
+planner is pointed at extract, a text search, one list's subtree, a scroll or
+a control. A select on a control that takes no select (a filter checkbox, a
+place field's suggestion) is bound as a click on the option it named,
+verified as a page change, and judged like any click. A
 screenshot that cannot be taken of the current look goes back as a fresh text
 look. A load a step diverted is followed only when the site session admits
 it; a section anchor loads its page, and an anchor of the open page stays a
@@ -234,8 +251,14 @@ scroll. A navigation to an exact address an earlier hop requested and the site
 redirected to the page now open is refused before any authority is minted. A native select offers only
 select: a click or key would open WebKit's own menu, whose modal loop holds
 the page. A locate scope the look cannot hold searches the whole look. A
-chosen page model replies within 4,096 output tokens, and a lost or runaway
-reply is charged at that ceiling. A page that ends on a stalled look with no
+chosen page model replies within 4,096 output tokens: a browser turn keeps up
+to 512 of them back, and a reply that runs past the rest is asked once more,
+told to be brief with one tool call and with thinking off, inside the same
+reservation; both asks are charged as reported, and a lost reply at the
+ceiling. A page task on a travel site whose results address is known
+(Booking, Airbnb, Skyscanner, Rome2Rio, Expedia, Hotels.com, Kayak, on any
+country domain) carries that address's format, so the planner opens the list
+with the goal's places, dates and guests instead of driving the form. A page that ends on a stalled look with no
 model call in flight fails as too slow and is charged its settled calls, not
 the page's whole reservation.
 

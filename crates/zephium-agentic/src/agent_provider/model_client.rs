@@ -450,6 +450,31 @@ impl ModelClientReplyContract {
         Some(messages)
     }
 
+    /// A browser reply that ran past its output limit is asked once more
+    /// for one tool call alone. Its runaway text is not handed back.
+    pub(crate) fn reask_runaway(
+        &self,
+        outcome: &WorkModelOutcome,
+    ) -> Option<Vec<WorkModelMessage>> {
+        if self.structured || outcome.stop != WorkModelStop::MaxTokens {
+            return None;
+        }
+        let offered = self
+            .offered
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(vec![WorkModelMessage::User(vec![WorkModelPart::Text(format!(
+            "{DEVELOPER_LABEL}output_limit: nothing ran. Your reply ran past its length limit. Be brief: reply now with exactly one call to one of the offered tools ({offered}), no other text and no long reasoning."
+        ))])])
+    }
+
+    /// Whether this call answers in structured output rather than a tool.
+    pub(crate) const fn is_structured(&self) -> bool {
+        self.structured
+    }
+
     /// Decodes the reply through the closed browser-tool contract. Usage is
     /// the provider's; the identity is the requested model, never a claim the
     /// provider made.

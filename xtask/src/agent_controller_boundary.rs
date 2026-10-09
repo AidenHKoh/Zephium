@@ -254,12 +254,14 @@ fn validate_account_refresh(
         // waits, screenshots, decisions, a site's whole first look, the whole
         // look a consent press is made on, an app view's look and each
         // landmark it opens, each view an app read switches to, a results
-        // page's read, and the look after Rust closes a site's own overlay
-        // offer) each sample once more.
+        // page's read, the look after Rust closes a site's own overlay
+        // offer, the refusal of a whole look in a streak, and the fresh look
+        // after a banner search that found nothing to press) each sample
+        // once more.
         || format!("{work}\n{decision}")
             .matches("state.refresh_account(worker, browser)?")
             .count()
-            != 30
+            != 32
         || !policy.contains("MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS: u64 = 30_000;")
     {
         return Err("Work lost per-admission sampling, control or original expiry boundary".into());
@@ -1031,7 +1033,7 @@ fn validate_action(source: &str, refusal: &str) -> Result<(), String> {
     for required in [
         "config != &continuation.config",
         "!continuation.baseline.matches(observation)",
-        "actions.actions().iter().find_map",
+        "actions.iter().find_map(|action| {",
         "targets.permitted_operations(context.target)",
         "SemanticReferenceError::OperationDenied",
         "SemanticActionBatch::bind",
@@ -1951,7 +1953,7 @@ mod tests {
         for boundary in [
             "config != &continuation.config",
             "!continuation.baseline.matches(observation)",
-            "actions.actions().iter().find_map",
+            "actions.iter().find_map(|action| {",
             "targets.permitted_operations(context.target)",
             "SemanticReferenceError::OperationDenied",
             "SemanticActionBatch::bind",

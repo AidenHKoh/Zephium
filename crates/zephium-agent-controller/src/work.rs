@@ -1443,6 +1443,7 @@ impl AgentWorkController {
                     typed_unsent: false,
                     typed_field: None,
                     scroll_streak: 0,
+                    look_streak: 0,
                     failure: None,
                     observation: None,
                     native_terminal: None,
@@ -1477,6 +1478,8 @@ struct WorkState {
     typed_field: Option<u64>,
     /// Verified scrolls in a row with nothing else done.
     scroll_streak: u8,
+    /// Whole looks of this page in a row with nothing done between them.
+    look_streak: u8,
     navigation_target: Option<ContextNavigationTarget>,
     navigation_route: Option<AgentNavigationRoute>,
     navigation_discovery: Option<AgentNavigationDiscovery>,
@@ -2934,52 +2937,7 @@ impl AgentWorkController {
                 Box::pin(Self::observe(state, worker, browser)).await?,
             )?;
         }
-        // A cookie banner on a page worked for the person is refused by Rust
-        // before any model sees the page. Rust presses on a whole look of the
-        // page: the model's fitted look may shorten the banner's fields or cut
-        // its buttons off, and a press needs them whole.
-        if state.actions_before_extraction
-            && state
-                .navigation_discovery
-                .as_ref()
-                .is_some_and(AgentNavigationDiscovery::is_site_session)
-            && (state.task.consent_dismissal(&observation).is_some()
-                || state.task.consent_suspected(&observation))
-        {
-            state.refresh_account(worker, browser)?;
-            let initial = Box::pin(Self::observe(state, worker, browser)).await?;
-            let whole = Box::pin(Self::whole_page_capture(
-                state,
-                worker,
-                browser,
-                initial,
-                SemanticExpansionKind::Subtree,
-            ))
-            .await?;
-            if let Some(target) = state.task.consent_dismissal(&whole) {
-                observation =
-                    Box::pin(Self::dismiss_consent(state, worker, browser, whole, target)).await?;
-            }
-        }
-        // So is a sign-in, newsletter or app offer the site laid over the
-        // page with its own close control.
-        if state.actions_before_extraction
-            && state
-                .navigation_discovery
-                .as_ref()
-                .is_some_and(AgentNavigationDiscovery::is_site_session)
-        {
-            if let Some(target) = state.task.overlay_dismissal(&observation) {
-                observation = Box::pin(Self::close_overlay(
-                    state,
-                    worker,
-                    browser,
-                    observation,
-                    target,
-                ))
-                .await?;
-            }
-        }
+        observation = Box::pin(Self::clear_offers(state, worker, browser, observation)).await?;
         let mut captured_at = SemanticCaptureInstant::from_millis(
             state
                 .journal_mut()?
@@ -3009,6 +2967,9 @@ impl AgentWorkController {
             observation = Self::fit_model_observation(
                 Box::pin(Self::observe(state, worker, browser)).await?,
             )?;
+            // A banner or offer the page put up after its first look (a
+            // consent dialog its scripts add late) is cleared the same way.
+            observation = Box::pin(Self::clear_offers(state, worker, browser, observation)).await?;
             captured_at = SemanticCaptureInstant::from_millis(
                 state
                     .journal_mut()?
@@ -3159,6 +3120,41 @@ impl AgentWorkController {
                         AgentBrowserProviderError::TurnLimit,
                     ));
                 }
+                let whole = whole_look(turn.turn.proposal(), &observation);
+                // Planners swung between the whole page and itself for many
+                // calls (sidebar-heavy listings): a third whole look in a
+                // row with nothing done between is refused unrun, once per
+                // streak, and pointed at narrower looks, extract or acting.
+                if whole && state.look_streak >= 2 {
+                    state.look_streak = 0;
+                    state.native.check_control(worker, browser)?;
+                    state.refresh_account(worker, browser)?;
+                    state.journal_mut()?.emit(AgentWorkEventKind::ToolProposed(
+                        AgentBrowserToolKind::Snapshot,
+                    ))?;
+                    state
+                        .journal_mut()?
+                        .emit(AgentWorkEventKind::InspectionRefused)?;
+                    fruitless.refused(state)?;
+                    let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                    let refusal = turn
+                        .into_tool_turn()
+                        .into_parts()
+                        .1
+                        .refuse_whole_look(&observation, &session.config)
+                        .map_err(|_| {
+                            AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
+                        })?;
+                    turn = Self::provider(
+                        &mut state.native,
+                        worker,
+                        browser,
+                        session.cancellation.clone(),
+                        session.continue_after_scope_refusal(refusal, &observation),
+                    )
+                    .await?;
+                    continue;
+                }
                 let resolution = turn
                     .into_tool_turn()
                     .into_parts()
@@ -3205,7 +3201,7 @@ impl AgentWorkController {
                         state
                             .journal_mut()?
                             .emit(AgentWorkEventKind::InspectionRefused)?;
-                        fruitless.refused()?;
+                        fruitless.refused(state)?;
                         refused_looks = refused_looks.saturating_add(1);
                         let refusal = if refused_looks >= 3 && state.progressive_observation {
                             let session =
@@ -3268,6 +3264,13 @@ impl AgentWorkController {
                     }
                 };
                 refused_looks = 0;
+                // A narrower look between them breaks the streak: the whole
+                // page is then the way back from a section.
+                state.look_streak = if whole {
+                    state.look_streak.saturating_add(1)
+                } else {
+                    0
+                };
                 let next =
                     Self::inspect_current(state, worker, browser, checkpoint, &observation).await?;
                 observation = next.0;
@@ -3355,6 +3358,55 @@ impl AgentWorkController {
                 state.observation = Some(observation);
                 return Ok(());
             }
+            if turn.turn.proposal().kind() == AgentBrowserToolKind::Wait
+                && !matches!(observation.request().scope(), SemanticScope::Initial)
+            {
+                // A wait compares whole looks of the page; after a look of
+                // one section (Skyscanner's results loading) it ended the
+                // page. It is answered with a fresh whole look a moment later.
+                let pause = match turn.turn.proposal() {
+                    AgentBrowserToolProposal::Wait { timeout, .. } => {
+                        Duration::from_millis(u64::from(timeout.millis()).min(3000))
+                    }
+                    _ => return Err(AgentWorkFailure::Contract),
+                };
+                let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                let checkpoint = turn
+                    .into_tool_turn()
+                    .into_parts()
+                    .1
+                    .into_wait_refresh(&observation, &session.config)
+                    .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?;
+                let wake = Instant::now() + pause;
+                if wake < state.native.deadline {
+                    tokio::select! {
+                        biased;
+                        event = state.native.next_event(worker, browser) => {
+                            state.native.retain(event?)?;
+                            return Err(AgentWorkFailure::Mailbox);
+                        }
+                        () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+                    }
+                }
+                let next =
+                    Self::inspect_current(state, worker, browser, checkpoint, &observation).await?;
+                observation = next.0;
+                captured_at = next.1;
+                progress = next.2;
+                let Some(next_turn) = next.3 else {
+                    state.observation = Some(observation);
+                    return Ok(());
+                };
+                turn = next_turn;
+                frames.clear();
+                frames.extend(
+                    observation
+                        .frames()
+                        .iter()
+                        .map(|snapshot| snapshot.frame().clone()),
+                );
+                continue;
+            }
             if turn.turn.proposal().kind() == AgentBrowserToolKind::Wait {
                 let next = Self::wait_current(state, worker, browser, turn, observation).await?;
                 observation = next.0;
@@ -3391,7 +3443,7 @@ impl AgentWorkController {
                 state
                     .journal_mut()?
                     .emit(AgentWorkEventKind::NavigationRefused(reason))?;
-                fruitless.refused()?;
+                fruitless.refused(state)?;
                 let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
                 if session.turns.saturating_add(2) > session.max_model_calls {
                     return Err(AgentWorkFailure::Browser(
@@ -3616,7 +3668,7 @@ impl AgentWorkController {
                                 state.observation = Some(observation);
                                 return Ok(());
                             }
-                            fruitless.refused()?;
+                            fruitless.refused(state)?;
                             let stuck = Self::refused_again(&mut last_refused, &refusal);
                             let refusal = Self::repeated_refusal(&mut action_refusals, refusal)?;
                             let refusal = Self::count_refused_control(
@@ -3772,7 +3824,7 @@ impl AgentWorkController {
                     state
                         .journal_mut()?
                         .emit(AgentWorkEventKind::ActionProposalRefused(refusal.reason()))?;
-                    fruitless.refused()?;
+                    fruitless.refused(state)?;
                     let refusal = Self::repeated_refusal(&mut action_refusals, refusal)?;
                     let refusal = Self::count_refused_control(
                         &mut refused_controls,
@@ -3839,6 +3891,7 @@ impl AgentWorkController {
             )?;
             state.typed_unsent = typed.is_some();
             state.typed_field = typed;
+            state.look_streak = 0;
             state.scroll_streak = if scrolled {
                 state.scroll_streak.saturating_add(1)
             } else {
@@ -4328,6 +4381,70 @@ impl AgentWorkController {
 
     /// Clicks a consent banner's refusal as a read. A page that refuses the
     /// click or does not change keeps the model's ordinary first look.
+    /// Refuses a cookie banner and closes a site's own offer on a page worked
+    /// for the person, before the planner spends a call on either.
+    async fn clear_offers(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        mut observation: SemanticObservation,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        // A cookie banner on a page worked for the person is refused by Rust
+        // before any model sees the page. Rust presses on a whole look of the
+        // page: the model's fitted look may shorten the banner's fields or cut
+        // its buttons off, and a press needs them whole.
+        if state.actions_before_extraction
+            && state
+                .navigation_discovery
+                .as_ref()
+                .is_some_and(AgentNavigationDiscovery::is_site_session)
+            && (state.task.consent_dismissal(&observation).is_some()
+                || state.task.consent_suspected(&observation))
+        {
+            state.refresh_account(worker, browser)?;
+            let initial = Box::pin(Self::observe(state, worker, browser)).await?;
+            let whole = Box::pin(Self::whole_page_capture(
+                state,
+                worker,
+                browser,
+                initial,
+                SemanticExpansionKind::Subtree,
+            ))
+            .await?;
+            if let Some(target) = state.task.consent_dismissal(&whole) {
+                observation =
+                    Box::pin(Self::dismiss_consent(state, worker, browser, whole, target)).await?;
+            } else {
+                // The looks taken to find the banner replaced the one held:
+                // acting on that one is refused by the page's runtime.
+                state.refresh_account(worker, browser)?;
+                observation = Self::fit_model_observation(
+                    Box::pin(Self::observe(state, worker, browser)).await?,
+                )?;
+            }
+        }
+        // So is a sign-in, newsletter or app offer the site laid over the
+        // page with its own close control.
+        if state.actions_before_extraction
+            && state
+                .navigation_discovery
+                .as_ref()
+                .is_some_and(AgentNavigationDiscovery::is_site_session)
+        {
+            if let Some(target) = state.task.overlay_dismissal(&observation) {
+                observation = Box::pin(Self::close_overlay(
+                    state,
+                    worker,
+                    browser,
+                    observation,
+                    target,
+                ))
+                .await?;
+            }
+        }
+        Ok(observation)
+    }
+
     async fn dismiss_consent(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
@@ -5892,7 +6009,19 @@ const MAX_FRUITLESS_STEPS: u8 = 8;
 struct Fruitless(u8);
 
 impl Fruitless {
-    fn refused(&mut self) -> Result<(), AgentWorkFailure> {
+    /// Two refusals before the end, the planner is offered extraction
+    /// alone: what its looks already hold becomes the page's result instead
+    /// of a loop that ends it with nothing.
+    fn refused(&mut self, state: &mut WorkState) -> Result<(), AgentWorkFailure> {
+        self.count()?;
+        if self.0 == MAX_FRUITLESS_STEPS - 2 && state.extraction_schema.is_some() {
+            if let Some(session) = state.session.as_mut() {
+                session.decide_last();
+            }
+        }
+        Ok(())
+    }
+    fn count(&mut self) -> Result<(), AgentWorkFailure> {
         self.0 = self.0.saturating_add(1);
         if self.0 >= MAX_FRUITLESS_STEPS {
             return Err(AgentWorkFailure::Browser(
@@ -5914,19 +6043,40 @@ mod fruitless_tests {
     fn only_a_long_run_of_refusals_with_nothing_done_ends_a_page() {
         let mut fruitless = Fruitless::default();
         for _ in 1..MAX_FRUITLESS_STEPS {
-            assert!(fruitless.refused().is_ok());
+            assert!(fruitless.count().is_ok());
         }
         fruitless.progressed();
         for _ in 1..MAX_FRUITLESS_STEPS {
-            assert!(fruitless.refused().is_ok());
+            assert!(fruitless.count().is_ok());
         }
         assert_eq!(
-            fruitless.refused(),
+            fruitless.count(),
             Err(AgentWorkFailure::Browser(
                 AgentBrowserProviderError::ActionProposalLoop
             ))
         );
     }
+}
+
+/// A snapshot of the whole page: the initial look, or a region or subtree
+/// of the document itself.
+fn whole_look(proposal: &AgentBrowserToolProposal, observation: &SemanticObservation) -> bool {
+    let target = match proposal {
+        AgentBrowserToolProposal::Snapshot(AgentBrowserScopeProposal::Initial) => return true,
+        AgentBrowserToolProposal::Snapshot(
+            AgentBrowserScopeProposal::Region(target) | AgentBrowserScopeProposal::Subtree(target),
+        ) => *target,
+        _ => return false,
+    };
+    observation
+        .frames()
+        .iter()
+        .flat_map(|frame| frame.nodes())
+        .any(|node| {
+            node.reference() == target
+                && node.role() == SemanticRole::Document
+                && node.parent().is_none()
+        })
 }
 
 fn looks_like_human_challenge(observation: &SemanticObservation) -> bool {

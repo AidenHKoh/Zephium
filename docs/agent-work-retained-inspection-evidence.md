@@ -57,16 +57,21 @@ source-level provenance identifies when each quoted fact was observed.
 
 ## Bounds and selection
 
-The evidence owner keeps at most eight nonempty captures, 128 public primitives
-and 32 KiB of primitive content in total. Re-admission of an identical capture
-is idempotent. An empty capture preserves useful older sources. When admitting a
-new capture would exceed the bounds, oldest whole captures are evicted and
-omission flags/counts record the loss. Building a replacement can temporarily
+The evidence owner keeps at most eight nonempty captures, 256 public primitives
+and 48 KiB of primitive content in total. Re-admission of an identical capture
+is idempotent. An empty capture preserves useful older sources. Past eight
+captures the oldest goes whole. When admitting a new capture would exceed the
+fragment or byte bounds, the costliest capture (unfocused before focused, then
+the largest) sheds its least useful fragments one at a time (the page's header,
+navigation, footer and search landmarks first, then what sits beside the main
+content, then control labels and addresses, latest first) until the evidence
+fits, so a listing's look keeps its records instead of being dropped for a few
+short text searches; omission flags/counts record the loss. Building a replacement can temporarily
 hold the old bounded inventory plus one additional STANDARD read-sized copy.
 Frame metadata remains independently bounded by the original observation caps.
 
 Terminal mapping prioritizes the current read, followed by retained captures
-newest first, under the same 128-fragment/32-KiB read ceiling. Additional omitted
+newest first, under the same 256-fragment/48-KiB read ceiling. Additional omitted
 fragments are counted; original privacy and incomplete-source flags survive.
 Quotes are copied exactly and never joined, summarized or deduplicated by their
 meaning. Contradictory captured values remain distinct historical sources.

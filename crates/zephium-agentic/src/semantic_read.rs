@@ -550,6 +550,11 @@ pub struct SemanticReadFragment<'a> {
     role: SemanticRole,
     content: SemanticReadContent<'a>,
     provenance: SemanticReadProvenance<'a>,
+    /// Where on the page it sits, for shedding: 0 the main content, 1 beside
+    /// it, 2 the page's chrome (header, navigation, footer, search).
+    region: u8,
+    /// How useful it is within its region, for shedding: lower is kept.
+    rank: u8,
 }
 
 impl<'a> SemanticReadFragment<'a> {
@@ -1462,6 +1467,8 @@ impl<'a> SemanticReadBuilder<'a> {
             role: node.role(),
             content,
             provenance,
+            region: page_region(node, snapshot),
+            rank: shed_rank(field, node.role(), content),
         });
         self.stats.items = self.stats.items.saturating_add(1);
         self.stats.content_bytes = next_bytes;
@@ -1489,9 +1496,7 @@ impl<'a> SemanticReadBuilder<'a> {
                 .fragments
                 .iter()
                 .enumerate()
-                .max_by_key(|(index, fragment)| {
-                    (read_priority(fragment.field, fragment.role), *index)
-                })
+                .max_by_key(|(index, fragment)| (fragment.region, fragment.rank, *index))
                 .map(|(index, _)| index)
             else {
                 break;
@@ -1590,6 +1595,68 @@ const COLLECTED_READ_BYTES: u32 = 4 * MAX_SEMANTIC_READ_BYTES;
 /// How readily a fragment is shed from an over-budget read, lowest kept
 /// longest: stated facts and form values, then addresses and picture text,
 /// then the names of controls and list options.
+/// A listing's records sit in the main content, after the header, the
+/// navigation and the filters that precede them: those are shed first, so
+/// a terminal read keeps the records rather than the page around them.
+fn page_region(node: &SemanticNode, snapshot: &crate::SemanticSnapshot) -> u8 {
+    let nodes = snapshot.nodes();
+    let mut parent = node.parent();
+    let kinds = std::iter::once(node.landmark_kind()).chain(std::iter::from_fn(|| {
+        let ancestor = nodes.get(usize::from(parent?))?;
+        parent = ancestor.parent();
+        Some(ancestor.landmark_kind())
+    }));
+    let mut in_main = false;
+    for kind in kinds.flatten() {
+        match kind {
+            crate::SemanticLandmarkKind::Banner
+            | crate::SemanticLandmarkKind::Navigation
+            | crate::SemanticLandmarkKind::Contentinfo
+            | crate::SemanticLandmarkKind::Search => return 2,
+            crate::SemanticLandmarkKind::Main => in_main = true,
+            _ => {}
+        }
+    }
+    let has_main = nodes
+        .iter()
+        .any(|node| node.landmark_kind() == Some(crate::SemanticLandmarkKind::Main));
+    // The page's own facts and title sit at its top level beside the main
+    // content; they stay with it.
+    let top_level = node
+        .parent()
+        .and_then(|index| nodes.get(usize::from(index)))
+        .is_none_or(|parent| parent.parent().is_none());
+    u8::from(has_main && !in_main && !top_level)
+}
+
+/// A fragment's usefulness under pressure: its field's and role's, except
+/// that a filter checkbox's state and a bare facet count ("( 858 )") are
+/// shed with the control labels, so a listing keeps its records over them.
+fn shed_rank(field: SemanticReadField, role: SemanticRole, content: SemanticReadContent<'_>) -> u8 {
+    let facet = match content {
+        SemanticReadContent::Boolean(_) => {
+            matches!(role, SemanticRole::Checkbox | SemanticRole::Radio)
+        }
+        SemanticReadContent::Text(text) => text
+            .as_str()
+            .trim()
+            .strip_prefix('(')
+            .and_then(|rest| rest.strip_suffix(')'))
+            .is_some_and(|inner| {
+                !inner.trim().is_empty()
+                    && inner
+                        .chars()
+                        .all(|ch| ch.is_ascii_digit() || matches!(ch, ' ' | ',' | '.' | '\u{a0}'))
+            }),
+        _ => false,
+    };
+    if facet {
+        2
+    } else {
+        read_priority(field, role)
+    }
+}
+
 pub(crate) fn read_priority(field: SemanticReadField, role: SemanticRole) -> u8 {
     match field {
         SemanticReadField::TextValue
@@ -2301,7 +2368,12 @@ mod tests {
             .unwrap();
             evidence.retain(&read, &ack).unwrap();
         }
-        assert_eq!(evidence.retained_items(), 4);
+        // The broad capture sheds fragments down to the budget; the focused
+        // sources it duplicated stay with their first capture.
+        assert_eq!(
+            evidence.retained_items(),
+            SemanticReadBudget::EXTRACTION.max_items()
+        );
         let empty = retained_observation(4, json!([{"k":1,"r":"document","o":16}]));
         let ack = acknowledgement(&empty);
         let read = read_semantic_observation(
@@ -2325,6 +2397,134 @@ mod tests {
             .unwrap();
         assert_eq!(source.provenance().observation().get(), 1);
         assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
+    }
+
+    #[test]
+    fn bare_facet_counts_are_shed_before_the_records_after_them() {
+        let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
+        for key in 2..=151 {
+            nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("( {key} )")}));
+        }
+        for key in 152..=301 {
+            nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("Laptop {key} 32 GB")}));
+        }
+        let page = retained_observation(1, json!(nodes));
+        let ack = acknowledgement(&page);
+        let read = read_semantic_observation(
+            &page,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::try_new(160, 48 * 1024).unwrap(),
+        )
+        .unwrap();
+        let laptops = read
+            .fragments()
+            .iter()
+            .filter(|fragment| {
+                fragment
+                    .content()
+                    .text()
+                    .is_some_and(|text| text.as_str().starts_with("Laptop"))
+            })
+            .count();
+        assert_eq!(laptops, 150);
+    }
+
+    #[test]
+    fn retained_pressure_trims_the_largest_look_instead_of_dropping_it() {
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        for (id, label, count) in [(1, "Listing", 200), (2, "Other", 100)] {
+            let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
+            for key in 2..2 + count {
+                nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("{label} {key}")}));
+            }
+            let observation = retained_observation(id, json!(nodes));
+            let ack = acknowledgement(&observation);
+            let read = read_semantic_observation(
+                &observation,
+                SemanticReadAuthority::Acknowledged(&ack),
+                SemanticCaptureInstant::from_millis(id),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::EXTRACTION,
+            )
+            .unwrap();
+            evidence.retain(&read, &ack).unwrap();
+        }
+        assert_eq!(
+            evidence.retained_items(),
+            SemanticReadBudget::EXTRACTION.max_items()
+        );
+        let empty = retained_observation(3, json!([{"k":1,"r":"document","o":16}]));
+        let ack = acknowledgement(&empty);
+        let current = read_semantic_observation(
+            &empty,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(3),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        let merged = evidence.merge_for_extraction(current).unwrap();
+        let listings = merged
+            .fragments()
+            .iter()
+            .filter(|fragment| {
+                fragment
+                    .content()
+                    .text()
+                    .is_some_and(|text| text.as_str().starts_with("Listing"))
+            })
+            .count();
+        assert!(listings >= 150, "{listings}");
+    }
+
+    #[test]
+    fn a_terminal_read_sheds_the_page_chrome_and_filters_before_the_main_records() {
+        let mut nodes = vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"paragraph","n":"Page title","t":"Results"}),
+            json!({"k":3,"p":0,"r":"landmark","lm":"banner"}),
+        ];
+        for key in 4..=103 {
+            nodes.push(json!({"k":key,"p":2,"r":"link","n":format!("Menu {key}")}));
+        }
+        nodes.push(json!({"k":104,"p":0,"r":"group"}));
+        for key in 105..=204 {
+            nodes.push(json!({"k":key,"p":103,"r":"list_item","t":format!("Filter {key}")}));
+        }
+        nodes.push(json!({"k":205,"p":0,"r":"landmark","lm":"main"}));
+        for key in 206..=305 {
+            nodes.push(json!({"k":key,"p":204,"r":"list_item","t":format!("Listing {key}")}));
+        }
+        let page = retained_observation(1, json!(nodes));
+        let ack = acknowledgement(&page);
+        let read = read_semantic_observation(
+            &page,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::try_new(160, 48 * 1024).unwrap(),
+        )
+        .unwrap();
+        let texts = read
+            .fragments()
+            .iter()
+            .filter_map(|fragment| match fragment.content() {
+                SemanticReadContent::Text(text) => Some(text.as_str().to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(texts.iter().any(|text| text == "Listing 305"));
+        assert!(texts.iter().any(|text| text == "Results"));
+        assert!(!texts.iter().any(|text| text.starts_with("Menu")));
+        assert!(
+            texts
+                .iter()
+                .filter(|text| text.starts_with("Filter"))
+                .count()
+                < 100
+        );
     }
 
     #[test]
@@ -2362,13 +2562,18 @@ mod tests {
         detail_read.focused = true;
         evidence.retain(&detail_read, &detail_ack).unwrap();
         let merged = evidence.merge_for_extraction(detail_read).unwrap();
-        assert_eq!(merged.fragments().len(), 255);
-        assert!(!merged.has_retained_evidence());
-        assert!(merged.fragments().iter().all(|fragment| fragment
-            .provenance()
-            .observation()
-            .get()
-            == 2));
+        // Every current fact is kept; old chrome only fills what is left.
+        assert_eq!(
+            merged
+                .fragments()
+                .iter()
+                .filter(|fragment| fragment.provenance().observation().get() == 2)
+                .count(),
+            255
+        );
+        assert!(
+            merged.fragments().len() <= usize::from(SemanticReadBudget::EXTRACTION.max_items())
+        );
         assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
     }
 
@@ -2467,7 +2672,10 @@ mod tests {
         let mut evidence = SemanticRetainedReadEvidence::default();
         evidence.retain(&detail_read, &detail_ack).unwrap();
         evidence.retain(&broad_read, &broad_ack).unwrap();
-        assert_eq!(evidence.retained_items(), 2);
+        assert_eq!(
+            evidence.retained_items(),
+            SemanticReadBudget::EXTRACTION.max_items()
+        );
         let merged = evidence.merge_for_extraction(broad_read).unwrap();
         assert!(merged.matches_acknowledgement(&broad_ack));
         assert_eq!(merged.fragments().len(), 256);

@@ -530,3 +530,49 @@ async fn a_reply_without_a_call_or_with_an_unoffered_tool_is_asked_again() {
     assert_eq!(terminal.receipt().input_tokens(), 2_700);
     assert!(terminal.has_tool_turn());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_runaway_reply_is_asked_once_more_briefly_inside_its_kept_back_output() {
+    let mut runaway = outcome(
+        WorkModelStop::MaxTokens,
+        vec![WorkModelPart::Text(
+            "Let me think about every listing".to_owned(),
+        )],
+    );
+    runaway.usage.output_tokens = 6;
+    let client = Scripted::answering_each(vec![
+        Ok(runaway),
+        Ok(outcome(WorkModelStop::ToolUse, vec![locate()])),
+    ]);
+    let (mut policy, model, result) = run(client.clone()).await;
+    let calls = client.calls();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].reasoning.is_some());
+    let reason = reasked_reason(&calls[1]);
+    assert!(reason.contains("output_limit: nothing ran"), "{reason}");
+    assert!(reason.contains("Be brief"), "{reason}");
+    // The runaway text is not handed back, thinking is off, and the second
+    // ask may spend what the first left of the call's whole allowance.
+    assert!(!calls[1].messages.iter().any(|message| matches!(
+        message,
+        WorkModelMessage::Assistant(parts)
+            if parts.iter().any(|part| matches!(part, WorkModelPart::Text(text) if text.contains("every listing")))
+    )));
+    assert!(calls[1].reasoning.is_none());
+    assert!(calls[0].max_output_tokens < 20);
+    assert_eq!(calls[1].max_output_tokens, 20 - 6);
+    assert_eq!(
+        result.model_reply().map(|facts| facts.asked_again()),
+        Some(1)
+    );
+    let AgentProviderPolicySettlement::PricingRequired(settlement) =
+        result.into_policy_settlement()
+    else {
+        panic!("a re-asked runaway is priced as reported");
+    };
+    let terminal = settlement
+        .settle(&mut policy, model.schedule())
+        .expect("settled");
+    assert_eq!(terminal.receipt().input_tokens(), 1_800);
+    assert!(terminal.has_tool_turn());
+}

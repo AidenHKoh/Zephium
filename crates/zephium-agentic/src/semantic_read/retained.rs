@@ -71,6 +71,8 @@ struct Fragment {
     snapshot: SemanticSnapshotGeneration,
     reference: SemanticReferenceId,
     trust: SemanticTrust,
+    region: u8,
+    rank: u8,
 }
 
 struct Capture {
@@ -251,6 +253,8 @@ impl SemanticRetainedReadEvidence {
                         snapshot: source.snapshot(),
                         reference: source.reference(),
                         trust: source.trust(),
+                        region: fragment.region,
+                        rank: fragment.rank,
                     }
                 })
                 .collect(),
@@ -298,6 +302,31 @@ impl SemanticRetainedReadEvidence {
             } else {
                 0
             };
+            // A listing's whole look was evicted at once for a few short
+            // text searches, and the mapper got no records: under pressure
+            // the costliest look sheds its least useful fragment instead.
+            if (byte_pressure || item_pressure) && self.captures[index].fragments.len() > 1 {
+                let capture = &mut self.captures[index];
+                let shed = capture
+                    .fragments
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(at, fragment)| (fragment.region, fragment.rank, *at))
+                    .map(|(at, _)| at)
+                    .expect("nonempty capture");
+                let removed = capture.fragments.remove(shed);
+                capture.stats.items -= 1;
+                capture.stats.public_items -= 1;
+                capture.stats.content_bytes -= removed.content.borrow().retained_bytes();
+                self.dropped_stats.omitted_items =
+                    self.dropped_stats.omitted_items.saturating_add(1);
+                self.dropped_omissions |= if item_pressure {
+                    SemanticReadOmission::ItemLimit.bit()
+                } else {
+                    SemanticReadOmission::ByteLimit.bit()
+                };
+                continue;
+            }
             let removed = self.captures.remove(index);
             merge_omitted_stats(&mut self.dropped_stats, removed.stats);
             self.dropped_stats.omitted_items = self
@@ -374,9 +403,7 @@ impl SemanticRetainedReadEvidence {
                 .fragments
                 .iter()
                 .enumerate()
-                .max_by_key(|(index, fragment)| {
-                    (super::read_priority(fragment.field, fragment.role), *index)
-                })
+                .max_by_key(|(index, fragment)| (fragment.region, fragment.rank, *index))
                 .map(|(index, _)| index)
                 .expect("nonempty over-budget read");
             let removed = current.fragments.remove(index);
@@ -426,6 +453,8 @@ impl SemanticRetainedReadEvidence {
                     field: source.field,
                     role: source.role,
                     content,
+                    region: source.region,
+                    rank: source.rank,
                     provenance: SemanticReadProvenance {
                         fields_complete: source.fields_complete,
                         node_key: source.node_key,
