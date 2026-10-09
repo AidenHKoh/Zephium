@@ -932,6 +932,26 @@ pub(super) async fn lead_workflow(
         }
         None => WorkLeadModels { lead, page, light },
     };
+    // Work's memory on a live site: Never keeps the start site out of the
+    // person's session, so its page opens in Work's own store.
+    let memory_host = scenario
+        .site
+        .filter(|_| std::env::var_os("ZEPHIUM_PROBE_WORK_MEMORY").is_some())
+        .and_then(|start| zephium_app::work_sites::site_of(start.split(' ').next()?));
+    if let Some(host) = &memory_host {
+        zephium_app::work_sites::set_standing(
+            handle,
+            profile,
+            host.clone(),
+            Some(zephium_core::work::sites::WorkSiteAccessV1::Never),
+        )
+        .await
+        .map_err(|_| "memory_standing")?;
+        say(format_args!(
+            "work-memory: profile={profile} stage=before stores(own,work)={:?}",
+            super::work_site::stores_hold(profile, host)
+        ));
+    }
     let folder = if scenario.folder {
         Some(bug_folder()?)
     } else {
@@ -1166,6 +1186,19 @@ pub(super) async fn lead_workflow(
             fixed.contains("nightly * nights")
         ));
         let _ = std::fs::remove_dir_all(&folder);
+    }
+    if let Some(host) = &memory_host {
+        say(format_args!(
+            "work-memory: profile={profile} stage=after stores(own,work)={:?}",
+            super::work_site::stores_hold(profile, host)
+        ));
+        if std::env::var_os("ZEPHIUM_PROBE_WORK_MEMORY_CLEAR").is_some() {
+            say(format_args!(
+                "work-memory: profile={profile} stage=cleared empty={:?} stores(own,work)={:?}",
+                super::work_site::clear_work_memory(profile),
+                super::work_site::stores_hold(profile, host)
+            ));
+        }
     }
     let state = state.ok_or("lead_no_run")?;
     let directory = std::path::Path::new("target/work-runtime-proof/lead");
