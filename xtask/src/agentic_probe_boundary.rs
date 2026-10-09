@@ -6621,7 +6621,9 @@ fn validate_provider_revocation_before_secret_materialization(source: &str) -> R
 /// A chosen model's drive keeps the fixed-endpoint ordering: it moves the
 /// body out of the retained owner, checks sticky cancellation twice, then
 /// publishes possible dispatch before the client can first be polled. It
-/// holds no key and reaches no network of its own.
+/// holds no key and reaches no network of its own. A reply with no usable
+/// browser call may be asked again a fixed number of times, every ask
+/// summed into the one call's usage and held to its one reservation.
 fn validate_chosen_model_drive_contract(source: &str) -> Result<(), String> {
     let production = source
         .split_once("\n#[cfg(test)]\nmod tests")
@@ -6656,7 +6658,7 @@ fn validate_chosen_model_drive_contract(source: &str) -> Result<(), String> {
         .find("self.mark_model_may_have_dispatched();")
         .ok_or_else(|| "chosen-model drive no longer publishes dispatch".to_owned())?;
     let call = drive
-        .find("outcome=model.client.call(request,&events)=>outcome")
+        .find("outcome=model.client.call(request.clone(),&events)=>outcome")
         .ok_or_else(|| "chosen-model drive call boundary is missing".to_owned())?;
     if checks.len() != 2 || !(begin < checks[0] && checks[1] < dispatch && dispatch < call) {
         return Err(
@@ -6665,7 +6667,9 @@ fn validate_chosen_model_drive_contract(source: &str) -> Result<(), String> {
         );
     }
     for required in [
-        "outcome.usage.input_tokens>reserved",
+        "spent.input_tokens>reserved||spent.output_tokens>max_output",
+        "outcome.usage=spent;",
+        "reasks<MAX_REASKS",
         "contract.finish(call,&config,outcome)",
         "Err(_)=>{self.fail_stop();returnself.finish_terminal(integration_failure());}",
     ] {
@@ -6674,6 +6678,9 @@ fn validate_chosen_model_drive_contract(source: &str) -> Result<(), String> {
                 "chosen-model drive lost required settlement rule {required}"
             ));
         }
+    }
+    if !source.contains("constMAX_REASKS:u8=2;") {
+        return Err("chosen-model drive re-asks a malformed call more than twice".to_owned());
     }
     Ok(())
 }

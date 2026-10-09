@@ -361,6 +361,84 @@ fn input_image(
 }
 
 impl ModelClientReplyContract {
+    /// When a reply cannot become a browser turn but the model could correct
+    /// it (no tool call, a tool not offered, arguments that do not decode),
+    /// the messages that hand it back with the exact reason, to append to
+    /// the request and ask once more. None for a reply that decodes, that
+    /// ran out of output or was refused, and for structured output, whose
+    /// mapper has its own told-why retry.
+    pub(crate) fn reask(
+        &self,
+        outcome: &WorkModelOutcome,
+        tools: &[WorkModelTool],
+    ) -> Option<Vec<WorkModelMessage>> {
+        if self.structured
+            || !matches!(
+                outcome.stop,
+                WorkModelStop::EndTurn | WorkModelStop::ToolUse
+            )
+        {
+            return None;
+        }
+        let offered = self
+            .offered
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut turn: Vec<WorkModelPart> = outcome
+            .assistant
+            .iter()
+            .filter(|part| {
+                !matches!(
+                    part,
+                    WorkModelPart::ToolCall(_) | WorkModelPart::Image { .. }
+                )
+            })
+            .cloned()
+            .collect();
+        let first = outcome.assistant.iter().find_map(|part| match part {
+            WorkModelPart::ToolCall(call) => Some(call),
+            _ => None,
+        });
+        let mut messages = Vec::new();
+        let Some(call) = first else {
+            if !turn.is_empty() {
+                messages.push(WorkModelMessage::Assistant(turn));
+            }
+            messages.push(WorkModelMessage::User(vec![WorkModelPart::Text(format!(
+                "{DEVELOPER_LABEL}no_tool_call: nothing ran. Every reply on this page must be exactly one call to one of the offered tools ({offered}); text alone is not read. Call one now."
+            ))]));
+            return Some(messages);
+        };
+        let problem = match AgentBrowserToolKind::parse(&call.name)
+            .filter(|kind| self.offered.contains(kind))
+        {
+            None => {
+                let name: String = call.name.chars().take(64).collect();
+                format!(
+                    "invalid_tool_call: nothing ran. `{name}` is not a tool offered on this turn. Call exactly one of: {offered}."
+                )
+            }
+            Some(_) => {
+                let arguments = serde_json::to_string(&call.arguments).ok()?;
+                let schema = tools
+                    .iter()
+                    .find(|tool| tool.name == call.name)
+                    .map(|tool| &tool.schema);
+                super::tool::browser_call_problem(&call.name, &arguments, schema)?
+            }
+        };
+        turn.push(WorkModelPart::ToolCall(call.clone()));
+        messages.push(WorkModelMessage::Assistant(turn));
+        messages.push(WorkModelMessage::ToolResults(vec![WorkModelToolResult {
+            call: call.id.clone(),
+            content: problem,
+            is_error: true,
+        }]));
+        Some(messages)
+    }
+
     /// Decodes the reply through the closed browser-tool contract. Usage is
     /// the provider's; the identity is the requested model, never a claim the
     /// provider made.

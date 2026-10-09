@@ -8,6 +8,7 @@
 
 #[cfg(any(test, feature = "provider-transport"))]
 mod anthropic;
+mod call_schema;
 mod continuation;
 mod extraction;
 #[cfg(feature = "provider-transport")]
