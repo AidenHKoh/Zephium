@@ -101,6 +101,26 @@ impl AgentProviderContinuation {
         ))
     }
 
+    /// An extraction asked for while the page still says it loads what it
+    /// shows is answered with a fresh look a moment later, told so: mapping
+    /// a page of placeholders ends the task with nothing.
+    pub fn into_loading_extract_refresh(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderObservationCheckpoint, Box<Self>> {
+        if config != &self.config
+            || self.correlation.kind() != AgentBrowserToolKind::Extract
+            || !AgentProviderObservationCheckpoint::refreshable(&self, observation)
+        {
+            return Err(Box::new(self));
+        }
+        Ok(AgentProviderObservationCheckpoint::refresh(
+            self,
+            "page_still_loading: nothing was extracted. The page still showed it was loading (a loading or searching line, or placeholders where records belong), so it was given a moment. This is a fresh look: extract when the records you need are in it; if it still loads, wait for a semantic change rather than extracting placeholders.".to_owned(),
+        ))
+    }
+
     /// A planner that asked the person to sign in on a page with no sign-in
     /// form of its own is told that signing in is optional there, nothing
     /// was asked of anyone, and given a fresh look to carry on as a guest.

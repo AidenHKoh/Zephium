@@ -142,8 +142,9 @@ const LOADING_WORDS: [&str; 9] = [
 ];
 
 /// A page that says, in a status or progress line, that it is still loading
-/// what it shows (rome2rio's "Loading trip planner"): scheduling evidence
-/// only, like a placeholder.
+/// what it shows (rome2rio's "Loading trip planner", a flight search's
+/// results opened by their address): scheduling evidence only, like a
+/// placeholder.
 fn announces_loading(observation: &SemanticObservation) -> bool {
     observation
         .frames()
@@ -1459,6 +1460,7 @@ impl AgentWorkController {
                     scroll_streak: 0,
                     look_streak: 0,
                     sign_in_refusals: 0,
+                    loading_extract_waits: 0,
                     failure: None,
                     observation: None,
                     native_terminal: None,
@@ -1497,6 +1499,8 @@ struct WorkState {
     look_streak: u8,
     /// Requests that the person sign in refused on pages with no sign-in form.
     sign_in_refusals: u8,
+    /// Extractions answered with a later look because the page still loaded.
+    loading_extract_waits: u8,
     navigation_target: Option<ContextNavigationTarget>,
     navigation_route: Option<AgentNavigationRoute>,
     navigation_discovery: Option<AgentNavigationDiscovery>,
@@ -2828,7 +2832,7 @@ impl AgentWorkController {
             state.native.check_control(worker, browser)?;
             if readiness == AgentWorkInitialReadiness::Ready
                 && !has_dominant_loading_placeholders(&observation)
-                && !(site && unrendered(&observation))
+                && !(site && (unrendered(&observation) || announces_loading(&observation)))
             {
                 return Ok(observation);
             }
@@ -3578,6 +3582,52 @@ impl AgentWorkController {
                 )
                 .await?;
                 fruitless.progressed();
+                observation = next.0;
+                captured_at = next.1;
+                progress = next.2;
+                let Some(next_turn) = next.3 else {
+                    state.observation = Some(observation);
+                    return Ok(());
+                };
+                turn = next_turn;
+                frames.clear();
+                frames.extend(
+                    observation
+                        .frames()
+                        .iter()
+                        .map(|snapshot| snapshot.frame().clone()),
+                );
+                continue;
+            }
+            if step.turn.proposal().kind() == AgentBrowserToolKind::Extract
+                && state.actions_before_extraction
+                && state.loading_extract_waits < MAX_LOADING_EXTRACT_WAITS
+                && (has_dominant_loading_placeholders(&observation)
+                    || announces_loading(&observation))
+            {
+                state.loading_extract_waits = state.loading_extract_waits.saturating_add(1);
+                let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                let checkpoint = step
+                    .into_tool_turn()
+                    .into_parts()
+                    .1
+                    .into_loading_extract_refresh(&observation, &session.config)
+                    .map_err(|_| {
+                        AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
+                    })?;
+                let wake = Instant::now() + Duration::from_millis(LOADING_EXTRACT_PAUSE_MILLIS);
+                if wake < state.native.deadline {
+                    tokio::select! {
+                        biased;
+                        event = state.native.next_event(worker, browser) => {
+                            state.native.retain(event?)?;
+                            return Err(AgentWorkFailure::Mailbox);
+                        }
+                        () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+                    }
+                }
+                let next =
+                    Self::inspect_current(state, worker, browser, checkpoint, &observation).await?;
                 observation = next.0;
                 captured_at = next.1;
                 progress = next.2;
@@ -6109,6 +6159,10 @@ const MAX_HUMAN_CHALLENGE_NODES: usize = 48;
 const HUMAN_CHALLENGE_SETTLE_MILLIS: [u64; 3] = [2_000, 3_000, 4_000];
 /// Requests that the person sign in refused on one page before one is taken.
 const MAX_SIGN_IN_REFUSALS: u8 = 2;
+/// Extractions of a page still loading answered with a later look instead.
+const MAX_LOADING_EXTRACT_WAITS: u8 = 2;
+/// How long such a page is given before that look.
+const LOADING_EXTRACT_PAUSE_MILLIS: u64 = 2_500;
 /// A well-known script check is looked at again each second: for six on a
 /// page task, for two on a read the lead can replace with other sources.
 const AUTOMATIC_CHECK_SETTLE_MILLIS: [u64; 6] = [1_000; 6];
