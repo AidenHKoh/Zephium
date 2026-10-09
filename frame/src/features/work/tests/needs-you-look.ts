@@ -31,9 +31,13 @@ export function checkScene(stage: "waiting" | "expired"): BoardScene {
           service: { host: "allegro.pl" },
           ...(stage === "expired"
             ? {
-                state: "failed",
+                state: "failed" as const,
                 ended_ms: "1790620130000",
-                need: { kind: "retry", host: "allegro.pl", reason: "blocked_by_check" },
+                need: {
+                  kind: "retry" as const,
+                  host: "allegro.pl",
+                  reason: "blocked_by_check" as const,
+                },
               }
             : {}),
         }

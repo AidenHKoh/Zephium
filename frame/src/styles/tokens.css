@@ -348,7 +348,6 @@
   --brand-tile: linear-gradient(180deg, #29292b 0%, #3a3a3c 62%, #4a4a4c 100%);
   --color-brand-tile-ink: #fff;
   --shadow-brand-tile: inset 0 0 0 0.5px rgb(255 255 255 / 0.14);
-  --shadow-brand-lift: drop-shadow(0 6px 14px rgb(0 0 0 / 0.18));
   --shadow-track: inset 0 1px 2px rgb(0 0 0 / 0.22), inset 0 0 0 1px rgb(0 0 0 / 0.08);
 
   /* The thumb is the one moving part that genuinely sits above its track, and
