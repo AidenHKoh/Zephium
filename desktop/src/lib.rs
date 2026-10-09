@@ -3283,7 +3283,7 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     // authoritative URL of the page it shows.
     if matches!(
         id,
-        "note.new" | "page.copyLink" | "find.show" | "find.next" | "find.previous"
+        "note.new" | "page.copyLink" | "find.show" | "find.next" | "find.previous" | "work.dictate"
     ) {
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
             accepted_ui_operation()
