@@ -160,6 +160,19 @@ pub(super) fn remember_engine(engine: std::sync::Arc<zephium_engine::WebviewEngi
     let _ = ENGINE.set(engine);
 }
 
+/// The app's own session check and tab-load count, as the desktop installs
+/// them: the profile's real store answers.
+pub(super) fn install_app_presence(engine: std::sync::Arc<zephium_engine::WebviewEngine>) {
+    remember_engine(engine.clone());
+    let loads = engine.clone();
+    zephium_app::work_context::install_session_presence(std::sync::Arc::new(
+        move |profile, hosts| engine.work_sessions_present(profile, hosts),
+    ));
+    zephium_app::work_context::install_site_loads(std::sync::Arc::new(move |profile, site| {
+        loads.work_site_loads(profile, site)
+    }));
+}
+
 /// Clears Work's store as Settings does; whether it is empty afterwards.
 pub(super) fn clear_work_memory(profile: ProfileId) -> Option<bool> {
     ENGINE
@@ -182,6 +195,82 @@ pub(super) fn stores_hold(profile: ProfileId, host: &str) -> Option<(bool, bool)
         .recv_timeout(wait)
         .ok()?;
     Some((own.first() == Some(&true), work.first() == Some(&true)))
+}
+
+/// Sites a person's profile has usually seen before they ask Work anything.
+const EVERYDAY_SITES: &[&str] = &[
+    "https://www.google.com/",
+    "https://www.airbnb.com/",
+    "https://www.booking.com/",
+    "https://allegro.pl/",
+    "https://www.amazon.com/",
+    "https://www.ebay.com/",
+    "https://travel.state.gov/",
+    "https://www.state.gov/",
+    "https://www.kayak.com/",
+    "https://www.ycombinator.com/",
+    "https://www.lego.com/",
+    "https://www.x-kom.pl/",
+    "https://en.wikipedia.org/",
+    "https://github.com/",
+];
+
+/// `ZEPHIUM_PROBE_SEEDED_PROFILE` set: before the run, the profile's own
+/// store visits everyday sites (or the space-separated addresses the
+/// variable names), so the run meets the cookies a real profile holds.
+/// Prints, per site, whether the profile now holds a session for it.
+pub(super) async fn seed_profile(profile: ProfileId) -> Result<(), &'static str> {
+    let Some(named) = std::env::var_os("ZEPHIUM_PROBE_SEEDED_PROFILE") else {
+        return Ok(());
+    };
+    let named = named.to_string_lossy();
+    let urls: Vec<String> = if named.contains("https://") {
+        named.split_whitespace().map(str::to_owned).collect()
+    } else {
+        EVERYDAY_SITES.iter().map(|url| (*url).to_owned()).collect()
+    };
+    let hosts: Vec<String> = urls
+        .iter()
+        .filter_map(|url| zephium_app::work_sites::host_of(url))
+        .collect();
+    let engine = ENGINE.get().ok_or("seed_engine")?.clone();
+    let started = std::time::Instant::now();
+    let opened = engine
+        .visit_in_profile(profile, urls.clone())
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|_| "seed_visit")?;
+    // Every site's first load and its scripts' first cookies, bounded.
+    let mut present = Vec::new();
+    while started.elapsed() < Duration::from_secs(40) {
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        present = engine
+            .work_sessions_present(profile, hosts.clone())
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_default();
+        if started.elapsed() >= Duration::from_secs(16) && present.iter().all(|held| *held) {
+            break;
+        }
+    }
+    let _ = engine
+        .end_profile_visits()
+        .recv_timeout(Duration::from_secs(10));
+    for (host, held) in hosts
+        .iter()
+        .zip(present.iter().chain(std::iter::repeat(&false)))
+    {
+        let _ = writeln!(
+            std::io::stdout().lock(),
+            "seeded-profile: host={host} session_present={held}"
+        );
+    }
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "seeded-profile: opened={opened} sites={} present={} elapsed_ms={}",
+        hosts.len(),
+        present.iter().filter(|held| **held).count(),
+        started.elapsed().as_millis()
+    );
+    Ok(())
 }
 
 pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {

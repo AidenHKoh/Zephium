@@ -1769,6 +1769,37 @@ impl WebviewEngine {
         answer
     }
 
+    /// QA only: starts visiting each address off screen in the profile's own
+    /// website data, as a person browsing normally; yields how many started.
+    /// The pages keep loading until `end_profile_visits`.
+    #[cfg(all(target_os = "macos", feature = "agentic-browser-qa"))]
+    #[doc(hidden)]
+    pub fn visit_in_profile(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+        urls: Vec<String>,
+    ) -> std::sync::mpsc::Receiver<usize> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            host::try_with(move |engine| {
+                let _ = reply.send(engine.visit_in_profile(profile, urls));
+            });
+        });
+        answer
+    }
+
+    /// QA only: closes the pages `visit_in_profile` opened.
+    #[cfg(all(target_os = "macos", feature = "agentic-browser-qa"))]
+    #[doc(hidden)]
+    pub fn end_profile_visits(&self) -> std::sync::mpsc::Receiver<()> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            platform::macos::profile_seed_probe::finish();
+            let _ = reply.send(());
+        });
+        answer
+    }
+
     /// Finished page loads in the profile's ordinary tabs on a site: a count
     /// that grows when the person loads a page there, such as after signing in.
     #[cfg(any(target_os = "macos", target_os = "windows"))]

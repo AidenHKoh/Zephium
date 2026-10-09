@@ -602,7 +602,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             if mode == Mode::LoopbackSite {
                 super::work_site::install_presence(engine.clone());
             } else {
-                super::work_site::remember_engine(engine.clone());
+                super::work_site::install_app_presence(engine.clone());
             }
             let composition = MacosWorkComposition::new(engine, owner_store);
             if !shell.admit_startup() {

@@ -57,6 +57,21 @@ impl EngineHost {
         reply_cookie_sites(&store, hosts, reply);
     }
 
+    /// QA only: visits the addresses in the profile's own store, binding it
+    /// as durable as its first ordinary tab would.
+    #[cfg(feature = "agentic-browser-qa")]
+    pub(crate) fn visit_in_profile(&mut self, profile: ProfileId, urls: Vec<String>) -> usize {
+        if self.erasure_tombstones.contains(&profile)
+            || !super::profiles::bind_profile_persistence_class(
+                &mut self.profile_persistence_classes,
+                zephium_core::ports::engine::Partition::Persistent(profile),
+            )
+        {
+            return 0;
+        }
+        crate::platform::imp::profile_seed_probe::start(profile, urls)
+    }
+
     /// The same closed facts for Work's own store of the profile. A profile
     /// whose Work store was never created answers all false without one.
     #[cfg(feature = "agentic-browser")]

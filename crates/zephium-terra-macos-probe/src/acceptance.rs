@@ -986,6 +986,7 @@ pub(super) async fn lead_workflow(
             super::work_site::stores_hold(profile, host)
         ));
     }
+    super::work_site::seed_profile(profile).await?;
     let folder = if scenario.folder {
         Some(bug_folder()?)
     } else {
