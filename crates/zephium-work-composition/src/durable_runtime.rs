@@ -1489,6 +1489,7 @@ impl NativeWorkComposition {
                         intervention: None,
                         note: Some(
                             storage_note(&snapshot)
+                                .or_else(|| refusal_note(&snapshot))
                                 .unwrap_or("The browser was not ready for this page")
                                 .into(),
                         ),
@@ -1856,8 +1857,8 @@ fn refusal_line(snapshot: &zephium_app::RetainedWorkSnapshot, yours: bool) -> St
     let session = if yours { "yours" } else { "anonymous" };
     match snapshot.refusal {
         Some((cause, lane)) => format!(
-            "refused:{cause:?} session={session} live={} settled={} lost={} queued={} group_failed={} group_sealed={}",
-            lane.live, lane.settled, lane.lost, lane.queued, lane.group_failed, lane.group_sealed
+            "refused:{cause:?} session={session} live={} settled={} lost={} queued={} unsettled={} group_failed={} group_sealed={}",
+            lane.live, lane.settled, lane.lost, lane.queued, lane.unsettled, lane.group_failed, lane.group_sealed
         ),
         None => format!("refused:unstated session={session}"),
     }
@@ -2031,6 +2032,14 @@ fn redirect_note(destination: &ContextNavigationTarget) -> String {
 }
 
 /// The Store refused the page because recovery history fills it.
+fn refusal_note(snapshot: &zephium_app::RetainedWorkSnapshot) -> Option<&'static str> {
+    matches!(
+        snapshot.refusal,
+        Some((zephium_app::RetainedRefusal::Unsettled, _))
+    )
+    .then_some(zephium_core::work::runtime::read_note::STORAGE_UNCONFIRMED)
+}
+
 fn storage_note(snapshot: &zephium_app::RetainedWorkSnapshot) -> Option<&'static str> {
     (snapshot.persistence_failure == Some(AgentWorkJournalError::Capacity))
         .then_some(zephium_core::work::runtime::read_note::WORK_STORAGE)

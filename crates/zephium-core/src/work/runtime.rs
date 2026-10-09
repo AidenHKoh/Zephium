@@ -987,6 +987,10 @@ pub mod read_note {
     /// Live and interrupted page runs kept for recovery fill Work storage.
     pub const WORK_STORAGE: &str =
         "Work storage needs attention: too many interrupted page runs are waiting for review";
+    /// An earlier page's record was never confirmed saved, so no page can
+    /// open until Zephium restarts.
+    pub const STORAGE_UNCONFIRMED: &str =
+        "Work storage did not confirm an earlier page; restart Zephium to read more pages";
 
     /// A page that ended behind a bot check or waiting on the person:
     /// "state.gov asks for a human check; its page was skipped", "Airbnb

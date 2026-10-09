@@ -498,7 +498,11 @@ where
                 && step.status != WorkStepStatus::Succeeded
                 && matches!(
                     step.note.as_deref(),
-                    Some(NOT_READY | zephium_core::work::runtime::read_note::WORK_STORAGE)
+                    Some(
+                        NOT_READY
+                            | zephium_core::work::runtime::read_note::WORK_STORAGE
+                            | zephium_core::work::runtime::read_note::STORAGE_UNCONFIRMED
+                    )
                 )
         }) {
             self.run.set_browser_down();
