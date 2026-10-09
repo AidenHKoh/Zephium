@@ -632,13 +632,18 @@ fn affirms(text: &str, words: &[&str], negation: bool) -> bool {
             let after = text[at + word.len()..].chars().next();
             let whole = !before.is_some_and(char::is_alphanumeric)
                 && !after.is_some_and(char::is_alphanumeric);
+            // A negation anywhere earlier in its clause denies it: "No
+            // listings could be verified", "Nothing here is ready yet".
+            let clause = text[..at]
+                .rsplit(['.', ',', ';', ':', '!', '?', '—', '–'])
+                .next()
+                .unwrap_or("");
+            let clause = clause.rsplit(" but ").next().unwrap_or(clause);
             let denied = negation
-                && text[..at]
+                && clause
                     .split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '’'))
                     .filter(|w| !w.is_empty())
-                    .rev()
-                    .take(3)
-                    .any(|w| NEGATIONS.contains(&w));
+                    .any(|w| NEGATIONS.contains(&w) || matches!(w, "nothing" | "none"));
             whole && !denied
         })
     })
@@ -968,6 +973,8 @@ mod tests {
             "I couldn't read Slack",
             "The Slack check could not complete",
             "Your day plan isn't ready",
+            "No Best Buy listings could be verified",
+            "Nothing on Allegro is confirmed yet",
         ] {
             let plain: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
                 "kind": "reply", "headline": headline,
@@ -976,6 +983,11 @@ mod tests {
             .unwrap();
             assert!(honest(&plain, &honest_run).is_ok(), "{headline}");
         }
+        let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "reply", "headline": "Slack was not read, but the plan is complete", "text": "The plan stands."
+        }))
+        .unwrap();
+        assert!(honest(&claimed, &honest_run).is_err());
         let todo: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
             "kind": "list", "style": "todo", "items": [{"title": "Retry the Slack check"}]
         }))
