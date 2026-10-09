@@ -564,7 +564,7 @@ fn rating(said: &str) -> Option<(String, u8)> {
     } else {
         5
     };
-    (value <= f64::from(max)).then(|| (number, max))
+    (value <= f64::from(max)).then_some((number, max))
 }
 
 #[cfg(test)]
