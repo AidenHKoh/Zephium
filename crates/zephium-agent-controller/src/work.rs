@@ -3053,6 +3053,8 @@ impl AgentWorkController {
         // The last refused proposal's exact key and how often in a row the
         // model proposed it: a third time, the model is shown the page anew.
         let mut last_refused: Option<(AgentProviderActionRefusalKey, u8)> = None;
+        // Looks refused in a row: from the third, the host takes one itself.
+        let mut refused_looks = 0u8;
         loop {
             state.check_task_contract()?;
             // Deliver acknowledged audit batches while idle so long runs keep
@@ -3186,6 +3188,55 @@ impl AgentWorkController {
                             .journal_mut()?
                             .emit(AgentWorkEventKind::InspectionRefused)?;
                         fruitless.refused()?;
+                        refused_looks = refused_looks.saturating_add(1);
+                        let refusal = if refused_looks >= 3 && state.progressive_observation {
+                            let session =
+                                state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                            match refusal.into_refresh(&observation, &session.config) {
+                                Ok(checkpoint) => {
+                                    refused_looks = 0;
+                                    // A page still filling in gets a moment.
+                                    let wake = Instant::now() + Duration::from_millis(1500);
+                                    if wake < state.native.deadline {
+                                        tokio::select! {
+                                            biased;
+                                            event = state.native.next_event(worker, browser) => {
+                                                state.native.retain(event?)?;
+                                                return Err(AgentWorkFailure::Mailbox);
+                                            }
+                                            () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+                                        }
+                                    }
+                                    let next = Self::inspect_current(
+                                        state,
+                                        worker,
+                                        browser,
+                                        checkpoint,
+                                        &observation,
+                                    )
+                                    .await?;
+                                    observation = next.0;
+                                    captured_at = next.1;
+                                    progress = next.2;
+                                    let Some(next_turn) = next.3 else {
+                                        state.observation = Some(observation);
+                                        return Ok(());
+                                    };
+                                    turn = next_turn;
+                                    frames.clear();
+                                    frames.extend(
+                                        observation
+                                            .frames()
+                                            .iter()
+                                            .map(|snapshot| snapshot.frame().clone()),
+                                    );
+                                    continue;
+                                }
+                                Err(refusal) => refusal,
+                            }
+                        } else {
+                            refusal
+                        };
                         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
                         turn = Self::provider(
                             &mut state.native,
@@ -3198,6 +3249,7 @@ impl AgentWorkController {
                         continue;
                     }
                 };
+                refused_looks = 0;
                 let next =
                     Self::inspect_current(state, worker, browser, checkpoint, &observation).await?;
                 observation = next.0;

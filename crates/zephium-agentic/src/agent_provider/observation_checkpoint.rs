@@ -340,6 +340,24 @@ fn admissible_scope(
 }
 
 impl AgentProviderObservationRefusal {
+    /// A planner that keeps asking for a look it was refused is given a
+    /// fresh one, told why, instead of the same refusal again.
+    pub fn into_refresh(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderObservationCheckpoint, Box<Self>> {
+        if config != &self.0.config
+            || !AgentProviderObservationCheckpoint::refreshable(&self.0, observation)
+        {
+            return Err(Box::new(self));
+        }
+        Ok(AgentProviderObservationCheckpoint::refresh(
+            self.0,
+            "repeated_look: you asked again for a look you were already refused. This is a fresh look at the page, taken a moment later: extract now if it or your earlier looks show what you need; otherwise act on its controls or navigate. Do not ask for the same look again.".to_owned(),
+        ))
+    }
+
     pub(in crate::agent_provider) fn bind(
         self,
         observation: &SemanticObservation,
