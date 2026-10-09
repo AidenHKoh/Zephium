@@ -118,7 +118,12 @@ pub(crate) fn dismissable(snapshot: &SemanticSnapshot) -> Vec<(std::ops::Range<u
                 && !node.states().contains(SemanticState::Disabled)
                 && node.sensitivity() == SemanticSensitivity::Public
         });
-        if let Some(close) = close.filter(|_| nodes.len() - (end - index) >= PAGE_BEHIND) {
+        // A look rooted at the dialog itself was taken inside a focused modal
+        // (Booking's sign-in offer): the page is behind it, out of the look.
+        let modal_look = index == 0 && nodes[0].parent().is_none();
+        if let Some(close) =
+            close.filter(|_| modal_look || nodes.len() - (end - index) >= PAGE_BEHIND)
+        {
             found.push((index..end, close));
         }
         index = end;
@@ -180,6 +185,20 @@ mod tests {
             json!({"k":4,"p":1,"r":"textbox","n":"Email","o":2}),
         ]);
         assert_eq!(dismissal(&alone), None);
+    }
+
+    #[test]
+    fn a_look_taken_inside_a_focused_modal_offer_is_closed() {
+        let modal = page(vec![
+            json!({"k":1,"r":"dialog","n":"Window offering discounts when you sign in"}),
+            json!({"k":2,"p":0,"r":"button","n":"Dismiss sign-in info.","o":1,"ak":1,"b":at(600)}),
+            json!({"k":3,"p":0,"r":"heading","n":"Sign in, save money","l":2}),
+            json!({"k":4,"p":0,"r":"paragraph","t":"Sign in to save 10% or more"}),
+        ]);
+        assert_eq!(
+            dismissal(&modal),
+            Some(modal.frames()[0].nodes()[1].reference())
+        );
     }
 
     #[test]
