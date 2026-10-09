@@ -4361,6 +4361,13 @@ impl AgentWorkController {
             if let Some(target) = state.task.consent_dismissal(&whole) {
                 observation =
                     Box::pin(Self::dismiss_consent(state, worker, browser, whole, target)).await?;
+            } else {
+                // The looks taken to find the banner replaced the one held:
+                // acting on that one is refused by the page's runtime.
+                state.refresh_account(worker, browser)?;
+                observation = Self::fit_model_observation(
+                    Box::pin(Self::observe(state, worker, browser)).await?,
+                )?;
             }
         }
         // So is a sign-in, newsletter or app offer the site laid over the

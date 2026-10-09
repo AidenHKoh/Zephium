@@ -255,12 +255,13 @@ fn validate_account_refresh(
         // look a consent press is made on, an app view's look and each
         // landmark it opens, each view an app read switches to, a results
         // page's read, the look after Rust closes a site's own overlay
-        // offer, and the refusal of a whole look in a streak) each sample
+        // offer, the refusal of a whole look in a streak, and the fresh look
+        // after a banner search that found nothing to press) each sample
         // once more.
         || format!("{work}\n{decision}")
             .matches("state.refresh_account(worker, browser)?")
             .count()
-            != 31
+            != 32
         || !policy.contains("MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS: u64 = 30_000;")
     {
         return Err("Work lost per-admission sampling, control or original expiry boundary".into());
