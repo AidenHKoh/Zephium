@@ -724,6 +724,13 @@ impl NavigationFault {
                 assert!(text.contains("Field"));
                 return;
             }
+            if repeat && turns >= 3 {
+                // The third identical refused proposal in a row is shown the
+                // page anew, told why, instead of the same refusal.
+                let text = std::str::from_utf8(bytes).unwrap();
+                assert!(text.contains("repeated_proposal"));
+                return;
+            }
             if turns == 1 || (repeat && turns > 0) {
                 let body: serde_json::Value = serde_json::from_slice(bytes).unwrap();
                 let result = body["input"]
