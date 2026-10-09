@@ -1007,11 +1007,38 @@ impl AgentProviderNavigationCheckpoint {
             || request.account().context() != successor
             || request.account().account() != receipt.account()
             || request.account().observed_at() < receipt.settled_at()
-            || observation.frames()[0].frame().origin() != &target_origin
+            || !(observation.frames()[0].frame().origin() == &target_origin
+                || landed_on_same_site(&self.target, observation))
         {
             return Err(AgentProviderContinuationError::Baseline);
         }
         Ok(())
+    }
+}
+
+/// A site load the site-session gate followed to another host of the same
+/// site, or to its brand's country domain (yelp.com to yelp.pl).
+fn landed_on_same_site(
+    target: &crate::ContextNavigationTarget,
+    observation: &crate::SemanticObservation,
+) -> bool {
+    let Some(frame) = observation.frames().first() else {
+        return false;
+    };
+    let Ok(landed) =
+        crate::ContextNavigationTarget::parse(frame.frame().origin().as_url().as_str())
+    else {
+        return false;
+    };
+    if crate::same_work_site(target, &landed) {
+        return true;
+    }
+    match (
+        crate::registrable_site(target),
+        crate::registrable_site(&landed),
+    ) {
+        (Some(from), Some(to)) => crate::brand_family(from.as_bytes(), to.as_bytes()).is_some(),
+        _ => false,
     }
 }
 
