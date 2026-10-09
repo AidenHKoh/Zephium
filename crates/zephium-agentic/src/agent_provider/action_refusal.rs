@@ -165,6 +165,7 @@ impl super::super::AgentProviderSettledToolTurn {
                     error,
                     context: Some(context),
                     repeated: false,
+                    stuck: false,
                 },
             ));
         }
@@ -189,6 +190,7 @@ impl super::super::AgentProviderSettledToolTurn {
                             error: SemanticActionBindingError::TargetIncomplete,
                             context: refusal_context,
                             repeated: false,
+                            stuck: false,
                         },
                     ));
                 }
@@ -211,6 +213,7 @@ impl super::super::AgentProviderSettledToolTurn {
                     error,
                     context: refusal_context,
                     repeated: false,
+                    stuck: false,
                 },
             )),
             Err(error) => Err(Error::Binding(error)),
@@ -225,6 +228,7 @@ pub struct AgentProviderActionRefusal {
     error: SemanticActionBindingError,
     context: Option<AgentProviderActionRefusalContext>,
     repeated: bool,
+    stuck: bool,
 }
 
 impl AgentProviderActionRefusal {
@@ -240,12 +244,20 @@ impl AgentProviderActionRefusal {
             error,
             context,
             repeated: false,
+            stuck: false,
         }
     }
     /// This control was refused before on an earlier look: the model hears
     /// to change approach instead of trying it again.
     pub fn repeated(mut self) -> Self {
         self.repeated = true;
+        self
+    }
+    /// The model proposed this exact refused action again and again: it
+    /// gets a fresh look of the page with that said, whatever the refusal.
+    pub fn stuck(mut self) -> Self {
+        self.repeated = true;
+        self.stuck = true;
         self
     }
     /// The refused proposal's target on the observation it was made on.
@@ -267,6 +279,7 @@ impl AgentProviderActionRefusal {
         config: &AgentProviderCallConfig,
     ) -> Result<super::AgentProviderObservationCheckpoint, Box<Self>> {
         let note = match self.error {
+            _ if self.stuck => "repeated_proposal: nothing executed. You proposed exactly this refused action several times in a row; it will not run on this page. This is a fresh look at the page: choose a different control or tool (fill a text field and then click a suggestion or a search button, press Enter in a field, navigate to the site's search results address, or extract what your looks already show).",
             SemanticActionBindingError::TargetCovered => "target_covered: nothing executed; another element (a cookie or consent banner, a dialog, a popover or a sticky header) lay over the target where it would be clicked. This is a fresh look at the page. The control still takes a key: press it with Enter (act press, key enter, on its ref in this look), which reaches it without the pointer. Or close what covers it with its own close, dismiss or reject control. A dialog whose own controls are refused does not block the rest of the page: leave it and use the page's search box, its links, or the site's search results address.",
             SemanticActionBindingError::DispatchRejected => "target_changed: nothing executed; the page changed before the action ran. This is a fresh look at the page: act on these refs; if a dialog opened, work within it first.",
             SemanticActionBindingError::Unverified
@@ -279,7 +292,9 @@ impl AgentProviderActionRefusal {
             SemanticActionBindingError::Unverified => "outcome_not_observed: the action ran, but its declared outcome was not seen. This is a fresh look at the page as it is now: continue from what it shows, and do not repeat the same action unchanged.",
             _ => return Err(Box::new(self)),
         };
-        let note = if self.repeated && self.error == SemanticActionBindingError::TargetCovered {
+        let note = if self.stuck {
+            note.to_owned()
+        } else if self.repeated && self.error == SemanticActionBindingError::TargetCovered {
             format!("{note} This control was covered before too: do not click it again. Press it with Enter, or change approach (navigate to another address on this site, such as its search results for your query, or use its search box).")
         } else if self.repeated {
             format!("{note} This control was refused before: change approach (navigate to another address on this site, such as its search results for your query, use its search box, or scroll).")

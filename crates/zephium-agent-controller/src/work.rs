@@ -3046,6 +3046,9 @@ impl AgentWorkController {
         // Refusals in a row with nothing done between them. Only a long run of
         // them ends the page: every refusal reaches the model as feedback.
         let mut fruitless = Fruitless::default();
+        // The last refused proposal's exact key and how often in a row the
+        // model proposed it: a third time, the model is shown the page anew.
+        let mut last_refused: Option<(AgentProviderActionRefusalKey, u8)> = None;
         loop {
             state.check_task_contract()?;
             // Deliver acknowledged audit batches while idle so long runs keep
@@ -3395,6 +3398,7 @@ impl AgentWorkController {
                                 return Ok(());
                             }
                             fruitless.refused()?;
+                            let stuck = Self::refused_again(&mut last_refused, &refusal);
                             let refusal = Self::repeated_refusal(&mut action_refusals, refusal)?;
                             let refusal = Self::count_refused_control(
                                 &mut refused_controls,
@@ -3403,6 +3407,41 @@ impl AgentWorkController {
                                 &observation,
                                 &frames,
                             )?;
+                            let refusal = if stuck && state.progressive_observation {
+                                let session =
+                                    state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                                match refusal.stuck().into_refresh(&observation, &session.config) {
+                                    Ok(checkpoint) => {
+                                        let next = Self::inspect_current(
+                                            state,
+                                            worker,
+                                            browser,
+                                            checkpoint,
+                                            &observation,
+                                        )
+                                        .await?;
+                                        observation = next.0;
+                                        captured_at = next.1;
+                                        progress = next.2;
+                                        let Some(next_turn) = next.3 else {
+                                            state.observation = Some(observation);
+                                            return Ok(());
+                                        };
+                                        turn = next_turn;
+                                        frames.clear();
+                                        frames.extend(
+                                            observation
+                                                .frames()
+                                                .iter()
+                                                .map(|snapshot| snapshot.frame().clone()),
+                                        );
+                                        continue;
+                                    }
+                                    Err(refusal) => *refusal,
+                                }
+                            } else {
+                                refusal
+                            };
                             let session =
                                 state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
                             turn = Self::provider(
@@ -3631,6 +3670,24 @@ impl AgentWorkController {
             )
             .await?;
         }
+    }
+
+    /// Whether the model proposed this exact refused action for the third
+    /// time in a row.
+    fn refused_again(
+        last: &mut Option<(AgentProviderActionRefusalKey, u8)>,
+        refusal: &AgentProviderActionRefusal,
+    ) -> bool {
+        let Some(key) = refusal.key() else {
+            *last = None;
+            return false;
+        };
+        let count = match last {
+            Some((previous, count)) if *previous == key => count.saturating_add(1),
+            _ => 1,
+        };
+        *last = Some((key, count));
+        count >= 3
     }
 
     /// The in-scope observed destination of a link this action clicks, for
