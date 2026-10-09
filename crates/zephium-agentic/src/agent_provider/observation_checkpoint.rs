@@ -82,6 +82,25 @@ pub struct AgentProviderObservationCheckpoint {
 }
 
 impl AgentProviderContinuation {
+    /// The host ran the search a planner typed and never ran (it scrolled
+    /// instead): the pending step is retired unrun, and the planner gets a
+    /// fresh look of the page the search produced, told so.
+    pub fn into_search_refresh(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderObservationCheckpoint, Box<Self>> {
+        if config != &self.config
+            || !AgentProviderObservationCheckpoint::refreshable(&self, observation)
+        {
+            return Err(Box::new(self));
+        }
+        Ok(AgentProviderObservationCheckpoint::refresh(
+            self,
+            "search_run: your last step did not run. You typed into a search or filter field and kept scrolling instead of running it, so the host pressed Enter in that field for you. This is a fresh look at the page it produced: extract the records if they are here, otherwise continue from it.".to_owned(),
+        ))
+    }
+
     /// Resolve a model inspection proposal without confusing an invalid target
     /// with a broken authority chain. A refusal grants no native dispatch.
     pub fn resolve_observation(
