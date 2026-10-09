@@ -3605,13 +3605,17 @@ mod tests {
                 SemanticActionBindingError::CurrentFrameCohort
             ))
         ));
-        assert!(matches!(
+        // A ref the look never showed is the model's slip: it hears so.
+        let Ok(AgentProviderActionResolution::Refused(unknown)) =
             action_refusal_turn(&initial, config.clone(), "@a99")
-                .resolve_action(batch, &initial, &frames, &config),
-            Err(AgentProviderActionResolutionError::Binding(
-                SemanticActionBindingError::Reference(SemanticReferenceError::Unknown)
-            ))
-        ));
+                .resolve_action(batch, &initial, &frames, &config)
+        else {
+            panic!("an unknown ref is refused to the model");
+        };
+        assert_eq!(
+            unknown.reason(),
+            SemanticActionBindingError::Reference(SemanticReferenceError::Unknown)
+        );
         let changed_config = config.clone().restrict_to_navigation_and_extraction();
         assert!(matches!(
             make().resolve_action(batch, &initial, &frames, &changed_config),

@@ -200,10 +200,11 @@ impl super::super::AgentProviderSettledToolTurn {
             }
             Err(
                 error @ (SemanticActionBindingError::Reference(
-                    SemanticReferenceError::OperationDenied,
+                    SemanticReferenceError::OperationDenied | SemanticReferenceError::Unknown,
                 )
                 | SemanticActionBindingError::OutcomeAlreadySatisfied
-                | SemanticActionBindingError::OutcomeContract),
+                | SemanticActionBindingError::OutcomeContract
+                | SemanticActionBindingError::SelectionTarget),
             ) => Ok(AgentProviderActionResolution::Refused(
                 AgentProviderActionRefusal {
                     continuation,
@@ -329,6 +330,14 @@ impl AgentProviderActionRefusal {
             SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied) => (
                 "operation_not_supported",
                 "The requested operation is not in the target ref's advertised ops. The rejected metadata identifies the exact operation, target, role and observed capabilities without echoing action content. This operation/target pair is unavailable while the observation is unchanged; other eligible refs remain available. Choose an advertised operation on another supplied ref, inspect to reveal a suitable control, or request a genuinely fresh observation before reconsidering changed state. Do not repeat the rejected pair.",
+            ),
+            SemanticActionBindingError::Reference(SemanticReferenceError::Unknown) => (
+                "unknown_ref",
+                "Nothing executed. A ref in this action is not on the look you hold: refs change with every look. Use refs exactly as the latest look prints them, such as @a12, and only ones it shows.",
+            ),
+            SemanticActionBindingError::SelectionTarget => (
+                "selection_target_invalid",
+                "Nothing executed. select needs a target that is a native select or listbox the look lists for select, and an option ref that is an r=option inside that target. A text field with suggestions takes fill, then a click on the suggestion; a custom dropdown opens with click, and its option is clicked.",
             ),
             SemanticActionBindingError::TaskEffectMismatch(_) => (
                 "task_effect_mismatch",
