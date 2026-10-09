@@ -217,9 +217,13 @@ asks once: Allow (this run), Always
 for the site (kept per profile, `WorkRequest::SiteAccess`), or Not now (the
 site is worked privately). Never and the closed list of sensitive sites
 (banks, password managers, health and tax portals; Ask at most) keep the
-session closed; a private run (`WorkAgentGrantV1.private`) uses the run's own
-storage everywhere. A plain `read` uses the session only on a site the run
-already works on as the person.
+session closed. A page without the person's session opens in Work's own
+website data: one persistent store per profile, apart from the profile's own,
+that remembers solved bot checks, consent choices and site preferences across
+pages and runs (see `docs/agentic-browsing.md` 4.3; Settings → Work clears
+it). A private run (`WorkAgentGrantV1.private`) uses the run's own empty
+storage everywhere instead. A plain `read` uses the session only on a site the
+run already works on as the person.
 
 A public `read` cites the exact address it read, so a redirect never moves
 it. When the page's server (a 3xx) or its own script before the page is ready
@@ -278,9 +282,11 @@ decides whether a query may leave at all; a query it refuses is sent nowhere.
 The lead's freshness becomes the engine's own parameter where one exists
 (Google `tbs`, DuckDuckGo `df`, Bing `filters`, Brave `tf`).
 
-The page opens as a step of the run, beside the batch's other searches, in a
-fresh ephemeral store of its own: nothing from the person's tabs or the run's
-other pages. Typed decisions are off, and the results policy takes the
+The page opens as a step of the run, beside the batch's other searches, in
+Work's own website data: nothing from the person's tabs, but the engine's
+consent choice from earlier runs is remembered, so an EU consent wall is met
+once rather than on every search. A private run's results page opens in a
+fresh ephemeral store of its own. Typed decisions are off, and the results policy takes the
 page's whole first look, presses nothing and ends there, so no model sees it
 and nothing is charged but the step. The reader
 (`zephium_agentic::read_search_page`) keeps up to eight results in the

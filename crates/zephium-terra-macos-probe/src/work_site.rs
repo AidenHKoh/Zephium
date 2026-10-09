@@ -35,6 +35,8 @@ const OTHER_SITE: &str = "other.probe.test";
 const THIRD_SITE: &str = "third.probe.test";
 const BOARD_SITE: &str = "board.probe.test";
 const ACCOUNT_COOKIE: &str = "zaccount=signed-in-a";
+/// The consent choice the other site saves, which Work's memory keeps.
+const MEMORY_COOKIE: &str = "zmemory=no";
 const INBOX_FACT: &str = "Quarterly report from Dana";
 const REPORT_FACT: &str = "Reports total is 4,812";
 const LANDED_FACT: &str = "Landing desk opens at nine";
@@ -118,10 +120,15 @@ enum Check {
     LinearWrite,
     /// A line added to a page of blocks that saves as it is typed.
     NotionWrite,
+    /// A consent choice a page outside the person's session saved in one run
+    /// reaches the site in the next run from Work's own memory; the profile's
+    /// own store holds none.
+    Memory,
 }
 /// Freeze leaves a lost page's debt, which the probe's exit reports as an
 /// unclean shutdown; it runs on its own.
-const ALL: [Check; 22] = [
+const ALL: [Check; 23] = [
+    Check::Memory,
     Check::Session,
     Check::Always,
     Check::Never,
@@ -146,6 +153,36 @@ const ALL: [Check; 22] = [
     Check::Views,
 ];
 static CHECKS: OnceLock<Vec<Check>> = OnceLock::new();
+/// The engine, to ask which store holds a site's cookies.
+static ENGINE: OnceLock<std::sync::Arc<zephium_engine::WebviewEngine>> = OnceLock::new();
+
+pub(super) fn remember_engine(engine: std::sync::Arc<zephium_engine::WebviewEngine>) {
+    let _ = ENGINE.set(engine);
+}
+
+/// Clears Work's store as Settings does; whether it is empty afterwards.
+pub(super) fn clear_work_memory(profile: ProfileId) -> Option<bool> {
+    ENGINE
+        .get()?
+        .clear_work_website_data(profile)
+        .recv_timeout(Duration::from_secs(15))
+        .ok()
+}
+
+/// Whether the profile's own store and Work's store hold cookies for a host.
+pub(super) fn stores_hold(profile: ProfileId, host: &str) -> Option<(bool, bool)> {
+    let engine = ENGINE.get()?;
+    let wait = Duration::from_secs(5);
+    let own = engine
+        .work_sessions_present(profile, vec![host.into()])
+        .recv_timeout(wait)
+        .ok()?;
+    let work = engine
+        .work_store_sessions_present(profile, vec![host.into()])
+        .recv_timeout(wait)
+        .ok()?;
+    Some((own.first() == Some(&true), work.first() == Some(&true)))
+}
 
 pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
     let checks = match which.to_str() {
@@ -173,6 +210,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("heavy") => vec![Check::Heavy],
         Some("apps") => vec![Check::Apps],
         Some("views") => vec![Check::Views],
+        Some("memory") => vec![Check::Memory],
         Some("slackwrite") => vec![Check::SlackWrite],
         Some("slackenter") => vec![Check::SlackEnter],
         Some("linearwrite") => vec![Check::LinearWrite],
@@ -206,6 +244,7 @@ struct Hit {
 /// The app's session check against the real profile store, with each
 /// contract site answered by the loopback host whose cookies stand for it.
 pub(super) fn install_presence(engine: std::sync::Arc<zephium_engine::WebviewEngine>) {
+    remember_engine(engine.clone());
     zephium_app::work_context::install_session_presence(std::sync::Arc::new(
         move |profile, sites: Vec<String>| {
             let hosts = sites
@@ -390,6 +429,11 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
         (Site::Account, "POST", "/consent/jsave") => (
             "200 OK",
             "Set-Cookie: zjconsent=no; Path=/; Max-Age=3600\r\n".into(),
+            String::new(),
+        ),
+        (Site::Other, "POST", "/memory/save") => (
+            "303 See Other",
+            format!("Set-Cookie: {MEMORY_COOKIE}; Path=/; Max-Age=3600\r\nLocation: /memory\r\n"),
             String::new(),
         ),
         (_, "POST", _) => ("200 OK", String::new(), page("Done", "<p>Saved.</p>")),
@@ -597,6 +641,16 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
             "200 OK",
             String::new(),
             page("Calendar", &format!("<h1>Today</h1><ul><li>{DAY_FACT}.</li><li>Lunch with Ana at 12:30.</li></ul>")),
+        ),
+        (Site::Other, _, "/memory") if cookie.contains(MEMORY_COOKIE) => (
+            "200 OK",
+            String::new(),
+            page("Fares", &format!("<h1>Fares</h1><p>{CONSENT_FACT}.</p>")),
+        ),
+        (Site::Other, _, "/memory") => (
+            "200 OK",
+            String::new(),
+            String::from("<div role=\"dialog\" aria-modal=\"true\" aria-label=\"Before you continue\"><h2>Before you continue</h2><p>We use cookies and data to deliver and maintain our services.</p><form method=\"post\" action=\"/memory/save\"><button name=\"set\" value=\"reject\">Reject all</button><button name=\"set\" value=\"accept\">Accept all</button></form></div><main><p>Loading fares</p></main>"),
         ),
         (Site::Other, _, _) => (
             "200 OK",
@@ -2171,6 +2225,75 @@ pub(super) async fn workflow(
                     last = run.state;
                 }
                 passed
+            }
+            Check::Memory => {
+                let goal = "Report how many flights the fares list shows";
+                // Never keeps the site out of the person's session: its pages
+                // open in Work's memory, as a public site's would.
+                zephium_app::work_sites::set_standing(
+                    handle,
+                    profile,
+                    OTHER_SITE.into(),
+                    Some(WorkSiteAccessV1::Never),
+                )
+                .await
+                .map_err(|_| "memory_standing")?;
+                let before = stores_hold(profile, "localhost").ok_or("memory_stores")?;
+                let first = context
+                    .run(
+                        "Fares, first",
+                        false,
+                        "Allow",
+                        vec![vec![browse_at(OTHER, "/memory", goal)]],
+                    )
+                    .await?;
+                let between = stores_hold(profile, "localhost").ok_or("memory_stores")?;
+                let loads_before = context.sites.hits(Site::Other, "/memory").len();
+                let second = context
+                    .run(
+                        "Fares, again",
+                        false,
+                        "Allow",
+                        vec![vec![browse_at(OTHER, "/memory", goal)]],
+                    )
+                    .await?;
+                zephium_app::work_sites::set_standing(handle, profile, OTHER_SITE.into(), None)
+                    .await
+                    .map_err(|_| "memory_standing")?;
+                let after = stores_hold(profile, "localhost").ok_or("memory_stores")?;
+                let loads = context
+                    .sites
+                    .hits(Site::Other, "/memory")
+                    .into_iter()
+                    .filter(|(post, _)| !post)
+                    .map(|(_, cookie)| cookie.contains(MEMORY_COOKIE))
+                    .collect::<Vec<_>>();
+                let first_fresh = loads.first() == Some(&false);
+                let remembered = context
+                    .sites
+                    .hits(Site::Other, "/memory")
+                    .get(loads_before)
+                    .is_some_and(|(_, cookie)| cookie.contains(MEMORY_COOKIE));
+                let saves = context.sites.hits(Site::Other, "/memory/save").len();
+                let content = says(&second, CONSENT_FACT) || mentions(&second, &["4"]);
+                line(format!(
+                    "check=memory loads={loads:?} saves={saves} first_fresh={first_fresh} remembered_next_run={remembered} content={content} first_yours={} second_yours={} own_store(before,between,after)=({},{},{}) work_store(before,between,after)=({},{},{})",
+                    first.opened.iter().any(|p| p.yours),
+                    second.opened.iter().any(|p| p.yours),
+                    before.0, between.0, after.0, before.1, between.1, after.1,
+                ));
+                last = second.state;
+                first_fresh
+                    && saves >= 1
+                    && remembered
+                    && content
+                    && !before.0
+                    && !between.0
+                    && !after.0
+                    && between.1
+                    && after.1
+                    && !first.opened.iter().any(|p| p.yours)
+                    && !second.opened.iter().any(|p| p.yours)
             }
             Check::Wall => {
                 let run = context

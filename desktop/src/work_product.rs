@@ -19,6 +19,10 @@ impl WorkProductState {
     ) -> Option<std::sync::Arc<Vec<u8>>> {
         self.providers.activity.frame(attempt, step)
     }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(crate) fn clear_website_data(&self, profile: ProfileId) -> std::sync::mpsc::Receiver<bool> {
+        self.providers.clear_website_data(profile)
+    }
 }
 /// Durable last frames of pages the agent read, managed beside the media blobs.
 pub(crate) struct WorkFrames(pub(crate) std::sync::Arc<zephium_store::WorkFrameStore>);

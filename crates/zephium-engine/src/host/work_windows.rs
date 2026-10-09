@@ -59,7 +59,11 @@ impl EngineHost {
             } else {
                 continue;
             };
-            self.erase_windows_anonymous_environment(native_profile, completion);
+            self.erase_windows_native_environment(
+                native_profile,
+                self.private_runtime.root().to_owned(),
+                completion,
+            );
         }
     }
     pub(super) fn prepare_windows_anonymous_erasure(
@@ -87,14 +91,81 @@ impl EngineHost {
             } else {
                 let native_profile = entry.native_profile;
                 entry.retirement = Some(completion.clone());
-                self.erase_windows_anonymous_environment(native_profile, completion);
+                self.erase_windows_native_environment(
+                    native_profile,
+                    self.private_runtime.root().to_owned(),
+                    completion,
+                );
             }
         }
         selected
     }
-    fn erase_windows_anonymous_environment(
+    /// Profile erasure also removes Work's own store folder, whether or not
+    /// this process opened it.
+    pub(super) fn prepare_windows_work_store_erasure(
+        &mut self,
+        profile: zephium_core::ids::ProfileId,
+        completion: Arc<crate::erasure::Completion>,
+    ) -> Arc<crate::erasure::Completion> {
+        let mut completions = crate::erasure::Completion::split(completion, 2);
+        let selected = completions.remove(0);
+        let work = completions.remove(0);
+        self.erase_windows_native_environment(
+            crate::work_website_data::native_profile(profile),
+            self.profiles_root.clone(),
+            work,
+        );
+        selected
+    }
+    /// Empties the profile's Work store. A live Work page clears it through
+    /// WebView2; with no environment running the folder is removed. While
+    /// the environment runs without a page the answer is false.
+    pub(crate) fn clear_work_website_data(
+        &mut self,
+        profile: zephium_core::ids::ProfileId,
+        reply: std::sync::mpsc::Sender<bool>,
+    ) {
+        if self.erasure_tombstones.contains(&profile) {
+            let _ = reply.send(false);
+            return;
+        }
+        let expected = AgentOwnedProfile::work(crate::work_website_data::identifier(profile));
+        let live = self
+            .work_resources
+            .values()
+            .filter(|resource| resource.profile() == profile)
+            .find_map(|resource| {
+                resource
+                    .view
+                    .as_ref()
+                    .filter(|view| view.work_profile_matches(&expected))
+            });
+        if let Some(view) = live {
+            if !view.clear_profile_browsing_data(reply.clone()) {
+                let _ = reply.send(false);
+            }
+            return;
+        }
+        let native = crate::work_website_data::native_profile(profile);
+        if self.environments.contains_key(&native) || self.erasure_tombstones.contains(&native) {
+            let _ = reply.send(false);
+            return;
+        }
+        let root = self.profiles_root.clone();
+        let spawned = std::thread::Builder::new()
+            .name("work-website-data-clear".into())
+            .spawn(move || {
+                let _ = reply.send(crate::erasure::remove_profile_directories_verified(
+                    &[root],
+                    native,
+                ));
+            });
+        drop(spawned);
+    }
+    fn erase_windows_native_environment(
         &mut self,
         native_profile: zephium_core::ids::ProfileId,
+        root: std::path::PathBuf,
         completion: Arc<crate::erasure::Completion>,
     ) {
         self.erasure_tombstones.insert(native_profile);
@@ -120,7 +191,7 @@ impl EngineHost {
             process,
             proof,
             clean,
-            vec![self.private_runtime.root().to_owned()],
+            vec![root],
             native_profile,
             completion,
         );
@@ -296,7 +367,10 @@ impl EngineHost {
         native_resource: &mut Option<super::NativeResourceLease>,
     ) -> Result<AgentOwnedView, ContextPortFailure> {
         let profile = guard.resource().identity().profile();
-        let storage = if guard.isolated_public() {
+        let work_data = guard.work_website_data();
+        let storage = if work_data {
+            ContextProfileStorageClass::Durable
+        } else if guard.isolated_public() {
             ContextProfileStorageClass::Ephemeral
         } else {
             guard.storage()
@@ -316,9 +390,14 @@ impl EngineHost {
         {
             return Err(ContextPortFailure::ResourceExhausted);
         }
-        let native_profile = if storage == ContextProfileStorageClass::Ephemeral
-            && guard.isolated_public()
-        {
+        let native_profile = if work_data {
+            if self.profile_persistence_classes.get(&profile)
+                != Some(&super::profiles::ProfilePersistenceClass::Durable)
+            {
+                return Err(ContextPortFailure::ProfileUnavailable);
+            }
+            crate::work_website_data::native_profile(profile)
+        } else if storage == ContextProfileStorageClass::Ephemeral && guard.isolated_public() {
             if let Some(session) = guard.anonymous_session() {
                 if let Some(entry) = self.anonymous_work_environments.get(&session.id()) {
                     if entry.retirement.is_some() {
@@ -393,7 +472,7 @@ impl EngineHost {
                 native_profile,
                 deadline,
                 path.clone(),
-                storage == ContextProfileStorageClass::Durable,
+                storage == ContextProfileStorageClass::Durable && !work_data,
             )
             .map_err(|_| ContextPortFailure::ProfileUnavailable)?;
         let environment = self
@@ -411,7 +490,9 @@ impl EngineHost {
         let invariant = guard.clone();
         let panic = guard.clone();
         let redirected = guard.clone();
-        let owned_profile = if storage == ContextProfileStorageClass::Durable {
+        let owned_profile = if work_data {
+            AgentOwnedProfile::work(crate::work_website_data::identifier(profile))
+        } else if storage == ContextProfileStorageClass::Durable {
             AgentOwnedProfile::work_site(guard.document().ok_or(ContextPortFailure::NativeRefused)?)
                 .map_err(|_| ContextPortFailure::NativeRefused)?
         } else if let Some(session) = guard.anonymous_session() {
@@ -429,7 +510,7 @@ impl EngineHost {
                 let _ = writeln!(std::io::stderr().lock(), "windows-work-cookies: stage=construct store_reused={reused} expected_native_name_hash={hash}; content=redacted");
             }
         }
-        let store = if storage == ContextProfileStorageClass::Durable {
+        let store = if storage == ContextProfileStorageClass::Durable && !work_data {
             let AgentOwnedProfile::Automation { name } = &owned_profile else {
                 return Err(ContextPortFailure::NativeRefused);
             };
@@ -477,7 +558,7 @@ impl EngineHost {
             storage,
             &path,
             deadline,
-            storage == ContextProfileStorageClass::Durable,
+            storage == ContextProfileStorageClass::Durable && !work_data,
             AgentOwnedViewCallbacks::new(
                 move |_| {
                     legacy.fail();

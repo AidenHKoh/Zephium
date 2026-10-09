@@ -48,6 +48,9 @@ pub struct WorkAgentBrowseRequest {
     /// A new read of where an earlier read's first load was redirected on
     /// its own site: the address that redirected here.
     pub redirected_from: Option<String>,
+    /// A private run: pages without the person's session keep the run's own
+    /// empty storage instead of Work's memory.
+    pub private_run: bool,
 }
 
 /// A step a page task holds for the person, as the site policy read it
@@ -1453,6 +1456,7 @@ impl Driver {
                     view: false,
                     results: Some(page),
                     redirected_from: None,
+                    private_run: self.grant.private,
                 },
             )));
         }

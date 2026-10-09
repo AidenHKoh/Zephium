@@ -260,6 +260,20 @@ impl AgentOwnedView {
     pub(crate) fn work_native_profile(&self) -> Option<ProfileId> {
         self.work_native_profile
     }
+    /// Clears every kind of browsing data of this view's WebView2 profile and
+    /// replies whether WebView2 reported success. False if it could not start.
+    pub(crate) fn clear_profile_browsing_data(&self, reply: std::sync::mpsc::Sender<bool>) -> bool {
+        let Ok(profile) = super::profile_for_erasure(&self.view) else {
+            return false;
+        };
+        let handler =
+            webview2_com::ClearBrowsingDataCompletedHandler::create(Box::new(move |result| {
+                let _ = reply.send(result.is_ok());
+                Ok(())
+            }));
+        // SAFETY: the STA-owned live profile and handler are reference counted.
+        unsafe { profile.ClearBrowsingDataAll(&handler) }.is_ok()
+    }
 
     #[expect(
         clippy::too_many_arguments,
