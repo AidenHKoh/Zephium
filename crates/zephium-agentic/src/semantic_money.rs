@@ -254,7 +254,15 @@ fn marker_after(after: &str) -> Option<usize> {
 /// "$349.99" in "Tower Bridge $349.99 New"; none when it shows no amount or
 /// more than one.
 pub(crate) fn single_currency_amount(text: &str) -> Option<&str> {
-    let mut found = None;
+    match currency_amounts(text).as_slice() {
+        [only] => Some(only),
+        _ => None,
+    }
+}
+
+/// Every currency amount `text` displays, marker included, in order.
+pub(crate) fn currency_amounts(text: &str) -> Vec<&str> {
+    let mut found = Vec::new();
     let mut index = 0;
     while index < text.len() {
         let Some(offset) = text[index..].find(|ch: char| ch.is_ascii_digit()) else {
@@ -278,11 +286,9 @@ pub(crate) fn single_currency_amount(text: &str) -> Option<&str> {
             (None, Some(to)) => start..end + to,
             (None, None) => continue,
         };
-        if found.replace(span).is_some() {
-            return None;
-        }
+        found.push(&text[span]);
     }
-    found.map(|span| &text[span])
+    found
 }
 
 #[cfg(test)]

@@ -336,15 +336,18 @@ impl SemanticExtractionFieldSchema {
     /// price, cost, total or amount, the one currency amount the text shows;
     /// otherwise, or when it shows none or several, the whole text.
     pub fn verbatim_value<'a>(&self, exact: &'a str) -> &'a str {
-        let name = self.name.to_ascii_lowercase();
-        let money_like = matches!(self.spec, SemanticExtractionFieldSpec::Text { .. })
-            && ["price", "cost", "total", "amount"]
-                .iter()
-                .any(|word| name.contains(word));
-        money_like
+        self.money_like()
             .then(|| crate::semantic_money::single_currency_amount(exact))
             .flatten()
             .unwrap_or(exact)
+    }
+
+    fn money_like(&self) -> bool {
+        let name = self.name.to_ascii_lowercase();
+        matches!(self.spec, SemanticExtractionFieldSpec::Text { .. })
+            && ["price", "cost", "total", "amount"]
+                .iter()
+                .any(|word| name.contains(word))
     }
 
     /// Marks a URL column whose value is the subject's own page address. It
@@ -1783,25 +1786,42 @@ fn admit_value<'a>(
         ) => {
             let raw_sources = resolvable_sources(raw_sources, read, sensitivity_limit);
             if field.verbatim_text() {
-                let [source] = raw_sources.as_slice() else {
-                    return Err(SemanticExtractionError::VerbatimMismatch);
+                // A copy is one cited fragment's whole text, or for a price
+                // column one currency amount it shows; with several cited,
+                // the one the copy matches.
+                let cited: Vec<(&String, &str)> = raw_sources
+                    .iter()
+                    .filter_map(|token| {
+                        SemanticReadFragmentId::parse_model_token(token)
+                            .and_then(|id| read.fragment(id))
+                            .and_then(|fragment| fragment.verbatim_text())
+                            .map(|exact| (token, exact))
+                    })
+                    .collect();
+                let (token, value) = match value {
+                    None => match cited.as_slice() {
+                        [(token, exact)] => (*token, field.verbatim_value(exact).to_owned()),
+                        _ => return Err(SemanticExtractionError::VerbatimMismatch),
+                    },
+                    Some(value) => {
+                        let token = cited
+                            .iter()
+                            .find(|(_, exact)| {
+                                *exact == value
+                                    || field.verbatim_value(exact) == value
+                                    || (field.money_like()
+                                        && crate::semantic_money::currency_amounts(exact)
+                                            .contains(&value.as_str()))
+                            })
+                            .map(|(token, _)| *token)
+                            .ok_or(SemanticExtractionError::VerbatimMismatch)?;
+                        (token, value)
+                    }
                 };
-                let exact = SemanticReadFragmentId::parse_model_token(source)
-                    .and_then(|id| read.fragment(id))
-                    .and_then(|fragment| fragment.verbatim_text())
-                    .ok_or(SemanticExtractionError::VerbatimMismatch)?;
-                let published = field.verbatim_value(exact);
-                if value
-                    .as_ref()
-                    .is_some_and(|value| value != exact && value != published)
-                {
-                    return Err(SemanticExtractionError::VerbatimMismatch);
-                }
-                let value = value.unwrap_or_else(|| published.to_owned());
                 return Ok(SemanticExtractedValue::Text(admit_text(
                     value,
                     *max_bytes,
-                    raw_sources,
+                    vec![token.clone()],
                     read,
                     sensitivity_limit,
                     sources,
@@ -3394,6 +3414,10 @@ mod tests {
         ]));
         let row = vec![
             SemanticExtractionFieldSchema::try_text("name".into(), true, 512).unwrap(),
+            SemanticExtractionFieldSchema::try_text("price".into(), false, 1024)
+                .unwrap()
+                .with_verbatim_text()
+                .unwrap(),
             SemanticExtractionFieldSchema::try_url("url".into(), true, 2048).unwrap(),
         ];
         let schema = SemanticExtractionSchema::try_new(
@@ -3421,10 +3445,12 @@ mod tests {
         let output = json!({"fields":[{"name":"output_0","value":{"k":"rows","items":[
             {"fields":[
                 {"name":"name","value":{"k":"text","value":"Acer Aspire 14 AI/32GB","sources":[facts]}},
+                {"name":"price","value":{"k":"text","value":"3249 PLN","sources":[facts]}},
                 {"name":"url","value":{"k":"url","sources":[facts]}}
             ]},
             {"fields":[
                 {"name":"name","value":{"k":"text","value":"Dell 15 Ryzen 7/32GB","sources":[facts]}},
+                {"name":"price","value":{"k":"text","value":"4399 PLN or less","sources":[facts]}},
                 {"name":"url","value":{"k":"url","value":"/p/1520309-dell.html","sources":[facts]}}
             ]}
         ]}}]});
@@ -3439,10 +3465,16 @@ mod tests {
         let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
             panic!("rows");
         };
+        // A price column copies one amount the cited text shows, never an
+        // amount it does not.
+        assert!(
+            matches!(rows.items()[0].fields()[1].value(), SemanticExtractedValue::Text(price) if price.as_str() == "3249 PLN")
+        );
+        assert_eq!(rows.items()[1].fields().len(), 2);
         let urls: Vec<_> = rows
             .items()
             .iter()
-            .map(|row| match row.fields()[1].value() {
+            .map(|row| match row.fields().last().unwrap().value() {
                 SemanticExtractedValue::Url(url) => url.as_str().to_owned(),
                 _ => panic!("url"),
             })
@@ -3570,11 +3602,7 @@ mod tests {
                 json!(["@r2"]),
                 Some(SemanticExtractionError::VerbatimMismatch),
             ),
-            (
-                "Quarterly summary",
-                json!(["@r1", "@r2"]),
-                Some(SemanticExtractionError::VerbatimMismatch),
-            ),
+            ("Quarterly summary", json!(["@r1", "@r2"]), None),
             (
                 "Private customer note",
                 json!(["@r5"]),
