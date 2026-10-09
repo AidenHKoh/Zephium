@@ -1,8 +1,11 @@
 <script lang="ts">
+  import type { Component } from "svelte";
   import {
     accountSession as session,
+    credits,
     offerKey,
     planName,
+    positive,
     priceLabel,
     shortDate,
     usageTone,
@@ -23,6 +26,8 @@
   const paid = $derived(subscription?.status === "active");
   const billing = $derived(account?.billing === true);
   const hosted = $derived(account?.hosted_models !== false);
+  const amount = (units: string | null | undefined) =>
+    usage ? credits(units, usage.unit_scale) : null;
 
   type Plan = Extract<AccountOfferV1, { kind: "plan" }>;
   type TopUp = Extract<AccountOfferV1, { kind: "top_up" }>;
@@ -67,6 +72,16 @@
     return planName(value) ?? value;
   }
 
+  function topUpLine(offer: TopUp) {
+    const added = offer.units ? credits(offer.units, usage?.unit_scale ?? 1_000_000) : null;
+    if (added && offer.expires_days)
+      return m.account_topup_adds_days({ amount: added, days: offer.expires_days });
+    if (added) return m.account_topup_adds({ amount: added });
+    return offer.expires_days
+      ? m.account_topup_desc_days({ days: offer.expires_days })
+      : m.account_topup_desc();
+  }
+
   const usageLine = $derived.by(() => {
     const percent = usage?.used_percent;
     if (percent == null) return usage ? m.account_usage_none() : m.account_usage_loading();
@@ -75,7 +90,28 @@
       ? m.account_usage_used({ percent, date })
       : m.account_usage_used_nodate({ percent });
   });
-
+  const allowanceLine = $derived.by(() => {
+    const used = amount(usage?.allowance_used ?? "0");
+    const total = amount(usage?.allowance_total);
+    return used && total && positive(usage?.allowance_total)
+      ? m.account_allowance_value({ used, total })
+      : null;
+  });
+  const bonusLine = $derived.by(() => {
+    if (!positive(usage?.bonus_remaining)) return null;
+    const left = amount(usage?.bonus_remaining);
+    if (!left) return null;
+    const date = shortDate(usage?.bonus_expires_at);
+    return date
+      ? m.account_bonus_value({ amount: left, date })
+      : m.account_bonus_value_nodate({ amount: left });
+  });
+  const held = $derived(positive(usage?.held) ? amount(usage?.held) : null);
+  const dailyLine = $derived.by(() => {
+    const limit = amount(usage?.daily_limit);
+    if (!limit) return null;
+    return m.account_daily_value({ spent: amount(usage?.spent_today ?? "0") ?? "0", limit });
+  });
   const planLine = $derived.by(() => {
     if (!subscription || subscription.status === "inactive") return undefined;
     if (subscription.status === "unknown") return m.account_plan_unknown();
@@ -85,6 +121,21 @@
       ? m.account_plan_ends({ date })
       : m.account_plan_renews({ date });
   });
+  const unconfirmed = $derived(
+    (account?.unsettled ?? []).some((request) => request.state !== "settled"),
+  );
+
+  /** Usage history is loaded only when someone asks to see it. */
+  let History = $state.raw<Component | null>(null);
+  let loadingHistory = $state(false);
+  async function showHistory() {
+    loadingHistory = true;
+    try {
+      History = (await import("./AccountHistory.svelte")).default;
+    } finally {
+      loadingHistory = false;
+    }
+  }
 
   const billingFault = $derived(
     fault && (fault.action === "buy" || fault.action === "manage")
@@ -119,16 +170,37 @@
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={usage.used_percent}
+          aria-valuetext={allowanceLine ?? undefined}
           data-tone={usageTone(usage.used_percent)}
         >
           <span style:inline-size={`${usage.used_percent}%`}></span>
-        </div>{/if}
+        </div>
+        {#if allowanceLine}<p class="caption">{allowanceLine}</p>{/if}{/if}
     </div>
+    {#if bonusLine}<SettingsRow title={m.account_bonus_title()}
+        ><span class="value">{bonusLine}</span></SettingsRow
+      >{/if}
     <SettingsRow title={m.account_extra_title()}
-      ><span class="value">{usage?.extra ? m.account_extra_left() : m.account_extra_none()}</span
+      ><span class="value"
+        >{positive(usage?.purchased_remaining) && amount(usage?.purchased_remaining)
+          ? m.account_extra_value({ amount: amount(usage?.purchased_remaining)! })
+          : m.account_extra_none()}</span
       ></SettingsRow
     >
+    {#if held}<SettingsRow title={m.account_held_title()}
+        ><span class="value">{m.account_held_value({ amount: held })}</span></SettingsRow
+      >{/if}
+    {#if dailyLine}<SettingsRow title={m.account_daily_title()}
+        ><span class="value">{dailyLine}</span></SettingsRow
+      >{/if}
+    {#if History}<History />
+    {:else}<SettingsRow title={m.account_history_row()} description={m.account_history_row_desc()}
+        ><Button size="compact" pending={loadingHistory} onclick={() => void showHistory()}
+          >{m.account_history_show()}</Button
+        ></SettingsRow
+      >{/if}
   </SettingsGroup>
+  {#if unconfirmed}<p class="note" role="status">{m.account_unsettled()}</p>{/if}
 
   {#if billing}
     <SettingsGroup title={m.account_plan_group()}>
@@ -161,12 +233,7 @@
       {/each}
       {#each topups as offer (offer.id)}
         {@const price = priceLabel(offer.price)}
-        <SettingsRow
-          title={m.account_topup_title()}
-          description={offer.expires_days
-            ? m.account_topup_desc_days({ days: offer.expires_days })
-            : m.account_topup_desc()}
-        >
+        <SettingsRow title={offer.name ?? m.account_topup_title()} description={topUpLine(offer)}>
           <Button
             pending={buying === offerKey(offer)}
             disabled={!!busy}
@@ -198,11 +265,16 @@
   }
 
   .usage-copy p,
-  .value {
+  .value,
+  .caption {
     margin: 2px 0 0;
     color: var(--color-muted);
     font-size: var(--text-label);
     font-variant-numeric: tabular-nums;
+  }
+
+  .caption {
+    margin: -4px 0 0;
   }
 
   .meter {

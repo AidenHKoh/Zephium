@@ -6,8 +6,10 @@
 import {
   commands,
   type AccountFaultV1,
+  type AccountHistoryV1,
   type AccountPurchaseV1,
   type AccountReplyV1,
+  type AccountRequestV1,
   type AccountSessionV1,
   type AccountV1,
 } from "$shared/ipc/bindings";
@@ -17,17 +19,25 @@ import { observe } from "$shared/lib/observe";
 const TIMEOUT = 15_000;
 /** Signing out tells the server first, and must not hang on it. */
 const SIGN_OUT_TIMEOUT = 30_000;
+/** Export waits on the person choosing where to save. */
+const EXPORT_TIMEOUT = 10 * 60_000;
 
 type AccountAction =
   | "send"
   | "verify"
   | "sign_out"
+  | "sign_out_all"
   | "buy"
   | "manage"
   | "revoke"
   | "server"
   | "deletion_code"
-  | "delete";
+  | "delete"
+  | "name"
+  | "reauth"
+  | "email_code"
+  | "email_change"
+  | "export";
 
 type AccountFault = {
   action: AccountAction;
@@ -40,6 +50,7 @@ let current = $state.raw<AccountV1 | null>(null);
 let unreachable = $state(false);
 let busy = $state<AccountAction | null>(null);
 let lastFault = $state.raw<AccountFault | null>(null);
+let moved = $state<string | null>(null);
 let users = 0;
 let stop: (() => void) | null = null;
 let generation = 0;
@@ -57,6 +68,7 @@ function adopt(reply: AccountReplyV1 | undefined) {
   }
   unreachable = false;
   current = reply.account;
+  if (current.signed_in) moved = null;
 }
 
 async function read() {
@@ -103,6 +115,7 @@ export function release() {
   stop = null;
   busy = null;
   lastFault = null;
+  moved = null;
 }
 
 async function act(
@@ -154,7 +167,63 @@ export const setServer = (server: string | null) =>
 export const sendDeletionCode = () => act("deletion_code", () => commands.accountDeletionCode());
 export const deleteAccount = (code: string) => act("delete", () => commands.accountDelete(code));
 export const signOut = () => act("sign_out", () => commands.accountSignOut(), SIGN_OUT_TIMEOUT);
+export const signOutEverywhere = () =>
+  act("sign_out_all", () => commands.accountSignOutEverywhere(), SIGN_OUT_TIMEOUT);
 export const revoke = (id: string) => act("revoke", () => commands.accountRevokeSession(id));
+export const setName = (name: string | null) => act("name", () => commands.accountSetName(name));
+/** Emails a sign-in code to the account's own address, for a change that needs a fresh session. */
+export const sendReauthCode = () => act("reauth", () => commands.accountReauthCode());
+export const sendEmailCode = (email: string) =>
+  act("email_code", () => commands.accountEmailCode(email));
+
+/** The address the account just moved to, until signing in again. */
+export const movedTo = () => moved;
+
+/**
+ * Moves the account to `email`. The server ends every session when it does,
+ * so a sign-in code goes to the new address straight away.
+ */
+export async function changeEmail(email: string, code: string): Promise<boolean> {
+  if (!(await act("email_change", () => commands.accountChangeEmail(email, code)))) return false;
+  moved = email;
+  await sendCode(email);
+  return true;
+}
+
+/** Saves the account's export where the person chooses. */
+export async function exportData(): Promise<"saved" | "cancelled" | AccountFaultV1> {
+  if (busy) return "cancelled";
+  busy = "export";
+  lastFault = null;
+  const started = generation;
+  const response = await observe(
+    Promise.resolve().then(() => commands.accountExport()),
+    EXPORT_TIMEOUT,
+  );
+  if (started !== generation) return "cancelled";
+  busy = null;
+  if (response.state !== "received") return "offline";
+  if (response.value.fault) return response.value.fault;
+  return response.value.saved ? "saved" : "cancelled";
+}
+
+export async function usageHistory(cursor: string | null): Promise<AccountHistoryV1> {
+  const response = await observe(
+    Promise.resolve().then(() => commands.accountUsageHistory(cursor)),
+    TIMEOUT,
+  );
+  if (response.state === "received") return response.value;
+  return { requests: [], next_cursor: null, fault: "offline" };
+}
+
+export async function receipt(id: string): Promise<AccountRequestV1 | AccountFaultV1> {
+  const response = await observe(
+    Promise.resolve().then(() => commands.accountReceipt(id)),
+    TIMEOUT,
+  );
+  if (response.state !== "received") return "offline";
+  return response.value.request ?? response.value.fault ?? "server";
+}
 
 /** Goes back to entering an address; nothing is sent. */
 export async function cancelCode() {
