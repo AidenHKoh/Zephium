@@ -1712,6 +1712,52 @@ fn startup_loading_signal_distinguishes_skeletons_from_usable_progress_pages() {
                         .unwrap();
                 assert_eq!(super::unrendered(&candidate), expected);
             }
+            // A results page that says it is still loading them waits longer;
+            // a status about something else, or a long line, does not.
+            for (children, expected) in [
+                (
+                    vec![serde_json::json!({"r":"status", "n":"Loading trip planner"})],
+                    true,
+                ),
+                (
+                    vec![serde_json::json!({"r":"progress", "t":"Wyszukiwanie ofert…"})],
+                    true,
+                ),
+                (
+                    vec![serde_json::json!({"r":"paragraph", "t":"Loading bay opening hours"})],
+                    false,
+                ),
+                (
+                    vec![serde_json::json!({"r":"status", "n":"3 results found"})],
+                    false,
+                ),
+            ] {
+                let mut nodes = vec![serde_json::json!({"k":1,"r":"document","o":16})];
+                for (index, mut node) in children.into_iter().enumerate() {
+                    node["k"] = (index + 2).into();
+                    node["p"] = 0.into();
+                    nodes.push(node);
+                }
+                let frame = &source.frames()[0];
+                let wire = serde_json::to_vec(&serde_json::json!({
+                    "v":1,"i":frame.invocation().get(),"g":frame.generation().get(),"c":"complete","n":nodes
+                })).unwrap();
+                let snapshot = decode_semantic_snapshot(
+                    SemanticDecodeContext::new(
+                        frame.invocation(),
+                        frame.frame().clone(),
+                        frame.generation(),
+                    ),
+                    &wire,
+                )
+                .unwrap();
+                let candidate =
+                    SemanticObservationAssembler::new(source.request().clone(), snapshot)
+                        .unwrap()
+                        .finish()
+                        .unwrap();
+                assert_eq!(super::announces_loading(&candidate), expected);
+            }
             Ok(AgentWorkTaskProgress::Complete)
         }
         fn assess(
