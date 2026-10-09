@@ -1380,8 +1380,11 @@
       case "spinbutton":
         return readonly || fillControlKind(descriptor, "") === 0 ? 1 | 8 : 1 | 2 | 8;
       case "combobox":
-        // Role alone grants neither Fill nor Select.
-        return readonly ? 1 | 8 : descriptor.tag === "select" ? 1 | 4 | 8 :
+        // Role alone grants neither Fill nor Select. A native select is only
+        // chosen in: a click or key opens WebKit's own menu, whose modal loop
+        // holds the page until someone closes it.
+        if (descriptor.tag === "select") return readonly ? 0 : 4;
+        return readonly ? 1 | 8 :
           fillControlKind(descriptor, "") !== 0 ? 1 | 2 | 8 : 1 | 8;
       case "listbox":
         return 4 | 8 | (scrollElement(element) === null ? 0 : 16);

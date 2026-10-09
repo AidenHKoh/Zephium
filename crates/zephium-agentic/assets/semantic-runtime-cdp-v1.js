@@ -1276,7 +1276,8 @@ return readonly ? 1 | 8 : 1 | 2 | 8;
 case "spinbutton":
 return readonly || fillControlKind(descriptor, "") === 0 ? 1 | 8 : 1 | 2 | 8;
 case "combobox":
-return readonly ? 1 | 8 : descriptor.tag === "select" ? 1 | 4 | 8 :
+if (descriptor.tag === "select") return readonly ? 0 : 4;
+return readonly ? 1 | 8 :
 fillControlKind(descriptor, "") !== 0 ? 1 | 2 | 8 : 1 | 8;
 case "listbox":
 return 4 | 8 | (scrollElement(element) === null ? 0 : 16);

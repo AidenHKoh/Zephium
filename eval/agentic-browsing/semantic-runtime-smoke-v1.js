@@ -746,8 +746,10 @@ for (const name of ["Editable with control", "Editable with media", "Deeply nest
 }
 const languageNode = initial.n.find((node) => node.n === "Language");
 assert(languageNode && languageNode.r === "combobox", "visible native select missing");
-assert(languageNode.o === 13 && languageNode.v?.k === "ordinal" && languageNode.fs !== 1,
-  "native select acquired text-fill capability");
+// A native select is only chosen in: a click or key would open WebKit's own
+// menu, whose modal loop holds the page.
+assert(languageNode.o === 4 && languageNode.v?.k === "ordinal" && languageNode.fs !== 1,
+  "native select acquired text-fill, click or key capability");
 for (const [name, value] of [["Editable suggestions", ""],
   ["Editable suggestion host", "host query"]]) {
   const combo = initial.n.find(node => node.n === name);
