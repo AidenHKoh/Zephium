@@ -1017,6 +1017,18 @@ impl WorkDocumentNavigation {
             };
         }
         let site = state.policy.follows_site_loads();
+        // Navigation IDs are WebKit object addresses, which a later load can
+        // reuse: a superseded load has already started, so a start while the
+        // gate waits for its armed load is that load, whatever its ID.
+        if site
+            && state.superseded == Some(event.id)
+            && state.phase == Phase::Armed
+            && state.requested
+            && state.native_id.is_none()
+            && event.phase == E::Started
+        {
+            state.superseded = None;
+        }
         if site && state.superseded == Some(event.id) {
             return Ok((false, false));
         }
@@ -1539,6 +1551,22 @@ mod tests {
             .unwrap();
         settle(&gate, "https://app.slack.com/client/T1");
         assert!(gate.ready(Some("https://app.slack.com/client/T1")));
+        assert!(!gate.failed());
+    }
+    #[test]
+    fn a_site_load_that_reuses_a_superseded_load_id_is_still_followed() {
+        let start = "https://www.example.com/";
+        let gate = site_gate(start);
+        gate.observe(event(1, E::Started, start)).unwrap();
+        gate.observe(event(1, E::Committed, start)).unwrap();
+        assert!(gate.allows("https://www.example.com/?reloaded=1"));
+        // WebKit hands the next load the address the superseded one had.
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, "https://www.example.com/?reloaded=1"))
+                .unwrap();
+        }
+        settle(&gate, "https://www.example.com/?reloaded=1");
+        assert!(gate.ready(Some("https://www.example.com/?reloaded=1")));
         assert!(!gate.failed());
     }
     fn public_gate(
