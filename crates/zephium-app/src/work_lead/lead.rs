@@ -65,6 +65,8 @@ struct LeadState {
     steers: BTreeSet<WorkStepId>,
     searches: usize,
     reads: usize,
+    /// The browser parts this run started, by the site each works on.
+    sites: Vec<parts::SitePart>,
 }
 
 pub(crate) struct Lead<'a, B> {
@@ -152,6 +154,32 @@ where
         };
         *used += 1;
         *used <= cap
+    }
+    /// Whether a browser part may start on `site` now, given the parts this
+    /// run already ran there; a part that may is counted as running there.
+    pub(crate) fn claim_site(&self, site: &str, title: &str) -> parts::SiteTurn {
+        let mut state = self.state();
+        let turn = parts::site_turn(&state.sites, site);
+        if !matches!(turn, parts::SiteTurn::Refuse(_)) {
+            state.sites.push(parts::SitePart {
+                site: site.to_owned(),
+                title: title.to_owned(),
+                ended: None,
+            });
+        }
+        turn
+    }
+    /// How the part that claimed `site` under `title` ended.
+    pub(crate) fn end_site(&self, site: &str, title: &str, ended: parts::SiteEnd) {
+        let mut state = self.state();
+        if let Some(part) = state
+            .sites
+            .iter_mut()
+            .rev()
+            .find(|p| p.site == site && p.title == title && p.ended.is_none())
+        {
+            part.ended = Some(ended);
+        }
     }
     pub(crate) fn release_part(&self) {
         let mut state = self.state();

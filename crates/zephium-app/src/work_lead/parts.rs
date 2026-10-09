@@ -164,6 +164,119 @@ impl PartReport {
     }
 }
 
+/// A browser part this run started on a site, and how it ended.
+pub(crate) struct SitePart {
+    pub site: String,
+    pub title: String,
+    pub ended: Option<SiteEnd>,
+}
+pub(crate) struct SiteEnd {
+    pub state: WorkPartStateV1,
+    pub need: Option<WorkPartNeedV1>,
+    pub summary: Option<String>,
+    /// Pages the part opened on the site.
+    pub pages: usize,
+}
+/// Whether another browser part may start on a site in this run.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum SiteTurn {
+    Go,
+    /// Once more, another way in: the words go into its brief.
+    Retry(String),
+    /// Not again: the words tell the lead why and what to do instead.
+    Refuse(String),
+}
+
+/// What the parts that already ran on `site` in this request allow: a site
+/// is read once per request; one that failed for a reason another way in
+/// can fix is tried once more, differently; one that needs the person, or
+/// failed twice, is not tried again.
+pub(crate) fn site_turn(sites: &[SitePart], site: &str) -> SiteTurn {
+    let mine: Vec<&SitePart> = sites.iter().filter(|p| p.site == site).collect();
+    if let Some(running) = mine.iter().find(|p| p.ended.is_none()) {
+        return SiteTurn::Refuse(format!(
+            "Part {} is already working on {site}; its report comes back when it ends. Never start a second part on the same site.",
+            running.title
+        ));
+    }
+    let ended: Vec<(&SitePart, &SiteEnd)> = mine
+        .iter()
+        .filter_map(|p| p.ended.as_ref().map(|end| (*p, end)))
+        .filter(|(_, end)| end.state != WorkPartStateV1::Stopped)
+        .collect();
+    if let Some((part, end)) = ended
+        .iter()
+        .find(|(_, end)| end.state == WorkPartStateV1::Done)
+    {
+        return SiteTurn::Refuse(format!(
+            "Part {} already read {site} in this request{}: build the result from its digest and the objects on its row. A request reads a site once.",
+            part.title,
+            end.summary
+                .as_deref()
+                .map(|s| format!(" ({s})"))
+                .unwrap_or_default()
+        ));
+    }
+    if let Some((part, need)) = ended.iter().find_map(|(part, end)| {
+        end.need
+            .as_ref()
+            .filter(|need| blocks(need))
+            .map(|need| (part, need))
+    }) {
+        return SiteTurn::Refuse(format!(
+            "{site} needs {}; part {}'s row shows the fix. Don't start another part there: build the result from what the other parts found, and say in the reply what {site} needs.",
+            need_words(need),
+            part.title
+        ));
+    }
+    let pages: usize = ended.iter().map(|(_, end)| end.pages).sum();
+    if ended.len() >= 2 || pages >= 2 {
+        return SiteTurn::Refuse(format!(
+            "{site} was tried {} times in this request and gave nothing. Don't try it again: build the result from what you have and say in the reply that {site} could not be read.",
+            pages.max(ended.len())
+        ));
+    }
+    match ended.first() {
+        Some((_, end)) => SiteTurn::Retry(format!(
+            "An earlier part on {site} could not do its job{}. Go in another way: browse the site's front page and use its own search with fewer words, or open the page that lists what the goal needs. If that fails as well, finish at once and say what {site} did not show.",
+            end.need
+                .as_ref()
+                .map(|need| format!(" ({})", need_words(need)))
+                .unwrap_or_default()
+        )),
+        None => SiteTurn::Go,
+    }
+}
+
+/// A need another try on the same site cannot meet: the person must act.
+fn blocks(need: &WorkPartNeedV1) -> bool {
+    !matches!(
+        need,
+        WorkPartNeedV1::Retry {
+            reason: None
+                | Some(
+                    WorkPartReasonV1::CouldntRead
+                        | WorkPartReasonV1::NotFound
+                        | WorkPartReasonV1::SiteError
+                        | WorkPartReasonV1::NoAnswer
+                ),
+            ..
+        }
+    )
+}
+
+/// The site a browser part works on, by its registrable domain.
+fn part_site(spec: &PartSpec) -> Option<String> {
+    if spec.helper != WorkHelperV1::Browser {
+        return None;
+    }
+    let host = spec.service.as_ref()?.host.as_deref()?;
+    crate::work_sites::site_of(&format!("https://{host}/")).or_else(|| Some(host.to_owned()))
+}
+
+/// Said to the lead once a page waited its whole turn for the browser.
+const BROWSER_DOWN: &str = "Pages cannot open in this request now: the browser did not take the last page. Don't start browser parts or read pages: build the result from what was found, use web_search for what is missing, and say in the reply which sites could not be opened.";
+
 enum Kit {
     Browser,
     Research,
@@ -178,7 +291,38 @@ where
 {
     /// Runs one part to its end and returns what the lead reads.
     pub(crate) async fn part(&self, mut spec: PartSpec) -> (String, bool) {
+        if spec.helper == WorkHelperV1::Browser && self.run.browser_down() {
+            return (BROWSER_DOWN.into(), true);
+        }
+        let site = part_site(&spec);
+        if let Some(site) = &site {
+            match self.claim_site(site, &spec.title) {
+                SiteTurn::Refuse(why) => return (why, true),
+                SiteTurn::Retry(note) => {
+                    spec.brief = format!("{}\n{note}", spec.brief).trim().to_owned();
+                    // Its results page is what gave nothing.
+                    spec.search = None;
+                }
+                SiteTurn::Go => {}
+            }
+        }
+        let title = spec.title.clone();
+        let release_site = |state: WorkPartStateV1, need, summary, pages| {
+            if let Some(site) = &site {
+                self.end_site(
+                    site,
+                    &title,
+                    SiteEnd {
+                        state,
+                        need,
+                        summary,
+                        pages,
+                    },
+                );
+            }
+        };
         if !self.claim_part() {
+            release_site(WorkPartStateV1::Stopped, None, None, 0);
             return (
                 format!("A run holds at most {MAX_WORK_PARTS} parts; finish the work with the parts you have"),
                 true,
@@ -198,6 +342,7 @@ where
             need: None,
         };
         if self.run.part(fact.clone()).await.is_err() {
+            release_site(WorkPartStateV1::Stopped, None, None, 0);
             return ("The part could not be recorded".into(), true);
         }
         let _slot = self.slots.acquire().await.ok();
@@ -243,6 +388,28 @@ where
             .map(|s| clip(s.lines().next().unwrap_or(""), 78))
             .filter(|s| !s.trim().is_empty());
         let _ = self.run.part(fact.clone()).await;
+        let pages = match &site {
+            Some(site) => self
+                .run
+                .execution()
+                .await
+                .map(|execution| {
+                    execution
+                        .steps
+                        .iter()
+                        .filter(|s| s.part == Some(fact.id))
+                        .filter(|s| match &s.kind {
+                            WorkStepKindV1::Read { url, .. } => {
+                                crate::work_sites::site_of(url).as_deref() == Some(site.as_str())
+                            }
+                            _ => false,
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
+            None => 0,
+        };
+        release_site(report.state, fact.need.clone(), fact.summary.clone(), pages);
         self.run.report(super::WorkLeadDiagnostic::PartEnded {
             helper: spec.helper,
             state: report.state,
@@ -1886,6 +2053,90 @@ mod tests {
         ] {
             assert!(!plain_page(refused), "{refused}");
         }
+    }
+
+    #[test]
+    fn a_site_is_read_once_and_retried_once_another_way() {
+        let part =
+            |title: &str, ended: Option<(WorkPartStateV1, Option<WorkPartNeedV1>, usize)>| {
+                SitePart {
+                    site: "x-kom.pl".into(),
+                    title: title.into(),
+                    ended: ended.map(|(state, need, pages)| SiteEnd {
+                        state,
+                        need,
+                        summary: Some("3 offers".into()),
+                        pages,
+                    }),
+                }
+            };
+        let retry = |reason| {
+            Some(WorkPartNeedV1::Retry {
+                host: Some("x-kom.pl".into()),
+                reason,
+            })
+        };
+        assert_eq!(site_turn(&[], "x-kom.pl"), SiteTurn::Go);
+        let refused =
+            |sites: &[SitePart]| matches!(site_turn(sites, "x-kom.pl"), SiteTurn::Refuse(_));
+        assert!(refused(&[part("x-kom", None)]));
+        assert!(refused(&[part(
+            "x-kom",
+            Some((WorkPartStateV1::Done, None, 1))
+        )]));
+        assert!(matches!(
+            site_turn(
+                &[part(
+                    "x-kom",
+                    Some((
+                        WorkPartStateV1::Failed,
+                        retry(Some(WorkPartReasonV1::CouldntRead)),
+                        1
+                    ))
+                )],
+                "x-kom.pl"
+            ),
+            SiteTurn::Retry(_)
+        ));
+        // Tried twice already inside the part, or needs the person: not again.
+        assert!(refused(&[part(
+            "x-kom",
+            Some((
+                WorkPartStateV1::Failed,
+                retry(Some(WorkPartReasonV1::CouldntRead)),
+                2
+            ))
+        )]));
+        assert!(refused(&[part(
+            "x-kom",
+            Some((
+                WorkPartStateV1::Failed,
+                retry(Some(WorkPartReasonV1::BlockedByCheck)),
+                1
+            ))
+        )]));
+        assert!(refused(&[part(
+            "x-kom",
+            Some((
+                WorkPartStateV1::Failed,
+                Some(WorkPartNeedV1::SignIn {
+                    host: "x-kom.pl".into()
+                }),
+                1
+            ))
+        )]));
+        // A stopped part never ran its course: the site is free again.
+        assert_eq!(
+            site_turn(
+                &[part("x-kom", Some((WorkPartStateV1::Stopped, None, 1)))],
+                "x-kom.pl"
+            ),
+            SiteTurn::Go
+        );
+        assert_eq!(
+            site_turn(&[part("x-kom", None)], "allegro.pl"),
+            SiteTurn::Go
+        );
     }
 
     #[test]

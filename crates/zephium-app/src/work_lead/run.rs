@@ -82,6 +82,10 @@ pub(crate) struct LeadRun {
     /// Connections the person chose for this run where they were asked for
     /// something broader (their day's sources): no second question.
     accepted: Mutex<Vec<String>>,
+    /// A page waited its whole turn for the browser and was never seated:
+    /// the run's page lane will not take another, so later pages fail at
+    /// once instead of each waiting as long again.
+    browser_down: std::sync::atomic::AtomicBool,
     diagnostic: Option<fn(super::WorkLeadDiagnostic)>,
 }
 
@@ -141,8 +145,16 @@ impl LeadRun {
                 unreadable: 0,
             }),
             accepted: Mutex::new(Vec::new()),
+            browser_down: std::sync::atomic::AtomicBool::new(false),
             diagnostic,
         }
+    }
+    pub(crate) fn browser_down(&self) -> bool {
+        self.browser_down.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub(crate) fn set_browser_down(&self) {
+        self.browser_down
+            .store(true, std::sync::atomic::Ordering::Release);
     }
     /// The person chose this connection for the run, by the answer that
     /// uses it ("Use Slack").

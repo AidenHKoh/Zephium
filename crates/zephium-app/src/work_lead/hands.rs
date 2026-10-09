@@ -25,6 +25,8 @@ const SEARCH_ANSWER_CHARS: usize = 2_400;
 const SEARCH_SOURCES: usize = 8;
 const RECORD_LINES: usize = 32;
 const FILE_TEXT_BYTES: usize = 6 * 1024;
+/// A page's note when it waited its whole turn and the browser never took it.
+const NOT_READY: &str = "The browser was not ready for this page";
 
 /// The browser closure the host gives the run, shared by every part, with
 /// its gates: at most three pages live, and at most one page task per site,
@@ -315,6 +317,14 @@ where
         let mut admitted = Vec::with_capacity(requests.len());
         for request in requests {
             if let WorkStepKindV1::Read { url, .. } = &request.kind {
+                if self.run.browser_down() {
+                    refused.push((
+                        request.call,
+                        format!("Failed: {NOT_READY}; pages cannot open in this request now"),
+                        true,
+                    ));
+                    continue;
+                }
                 if let Err(why) = self.run.admit_address(url, self.part).await {
                     refused.push((request.call, why, true));
                     continue;
@@ -483,6 +493,13 @@ where
                     .collect()
             })
             .unwrap_or_default();
+        if new.iter().any(|step| {
+            matches!(step.kind, WorkStepKindV1::Read { .. })
+                && step.status != WorkStepStatus::Succeeded
+                && step.note.as_deref() == Some(NOT_READY)
+        }) {
+            self.run.set_browser_down();
+        }
         if new.iter().any(|step| {
             step.account.is_some()
                 || matches!(
