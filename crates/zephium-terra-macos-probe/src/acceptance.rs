@@ -786,11 +786,15 @@ fn page_rows(execution: &zephium_core::work::runtime::WorkExecutionFact) {
                     .iter()
                     .filter(|row| {
                         row.iter().any(|cell| {
-                            matches!(&cell.value,
-                                zephium_core::work::artifact::WorkCellValue::Money { .. })
-                                || matches!(&cell.value,
+                            matches!(
+                                &cell.value,
+                                zephium_core::work::artifact::WorkCellValue::Money { .. }
+                            ) || matches!(&cell.value,
                                     zephium_core::work::artifact::WorkCellValue::Text { text }
-                                        if text.chars().any(|c| "$€£¥".contains(c)) || text.contains("zł"))
+                                        if text.chars().any(|c| "$€£¥".contains(c))
+                                            || ["zł", "PLN", "USD", "EUR", "GBP"]
+                                                .iter()
+                                                .any(|code| text.contains(code)))
                         })
                     })
                     .count();
