@@ -30,42 +30,36 @@ pub(crate) fn normalize_extraction_output(
 ) -> Option<NormalizedExtraction> {
     let mut root = parse_object(bytes)?;
     let mut dropped = 0;
+    let version = root
+        .remove("v")
+        .filter(Value::is_u64)
+        .unwrap_or_else(|| SEMANTIC_EXTRACTION_SCHEMA_VERSION.into());
+    let schema_id = root
+        .remove("schema")
+        .filter(Value::is_u64)
+        .unwrap_or_else(|| schema.id().get().into());
     let fields_value = match root.remove("fields") {
         Some(fields) => fields,
-        None => {
-            // A bare record list or a bare field map is the one field it fills.
-            if let [only] = schema.fields() {
-                if only.kind() == SemanticExtractionValueKind::Rows {
-                    let rows = root
-                        .remove(only.name())
-                        .or_else(|| root.remove("items"))
-                        .or_else(|| root.remove("rows"))
-                        .or_else(|| root.remove("records"))?;
-                    Value::Array(vec![
-                        serde_json::json!({"name": only.name(), "value": rows}),
-                    ])
-                } else {
-                    Value::Object(root.clone())
-                }
-            } else {
-                Value::Object(root.clone())
+        // A bare record list is the one rows field it fills; a bare map
+        // names its fields.
+        None => match schema.fields() {
+            [only] if only.kind() == SemanticExtractionValueKind::Rows => {
+                let rows = root
+                    .remove(only.name())
+                    .or_else(|| root.remove("items"))
+                    .or_else(|| root.remove("rows"))
+                    .or_else(|| root.remove("records"))?;
+                Value::Array(vec![
+                    serde_json::json!({"name": only.name(), "value": rows}),
+                ])
             }
-        }
+            _ => Value::Object(root),
+        },
     };
     let fields = normalize_fields(schema.fields(), fields_value, &mut dropped);
     let mut output = Map::new();
-    output.insert(
-        "v".into(),
-        root.remove("v")
-            .filter(Value::is_u64)
-            .unwrap_or_else(|| SEMANTIC_EXTRACTION_SCHEMA_VERSION.into()),
-    );
-    output.insert(
-        "schema".into(),
-        root.remove("schema")
-            .filter(Value::is_u64)
-            .unwrap_or_else(|| schema.id().get().into()),
-    );
+    output.insert("v".into(), version);
+    output.insert("schema".into(), schema_id);
     output.insert("fields".into(), Value::Array(fields));
     Some(NormalizedExtraction {
         value: Value::Object(output),
