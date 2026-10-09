@@ -125,6 +125,35 @@ fn says_loading(observation: &SemanticObservation) -> bool {
         })
 }
 
+/// Words a status line opens with while a page fetches what it shows.
+const LOADING_WORDS: [&str; 9] = [
+    "loading",
+    "searching",
+    "please wait",
+    "fetching",
+    "ładowanie",
+    "wczytywanie",
+    "wyszukiwanie",
+    "wird geladen",
+    "chargement",
+];
+
+/// A page that says, in a status or progress line, that it is still loading
+/// what it shows (rome2rio's "Loading trip planner"): scheduling evidence
+/// only, like a placeholder.
+fn announces_loading(observation: &SemanticObservation) -> bool {
+    observation
+        .frames()
+        .iter()
+        .flat_map(SemanticSnapshot::nodes)
+        .filter(|node| matches!(node.role(), SemanticRole::Status | SemanticRole::Progress))
+        .flat_map(|node| [node.name(), node.text()].into_iter().flatten())
+        .any(|words| {
+            let words = words.as_str().trim().to_lowercase();
+            words.len() <= 64 && LOADING_WORDS.iter().any(|lead| words.starts_with(lead))
+        })
+}
+
 /// A page with next to nothing rendered yet: a client-side app still
 /// booting, or a bot check's empty shell about to reload. Frames count as
 /// content: a challenge widget is judged by its own frame.

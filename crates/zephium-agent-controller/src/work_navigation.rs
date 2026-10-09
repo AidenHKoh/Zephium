@@ -634,12 +634,9 @@ impl AgentWorkController {
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
     ) -> Result<SemanticObservation, AgentWorkFailure> {
-        const DELAYS_MS: [u64; 4] = [250, 500, 1000, 1500];
+        const DELAYS_MS: [u64; 6] = [250, 500, 1000, 1500, 2000, 2000];
         let mut observation = Self::observe(state, worker, browser).await?;
-        let deadline = Instant::now()
-            .checked_add(Duration::from_secs(4))
-            .ok_or(AgentWorkFailure::Deadline)?
-            .min(state.native.deadline);
+        let started = Instant::now();
         // A site page that has rendered next to nothing yet (an app booting,
         // results still on their way) is waited out like a first page.
         let site = state
@@ -647,7 +644,14 @@ impl AgentWorkController {
             .as_ref()
             .is_some_and(AgentNavigationDiscovery::is_site_session);
         for delay in DELAYS_MS {
+            // A results page still saying it loads them gets longer.
+            let announced = site && super::announces_loading(&observation);
+            let deadline = started
+                .checked_add(Duration::from_secs(if announced { 8 } else { 4 }))
+                .ok_or(AgentWorkFailure::Deadline)?
+                .min(state.native.deadline);
             if !(has_dominant_loading_placeholders(&observation)
+                || announced
                 || (site && super::unrendered(&observation)))
                 || state
                     .native
