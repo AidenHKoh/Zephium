@@ -296,6 +296,39 @@ fn blocks(need: &WorkPartNeedV1) -> bool {
     )
 }
 
+/// A goal about what anyone sees on a service's site (its pricing, plans,
+/// features or docs), not the person's own workspace there: it reads the
+/// public site, and the person's connection is no way in to it.
+fn public_goal(spec: &PartSpec) -> bool {
+    const PUBLIC: [&str; 12] = [
+        "pricing",
+        "price",
+        "plans",
+        "per seat",
+        "per user",
+        "features",
+        "documentation",
+        "docs",
+        "changelog",
+        "careers",
+        "blog",
+        "compare",
+    ];
+    const OWN: [&str; 9] = [
+        "my ",
+        "mine",
+        "inbox",
+        "assigned",
+        "notification",
+        "unread",
+        "person's",
+        "user's",
+        "our ",
+    ];
+    let text = format!("{} {} {}", spec.title, spec.goal, spec.brief).to_lowercase();
+    PUBLIC.iter().any(|word| text.contains(word)) && !OWN.iter().any(|word| text.contains(word))
+}
+
 /// The site a browser part works on, by its registrable domain.
 fn part_site(spec: &PartSpec) -> Option<String> {
     if spec.helper != WorkHelperV1::Browser {
@@ -604,8 +637,9 @@ where
         .personal(
             spec.helper == WorkHelperV1::Connection
                 || spec.declined.is_some()
-                || super::route::brand(spec.service.as_ref(), &spec.title)
-                    .is_some_and(|brand| super::route::site(&brand).is_some()),
+                || (!public_goal(spec)
+                    && super::route::brand(spec.service.as_ref(), &spec.title)
+                        .is_some_and(|brand| super::route::site(&brand).is_some())),
         );
         let mut tools: Vec<WorkModelTool> = match &kit {
             Kit::Browser => vec![
@@ -1091,6 +1125,9 @@ where
         let Some(brand) = super::route::brand(spec.service.as_ref(), &spec.title) else {
             return;
         };
+        if spec.helper == WorkHelperV1::Browser && public_goal(spec) {
+            return;
+        }
         // Reading a service's public site (its product or pricing pages) is
         // not the person's workspace: their connection is not offered.
         if spec.helper == WorkHelperV1::Browser
@@ -1322,6 +1359,7 @@ where
         // add that this person has not: connecting it is the fix. A request
         // that asked for the connection gets it whatever else went wrong.
         if let Some(name) = super::route::brand(spec.service.as_ref(), &spec.title)
+            .filter(|_| !public_goal(spec))
             .filter(|brand| !connected(self.run, brand))
             .and_then(|brand| super::route::known_server(&brand))
         {
@@ -2181,6 +2219,28 @@ mod tests {
             site_turn(&[part("x-kom", None)], "allegro.pl"),
             SiteTurn::Go
         );
+    }
+
+    #[test]
+    fn a_services_pricing_is_its_public_site_not_the_persons_app() {
+        let part = |goal: &str| PartSpec {
+            title: "Linear".into(),
+            helper: WorkHelperV1::Browser,
+            goal: goal.into(),
+            brief: String::new(),
+            service: Some(WorkPartServiceV1 {
+                host: Some("linear.app".into()),
+                connection: None,
+            }),
+            records: vec![],
+            search: None,
+            declined: None,
+        };
+        assert!(public_goal(&part(
+            "Find Linear's pricing for a 10-person team"
+        )));
+        assert!(!public_goal(&part("What is assigned to me in Linear")));
+        assert!(!public_goal(&part("Read my Linear inbox")));
     }
 
     #[test]
