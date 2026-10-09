@@ -182,6 +182,8 @@ pub(crate) struct PartReport {
     pub objects: Vec<WorkArtifactId>,
     /// What the person can do so the part can do its job.
     pub need: Option<WorkPartNeedV1>,
+    /// Its helper read what its pages gave and reported nothing usable.
+    pub judged_empty: bool,
 }
 impl PartReport {
     fn ended(state: WorkPartStateV1, digest: &str, objects: Vec<WorkArtifactId>) -> Self {
@@ -191,6 +193,7 @@ impl PartReport {
             digest: digest.into(),
             objects,
             need: None,
+            judged_empty: false,
         }
     }
 }
@@ -415,8 +418,11 @@ where
         let _ = self.run.part(fact.clone()).await;
         self.run.activity(WorkActivityV1::Delegating);
         let mut report = self.helper(fact.id, &spec).await;
+        // Records stand for the part unless its helper read them and found
+        // nothing in them that answers the goal.
         if report.objects.is_empty()
             && report.state != WorkPartStateV1::Stopped
+            && !report.judged_empty
             && matches!(self.kit(spec.helper), Kit::Browser)
         {
             if let Some((id, count)) = self.place_found(fact.id, &spec).await {
@@ -1061,6 +1067,7 @@ where
                     },
                     summary: Some(summary),
                     digest: clip(&digest, 3_000),
+                    judged_empty: !found,
                     objects: placed,
                     need,
                 };
@@ -1080,6 +1087,7 @@ where
             },
             objects: placed,
             need: None,
+            judged_empty: false,
         }
     }
 
