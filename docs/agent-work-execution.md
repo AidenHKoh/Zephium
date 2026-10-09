@@ -232,7 +232,14 @@ row, a moment later. Six refusals in a row with nothing done, two before the
 loop would end the page, the next model call is offered extraction alone, so
 what the looks already hold becomes the result. A wait proposed while the
 planner holds a look of one section pauses for up to three seconds and is
-answered with a fresh whole look. The first scroll proposed right after a verified fill of
+answered with a fresh whole look, and so is a wait on a whole look whose page
+replaced its document while it loaded. A page task's first look waits, like a
+page reached by navigation, while the page says it is loading its results,
+and an extraction asked for while it still says so is answered at most twice
+with a fresh look 2.5 s later. A request that the person sign in, on a page
+task whose page shows no sign-in form or secret field, is refused twice with a
+fresh look telling the planner that signing in is optional and to continue as
+a guest; a third request goes to the person. The first scroll proposed right after a verified fill of
 a field that commits nothing (a search, filter or place box) is refused unrun
 and the planner is told to run the search first; a second such scroll has Rust
 press Enter in that field as its own read and hand the planner the page it
@@ -266,6 +273,20 @@ After a navigation settles, the session takes the arrival's fresh account
 sample (settled after the load, a new attestation, the same account) before
 the arrival is checked for a wall, so a bot check a page loads on arrival is
 judged under the new document's account.
+
+Well-known bot checks are read by Rust from the first look, without a typed
+decision or a model call: a small page whose short texts or embedded frame
+titles are Cloudflare's, DataDome's, hCaptcha's, reCAPTCHA's checkbox or a
+"verify you are human" line. A widget only a person can pass goes to the
+person at once; a script check ("Just a moment", "Verifying you are human",
+a DataDome device check, a page that is only a frame) is looked at again each
+second, for two seconds on a research read and six on a page task, and one
+that clears by itself is never shown. Such a page is not waited on as a page
+still loading. A site-session page whose check reloads it several times in a
+row keeps loading: a later request of the page's own made before the followed
+load started continues it, within the same load bound. A read for records
+with a link column sheds a link's address with its record's text, never
+before it, when it is over its budget.
 
 Page-agent requests keep an append-only prefix for provider prompt caches:
 instructions, tools, objective and the first observation, then the turns;
