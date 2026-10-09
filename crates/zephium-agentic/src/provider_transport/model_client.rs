@@ -208,13 +208,29 @@ impl AgentProviderModelClient {
             request.reasoning = None;
         }
         let started = Instant::now();
-        let outcome = match self.client.call(request, &|_| {}).await {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                return format!(
-                    "error={error:?} elapsed_ms={}",
-                    started.elapsed().as_millis()
-                )
+        // As the page agent does: a reply with no usable call is answered
+        // with its reason and asked again, at most MAX_REASKS times.
+        let mut asked_again = 0_u8;
+        let outcome = loop {
+            let outcome = match self.client.call(request.clone(), &|_| {}).await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return format!(
+                        "error={error:?} elapsed_ms={}",
+                        started.elapsed().as_millis()
+                    )
+                }
+            };
+            match (asked_again < MAX_REASKS)
+                .then(|| contract.reask(&outcome, &request.tools))
+                .flatten()
+            {
+                Some(messages) => {
+                    asked_again += 1;
+                    request.messages.extend(messages);
+                    request.volatile_tail = 0;
+                }
+                None => break outcome,
             }
         };
         let elapsed = started.elapsed().as_millis();
@@ -225,7 +241,7 @@ impl AgentProviderModelClient {
             Err(error) => format!("decoded={error:?}"),
         };
         format!(
-            "elapsed_ms={elapsed} input={} cached={} output={} reasoning={} {decoded}",
+            "elapsed_ms={elapsed} asked_again={asked_again} input={} cached={} output={} reasoning={} {decoded}",
             usage.input_tokens,
             usage.cached_input_tokens,
             usage.output_tokens,
