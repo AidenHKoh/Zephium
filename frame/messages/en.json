@@ -2239,6 +2239,7 @@
   "ai_key_refused": "{provider} didn’t accept this key.",
   "ai_key_unreachable": "Couldn’t reach {provider}. Check your connection and try again.",
   "ai_key_keychain": "The OS credential store didn’t allow this change.",
+  "ai_key_keychain_waiting": "The Keychain is waiting for your approval. Answer its prompt, then try again.",
   "ai_key_tested": "{provider} accepted the key.",
   "ai_endpoint_field": "Server address",
   "ai_endpoint_key": "API key, if the server needs one",

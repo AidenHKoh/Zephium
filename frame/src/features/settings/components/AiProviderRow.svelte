@@ -102,6 +102,8 @@
         return m.ai_fault_request();
       case "keychain":
         return m.ai_key_keychain();
+      case "keychain_waiting":
+        return m.ai_key_keychain_waiting();
       case "invalid":
         return custom ? m.ai_endpoint_invalid() : m.ai_key_refused({ provider: name });
       default:

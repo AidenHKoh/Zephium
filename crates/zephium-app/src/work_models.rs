@@ -179,6 +179,8 @@ pub enum WorkKeyFault {
     ProviderDown,
     Offline,
     Keychain,
+    /// The Keychain is showing the person a prompt for an earlier call.
+    KeychainWaiting,
     Request,
 }
 
@@ -667,6 +669,14 @@ impl LeadCredential for VaultCredential {
             match blocking(move || vault().load(provider)).await {
                 Some(Ok(secret)) => Ok(secret),
                 Some(Err(keys::LeadKeyError::Missing)) => Err(WorkModelError::MissingKey),
+                Some(Err(keys::LeadKeyError::AwaitingApproval)) => {
+                    record_failure(
+                        provider,
+                        self.generation,
+                        Some(WorkKeyFault::KeychainWaiting),
+                    );
+                    Err(WorkModelError::MissingKey)
+                }
                 _ => {
                     record_failure(provider, self.generation, Some(WorkKeyFault::Keychain));
                     // A vault refusal is not a provider authentication failure.
@@ -691,6 +701,14 @@ impl LeadCredential for CompatibleCredential {
                 Some(Ok(secret)) => Ok(secret),
                 Some(Err(keys::LeadKeyError::Missing)) => {
                     LeadSecret::new("zephium".into()).map(Arc::new)
+                }
+                Some(Err(keys::LeadKeyError::AwaitingApproval)) => {
+                    record_failure(
+                        P::Compatible,
+                        self.generation,
+                        Some(WorkKeyFault::KeychainWaiting),
+                    );
+                    Err(WorkModelError::MissingKey)
                 }
                 _ => {
                     record_failure(P::Compatible, self.generation, Some(WorkKeyFault::Keychain));
@@ -985,6 +1003,14 @@ pub async fn test_key(provider: P) -> Result<WorkKeyStatus, WorkModelError> {
     let secret = match blocking(move || vault().load(provider)).await {
         Some(Ok(secret)) => secret,
         Some(Err(keys::LeadKeyError::Missing)) => return Ok(WorkKeyStatus::Missing),
+        Some(Err(keys::LeadKeyError::AwaitingApproval)) => {
+            record_failure(
+                provider,
+                generation(provider),
+                Some(WorkKeyFault::KeychainWaiting),
+            );
+            return Err(WorkModelError::MissingKey);
+        }
         _ => {
             record_failure(provider, generation(provider), Some(WorkKeyFault::Keychain));
             return Err(WorkModelError::Unauthorized);
@@ -1125,7 +1151,9 @@ pub async fn more_models(
     } else {
         match blocking(move || vault().load(provider)).await {
             Some(Ok(secret)) => secret,
-            Some(Err(keys::LeadKeyError::Missing)) => return Err(WorkModelError::MissingKey),
+            Some(Err(keys::LeadKeyError::Missing | keys::LeadKeyError::AwaitingApproval)) => {
+                return Err(WorkModelError::MissingKey)
+            }
             _ => return Err(WorkModelError::Unauthorized),
         }
     };

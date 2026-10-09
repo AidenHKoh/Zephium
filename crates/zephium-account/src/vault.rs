@@ -38,7 +38,9 @@ impl SystemVault {
     pub fn drop_unscoped(&self) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
-            let _turn = zephium_credentials::turn();
+            let Ok(_turn) = zephium_credentials::turn() else {
+                return;
+            };
             if zephium_credentials::present(UNSCOPED).unwrap_or(false) {
                 let _ = zephium_credentials::delete(UNSCOPED);
             }
@@ -61,7 +63,7 @@ mod platform {
     impl AccountVault for SystemVault {
         fn load(&self, origin: &str) -> Result<AccountToken, VaultFault> {
             let service = item(origin);
-            let _turn = zephium_credentials::turn();
+            let _turn = zephium_credentials::turn().map_err(fault)?;
             let bytes = match zephium_credentials::read(&service) {
                 Err(VaultError::Inaccessible) => {
                     // Concurrent login-keychain reads fail transiently.
@@ -76,12 +78,12 @@ mod platform {
         }
 
         fn store(&self, origin: &str, token: &AccountToken) -> Result<(), VaultFault> {
-            let _turn = zephium_credentials::turn();
+            let _turn = zephium_credentials::turn().map_err(fault)?;
             zephium_credentials::write(&item(origin), token.expose().as_bytes()).map_err(fault)
         }
 
         fn clear(&self, origin: &str) -> Result<(), VaultFault> {
-            let _turn = zephium_credentials::turn();
+            let _turn = zephium_credentials::turn().map_err(fault)?;
             match zephium_credentials::delete(&item(origin)) {
                 Err(VaultError::Missing) => Ok(()),
                 other => other.map_err(fault),
@@ -89,7 +91,7 @@ mod platform {
         }
 
         fn present(&self, origin: &str) -> Result<bool, VaultFault> {
-            let _turn = zephium_credentials::turn();
+            let _turn = zephium_credentials::turn().map_err(fault)?;
             zephium_credentials::present(&item(origin)).map_err(fault)
         }
     }

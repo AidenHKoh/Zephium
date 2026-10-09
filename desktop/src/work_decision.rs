@@ -352,9 +352,9 @@ async fn mutate_key(
             .and_then(|result| {
                 result.map_err(|error| match error {
                     keys::LeadKeyError::Invalid => WorkError::Invalid,
-                    keys::LeadKeyError::Missing | keys::LeadKeyError::Inaccessible => {
-                        WorkError::Unavailable
-                    }
+                    keys::LeadKeyError::Missing
+                    | keys::LeadKeyError::Inaccessible
+                    | keys::LeadKeyError::AwaitingApproval => WorkError::Unavailable,
                 })
             });
             finish_presence_mutation(profile, stored.is_ok().then_some(present));

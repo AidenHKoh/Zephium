@@ -249,6 +249,10 @@ pub enum AgentProviderVaultError {
     /// A bounded zeroizing credential copy could not be allocated.
     #[error("agent provider credential memory is unavailable")]
     Capacity,
+    /// An earlier vault call is waiting on an OS prompt the person has not
+    /// answered; this load never reached the vault.
+    #[error("the OS vault is waiting for the person's approval of an earlier request")]
+    AwaitingApproval,
 }
 
 /// Compatibility name for the macOS credential loader's closed errors.
@@ -300,7 +304,7 @@ fn load_windows_credential<P: AgentCredentialBinding>(
     provider: P,
     target: &str,
 ) -> Result<AgentProviderCredential<P>, AgentProviderVaultError> {
-    let _turn = keychain_turn();
+    let _turn = keychain_turn().map_err(vault_error)?;
     let read = || zephium_credentials::read(target);
     let loaded = match read() {
         Err(zephium_credentials::VaultError::Inaccessible) => {
@@ -309,12 +313,7 @@ fn load_windows_credential<P: AgentCredentialBinding>(
         }
         loaded => loaded,
     };
-    let secret = loaded.map_err(|error| match error {
-        zephium_credentials::VaultError::Missing => AgentProviderVaultError::Missing,
-        zephium_credentials::VaultError::Inaccessible => AgentProviderVaultError::Inaccessible,
-        zephium_credentials::VaultError::Invalid => AgentProviderVaultError::Invalid,
-        zephium_credentials::VaultError::Capacity => AgentProviderVaultError::Capacity,
-    })?;
+    let secret = loaded.map_err(vault_error)?;
     AgentProviderCredential::try_from_zeroizing(provider, secret).map_err(|error| match error {
         AgentProviderCredentialError::Content => AgentProviderVaultError::Invalid,
         AgentProviderCredentialError::Capacity => AgentProviderVaultError::Capacity,
@@ -382,10 +381,25 @@ pub fn load_macos_development_typesafe_credential(
 
 /// One Keychain call at a time across the process: concurrent reads of the
 /// login keychain fail transiently, so every caller, including the account
-/// session, takes the same turn.
+/// session, takes the same turn. A call stuck behind an unanswered OS prompt
+/// fails the ones after it fast instead of queueing them forever.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub(crate) fn keychain_turn() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn keychain_turn() -> Result<zephium_credentials::Turn, zephium_credentials::VaultError>
+{
     zephium_credentials::turn()
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const fn vault_error(error: zephium_credentials::VaultError) -> AgentProviderVaultError {
+    match error {
+        zephium_credentials::VaultError::Missing => AgentProviderVaultError::Missing,
+        zephium_credentials::VaultError::Inaccessible => AgentProviderVaultError::Inaccessible,
+        zephium_credentials::VaultError::Invalid => AgentProviderVaultError::Invalid,
+        zephium_credentials::VaultError::Capacity => AgentProviderVaultError::Capacity,
+        zephium_credentials::VaultError::AwaitingApproval => {
+            AgentProviderVaultError::AwaitingApproval
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -394,7 +408,7 @@ fn load_keychain_login_credential<P: AgentCredentialBinding>(
     service: &'static str,
     account: &'static str,
 ) -> Result<AgentProviderCredential<P>, MacosAgentProviderCredentialError> {
-    let _turn = keychain_turn();
+    let _turn = keychain_turn().map_err(vault_error)?;
     match read_keychain_login_credential(provider, service, account) {
         Err(MacosAgentProviderCredentialError::Inaccessible) => {
             std::thread::sleep(std::time::Duration::from_millis(40));
