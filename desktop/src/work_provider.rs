@@ -14,6 +14,8 @@ pub(crate) struct WorkProviders {
     pub(crate) activity: super::work_activity::WorkActivity,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) browser: zephium_work_composition::NativeWorkComposition,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    engine: Arc<zephium_engine::WebviewEngine>,
 }
 impl WorkProviders {
     pub(crate) fn new(
@@ -41,8 +43,17 @@ impl WorkProviders {
         Self {
             activity: super::work_activity::WorkActivity::new(frames),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
-            browser: zephium_work_composition::NativeWorkComposition::new(engine, store),
+            browser: zephium_work_composition::NativeWorkComposition::new(engine.clone(), store),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            engine,
         }
+    }
+
+    /// Empties Work's own website data for the profile; its answer is
+    /// whether the store is empty afterwards.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(crate) fn clear_website_data(&self, profile: ProfileId) -> std::sync::mpsc::Receiver<bool> {
+        self.engine.clear_work_website_data(profile)
     }
 
     pub(crate) async fn run(

@@ -99,6 +99,11 @@ export const commands = {
 	accountDelete: (code: string) => __TAURI_INVOKE<AccountReplyV1>("account_delete", { code }),
 	workSites: (expectedProfile: string) => __TAURI_INVOKE<WorkSiteAccessResponseV1>("work_sites", { expectedProfile }),
 	workSetSite: (expectedProfile: string, change: WorkSiteChangeV1) => __TAURI_INVOKE<WorkSiteAccessResponseV1>("work_set_site", { expectedProfile, change }),
+	/**
+	 *  Clears Work's website data for the profile. The profile's own browsing
+	 *  data is untouched. True when Work's store is empty afterwards.
+	 */
+	workClearWebsiteData: (expectedProfile: string) => __TAURI_INVOKE<boolean>("work_clear_website_data", { expectedProfile }),
 	/**  The tools found on this Mac and the servers this profile added. */
 	workConnections: (expectedProfile: string) => __TAURI_INVOKE<WorkConnectionsResponseV1_Serialize>("work_connections", { expectedProfile }),
 	/**  Adds or replaces a server; new secrets go to the Keychain. */

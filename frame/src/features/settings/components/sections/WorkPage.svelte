@@ -5,6 +5,7 @@
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Switch from "$shared/ui/Switch";
+  import WorkWebsiteData from "../WorkWebsiteData.svelte";
   let profile = $derived(tabs.profile());
 </script>
 
@@ -34,6 +35,11 @@
     /></SettingsRow
   >
 </SettingsGroup>
+{#if profile && profile.kind !== "incognito"}
+  <SettingsGroup title={m.settings_work_privacy()}>
+    <WorkWebsiteData profile={profile.id} />
+  </SettingsGroup>
+{/if}
 {#if preferences.saveFailed()}<p class="work-note" role="status">{m.settings_work_failed()}</p>{/if}
 {#if !profile || profile.kind === "incognito"}<p class="work-note">
     {m.work_regular_profile()}
