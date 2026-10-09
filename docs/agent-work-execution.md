@@ -231,7 +231,7 @@ screenshot that cannot be taken of the current look goes back as a fresh text
 look. A load a step diverted is followed only when the site session admits
 it; a section anchor loads its page, and an anchor of the open page stays a
 scroll. A navigation to an exact address an earlier hop requested and the site
-answered with another page is refused before any authority is minted. A native select offers only
+redirected to the page now open is refused before any authority is minted. A native select offers only
 select: a click or key would open WebKit's own menu, whose modal loop holds
 the page. A locate scope the look cannot hold searches the whole look. A
 chosen page model replies within 4,096 output tokens, and a lost or runaway
