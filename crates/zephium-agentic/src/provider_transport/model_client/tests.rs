@@ -2,9 +2,9 @@ use std::sync::Mutex;
 
 use serde_json::json;
 use zephium_core::work::model::{
-    WorkModelEntry, WorkModelFuture, WorkModelOutcome, WorkModelPart, WorkModelPrice,
-    WorkModelProvider, WorkModelRequest, WorkModelStop, WorkModelSupports, WorkModelToolCall,
-    WorkModelToolChoice, WorkModelUsage, WorkModelWire,
+    WorkModelEntry, WorkModelFuture, WorkModelMessage, WorkModelOutcome, WorkModelPart,
+    WorkModelPrice, WorkModelProvider, WorkModelRequest, WorkModelStop, WorkModelSupports,
+    WorkModelToolCall, WorkModelToolChoice, WorkModelUsage, WorkModelWire,
 };
 
 use super::super::tests::{model_reported_fixture, provider_exact_fixture};
@@ -42,26 +42,30 @@ fn entry(id: &str) -> WorkModelEntry {
     }
 }
 
-/// Answers once with a scripted reply and keeps the request it was sent.
+/// Answers with scripted replies in turn and keeps the requests it was sent.
 struct Scripted {
-    reply: Mutex<Option<Result<WorkModelOutcome, WorkModelError>>>,
-    seen: Mutex<Option<WorkModelRequest>>,
+    replies: Mutex<std::collections::VecDeque<Result<WorkModelOutcome, WorkModelError>>>,
+    seen: Mutex<Vec<WorkModelRequest>>,
     stall: bool,
 }
 
 impl Scripted {
     fn answering(reply: Result<WorkModelOutcome, WorkModelError>) -> Arc<Self> {
+        Self::answering_each(vec![reply])
+    }
+
+    fn answering_each(replies: Vec<Result<WorkModelOutcome, WorkModelError>>) -> Arc<Self> {
         Arc::new(Self {
-            reply: Mutex::new(Some(reply)),
-            seen: Mutex::new(None),
+            replies: Mutex::new(replies.into()),
+            seen: Mutex::new(Vec::new()),
             stall: false,
         })
     }
 
     fn stalled() -> Arc<Self> {
         Arc::new(Self {
-            reply: Mutex::new(None),
-            seen: Mutex::new(None),
+            replies: Mutex::new(Default::default()),
+            seen: Mutex::new(Vec::new()),
             stall: true,
         })
     }
@@ -70,8 +74,13 @@ impl Scripted {
         self.seen
             .lock()
             .expect("seen")
-            .clone()
+            .last()
+            .cloned()
             .expect("the client was called")
+    }
+
+    fn calls(&self) -> Vec<WorkModelRequest> {
+        self.seen.lock().expect("seen").clone()
     }
 }
 
@@ -81,11 +90,16 @@ impl WorkModelClient for Scripted {
         request: WorkModelRequest,
         _events: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
     ) -> WorkModelFuture<'a> {
-        *self.seen.lock().expect("seen") = Some(request);
+        self.seen.lock().expect("seen").push(request);
         if self.stall {
             return Box::pin(std::future::pending());
         }
-        let reply = self.reply.lock().expect("reply").take().expect("one call");
+        let reply = self
+            .replies
+            .lock()
+            .expect("replies")
+            .pop_front()
+            .expect("a scripted reply for every call");
         Box::pin(async move { reply })
     }
 }
@@ -97,7 +111,7 @@ fn outcome(stop: WorkModelStop, assistant: Vec<WorkModelPart>) -> WorkModelOutco
             input_tokens: 900,
             cached_input_tokens: 400,
             cache_write_input_tokens: 100,
-            output_tokens: 12,
+            output_tokens: 5,
             reasoning_tokens: 4,
             cost_micros: None,
         },
@@ -226,14 +240,19 @@ async fn only_the_first_tool_call_is_decoded() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oversized_arguments_fail_at_the_reservation() {
     let query = "word ".repeat(4_000);
-    let client = Scripted::answering(Ok(outcome(
-        WorkModelStop::ToolUse,
-        vec![tool(
-            "locate",
-            json!({"semantic_query": query, "scope": {"kind": "initial"}}),
-        )],
-    )));
-    let (mut policy, _, result) = run(client).await;
+    let oversized = || {
+        Ok(outcome(
+            WorkModelStop::ToolUse,
+            vec![tool(
+                "locate",
+                json!({"semantic_query": query, "scope": {"kind": "initial"}}),
+            )],
+        ))
+    };
+    // Asked again twice, told why, and still oversized.
+    let client = Scripted::answering_each(vec![oversized(), oversized(), oversized()]);
+    let (mut policy, _, result) = run(client.clone()).await;
+    assert_eq!(client.calls().len(), 3);
     assert!(matches!(
         result.outcome(),
         AgentProviderTransportOutcome::Failed(failure)
@@ -407,4 +426,107 @@ fn model_entries_bind_closed_labels_and_conservative_prices() {
     let mut toolless = entry("local/model");
     toolless.supports.tools = false;
     assert!(AgentProviderModelClient::try_new(&toolless, client).is_err());
+}
+
+fn reasked_reason(request: &WorkModelRequest) -> String {
+    match request.messages.last() {
+        Some(WorkModelMessage::ToolResults(results)) => {
+            assert!(results.iter().all(|result| result.is_error));
+            results[0].content.clone()
+        }
+        Some(WorkModelMessage::User(parts)) => match parts.last() {
+            Some(WorkModelPart::Text(text)) => text.clone(),
+            _ => panic!("a re-ask ends in its reason"),
+        },
+        _ => panic!("a re-ask ends in its reason"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_malformed_call_is_asked_again_told_why_and_charged_as_reported() {
+    let client = Scripted::answering_each(vec![
+        // A click with no target: the act schema refuses it.
+        Ok(outcome(
+            WorkModelStop::ToolUse,
+            vec![tool(
+                "act",
+                json!({"actions": [{"kind": "click", "effect": "read",
+                    "wait": {"kind": "immediate"},
+                    "verification": {"kind": "page_changed"}, "settle_millis": 2000}]}),
+            )],
+        )),
+        Ok(outcome(WorkModelStop::ToolUse, vec![locate()])),
+    ]);
+    let (mut policy, model, result) = run(client.clone()).await;
+    let calls = client.calls();
+    assert_eq!(calls.len(), 2);
+    let reason = reasked_reason(&calls[1]);
+    assert!(
+        reason.starts_with("invalid_tool_call: nothing ran."),
+        "{reason}"
+    );
+    assert!(reason.contains("target"), "{reason}");
+    assert!(matches!(
+        calls[1].messages.iter().rev().nth(1),
+        Some(WorkModelMessage::Assistant(parts))
+            if parts.iter().any(|part| matches!(part, WorkModelPart::ToolCall(call) if call.name == "act"))
+    ));
+    assert_eq!(
+        result.model_reply().map(|facts| facts.asked_again()),
+        Some(1)
+    );
+    let AgentProviderPolicySettlement::PricingRequired(settlement) =
+        result.into_policy_settlement()
+    else {
+        panic!("a corrected call is priced as reported");
+    };
+    let terminal = settlement
+        .settle(&mut policy, model.schedule())
+        .expect("settled");
+    // Both asks are charged: the usage is their sum.
+    assert_eq!(terminal.receipt().input_tokens(), 1_800);
+    assert_eq!(
+        terminal
+            .into_tool_turn()
+            .expect("tool turn")
+            .proposal()
+            .kind(),
+        AgentBrowserToolKind::Locate
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reply_without_a_call_or_with_an_unoffered_tool_is_asked_again() {
+    let client = Scripted::answering_each(vec![
+        Ok(outcome(
+            WorkModelStop::EndTurn,
+            vec![WorkModelPart::Text("The page shows prices.".to_owned())],
+        )),
+        Ok(outcome(
+            WorkModelStop::ToolUse,
+            vec![tool("click_element", json!({"index": 3}))],
+        )),
+        Ok(outcome(WorkModelStop::ToolUse, vec![locate()])),
+    ]);
+    let (mut policy, model, result) = run(client.clone()).await;
+    let calls = client.calls();
+    assert_eq!(calls.len(), 3);
+    assert!(reasked_reason(&calls[1]).contains("no_tool_call"));
+    let unoffered = reasked_reason(&calls[2]);
+    assert!(unoffered.contains("`click_element` is not a tool offered"));
+    assert!(unoffered.contains("locate"));
+    assert_eq!(
+        result.model_reply().map(|facts| facts.asked_again()),
+        Some(2)
+    );
+    let AgentProviderPolicySettlement::PricingRequired(settlement) =
+        result.into_policy_settlement()
+    else {
+        panic!("priced");
+    };
+    let terminal = settlement
+        .settle(&mut policy, model.schedule())
+        .expect("settled");
+    assert_eq!(terminal.receipt().input_tokens(), 2_700);
+    assert!(terminal.has_tool_turn());
 }

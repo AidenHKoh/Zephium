@@ -401,18 +401,18 @@ fn cost_follows_the_catalog_price_and_search_fees() {
 fn targets_build_exact_urls_for_direct_and_cloud() {
     let gemini = LeadTarget::direct(WorkModelProvider::Google).unwrap();
     assert_eq!(
-        gemini.call_url("gemini-3.8-flash").unwrap().as_str(),
+        gemini.call_url("gemini-3.8-flash", false).unwrap().as_str(),
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse"
     );
-    assert!(gemini.call_url("../../x").is_err());
+    assert!(gemini.call_url("../../x", false).is_err());
     let cloud = LeadTarget::cloud(ZEPHIUM_CLOUD_BASE, WorkModelProvider::DeepSeek).unwrap();
     assert_eq!(
-        cloud.call_url("deepseek-flash").unwrap().as_str(),
+        cloud.call_url("deepseek-flash", false).unwrap().as_str(),
         "https://api.zephium.app/deepseek/v1/chat/completions"
     );
     let cloud = LeadTarget::cloud(ZEPHIUM_CLOUD_BASE, WorkModelProvider::OpenAi).unwrap();
     assert_eq!(
-        cloud.call_url("gpt-6-sol").unwrap().as_str(),
+        cloud.call_url("gpt-6-sol", false).unwrap().as_str(),
         "https://api.zephium.app/openai/v1/responses"
     );
     assert!(LeadTarget::compatible("http://example.com/v1").is_err());

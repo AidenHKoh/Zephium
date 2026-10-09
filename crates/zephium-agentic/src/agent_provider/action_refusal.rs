@@ -200,10 +200,11 @@ impl super::super::AgentProviderSettledToolTurn {
             }
             Err(
                 error @ (SemanticActionBindingError::Reference(
-                    SemanticReferenceError::OperationDenied,
+                    SemanticReferenceError::OperationDenied | SemanticReferenceError::Unknown,
                 )
                 | SemanticActionBindingError::OutcomeAlreadySatisfied
-                | SemanticActionBindingError::OutcomeContract),
+                | SemanticActionBindingError::OutcomeContract
+                | SemanticActionBindingError::SelectionTarget),
             ) => Ok(AgentProviderActionResolution::Refused(
                 AgentProviderActionRefusal {
                     continuation,
@@ -268,6 +269,13 @@ impl AgentProviderActionRefusal {
         let note = match self.error {
             SemanticActionBindingError::TargetCovered => "target_covered: nothing executed; another element (a cookie or consent banner, a dialog, a popover or a sticky header) covered the target. This is a fresh look at the page: close what covers it with its close, dismiss or reject control, or choose another control, using these refs.",
             SemanticActionBindingError::DispatchRejected => "target_changed: nothing executed; the page changed before the action ran. This is a fresh look at the page: act on these refs; if a dialog opened, work within it first.",
+            SemanticActionBindingError::Unverified
+                if self.context.is_some_and(|context| {
+                    matches!(
+                        context.kind,
+                        SemanticActionKind::Fill | SemanticActionKind::Select
+                    )
+                }) => "field_rewritten: the text was typed, but the field did not keep it exactly as typed: the page rewrote it or is offering suggestions (an autocomplete, a place or date picker). This is a fresh look at the page as it is now, with the field's current value and any suggestion list or calendar it opened. If a suggestion matches what you meant, click it; if the field already holds an acceptable value, go on (search, apply, or the next field); otherwise fill it again with a shorter or different value.",
             SemanticActionBindingError::Unverified => "outcome_not_observed: the action ran, but its declared outcome was not seen. This is a fresh look at the page as it is now: continue from what it shows, and do not repeat the same action unchanged.",
             _ => return Err(Box::new(self)),
         };
@@ -323,6 +331,14 @@ impl AgentProviderActionRefusal {
                 "operation_not_supported",
                 "The requested operation is not in the target ref's advertised ops. The rejected metadata identifies the exact operation, target, role and observed capabilities without echoing action content. This operation/target pair is unavailable while the observation is unchanged; other eligible refs remain available. Choose an advertised operation on another supplied ref, inspect to reveal a suitable control, or request a genuinely fresh observation before reconsidering changed state. Do not repeat the rejected pair.",
             ),
+            SemanticActionBindingError::Reference(SemanticReferenceError::Unknown) => (
+                "unknown_ref",
+                "Nothing executed. A ref in this action is not on the look you hold: refs change with every look. Use refs exactly as the latest look prints them, such as @a12, and only ones it shows.",
+            ),
+            SemanticActionBindingError::SelectionTarget => (
+                "selection_target_invalid",
+                "Nothing executed. select needs a target that is a native select or listbox the look lists for select, and an option ref that is an r=option inside that target. A text field with suggestions takes fill, then a click on the suggestion; a custom dropdown opens with click, and its option is clicked.",
+            ),
             SemanticActionBindingError::TaskEffectMismatch(_) => (
                 "task_effect_mismatch",
                 "Nothing executed. The proposed effect conflicts with this assignment. The required_effect field is a host constraint, not a claim about arbitrary page handlers. If the intended action fits the assignment, correct its effect using the current ref and supported verification. Otherwise inspect or extract within scope; do not relabel a consequential action to bypass the assignment. The target remains available for a corrected proposal.",
@@ -370,6 +386,28 @@ impl AgentProviderActionRefusal {
             _ => return Err(AgentProviderContinuationError::ToolKind),
         };
         let executed = self.error == SemanticActionBindingError::Unverified;
+        // The one confusion planners repeat: a text field with suggestions
+        // (a place or search combobox) is typed into, not chosen from.
+        let hint = match (self.error, self.context) {
+            (
+                SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied),
+                Some(context),
+            ) if context.kind == SemanticActionKind::Select
+                && context.operations.contains(SemanticOperationClass::Fill) =>
+            {
+                Some(" This control is a text field with suggestions: it takes fill, not select. Fill it with the text you want; then, in the fresh look, click the matching suggestion if one appears.")
+            }
+            (
+                SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied),
+                Some(context),
+            ) if context.kind == SemanticActionKind::Fill
+                && context.operations.contains(SemanticOperationClass::Click) =>
+            {
+                Some(" This control cannot be typed into: click it to open its field or picker, then fill the field it opens.")
+            }
+            _ => None,
+        };
+        let guidance = format!("{guidance}{}", hint.unwrap_or_default());
         let guidance = if self.repeated {
             format!("{guidance} This control was already refused on an earlier look, so trying it again will not work: change approach. Navigate to another address on this site that shows what you need (a link's destination, or the site's own search results address with your query), use the site's search or filter box, close what covers the page, or scroll and read what it already shows.")
         } else {

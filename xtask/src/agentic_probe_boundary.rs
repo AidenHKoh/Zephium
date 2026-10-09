@@ -6262,15 +6262,17 @@ fn validate_provider_transport_http2_ingress_boundary(source: &str) -> Result<()
     Ok(())
 }
 
-// These fixed platform vault loaders each retry Inaccessible once,
-// under the existing process-wide lock. No other thread or sleep is exempted.
+// These fixed platform vault loaders each retry Inaccessible once, under the
+// process-wide vault turn, whose wait for the call ahead is itself bounded so
+// one unanswered OS prompt cannot queue every later load. No other thread or
+// sleep is exempted.
 const KEYCHAIN_RETRY_SLEEP: &str = "std::thread::sleep(std::time::Duration::from_millis(40));";
 const KEYCHAIN_LOGIN_LOADER: &str = r#"fn load_keychain_login_credential<P: AgentCredentialBinding>(
     provider: P,
     service: &'static str,
     account: &'static str,
 ) -> Result<AgentProviderCredential<P>, MacosAgentProviderCredentialError> {
-    let _turn = keychain_turn();
+    let _turn = keychain_turn().map_err(vault_error)?;
     match read_keychain_login_credential(provider, service, account) {
         Err(MacosAgentProviderCredentialError::Inaccessible) => {
             std::thread::sleep(std::time::Duration::from_millis(40));
@@ -6280,7 +6282,7 @@ const KEYCHAIN_LOGIN_LOADER: &str = r#"fn load_keychain_login_credential<P: Agen
     }
 }"#;
 const LEAD_KEYCHAIN_LOADER: &str = r#"pub(super) fn read(service: &str) -> Result<LeadSecret, LeadKeyError> {
-        let _turn = turn();
+        let _turn = turn()?;
         match read_once(service) {
             Err(LeadKeyError::Inaccessible) => {
                 std::thread::sleep(std::time::Duration::from_millis(40));
@@ -6295,7 +6297,7 @@ const WINDOWS_VAULT_LOADER: &str = r#"fn load_windows_credential<P: AgentCredent
     provider: P,
     target: &str,
 ) -> Result<AgentProviderCredential<P>, AgentProviderVaultError> {
-    let _turn = keychain_turn();
+    let _turn = keychain_turn().map_err(vault_error)?;
     let read = || zephium_credentials::read(target);
     let loaded = match read() {
         Err(zephium_credentials::VaultError::Inaccessible) => {
@@ -6304,19 +6306,14 @@ const WINDOWS_VAULT_LOADER: &str = r#"fn load_windows_credential<P: AgentCredent
         }
         loaded => loaded,
     };
-    let secret = loaded.map_err(|error| match error {
-        zephium_credentials::VaultError::Missing => AgentProviderVaultError::Missing,
-        zephium_credentials::VaultError::Inaccessible => AgentProviderVaultError::Inaccessible,
-        zephium_credentials::VaultError::Invalid => AgentProviderVaultError::Invalid,
-        zephium_credentials::VaultError::Capacity => AgentProviderVaultError::Capacity,
-    })?;
+    let secret = loaded.map_err(vault_error)?;
     AgentProviderCredential::try_from_zeroizing(provider, secret).map_err(|error| match error {
         AgentProviderCredentialError::Content => AgentProviderVaultError::Invalid,
         AgentProviderCredentialError::Capacity => AgentProviderVaultError::Capacity,
     })
 }"#;
 const LEAD_WINDOWS_VAULT_LOADER: &str = r#"pub(super) fn read(service: &str) -> Result<LeadSecret, LeadKeyError> {
-        let _turn = crate::provider_transport::keychain_turn();
+        let _turn = crate::provider_transport::keychain_turn().map_err(map)?;
         let loaded = match zephium_credentials::read(service) {
             Err(VaultError::Inaccessible) => {
                 std::thread::sleep(std::time::Duration::from_millis(40));
@@ -6624,7 +6621,9 @@ fn validate_provider_revocation_before_secret_materialization(source: &str) -> R
 /// A chosen model's drive keeps the fixed-endpoint ordering: it moves the
 /// body out of the retained owner, checks sticky cancellation twice, then
 /// publishes possible dispatch before the client can first be polled. It
-/// holds no key and reaches no network of its own.
+/// holds no key and reaches no network of its own. A reply with no usable
+/// browser call may be asked again a fixed number of times, every ask
+/// summed into the one call's usage and held to its one reservation.
 fn validate_chosen_model_drive_contract(source: &str) -> Result<(), String> {
     let production = source
         .split_once("\n#[cfg(test)]\nmod tests")
@@ -6659,7 +6658,7 @@ fn validate_chosen_model_drive_contract(source: &str) -> Result<(), String> {
         .find("self.mark_model_may_have_dispatched();")
         .ok_or_else(|| "chosen-model drive no longer publishes dispatch".to_owned())?;
     let call = drive
-        .find("outcome=model.client.call(request,&events)=>outcome")
+        .find("outcome=model.client.call(request.clone(),&events)=>outcome")
         .ok_or_else(|| "chosen-model drive call boundary is missing".to_owned())?;
     if checks.len() != 2 || !(begin < checks[0] && checks[1] < dispatch && dispatch < call) {
         return Err(
@@ -6668,7 +6667,9 @@ fn validate_chosen_model_drive_contract(source: &str) -> Result<(), String> {
         );
     }
     for required in [
-        "outcome.usage.input_tokens>reserved",
+        "spent.input_tokens>reserved||spent.output_tokens>max_output",
+        "outcome.usage=spent;",
+        "reasks<MAX_REASKS",
         "contract.finish(call,&config,outcome)",
         "Err(_)=>{self.fail_stop();returnself.finish_terminal(integration_failure());}",
     ] {
@@ -6677,6 +6678,9 @@ fn validate_chosen_model_drive_contract(source: &str) -> Result<(), String> {
                 "chosen-model drive lost required settlement rule {required}"
             ));
         }
+    }
+    if !source.contains("constMAX_REASKS:u8=2;") {
+        return Err("chosen-model drive re-asks a malformed call more than twice".to_owned());
     }
     Ok(())
 }
@@ -13461,10 +13465,10 @@ mod tests {
                 loader.replace(sleep, &format!("loop {{ {sleep} }}")),
                 loader.replace("::Inaccessible)", "::Missing)"),
                 loader
-                    .replace("let _turn = keychain_turn();", "")
-                    .replace("let _turn = turn();", "")
+                    .replace("let _turn = keychain_turn().map_err(vault_error)?;", "")
+                    .replace("let _turn = turn()?;", "")
                     .replace(
-                        "let _turn = crate::provider_transport::keychain_turn();",
+                        "let _turn = crate::provider_transport::keychain_turn().map_err(map)?;",
                         "",
                     ),
             ] {

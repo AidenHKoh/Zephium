@@ -123,6 +123,8 @@ impl AgentWorkArtifactPublication {
                                 SemanticReadField::LinkDestination => 6,
                                 SemanticReadField::ImageSource => 7,
                                 SemanticReadField::DocumentAddress => 8,
+                                // Read by the model from pixels.
+                                SemanticReadField::ViewportImage => 9,
                             },
                             context: identity.id().bytes(),
                             context_generation: source.frame.context().context_generation().get(),

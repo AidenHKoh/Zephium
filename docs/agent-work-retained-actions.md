@@ -7,6 +7,22 @@ observation and verification loop. Retained discovery remains read-only: its
 task assessor refuses effects, and discovery admission refuses action-capable
 tasks. A separate trusted task must supply the actual effect contract.
 
+## Rewritten fields are feedback, not uncertain effects
+
+A fill or choice into a field that commits nothing by itself is not an
+uncertain effect when the page rewrites it. Search boxes, place and date
+pickers, filters, comboboxes, fields with no form and fields of a form that
+only queries (GET, or a search form) are routinely rewritten by autocomplete:
+"Krakow" becomes the page's "Kraków, Poland" suggestion. The site policy names
+such a field (`rewritable_field`); when its fill comes back `AppliedUnverified`,
+the charged step closes like a covered one and the model gets a fresh look at
+the page, with the field's current value and any suggestion list or calendar
+it opened, and a `field_rewritten` note telling it to pick a suggestion, keep
+an acceptable value, or type a different one. A field of a form that posts,
+a sensitive or secret field, one that saves as it is typed, and any typing
+the person holds for themselves keep the exact verification below: their
+unverified fill still ends the page for the person.
+
 ## Independent reinspection after uncertain application
 
 An exactly accounted `AppliedUnverified` write can now retain one explicit

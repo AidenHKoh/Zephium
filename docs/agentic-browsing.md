@@ -1302,7 +1302,18 @@ call identity, and further calls and narration are dropped and counted
 without conferring anything. When its one call was kept whole, the model's
 own parts around it (thinking blocks, signatures, reasoning items) and the
 call identity it gave are retained, bounded and opaque, only to be given back
-to its wire with that call on the next turn. Typed decisions the primary backend leaves open
+to its wire with that call on the next turn. A reply that cannot become a
+browser turn but that the model could correct (no tool call, a tool not
+offered on that turn, arguments that do not decode) is not the end of the
+page: inside the same call the model's turn is handed back with the exact
+reason (the field path where its arguments leave the schema it was given,
+such as `arguments.actions[0].target: must be a string, not object`, or the
+decoder's own words) and it is asked again, at most twice per call. Every ask
+is summed into the one call's reported usage and held to the one call's
+reservation; a re-ask that could not fit is not made, and a reply still
+unusable after the last ask fails as before. Providers that hold tool calls
+to a schema get the browser tools marked strict: OpenAI and Cloud on the
+Responses wire, DeepSeek on its beta Chat Completions path. Typed decisions the primary backend leaves open
 are answered by the person's light model through one forced tool whose schema
 is the request's own answer schema, under the same validator, reservation and
 deadline as the OpenAI emulation.

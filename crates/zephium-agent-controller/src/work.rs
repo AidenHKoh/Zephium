@@ -393,6 +393,13 @@ pub trait AgentWorkTask: Send {
     fn results_page(&self, _: &SemanticObservation) -> Vec<Vec<SemanticReferenceId>> {
         Vec::new()
     }
+    /// The field this fill or choice types into commits nothing by itself
+    /// (a search box, a place or date picker, a filter): the page may rewrite
+    /// what was typed, and an unverified result is shown to the model as the
+    /// field now is rather than held for the person.
+    fn rewritable_field(&self, _: &SemanticPreparedAction, _: &SemanticObservation) -> bool {
+        false
+    }
     /// Supplies independently sourced current account facts for this exact
     /// context. Called at startup and before each provider/effect admission,
     /// including nonterminal inspection and extraction mapping. It must be
@@ -3970,7 +3977,36 @@ impl AgentWorkController {
                 AgentBrowserProviderError::UnsupportedTool(AgentBrowserToolKind::Screenshot),
             ));
         }
-        let baseline = turn.turn.continuation().baseline();
+        let screenshot = Self::capture_screenshot(
+            state,
+            worker,
+            browser,
+            turn.turn.continuation().baseline(),
+            observation,
+        )
+        .await?;
+        state.native.check_control(worker, browser)?;
+        state.refresh_account(worker, browser)?;
+        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        Self::provider(
+            &mut state.native,
+            worker,
+            browser,
+            session.cancellation.clone(),
+            session.continue_after_screenshot(turn.into_tool_turn(), screenshot, observation),
+        )
+        .await
+    }
+
+    /// One bounded viewport screenshot of `observation`'s page, bound to the
+    /// look the model holds.
+    async fn capture_screenshot(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        baseline: &SemanticObservationAcknowledgement,
+        observation: &SemanticObservation,
+    ) -> Result<SemanticScreenshot, AgentWorkFailure> {
         let now = state
             .session
             .as_mut()
@@ -4045,22 +4081,11 @@ impl AgentWorkController {
             .take()
             .ok_or(AgentWorkFailure::Contract)?;
         let context = observation.request().context();
-        let screenshot = state
+        state
             .native
             .screenshots
             .admit(pending, context, capture)
-            .map_err(|_| AgentWorkFailure::ContextLost)?;
-        state.native.check_control(worker, browser)?;
-        state.refresh_account(worker, browser)?;
-        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        Self::provider(
-            &mut state.native,
-            worker,
-            browser,
-            session.cancellation.clone(),
-            session.continue_after_screenshot(turn.into_tool_turn(), screenshot, observation),
-        )
-        .await
+            .map_err(|_| AgentWorkFailure::ContextLost)
     }
 
     async fn wait_current(
@@ -4248,6 +4273,38 @@ impl AgentWorkController {
             .iter()
             .map(|snapshot| snapshot.frame().clone())
             .collect::<Vec<_>>();
+        // A page that shows too little text to read its records from (a
+        // canvas, a gallery, prices drawn as images) is mapped with one
+        // viewport screenshot beside its text, when the model can see. The
+        // image is best effort: without it the mapping runs as before.
+        let viewport = if expanded.is_none()
+            && state.viewport_screenshot
+            && state.native.screenshot_pending.is_none()
+            && state
+                .session
+                .as_ref()
+                .is_some_and(|session| session.supports_vision())
+            && state
+                .native
+                .retained
+                .as_ref()
+                .is_none_or(|browser| browser.supports_screenshots())
+            && zephium_agentic::semantic_observation_reads_sparse(observation)
+        {
+            let baseline = turn.turn.continuation().baseline().clone();
+            match Self::capture_screenshot(state, worker, browser, &baseline, observation).await {
+                Ok(screenshot) => Some(screenshot),
+                Err(
+                    AgentWorkFailure::Screenshot(_)
+                    | AgentWorkFailure::Context
+                    | AgentWorkFailure::ContextLost
+                    | AgentWorkFailure::Browser(AgentBrowserProviderError::Authority),
+                ) => None,
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
         state.refresh_account(worker, browser)?;
         let schema = state
             .extraction_schema
@@ -4271,6 +4328,7 @@ impl AgentWorkController {
                 } else {
                     None
                 },
+                viewport.as_ref(),
             ),
         )
         .await?;
@@ -5404,6 +5462,11 @@ pub enum AgentWorkEventKind {
         /// Narration that came beside a tool call.
         dropped_text_bytes: u32,
     },
+    /// A chosen model's reply had no usable browser call; it was told why
+    /// and asked again this many times within the one call.
+    ModelAskedAgain(u8),
+    /// A sparse page's mapping carried the host's viewport screenshot.
+    ViewportImageAttached,
     /// The model proposed a bounded typed tool.
     ToolProposed(AgentBrowserToolKind),
     /// Snapshot scope was incompatible with the delivered baseline. No native

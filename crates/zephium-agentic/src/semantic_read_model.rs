@@ -727,6 +727,7 @@ const fn field_label(field: SemanticReadField) -> &'static str {
         SemanticReadField::LinkDestination => "link_destination",
         SemanticReadField::ImageSource => "image_source",
         SemanticReadField::DocumentAddress => "document_address",
+        SemanticReadField::ViewportImage => "viewport_image",
     }
 }
 
@@ -740,7 +741,8 @@ const fn field_matches_content(field: SemanticReadField, content: SemanticReadCo
             SemanticReadField::TextValue
                 | SemanticReadField::LinkDestination
                 | SemanticReadField::ImageSource
-                | SemanticReadField::DocumentAddress,
+                | SemanticReadField::DocumentAddress
+                | SemanticReadField::ViewportImage,
             SemanticReadContent::ValuePreview(_)
         ) | (
             SemanticReadField::BooleanValue,

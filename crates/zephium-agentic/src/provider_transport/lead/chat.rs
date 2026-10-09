@@ -152,13 +152,19 @@ pub(super) fn body(
     }
     body.insert("max_tokens".into(), json!(request.max_output_tokens));
     if !request.tools.is_empty() {
+        // Held to their schemas, the browser tools cannot come back malformed.
+        let strict = target.strict_tools(request);
         let tools: Vec<Value> = request
             .tools
             .iter()
             .map(|tool| {
-                json!({"type": "function", "function": {
+                let mut function = json!({
                     "name": tool.name, "description": tool.description, "parameters": tool.schema,
-                }})
+                });
+                if strict {
+                    function["strict"] = json!(true);
+                }
+                json!({"type": "function", "function": function})
             })
             .collect();
         let choice = match tool_choice(request)? {

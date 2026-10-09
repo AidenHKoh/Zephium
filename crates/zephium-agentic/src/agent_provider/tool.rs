@@ -934,6 +934,18 @@ fn decode_proposal(
             }
             let target = ContextNavigationTarget::parse(&value.url)
                 .map_err(|_| AgentBrowserToolContractError::Navigation)?;
+            // A section anchor on another page ("…/functools.html#lru_cache")
+            // loads that page: the anchor only scrolls. A hash route
+            // ("#/settings", "#!/a") is the page itself and stays.
+            let target = match target.as_url().fragment() {
+                Some(fragment) if !fragment.starts_with(['/', '!']) => {
+                    let mut page = target.as_url().clone();
+                    page.set_fragment(None);
+                    ContextNavigationTarget::parse(page.as_str())
+                        .map_err(|_| AgentBrowserToolContractError::Navigation)?
+                }
+                _ => target,
+            };
             Ok(AgentBrowserToolProposal::Navigate(target))
         }
         AgentBrowserToolKind::Back => {
@@ -1005,6 +1017,93 @@ fn decode_proposal(
             Ok(AgentBrowserToolProposal::ResumeAfterHuman)
         }
     }
+}
+
+/// Why a browser tool call does not decode, in words the model can correct:
+/// the exact JSON error where the arguments do not parse into the tool's
+/// schema, otherwise what the decoded values break. None when it decodes.
+/// The text may quote the model's own arguments back to it; it never carries
+/// page content and must not be logged.
+pub(crate) fn browser_call_problem(
+    name: &str,
+    arguments: &str,
+    schema: Option<&Value>,
+) -> Option<String> {
+    let error = decode_proposal(name, arguments).err()?;
+    let kind = AgentBrowserToolKind::parse(name)?;
+    let against_schema = schema.and_then(|schema| {
+        let value = serde_json::from_str::<Value>(arguments).ok()?;
+        super::call_schema::schema_problem(schema, &value)
+    });
+    let shape = against_schema.or_else(|| match kind {
+        AgentBrowserToolKind::Navigate => serde_problem::<NavigateWire>(arguments),
+        AgentBrowserToolKind::Back
+        | AgentBrowserToolKind::Forward
+        | AgentBrowserToolKind::Reload
+        | AgentBrowserToolKind::Screenshot
+        | AgentBrowserToolKind::ResumeAfterHuman => serde_problem::<EmptyWire>(arguments),
+        AgentBrowserToolKind::Snapshot | AgentBrowserToolKind::Read => {
+            serde_problem::<ScopeArgumentsWire>(arguments)
+        }
+        AgentBrowserToolKind::Locate => serde_problem::<LocateWire>(arguments),
+        AgentBrowserToolKind::Act => serde_problem::<ActWire>(arguments),
+        AgentBrowserToolKind::Wait => serde_problem::<WaitArgumentsWire>(arguments),
+        AgentBrowserToolKind::Extract => serde_problem::<ExtractWire>(arguments),
+        AgentBrowserToolKind::ShowForHuman => serde_problem::<HumanWire>(arguments),
+    });
+    let detail = shape.unwrap_or_else(|| {
+        let text = match error {
+            AgentBrowserToolContractError::ArgumentLimit => "the arguments are too long",
+            AgentBrowserToolContractError::Arguments => {
+                "the arguments are not one JSON object matching the tool's schema (unknown or missing fields, or nesting too deep)"
+            }
+            AgentBrowserToolContractError::Reference => {
+                "a target must be a ref exactly as the latest look prints it, such as @a12"
+            }
+            AgentBrowserToolContractError::Navigation => {
+                "url must be one absolute http(s) address without credentials, at most 8 KiB"
+            }
+            AgentBrowserToolContractError::Query => {
+                "semantic_query must be short plain text without control characters"
+            }
+            AgentBrowserToolContractError::Scope => {
+                "scope must be {\"kind\":\"initial\"} or a kind with a target ref from the latest look; a text_search needs a non-empty query and surrounding_text a bounded window"
+            }
+            AgentBrowserToolContractError::Action => {
+                "an action's kind, wait and verification do not fit together, or its value or settle_millis is out of range (settle_millis is 1 to 30000)"
+            }
+            AgentBrowserToolContractError::ActionBatch => {
+                return format!(
+                    "actions must hold 1 to {MAX_SEMANTIC_ACTIONS_PER_BATCH} actions that all declare the same effect (a consequential effect stands alone), with at most {MAX_SEMANTIC_ACTION_BATCH_SETTLE_MILLIS} ms of settle_millis and {MAX_SEMANTIC_ACTION_BATCH_TEXT_BYTES} bytes of fill text between them"
+                );
+            }
+            AgentBrowserToolContractError::Wait => {
+                "the wait's condition or timeout_millis is out of range"
+            }
+            AgentBrowserToolContractError::ExtractionSchema => {
+                "schema_id must be the positive schema id the task gave"
+            }
+            AgentBrowserToolContractError::CallId | AgentBrowserToolContractError::ToolName => {
+                "the call is malformed"
+            }
+        };
+        text.to_owned()
+    });
+    Some(format!(
+        "invalid_tool_call: nothing ran. The {} call was refused: {detail}. Call one tool again with corrected arguments that match its schema exactly.",
+        kind.as_str()
+    ))
+}
+
+fn serde_problem<'a, T: Deserialize<'a>>(arguments: &'a str) -> Option<String> {
+    let message = serde_json::from_str::<T>(arguments).err()?.to_string();
+    // A column into arguments the model wrote as it likes tells it nothing.
+    Some(
+        message
+            .rsplit_once(" at line ")
+            .map_or(message.as_str(), |(message, _)| message)
+            .to_owned(),
+    )
 }
 
 fn parse_empty(arguments: &str) -> Result<(), AgentBrowserToolContractError> {
@@ -1624,6 +1723,22 @@ mod tests {
         let navigate =
             decode("navigate", r#"{"url":"https://example.test/path"}"#).expect("navigate");
         assert_eq!(navigate.proposal().kind(), AgentBrowserToolKind::Navigate);
+        let target = |url: &str| match decode("navigate", &format!(r#"{{"url":"{url}"}}"#))
+            .expect("navigate")
+            .proposal()
+        {
+            AgentBrowserToolProposal::Navigate(target) => target.as_url().to_string(),
+            _ => panic!("navigate"),
+        };
+        // A section anchor loads its page; a hash route is kept.
+        assert_eq!(
+            target("https://docs.example.test/library/functools.html#functools.lru_cache"),
+            "https://docs.example.test/library/functools.html"
+        );
+        assert_eq!(
+            target("https://app.example.test/#/settings"),
+            "https://app.example.test/#/settings"
+        );
         for name in [
             "back",
             "forward",
@@ -2066,5 +2181,26 @@ mod tests {
             OpenAiResponseReplayItem::FunctionCall,
         ])
         .is_none());
+    }
+
+    #[test]
+    fn a_malformed_call_is_described_by_the_field_that_broke() {
+        let arguments = r#"{"actions":[{"effect":"local_write","kind":"fill","settle_millis":2000,"target":{"ref":"@a13"},"value":"x","verification":{"kind":"target_value_matches_input"},"wait":{"kind":"immediate"}}]}"#;
+        let schema = serde_json::json!({"type": "object", "properties": {"actions": {"type": "array",
+            "items": {"type": "object", "properties": {"target": {"type": "string"}}}}}});
+        let problem = browser_call_problem("act", arguments, Some(&schema)).expect("refused");
+        assert!(problem.starts_with("invalid_tool_call: nothing ran. The act call"));
+        assert!(
+            problem.contains("arguments.actions[0].target: must be a string, not object"),
+            "{problem}"
+        );
+        // Without the schema the decoder's own words, never a column.
+        let problem = browser_call_problem("act", arguments, None).expect("refused");
+        assert!(problem.contains("invalid type: map"), "{problem}");
+        assert!(!problem.contains("line 1 column"), "{problem}");
+        let problem =
+            browser_call_problem("navigate", r#"{"url":"not a url"}"#, None).expect("refused");
+        assert!(problem.contains("url must be one absolute"), "{problem}");
+        assert!(browser_call_problem("back", "{}", None).is_none());
     }
 }

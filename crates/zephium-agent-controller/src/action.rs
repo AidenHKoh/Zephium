@@ -615,11 +615,21 @@ impl AgentBrowserAction {
     }
     /// An action the page refused before it acted (its target covered, out
     /// of view, changed or gone): nothing was pressed or typed, so a read or
-    /// a draft keeps its continuation and the model hears why.
+    /// a draft keeps its continuation and the model hears why. With
+    /// `rewritable`, a fill or choice into a field that commits nothing,
+    /// which ran but whose value the page did not keep as typed (an
+    /// autocomplete that rewrote it), is handed back the same way.
     pub(crate) fn into_covered_refusal(
         self,
+        rewritable: bool,
     ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
         let effect = self.proposal.action.effect();
+        let rewritten = rewritable
+            && self.native_unverified
+            && matches!(
+                self.proposal.action.kind(),
+                SemanticActionKind::Fill | SemanticActionKind::Select
+            );
         if !self.finished
             || self.native.is_some()
             || self.pending.is_some()
@@ -631,17 +641,19 @@ impl AgentBrowserAction {
             )
             || self.proposal.continuation.is_none()
             || self.failed.as_ref().is_none_or(|failed| {
-                self.receipt != Some(failed.receipt()) || !refused_before_acting(failed.failure())
+                self.receipt != Some(failed.receipt())
+                    || !(refused_before_acting(failed.failure())
+                        || (rewritten && failed.failure() == SemanticActionFailure::NeedsHuman))
             })
         {
             return Err(Box::new(self));
         }
         let mut this = self;
         let failed = this.failed.take().expect("checked original failed owner");
-        let reason = if failed.failure() == SemanticActionFailure::TargetOccluded {
-            SemanticActionBindingError::TargetCovered
-        } else {
-            SemanticActionBindingError::DispatchRejected
+        let reason = match failed.failure() {
+            SemanticActionFailure::TargetOccluded => SemanticActionBindingError::TargetCovered,
+            SemanticActionFailure::NeedsHuman => SemanticActionBindingError::Unverified,
+            _ => SemanticActionBindingError::DispatchRejected,
         };
         match this.proposal.batch.fail(&this.proposal.action, failed) {
             Ok(terminal) => Ok((

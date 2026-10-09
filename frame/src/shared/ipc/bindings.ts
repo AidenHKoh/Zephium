@@ -4543,6 +4543,8 @@ export type WorkModelsFaultV1 =
 "unreachable" | "billing" | "rate_limited" | "provider_down" | "request" | 
 /**  The Keychain refused. */
 "keychain" | 
+/**  The Keychain is waiting for the person to answer its prompt. */
+"keychain_waiting" | 
 /**  The request was malformed (an unknown model, a bad address). */
 "invalid" | 
 /**  Models are unavailable in this build or profile. */

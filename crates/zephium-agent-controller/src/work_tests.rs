@@ -1342,6 +1342,14 @@ impl AgentBrowserPort for Port {
             }
             Fault::ActionDispatch => return ContextDispatch::Unsupported,
             Fault::ActionCallback => {}
+            Fault::Navigation(NavigationFault::DiscoveryActionRefusal(
+                _,
+                navigation_tests::ActionRefusal::Rewritten,
+            )) if lock(&self.calls).iter().filter(|call| **call == 7).count() == 1 => {
+                let now = request.requested_at();
+                completion(request.fail(SemanticActionNativeFailure::AppliedUnverified, now));
+                return ContextDispatch::Scheduled;
+            }
             Fault::ScrollVerification => {
                 let now = request.requested_at();
                 let geometry = request.expected_geometry();

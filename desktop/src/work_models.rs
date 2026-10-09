@@ -28,6 +28,8 @@ pub(crate) enum WorkModelsFaultV1 {
     Request,
     /// The Keychain refused.
     Keychain,
+    /// The Keychain is waiting for the person to answer its prompt.
+    KeychainWaiting,
     /// The request was malformed (an unknown model, a bad address).
     Invalid,
     /// Models are unavailable in this build or profile.
@@ -154,6 +156,7 @@ mod product {
             models::WorkKeyFault::ProviderDown => WorkModelsFaultV1::ProviderDown,
             models::WorkKeyFault::Offline => WorkModelsFaultV1::Unreachable,
             models::WorkKeyFault::Keychain => WorkModelsFaultV1::Keychain,
+            models::WorkKeyFault::KeychainWaiting => WorkModelsFaultV1::KeychainWaiting,
             models::WorkKeyFault::Request => WorkModelsFaultV1::Request,
         }
     }

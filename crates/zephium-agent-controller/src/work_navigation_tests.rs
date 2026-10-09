@@ -62,6 +62,9 @@ impl crate::AgentWorkLocalActionPolicy for LocalActionPolicy {
     fn model_action_effect(&self) -> Option<SemanticEffectClass> {
         Some(SemanticEffectClass::LocalWrite)
     }
+    fn rewritable_field(&self, action: &SemanticPreparedAction, _: &SemanticObservation) -> bool {
+        action.kind() == SemanticActionKind::Fill
+    }
     fn model_action_operations(
         &self,
         node: &SemanticNode,
@@ -115,7 +118,11 @@ fn open_objective_corrects_unissued_action_and_bounds_repeated_invalid_proposals
             ActionRefusal::OperationDenied,
             ActionRefusal::EffectMismatch,
             ActionRefusal::UnsupportedWait,
+            ActionRefusal::Rewritten,
         ] {
+            if repeat && refusal == ActionRefusal::Rewritten {
+                continue;
+            }
             provider_fixture(ProviderFault::Navigation(
                 NavigationFault::DiscoveryActionRefusal(repeat, refusal),
             ));
@@ -319,6 +326,9 @@ pub(super) enum ActionRefusal {
     EffectMismatch,
     /// A wait this host cannot evidence; the model is told and continues.
     UnsupportedWait,
+    /// The fill ran, but the page did not keep its value as typed (an
+    /// autocomplete rewrote it): the model sees the field as it is now.
+    Rewritten,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NavigationFault {
@@ -477,6 +487,7 @@ impl NavigationFault {
                             r#"\"wait\":{\"kind\":\"immediate\"}"#,
                             r#"\"wait\":{\"kind\":\"target_state\",\"state\":\"focused\",\"present\":true}"#,
                         ),
+                    ActionRefusal::Rewritten => tool_stream(turn, true).replace("@a2", "@a3"),
                 };
             }
             let phase = turn - 1;
@@ -705,6 +716,14 @@ impl NavigationFault {
         }
 
         if let Self::DiscoveryActionRefusal(repeat, refusal) = self {
+            if turns == 1 && refusal == ActionRefusal::Rewritten {
+                // The fill ran: the model gets a fresh look at the field as
+                // it is now, told why.
+                let text = std::str::from_utf8(bytes).unwrap();
+                assert!(text.contains("field_rewritten"));
+                assert!(text.contains("Field"));
+                return;
+            }
             if turns == 1 || (repeat && turns > 0) {
                 let body: serde_json::Value = serde_json::from_slice(bytes).unwrap();
                 let result = body["input"]
@@ -722,6 +741,7 @@ impl NavigationFault {
                         ActionRefusal::EffectMismatch => "task_effect_mismatch",
                         ActionRefusal::OperationDenied => "operation_not_supported",
                         ActionRefusal::UnsupportedWait => "verification_not_supported",
+                        ActionRefusal::Rewritten => unreachable!(),
                     }
                 );
                 if refusal == ActionRefusal::EffectMismatch {
@@ -1406,7 +1426,7 @@ pub(super) fn assert_outcome(
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
         return;
     }
-    if let NavigationFault::DiscoveryActionRefusal(repeat, _) = fault {
+    if let NavigationFault::DiscoveryActionRefusal(repeat, refusal) = fault {
         if repeat {
             let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
                 panic!("{outcome:?}");
@@ -1424,6 +1444,25 @@ pub(super) fn assert_outcome(
             assert_eq!(closed.policy_settlement().closure().effects(), 0);
             assert!(!calls.contains(&7), "invalid actions never dispatch");
             assert!(!calls.contains(&9), "invalid actions never navigate");
+        } else if refusal == ActionRefusal::Rewritten {
+            let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+                panic!("a rewritten fill is the model's to follow up: {outcome:?}");
+            };
+            // The rewritten fill ran and is charged; the model saw the field
+            // as it was, filled it again and went on.
+            assert_eq!(success.closure().model_calls(), 5);
+            assert_eq!(success.closure().navigations(), 1);
+            assert!(success.take_extraction().is_some());
+            // The fresh look showed the field holding the value, so the
+            // model's second fill was already satisfied and never dispatched.
+            assert_eq!(calls.iter().filter(|call| **call == 7).count(), 1);
+            assert!(!events
+                .iter()
+                .any(|event| matches!(event.kind(), AgentWorkEventKind::NeedsHuman(_))));
+            assert!(events.iter().any(|event| event.kind()
+                == AgentWorkEventKind::ActionProposalRefused(
+                    SemanticActionBindingError::Unverified
+                )));
         } else {
             let AgentWorkOutcome::Succeeded(mut success) = outcome else {
                 panic!("{outcome:?}");
@@ -1443,7 +1482,11 @@ pub(super) fn assert_outcome(
                     AgentWorkEventKind::ActionProposalRefused(_)
                 ))
                 .count(),
-            if repeat { 4 } else { 1 }
+            match (repeat, refusal) {
+                (true, _) => 4,
+                (false, ActionRefusal::Rewritten) => 2,
+                (false, _) => 1,
+            }
         );
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
         return;

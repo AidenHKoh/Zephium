@@ -177,6 +177,50 @@ async fn round_trip(
     Ok(())
 }
 
+/// Replays a recorded page-agent body on one catalog model, with or without
+/// its thinking, `times` times. Prints closed facts only.
+#[cfg(feature = "durable-runtime")]
+pub(super) fn replay_page(
+    body: &std::ffi::OsStr,
+    id: &std::ffi::OsStr,
+    thinking: &std::ffi::OsStr,
+    times: &std::ffi::OsStr,
+) -> Result<(), super::ProbeFailure> {
+    use super::ProbeFailure as Error;
+    let body = std::fs::read(body).map_err(|_| Error::Authority)?;
+    let id = id.to_str().ok_or(Error::Authority)?;
+    let thinking = thinking == "on";
+    let times: u8 = times
+        .to_str()
+        .and_then(|times| times.parse().ok())
+        .filter(|times| (1..=8).contains(times))
+        .ok_or(Error::Authority)?;
+    let entry = models::builtin()
+        .into_iter()
+        .find(|entry| entry.id == id)
+        .ok_or(Error::Authority)?;
+    let provider = entry.model.provider;
+    let target = LeadTarget::direct(provider).map_err(|_| Error::Authority)?;
+    let client: Arc<dyn WorkModelClient> = Arc::new(LeadClient::new(
+        target,
+        Arc::new(keys::KeychainCredential::new(provider)),
+        entry.price.clone(),
+    ));
+    let model = zephium_agentic::AgentProviderModelClient::try_new(&entry, client)
+        .map_err(|_| Error::Authority)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| Error::Runtime)?;
+    for turn in 0..times {
+        let facts = runtime.block_on(model.probe_replay(&body, thinking));
+        say(format_args!(
+            "page-replay: model={id} thinking={thinking} turn={turn} {facts}"
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

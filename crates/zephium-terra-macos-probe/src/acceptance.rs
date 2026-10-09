@@ -912,6 +912,12 @@ pub(super) async fn lead_workflow(
             .ok()
             .map(|(entry, client)| LeadModel { entry, client })
     };
+    // A named page model, as a person picks one in Settings → AI.
+    if let Ok(id) = std::env::var("ZEPHIUM_PROBE_PAGE_MODEL") {
+        let _ = zephium_app::work_models::view(profile).await;
+        zephium_app::work_models::choose(profile, WorkModelRole::Page, Some(&id))
+            .map_err(|_| "page_model_choice")?;
+    }
     let lead = resolve(WorkModelRole::Lead).await.ok_or("lead_model")?;
     let page = resolve(WorkModelRole::Page)
         .await

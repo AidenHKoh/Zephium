@@ -2024,6 +2024,9 @@ pub struct AgentBrowserSession {
     /// A site session hands an unverified draft step back to the model
     /// instead of ending the page task.
     pub(crate) unverified_local_writes: bool,
+    /// The pending fill types into a field that commits nothing: the page
+    /// rewriting it is the model's to see, not the person's to resolve.
+    pub(crate) rewritable_fill: bool,
     failure: Option<AgentBrowserProviderError>,
     deadline: Instant,
     turns: u8,
@@ -2274,6 +2277,7 @@ impl AgentBrowserSession {
             action_terminal: None,
             rejected_refusal: None,
             unverified_local_writes: false,
+            rewritable_fill: false,
             failure: None,
             deadline,
             turns: 0,
@@ -2719,12 +2723,13 @@ impl AgentBrowserSession {
             captured_at,
             schema,
             None,
+            None,
         )
         .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn extract_from_with_evidence<'a>(
+    pub(super) async fn extract_from_with_evidence<'a>(
         &mut self,
         turn: AgentBrowserProviderTurn,
         observation: &'a zephium_agentic::SemanticObservation,
@@ -2733,9 +2738,12 @@ impl AgentBrowserSession {
         captured_at: zephium_agentic::SemanticCaptureInstant,
         schema: &zephium_agentic::SemanticExtractionSchema,
         evidence: Option<&'a zephium_agentic::SemanticRetainedReadEvidence>,
+        viewport: Option<&zephium_agentic::SemanticScreenshot>,
     ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
         use zephium_agentic::*;
         self.check_live()?;
+        // Pixels reach only a model that sees, and only a whole-look mapping.
+        let viewport = viewport.filter(|_| self.supports_vision() && previous.is_none());
         if self.turns >= self.max_model_calls {
             return Err(AgentBrowserProviderError::TurnLimit);
         }
@@ -2776,21 +2784,38 @@ impl AgentBrowserSession {
                 ))
                 .map_err(|_| AgentBrowserProviderError::Journal)?;
         }
-        let read = zephium_agentic::read_semantic_observation_for_schema(
-            observation,
-            match previous {
-                Some(previous) => SemanticReadAuthority::AcknowledgedExpansion {
-                    previous,
-                    acknowledgement: continuation.baseline(),
-                },
-                None => SemanticReadAuthority::Acknowledged(continuation.baseline()),
+        let authority = match previous {
+            Some(previous) => SemanticReadAuthority::AcknowledgedExpansion {
+                previous,
+                acknowledgement: continuation.baseline(),
             },
-            captured_at,
-            SemanticReadSensitivityLimit::PublicOnly,
-            SemanticReadBudget::EXTRACTION,
-            schema,
-        )
+            None => SemanticReadAuthority::Acknowledged(continuation.baseline()),
+        };
+        let read = if viewport.is_some() {
+            zephium_agentic::read_semantic_observation_for_schema_with_viewport_image(
+                observation,
+                authority,
+                captured_at,
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::EXTRACTION,
+                schema,
+            )
+        } else {
+            zephium_agentic::read_semantic_observation_for_schema(
+                observation,
+                authority,
+                captured_at,
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::EXTRACTION,
+                schema,
+            )
+        }
         .map_err(AgentBrowserProviderError::Read)?;
+        let viewport = viewport.filter(|_| {
+            read.fragments()
+                .iter()
+                .any(|fragment| fragment.field() == SemanticReadField::ViewportImage)
+        });
         let read = match evidence {
             Some(evidence) => evidence
                 .merge_for_extraction(read)
@@ -2817,10 +2842,21 @@ impl AgentBrowserSession {
             .bind_extraction_request(request, &self.config, schema, &read, payload)
             .map_err(|_| AgentBrowserProviderError::Continuation)?;
         let prepared = AgentProviderExtractionRequestDraft::try_new(bound)
+            .and_then(|draft| match viewport {
+                Some(screenshot) => draft.with_viewport_image(&read, screenshot),
+                None => Ok(draft),
+            })
             .and_then(|draft| {
                 draft.try_prepare_for_provider_exact_count(&mut self.policy, request, schema, &read)
             })
             .map_err(AgentBrowserProviderError::from_request)?;
+        if viewport.is_some() {
+            if let Some(journal) = &self.journal {
+                journal
+                    .emit(work::AgentWorkEventKind::ViewportImageAttached)
+                    .map_err(|_| AgentBrowserProviderError::Journal)?;
+            }
+        }
         let (input, output) = prepared.into_transport_parts();
         let (terminal, _, _) = self.drive_terminal(input, Some(output)).await?;
         let mapped = self
@@ -2835,8 +2871,20 @@ impl AgentBrowserSession {
             );
         match mapped {
             Err(AgentProviderExtractionOutputError::Extraction(refusal)) if !subtree => {
-                self.map_after_refusal(refusal, &baseline, schema, &read)
+                self.map_told(Some(refusal), &baseline, schema, &read, viewport)
                     .await
+            }
+            // Nothing mapped from evidence the planner chose to extract
+            // from: the mapper is told so and maps once more.
+            Ok(result) if !subtree && result.is_empty() => {
+                match self
+                    .map_told(None, &baseline, schema, &read, viewport)
+                    .await
+                {
+                    Ok(retried) => Ok(retried),
+                    Err(_) if self.failure.is_none() => Ok(result),
+                    Err(error) => Err(error),
+                }
             }
             mapped => mapped.map_err(AgentBrowserProviderError::Extraction),
         }
@@ -2854,11 +2902,31 @@ impl AgentBrowserSession {
         schema: &zephium_agentic::SemanticExtractionSchema,
         read: &zephium_agentic::SemanticReadResult<'a>,
     ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
+        self.map_told(Some(refusal), baseline, schema, read, None)
+            .await
+    }
+
+    /// One corrective mapping, told why: after Rust refused the first
+    /// output (`refusal`), or after it admitted nothing at all (`None`).
+    async fn map_told<'a>(
+        &mut self,
+        refusal: Option<zephium_agentic::SemanticExtractionError>,
+        baseline: &zephium_agentic::SemanticObservationAcknowledgement,
+        schema: &zephium_agentic::SemanticExtractionSchema,
+        read: &zephium_agentic::SemanticReadResult<'a>,
+        viewport: Option<&zephium_agentic::SemanticScreenshot>,
+    ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
         use zephium_agentic::*;
-        let refused = AgentBrowserProviderError::Extraction(
-            AgentProviderExtractionOutputError::Extraction(refusal),
-        );
-        if self.extraction_corrected || !semantic_extraction_refusal_is_retryable(refusal) {
+        let refused = match refusal {
+            Some(refusal) => AgentBrowserProviderError::Extraction(
+                AgentProviderExtractionOutputError::Extraction(refusal),
+            ),
+            None => AgentBrowserProviderError::NoExtractionEvidence,
+        };
+        if self.extraction_corrected
+            || refusal.is_some_and(|refusal| !semantic_extraction_refusal_is_retryable(refusal))
+            || read.fragments().is_empty()
+        {
             return Err(refused);
         }
         self.extraction_corrected = true;
@@ -2880,20 +2948,38 @@ impl AgentBrowserSession {
         let Some(objective) = self.objective.as_ref() else {
             return Err(refused);
         };
-        let Ok(prepared) = AgentProviderExtractionRequestDraft::try_after_refusal(
-            baseline,
-            prior,
-            request,
-            &self.config,
-            objective,
-            payload,
-            schema,
-            read,
-            refusal,
-        )
-        .and_then(|draft| {
-            draft.try_prepare_for_provider_exact_count(&mut self.policy, request, schema, read)
-        }) else {
+        let draft = match refusal {
+            Some(refusal) => AgentProviderExtractionRequestDraft::try_after_refusal(
+                baseline,
+                prior,
+                request,
+                &self.config,
+                objective,
+                payload,
+                schema,
+                read,
+                refusal,
+            ),
+            None => AgentProviderExtractionRequestDraft::try_after_empty(
+                baseline,
+                prior,
+                request,
+                &self.config,
+                objective,
+                payload,
+                schema,
+                read,
+            ),
+        };
+        let Ok(prepared) = draft
+            .and_then(|draft| match viewport {
+                Some(screenshot) => draft.with_viewport_image(read, screenshot),
+                None => Ok(draft),
+            })
+            .and_then(|draft| {
+                draft.try_prepare_for_provider_exact_count(&mut self.policy, request, schema, read)
+            })
+        else {
             return Err(refused);
         };
         if let Some(journal) = &self.journal {
@@ -3114,6 +3200,17 @@ impl AgentBrowserSession {
                         dropped_tool_calls: facts.dropped_tool_calls(),
                         dropped_text_bytes: facts.dropped_text_bytes(),
                     })
+                    .map_err(|_| AgentBrowserProviderError::Journal)?;
+            }
+        }
+        if let Some(times) = result
+            .model_reply()
+            .map(|facts| facts.asked_again())
+            .filter(|times| *times != 0)
+        {
+            if let Some(journal) = &self.journal {
+                journal
+                    .emit(work::AgentWorkEventKind::ModelAskedAgain(times))
                     .map_err(|_| AgentBrowserProviderError::Journal)?;
             }
         }
@@ -3711,7 +3808,9 @@ impl AgentBrowserSession {
             );
         match result {
             Err(error @ crate::AgentBrowserActionError::Failed(failure))
-                if crate::action::refused_before_acting(failure) =>
+                if crate::action::refused_before_acting(failure)
+                    || (self.rewritable_fill
+                        && failure == zephium_agentic::SemanticActionFailure::NeedsHuman) =>
             {
                 if let Some(refusal) = self.covered_refusal()? {
                     self.rejected_refusal = Some(refusal);
@@ -3772,7 +3871,7 @@ impl AgentBrowserSession {
         let Some(action) = self.action.take() else {
             return Ok(None);
         };
-        let (terminal, refusal) = match action.into_covered_refusal() {
+        let (terminal, refusal) = match action.into_covered_refusal(self.rewritable_fill) {
             Ok(parts) => parts,
             Err(action) => {
                 self.action = Some(*action);

@@ -191,6 +191,65 @@ impl AgentProviderModelClient {
     }
 }
 
+#[cfg(feature = "probe-harness")]
+impl AgentProviderModelClient {
+    /// Replays one recorded page-agent body on this model outside any run,
+    /// for the release-excluded probe. Returns closed facts, never model text.
+    pub async fn probe_replay(&self, body: &[u8], thinking: bool) -> String {
+        let Ok(config) = self.try_call_config(8_192) else {
+            return "config=refused".to_owned();
+        };
+        let Ok((mut request, contract)) =
+            translate_model_client_call(&config, self.model(), self.supports_vision(), body)
+        else {
+            return "translate=refused".to_owned();
+        };
+        if !thinking {
+            request.reasoning = None;
+        }
+        let started = Instant::now();
+        // As the page agent does: a reply with no usable call is answered
+        // with its reason and asked again, at most MAX_REASKS times.
+        let mut asked_again = 0_u8;
+        let outcome = loop {
+            let outcome = match self.client.call(request.clone(), &|_| {}).await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return format!(
+                        "error={error:?} elapsed_ms={}",
+                        started.elapsed().as_millis()
+                    )
+                }
+            };
+            match (asked_again < MAX_REASKS)
+                .then(|| contract.reask(&outcome, &request.tools))
+                .flatten()
+            {
+                Some(messages) => {
+                    asked_again += 1;
+                    request.messages.extend(messages);
+                    request.volatile_tail = 0;
+                }
+                None => break outcome,
+            }
+        };
+        let elapsed = started.elapsed().as_millis();
+        let usage = outcome.usage;
+        let call = crate::AgentProviderCallIdentity::probe_fixture();
+        let decoded = match contract.finish(call, &config, outcome) {
+            Ok(reply) => format!("decoded=ok text={}", reply.text.is_some()),
+            Err(error) => format!("decoded={error:?}"),
+        };
+        format!(
+            "elapsed_ms={elapsed} asked_again={asked_again} input={} cached={} output={} reasoning={} {decoded}",
+            usage.input_tokens,
+            usage.cached_input_tokens,
+            usage.output_tokens,
+            usage.reasoning_tokens
+        )
+    }
+}
+
 impl fmt::Debug for AgentProviderModelClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -225,6 +284,30 @@ fn label(id: &str) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect();
     format!("model-{hex}")
+}
+
+/// Asks again after a reply with no usable browser call, per model call.
+const MAX_REASKS: u8 = 2;
+/// Tokens the reason and the model's own failed turn may add to a re-ask's
+/// input beyond the last call's input and output.
+const REASK_INPUT_ALLOWANCE: u64 = 1_024;
+
+fn added(spent: WorkModelUsage, more: WorkModelUsage) -> WorkModelUsage {
+    WorkModelUsage {
+        input_tokens: spent.input_tokens.saturating_add(more.input_tokens),
+        cached_input_tokens: spent
+            .cached_input_tokens
+            .saturating_add(more.cached_input_tokens),
+        cache_write_input_tokens: spent
+            .cache_write_input_tokens
+            .saturating_add(more.cache_write_input_tokens),
+        output_tokens: spent.output_tokens.saturating_add(more.output_tokens),
+        reasoning_tokens: spent.reasoning_tokens.saturating_add(more.reasoning_tokens),
+        cost_micros: spent
+            .cost_micros
+            .zip(more.cost_micros)
+            .map(|(spent, more)| spent.saturating_add(more)),
+    }
 }
 
 const fn failure_for(error: WorkModelError) -> AgentProviderFailure {
@@ -287,7 +370,7 @@ impl AgentProviderAttempt {
         if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
             return self.finish_terminal(cancelled_failure());
         }
-        let (request, contract) = match translate_model_client_call(
+        let (mut request, contract) = match translate_model_client_call(
             &config,
             model.model(),
             model.supports_vision(),
@@ -307,34 +390,65 @@ impl AgentProviderAttempt {
         // Streamed events are not trusted before the call ends; the outcome
         // alone is decoded.
         let events = |_: WorkModelEvent| {};
-        let outcome = tokio::select! {
-            biased;
-            () = self.cancellation.cancelled() => return self.finish_terminal(cancelled_failure()),
-            () = self.shutdown.cancelled() => return self.finish_terminal(cancelled_failure()),
-            () = &mut deadline => return self.finish_terminal(timeout_failure()),
-            outcome = model.client.call(request, &events) => outcome,
-        };
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                return self.finish_terminal(AgentProviderTransportOutcomeOwned::Failed(
-                    failure_for(error),
-                ))
+        let max_output = u64::from(config.max_output_tokens());
+        let mut spent = WorkModelUsage::default();
+        let mut reasks = 0_u8;
+        let outcome = loop {
+            let outcome = tokio::select! {
+                biased;
+                () = self.cancellation.cancelled() => return self.finish_terminal(cancelled_failure()),
+                () = self.shutdown.cancelled() => return self.finish_terminal(cancelled_failure()),
+                () = &mut deadline => return self.finish_terminal(timeout_failure()),
+                outcome = model.client.call(request.clone(), &events) => outcome,
+            };
+            let mut outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return self.finish_terminal(AgentProviderTransportOutcomeOwned::Failed(
+                        failure_for(error),
+                    ))
+                }
+            };
+            let last = outcome.usage;
+            spent = if reasks == 0 {
+                last
+            } else {
+                added(spent, last)
+            };
+            if spent.input_tokens > reserved || spent.output_tokens > max_output {
+                return self.finish_terminal(protocol_decoder_failure(
+                    crate::AgentProviderProtocolError::Usage,
+                    None,
+                ));
             }
+            outcome.usage = spent;
+            // A provider without strict tool calling may answer with no call
+            // or a malformed one. It is told exactly why and asked again,
+            // inside this call's own reservation; every ask is charged as
+            // reported, and a reply that still fails ends as before.
+            let left_output = max_output - spent.output_tokens;
+            let next_input = spent
+                .input_tokens
+                .saturating_add(last.input_tokens)
+                .saturating_add(last.output_tokens)
+                .saturating_add(REASK_INPUT_ALLOWANCE);
+            let Some(messages) = (reasks < MAX_REASKS
+                && next_input <= reserved
+                && left_output >= last.output_tokens.max(1))
+            .then(|| contract.reask(&outcome, &request.tools))
+            .flatten() else {
+                break outcome;
+            };
+            reasks += 1;
+            request.messages.extend(messages);
+            request.volatile_tail = 0;
+            request.max_output_tokens = u32::try_from(left_output).unwrap_or(u32::MAX);
         };
-        if outcome.usage.input_tokens > reserved
-            || outcome.usage.output_tokens > u64::from(config.max_output_tokens())
-        {
-            return self.finish_terminal(protocol_decoder_failure(
-                crate::AgentProviderProtocolError::Usage,
-                None,
-            ));
-        }
         let reply = match contract.finish(call, &config, outcome) {
             Ok(reply) => reply,
             Err(error) => return self.finish_terminal(protocol_decoder_failure(error, None)),
         };
-        self.model_reply = Some(reply.facts);
+        self.model_reply = Some(reply.facts.with_asked_again(reasks));
         if let Some(text) = reply.text {
             let batch = AgentProviderStreamBatch::new(call, vec![text]);
             let disposition =

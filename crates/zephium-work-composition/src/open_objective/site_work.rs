@@ -1179,6 +1179,21 @@ pub(crate) fn signed_out(observation: &SemanticObservation) -> bool {
     offers && !controls().any(|node| names_any(&label(node), &ACCOUNT_WORDS))
 }
 
+/// A field typing into which commits nothing by itself: a search box, a
+/// place or date picker, a filter, a field of a form that only queries. A
+/// field of a form that posts, a personal or secret one, or one that saves
+/// as it is typed stays verified exactly.
+fn rewritable(kind: SemanticActionKind, node: &SemanticNode, snapshot: &SemanticSnapshot) -> bool {
+    matches!(kind, SemanticActionKind::Fill | SemanticActionKind::Select)
+        && node.sensitivity() == SemanticSensitivity::Public
+        && !credential(node)
+        && (in_search(node, snapshot)
+            || node
+                .form()
+                .is_none_or(|form| form.method() == SemanticFormMethod::Get || form.search()))
+        && !matches!(classify(kind, None, node, snapshot), SiteEffect::Commit(_))
+}
+
 fn credential(node: &SemanticNode) -> bool {
     node.role() == SemanticRole::Password || node.sensitivity() == SemanticSensitivity::Secret
 }
@@ -1273,6 +1288,28 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
         })
         .collect::<Vec<_>>();
         SemanticOperations::try_new(&operations).map_err(|_| AgentWorkFailure::Contract)
+    }
+
+    fn rewritable_field(
+        &self,
+        action: &SemanticPreparedAction,
+        observation: &SemanticObservation,
+    ) -> bool {
+        let Some(snapshot) = observation.frames().first() else {
+            return false;
+        };
+        let Some(node) = snapshot
+            .nodes()
+            .iter()
+            .find(|node| node.reference() == action.target_reference())
+        else {
+            return false;
+        };
+        matches!(
+            action.effect(),
+            SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
+        ) && !self.gate.state().hold_typing
+            && rewritable(action.kind(), node, snapshot)
     }
 
     fn assess(
@@ -1557,6 +1594,41 @@ mod tests {
             ),
             SiteEffect::Read
         );
+    }
+
+    #[test]
+    fn only_fields_that_commit_nothing_take_a_rewritten_value_as_feedback() {
+        let page = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"landmark","lm":"search"}),
+            json!({"k":3,"p":1,"r":"combobox","n":"From","o":2}),
+            json!({"k":4,"p":0,"r":"textbox","n":"Check-in date","o":2}),
+            json!({"k":5,"p":0,"r":"textbox","n":"Card number","o":2,"q":"sensitive"}),
+            json!({"k":6,"p":0,"r":"password","n":"Password","o":2}),
+            json!({"k":7,"p":0,"r":"textbox","n":"Email","o":2,"ff":6}),
+            json!({"k":8,"p":0,"r":"textbox","n":"Search products","o":2,"ff":5}),
+        ]);
+        let snapshot = page.frames().first().unwrap();
+        let field = |key: u64, kind| {
+            rewritable(
+                kind,
+                &snapshot.nodes()[usize::try_from(key - 1).unwrap()],
+                snapshot,
+            )
+        };
+        assert!(field(3, SemanticActionKind::Fill), "a place picker");
+        assert!(field(4, SemanticActionKind::Fill), "a field with no form");
+        assert!(
+            field(8, SemanticActionKind::Fill),
+            "a form that only queries"
+        );
+        assert!(
+            !field(3, SemanticActionKind::Click),
+            "only typing or choosing"
+        );
+        assert!(!field(5, SemanticActionKind::Fill), "a sensitive field");
+        assert!(!field(6, SemanticActionKind::Fill), "a password");
+        assert!(!field(7, SemanticActionKind::Fill), "a form that posts");
     }
 
     #[test]

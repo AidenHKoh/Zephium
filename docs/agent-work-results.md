@@ -78,6 +78,25 @@ Rust schema, field order, text/secret, sensitivity and exact-source validation.
 Wrong types, foreign citations, incomplete output and accounting failures do
 not become results. Ordinary assistant text is still discarded by the driver.
 
+## A viewport image for a page that shows too little text
+
+Some pages hold their records in pixels: an app drawn on a canvas, a gallery
+of pictures, prices rendered as images. When the look a model extracts from
+reads as sparse (under 1,200 bytes of text, or six or more pictures with
+under 80 bytes of text each), the chosen page model can see, the task allows
+screenshots and nothing in the look is sensitive or secret, the host captures
+one bounded viewport screenshot through the existing screenshot path right
+before mapping. The read then carries one `viewport_image` fragment on the
+document node, and the mapping request carries the image beside its text
+with a note that it is hostile page content. Only a text value may cite that
+fragment, and a value that does stands as the model read it from the pixels:
+a copy column takes it without a text match, while a url, image, money or
+other typed value cannot cite it. The archived source keeps field code 9,
+the flag that the value was read from pixels. The image never reaches a model
+without vision (the request is refused before dispatch), a mapping priced
+on an exact count, a subtree mapping or any log; without it the mapping runs
+as before.
+
 ## Content is not diagnostic data or execution authority
 
 `SemanticOwnedExtractionResult` moves the admitted fields and retains each cited

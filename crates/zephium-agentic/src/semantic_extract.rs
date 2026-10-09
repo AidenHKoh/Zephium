@@ -1029,6 +1029,13 @@ impl<'a> SemanticExtractionResult<'a> {
     pub const fn read_omissions(&self) -> crate::SemanticReadOmissions {
         self.read_omissions
     }
+    /// The mapping admitted nothing: no scalar value and no record.
+    pub fn is_empty(&self) -> bool {
+        self.fields.iter().all(|field| match field.value() {
+            SemanticExtractedValue::Rows(rows) => rows.items().is_empty(),
+            _ => false,
+        })
+    }
     /// Original delivered-read counts, including uncited admitted fragments.
     pub const fn read_stats(&self) -> crate::SemanticReadStats {
         self.read_stats
@@ -1406,6 +1413,9 @@ pub const fn semantic_extraction_refusal_is_retryable(error: SemanticExtractionE
             | SemanticExtractionError::Sensitivity
     )
 }
+
+/// Told to a mapper whose first mapping admitted no record at all.
+pub const SEMANTIC_EXTRACTION_EMPTY_NOTE: &str = "Your previous mapping returned no records and no values, but the browsing model extracted because this evidence answers the request. Map what the evidence supports: for a request about one thing (a function, a product, a page), one record naming it with the details the evidence states; for a list, each record the evidence shows. Cite each value's own fragments. Return no records only if nothing in the evidence relates to the request.";
 
 /// Trusted, content-free text telling the mapper why Rust refused its last
 /// output, for the one corrective mapping call.
@@ -1798,25 +1808,50 @@ fn admit_value<'a>(
                             .map(|exact| (token, exact))
                     })
                     .collect();
-                let (token, value) = match value {
-                    None => match cited.as_slice() {
-                        [(token, exact)] => (*token, field.verbatim_value(exact).to_owned()),
-                        _ => return Err(SemanticExtractionError::VerbatimMismatch),
-                    },
-                    Some(value) => {
-                        let token = cited
-                            .iter()
-                            .find(|(_, exact)| {
+                // A value read from the attached viewport image has no text
+                // to copy: the model's reading stands, cited to the image.
+                let pixels = raw_sources.iter().find(|token| {
+                    SemanticReadFragmentId::parse_model_token(token)
+                        .and_then(|id| read.fragment(id))
+                        .is_some_and(|fragment| {
+                            fragment.field() == crate::SemanticReadField::ViewportImage
+                        })
+                });
+                let (token, value) = match (value, pixels) {
+                    (Some(value), Some(token)) if cited.is_empty() => (token, value),
+                    (value, _) => match value {
+                        None => match cited.as_slice() {
+                            [(token, exact)] => (*token, field.verbatim_value(exact).to_owned()),
+                            _ => return Err(SemanticExtractionError::VerbatimMismatch),
+                        },
+                        Some(value) => {
+                            let found = cited.iter().find(|(_, exact)| {
                                 *exact == value
                                     || field.verbatim_value(exact) == value
                                     || (field.money_like()
                                         && crate::semantic_money::currency_amounts(exact)
                                             .contains(&value.as_str()))
-                            })
-                            .map(|(token, _)| *token)
-                            .ok_or(SemanticExtractionError::VerbatimMismatch)?;
-                        (token, value)
-                    }
+                            });
+                            match found {
+                                Some((token, _)) => (*token, value),
+                                // A price written with its label ("Price 806 zł")
+                                // publishes the one amount it names, when the
+                                // cited text shows that amount.
+                                None => field
+                                    .money_like()
+                                    .then(|| crate::semantic_money::single_currency_amount(&value))
+                                    .flatten()
+                                    .and_then(|amount| {
+                                        cited.iter().find_map(|(token, exact)| {
+                                            crate::semantic_money::currency_amounts(exact)
+                                                .contains(&amount)
+                                                .then(|| (*token, amount.to_owned()))
+                                        })
+                                    })
+                                    .ok_or(SemanticExtractionError::VerbatimMismatch)?,
+                            }
+                        }
+                    },
                 };
                 return Ok(SemanticExtractedValue::Text(admit_text(
                     value,
@@ -3352,6 +3387,18 @@ mod tests {
              "price":{"k":"text","sources":[token("1 299,00 zł")]},
              "url":{"k":"url","sources":[card]}}
         ]}}]});
+        // A mapping that admits no record is told so once; one that admits
+        // any is not.
+        let empty = json!({"fields":[{"name":"output_0","value":{"k":"rows","items":[]}}]});
+        assert!(extract_semantic_read(
+            &schema,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&empty).unwrap(),
+        )
+        .unwrap()
+        .is_empty());
         let result = extract_semantic_read(
             &schema,
             &read,
@@ -3359,9 +3406,9 @@ mod tests {
             SemanticReadSensitivityLimit::PublicOnly,
             &serde_json::to_vec(&output).unwrap(),
         )
-        .unwrap()
-        .into_owned()
         .unwrap();
+        assert!(!result.is_empty());
+        let result = result.into_owned().unwrap();
         let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
             panic!("rows");
         };
@@ -3402,6 +3449,91 @@ mod tests {
                 "https://m.media-amazon.com/images/I/71mclaren.jpg".into()
             )
         );
+    }
+
+    #[test]
+    fn only_a_text_value_may_cite_the_viewport_image_and_it_is_read_from_pixels() {
+        // A gallery whose prices are drawn as images: little text, pictures.
+        let observation = observation_with_nodes(json!([
+            {"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"heading","l":1,"n":"Sets"},
+            {"k":3,"p":0,"r":"image","n":"Technic 42205"}
+        ]));
+        assert!(crate::semantic_observation_reads_sparse(&observation));
+        let row = vec![
+            SemanticExtractionFieldSchema::try_text("name".into(), true, 512).unwrap(),
+            SemanticExtractionFieldSchema::try_text("price".into(), false, 1024)
+                .unwrap()
+                .with_verbatim_text()
+                .unwrap(),
+            SemanticExtractionFieldSchema::try_url("url".into(), false, 2048).unwrap(),
+        ];
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows("output_0".into(), true, row, 8).unwrap()],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema_with_viewport_image(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+            &schema,
+        )
+        .unwrap();
+        let delivery = delivered(&read);
+        let token = |field: crate::SemanticReadField| {
+            read.fragments()
+                .iter()
+                .find(|fragment| fragment.field() == field)
+                .unwrap()
+                .id()
+                .model_token()
+        };
+        let pixels = token(crate::SemanticReadField::ViewportImage);
+        let name = token(crate::SemanticReadField::AccessibleName);
+        let output = json!({"fields":[{"name":"output_0","value":{"k":"rows","items":[
+            {"fields":[
+                {"name":"name","value":{"k":"text","value":"Technic 42205","sources":[name]}},
+                {"name":"price","value":{"k":"text","value":"899 zł","sources":[pixels.clone()]}},
+                {"name":"url","value":{"k":"url","sources":[pixels.clone()]}}
+            ]}
+        ]}}]});
+        let result = extract_semantic_read(
+            &schema,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&output).unwrap(),
+        )
+        .unwrap();
+        let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+            panic!("rows");
+        };
+        let fields = rows.items()[0].fields();
+        // The price stands as read from the image; a link cannot come from it.
+        assert!(fields.iter().any(|field| field.name() == "price"
+            && matches!(field.value(), SemanticExtractedValue::Text(price) if price.as_str() == "899 zł")));
+        assert!(!fields.iter().any(|field| field.name() == "url"));
+        // A look holding anything private gets no viewport image.
+        let private = observation_with_nodes(json!([
+            {"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"textbox","n":"Email","q":"sensitive"}
+        ]));
+        let read = crate::read_semantic_observation_for_schema_with_viewport_image(
+            &private,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+            &schema,
+        )
+        .unwrap();
+        assert!(!read
+            .fragments()
+            .iter()
+            .any(|fragment| fragment.field() == crate::SemanticReadField::ViewportImage));
     }
 
     #[test]
@@ -3465,12 +3597,14 @@ mod tests {
         let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
             panic!("rows");
         };
-        // A price column copies one amount the cited text shows, never an
-        // amount it does not.
+        // A price column copies one amount the cited text shows; a price
+        // written with words around it publishes the amount it names.
         assert!(
             matches!(rows.items()[0].fields()[1].value(), SemanticExtractedValue::Text(price) if price.as_str() == "3249 PLN")
         );
-        assert_eq!(rows.items()[1].fields().len(), 2);
+        assert!(
+            matches!(rows.items()[1].fields()[1].value(), SemanticExtractedValue::Text(price) if price.as_str() == "4399 PLN")
+        );
         let urls: Vec<_> = rows
             .items()
             .iter()
