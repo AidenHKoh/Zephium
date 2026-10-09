@@ -3504,7 +3504,56 @@ impl AgentWorkController {
                 continue;
             }
             if turn.turn.proposal().kind() == AgentBrowserToolKind::Wait {
-                let next = Self::wait_current(state, worker, browser, turn, observation).await?;
+                let next = match Self::wait_current(state, worker, browser, turn, observation)
+                    .await?
+                {
+                    Ok(next) => next,
+                    // The page moved under the wait (a results page that
+                    // replaced its document while it loaded): the wait is
+                    // answered with a fresh whole look, as after a section look.
+                    Err(unwaited) => {
+                        let (unwaited, original) = *unwaited;
+                        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                        let checkpoint = unwaited
+                            .into_tool_turn()
+                            .into_parts()
+                            .1
+                            .into_wait_refresh(&original, &session.config)
+                            .map_err(|_| {
+                                AgentWorkFailure::Browser(AgentBrowserProviderError::Authority)
+                            })?;
+                        let wake = Instant::now() + Duration::from_millis(1_500);
+                        if wake < state.native.deadline {
+                            tokio::select! {
+                                biased;
+                                event = state.native.next_event(worker, browser) => {
+                                    state.native.retain(event?)?;
+                                    return Err(AgentWorkFailure::Mailbox);
+                                }
+                                () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+                            }
+                        }
+                        let next =
+                            Self::inspect_current(state, worker, browser, checkpoint, &original)
+                                .await?;
+                        observation = next.0;
+                        captured_at = next.1;
+                        progress = next.2;
+                        let Some(next_turn) = next.3 else {
+                            state.observation = Some(observation);
+                            return Ok(());
+                        };
+                        turn = next_turn;
+                        frames.clear();
+                        frames.extend(
+                            observation
+                                .frames()
+                                .iter()
+                                .map(|snapshot| snapshot.frame().clone()),
+                        );
+                        continue;
+                    }
+                };
                 observation = next.0;
                 captured_at = next.1;
                 turn = next.2;
@@ -4958,11 +5007,14 @@ impl AgentWorkController {
         turn: AgentBrowserProviderTurn,
         observation: SemanticObservation,
     ) -> Result<
-        (
-            SemanticObservation,
-            SemanticCaptureInstant,
-            AgentBrowserProviderTurn,
-        ),
+        Result<
+            (
+                SemanticObservation,
+                SemanticCaptureInstant,
+                AgentBrowserProviderTurn,
+            ),
+            Box<(AgentBrowserProviderTurn, SemanticObservation)>,
+        >,
         AgentWorkFailure,
     > {
         state.check_task_contract()?;
@@ -4979,12 +5031,14 @@ impl AgentWorkController {
             .map_or(state.native.deadline, |deadline| {
                 deadline.min(state.native.deadline)
             });
-        let mut wait = SemanticStandaloneWait::prepare(
+        let original = observation.clone();
+        let Ok(mut wait) = SemanticStandaloneWait::prepare(
             *condition,
             observation,
             turn.turn.continuation().baseline(),
-        )
-        .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?;
+        ) else {
+            return Ok(Err(Box::new((turn, original))));
+        };
         let mut backoff = SemanticStandaloneWaitBackoff::new();
         let result = loop {
             let now = Instant::now();
@@ -5014,9 +5068,9 @@ impl AgentWorkController {
                 }
                 result => result?,
             };
-            let step = wait
-                .advance(current)
-                .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?;
+            let Ok(step) = wait.advance(current) else {
+                return Ok(Err(Box::new((turn, original))));
+            };
             if Instant::now() >= wait_deadline {
                 break match step {
                     SemanticStandaloneWaitStep::Pending(pending) => pending.time_out(),
@@ -5050,7 +5104,7 @@ impl AgentWorkController {
             ),
         )
         .await?;
-        Ok((observation, captured_at, next_turn))
+        Ok(Ok((observation, captured_at, next_turn)))
     }
 
     async fn extract_current(
