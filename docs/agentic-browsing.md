@@ -313,8 +313,9 @@ profile's user-data environment. The digest binds the approved registrable
 site, scheme and port. Pages for that site share the person's Work sign-in and
 origin storage across parts and runs, while independent apps can run in
 parallel. Each construction still verifies the extension-free inventory.
-Anonymous public Work sessions use separate ephemeral environments and never
-seed from the person's profile.
+Pages without the person's session use Work's own website data (4.3) and never
+seed from the person's profile. Private runs and loopback qualification
+fixtures use separate ephemeral environments.
 
 The retained Work cookie bridge keeps existing destination-origin cookies.
 Initial seeding is serialized per site store; a new origin waits for that
@@ -330,7 +331,46 @@ previously used HTTP and custom-port stores, within one bounded request.
 This preserves Work sign-ins without claiming full Browse origin-storage
 equivalence or cross-site Work storage sharing with macOS.
 
-### 4.3 Profile leasing
+### 4.3 Work's own website data
+
+Pages Work opens without the person's session (public reads, page tasks on
+sites the person is not signed in to through Work, sites marked Never or
+declined for the run, and search results pages) use **Work's own website
+data**: one persistent store per durable Zephium profile, separate from the
+profile's own store and from every other profile's. It remembers what a
+person-free browser would remember between visits: solved bot checks such as
+DataDome or Cloudflare clearance cookies, consent choices such as Google's EU
+consent, and site preferences. Earlier Work kept these pages in per-run
+ephemeral storage, so every run met the same consent wall and bot check again
+and failed on sites that only let a returning browser through. Work's store
+holds no session of the person's: it is signed in somewhere only if the person
+signs in inside a Work page.
+
+- macOS: a persistent `WKWebsiteDataStore` from `dataStoreForIdentifier:` with
+  an identifier derived from the profile (SHA-256 of a domain tag and the
+  profile id, shaped as a version 8 UUID), never equal to the profile's own
+  identifier. Construction and every attestation check that the page's store
+  is persistent, carries exactly that identifier, and is the host's one
+  retained object for the profile.
+- Windows: a dedicated WebView2 user-data folder under the profiles root,
+  keyed by the same derived identifier, with one non-private named profile
+  `work-<identifier>`. Its environment never enables extensions and is never
+  seeded from the person's cookies.
+
+Every page of a run and of parallel runs shares the profile's one store, as
+ordinary tabs share a profile's; page teardown never removes it. Deleting the
+Zephium profile erases it with the profile's own data (macOS removes the named
+store and verifies it is gone; Windows removes and verifies the folder).
+Settings → Work → Privacy clears it on request
+(`work_clear_website_data`). A private profile has no Work store; its Work
+pages keep run-scoped ephemeral storage. A private run keeps the run's own
+empty storage for every page. The signed-in path (the person's session for a
+site, including the sign-in handoff) is unchanged and uses the profile's
+storage as before. Content policy, tracking protection and the ad blocker
+apply to Work's store as to every other Work context, and no extension ever
+loads in it.
+
+### 4.4 Profile leasing
 
 Every probe or production context names a profile explicitly. Test tooling
 never falls back to the default profile.
