@@ -2566,6 +2566,17 @@ return null;
 }
 return { width, height };
 }
+function coveredPoint(rect, viewport) {
+const left = mathMax(0, rect.x);
+const top = mathMax(0, rect.y);
+const right = mathMin(viewport.width, rect.x + rect.width);
+const bottom = mathMin(viewport.height, rect.y + rect.height);
+if (right <= left || bottom <= top) return null;
+return {
+x: mathMax(0, mathMin(viewport.width - 1, mathRound((left + right) / 2))),
+y: mathMax(0, mathMin(viewport.height - 1, mathRound((top + bottom) / 2)))
+};
+}
 function actionPoint(target, rect, viewport) {
 const left = mathMax(0, rect.x);
 const top = mathMax(0, rect.y);
@@ -3368,6 +3379,10 @@ point = rect === null ? null : actionPoint(target, rect, viewport);
 } catch (_) {
 point = null;
 }
+}
+if (point === null && rect !== null && !cdpPreparing && target !== document &&
+(request.k === "fill" || request.k === "press" || (request.k === "select" && tagName(target) === "select"))) {
+point = coveredPoint(rect, viewport);
 }
 if (point === null || rect === null) return actionFault("target_occluded");
 readiness = "visible";

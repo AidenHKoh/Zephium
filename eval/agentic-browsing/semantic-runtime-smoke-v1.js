@@ -1118,6 +1118,10 @@ async function finish() {
     runtime.invoke(actionRequest(4)) === "E2:target_occluded",
     "occluded action target was accepted"
   );
+  // A key reaches its target through events, not the pointer: something
+  // lying over the target does not stop it.
+  const coveredKey = runtime.invoke(JSON.stringify({ ...JSON.parse(actionRequest(40)), k: "press", pk: "escape" }));
+  assert(!String(coveredKey).startsWith("E2:target_occluded"), "a key to a covered target was refused: " + coveredKey);
   document._hit = button;
 
   button.rect = { x: 240, y: 10, width: 160, height: 32 };
