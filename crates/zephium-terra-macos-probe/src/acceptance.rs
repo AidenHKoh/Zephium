@@ -1179,6 +1179,10 @@ pub(super) async fn lead_workflow(
     use zephium_ipc::work::*;
     let export = public_eval_path(scenario)?;
     let public_eval = export.is_some();
+    let account_probe = super::work_account::active().is_some();
+    if account_probe && (public_eval || scenario.folder || scenario.name != "request") {
+        return Err("account_scope");
+    }
     let read_decision_env = if public_eval {
         std::env::var("ZEPHIUM_EVAL_READ_DECISIONS")
             .map(Some)
@@ -1193,7 +1197,7 @@ pub(super) async fn lead_workflow(
     let block_probe = scenario.name.starts_with("blocks-");
     let eval_started = Instant::now();
     let local_diagnostics = Arc::new(Mutex::new(EvalDiagnostics::default()));
-    if public_eval || block_probe {
+    if public_eval || block_probe || account_probe {
         let _ = zephium_app::work_models::view(profile).await;
         for role in [
             WorkModelRole::Lead,
@@ -1212,7 +1216,7 @@ pub(super) async fn lead_workflow(
     };
     // A named page model, as a person picks one in Settings → AI.
     if let Ok(id) = std::env::var("ZEPHIUM_PROBE_PAGE_MODEL").and_then(|id| {
-        if public_eval || block_probe {
+        if public_eval || block_probe || account_probe {
             Err(std::env::VarError::NotPresent)
         } else {
             Ok(id)
@@ -1230,7 +1234,7 @@ pub(super) async fn lead_workflow(
         .await
         .unwrap_or_else(|| page.clone());
     let model_setup = serde_json::json!({ "lead": lead.entry, "page": page.entry, "light": light.entry, "public_search_model": PUBLIC_SEARCH_MODEL, "read_triage": read_decision_name });
-    if public_eval || block_probe {
+    if public_eval || block_probe || account_probe {
         for (role, model) in [
             ("lead", &mut lead),
             ("page", &mut page),
@@ -1372,23 +1376,31 @@ pub(super) async fn lead_workflow(
     } else {
         None
     };
-    let person = tokio::spawn(stand_in(
-        handle.clone(),
-        profile,
-        work,
-        scenario.answer,
-        pick.clone(),
-        public_eval || block_probe,
-    ));
+    let person = (!account_probe).then(|| {
+        tokio::spawn(stand_in(
+            handle.clone(),
+            profile,
+            work,
+            scenario.answer,
+            pick.clone(),
+            public_eval || block_probe,
+        ))
+    });
     let keys = Arc::new(Mutex::new(keys));
     let callback = handle.callback_handle();
     let service = WorkLeadService::new(handle.clone()).with_diagnostic(|event| {
         say(format_args!("lead-run: event={event:?}"));
     });
+    let no_search = super::work_account::NoSearch;
+    let active_search: &dyn WorkPublicSearchProvider =
+        if account_probe { &no_search } else { &search };
     let mut expected = created.applied_revision;
     let mut state = None;
     let mut failure = None;
     for (index, request) in scenario.requests.iter().enumerate() {
+        if super::work_account::active().is_some_and(|account| account.stopped()) {
+            break;
+        }
         if index > 0 {
             let edited = handle
                 .work_authoring_command(
@@ -1414,81 +1426,95 @@ pub(super) async fn lead_workflow(
             expected = receipt.applied_revision;
         }
         let started = Instant::now();
-        let result = service
-            .run(
-                profile,
-                WorkCommandV1 {
-                    version: 1,
-                    work,
-                    expected_revision: expected,
-                    command: WorkCommandId::generate(),
-                    intent: WorkRuntimeIntent::BeginAgent {
-                        grant: WorkAgentGrantV1 {
-                            provider: WorkSearchProvider::OpenAi,
-                            model: PUBLIC_SEARCH_MODEL.into(),
-                            max_turns: 10,
-                            max_steps: 32,
-                            browse_hops: 4,
-                            folders: folder
-                                .iter()
-                                .map(|f| f.to_string_lossy().into_owned())
-                                .collect(),
-                            accounts: vec![],
-                            private: public_eval || block_probe,
-                            lead: None,
-                            skill: None,
-                            search_fallback: None,
-                        },
-                        limits: WorkExecutionLimits {
-                            model_tokens: 1_000_000,
-                            cost_micro_usd: 3_000_000,
-                            operations: 256,
-                            timeout_seconds: 1_800,
-                            max_workers: 4,
-                        },
+        let running = service.run(
+            profile,
+            WorkCommandV1 {
+                version: 1,
+                work,
+                expected_revision: expected,
+                command: WorkCommandId::generate(),
+                intent: WorkRuntimeIntent::BeginAgent {
+                    grant: WorkAgentGrantV1 {
+                        provider: WorkSearchProvider::OpenAi,
+                        model: PUBLIC_SEARCH_MODEL.into(),
+                        max_turns: 10,
+                        max_steps: 32,
+                        browse_hops: 4,
+                        folders: folder
+                            .iter()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .collect(),
+                        accounts: vec![],
+                        private: public_eval || block_probe || account_probe,
+                        lead: None,
+                        skill: None,
+                        search_fallback: None,
+                    },
+                    limits: WorkExecutionLimits {
+                        model_tokens: 1_000_000,
+                        cost_micro_usd: 3_000_000,
+                        operations: 256,
+                        timeout_seconds: 1_800,
+                        max_workers: 4,
                     },
                 },
-                block_fixture
-                    .as_ref()
-                    .map(super::work_blocks::Fixture::selection),
-                models.clone(),
-                &search,
-                |probe, request| {
-                    let key = keys.lock().ok().and_then(|mut keys| keys.pop());
-                    let callback = &callback;
-                    let chosen_page = chosen_page.clone();
-                    let chosen_light = chosen_light.clone();
-                    async move {
-                        let key = match key {
-                            Some(key) => key,
-                            None => tokio::task::spawn_blocking(
-                                zephium_agentic::load_macos_probe_openai_credential,
-                            )
-                            .await
-                            .map_err(|_| WorkError::Unavailable)?
-                            .map_err(|_| WorkError::Unavailable)?,
-                        };
-                        let mut settings = super::work_durable::browser_settings(binding, key);
-                        settings.access =
-                            zephium_agent_controller::AgentBrowserModelAccess::Chosen(chosen_page);
-                        settings.decision_model = chosen_light;
-                        if public_eval {
-                            settings.decisions = read_decisions;
-                        }
-                        if public_eval || block_probe {
-                            settings.stage_diagnostic = None;
-                            settings.model_diagnostic = None;
-                            settings.resource_diagnostic = None;
-                            settings.diagnostic = None;
-                        }
-                        composition
-                            .run_agent_step(callback, &probe, request, settings)
-                            .await
+            },
+            block_fixture
+                .as_ref()
+                .map(super::work_blocks::Fixture::selection),
+            models.clone(),
+            active_search,
+            |probe, request| {
+                let key = keys.lock().ok().and_then(|mut keys| keys.pop());
+                let callback = &callback;
+                let chosen_page = chosen_page.clone();
+                let chosen_light = chosen_light.clone();
+                async move {
+                    if super::work_account::active()
+                        .is_some_and(|account| !account.permits(&request))
+                    {
+                        return Err(WorkError::Unavailable);
                     }
-                },
-                |_| {},
-            )
-            .await;
+                    let key = match key {
+                        Some(key) => key,
+                        None => tokio::task::spawn_blocking(
+                            zephium_agentic::load_macos_probe_openai_credential,
+                        )
+                        .await
+                        .map_err(|_| WorkError::Unavailable)?
+                        .map_err(|_| WorkError::Unavailable)?,
+                    };
+                    let mut settings = super::work_durable::browser_settings(binding, key);
+                    settings.access =
+                        zephium_agent_controller::AgentBrowserModelAccess::Chosen(chosen_page);
+                    settings.decision_model = chosen_light;
+                    if account_probe {
+                        settings.retain_public_responses = false;
+                    }
+                    if public_eval {
+                        settings.decisions = read_decisions;
+                    }
+                    if public_eval || block_probe || account_probe {
+                        settings.stage_diagnostic = None;
+                        settings.model_diagnostic = None;
+                        settings.resource_diagnostic = None;
+                        settings.diagnostic = None;
+                    }
+                    composition
+                        .run_agent_step(callback, &probe, request, settings)
+                        .await
+                }
+            },
+            |_| {},
+        );
+        let result = if let Some(account) = super::work_account::active() {
+            tokio::select! {
+                result = running => result,
+                _ = account.person(handle, composition, profile, work) => Err(WorkError::Unavailable),
+            }
+        } else {
+            running.await
+        };
         let projection = match result {
             Ok(projection) => projection,
             Err(error) => {
@@ -1509,11 +1535,13 @@ pub(super) async fn lead_workflow(
             execution,
             started.elapsed().as_millis(),
         );
-        if !public_eval && !block_probe {
+        if !public_eval && !block_probe && !account_probe {
             page_rows(execution);
             part_rows(execution);
         }
-        media_row(execution).await;
+        if !account_probe {
+            media_row(execution).await;
+        }
         if !matches!(
             execution.status,
             WorkExecutionStatus::Completed | WorkExecutionStatus::NeedsReview
@@ -1522,7 +1550,9 @@ pub(super) async fn lead_workflow(
         }
         state = Some(projection);
     }
-    person.abort();
+    if let Some(person) = person {
+        person.abort();
+    }
     if let Some(pick) = pick {
         let written = std::fs::read_dir(&pick)
             .map(|entries| {
@@ -1575,7 +1605,7 @@ pub(super) async fn lead_workflow(
             &local_diagnostics,
             eval_started.elapsed().as_millis(),
         )?;
-    } else if !block_probe {
+    } else if !block_probe && !account_probe {
         let directory = std::path::Path::new("target/work-runtime-proof/lead");
         let _ = std::fs::create_dir_all(directory);
         let _ = std::fs::write(

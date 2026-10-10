@@ -205,6 +205,16 @@ pub(super) fn run_lead_request(
     run_mode(Mode::Lead)
 }
 
+pub(super) fn run_account_read(start: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
+    let request =
+        super::work_account::configure(start.to_str().ok_or(super::ProbeFailure::Authority)?)
+            .map_err(|_| super::ProbeFailure::Authority)?;
+    LEAD_SCENARIO
+        .set(super::acceptance::request_scenario(&request, ""))
+        .map_err(|_| super::ProbeFailure::Authority)?;
+    run_mode(Mode::Lead)
+}
+
 /// One page task on a named start page through the lead's Browser helper,
 /// with scripted lead and helper turns: only the page agent calls a model.
 pub(super) fn run_site(
@@ -493,12 +503,20 @@ pub(super) fn replay_agent_turn(
 fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
     zephium_app::work_trace::install(Arc::new(|line: std::fmt::Arguments<'_>| {
-        if std::env::var_os("ZEPHIUM_EVAL_PUBLIC_EXPORT").is_none()
+        if super::work_account::active().is_none()
+            && std::env::var_os("ZEPHIUM_EVAL_PUBLIC_EXPORT").is_none()
             && !LEAD_SCENARIO
                 .get()
                 .is_some_and(|scenario| scenario.name.starts_with("blocks-"))
         {
             let _ = writeln!(std::io::stdout().lock(), "trace: {line}");
+        }
+    }));
+    zephium_app::work_trace::install_record_media(Arc::new(|event| {
+        // Account qualification never exports even closed media measurements.
+        // Public qualification uses only this typed channel, not free-text traces.
+        if super::work_account::active().is_none() {
+            let _ = writeln!(std::io::stdout().lock(), "record-media: {event:?}");
         }
     }));
     let coordinated = !matches!(mode, Mode::Public | Mode::MoneyNode);
@@ -598,7 +616,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     });
     let run = zephium_engine::run_macos_work_application_with_input_probe(
         profile,
-        if matches!(mode, Mode::AgentHumanGovernment)
+        if super::work_account::active().is_some()
+            || matches!(mode, Mode::AgentHumanGovernment)
             || (mode == Mode::LoopbackSite && super::work_site::needs_human_presentation())
         {
             zephium_engine::MacosWorkProbeInput::Human

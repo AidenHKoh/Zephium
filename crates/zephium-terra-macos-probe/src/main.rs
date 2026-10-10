@@ -17,6 +17,8 @@ mod decision_observation;
 mod lead_smoke;
 #[cfg(target_os = "macos")]
 mod loopback_support;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod work_account;
 #[cfg(target_os = "macos")]
 mod work_actor;
 #[cfg(all(target_os = "macos", feature = "durable-runtime"))]
@@ -215,6 +217,10 @@ fn main() {
         [argument, scenario] if argument == "--live-lead" => work_durable::run_lead(scenario),
         [argument, request, answer] if argument == "--live-lead-request" => {
             work_durable::run_lead_request(request, answer)
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument, start] if argument == "--live-account-read" => {
+            work_durable::run_account_read(start)
         }
         #[cfg(feature = "durable-runtime")]
         [argument, start, goal] if argument == "--live-site" => work_durable::run_site(start, goal),
