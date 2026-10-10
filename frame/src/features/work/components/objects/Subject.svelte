@@ -1,9 +1,22 @@
 <script lang="ts">
   import Icon from "$shared/ui/Icon";
+  import type { IconSvgElement } from "@hugeicons/svelte";
   import * as m from "$shared/i18n/messages";
   import type { ObjectActions, SubjectView } from "../../lib/board/types";
   import { siteName } from "../../lib/run/site";
-  import { ArrowUpRight01Icon } from "./icons";
+  import {
+    ArrowUpRight01Icon,
+    CheckmarkCircle02Icon,
+    Doc01Icon,
+    GitMergeIcon,
+    GitPullRequestClosedIcon,
+    GitPullRequestIcon,
+    Mail01Icon,
+    Message01Icon,
+    PlayCircleIcon,
+    RecordIcon,
+    Ticket01Icon,
+  } from "./icons";
   import Inline from "./Inline.svelte";
   import Mark from "./Mark.svelte";
   /** One thing in a service — a pull request, an issue, a thread — read the way that service shows it. */
@@ -20,12 +33,30 @@
     }
   });
   const service = $derived(host ? siteName(host) : "");
-  /** "Ana Kowalska" → AK; a handle stands for one person, so it gives one letter. */
-  const initials = (name: string) => {
-    const words = name.trim().split(/\s+/u);
-    const letters = words.length > 1 ? [words[0], words.at(-1)] : [words[0]];
-    return letters.map((word) => word?.[0]?.toUpperCase() ?? "").join("");
-  };
+  /** `crynta/terax#1337` as where it lives and its number; a bare `#48` lives in its service. */
+  const where = $derived.by(() => {
+    const reference = object.reference ?? "";
+    const at = reference.lastIndexOf("#");
+    if (at > 0) return { path: reference.slice(0, at), number: reference.slice(at) };
+    return { path: service || reference, number: service ? reference : "" };
+  });
+  const tone = $derived(object.status?.tone ?? "active");
+  /** The service's own sign for this kind of thing in this state. */
+  const glyph = $derived.by((): IconSvgElement => {
+    const noun = object.noun.toLowerCase();
+    if (/pull|merge request/u.test(noun))
+      return tone === "done"
+        ? GitMergeIcon
+        : tone === "closed"
+          ? GitPullRequestClosedIcon
+          : GitPullRequestIcon;
+    if (/issue|bug/u.test(noun)) return tone === "done" ? CheckmarkCircle02Icon : RecordIcon;
+    if (/mail/u.test(noun)) return Mail01Icon;
+    if (/thread|message|channel|chat|conversation/u.test(noun)) return Message01Icon;
+    if (/ticket|task|story/u.test(noun)) return Ticket01Icon;
+    if (/video/u.test(noun)) return PlayCircleIcon;
+    return Doc01Icon;
+  });
   const open = (event: MouseEvent) => {
     if (!actions.link) return;
     event.preventDefault();
@@ -34,55 +65,50 @@
 </script>
 
 <article class="subject" class:centre aria-label={object.heading}>
-  <header>
-    <span class="where">
-      {#if host}<Mark address={object.url} size={16} />{/if}
-      <span class="noun">{service ? `${service} · ${object.noun}` : object.noun}</span>
-      {#if object.reference}<span class="reference">{object.reference}</span>{/if}
-    </span>
-    {#if object.status}<span class="state" data-tone={object.status.tone}
-        >{object.status.label}</span
-      >{/if}
-  </header>
+  <a
+    class="where nodrag"
+    href={object.url}
+    onclick={open}
+    title={service ? m.work_list_open_in({ app: service }) : m.work_env_open()}
+  >
+    {#if host}<Mark address={object.url} size={16} />{/if}
+    <span class="path">{where.path}</span>
+    {#if where.number}<span class="number">{where.number}</span>{/if}
+    <Icon icon={ArrowUpRight01Icon} size={12} />
+  </a>
 
-  <h3>{object.heading}</h3>
+  <div class="head" data-tone={tone}>
+    <span class="glyph" title={object.noun}><Icon icon={glyph} size={centre ? 20 : 18} /></span>
+    <h3>{object.heading}</h3>
+  </div>
+
+  <p class="meta" data-tone={tone}>
+    {#if object.status}<span class="state">{object.status.label}</span>{:else}<span class="noun"
+        >{object.noun}</span
+      >{/if}
+    {#each object.people as person, index (index)}<span class="item"
+        ><span class="key">{person.role}</span> <span class="value">{person.name}</span></span
+      >{/each}
+    {#each object.facts as fact, index (index)}<span class="item"
+        ><span class="key">{fact.label}</span> <span class="value">{fact.value}</span></span
+      >{/each}
+  </p>
+
   {#if object.summary}<p class="summary"><Inline text={object.summary} /></p>{/if}
 
-  {#if object.people.length || object.facts.length}<dl class="facts">
-      {#each object.people as person, index (index)}<div>
-          <dt>{person.role}</dt>
-          <dd class="person">
-            <span class="avatar" aria-hidden="true">{initials(person.name)}</span>
-            <span class="name">{person.name}</span>
-          </dd>
-        </div>{/each}
-      {#each object.facts as fact, index (index)}<div>
-          <dt>{fact.label}</dt>
-          <dd>{fact.value}</dd>
-        </div>{/each}
-    </dl>{/if}
-
-  <footer>
-    {#if object.labels.length}<ul class="labels">
-        {#each object.labels as label (label)}<li>{label}</li>{/each}
-      </ul>{/if}
-    <a class="open nodrag" href={object.url} onclick={open}
-      >{service ? m.work_list_open_in({ app: service }) : m.work_env_open()}<Icon
-        icon={ArrowUpRight01Icon}
-        size={13}
-      /></a
-    >
-  </footer>
+  {#if object.labels.length}<ul class="labels">
+      {#each object.labels as label (label)}<li>{label}</li>{/each}
+    </ul>{/if}
 </article>
 
 <style>
   .subject {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
     box-sizing: border-box;
     inline-size: 100%;
-    padding: 18px 22px 16px;
+    padding: 16px 20px 18px;
     border-radius: var(--radius-card);
     background: var(--color-surface);
     box-shadow: var(--shadow-raised);
@@ -90,82 +116,99 @@
   }
 
   .centre {
-    gap: 14px;
-    padding: 26px 30px 22px;
-  }
-
-  header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
     gap: 12px;
-    min-block-size: 22px;
+    padding: 24px 28px 26px;
   }
 
+  [data-tone] {
+    --tone: var(--color-success);
+  }
+
+  [data-tone="done"] {
+    --tone: var(--color-info);
+  }
+
+  [data-tone="waiting"] {
+    --tone: var(--color-warning);
+  }
+
+  [data-tone="blocked"] {
+    --tone: var(--color-danger);
+  }
+
+  [data-tone="closed"] {
+    --tone: var(--color-muted);
+  }
+
+  /* Where it lives, as the service names it: the way back to it. */
   .where {
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    gap: 7px;
-    min-inline-size: 0;
+    align-self: flex-start;
+    gap: 6px;
+    max-inline-size: 100%;
     color: var(--color-muted);
     font-size: var(--text-label);
+    text-decoration: none;
+    cursor: default;
+    transition: color var(--motion-fast) var(--ease-out);
   }
 
-  .noun {
+  .where :global(svg:last-child) {
     flex: none;
-    font-weight: 500;
+    opacity: 0;
+    transition: opacity var(--motion-fast) var(--ease-out);
   }
 
-  .reference {
+  .where:hover {
+    color: var(--color-text);
+  }
+
+  .where:hover :global(svg:last-child),
+  .where:focus-visible :global(svg:last-child) {
+    opacity: 1;
+  }
+
+  .where:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+    border-radius: var(--radius-control-compact);
+  }
+
+  .path {
     overflow: hidden;
-    color: var(--color-faint);
-    font-family: var(--font-mono);
+    font-weight: 500;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .state {
-    --tone: var(--color-muted);
-
-    display: inline-flex;
+  .number {
     flex: none;
-    align-items: center;
-    gap: 6px;
-    block-size: 22px;
-    padding: 0 9px 0 8px;
-    border-radius: var(--radius-capsule);
-    background: color-mix(in srgb, var(--tone) 14%, transparent);
+    color: var(--color-faint);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .head {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+  }
+
+  .glyph {
+    display: grid;
+    flex: none;
+    place-items: center;
+    block-size: 1.3em;
     color: var(--tone);
-    font-size: var(--text-label);
-    font-weight: 600;
+    font-size: var(--text-object-title);
   }
 
-  .state::before {
-    inline-size: 6px;
-    block-size: 6px;
-    border-radius: var(--radius-capsule);
-    background: currentcolor;
-    content: "";
-  }
-
-  .state[data-tone="active"] {
-    --tone: var(--color-success);
-  }
-
-  .state[data-tone="done"] {
-    --tone: var(--color-info);
-  }
-
-  .state[data-tone="waiting"] {
-    --tone: var(--color-warning);
-  }
-
-  .state[data-tone="blocked"] {
-    --tone: var(--color-danger);
+  .centre .glyph {
+    font-size: var(--text-title);
   }
 
   h3 {
-    margin: 2px 0 0;
+    margin: 0;
     font-size: var(--text-object-title);
     font-weight: 650;
     line-height: 1.3;
@@ -178,8 +221,37 @@
     font-size: var(--text-title);
   }
 
-  .summary {
+  /* One quiet line of what it is now: its state in its tone, then who and the few numbers. */
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 16px;
     margin: 0;
+    padding-inline-start: 27px;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    line-height: 18px;
+  }
+
+  .centre .meta {
+    padding-inline-start: 29px;
+    font-size: var(--text-body);
+  }
+
+  .state {
+    color: var(--tone);
+    font-weight: 600;
+  }
+
+  .value {
+    color: var(--color-label-secondary);
+    font-variant-numeric: tabular-nums;
+    font-weight: 550;
+  }
+
+  .summary {
+    margin: 6px 0 0;
     max-inline-size: 68ch;
     color: var(--color-label-secondary);
     font-size: var(--text-body);
@@ -191,104 +263,21 @@
     font-size: var(--text-reading);
   }
 
-  .facts {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px 32px;
-    margin: 4px 0 0;
-    padding-block-start: 14px;
-    border-block-start: 1px solid var(--color-border);
-  }
-
-  .facts div {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    min-inline-size: 0;
-    max-inline-size: 100%;
-  }
-
-  dt {
-    color: var(--color-muted);
-    font-size: var(--text-caption);
-    font-weight: 500;
-  }
-
-  dd {
-    margin: 0;
-    overflow: hidden;
-    font-size: var(--text-body);
-    font-variant-numeric: tabular-nums;
-    font-weight: 550;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .person {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .avatar {
-    display: grid;
-    flex: none;
-    place-items: center;
-    inline-size: 18px;
-    block-size: 18px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-fill-strong);
-    color: var(--color-label-secondary);
-    font-size: 9px;
-    font-weight: 650;
-    letter-spacing: 0.02em;
-  }
-
-  .name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    margin-block-start: 2px;
-  }
-
   .labels {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    min-inline-size: 0;
-    margin: 0;
+    margin: 4px 0 0;
     padding: 0;
     list-style: none;
   }
 
   .labels li {
-    padding: 2px 8px;
+    padding: 1px 8px;
     border-radius: var(--radius-capsule);
-    background: var(--color-fill);
+    box-shadow: inset 0 0 0 1px var(--color-border-strong);
     color: var(--color-label-secondary);
     font-size: var(--text-label);
-  }
-
-  .open {
-    display: inline-flex;
-    flex: none;
-    align-items: center;
-    gap: 4px;
-    margin-inline-start: auto;
-    color: var(--color-muted);
-    font-size: var(--text-label);
-    font-weight: 500;
-    text-decoration: none;
-    cursor: default;
-  }
-
-  .open:hover {
-    color: var(--color-text);
+    line-height: 18px;
   }
 </style>
