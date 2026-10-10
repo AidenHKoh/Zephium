@@ -5,8 +5,7 @@ use zephium_core::work::parts::{
 };
 
 const MAX_CONCURRENT_PAGE_READS: usize = 3;
-/// New reads one plain read may become by following its own site's
-/// redirects.
+/// New reads one public page task may become after a first-load redirect.
 pub(crate) const MAX_REDIRECT_HOPS: usize = 2;
 /// How often a page read looks at the steps its pages hold for the person.
 const HELD_POLL: Duration = Duration::from_millis(500);
@@ -419,7 +418,7 @@ impl Driver {
 }
 
 impl Driver {
-    /// A new read of the address a plain public read's first load was
+    /// A new read of the address a public page task's first load was
     /// redirected to on its own site: its own step citing that address,
     /// within what the first read left of its share, never an address the
     /// chain already read, and at most `MAX_REDIRECT_HOPS` of them. The
@@ -432,18 +431,11 @@ impl Driver {
         used: WorkUsage,
         read: &[String],
     ) -> Result<Option<WorkAgentBrowseRequest>, WorkError> {
-        let WorkStepKindV1::Read {
-            url,
-            goal: None,
-            collection,
-        } = &request.step
-        else {
+        let WorkStepKindV1::Read { url, .. } = &request.step else {
             return Ok(None);
         };
-        let target = |url: &str| zephium_agentic::ContextNavigationTarget::parse(url).ok();
-        let same_site = target(url)
-            .zip(target(destination))
-            .is_some_and(|(from, to)| zephium_agentic::same_work_site(&from, &to));
+        let kind = redirected_kind(&request.step, destination);
+        let same_site = kind.is_some();
         let followed = read.len().saturating_sub(1);
         let follows = same_site
             && request.results.is_none()
@@ -457,10 +449,8 @@ impl Driver {
         let Some(limits) = retry_limits(request.limits, used).filter(|_| follows) else {
             return Ok(None);
         };
-        let kind = WorkStepKindV1::Read {
-            url: destination.to_owned(),
-            goal: None,
-            collection: collection.clone(),
+        let Some(kind) = kind else {
+            return Ok(None);
         };
         let id = self
             .begin(
@@ -490,6 +480,24 @@ impl Driver {
             ..request.clone()
         }))
     }
+}
+
+fn redirected_kind(step: &WorkStepKindV1, destination: &str) -> Option<WorkStepKindV1> {
+    let WorkStepKindV1::Read {
+        url,
+        goal,
+        collection,
+    } = step
+    else {
+        return None;
+    };
+    let from = zephium_agentic::ContextNavigationTarget::parse(url).ok()?;
+    let to = zephium_agentic::ContextNavigationTarget::parse(destination).ok()?;
+    zephium_agentic::same_work_site(&from, &to).then(|| WorkStepKindV1::Read {
+        url: destination.to_owned(),
+        goal: goal.clone(),
+        collection: collection.clone(),
+    })
 }
 
 // Short-lived coordination only: durable Ask/Read facts remain authoritative.
@@ -1428,6 +1436,52 @@ pub(super) fn combined_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_load_redirect_preserves_task_and_collection_without_crossing_sites() {
+        for goal in [
+            None,
+            Some("Compare the listed products without buying".into()),
+        ] {
+            let collection = Some(WorkBrowseCollection {
+                title: "Products".into(),
+                columns: vec![WorkBrowseColumn {
+                    name: "price".into(),
+                    value: WorkBrowseValue::Text,
+                    required: false,
+                    extraction: WorkBrowseExtraction::Generate,
+                }],
+                max_items: 5,
+            });
+            let step = WorkStepKindV1::Read {
+                url: "https://example.com/products".into(),
+                goal: goal.clone(),
+                collection: collection.clone(),
+            };
+            assert_eq!(
+                redirected_kind(&step, "https://www.example.com/products/"),
+                Some(WorkStepKindV1::Read {
+                    url: "https://www.example.com/products/".into(),
+                    goal,
+                    collection,
+                })
+            );
+            for destination in [
+                "https://example.com.evil.test/products",
+                "https://other.example.net/products",
+                "file:///etc/passwd",
+            ] {
+                assert!(redirected_kind(&step, destination).is_none());
+            }
+        }
+        assert!(redirected_kind(
+            &WorkStepKindV1::Search {
+                query: "products".into()
+            },
+            "https://example.com/products"
+        )
+        .is_none());
+    }
 
     fn blocker_read(
         url: &str,

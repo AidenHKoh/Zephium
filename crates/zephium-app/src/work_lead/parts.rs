@@ -1724,7 +1724,7 @@ fn operator_last(query: &str) -> String {
     }
 }
 
-/// A new plain read of the address a read's first load was redirected to,
+/// A new read of the address a page's first load was redirected to,
 /// admitted by the same checks as a read the lead asked for itself.
 pub(crate) fn redirected_read(
     kind: &WorkStepKindV1,
@@ -1732,19 +1732,17 @@ pub(crate) fn redirected_read(
     run: &super::run::LeadRun,
 ) -> Result<WorkStepKindV1, String> {
     let WorkStepKindV1::Read {
-        collection,
-        goal: None,
-        ..
+        collection, goal, ..
     } = kind
     else {
-        return Err("only a plain read follows a redirect".into());
+        return Err("only a page read follows a redirect".into());
     };
     admit_kind(
         "read",
         WorkStepKindV1::Read {
             url: destination.to_owned(),
             collection: collection.clone(),
-            goal: None,
+            goal: goal.clone(),
         },
         run,
     )
