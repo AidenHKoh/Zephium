@@ -350,6 +350,9 @@ async fn read(context: LeadToolContext<'_>, args: Value) -> Result<String, Strin
         data[key] = json!(rows);
         let reply=json!({"id":record.id,"revision":record.revision,"title":record.draft.title,"kind":kind,"offset":args.offset,"count":count,"returned":rows.len(),"data":data}).to_string();
         if reply.len() <= MAX_REPLY {
+            crate::work_context::require_model_safe_text(&reply).map_err(|_| {
+                "This block contains recognizable credentials; remove them before sharing it with the model".to_owned()
+            })?;
             context
                 .run
                 .blocks
