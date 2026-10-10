@@ -468,11 +468,14 @@ fn behind_check(steps: &[WorkStepFact]) -> Vec<String> {
         match step.status {
             WorkStepStatus::Succeeded => sites.retain(|known| *known != site),
             WorkStepStatus::Failed
-                if step
-                    .note
-                    .as_deref()
-                    .is_some_and(zephium_core::work::runtime::read_note::is_human_check)
-                    && !sites.contains(&site) =>
+                if match step.measurements.and_then(|m| m.outcome) {
+                    Some(WorkPageOutcomeV1::NeedsCheck) => true,
+                    None => step
+                        .note
+                        .as_deref()
+                        .is_some_and(zephium_core::work::runtime::read_note::is_human_check),
+                    _ => false,
+                } && !sites.contains(&site) =>
             {
                 sites.push(site)
             }
@@ -751,11 +754,17 @@ impl Driver {
                 fact.state = zephium_core::work::parts::WorkPartStateV1::Waiting;
                 fact.summary = Some(format!("Needs you on {site}"));
                 // A sign-in says so on the row, with its fix.
-                fact.need = (wait == crate::work_agent::WorkPageWait::SignIn)
-                    .then(|| zephium_core::work::parts::WorkPartNeedV1::SignIn {
+                use zephium_core::work::parts::{WorkPartNeedV1, WorkPartReasonV1};
+                fact.need = Some(match wait {
+                    crate::work_agent::WorkPageWait::SignIn => WorkPartNeedV1::SignIn {
                         host: site.to_owned(),
-                    })
-                    .filter(|need| need.validate().is_ok());
+                    },
+                    crate::work_agent::WorkPageWait::Check => WorkPartNeedV1::Retry {
+                        host: Some(site.to_owned()),
+                        reason: Some(WorkPartReasonV1::BlockedByCheck),
+                    },
+                })
+                .filter(|need| need.validate().is_ok());
             }
             None => {
                 fact.state = zephium_core::work::parts::WorkPartStateV1::Running;

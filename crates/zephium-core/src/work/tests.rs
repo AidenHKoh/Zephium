@@ -1520,6 +1520,17 @@ fn step_measurements_name_their_cost_basis_and_read_older_records() {
     );
     let priced = read(r#","cost_basis":"priced""#);
     assert_eq!(priced.cost_basis, WorkCostBasis::Priced);
+    assert_eq!(priced.outcome, None);
+    let checked = read(",\"outcome\":{\"kind\":\"needs_check\"}");
+    assert_eq!(
+        checked.outcome,
+        Some(runtime::WorkPageOutcomeV1::NeedsCheck)
+    );
+    assert_eq!(
+        serde_json::from_str::<WorkStepMeasurementsV1>(&serde_json::to_string(&checked).unwrap())
+            .unwrap(),
+        checked
+    );
     let written = serde_json::to_string(&priced).unwrap();
     assert!(written.contains(r#""cost_basis":"priced""#) && !written.contains("cost_exact"));
     assert_eq!(

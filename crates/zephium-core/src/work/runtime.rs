@@ -1088,6 +1088,9 @@ pub enum WorkCostBasis {
 /// accounting beside the conservative ceiling in `usage`. Never page, model
 /// or provider text.
 pub struct WorkStepMeasurementsV1 {
+    /// Closed page outcome, independent of explanatory text. Absent on older steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<WorkPageOutcomeV1>,
     /// Wall time from the step's resource launch to its settled outcome.
     pub wall_millis: u32,
     /// Typed decision calls answered by the recommended backend.
@@ -1112,6 +1115,8 @@ impl<'de> Deserialize<'de> for WorkStepMeasurementsV1 {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
+            #[serde(default)]
+            outcome: Option<WorkPageOutcomeV1>,
             wall_millis: u32,
             decision_calls: u16,
             emulation_calls: u16,
@@ -1126,6 +1131,7 @@ impl<'de> Deserialize<'de> for WorkStepMeasurementsV1 {
         }
         let wire = Wire::deserialize(deserializer)?;
         Ok(Self {
+            outcome: wire.outcome,
             wall_millis: wire.wall_millis,
             decision_calls: wire.decision_calls,
             emulation_calls: wire.emulation_calls,
@@ -1140,6 +1146,38 @@ impl<'de> Deserialize<'de> for WorkStepMeasurementsV1 {
             }),
         })
     }
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkPageOutcomeV1 {
+    Completed,
+    Incomplete,
+    NeedsSignIn,
+    NeedsCheck,
+    NeedsApproval,
+    NeedsInteraction,
+    TooManySteps,
+    Redirected,
+    Refused { stage: WorkPageFailureStageV1 },
+    SiteError,
+    Cancelled,
+    OutcomeUnknown,
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkPageFailureStageV1 {
+    Admission,
+    Observation,
+    Action,
+    Navigation,
+    Extraction,
+    Provider,
+    Storage,
+    Runtime,
 }
 
 impl WorkUsage {

@@ -791,7 +791,7 @@ where
             WorkStepKindV1::Read { url, goal, .. } => {
                 let measured = step.measurements.as_ref();
                 crate::work_trace::record(format_args!(
-                    "work: phase=page site={} task={} status={:?} wall_ms={} calls={} actions={} tokens={} records={}",
+                    "work: phase=page site={} task={} status={:?} wall_ms={} calls={} actions={} tokens={} records={} outcome={:?}",
                     crate::work_sites::site_of(url).unwrap_or_default(),
                     goal.is_some(),
                     step.status,
@@ -800,6 +800,7 @@ where
                     measured.map_or(0, |m| m.native_actions),
                     measured.map_or(0, |m| m.model_tokens),
                     step.artifacts.len(),
+                    measured.and_then(|m| m.outcome),
                 ));
                 let title = step
                     .local

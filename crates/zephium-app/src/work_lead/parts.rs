@@ -1284,7 +1284,11 @@ where
             _ => steps.iter().find_map(|s| match &s.kind {
                 WorkStepKindV1::Read { url, .. }
                     if s.status != WorkStepStatus::Succeeded
-                        && s.note.as_deref() == Some(SIGN_IN_NOTE) =>
+                        && match s.measurements.and_then(|m| m.outcome) {
+                            Some(WorkPageOutcomeV1::NeedsSignIn) => true,
+                            None => s.note.as_deref() == Some(SIGN_IN_NOTE),
+                            _ => false,
+                        } =>
                 {
                     crate::work_sites::site_of(url)
                         .or_else(|| service_host.clone())
@@ -1935,7 +1939,7 @@ fn need_words(need: &WorkPartNeedV1) -> String {
                     format!("another try: {site} showed its signed-out view")
                 }
                 Some(WorkPartReasonV1::BlockedByCheck) => {
-                    format!("another try: {site} asked for a human check")
+                    format!("the person to pass the human check on {site} before continuing")
                 }
                 Some(WorkPartReasonV1::NotFound) => {
                     format!("another try: {site} showed nothing that matched")
@@ -1970,11 +1974,15 @@ fn step_reason(
             WorkStepStatus::Failed | WorkStepStatus::OutcomeUnknown
         )
     });
-    if let Some(reason) = failed.and_then(|step| {
-        note_reason(
+    if let Some(reason) = failed.and_then(|step| match step.measurements.and_then(|m| m.outcome) {
+        Some(WorkPageOutcomeV1::NeedsSignIn) => Some(WorkPartReasonV1::SignedOut),
+        Some(WorkPageOutcomeV1::NeedsCheck) => Some(WorkPartReasonV1::BlockedByCheck),
+        Some(WorkPageOutcomeV1::SiteError) => Some(WorkPartReasonV1::SiteError),
+        Some(_) => Some(WorkPartReasonV1::CouldntRead),
+        None => note_reason(
             step.note.as_deref(),
             matches!(step.kind, WorkStepKindV1::Search { .. }),
-        )
+        ),
     }) {
         return Some(reason);
     }

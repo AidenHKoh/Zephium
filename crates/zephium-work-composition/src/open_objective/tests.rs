@@ -57,6 +57,51 @@ fn settings(account: PublicReadWorkAccount) -> PublicReadWorkSettings {
     }
 }
 
+#[test]
+fn host_effect_overlap_does_not_break_initial_or_successor_admission() {
+    for class in [
+        SemanticEffectClass::Read,
+        SemanticEffectClass::LocalWrite,
+        SemanticEffectClass::ExternalWrite,
+        SemanticEffectClass::Communication,
+        SemanticEffectClass::Purchase,
+        SemanticEffectClass::Destructive,
+    ] {
+        for read_only in [false, true] {
+            for allow_edits in [false, true] {
+                for approved in [false, true] {
+                    let mut commits = if approved { vec![class, class] } else { vec![] };
+                    if allow_edits {
+                        commits.push(SemanticEffectClass::ExternalWrite);
+                    }
+                    // Fresh and resumed runs get independent identities, but the same
+                    // exact approved effect union must admit in both.
+                    for _ in 0..2 {
+                        let mut definition = objective();
+                        definition.navigation = AgentNavigationDiscovery::try_new_site_session(
+                            ContextNavigationTarget::parse("https://example.test/project").unwrap(),
+                            16,
+                        )
+                        .unwrap();
+                        assert!(assemble_with_actions(
+                            identity(),
+                            ContextProfileStorageClass::Durable,
+                            definition,
+                            settings(PublicReadWorkAccount::Anonymous),
+                            Some(LocalActions {
+                                policy: Box::new(read_interactions::SessionReadingPolicy),
+                                max_actions: 8,
+                                read_only,
+                                commits: commits.clone(),
+                            }),
+                        ).is_ok(), "class={class:?} read_only={read_only} allow_edits={allow_edits} approved={approved}");
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn join(identity: ContextIdentity) -> ContextJoin {
     let mut registry = ContextRegistry::new();
     registry
