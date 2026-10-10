@@ -6,6 +6,8 @@
   import { NodeToolbar, Position, SelectionMode } from "@xyflow/svelte";
   import { untrack, setContext, tick } from "svelte";
   import { fade } from "svelte/transition";
+  import Icon from "$shared/ui/Icon";
+  import { Navigation03Icon } from "../lib/icons";
   import {
     canvasInspection,
     canvasResize,
@@ -973,7 +975,7 @@
         class="follow"
         style:inset-block-end={`${fitBottomInset + 14}px`}
         transition:fade={{ duration: duration("fast") }}
-        onclick={resumeFollow}><span class="orb" aria-hidden="true"></span>{m.work_follow()}</button
+        onclick={resumeFollow}><Icon icon={Navigation03Icon} size={13} />{m.work_follow()}</button
       >{/if}
   {:else}<div class="canvas-empty" role="status">
       {valid ? m.work_canvas_empty() : m.work_canvas_unavailable()}
@@ -1093,13 +1095,6 @@
   .follow:focus-visible {
     outline: 2px solid var(--color-ring);
     outline-offset: 2px;
-  }
-
-  .orb {
-    inline-size: 7px;
-    block-size: 7px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-accent);
   }
 
   .canvas-empty {
