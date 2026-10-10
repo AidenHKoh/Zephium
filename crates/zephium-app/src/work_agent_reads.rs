@@ -312,10 +312,7 @@ impl Driver {
                 let retry = prior.is_none()
                     && terminal.is_none()
                     && failure.is_none()
-                    && (signed_in
-                        || (!matches!(request.step, WorkStepKindV1::Read { goal: Some(_), .. })
-                            && matches!(&outcome, Ok(WorkBrowserOutcome { status: WorkStepStatus::Failed, usage: Some(_), note: Some(note), helped, .. })
-                                if (note == read_note::HUMAN_CHECK && *helped) || note == read_note::UNSETTLED || note == read_note::CONSTRUCTION_TIMEOUT)));
+                    && (signed_in || retryable_read(&request.step, &outcome));
                 if retry && !pending.is_empty() {
                     retries.push((request, outcome));
                     continue;
@@ -1287,6 +1284,29 @@ fn job_listing(kind: WorkStepKindV1) -> WorkStepKindV1 {
     }
 }
 
+fn retryable_read(step: &WorkStepKindV1, outcome: &Result<WorkBrowserOutcome, WorkError>) -> bool {
+    if !matches!(step, WorkStepKindV1::Read { goal: None, .. }) {
+        return false;
+    }
+    let Ok(outcome) = outcome else {
+        return false;
+    };
+    if outcome.status != WorkStepStatus::Failed || outcome.usage.is_none() {
+        return false;
+    }
+    let steps = outcome
+        .measurements
+        .as_ref()
+        .and_then(|m| m.outcome.as_ref())
+        == Some(&WorkPageOutcomeV1::TooManySteps);
+    steps
+        || outcome.note.as_deref().is_some_and(|note| {
+            (note == read_note::HUMAN_CHECK && outcome.helped)
+                || note == read_note::UNSETTLED
+                || note == read_note::CONSTRUCTION_TIMEOUT
+        })
+}
+
 fn retry_request(
     request: WorkAgentBrowseRequest,
     outcome: &Result<WorkBrowserOutcome, WorkError>,
@@ -1436,6 +1456,47 @@ pub(super) fn combined_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_turn_limit_can_retry_only_a_failed_read_with_known_usage() {
+        for goal in [None, Some("Send the message".into())] {
+            let step = WorkStepKindV1::Read {
+                url: "https://example.com/article".into(),
+                goal: goal.clone(),
+                collection: None,
+            };
+            for status in [
+                WorkStepStatus::Failed,
+                WorkStepStatus::Succeeded,
+                WorkStepStatus::Cancelled,
+                WorkStepStatus::OutcomeUnknown,
+            ] {
+                for usage in [None, Some(WorkUsage::default())] {
+                    let outcome = WorkBrowserOutcome {
+                        status,
+                        usage,
+                        artifacts: vec![],
+                        intervention: None,
+                        note: None,
+                        measurements: Some(WorkStepMeasurementsV1 {
+                            outcome: Some(WorkPageOutcomeV1::TooManySteps),
+                            ..Default::default()
+                        }),
+                        helped: false,
+                        held_back: false,
+                        rerun: false,
+                        search: None,
+                        redirect: None,
+                    };
+                    assert_eq!(
+                        retryable_read(&step, &Ok(outcome)),
+                        goal.is_none() && status == WorkStepStatus::Failed && usage.is_some()
+                    );
+                }
+            }
+            assert!(!retryable_read(&step, &Err(WorkError::OutcomeUnknown)));
+        }
+    }
 
     #[test]
     fn first_load_redirect_preserves_task_and_collection_without_crossing_sites() {

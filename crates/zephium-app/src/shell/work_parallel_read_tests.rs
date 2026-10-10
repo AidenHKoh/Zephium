@@ -55,11 +55,13 @@ impl WorkPublicSearchProvider for NoSearch {
 
 #[tokio::test]
 async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
-    for (unknown, slow, slow_fails) in [
-        (false, false, false),
-        (true, false, false),
-        (false, true, false),
-        (false, true, true),
+    for (unknown, slow, slow_fails, turn_limit) in [
+        (false, false, false, false),
+        (true, false, false, false),
+        (false, true, false, false),
+        (false, true, true, false),
+        (false, false, false, true),
+        (false, false, true, true),
     ] {
         let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
         let (mut shell, queue, handle, profile) = fixture(store);
@@ -171,10 +173,17 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
                                     }
                                 }),
                                 intervention: None,
-                                measurements: None,
+                                measurements: ((first || retry_failed) && turn_limit).then(|| {
+                                    WorkStepMeasurementsV1 {
+                                        outcome: Some(WorkPageOutcomeV1::TooManySteps),
+                                        ..Default::default()
+                                    }
+                                }),
                                 // The first page's human check was taken and continued.
-                                helped: first && !slow,
-                                note: if first {
+                                helped: first && !slow && !turn_limit,
+                                note: if first && turn_limit {
+                                    None
+                                } else if first {
                                     Some(
                                         if slow {
                                             read_note::CONSTRUCTION_TIMEOUT
