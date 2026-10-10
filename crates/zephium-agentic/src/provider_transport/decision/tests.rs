@@ -721,7 +721,7 @@ fn a_whole_page_findings_read_generates_from_ranked_evidence_or_leaves_the_plann
         &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
     )
     .unwrap();
-    for relevant in [0.9, 0.1] {
+    for (relevant, complete) in [(0.9, 0.99), (0.1, 0.99), (0.9, 0.01), (0.9, 0.5)] {
         let projection = DecisionObservation::try_for_read(
             &observation,
             &objective,
@@ -732,6 +732,7 @@ fn a_whole_page_findings_read_generates_from_ranked_evidence_or_leaves_the_plann
         .unwrap();
         assert!(!projection.request().questions().contains_key("locate_0"));
         let mut body = fixture_answers(projection.request());
+        body["answers"]["done"] = json!({"type":"noul","noul":complete});
         body["answers"]["any_0"] = json!({"type":"noul","noul":relevant});
         let Question::Choice { criteria, .. } = &projection.request().questions()["find_0"] else {
             panic!("choice expected");
@@ -760,7 +761,7 @@ fn a_whole_page_findings_read_generates_from_ranked_evidence_or_leaves_the_plann
             .unwrap();
         let mut answers = projection.route(Ok(response)).unwrap().finish(None);
         let mut evidence = SemanticRetainedReadEvidence::default();
-        let (selection, ready) = answers
+        let selected = answers
             .take_read_progress_retaining_evidence(
                 &observation,
                 call.account(),
@@ -768,8 +769,15 @@ fn a_whole_page_findings_read_generates_from_ranked_evidence_or_leaves_the_plann
                 SemanticCaptureInstant::from_millis(101),
                 &mut evidence,
             )
-            .unwrap()
             .unwrap();
+        if complete != 0.99 {
+            assert!(
+                selected.is_none(),
+                "partial or uncertain completion must leave the planner"
+            );
+            continue;
+        }
+        let (selection, ready) = selected.unwrap();
         if relevant < 0.5 {
             // Nothing located: the page planner reads this page.
             assert!(!ready && selection.located() == 0);
@@ -3581,4 +3589,96 @@ fn a_located_label_value_pair_copies_its_value_node() {
         panic!("text expected");
     };
     assert_eq!(value.as_str(), "3745");
+}
+
+#[test]
+fn whole_page_findings_leave_clipped_observations_to_the_page_planner() {
+    let (_, call, previous, _) = admitted_fixture();
+    let schema = SemanticExtractionSchema::try_new(
+        SemanticExtractionSchemaId::new(1).unwrap(),
+        vec![
+            SemanticExtractionFieldSchema::try_text_list("findings".into(), true, 16, 1024)
+                .unwrap(),
+        ],
+    )
+    .unwrap();
+    let objective = AgentProviderObjective::try_admit_conservative_utf8(
+        "Find the installation command and license conditions".into(),
+        &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
+    )
+    .unwrap();
+    for completeness in [
+        "complete",
+        "field_limit",
+        "text_limit",
+        "node_limit",
+        "depth_limit",
+        "inspection_limit",
+        "wire_limit",
+        "scope_boundary",
+        "unsupported_frame",
+        "model_projection",
+    ] {
+        let mut snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                SemanticInvocationId::new(1).unwrap(),
+                previous.frames()[0].frame().clone(),
+                SemanticSnapshotGeneration::new(1).unwrap(),
+            ),
+            &serde_json::to_vec(&json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,
+                "c":if completeness == "model_projection" { "complete" } else { completeness },
+                "n":[{"k":1,"r":"document"},{"k":2,"p":0,"r":"paragraph","t":"Installation introduction"}]})).unwrap(),
+        ).unwrap();
+        if completeness == "model_projection" {
+            snapshot.retain_model_prefix(2);
+        }
+        let observation = SemanticObservationAssembler::new(
+            SemanticObservationRequest::initial(
+                SemanticObservationId::new(1).unwrap(),
+                call.account().context(),
+                SemanticObservationBudget::try_new(8, 4096, 1).unwrap(),
+            ),
+            snapshot,
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+        let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+        for locate_only in [false, true] {
+            let result = if locate_only {
+                DecisionObservation::try_for_locate(
+                    &observation,
+                    &objective,
+                    &authority,
+                    call.account(),
+                    &schema,
+                )
+            } else {
+                DecisionObservation::try_for_read(
+                    &observation,
+                    &objective,
+                    &authority,
+                    call.account(),
+                    Some(&schema),
+                )
+            };
+            if completeness == "complete" {
+                assert!(result.is_ok());
+            } else {
+                assert!(
+                    matches!(result, Err(DecisionProjectionError::Capacity)),
+                    "{completeness}"
+                );
+            }
+        }
+        // Wall/action triage without a findings shortcut remains available.
+        assert!(DecisionObservation::try_for_read(
+            &observation,
+            &objective,
+            &authority,
+            call.account(),
+            None
+        )
+        .is_ok());
+    }
 }

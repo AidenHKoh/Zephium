@@ -97,6 +97,15 @@ impl ReadProjection {
         references: &BTreeSet<SemanticReferenceId>,
         questions: &mut BTreeMap<String, Question>,
     ) -> Result<(), DecisionProjectionError> {
+        // Relevance in a clipped look cannot establish a whole-page answer.
+        // Let the page planner inspect the missing scope before generation.
+        if observation
+            .frames()
+            .iter()
+            .any(|frame| frame.completeness() != SemanticCompleteness::Complete)
+        {
+            return Err(DecisionProjectionError::Capacity);
+        }
         let chunks = self.findings_chunks(observation, references);
         if chunks.is_empty() {
             return Err(DecisionProjectionError::Capacity);
@@ -551,6 +560,18 @@ impl DecisionObservationAnswers {
             return Ok(None);
         }
         if projection.findings {
+            // Some relevant evidence is not proof that every requested fact
+            // was found. An absent or uncertain completion leaves the planner.
+            let complete = match self.results.take("done") {
+                Some(ResolvedDecision::Answer { answer, .. }) => match answer.value() {
+                    AnswerValue::Noul { noul } => *noul >= 0.5,
+                    _ => return Err(DecisionProjectionError::Authority),
+                },
+                _ => false,
+            };
+            if !complete {
+                return Ok(None);
+            }
             let evidence = self.take_findings(observation, &projection)?;
             let ready = !evidence.is_empty();
             return Ok(Some((
