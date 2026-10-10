@@ -2379,6 +2379,10 @@ fn human_handoff_contract(cancel: bool) {
         assert_eq!(human.phase, RetainedHumanPhase::WaitingForHuman);
         assert_eq!(human.deadline, deadline);
         assert!(!work.ready());
+        assert!(
+            work.human_check_progress().is_none(),
+            "unpresented pages cannot be checked"
+        );
         let region = WorkBrowserHumanRegion::try_new(0, 0, 800, 600).unwrap();
         assert!(!work.present_human(human.generation + 1, Some(region), now()));
         native.hold_human.store(true, Ordering::Release);
@@ -2399,12 +2403,41 @@ fn human_handoff_contract(cancel: bool) {
                 RetainedHumanPhase::Presented
             }
         );
+        if cancel {
+            assert!(
+                work.human_check_progress().is_none(),
+                "Stop revokes explicit checks"
+            );
+        }
         if !cancel {
+            let check = work
+                .human_check_progress()
+                .unwrap()
+                .request_wall_check()
+                .unwrap();
+            assert_eq!(
+                check.state(human_progress.revision()),
+                zephium_agentic::WorkBrowserHumanCheckState::Pending
+            );
+            assert_eq!(
+                work.human_snapshot().unwrap().deadline,
+                deadline,
+                "checking cannot renew human time"
+            );
             assert!(
                 !work.human_snapshot().unwrap().can_continue,
                 "navigation readiness alone cannot clear sign-in"
             );
             assert!(!work.continue_human(human.generation, now()));
+            check.finish(Some(false));
+            assert_eq!(
+                check.state(human_progress.revision()),
+                zephium_agentic::WorkBrowserHumanCheckState::Waiting
+            );
+            assert!(
+                !work.human_snapshot().unwrap().can_continue,
+                "an explicit check cannot manufacture proof"
+            );
             human_progress.record_verified_wall_clear(true);
             assert!(work.human_snapshot().unwrap().can_continue);
             assert_eq!(native.acquisitions.load(Ordering::Acquire), 1);

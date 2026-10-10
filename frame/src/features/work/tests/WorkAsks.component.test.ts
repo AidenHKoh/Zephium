@@ -160,7 +160,7 @@ test("entry, context and connection questions answer with Rust's own option word
   }
 });
 
-test("a sign-in wall opens the held page without a second confirmation action", async () => {
+test("a sign-in wall opens the held page and offers native rechecking without confirmation", async () => {
   const { session, execution } = sessionWith(f.notionTask);
   const human = new WorkHumanSession("profile");
   native.human.mockResolvedValue({
@@ -182,7 +182,7 @@ test("a sign-in wall opens the held page without a second confirmation action", 
     .toBeVisible();
   await screen.getByRole("button", { name: "Sign in", exact: true }).click();
   expect(open).toHaveBeenCalledExactlyOnceWith("read-notion");
-  expect(screen.container.querySelectorAll("button")).toHaveLength(1);
+  expect(screen.container.querySelectorAll("button")).toHaveLength(2);
   expect(native.human).not.toHaveBeenCalled();
   await screen.unmount();
   session.dispose();
@@ -254,4 +254,70 @@ test("a remembered fact shows beside its run and Undo forgets it", async () => {
   );
   await expect.element(screen.getByRole("button", { name: "Undo" })).not.toBeInTheDocument();
   await screen.unmount();
+});
+
+test("Check again waits for the native answer and never continues the page", async () => {
+  for (const kind of ["sign_in", "check"] as const) {
+    const { session, execution } = sessionWith(f.notionTask);
+    const page = {
+      ...f.notionWall,
+      phase: "presented" as const,
+      reason: kind === "check" ? ("challenge" as const) : ("sign_in" as const),
+    };
+    const original = asksOf(execution, [], [f.notionWall])[0]!;
+    if (original.kind !== "sign_in") throw new Error("fixture must be a sign-in ask");
+    const ask = { ...original, kind, page };
+    let settle: (outcome: "waiting") => void = () => {};
+    const checkPage = vi.fn(
+      () =>
+        new Promise<"waiting">((done) => {
+          settle = done;
+        }),
+    );
+    const screen = await render(AskCard, {
+      ask,
+      actions: { ...runActions(session, execution.id), checkPage },
+    });
+    const button = screen.getByRole("button", { name: "Check again", exact: true });
+    await button.click();
+    await expect.element(button).toBeDisabled();
+    await expect.element(screen.getByRole("status")).toHaveTextContent("Checking…");
+    expect(checkPage).toHaveBeenCalledExactlyOnceWith(page);
+    settle("waiting");
+    await expect
+      .element(screen.getByRole("status"))
+      .toHaveTextContent(kind === "check" ? "Still waiting on the check" : "Still signed out");
+    await expect.element(button).toBeEnabled();
+    await screen.unmount();
+    session.dispose();
+  }
+});
+
+test("Check again opens an unpresented page and reports transport failure honestly", async () => {
+  const { session, execution } = sessionWith(f.notionTask);
+  const ask = asksOf(execution, [], [f.notionWall])[0]!;
+  if (ask.kind !== "sign_in") throw new Error("fixture must be a sign-in ask");
+  const openPage = vi.fn();
+  const checkPage = vi.fn().mockRejectedValue(new Error("fixture transport"));
+  const screen = await render(AskCard, {
+    ask,
+    actions: { ...runActions(session, execution.id), openPage, checkPage },
+  });
+  await screen.getByRole("button", { name: "Check again", exact: true }).click();
+  expect(openPage).toHaveBeenCalledExactlyOnceWith(ask.step);
+  expect(checkPage).not.toHaveBeenCalled();
+  await expect
+    .element(screen.getByRole("status"))
+    .toHaveTextContent("Open the page, then check again.");
+  await screen.unmount();
+  const presented = await render(AskCard, {
+    ask: { ...ask, kind: "sign_in", page: { ...f.notionWall, phase: "presented" } },
+    actions: { ...runActions(session, execution.id), checkPage },
+  });
+  await presented.getByRole("button", { name: "Check again", exact: true }).click();
+  await expect
+    .element(presented.getByRole("status"))
+    .toHaveTextContent("Couldn’t check the page. Try again.");
+  await presented.unmount();
+  session.dispose();
 });

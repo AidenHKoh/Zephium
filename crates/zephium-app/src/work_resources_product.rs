@@ -368,6 +368,7 @@ struct Projection {
     human: Option<RetainedHumanSnapshot>,
     human_resume: Option<RetainedHumanResume>,
     human_command: Option<HumanCommand>,
+    human_check_progress: Option<WorkBrowserHumanProgress>,
     continuation: Option<PreparedRetainedContinuation>,
     #[cfg(feature = "work-execution-probe")]
     construction_resource: Option<WorkBrowserResourceJoin>,
@@ -411,6 +412,59 @@ impl RetainedWorkHandle {
     }
     pub fn human_snapshot(&self) -> Option<RetainedHumanSnapshot> {
         self.signal.projection.lock().ok()?.human
+    }
+    /// Logical admission closes immediately on Stop, independently of native drain.
+    pub fn human_requests_open(&self) -> bool {
+        !self.signal.close.load(Ordering::Acquire)
+            && !self.signal.stop.load(Ordering::Acquire)
+            && !self.is_closed()
+    }
+    /// Request a bounded fresh native wall survey on this exact presented page.
+    /// The native host schedules its existing bounded survey immediately;
+    /// no new timer, provider call, or actor authority is created.
+    pub fn check_human(&self, generation: u32) -> Option<zephium_agentic::WorkBrowserHumanCheck> {
+        if !self.human_requests_open() {
+            return None;
+        }
+        let projection = self.signal.projection.lock().ok()?;
+        let human = projection.human?;
+        if human.generation != generation
+            || human.phase != RetainedHumanPhase::Presented
+            || Instant::now() >= human.deadline
+        {
+            return None;
+        }
+        projection
+            .human_check_progress
+            .as_ref()?
+            .request_wall_check()
+    }
+    /// Rechecks logical revocation and the native revision before showing a result.
+    pub fn human_check_state(
+        &self,
+        generation: u32,
+        check: &zephium_agentic::WorkBrowserHumanCheck,
+    ) -> zephium_agentic::WorkBrowserHumanCheckState {
+        use zephium_agentic::WorkBrowserHumanCheckState as Check;
+        if self.signal.close.load(Ordering::Acquire) || self.signal.stop.load(Ordering::Acquire) {
+            return Check::Unavailable;
+        }
+        let Ok(projection) = self.signal.projection.lock() else {
+            return Check::Unavailable;
+        };
+        if projection.human.is_none_or(|human| {
+            human.generation != generation
+                || human.phase != RetainedHumanPhase::Presented
+                || Instant::now() >= human.deadline
+        }) {
+            return Check::Unavailable;
+        }
+        projection
+            .human_check_progress
+            .as_ref()
+            .map_or(Check::Unavailable, |progress| {
+                check.state(progress.revision())
+            })
     }
     pub fn human_resume(&self) -> Option<RetainedHumanResume> {
         self.signal.projection.lock().ok()?.human_resume.clone()
@@ -631,6 +685,7 @@ impl CallbackHandle {
                 human: None,
                 human_resume: None,
                 human_command: None,
+                human_check_progress: None,
                 continuation: None,
                 #[cfg(feature = "work-execution-probe")]
                 construction_resource: None,
@@ -1142,6 +1197,7 @@ impl ProductWork {
         }
         projection.active_deadline = self.human_time.deadline(Instant::now());
         projection.human = work.human_snapshot();
+        projection.human_check_progress = work.human_check_progress();
         projection.human_resume = work.human_resume();
         retain_latest_frame(&mut projection.frame, work.latest_frame());
         #[cfg(feature = "work-execution-probe")]

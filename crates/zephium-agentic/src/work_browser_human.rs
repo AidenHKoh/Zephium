@@ -213,8 +213,125 @@ struct HumanProgress {
     wall_proof: std::sync::Mutex<Option<std::time::Instant>>,
     probe_pending: std::sync::atomic::AtomicBool,
     continuation_revision: std::sync::Mutex<Option<u64>>,
+    check: std::sync::Mutex<Option<WorkBrowserHumanCheck>>,
+    check_wake: std::sync::Mutex<Option<WallCheckWake>>,
+}
+#[derive(Clone)]
+struct WallCheckWake(Arc<dyn Fn() + Send + Sync>);
+impl std::fmt::Debug for WallCheckWake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WallCheckWake")
+    }
+}
+/// One coalesced request for a fresh native survey. It grants no continuation.
+#[derive(Clone, Debug)]
+pub struct WorkBrowserHumanCheck(Arc<HumanCheck>);
+#[derive(Debug)]
+struct HumanCheck {
+    requested: std::time::Instant,
+    revision: u64,
+    result: std::sync::Mutex<Option<Option<bool>>>,
+}
+/// The native answer to an explicit recheck, never a user attestation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkBrowserHumanCheckState {
+    /// Waiting for a survey started after the request.
+    Pending,
+    /// A fresh native sample still sees the wall.
+    Waiting,
+    /// The existing stamped native proof verifies clearance.
+    Clear,
+    /// The page changed, disappeared, or did not answer within the bound.
+    Unavailable,
+}
+impl WorkBrowserHumanCheck {
+    /// Current bounded result, joined to the still-current document revision.
+    pub fn state(&self, revision: u64) -> WorkBrowserHumanCheckState {
+        if revision != self.0.revision
+            || self.0.requested.elapsed() >= std::time::Duration::from_secs(2)
+        {
+            return WorkBrowserHumanCheckState::Unavailable;
+        }
+        match self.0.result.lock().ok().and_then(|result| *result) {
+            Some(Some(true)) => WorkBrowserHumanCheckState::Clear,
+            Some(Some(false)) => WorkBrowserHumanCheckState::Waiting,
+            Some(None) => WorkBrowserHumanCheckState::Unavailable,
+            None if self.0.requested.elapsed() < std::time::Duration::from_secs(2) => {
+                WorkBrowserHumanCheckState::Pending
+            }
+            None => WorkBrowserHumanCheckState::Unavailable,
+        }
+    }
+    /// Native callback settles once; no result can revive an expired request.
+    pub fn finish(&self, result: Option<bool>) {
+        if let Ok(mut value) = self.0.result.lock() {
+            if value.is_none() {
+                *value = Some(
+                    if self.0.requested.elapsed() < std::time::Duration::from_secs(2) {
+                        result
+                    } else {
+                        None
+                    },
+                );
+            }
+        }
+    }
 }
 impl WorkBrowserHumanProgress {
+    /// Coalesce pending clicks and bound new surveys to at most two per second.
+    pub fn request_wall_check(&self) -> Option<WorkBrowserHumanCheck> {
+        let mut slot = self.0.check.lock().ok()?;
+        if let Some(check) = slot.as_ref() {
+            if check.state(self.revision()) == WorkBrowserHumanCheckState::Pending {
+                return Some(check.clone());
+            }
+            if check.0.requested.elapsed() < std::time::Duration::from_millis(500) {
+                return None;
+            }
+        }
+        let check = WorkBrowserHumanCheck(Arc::new(HumanCheck {
+            requested: std::time::Instant::now(),
+            revision: self.revision(),
+            result: std::sync::Mutex::new(None),
+        }));
+        *slot = Some(check.clone());
+        drop(slot);
+        let wake = self.0.check_wake.lock().ok().and_then(|wake| wake.clone());
+        if let Some(wake) = wake {
+            (wake.0)();
+        }
+        Some(check)
+    }
+    /// Native host installs the same-page dispatch wake. One newly admitted
+    /// request schedules verification immediately; repeated clicks coalesce.
+    pub fn bind_wall_check_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut slot) = self.0.check_wake.lock() {
+            *slot = Some(WallCheckWake(wake));
+        }
+    }
+    /// Navigation or retirement invalidates even an already answered request.
+    /// Late callbacks cannot overwrite this refusal.
+    pub fn invalidate_wall_check(&self) {
+        if let Ok(slot) = self.0.check.lock() {
+            if let Some(check) = slot.as_ref() {
+                if let Ok(mut result) = check.0.result.lock() {
+                    *result = Some(None);
+                }
+            }
+        }
+    }
+    /// Captured only when a new native survey begins; an older in-flight
+    /// callback cannot answer a request made after that survey started.
+    pub fn pending_wall_check(&self) -> Option<WorkBrowserHumanCheck> {
+        self.0
+            .check
+            .lock()
+            .ok()?
+            .as_ref()
+            .filter(|check| check.state(self.revision()) == WorkBrowserHumanCheckState::Pending)
+            .cloned()
+    }
+
     /// Native readiness is advisory; continuation rechecks the live document.
     pub fn ready(&self) -> bool {
         self.0.ready.load(std::sync::atomic::Ordering::Acquire)
@@ -506,6 +623,71 @@ pub(super) fn settle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_wall_check_requires_a_fresh_native_answer_and_coalesces() {
+        use WorkBrowserHumanCheckState as Check;
+        let progress = WorkBrowserHumanProgress::default();
+        let wakes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let observed = wakes.clone();
+        progress.bind_wall_check_wake(Arc::new(move || {
+            observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+        assert!(
+            progress.pending_wall_check().is_none(),
+            "an earlier survey captures no later request"
+        );
+        let requested = progress.request_wall_check().unwrap();
+        let repeated = progress.request_wall_check().unwrap();
+        assert!(Arc::ptr_eq(&requested.0, &repeated.0));
+        assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 1);
+        progress.record_verified_wall_clear(true);
+        assert_eq!(
+            requested.state(0),
+            Check::Pending,
+            "cached automatic proof cannot answer the request"
+        );
+        progress.pending_wall_check().unwrap().finish(Some(false));
+        assert_eq!(requested.state(0), Check::Waiting);
+        assert!(
+            progress.request_wall_check().is_none(),
+            "completed requests are rate bounded, never cached as fresh"
+        );
+        assert_eq!(
+            requested.state(1),
+            Check::Unavailable,
+            "navigation invalidates a previously answered check"
+        );
+        progress.invalidate_wall_check();
+        requested.finish(Some(false));
+        assert_eq!(
+            requested.state(0),
+            Check::Unavailable,
+            "native navigation invalidates before a revision is published"
+        );
+    }
+
+    #[test]
+    fn explicit_wall_check_timeout_and_stale_callback_never_report_a_wall_result() {
+        use WorkBrowserHumanCheckState as Check;
+        let expired = WorkBrowserHumanCheck(Arc::new(HumanCheck {
+            requested: std::time::Instant::now() - std::time::Duration::from_secs(3),
+            revision: 7,
+            result: std::sync::Mutex::new(None),
+        }));
+        expired.finish(Some(false));
+        assert_eq!(expired.state(7), Check::Unavailable);
+        let progress = WorkBrowserHumanProgress::default();
+        let requested = progress.request_wall_check().unwrap();
+        requested.finish(None);
+        requested.finish(Some(true));
+        assert_eq!(
+            requested.state(0),
+            Check::Unavailable,
+            "native refusal settles once"
+        );
+    }
+
     #[test]
     fn human_time_restores_active_budget_once_and_caps_all_handoffs() {
         use std::time::{Duration, Instant};

@@ -64,6 +64,7 @@ export const commands = {
 	workHumanContinue: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1, account: WorkHumanAccountV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_continue", { expectedProfile, work, page, account }),
 	workHumanRelease: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_release", { expectedProfile, work, page }),
 	workHumanExtend: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_extend", { expectedProfile, work, page }),
+	workHumanCheck: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1) => __TAURI_INVOKE<WorkHumanCheckResponseV1>("work_human_check", { expectedProfile, work, page }),
 	workDecisionPreference: (expectedProfile: string) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_decision_preference", { expectedProfile }),
 	workSetDecisionPreference: (expectedProfile: string, choice: WorkDecisionChoiceV1) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_set_decision_preference", { expectedProfile, choice }),
 	/**  Inbound-only Jev key setup, authorized against the current regular profile. */
@@ -4197,6 +4198,17 @@ export type WorkHumanChanged = WorkHumanChangedV1;
 export type WorkHumanChangedV1 = {
 	profile: string,
 	work: WorkId,
+};
+
+/**  Fresh native check result; `clear` grants no actor or account authority. */
+export type WorkHumanCheckOutcomeV1 = "waiting" | "clear" | "open_page" | "unavailable";
+
+export type WorkHumanCheckResponseV1 = {
+	version: number,
+	profile: string,
+	work: WorkId,
+	page: WorkHumanPageIdV1,
+	outcome: WorkHumanCheckOutcomeV1,
 };
 
 export type WorkHumanPageIdV1 = {

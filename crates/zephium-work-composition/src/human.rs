@@ -371,6 +371,76 @@ impl NativeWorkComposition {
             page.handle.present_human(id.generation, region)
         })
     }
+    /// Actively request one coalesced native survey of this exact live page.
+    /// A click never clears the wall or extends any deadline.
+    pub async fn check_human_page(
+        &self,
+        profile: ProfileId,
+        work: WorkId,
+        id: WorkHumanPageIdV1,
+    ) -> WorkHumanCheckOutcomeV1 {
+        use zephium_agentic::WorkBrowserHumanCheckState as Check;
+        let check = {
+            let Ok(pages) = self.human_pages.0.lock() else {
+                return WorkHumanCheckOutcomeV1::Unavailable;
+            };
+            let Some(page) = pages.entries.get(&(profile, work, id.attempt, id.step)) else {
+                return WorkHumanCheckOutcomeV1::Unavailable;
+            };
+            let Some(state) = page.handle.human_snapshot().filter(|state| {
+                state.generation == id.generation && Instant::now() < state.deadline
+            }) else {
+                return WorkHumanCheckOutcomeV1::Unavailable;
+            };
+            if page.released
+                || !page.handle.human_requests_open()
+                || !matches!(
+                    state.reason,
+                    AgentBrowserHumanReason::SignIn | AgentBrowserHumanReason::HumanChallenge
+                )
+            {
+                return WorkHumanCheckOutcomeV1::Unavailable;
+            }
+            if matches!(
+                state.phase,
+                RetainedHumanPhase::WaitingForHuman | RetainedHumanPhase::Presenting
+            ) {
+                return WorkHumanCheckOutcomeV1::OpenPage;
+            }
+            let Some(check) = page.handle.check_human(id.generation) else {
+                return WorkHumanCheckOutcomeV1::Unavailable;
+            };
+            check
+        };
+        loop {
+            let result = {
+                let Ok(pages) = self.human_pages.0.lock() else {
+                    return WorkHumanCheckOutcomeV1::Unavailable;
+                };
+                let Some(page) = pages.entries.get(&(profile, work, id.attempt, id.step)) else {
+                    return WorkHumanCheckOutcomeV1::Unavailable;
+                };
+                let Some(state) = page.handle.human_snapshot().filter(|state| {
+                    state.generation == id.generation && Instant::now() < state.deadline
+                }) else {
+                    return WorkHumanCheckOutcomeV1::Unavailable;
+                };
+                if page.released
+                    || !page.handle.human_requests_open()
+                    || state.phase != RetainedHumanPhase::Presented
+                {
+                    return WorkHumanCheckOutcomeV1::Unavailable;
+                }
+                page.handle.human_check_state(id.generation, &check)
+            };
+            match result {
+                Check::Waiting => return WorkHumanCheckOutcomeV1::Waiting,
+                Check::Clear => return WorkHumanCheckOutcomeV1::Clear,
+                Check::Unavailable => return WorkHumanCheckOutcomeV1::Unavailable,
+                Check::Pending => tokio::time::sleep(Duration::from_millis(25)).await,
+            }
+        }
+    }
     pub fn continue_human_page(
         &self,
         profile: ProfileId,

@@ -50,7 +50,11 @@ impl EngineHost {
 }
 
 impl WorkNativeResource {
-    pub(super) fn handle_human(&mut self, task: WorkLifecycleTask) {
+    pub(super) fn handle_human(
+        &mut self,
+        task: WorkLifecycleTask,
+        dispatch: crate::MainThreadDispatch,
+    ) {
         let result = task.request().ok_or(()).and_then(|request| {
             let operation = request.operation();
             let now = work_browser_monotonic_now().ok_or(())?;
@@ -103,6 +107,23 @@ impl WorkNativeResource {
                     self.human_presentation = Some(presentation);
                     self.human_progress = request.human_progress();
                     if let Some(progress) = &self.human_progress {
+                        let guard = Arc::downgrade(&self.guard);
+                        progress.bind_wall_check_wake(Arc::new(move || {
+                            let Some(guard) = guard.upgrade() else {
+                                return;
+                            };
+                            let _ = dispatch(Box::new(move || {
+                                let _ = crate::host::try_with_agent_context(move |host| {
+                                    if let Some(resource) = host
+                                        .work_resources
+                                        .get(&guard.resource().identity().context())
+                                        .filter(|resource| Arc::ptr_eq(&resource.guard, &guard))
+                                    {
+                                        resource.sample_human_wall();
+                                    }
+                                });
+                            }));
+                        }));
                         view.work_navigation()
                             .ok_or(())?
                             .bind_human_progress(progress.clone());
@@ -219,6 +240,15 @@ impl WorkNativeResource {
     }
 
     fn sample_human_wall(&self) {
+        if !self
+            .human_presentation
+            .as_ref()
+            .is_some_and(|presentation| presentation.current())
+            || !work_browser_monotonic_now()
+                .is_some_and(|now| self.guard.human_current(Operation::PresentHuman, now))
+        {
+            return;
+        }
         let Some(progress) = self.human_progress.as_ref() else {
             return;
         };
@@ -234,6 +264,8 @@ impl WorkNativeResource {
         if !progress.begin_wall_probe() {
             return;
         }
+        let check = progress.pending_wall_check();
+        let failed_check = check.clone();
         let progress = progress.clone();
         let completed = progress.clone();
         let admitted = gate.clone();
@@ -246,19 +278,33 @@ impl WorkNativeResource {
                 if answered.swap(true, Ordering::AcqRel) {
                     return;
                 }
-                if work_browser_monotonic_now()
-                    .is_some_and(|now| guard.human_current(Operation::PresentHuman, now))
-                {
-                    admitted.record_human_wall_clear(
-                        stamp,
-                        result == "true" && sampled.elapsed() <= Duration::from_secs(1),
-                    );
+                let fresh = sampled.elapsed() <= Duration::from_secs(1);
+                let valid = fresh
+                    && matches!(result.as_str(), "true" | "false")
+                    && work_browser_monotonic_now()
+                        .is_some_and(|now| guard.human_current(Operation::PresentHuman, now))
+                    && admitted.record_human_wall_clear(stamp, result == "true");
+                if !valid {
+                    admitted.record_human_wall_clear(stamp, false);
+                }
+                if let Some(check) = check.as_ref() {
+                    if !valid {
+                        check.finish(None);
+                    } else if result == "false" {
+                        check.finish(Some(false));
+                    } else if admitted.human_verified_wall_clear() {
+                        check.finish(Some(true));
+                    }
+                    // One positive sample alone leaves the request pending.
                 }
                 completed.finish_wall_probe();
             })
             .is_err()
         {
             gate.record_human_wall_clear(stamp, false);
+            if let Some(check) = failed_check {
+                check.finish(None);
+            }
             progress.finish_wall_probe();
         }
     }
@@ -317,7 +363,9 @@ impl WorkNativeResource {
 
     pub(super) fn retire_human_presentation(&mut self) -> bool {
         self.human_wake = None;
-        self.human_progress = None;
+        if let Some(progress) = self.human_progress.take() {
+            progress.invalidate_wall_check();
+        }
         let clean = self
             .human_presentation
             .as_mut()

@@ -137,6 +137,17 @@ impl RetainedWork {
                     .is_some_and(WorkBrowserHumanProgress::verified_wall_clear),
         })
     }
+    pub(in crate::work_resources) fn human_check_progress(
+        &self,
+    ) -> Option<WorkBrowserHumanProgress> {
+        let human = self.human.as_ref()?;
+        (human.phase == RetainedHumanPhase::Presented
+            && requires_wall_proof(human.reason)
+            && !self.stopping
+            && Instant::now() < human.deadline)
+            .then(|| human.progress.clone())
+            .flatten()
+    }
     pub(in crate::work_resources) fn human_deadline(&self) -> Option<Instant> {
         self.human
             .as_ref()

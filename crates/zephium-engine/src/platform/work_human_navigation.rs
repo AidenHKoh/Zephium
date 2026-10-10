@@ -98,6 +98,7 @@ impl HumanNavigation {
         self.wall_clear_samples = 0;
         self.wall_sampled = None;
         if let Some(progress) = &self.progress {
+            progress.invalidate_wall_check();
             progress.record_verified_wall_clear(false);
         }
     }

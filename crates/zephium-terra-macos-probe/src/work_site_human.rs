@@ -79,6 +79,8 @@ pub(super) struct Session {
     signal_at: Option<Instant>,
     stale_revision: Option<String>,
     unresolved_held: bool,
+    check_waiting: bool,
+    check_clear: bool,
     cancel_sent: bool,
     cancel_millis: Option<u128>,
     failure: Option<&'static str>,
@@ -96,6 +98,8 @@ impl Session {
             signal_at: None,
             stale_revision: None,
             unresolved_held: false,
+            check_waiting: false,
+            check_clear: false,
             cancel_sent: false,
             cancel_millis: None,
             failure: None,
@@ -116,6 +120,7 @@ impl Session {
 enum Action {
     None,
     Present(WorkHumanPageIdV1),
+    Check(WorkHumanPageIdV1, bool),
     Cancel,
 }
 
@@ -244,6 +249,16 @@ fn advance(session: &mut Session, pages: &[WorkHumanPageV1]) -> Action {
     let original = session
         .revision
         .get_or_insert_with(|| page.document_revision.clone());
+    if !session.check_waiting {
+        return Action::Check(page.id, false);
+    }
+    if session.scenario.resumes()
+        && session.signal_at.is_some()
+        && CLEARED_DOCUMENT.load(Ordering::SeqCst) == 1
+        && !session.check_clear
+    {
+        return Action::Check(page.id, true);
+    }
     if session.signal_at.is_none() {
         if since.elapsed() < session.scenario.hold() {
             return Action::None;
@@ -348,6 +363,47 @@ pub(super) async fn person(context: &Context<'_>, work: WorkId, pages: &[WorkHum
                     }
                 }
             }
+        }
+        Action::Check(id, clear) => {
+            use zephium_ipc::work::WorkHumanCheckOutcomeV1 as Check;
+            let mut stale = id;
+            stale.generation = stale.generation.saturating_add(1);
+            let stale_refused = context
+                .composition
+                .check_human_page(context.profile, work, stale)
+                .await
+                == Check::Unavailable;
+            let (first, repeated) = tokio::join!(
+                context
+                    .composition
+                    .check_human_page(context.profile, work, id),
+                context
+                    .composition
+                    .check_human_page(context.profile, work, id),
+            );
+            let expected = if clear { Check::Clear } else { Check::Waiting };
+            let unchanged = context
+                .composition
+                .human_pages(context.profile, work)
+                .is_ok_and(|pages| {
+                    pages.iter().any(|page| {
+                        page.id == id
+                            && page.phase == WorkHumanPhaseV1::Presented
+                            && (clear || !page.can_continue)
+                    })
+                });
+            if let Ok(mut state) = context.human_fixture.lock() {
+                if let Some(session) = state.as_mut() {
+                    if first != expected || repeated != expected || !stale_refused || !unchanged {
+                        session.fail("native_recheck_result_or_identity");
+                    } else if clear {
+                        session.check_clear = true;
+                    } else {
+                        session.check_waiting = true;
+                    }
+                }
+            }
+            let _ = writeln!(std::io::stdout().lock(), "loopback-human-recheck: expected_clear={clear} first={first:?} repeated={repeated:?} stale_refused={stale_refused} same_page_held={unchanged}; content=synthetic");
         }
         Action::Cancel => {
             let Some(state) = context.projection(work).await else {
@@ -517,6 +573,15 @@ pub(super) async fn run(
         .composition
         .human_pages(context.profile, run.state.work.id)
         .is_ok_and(|pages| pages.is_empty());
+    let retired_check_refused = if let Some(id) = state.id {
+        context
+            .composition
+            .check_human_page(context.profile, run.state.work.id, id)
+            .await
+            == zephium_ipc::work::WorkHumanCheckOutcomeV1::Unavailable
+    } else {
+        false
+    };
     let elapsed_ms = state.started.elapsed().as_millis();
     let held_ms = state
         .signal_at
@@ -541,6 +606,8 @@ pub(super) async fn run(
         || (held_ms >= 35_000 && elapsed_ms > u128::from(admitted_timeout) * 1_000);
     let base = state.failure.is_none()
         && presented
+        && state.check_waiting
+        && retired_check_refused
         && state.unresolved_held
         && main_loads == 1
         && retired
@@ -549,6 +616,7 @@ pub(super) async fn run(
     let passed = base
         && if scenario.resumes() {
             content
+                && state.check_clear
                 && receipt
                 && calls > 0
                 && CLEARED_DOCUMENT.load(Ordering::SeqCst) == 1
@@ -568,10 +636,12 @@ pub(super) async fn run(
                         && POLLED_DOCUMENT.load(Ordering::SeqCst) == 2
                         && CLEARED_DOCUMENT.load(Ordering::SeqCst) != 2))
         };
+    let check_waiting = state.check_waiting;
+    let check_clear = state.check_clear;
     let cancel_millis = state.cancel_millis.unwrap_or(0);
     let durable_cancelled = state.cancel_millis.is_some();
     let _ = writeln!(std::io::stdout().lock(),
-        "loopback-human: scenario={} presented={presented} unresolved_held={} native_page_identity_stable={} same_document={} main_loads={main_loads} resolved_handoff={receipt} planner_calls={calls} cancelled={cancelled} durable_cancelled={durable_cancelled} cancel_millis={cancel_millis} retired={retired} stale_fixture_document_held={} manual_continue_calls=0 admitted_timeout_seconds={admitted_timeout} presented_hold_ms={held_ms} elapsed_ms={elapsed_ms} original_limits_unchanged={original_limits_unchanged} past_original_deadline={past_original_deadline} simulated_human=loopback_dom_only passed={passed} failure={}; content=synthetic",
+        "loopback-human: scenario={} presented={presented} unresolved_held={} native_page_identity_stable={} same_document={} main_loads={main_loads} resolved_handoff={receipt} planner_calls={calls} cancelled={cancelled} durable_cancelled={durable_cancelled} cancel_millis={cancel_millis} retired={retired} stale_fixture_document_held={} manual_continue_calls=0 check_waiting={check_waiting} check_clear={check_clear} retired_check_refused={retired_check_refused} admitted_timeout_seconds={admitted_timeout} presented_hold_ms={held_ms} elapsed_ms={elapsed_ms} original_limits_unchanged={original_limits_unchanged} past_original_deadline={past_original_deadline} simulated_human=loopback_dom_only passed={passed} failure={}; content=synthetic",
         scenario.name(), state.unresolved_held, state.id.is_some() && state.failure != Some("human_page_identity_changed"),
         scenario.resumes() && state.revision.is_some() && state.failure != Some("same_document_revision_changed"),
         state.stale_revision.is_some(), state.failure.unwrap_or("none"));
@@ -600,6 +670,7 @@ mod tests {
     #[test]
     fn long_wait_clears_only_after_the_admitted_deadline_has_elapsed() {
         let mut session = Session::new(Scenario::LongWait);
+        session.check_waiting = true;
         let page = page(WorkHumanReasonV1::SignIn);
         session.id = Some(page.id);
         session.presented_since = Some(Instant::now() - Duration::from_secs(34));

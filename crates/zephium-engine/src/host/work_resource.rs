@@ -1077,7 +1077,7 @@ impl EngineHost {
         };
         match operation {
             Operation::PresentHuman | Operation::ContinueAfterHuman => {
-                resource.handle_human(task);
+                resource.handle_human(task, self.main_dispatch.clone());
             }
             Operation::Acquire => {
                 let mut accepted = request.lease().is_some_and(|lease| {

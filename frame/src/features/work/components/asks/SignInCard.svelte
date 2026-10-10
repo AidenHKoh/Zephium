@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { WorkHumanCheckOutcomeV1, WorkHumanPageV1 } from "$shared/ipc/bindings";
   import Button from "$shared/ui/Button";
   import * as m from "$shared/i18n/messages";
   import HostGlyph from "../cards/HostGlyph.svelte";
@@ -12,12 +13,38 @@
     placement = "canvas",
     busy = false,
     onopen,
+    oncheck,
   }: {
     ask: SignInAsk;
     placement?: "canvas" | "island";
     busy?: boolean;
     onopen?: () => void;
+    oncheck?: (page: WorkHumanPageV1) => Promise<WorkHumanCheckOutcomeV1>;
   } = $props();
+  let checking = $state(false);
+  let checked = $state<{ key: string; outcome: WorkHumanCheckOutcomeV1 } | null>(null);
+  const checkKey = $derived(
+    `${ask.step}:${ask.page?.id.attempt}:${ask.page?.id.generation}:${ask.page?.document_revision}`,
+  );
+  const result = $derived(checked?.key === checkKey ? checked.outcome : null);
+  async function checkAgain() {
+    if (checking || busy) return;
+    const key = checkKey;
+    const page = ask.page;
+    checked = null;
+    if (!page || page.phase === "waiting_for_human" || page.phase === "presenting") {
+      onopen?.();
+      checked = { key, outcome: "open_page" };
+      return;
+    }
+    if (!oncheck) return;
+    checking = true;
+    const outcome = await oncheck(page).catch(() => "unavailable" as const);
+    checking = false;
+    if (key !== checkKey || ask.state !== "open") return;
+    checked = { key, outcome };
+    if (outcome === "open_page") onopen?.();
+  }
   const title = $derived(
     ask.kind === "check"
       ? m.work_human_title_check({ host: siteName(ask.host) })
@@ -29,9 +56,29 @@
   <AskShell {placement} {busy} label={title} where={registrableSite(ask.host)} {title}>
     {#snippet mark()}<HostGlyph host={ask.host} size={18} initial={false} />{/snippet}
     <p class="how">{m.work_ask_handoff_how()}</p>
+    {#if checking || result}
+      <p class="how" role="status">
+        {checking
+          ? m.work_human_checking()
+          : result === "waiting"
+            ? ask.kind === "check"
+              ? m.work_human_check_waiting()
+              : m.work_human_still_signed_out()
+            : result === "clear"
+              ? m.work_human_check_ready()
+              : result === "open_page"
+                ? m.work_human_check_open_page()
+                : m.work_human_check_unavailable()}
+      </p>
+    {/if}
     {#snippet actions()}
       {#if onopen}<Button variant="primary" disabled={busy} onclick={() => onopen?.()}
           >{ask.kind === "check" ? m.work_human_open() : m.work_ask_sign_in()}</Button
+        >{/if}
+      {#if oncheck}<Button
+          variant="ghost"
+          disabled={busy || checking}
+          onclick={() => void checkAgain()}>{m.work_human_check_again()}</Button
         >{/if}
     {/snippet}
   </AskShell>

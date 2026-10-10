@@ -87,6 +87,7 @@
       {placement}
       {busy}
       onopen={actions.openPage ? () => actions.openPage?.(ask.step) : undefined}
+      oncheck={actions.checkPage}
     />
   {:else if ask.kind === "question"}
     <QuestionCard {ask} {placement} {busy} {seed} onanswer={answer} />

@@ -77,3 +77,22 @@ pub struct WorkHumanResponseV1 {
     pub pages: Vec<WorkHumanPageV1>,
     pub error: Option<WorkFailureV1>,
 }
+
+/// Fresh native check result; `clear` grants no actor or account authority.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkHumanCheckOutcomeV1 {
+    Waiting,
+    Clear,
+    OpenPage,
+    Unavailable,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkHumanCheckResponseV1 {
+    pub version: u16,
+    pub profile: String,
+    pub work: WorkId,
+    pub page: WorkHumanPageIdV1,
+    pub outcome: WorkHumanCheckOutcomeV1,
+}
