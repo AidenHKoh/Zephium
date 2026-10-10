@@ -906,6 +906,26 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
     fact.attempts[0].usage = Some(usage);
     fact.status = WorkExecutionStatus::NeedsReview;
     fact.validate(&plan, revision).unwrap();
+    // Finishing the answer must not make later cancellation or failed
+    // settlement impossible; the published artifacts remain available.
+    for (attempt_status, execution_status) in [
+        (WorkAttemptStatus::Cancelled, WorkExecutionStatus::Cancelled),
+        (WorkAttemptStatus::Failed, WorkExecutionStatus::Failed),
+        (
+            WorkAttemptStatus::OutcomeUnknown,
+            WorkExecutionStatus::Interrupted,
+        ),
+    ] {
+        let mut interrupted = fact.clone();
+        interrupted.attempts[0].status = attempt_status;
+        interrupted.attempts[0].usage =
+            (attempt_status != WorkAttemptStatus::OutcomeUnknown).then_some(usage);
+        interrupted.status = execution_status;
+        assert!(
+            interrupted.validate(&plan, revision).is_ok(),
+            "terminal settlement after Finish: {attempt_status:?}"
+        );
+    }
     let mut after_finish = fact.clone();
     after_finish.attempts[0].status = WorkAttemptStatus::Running;
     after_finish.attempts[0].usage = None;

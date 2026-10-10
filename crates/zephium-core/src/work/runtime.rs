@@ -1791,6 +1791,34 @@ impl WorkStepKindV1 {
     }
 }
 impl WorkStepFact {
+    /// Interruption never proves a dispatched effect did not happen.
+    pub fn interruption_status(&self) -> WorkStepStatus {
+        if self.status != WorkStepStatus::Running {
+            return self.status;
+        }
+        if self.kind.fetches() || self.has_unconfirmed_effect() {
+            WorkStepStatus::OutcomeUnknown
+        } else {
+            WorkStepStatus::Cancelled
+        }
+    }
+    pub fn has_unconfirmed_effect(&self) -> bool {
+        matches!(
+            self.status,
+            WorkStepStatus::Running | WorkStepStatus::OutcomeUnknown
+        ) && (matches!(self.kind, WorkStepKindV1::RunCommand { .. })
+            || (self.kind.proposes_write() && self.kind.file_decision() == Some(true))
+            || (matches!(self.kind, WorkStepKindV1::Read { goal: Some(_), .. })
+                && self.measurements.is_none_or(|m| m.native_actions != 0)))
+    }
+    /// Human questions and confirmation cards do not occupy an execution worker.
+    pub fn occupies_worker(&self) -> bool {
+        self.status == WorkStepStatus::Running
+            && !matches!(
+                self.kind,
+                WorkStepKindV1::Ask { .. } | WorkStepKindV1::Confirm { .. }
+            )
+    }
     pub fn validate(&self) -> Result<(), WorkError> {
         self.kind.validate()?;
         if let Some(local) = &self.local {
@@ -2362,6 +2390,29 @@ impl WorkExecutionFact {
             );
         }
     }
+
+    /// Close logical steps without claiming that dispatched native effects
+    /// were undone or drained. Their native owners retain that responsibility.
+    pub fn close_pending_steps(&mut self, note: &str) -> bool {
+        let mut changed = false;
+        for step in &mut self.steps {
+            if step.status != WorkStepStatus::Running {
+                continue;
+            }
+            changed = true;
+            step.status = step.interruption_status();
+            step.usage = None;
+            step.note = Some(note.to_owned());
+            if let Some(measurements) = &mut step.measurements {
+                measurements.outcome = Some(if step.status == WorkStepStatus::OutcomeUnknown {
+                    WorkPageOutcomeV1::OutcomeUnknown
+                } else {
+                    WorkPageOutcomeV1::Cancelled
+                });
+            }
+        }
+        changed
+    }
     /// Each granted origin with the signed-in pages its steps opened.
     pub fn account_use(&self) -> Vec<WorkAccountUseV1> {
         let Some(grant) = self.agent_grant() else {
@@ -2551,7 +2602,7 @@ impl WorkExecutionFact {
                     return Err(WorkError::Invalid);
                 }
                 // A held site step waits beside its page; it is no worker.
-                if !matches!(step.kind, WorkStepKindV1::Confirm { confirm: _ }) {
+                if step.occupies_worker() {
                     running_steps += 1;
                 }
                 if matches!(step.kind, WorkStepKindV1::RunCommand { .. })
@@ -2611,7 +2662,6 @@ impl WorkExecutionFact {
             || (running_commands > 0 && pending_file_change)
             || running_steps > usize::from(self.spec.limits.max_workers)
             || (complete && (running_steps > 0 || !finished))
-            || (finished && !(complete || running))
             || claimed_artifacts.len() != self.artifacts.len()
             || claimed_evidence.len()
                 != self.provider_evidence.len()

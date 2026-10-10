@@ -288,7 +288,14 @@ async fn synthesis_case(
             assert_eq!(attempt.usage.unwrap().model_tokens, 300);
         }
         2 | 4 | 5 => {
-            assert_eq!(execution.status, WorkExecutionStatus::Interrupted);
+            assert_eq!(
+                execution.status,
+                if mode == 5 {
+                    WorkExecutionStatus::Cancelled
+                } else {
+                    WorkExecutionStatus::Interrupted
+                }
+            );
             assert_eq!(attempt.status, WorkAttemptStatus::OutcomeUnknown);
             assert!(attempt.usage.is_none());
             assert!(execution.artifacts.is_empty());

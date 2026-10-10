@@ -391,6 +391,8 @@ impl WorkAgentService {
             None => (command.into_request()?, Vec::new(), Vec::new(), Vec::new()),
         };
         request.validate()?;
+        let starting =
+            crate::work_runtime::WorkStartingAgent::acquire(&self.handle, profile, work)?;
         let response = tokio::time::timeout(
             Duration::from_secs(10),
             self.handle.submit_work_document(request, Some(profile))?,
@@ -412,7 +414,10 @@ impl WorkAgentService {
             return Err(WorkError::Invalid);
         }
         if replayed {
-            return Ok(*projection);
+            drop(starting);
+            let mut projection = *projection;
+            crate::work_runtime::project_driver_liveness(profile, &mut projection);
+            return Ok(projection);
         }
         let execution = projection
             .executions
@@ -439,6 +444,7 @@ impl WorkAgentService {
                 node,
             )
             .await?;
+        drop(starting);
         observe(attempt.observer());
         let original = attempt.attempt();
         let mut driver = Driver {
@@ -608,6 +614,39 @@ struct WorkSearchOutcomeOwned {
 }
 
 impl Driver {
+    async fn wait_for_step_capacity(&mut self, races: &mut u8) -> Result<bool, WorkError> {
+        loop {
+            if self.cancelled().await {
+                return Ok(false);
+            }
+            let state = self.probe.runtime_projection().await?;
+            let execution = state
+                .executions
+                .iter()
+                .find(|run| run.id == self.probe.execution())
+                .ok_or(WorkError::NotFound)?;
+            if execution
+                .steps
+                .iter()
+                .filter(|step| step.occupies_worker())
+                .count()
+                >= usize::from(execution.spec.limits.max_workers)
+            {
+                *races = 0;
+                self.probe.changes().next(Duration::from_millis(100)).await;
+                continue;
+            } else {
+                // A worker can finish between the refusal and this read. Allow
+                // one such race, but never spin on storage/payload exhaustion.
+                *races = races.saturating_add(1);
+                if *races > 1 {
+                    return Err(WorkError::Capacity);
+                }
+            }
+            self.probe.changes().next(Duration::from_millis(50)).await;
+            return Ok(true);
+        }
+    }
     fn remaining(&self) -> WorkExecutionLimits {
         WorkExecutionLimits {
             model_tokens: self
@@ -816,12 +855,7 @@ impl Driver {
         let swept = !running.is_empty();
         for step in running {
             // A fetch cut off mid-flight may have been charged: its outcome is unknown.
-            let settled = match step.kind {
-                WorkStepKindV1::Search { .. }
-                | WorkStepKindV1::Read { .. }
-                | WorkStepKindV1::Discover { .. } => WorkStepStatus::OutcomeUnknown,
-                _ => WorkStepStatus::Cancelled,
-            };
+            let settled = step.interruption_status();
             if self
                 .settle(
                     step.id,
@@ -1284,6 +1318,7 @@ impl Driver {
             .into_iter()
             .partition(|kind| matches!(kind, WorkStepKindV1::Search { .. }));
         let mut offset = 0;
+        let mut capacity_races = 0;
         while offset < searches.len() {
             let steps = usize::from(self.grant.max_steps).saturating_sub(self.steps as usize + 1);
             if steps == 0 {
@@ -1331,12 +1366,19 @@ impl Driver {
             };
             let batch = &searches[offset..offset + count];
             let mut running = Vec::new();
+            let mut admission_failure = None;
             for (kind, limits) in batch.iter().zip(shares) {
                 let WorkStepKindV1::Search { query } = kind else {
                     continue;
                 };
                 let step = self.step(kind.clone(), WorkStepStatus::Running);
-                let id = self.begin(step, vec![], None).await?;
+                let id = match self.begin(step, vec![], None).await {
+                    Ok(id) => id,
+                    Err(error) => {
+                        admission_failure = Some(error);
+                        break;
+                    }
+                };
                 running.push((
                     id,
                     WorkPublicSearchScope {
@@ -1346,6 +1388,16 @@ impl Driver {
                     },
                     limits,
                 ));
+            }
+            let admitted = running.len();
+            if admitted == 0 && admission_failure == Some(WorkError::Capacity) {
+                if !self.wait_for_step_capacity(&mut capacity_races).await? {
+                    return Ok(Some(WorkAttemptStatus::Cancelled));
+                }
+                continue;
+            }
+            if admitted > 0 {
+                capacity_races = 0;
             }
             let mut pages = self.open_results_pages(search, browser, &running).await;
             let futures: Vec<Pin<Box<dyn Future<Output = Fetched> + Send + '_>>> = running
@@ -1398,13 +1450,24 @@ impl Driver {
                 })
                 .collect();
             let mut terminal = None;
+            let mut settlement_failure = None;
             for fetched in join_all(futures).await {
-                terminal = terminal.or(self.settle_fetched(attempt, fetched).await?);
+                match self.settle_fetched(attempt, fetched).await {
+                    Ok(status) => terminal = terminal.or(status),
+                    Err(error) => {
+                        settlement_failure.get_or_insert(error);
+                    }
+                }
+            }
+            if let Some(error) = settlement_failure
+                .or(admission_failure.filter(|error| *error != WorkError::Capacity))
+            {
+                return Err(error);
             }
             if terminal.is_some() {
                 return Ok(terminal);
             }
-            offset += count;
+            offset += admitted;
         }
         let (file_steps, browses): (Vec<_>, Vec<_>) = browses
             .into_iter()

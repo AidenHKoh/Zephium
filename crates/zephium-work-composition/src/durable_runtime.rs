@@ -936,6 +936,8 @@ impl NativeWorkComposition {
         let _page_guard = page
             .as_ref()
             .map(|(step, _)| PageSettle(attempt.clone(), *step));
+        let cancellation = attempt.wait_cancelled();
+        tokio::pin!(cancellation);
         loop {
             if let Some((step, url)) = &page {
                 if let Some(frame) = guard.0.frame() {
@@ -1053,7 +1055,9 @@ impl NativeWorkComposition {
                 }
             }
             let now = Instant::now();
-            if now >= next_cancel_check && !requested_close {
+            if !requested_close
+                && (attempt.cached_cancellation().is_some() || now >= next_cancel_check)
+            {
                 next_cancel_check = now + Duration::from_secs(1);
                 match attempt.cancellation_requested().await {
                     Ok(false) => {}
@@ -1840,12 +1844,15 @@ impl NativeWorkComposition {
                 )
                 .with_failure(snapshot.failure));
             }
-            tokio::time::sleep(if paused || (human_wait.is_some() && !requested_close) {
+            let pause = if paused || (human_wait.is_some() && !requested_close) {
                 HELD_PAGE_POLL
             } else {
                 Duration::from_millis(50)
-            })
-            .await;
+            };
+            tokio::select! {
+                _ = &mut cancellation, if !requested_close => { next_cancel_check = Instant::now(); }
+                _ = tokio::time::sleep(pause) => {}
+            }
         }
     }
 }

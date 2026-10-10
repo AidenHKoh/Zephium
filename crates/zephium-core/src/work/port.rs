@@ -36,8 +36,9 @@ pub enum WorkRequest {
         id: WorkId,
         link: artifact::WorkEvidenceLink,
     },
-    /// Owner drop notification. Exact attempt matching replaces user CAS; this
-    /// can only record uncertainty, never start work or publish a result.
+    /// Owner drop notification. Exact attempt matching replaces user CAS.
+    /// Closes uncertainty or retains an already finished answer; never starts
+    /// work or adds result objects.
     RuntimeAbandon {
         id: WorkId,
         execution: WorkExecutionId,
@@ -45,6 +46,15 @@ pub enum WorkRequest {
     },
     RuntimeRead {
         id: WorkId,
+    },
+    /// Application-actor attestation that this execution has no pending or live
+    /// driver. Never decoded from IPC; preserves the person's original
+    /// AcknowledgeInterruption command identity and receipt.
+    AcknowledgeOrphan {
+        id: WorkId,
+        expected: WorkRevision,
+        command: WorkCommandId,
+        execution: WorkExecutionId,
     },
     RuntimeCommand {
         id: WorkId,

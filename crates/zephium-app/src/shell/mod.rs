@@ -2023,3 +2023,5 @@ mod work_planning_tests;
 mod work_product_tests;
 #[cfg(all(test, feature = "work-runtime"))]
 mod work_runtime_tests;
+#[cfg(all(test, feature = "work-runtime"))]
+mod work_stop_tests;

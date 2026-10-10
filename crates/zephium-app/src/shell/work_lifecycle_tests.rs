@@ -584,7 +584,8 @@ async fn work_stop_anywhere_settles_every_step_and_the_next_request_runs() {
             .steps
             .iter()
             .filter(|step| step.status != WorkStepStatus::Succeeded)
-            .all(|step| step.note.as_deref() == Some("Stopped by you")));
+            .all(|step| step.note.as_deref()
+                == Some("Stopped by you; any in-flight outcome remains unconfirmed")));
         if matches!(at, StopAt::Takeover) {
             assert_eq!(
                 execution.intervention.as_ref().map(|i| i.kind),

@@ -33,6 +33,33 @@ impl crate::Shell {
             return;
         }
         let _ = owner.set(profile);
+        // The attestation is made only here, after profile authentication.
+        // A caller cannot submit the internal form and bypass live ownership.
+        if matches!(
+            request,
+            zephium_core::work::port::WorkRequest::AcknowledgeOrphan { .. }
+        ) {
+            reply.try_send(Err(WorkError::Invalid));
+            return;
+        }
+        #[cfg(feature = "work-runtime")]
+        if let zephium_core::work::port::WorkRequest::RuntimeCommand {
+            id,
+            expected,
+            command,
+            intent:
+                zephium_core::work::runtime::WorkRuntimeIntent::AcknowledgeInterruption { execution },
+        } = &request
+        {
+            if !crate::work_runtime::has_execution_driver(profile, *id, *execution) {
+                request = zephium_core::work::port::WorkRequest::AcknowledgeOrphan {
+                    id: *id,
+                    expected: *expected,
+                    command: *command,
+                    execution: *execution,
+                };
+            }
+        }
         if let zephium_core::work::port::WorkRequest::Environment {
             call,
             space_available,
@@ -149,6 +176,20 @@ impl crate::Shell {
             request,
             Box::new(move |result| {
                 let _permit = permit;
+                #[cfg(feature = "work-runtime")]
+                let mut result = result;
+                #[cfg(feature = "work-runtime")]
+                if let Ok(
+                    WorkReply::Runtime(projection)
+                    | WorkReply::RuntimeCommand { projection, .. }
+                    | WorkReply::RuntimeStarted { projection, .. }
+                    | WorkReply::PublicReadAdmitted { projection, .. }
+                    | WorkReply::AgentAdmitted { projection, .. },
+                ) = &mut result
+                {
+                    crate::work_runtime::project_driver_liveness(profile, projection);
+                    crate::work_runtime::revoke_published(profile, projection);
+                }
                 if changes {
                     if let Ok(WorkReply::Environment(
                         zephium_core::work::environment::WorkEnvironmentReply::Snapshot {

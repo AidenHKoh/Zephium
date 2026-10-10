@@ -95,6 +95,7 @@ impl Driver {
         }
         let cap = usize::from(self.limits.max_workers).clamp(1, MAX_CONCURRENT_PAGE_READS);
         let mut offset = 0;
+        let mut capacity_races = 0;
         while offset < reads.len() {
             let steps = usize::from(self.grant.max_steps).saturating_sub(self.steps as usize + 1);
             if steps == 0 {
@@ -137,6 +138,8 @@ impl Driver {
             )> = Vec::new();
             let mut terminal = None;
             let mut failure = None;
+            let mut consumed = 0;
+            let mut at_capacity = false;
             // Each live read's step and the addresses its chain has read.
             let mut chains: Vec<(WorkStepId, Vec<String>)> = Vec::new();
             for ((kind, session), limits) in batch.iter().zip(limits) {
@@ -160,6 +163,10 @@ impl Driver {
                 }
                 let id = match self.begin(step, vec![], None).await {
                     Ok(id) => id,
+                    Err(WorkError::Capacity) => {
+                        at_capacity = true;
+                        break;
+                    }
                     // One page the Store will not record is that page's
                     // problem, not the run's: the others still read.
                     Err(WorkError::Invalid) => {
@@ -170,6 +177,7 @@ impl Driver {
                             "A page could not start and was skipped: {}",
                             crate::work_sites::host_of(url).unwrap_or_default()
                         ));
+                        consumed += 1;
                         continue;
                     }
                     Err(error) => {
@@ -180,6 +188,7 @@ impl Driver {
                         break;
                     }
                 };
+                consumed += 1;
                 if let Some(site) = crate::work_sites::site_of(url) {
                     self.page_sites.push((id, site));
                 }
@@ -359,7 +368,15 @@ impl Driver {
             if terminal.is_some() {
                 return Ok(terminal);
             }
-            offset += count;
+            offset += consumed;
+            if consumed > 0 {
+                capacity_races = 0;
+            }
+            if at_capacity && consumed == 0 {
+                if !self.wait_for_step_capacity(&mut capacity_races).await? {
+                    return Ok(Some(WorkAttemptStatus::Cancelled));
+                }
+            }
         }
         Ok(None)
     }

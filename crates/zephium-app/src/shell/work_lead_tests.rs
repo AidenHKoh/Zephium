@@ -276,6 +276,231 @@ impl WorkModelClient for Script {
 /// The chosen model's own search, as most runs now use it.
 const SEARCH_MODEL: &str = "anthropic/claude-haiku-4-5-20251001";
 struct Search;
+
+struct BurstSearches(Script);
+impl WorkModelClient for BurstSearches {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        event: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let system: String = request
+                .system
+                .iter()
+                .map(|block| block.text.as_str())
+                .collect();
+            let first = !request
+                .messages
+                .iter()
+                .any(|message| matches!(message, WorkModelMessage::Assistant(_)));
+            let research = !system.contains("You are the Work agent")
+                && !system.contains("You work on web pages");
+            let mut outcome = self.0.call(request, event).await?;
+            if first && research {
+                outcome.assistant = [
+                    "ESTA eligibility nationality",
+                    "ESTA processing times",
+                    "ESTA application fees",
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, query)| {
+                    call(
+                        &format!("burst-{index}"),
+                        "web_search",
+                        json!({"query":query}),
+                    )
+                })
+                .collect();
+            }
+            Ok(outcome)
+        })
+    }
+}
+
+struct SlowSearch(std::sync::atomic::AtomicUsize);
+
+#[tokio::test]
+async fn a_finished_reply_keeps_an_unsettled_approved_write_unknown() {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Plan my YC batch trip from Warsaw".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let client = Arc::new(Script {
+        calls: Mutex::new(Vec::new()),
+    });
+    let models = WorkLeadModels {
+        lead: model(client.clone()),
+        page: model(client.clone()),
+        light: model(client),
+    };
+    let injected = std::sync::atomic::AtomicBool::new(false);
+    let service = WorkLeadService::new(handle);
+    let result = drive(
+        &mut shell,
+        &queue,
+        service.run(
+            profile,
+            command(work, WorkRevision::INITIAL),
+            None,
+            models,
+            &Search,
+            |probe, request| {
+                let first = !injected.swap(true, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if first {
+                        // A native write was approved but its settlement was lost.
+                        // Only its durable fact is injected; no file is touched.
+                        probe
+                            .commit_step(WorkRuntimeUpdate::BeginStep {
+                                execution: probe.execution(),
+                                attempt: probe.attempt(),
+                                step: WorkStepFact {
+                                    model_fault: None,
+                                    id: WorkStepId::generate(),
+                                    turn: 1,
+                                    kind: WorkStepKindV1::WriteFile {
+                                        path: "/Users/person/notes.txt".into(),
+                                        content: "Approved draft".into(),
+                                        decision: Some(true),
+                                    },
+                                    status: WorkStepStatus::Running,
+                                    usage: None,
+                                    artifacts: vec![],
+                                    evidence: None,
+                                    note: None,
+                                    measurements: None,
+                                    local: None,
+                                    account: None,
+                                    part: None,
+                                },
+                                artifacts: vec![],
+                                evidence: None,
+                                file: None,
+                            })
+                            .await?;
+                    }
+                    page(request).await
+                }
+            },
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    let execution = &result.executions[0];
+    assert!(execution
+        .artifacts
+        .iter()
+        .any(|artifact| matches!(artifact.data, WorkArtifactDataV1::Reply { .. })));
+    assert!(execution
+        .steps
+        .iter()
+        .any(|step| matches!(step.kind, WorkStepKindV1::Finish { .. })));
+    assert_eq!(execution.status, WorkExecutionStatus::Interrupted);
+    assert!(execution.attempts[0].usage.is_none());
+    assert!(execution
+        .steps
+        .iter()
+        .filter(|step| matches!(step.kind, WorkStepKindV1::WriteFile { .. }))
+        .all(|step| step.status == WorkStepStatus::OutcomeUnknown));
+}
+impl WorkPublicSearchProvider for SlowSearch {
+    fn grant(&self) -> Option<(WorkSearchProvider, String)> {
+        Search.grant()
+    }
+    fn search<'a>(
+        &'a self,
+        scope: &'a WorkPublicSearchScope,
+        context: &'a [zephium_core::work::context::WorkContextBody],
+        limits: WorkExecutionLimits,
+    ) -> WorkPublicSearchFuture<'a> {
+        Box::pin(async move {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            Search.search(scope, context, limits).await
+        })
+    }
+}
+
+#[tokio::test]
+async fn concurrent_parts_drain_partial_search_batches_before_retrying_worker_capacity() {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Plan my YC batch trip from Warsaw".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let client = Arc::new(BurstSearches(Script {
+        calls: Mutex::new(Vec::new()),
+    }));
+    let models = WorkLeadModels {
+        lead: model(client.clone()),
+        page: model(client.clone()),
+        light: model(client),
+    };
+    let search = SlowSearch(std::sync::atomic::AtomicUsize::new(0));
+    let mut request = command(work, WorkRevision::INITIAL);
+    let WorkRuntimeIntent::BeginAgent { limits, .. } = &mut request.intent else {
+        panic!()
+    };
+    limits.max_workers = 2;
+    let service = WorkLeadService::new(handle);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        drive(
+            &mut shell,
+            &queue,
+            service.run(
+                profile,
+                request,
+                None,
+                models,
+                &search,
+                |_, request| async {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    page(request).await
+                },
+                |_| {},
+            ),
+        ),
+    )
+    .await
+    .expect("no admission deadlock")
+    .unwrap();
+    let execution = &result.executions[0];
+    assert!(
+        matches!(
+            execution.status,
+            WorkExecutionStatus::Completed | WorkExecutionStatus::NeedsReview
+        ),
+        "{:?}",
+        execution.status
+    );
+    assert_eq!(search.0.load(std::sync::atomic::Ordering::SeqCst), 3);
+    let searches: Vec<_> = execution
+        .steps
+        .iter()
+        .filter(|step| matches!(step.kind, WorkStepKindV1::Search { .. }))
+        .collect();
+    assert_eq!(searches.len(), 3);
+    assert!(searches
+        .iter()
+        .all(|step| step.status == WorkStepStatus::Succeeded));
+    assert!(execution
+        .steps
+        .iter()
+        .all(|step| step.status != WorkStepStatus::Running));
+}
 impl WorkPublicSearchProvider for Search {
     fn grant(&self) -> Option<(WorkSearchProvider, String)> {
         Some((WorkSearchProvider::Native, SEARCH_MODEL.into()))
@@ -321,7 +546,7 @@ impl WorkPublicSearchProvider for Search {
     }
 }
 
-fn model(client: Arc<Script>) -> LeadModel {
+pub(super) fn model(client: Arc<dyn WorkModelClient>) -> LeadModel {
     LeadModel {
         entry: WorkModelEntry {
             id: "openai/gpt-6".into(),
@@ -352,7 +577,7 @@ fn model(client: Arc<Script>) -> LeadModel {
     }
 }
 
-fn command(work: WorkId, expected: WorkRevision) -> WorkCommandV1 {
+pub(super) fn command(work: WorkId, expected: WorkRevision) -> WorkCommandV1 {
     WorkCommandV1 {
         version: 1,
         work,

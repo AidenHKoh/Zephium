@@ -270,7 +270,8 @@ async fn coordinator_joins_original_child_publication_and_fails_closed_on_loss()
             fact.status,
             match mode {
                 0 => WorkExecutionStatus::NeedsReview,
-                1 | 3 | 4 => WorkExecutionStatus::Interrupted,
+                1 | 3 => WorkExecutionStatus::Interrupted,
+                4 => WorkExecutionStatus::Cancelled,
                 _ => WorkExecutionStatus::Failed,
             }
         );
@@ -282,6 +283,11 @@ async fn coordinator_joins_original_child_publication_and_fails_closed_on_loss()
                     .map(|a| a.usage.unwrap().model_tokens)
                     .sum::<u32>(),
                 700
+            );
+        } else if mode == 4 {
+            assert_eq!(
+                fact.attempts[0].usage, None,
+                "explicit Stop retains uncertain in-flight accounting"
             );
         } else {
             assert_eq!(fact.attempts[0].usage, Some(WorkUsage::default()));

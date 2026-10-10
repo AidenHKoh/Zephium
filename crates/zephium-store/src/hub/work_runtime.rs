@@ -232,6 +232,44 @@ pub(super) fn command(
     command: WorkCommandId,
     input: RuntimeIntentInput,
 ) -> Result<(WorkReply, bool), WorkError> {
+    command_observed(tx, profile, session, id, expected, command, input, false)
+}
+
+pub(super) fn acknowledge_orphan(
+    tx: &Transaction<'_>,
+    profile: ProfileId,
+    session: RuntimeClock,
+    id: WorkId,
+    expected: WorkRevision,
+    command: WorkCommandId,
+    execution: WorkExecutionId,
+) -> Result<(WorkReply, bool), WorkError> {
+    command_observed(
+        tx,
+        profile,
+        session,
+        id,
+        expected,
+        command,
+        RuntimeIntentInput {
+            intent: WorkRuntimeIntent::AcknowledgeInterruption { execution },
+            context: None,
+        },
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn command_observed(
+    tx: &Transaction<'_>,
+    profile: ProfileId,
+    session: RuntimeClock,
+    id: WorkId,
+    expected: WorkRevision,
+    command: WorkCommandId,
+    input: RuntimeIntentInput,
+    orphan_attested: bool,
+) -> Result<(WorkReply, bool), WorkError> {
     let RuntimeIntentInput { intent, context } = input;
     let mut current = read(tx, profile, id)?;
     let direct = matches!(intent, WorkRuntimeIntent::ReadPublic { .. });
@@ -707,16 +745,22 @@ pub(super) fn command(
                 intervention.validate()?;
                 row.fact.intervention = Some(intervention);
             }
-            row.fact.status = if row
-                .fact
-                .attempts
-                .iter()
-                .any(|a| a.status == WorkAttemptStatus::Running)
-            {
-                WorkExecutionStatus::CancelRequested
-            } else {
-                WorkExecutionStatus::Cancelled
-            };
+            // Stop revokes logical authority now. Native cleanup and original
+            // usage journals may drain later; no late result can publish here.
+            for attempt in &mut row.fact.attempts {
+                if attempt.status == WorkAttemptStatus::Running {
+                    attempt.status = WorkAttemptStatus::OutcomeUnknown;
+                    attempt.usage = None;
+                }
+            }
+            row.fact
+                .close_pending_steps("Stopped by you; any in-flight outcome remains unconfirmed");
+            stop_parts(&mut row.fact);
+            row.fact.status = WorkExecutionStatus::Cancelled;
+            row.fact.validate(
+                &read_plan(tx, id, row.fact.spec.plan_revision)?,
+                expected.next()?,
+            )?;
             write(tx, id, &row.fact)?;
             execution
         }
@@ -725,10 +769,28 @@ pub(super) fn command(
                 .into_iter()
                 .find(|r| r.fact.id == execution)
                 .ok_or(WorkError::NotFound)?;
-            if row.owner == session.session || row.fact.status.terminal() {
+            if row.fact.status.terminal()
+                || (row.owner == session.session
+                    && (!orphan_attested
+                        || !(row
+                            .fact
+                            .attempts
+                            .iter()
+                            .any(|attempt| attempt.status == WorkAttemptStatus::Running)
+                            || (row.fact.status == WorkExecutionStatus::Approved
+                                && row.fact.authorization
+                                    == WorkExecutionAuthorization::UserDirectedAgent
+                                && row.fact.attempts.is_empty()))))
+            {
                 return Err(WorkError::Conflict);
             }
+            if orphan_attested {
+                row.fact.close_pending_steps(
+                    "Work lost its driver; in-flight outcomes remain unconfirmed",
+                );
+            }
             row.fact.interrupt();
+            stop_parts(&mut row.fact);
             write(tx, id, &row.fact)?;
             execution
         }
@@ -744,6 +806,110 @@ pub(super) fn command(
         admitted(projection(tx, profile, id, session)?, receipt, false),
         true,
     ))
+}
+
+fn reserved_usage(limits: WorkExecutionLimits) -> WorkUsage {
+    WorkUsage {
+        model_tokens: limits.model_tokens,
+        cost_micro_usd: limits.cost_micro_usd,
+        operations: limits.operations,
+        accounting: WorkUsageAccounting::ConservativeReservation,
+    }
+}
+
+fn stop_parts(fact: &mut WorkExecutionFact) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_millis());
+    for part in &mut fact.parts {
+        if !part.state.terminal() {
+            part.state = zephium_core::work::parts::WorkPartStateV1::Stopped;
+            // A wall-clock correction cannot prevent terminal settlement.
+            let start = part
+                .started_ms
+                .as_deref()
+                .and_then(|time| time.parse::<u128>().ok())
+                .unwrap_or(0);
+            part.ended_ms = Some(now.max(start).to_string());
+        }
+    }
+}
+
+pub(super) fn abandon(
+    tx: &Transaction<'_>,
+    profile: ProfileId,
+    session: RuntimeClock,
+    id: WorkId,
+    expected: WorkRevision,
+    execution: WorkExecutionId,
+    attempt: WorkAttemptId,
+) -> Result<(WorkReply, bool), WorkError> {
+    let mut row = rows(tx, id)?
+        .into_iter()
+        .find(|row| row.fact.id == execution)
+        .ok_or(WorkError::NotFound)?;
+    if row.fact.is_agent()
+        && row.fact.status == WorkExecutionStatus::Approved
+        && row.fact.attempts.is_empty()
+    {
+        let current = read(tx, profile, id)?;
+        if row.owner != session.session
+            || current.revision != expected
+            || current.lifecycle != WorkLifecycle::Active
+        {
+            return Err(WorkError::Conflict);
+        }
+        // A refused initial Begin dispatched nothing. Do not invent an attempt
+        // or accept its payload, and never use this path for an existing worker.
+        row.fact.status = WorkExecutionStatus::Interrupted;
+        row.fact.validate(
+            &read_plan(tx, id, row.fact.spec.plan_revision)?,
+            expected.next()?,
+        )?;
+        write(tx, id, &row.fact)?;
+        bump(tx, id, expected, WorkAuthor::PrimaryAgent)?;
+        return Ok((
+            WorkReply::Runtime(Box::new(projection(tx, profile, id, session)?)),
+            true,
+        ));
+    }
+    let finished = row.fact.is_agent()
+        && row.fact.status == WorkExecutionStatus::Running
+        && !row
+            .fact
+            .steps
+            .iter()
+            .any(WorkStepFact::has_unconfirmed_effect)
+        && row
+            .fact
+            .steps
+            .iter()
+            .any(|step| matches!(step.kind, WorkStepKindV1::Finish { .. }))
+        && row.fact.artifacts.iter().any(|artifact| {
+            matches!(
+                artifact.data,
+                zephium_core::work::artifact::WorkArtifactDataV1::Reply { .. }
+            )
+        });
+    update(
+        tx,
+        profile,
+        session,
+        id,
+        expected,
+        WorkRuntimeUpdate::Settle {
+            execution,
+            attempt,
+            status: if finished {
+                WorkAttemptStatus::Succeeded
+            } else {
+                WorkAttemptStatus::OutcomeUnknown
+            },
+            usage: finished.then(|| reserved_usage(row.fact.spec.limits)),
+            artifacts: vec![],
+            intervention: None,
+        },
+    )
 }
 
 pub(super) fn update(
@@ -950,8 +1116,8 @@ pub(super) fn update(
         }
         WorkRuntimeUpdate::Settle {
             attempt,
-            status,
-            usage,
+            mut status,
+            mut usage,
             artifacts,
             intervention,
             ..
@@ -1014,6 +1180,41 @@ pub(super) fn update(
                 {
                     return Err(WorkError::Invalid);
                 }
+            }
+            if row.fact.is_agent() {
+                if status == WorkAttemptStatus::Succeeded
+                    && row
+                        .fact
+                        .steps
+                        .iter()
+                        .any(WorkStepFact::has_unconfirmed_effect)
+                {
+                    if !artifacts.is_empty() {
+                        return Err(WorkError::Invalid);
+                    }
+                    status = WorkAttemptStatus::OutcomeUnknown;
+                    usage = None;
+                }
+                let pending = row
+                    .fact
+                    .close_pending_steps("Work ended before this step's outcome was confirmed");
+                if pending && status != WorkAttemptStatus::OutcomeUnknown {
+                    usage = Some(reserved_usage(row.fact.spec.limits));
+                    if status == WorkAttemptStatus::Succeeded {
+                        if let Some(finish) = row
+                            .fact
+                            .steps
+                            .iter_mut()
+                            .find(|step| matches!(step.kind, WorkStepKindV1::Finish { .. }))
+                        {
+                            finish.note = Some(
+                                "Finished; some background step outcomes could not be confirmed"
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+                stop_parts(&mut row.fact);
             }
             row.fact.attempts[index].status = status;
             row.fact.attempts[index].usage = usage;
@@ -1091,6 +1292,19 @@ pub(super) fn update(
                 return Err(WorkError::Conflict);
             }
             step.validate()?;
+            // Parts share this limit. Contention is retryable capacity, not
+            // an invalid request; queued work must not become a running step.
+            if step.occupies_worker()
+                && row
+                    .fact
+                    .steps
+                    .iter()
+                    .filter(|step| step.occupies_worker())
+                    .count()
+                    >= usize::from(row.fact.spec.limits.max_workers)
+            {
+                return Err(WorkError::Capacity);
+            }
             revisions_admitted(&row.fact, &others, &artifacts)?;
             let node = fact.node;
             attach_step_payload(

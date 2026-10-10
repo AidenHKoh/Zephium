@@ -497,7 +497,9 @@ fn approved_deadline_uses_original_monotonic_store_incarnation() {
     let (approved, receipt) = approve(&mut hub, &planned, 100.into());
     // Wall time has not elapsed. Only the original process's monotonic clock
     // decides admission; absolute timestamps remain descriptive history.
-    let Some(epoch) = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(301))
+    let Some(epoch) = hub
+        .work_runtime_epoch
+        .checked_sub(std::time::Duration::from_secs(301))
     else {
         return;
     };
@@ -729,10 +731,7 @@ fn takeover_persists_its_reason_and_success_cannot_carry_one() {
     )
     .unwrap();
     let taken = read_runtime(&mut hub, &planned);
-    assert_eq!(
-        taken.executions[0].status,
-        WorkExecutionStatus::CancelRequested
-    );
+    assert_eq!(taken.executions[0].status, WorkExecutionStatus::Cancelled);
     assert_eq!(
         taken.executions[0].intervention,
         Some(WorkInterventionV1 {
@@ -767,9 +766,12 @@ fn takeover_persists_its_reason_and_success_cannot_carry_one() {
                 origin: None,
             })
         ),
-        Err(WorkError::Invalid)
+        Err(WorkError::Conflict)
     ));
-    settle(&mut hub, WorkAttemptStatus::Cancelled, None).unwrap();
+    assert!(matches!(
+        settle(&mut hub, WorkAttemptStatus::Cancelled, None),
+        Err(WorkError::Conflict)
+    ));
     let settled = read_runtime(&mut hub, &planned);
     assert_eq!(
         settled.executions[0].intervention.as_ref().map(|i| i.kind),
@@ -1475,6 +1477,317 @@ fn site_access_is_a_bounded_sorted_profile_list() {
             }
         )
         .is_err());
+}
+
+struct AgentSettlementFixture {
+    hub: Hub,
+    work: WorkSnapshot,
+    execution: WorkExecutionId,
+    attempt: WorkAttemptId,
+    node: WorkPlanNodeId,
+}
+impl AgentSettlementFixture {
+    fn new() -> Self {
+        use zephium_core::work::search::*;
+        let mut hub = Hub::in_memory().unwrap();
+        hub.save(&session()).unwrap();
+        let work = create(&mut hub);
+        let WorkReply::AgentAdmitted {
+            projection,
+            receipt,
+            ..
+        } = hub
+            .work_document(
+                work.profile,
+                WorkRequest::RuntimeCommand {
+                    id: work.id,
+                    expected: work.revision,
+                    command: 100.into(),
+                    intent: WorkRuntimeIntent::BeginAgent {
+                        grant: WorkAgentGrantV1 {
+                            lead: None,
+                            provider: WorkSearchProvider::OpenAi,
+                            model: PUBLIC_SEARCH_MODEL.into(),
+                            max_turns: 8,
+                            max_steps: 24,
+                            browse_hops: 4,
+                            folders: vec![],
+                            accounts: vec![],
+                            private: false,
+                            skill: None,
+                            search_fallback: None,
+                        },
+                        limits: WorkExecutionLimits {
+                            model_tokens: 100_000,
+                            cost_micro_usd: 100_000,
+                            operations: 32,
+                            timeout_seconds: 120,
+                            max_workers: 2,
+                        },
+                    },
+                },
+            )
+            .unwrap()
+        else {
+            panic!("admitted agent")
+        };
+        let mut fixture = Self {
+            hub,
+            work,
+            execution: receipt.execution,
+            attempt: 500.into(),
+            node: projection.work.plan.as_ref().unwrap().draft.nodes[0].id,
+        };
+        fixture
+            .update(WorkRuntimeUpdate::Begin {
+                execution: fixture.execution,
+                attempt: fixture.attempt,
+                node: fixture.node,
+            })
+            .unwrap();
+        fixture
+    }
+    fn update(&mut self, update: WorkRuntimeUpdate) -> Result<WorkReply, WorkError> {
+        let state = read_runtime(&mut self.hub, &self.work);
+        self.hub.work_document(
+            self.work.profile,
+            WorkRequest::RuntimeUpdate {
+                id: self.work.id,
+                expected: state.work.revision,
+                update,
+            },
+        )
+    }
+    fn step(
+        &mut self,
+        id: u128,
+        kind: WorkStepKindV1,
+        status: WorkStepStatus,
+        artifacts: Vec<artifact::WorkArtifactV1>,
+    ) -> Result<WorkReply, WorkError> {
+        self.update(WorkRuntimeUpdate::BeginStep {
+            execution: self.execution,
+            attempt: self.attempt,
+            step: WorkStepFact {
+                model_fault: None,
+                id: id.into(),
+                turn: 1,
+                kind,
+                status,
+                usage: None,
+                artifacts: artifacts.iter().map(|a| a.id).collect(),
+                evidence: None,
+                note: None,
+                measurements: None,
+                local: None,
+                account: None,
+                part: None,
+            },
+            artifacts,
+            evidence: None,
+            file: None,
+        })
+    }
+    fn publish(&mut self) {
+        let reply = artifact::WorkArtifactV1 {
+            version: 1,
+            id: 900.into(),
+            execution: self.execution,
+            attempt: self.attempt,
+            node: self.node,
+            output: "Result".into(),
+            title: "Exam plan".into(),
+            data: artifact::WorkArtifactDataV1::Reply {
+                headline: "Your study plan".into(),
+                text: "Review the collected course material.".into(),
+                figures: vec![],
+                points: vec![],
+            },
+            review: WorkOutputReview::SourceMappedNeedsReview,
+            presentation: artifact::WorkArtifactPresentationV1::Automatic,
+            evidence: vec![],
+            general_knowledge: true,
+            part: None,
+            revises: None,
+        };
+        self.step(
+            10,
+            WorkStepKindV1::Publish,
+            WorkStepStatus::Succeeded,
+            vec![reply],
+        )
+        .unwrap();
+    }
+    fn finish(&mut self) {
+        self.step(
+            11,
+            WorkStepKindV1::Finish {
+                followups: vec![],
+                title: None,
+            },
+            WorkStepStatus::Succeeded,
+            vec![],
+        )
+        .unwrap();
+    }
+    fn abandon(&mut self) {
+        self.hub
+            .work_document(
+                self.work.profile,
+                WorkRequest::RuntimeAbandon {
+                    id: self.work.id,
+                    execution: self.execution,
+                    attempt: self.attempt,
+                },
+            )
+            .unwrap();
+    }
+    fn fact(&mut self) -> WorkExecutionFact {
+        read_runtime(&mut self.hub, &self.work).executions.remove(0)
+    }
+}
+
+#[test]
+fn worker_contention_is_capacity_and_does_not_leave_an_unsent_step() {
+    let mut f = AgentSettlementFixture::new();
+    for id in [1, 2] {
+        f.step(
+            id,
+            WorkStepKindV1::Search {
+                query: format!("CS exam topic {id}"),
+            },
+            WorkStepStatus::Running,
+            vec![],
+        )
+        .unwrap();
+    }
+    assert!(matches!(
+        f.step(
+            3,
+            WorkStepKindV1::Search {
+                query: "CS exam topic 3".into()
+            },
+            WorkStepStatus::Running,
+            vec![]
+        ),
+        Err(WorkError::Capacity)
+    ));
+    assert_eq!(f.fact().steps.len(), 2);
+    f.step(
+        4,
+        WorkStepKindV1::Ask {
+            prompt: "Which exam?".into(),
+            options: vec![],
+            answer: None,
+            purpose: Some(WorkAskPurposeV1::Question),
+        },
+        WorkStepStatus::Running,
+        vec![],
+    )
+    .unwrap();
+    f.abandon();
+    let fact = f.fact();
+    assert_eq!(fact.status, WorkExecutionStatus::Interrupted);
+    assert!(fact
+        .steps
+        .iter()
+        .all(|step| step.status != WorkStepStatus::Running));
+}
+
+#[test]
+fn every_persisted_lead_stage_recovers_without_losing_the_published_answer() {
+    for stage in 0..5 {
+        let mut f = AgentSettlementFixture::new();
+        if stage >= 1 {
+            f.step(
+                1,
+                WorkStepKindV1::Search {
+                    query: "CS exam topics".into(),
+                },
+                WorkStepStatus::Running,
+                vec![],
+            )
+            .unwrap();
+        }
+        if stage >= 2 {
+            f.publish();
+        }
+        if stage >= 3 {
+            f.finish();
+        }
+        if stage == 4 {
+            // A malformed final accounting write must not poison recovery.
+            assert!(f
+                .update(WorkRuntimeUpdate::Settle {
+                    execution: f.execution,
+                    attempt: f.attempt,
+                    status: WorkAttemptStatus::Succeeded,
+                    usage: None,
+                    artifacts: vec![],
+                    intervention: Some(WorkInterventionV1 {
+                        kind: WorkInterventionKindV1::SignIn,
+                        origin: None
+                    })
+                })
+                .is_err());
+        }
+        f.abandon();
+        let fact = f.fact();
+        assert!(fact.status.terminal(), "stage={stage}");
+        assert!(fact
+            .steps
+            .iter()
+            .all(|step| step.status != WorkStepStatus::Running));
+        assert_eq!(fact.artifacts.len(), usize::from(stage >= 2));
+        if stage >= 3 {
+            assert_eq!(fact.status, WorkExecutionStatus::NeedsReview);
+            assert_eq!(
+                fact.attempts[0].usage.unwrap().accounting,
+                WorkUsageAccounting::ConservativeReservation
+            );
+            assert!(fact.steps.last().unwrap().note.is_some());
+        } else {
+            assert_eq!(fact.status, WorkExecutionStatus::Interrupted);
+        }
+    }
+}
+
+#[test]
+fn a_published_reply_does_not_hide_an_unconfirmed_page_task() {
+    for abandon in [false, true] {
+        let mut f = AgentSettlementFixture::new();
+        f.step(
+            1,
+            WorkStepKindV1::Read {
+                url: "https://example.com/".into(),
+                goal: Some("Send the approved message".into()),
+                collection: None,
+            },
+            WorkStepStatus::Running,
+            vec![],
+        )
+        .unwrap();
+        f.publish();
+        f.finish();
+        if abandon {
+            f.abandon();
+        } else {
+            f.update(WorkRuntimeUpdate::Settle {
+                execution: f.execution,
+                attempt: f.attempt,
+                status: WorkAttemptStatus::Succeeded,
+                usage: Some(WorkUsage::default()),
+                artifacts: vec![],
+                intervention: None,
+            })
+            .unwrap();
+        }
+        let fact = f.fact();
+        assert_eq!(fact.status, WorkExecutionStatus::Interrupted);
+        assert_eq!(fact.steps[0].status, WorkStepStatus::OutcomeUnknown);
+        assert!(fact.attempts[0].usage.is_none());
+        assert_eq!(fact.artifacts.len(), 1);
+    }
 }
 
 #[test]

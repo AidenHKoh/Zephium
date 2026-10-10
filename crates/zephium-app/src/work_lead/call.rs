@@ -107,9 +107,25 @@ pub(crate) async fn call(
             .probe
             .deadline()
             .min(std::time::Instant::now() + CALL_TIMEOUT);
-        let result =
-            tokio::time::timeout_at(deadline.into(), model.client.call(request.clone(), &events))
-                .await;
+        let result = tokio::select! {
+            biased;
+            _ = run.probe.wait_cancelled() => {
+                // A sent call may still be billed even when its answer is never
+                // received. Keep the reservation and never replay it on Stop.
+                let remaining = run.remaining();
+                run.charge(WorkUsage {
+                    model_tokens: remaining.model_tokens,
+                    cost_micro_usd: remaining.cost_micro_usd,
+                    operations: 1,
+                    accounting: WorkUsageAccounting::ConservativeReservation,
+                });
+                run.cancelled().await;
+                return Err(CallFailure::Stopped);
+            }
+            result = tokio::time::timeout_at(
+                deadline.into(), model.client.call(request.clone(), &events),
+            ) => result,
+        };
         let error = match result {
             Ok(Ok(outcome)) => {
                 let charged = usage(&model.entry, outcome.usage);
@@ -140,7 +156,14 @@ pub(crate) async fn call(
         match wait {
             Some(wait) if attempt < RETRIES => {
                 attempt += 1;
-                tokio::time::sleep(wait).await;
+                tokio::select! {
+                    biased;
+                    _ = run.probe.wait_cancelled() => {
+                        run.cancelled().await;
+                        return Err(CallFailure::Stopped);
+                    }
+                    _ = tokio::time::sleep(wait) => {},
+                }
             }
             _ => return Err(CallFailure::Refused(error)),
         }

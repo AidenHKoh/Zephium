@@ -2,7 +2,7 @@
 //! Construction is dormant. Deserialized facts can never construct an attempt.
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock, Weak},
     time::{Duration, Instant},
 };
 use zephium_core::{
@@ -47,6 +47,218 @@ impl Drop for Permit {
     }
 }
 
+struct StartingAgentEntry {
+    profile: ProfileId,
+    work: WorkId,
+    /// Tests isolate worker limits by their original test thread, as Permit does.
+    group: &'static Active,
+}
+fn starting_agents() -> &'static Mutex<Vec<StartingAgentEntry>> {
+    static STARTING: OnceLock<Mutex<Vec<StartingAgentEntry>>> = OnceLock::new();
+    STARTING.get_or_init(Mutex::default)
+}
+fn has_starting_agent(profile: ProfileId, work: WorkId) -> bool {
+    starting_agents()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|entry| entry.profile == profile && entry.work == work)
+}
+/// Bounded ownership established before automatic BeginAgent is dispatched.
+/// Its absence can identify an unstarted agent without retaining failure records.
+pub(crate) struct WorkStartingAgent {
+    handle: crate::Handle,
+    profile: ProfileId,
+    work: WorkId,
+}
+impl WorkStartingAgent {
+    pub(crate) fn acquire(
+        handle: &crate::Handle,
+        profile: ProfileId,
+        work: WorkId,
+    ) -> Result<Self, WorkError> {
+        let group = active();
+        let mut starting = starting_agents().lock().unwrap_or_else(|e| e.into_inner());
+        if starting
+            .iter()
+            .filter(|entry| std::ptr::eq(entry.group, group))
+            .count()
+            >= 4
+            || starting
+                .iter()
+                .any(|entry| entry.profile == profile && entry.work == work)
+        {
+            return Err(WorkError::Capacity);
+        }
+        starting.push(StartingAgentEntry {
+            profile,
+            work,
+            group,
+        });
+        Ok(Self {
+            handle: handle.clone(),
+            profile,
+            work,
+        })
+    }
+}
+impl Drop for WorkStartingAgent {
+    fn drop(&mut self) {
+        starting_agents()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|entry| entry.profile != self.profile || entry.work != self.work);
+        crate::work_changes::publish(self.work);
+        let _ = self.handle.dispatch(crate::Command::WorkChanged(
+            zephium_ipc::work::WorkChangedV1 {
+                profile: self.profile.to_string(),
+                work: self.work,
+            },
+        ));
+    }
+}
+
+/// Only live attempts are registered; these weak references cannot retain a run.
+struct ActiveLifetime {
+    profile: ProfileId,
+    work: WorkId,
+    execution: WorkExecutionId,
+    attempt: WorkAttemptId,
+    /// None while Begin is admitted but its reply has not arrived yet.
+    state: Option<Weak<Mutex<LifetimeState>>>,
+    /// Stop can commit between Begin's callback and lifetime promotion.
+    revoked: Option<WorkCancelCause>,
+}
+fn lifetimes() -> &'static Mutex<Vec<ActiveLifetime>> {
+    static LIFETIMES: OnceLock<Mutex<Vec<ActiveLifetime>>> = OnceLock::new();
+    LIFETIMES.get_or_init(Mutex::default)
+}
+/// Pending admission counts as a driver: a store reply can precede promotion
+/// to a lifetime, and must never turn that new attempt into an orphan.
+pub(crate) fn has_execution_driver(
+    profile: ProfileId,
+    work: WorkId,
+    execution: WorkExecutionId,
+) -> bool {
+    has_starting_agent(profile, work)
+        || lifetimes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|entry| {
+                entry.profile == profile
+                    && entry.work == work
+                    && entry.execution == execution
+                    && entry
+                        .state
+                        .as_ref()
+                        .is_none_or(|state| state.strong_count() > 0)
+            })
+}
+/// A same-process orphan retains its durable facts and reservations, but the
+/// projection cannot describe it as live just because abandonment failed to save.
+pub(crate) fn project_driver_liveness(profile: ProfileId, projection: &mut WorkRuntimeProjection) {
+    let registered = lifetimes().lock().unwrap_or_else(|e| e.into_inner());
+    for execution in &projection.executions {
+        if execution.status.terminal() || projection.interrupted.contains(&execution.id) {
+            continue;
+        }
+        let unstarted = execution.authorization == WorkExecutionAuthorization::UserDirectedAgent
+            && execution.status == WorkExecutionStatus::Approved
+            && execution.attempts.is_empty()
+            && !has_starting_agent(profile, projection.work.id)
+            && !registered.iter().any(|entry| {
+                entry.profile == profile
+                    && entry.work == projection.work.id
+                    && entry.execution == execution.id
+                    && entry
+                        .state
+                        .as_ref()
+                        .is_none_or(|state| state.strong_count() > 0)
+            });
+        if unstarted
+            || execution.attempts.iter().any(|attempt| {
+                attempt.status == WorkAttemptStatus::Running
+                    && !registered.iter().any(|entry| {
+                        entry.profile == profile
+                            && entry.work == projection.work.id
+                            && entry.execution == execution.id
+                            && entry.attempt == attempt.id
+                            && entry
+                                .state
+                                .as_ref()
+                                .is_none_or(|state| state.strong_count() > 0)
+                    })
+            })
+        {
+            projection.interrupted.push(execution.id);
+        }
+    }
+}
+fn unregister_attempt(
+    profile: ProfileId,
+    work: WorkId,
+    execution: WorkExecutionId,
+    attempt: WorkAttemptId,
+) {
+    lifetimes()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|entry| {
+            !(entry.profile == profile
+                && entry.work == work
+                && entry.execution == execution
+                && entry.attempt == attempt)
+                && entry
+                    .state
+                    .as_ref()
+                    .is_none_or(|state| state.strong_count() > 0)
+        });
+}
+/// A successful durable publication revokes authority before waking the caller.
+/// Existing native resources retain their original cleanup and accounting owners.
+pub(crate) fn revoke_published(profile: ProfileId, projection: &WorkRuntimeProjection) {
+    let revoked: Vec<_> = {
+        let mut registered = lifetimes().lock().unwrap_or_else(|e| e.into_inner());
+        registered.retain(|entry| {
+            entry
+                .state
+                .as_ref()
+                .is_none_or(|state| state.strong_count() > 0)
+        });
+        registered
+            .iter_mut()
+            .filter_map(|entry| {
+                if entry.profile != profile || entry.work != projection.work.id {
+                    return None;
+                }
+                let execution = projection
+                    .executions
+                    .iter()
+                    .find(|e| e.id == entry.execution)?;
+                let cause = if projection.interrupted.contains(&entry.execution) {
+                    WorkCancelCause::Interrupted
+                } else if matches!(
+                    execution.status,
+                    WorkExecutionStatus::CancelRequested | WorkExecutionStatus::Cancelled
+                ) {
+                    WorkCancelCause::Requested
+                } else if execution.status.terminal() {
+                    WorkCancelCause::ExecutionSettled
+                } else {
+                    return None;
+                };
+                let cause = *entry.revoked.get_or_insert(cause);
+                Some((Lifetime(entry.state.as_ref()?.upgrade()?), cause))
+            })
+            .collect()
+    };
+    // Session retirement may call back into the host; never hold the registry.
+    for (lifetime, cause) in revoked {
+        lifetime.cancel(cause);
+    }
+}
+
 /// Compact responsibility, exact approved scope and completion contract. This
 /// is deliberately move-only and not serializable. Executors disclose only the
 /// selected textual fields through their own provider policy boundary.
@@ -71,6 +283,15 @@ pub struct WorkNodeAttempt {
     _permit: Permit,
 }
 impl WorkNodeAttempt {
+    fn publish_driver_loss(&self) {
+        crate::work_changes::publish(self.work);
+        let _ = self.handle.dispatch(crate::Command::WorkChanged(
+            zephium_ipc::work::WorkChangedV1 {
+                profile: self.profile.to_string(),
+                work: self.work,
+            },
+        ));
+    }
     pub(crate) async fn runtime_projection(&self) -> Result<WorkRuntimeProjection, WorkError> {
         read(&self.handle, self.profile, self.work).await
     }
@@ -257,13 +478,63 @@ impl WorkNodeAttempt {
             .map(WorkNodeSettlement::into_projection)
     }
 
-    /// Preserve the original acknowledged publication for an owning parent.
-    /// Reads and decoded projections cannot construct this move-only receipt.
+    /// Preserve the original acknowledged publication, or the person's durable
+    /// cancellation of this exact owned attempt, for an owning parent. Decoded
+    /// projections alone cannot construct this move-only receipt.
     pub async fn settle_owned(
         self,
         result: WorkAdapterResult,
     ) -> Result<WorkNodeSettlement, WorkError> {
         self.settle_with_provider_evidence(result, None).await
+    }
+
+    /// Recover only the original agent's durable terminal bookkeeping. Store
+    /// decides whether a published reply is complete or effects remain unknown;
+    /// this carries no replacement result, artifacts, or execution permission.
+    pub(crate) async fn recover_owned(mut self) -> Result<WorkNodeSettlement, WorkError> {
+        if !matches!(&self.spec.capability, WorkCapability::Agent { .. }) {
+            return Err(WorkError::Invalid);
+        }
+        let reply = request(
+            &self.handle,
+            self.profile,
+            WorkRequest::RuntimeAbandon {
+                id: self.work,
+                execution: self.execution,
+                attempt: self.attempt,
+            },
+        )
+        .await?;
+        let WorkReply::Runtime(projection) = reply else {
+            return Err(WorkError::Invalid);
+        };
+        if projection.work.id != self.work
+            || projection.work.profile != self.profile
+            || !projection
+                .owners
+                .iter()
+                .any(|entry| entry.execution == self.execution && entry.owner == self.owner)
+            || !projection.executions.iter().any(|execution| {
+                execution.id == self.execution
+                    && execution.status.terminal()
+                    && execution.attempts.iter().any(|attempt| {
+                        attempt.id == self.attempt
+                            && attempt.node == self.node.id
+                            && attempt.status != WorkAttemptStatus::Running
+                    })
+            })
+        {
+            return Err(WorkError::Invalid);
+        }
+        self.settled = true;
+        Ok(WorkNodeSettlement {
+            profile: self.profile,
+            work: self.work,
+            execution: self.execution,
+            attempt: self.attempt,
+            node: self.node.id,
+            projection: *projection,
+        })
     }
 
     pub(crate) async fn settle_with_provider_evidence(
@@ -275,15 +546,45 @@ impl WorkNodeAttempt {
             return Err(WorkError::Invalid);
         }
         let mut status = result.status;
-        let mut artifacts = result
-            .artifacts
-            .into_iter()
-            .map(|draft| self.mint_artifact(draft))
-            .collect::<Result<Vec<_>, WorkError>>()?;
+        let mut drafts = Some(result.artifacts);
+        let mut artifacts = Vec::new();
         // Retry only persistence after a definite CAS conflict. Never repeat
         // adapter execution, change the attempt, or retry an uncertain write.
         for _ in 0..4 {
             let state = read(&self.handle, self.profile, self.work).await?;
+            // Stop closes the logical run before native cleanup necessarily
+            // finishes. Its original owner may observe that terminal receipt,
+            // but cannot publish a late result or replace unknown accounting.
+            if state
+                .owners
+                .iter()
+                .any(|entry| entry.execution == self.execution && entry.owner == self.owner)
+                && state.executions.iter().any(|execution| {
+                    execution.id == self.execution
+                        && execution.status == WorkExecutionStatus::Cancelled
+                        && execution.attempts.iter().any(|attempt| {
+                            attempt.id == self.attempt
+                                && attempt.node == self.node.id
+                                && attempt.status != WorkAttemptStatus::Running
+                        })
+                })
+            {
+                self.settled = true;
+                return Ok(WorkNodeSettlement {
+                    profile: self.profile,
+                    work: self.work,
+                    execution: self.execution,
+                    attempt: self.attempt,
+                    node: self.node.id,
+                    projection: state,
+                });
+            }
+            if let Some(drafts) = drafts.take() {
+                artifacts = drafts
+                    .into_iter()
+                    .map(|draft| self.mint_artifact(draft))
+                    .collect::<Result<Vec<_>, WorkError>>()?;
+            }
             let update = if let Some(evidence) = &provider_evidence {
                 WorkRuntimeUpdate::SettleProviderSearch {
                     execution: self.execution,
@@ -329,6 +630,14 @@ impl WorkNodeAttempt {
                     });
                 }
                 Err(WorkError::Conflict) => continue,
+                Err(error @ (WorkError::Invalid | WorkError::Capacity))
+                    if matches!(&self.spec.capability, WorkCapability::Agent { .. }) =>
+                {
+                    crate::work_trace::record(format_args!(
+                        "work: phase=attempt stage=terminal_write_refused error={error:?}"
+                    ));
+                    return self.recover_owned().await;
+                }
                 // A definite capacity refusal rolled back publication. Preserve
                 // the original worker's known usage with a small failed fact;
                 // never repeat provider work or treat an uncertain write this way.
@@ -343,13 +652,20 @@ impl WorkNodeAttempt {
                 Ok(_) => return Err(WorkError::Invalid),
             }
         }
-        Err(WorkError::Conflict)
+        if matches!(&self.spec.capability, WorkCapability::Agent { .. }) {
+            crate::work_trace::record(format_args!(
+                "work: phase=attempt stage=terminal_write_refused error=Conflict"
+            ));
+            self.recover_owned().await
+        } else {
+            Err(WorkError::Conflict)
+        }
     }
 }
 
-/// Fresh result of the original attempt's Store settlement callback. This is
-/// not an execution capability, and serialization of its projection loses the
-/// publication ownership required by the orchestration handoff.
+/// Fresh settlement of the original owned attempt, including a durable Stop
+/// acknowledged by that attempt after its worker drains. This is not an
+/// execution capability; serialization loses its original ownership.
 #[must_use]
 pub struct WorkNodeSettlement {
     profile: ProfileId,
@@ -708,6 +1024,7 @@ struct LifetimeState {
     deadline: Instant,
     session: zephium_agentic::WorkBrowserSession,
     closed: bool,
+    cancellation: tokio::sync::watch::Sender<Option<WorkCancelCause>>,
     work: WorkId,
     /// Pages a person holds now, and since when the first of them was held.
     held: u32,
@@ -720,15 +1037,45 @@ impl LifetimeState {
     }
 }
 impl Lifetime {
-    fn new(profile: ProfileId, work: WorkId, deadline: Instant) -> Self {
-        Self(Arc::new(Mutex::new(LifetimeState {
+    fn new(
+        profile: ProfileId,
+        work: WorkId,
+        execution: WorkExecutionId,
+        attempt: WorkAttemptId,
+        deadline: Instant,
+    ) -> Self {
+        let lifetime = Self(Arc::new(Mutex::new(LifetimeState {
             deadline,
             session: zephium_agentic::WorkBrowserSession::new(profile, work, deadline),
             closed: false,
+            cancellation: tokio::sync::watch::channel(None).0,
             work,
             held: 0,
             held_since: None,
-        })))
+        })));
+        let mut registered = lifetimes().lock().unwrap_or_else(|e| e.into_inner());
+        registered.retain(|entry| {
+            entry
+                .state
+                .as_ref()
+                .is_none_or(|state| state.strong_count() > 0)
+        });
+        let entry = registered
+            .iter_mut()
+            .find(|entry| {
+                entry.profile == profile
+                    && entry.work == work
+                    && entry.execution == execution
+                    && entry.attempt == attempt
+            })
+            .expect("the exact Begin was registered before dispatch");
+        entry.state = Some(Arc::downgrade(&lifetime.0));
+        let revoked = entry.revoked;
+        drop(registered);
+        if let Some(cause) = revoked {
+            lifetime.cancel(cause);
+        }
+        lifetime
     }
     fn state(&self) -> std::sync::MutexGuard<'_, LifetimeState> {
         self.0.lock().unwrap_or_else(|error| error.into_inner())
@@ -751,9 +1098,22 @@ impl Lifetime {
         state.session.clone()
     }
     fn close(&self) {
-        let mut state = self.state();
-        state.closed = true;
-        state.session.close();
+        let session = {
+            let mut state = self.state();
+            state.closed = true;
+            state.session.clone()
+        };
+        session.close();
+    }
+    fn cancel(&self, cause: WorkCancelCause) {
+        self.close();
+        self.state().cancellation.send_if_modified(|current| {
+            if current.is_some() {
+                return false;
+            }
+            *current = Some(cause);
+            true
+        });
     }
     /// Gives back the time the attempt spent waiting for the person.
     fn extend(&self, waited: Duration) {
@@ -961,9 +1321,16 @@ impl WorkAttemptProbe {
             }
         }
     }
-    /// Why this attempt must stop, from a fresh durable read; None while it
-    /// still owns a running execution.
+    /// A monotonic revocation already observed from durable state, without I/O.
+    pub fn cached_cancellation(&self) -> Option<WorkCancelCause> {
+        *self.lifetime.state().cancellation.borrow()
+    }
+    /// Why this attempt must stop, from durable revocation or a fresh read;
+    /// None while it still owns a running execution.
     pub async fn cancellation_cause(&self) -> Result<Option<WorkCancelCause>, WorkError> {
+        if let Some(cause) = self.cached_cancellation() {
+            return Ok(Some(cause));
+        }
         let state = read(&self.handle, self.profile, self.work).await?;
         let execution = state
             .executions
@@ -1009,10 +1376,36 @@ impl WorkAttemptProbe {
         } else {
             None
         };
-        if cause.is_some() {
-            self.lifetime.close();
+        if let Some(cause) = cause {
+            self.lifetime.cancel(cause);
         }
         Ok(cause)
+    }
+    /// Waits for durable revocation even while an adapter future does not poll.
+    /// The publication signal also wins over a stalled durable read. A fallback
+    /// handles store changes made outside the shell without a busy polling loop.
+    pub async fn wait_cancelled(&self) -> WorkCancelCause {
+        let mut cancelled = self.lifetime.state().cancellation.subscribe();
+        let mut changes = self.changes();
+        loop {
+            if let Some(cause) = *cancelled.borrow_and_update() {
+                return cause;
+            }
+            tokio::select! {
+                biased;
+                _ = cancelled.changed() => continue,
+                result = self.cancellation_cause() => {
+                    if let Ok(Some(cause)) = result {
+                        return cause;
+                    }
+                }
+            }
+            tokio::select! {
+                biased;
+                _ = cancelled.changed() => {},
+                _ = changes.next(Duration::from_millis(100)) => {},
+            }
+        }
     }
     pub(crate) async fn read_evidence(
         &self,
@@ -1135,10 +1528,12 @@ const KEPT_NOTHING: &str = "The work has grown too large to keep this result";
 impl Drop for WorkNodeAttempt {
     fn drop(&mut self) {
         self.lifetime.close();
+        unregister_attempt(self.profile, self.work, self.execution, self.attempt);
         if let Ok(mut progress) = self.progress.lock() {
             progress.take();
         }
         if !self.settled {
+            self.publish_driver_loss();
             // No detached future/thread. If admission itself fails, the retained
             // running fact still requires recovery; no success is manufactured.
             let _ = self.handle.submit_owned_work_runtime(
@@ -1183,6 +1578,14 @@ struct PendingBegin<'a> {
 impl Drop for PendingBegin<'_> {
     fn drop(&mut self) {
         if self.armed {
+            unregister_attempt(self.profile, self.work, self.execution, self.attempt);
+            crate::work_changes::publish(self.work);
+            let _ = self.handle.dispatch(crate::Command::WorkChanged(
+                zephium_ipc::work::WorkChangedV1 {
+                    profile: self.profile.to_string(),
+                    work: self.work,
+                },
+            ));
             let _ = self.handle.submit_owned_work_runtime(
                 WorkRequest::RuntimeAbandon {
                     id: self.work,
@@ -1223,8 +1626,24 @@ impl WorkRuntimeService {
         node: WorkPlanNodeId,
         parent: Option<(WorkAttemptId, Instant)>,
     ) -> Result<WorkNodeAttempt, WorkError> {
-        let permit = Permit::acquire((profile, work, node))?;
         let attempt = WorkAttemptId::generate();
+        {
+            let mut registered = lifetimes().lock().unwrap_or_else(|e| e.into_inner());
+            registered.retain(|entry| {
+                entry
+                    .state
+                    .as_ref()
+                    .is_none_or(|state| state.strong_count() > 0)
+            });
+            registered.push(ActiveLifetime {
+                profile,
+                work,
+                execution,
+                attempt,
+                state: None,
+                revoked: None,
+            });
+        }
         let mut pending = PendingBegin {
             handle: &self.handle,
             profile,
@@ -1233,6 +1652,9 @@ impl WorkRuntimeService {
             attempt,
             armed: true,
         };
+        // Approval already exists: every failure from here must notify the
+        // store, including refusal by the process-wide worker limit.
+        let permit = Permit::acquire((profile, work, node))?;
         let submitted = Instant::now();
         let reply = request(
             &self.handle,
@@ -1299,7 +1721,7 @@ impl WorkRuntimeService {
             deadline.min(parent_deadline)
         });
         let owned = WorkNodeAttempt {
-            lifetime: Lifetime::new(profile, work, deadline),
+            lifetime: Lifetime::new(profile, work, execution, attempt, deadline),
             basis_revision: Arc::new(Mutex::new(projection.work.revision)),
             owner: projection
                 .owners
@@ -1466,4 +1888,79 @@ fn compact_dependency_artifacts(
         }
     }
     Ok(project(low, false))
+}
+
+#[cfg(test)]
+mod driver_liveness_tests {
+    use super::*;
+
+    #[test]
+    fn work_pending_begin_drop_revokes_liveness_and_notifies_before_abandonment() {
+        let profile = ProfileId::generate();
+        let work = WorkId::generate();
+        let execution = WorkExecutionId::generate();
+        let attempt = WorkAttemptId::generate();
+        let queue = crate::actor::CommandQueue::new();
+        let handle = crate::Handle::new(queue.clone());
+        let mut changes = crate::work_changes::watch(work);
+        lifetimes().lock().unwrap().push(ActiveLifetime {
+            profile,
+            work,
+            execution,
+            attempt,
+            state: None,
+            revoked: Some(WorkCancelCause::Requested),
+        });
+        let pending = PendingBegin {
+            handle: &handle,
+            profile,
+            work,
+            execution,
+            attempt,
+            armed: true,
+        };
+        assert!(
+            has_execution_driver(profile, work, execution),
+            "a pending Begin is not an orphan"
+        );
+        assert!(!has_execution_driver(
+            ProfileId::generate(),
+            work,
+            execution
+        ));
+        assert!(!has_execution_driver(
+            profile,
+            WorkId::generate(),
+            execution
+        ));
+        assert!(!has_execution_driver(
+            profile,
+            work,
+            WorkExecutionId::generate()
+        ));
+        let lifetime = Lifetime::new(
+            profile,
+            work,
+            execution,
+            attempt,
+            Instant::now() + Duration::from_secs(30),
+        );
+        assert!(
+            !lifetime.session().is_current(),
+            "Stop before promotion cannot create fresh authority"
+        );
+        drop(pending);
+        assert!(!has_execution_driver(profile, work, execution));
+        assert!(changes.take(), "waiting runtimes observe failed promotion");
+        assert!(
+            matches!(queue.try_recv(), Some(crate::Command::WorkChanged(change))
+            if change.profile == profile.to_string() && change.work == work),
+            "the UI is notified even if the later abandonment cannot be delivered"
+        );
+        assert!(matches!(
+            queue.try_recv(),
+            Some(crate::Command::WorkDocument(_))
+        ));
+        assert!(queue.try_recv().is_none());
+    }
 }

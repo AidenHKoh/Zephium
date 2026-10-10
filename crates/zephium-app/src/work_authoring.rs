@@ -201,6 +201,7 @@ impl WorkDocumentSubmission {
             WorkRequest::Create { id, .. }
             | WorkRequest::ReadEvidence { id, .. }
             | WorkRequest::RuntimeAbandon { id, .. }
+            | WorkRequest::AcknowledgeOrphan { id, .. }
             | WorkRequest::RuntimeRead { id }
             | WorkRequest::RuntimeCommand { id, .. }
             | WorkRequest::RuntimeCommandDisclosed { id, .. }

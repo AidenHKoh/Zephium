@@ -187,6 +187,8 @@ impl WorkLeadService {
             None => (command.into_request()?, Vec::new(), Vec::new()),
         };
         request.validate()?;
+        let starting =
+            crate::work_runtime::WorkStartingAgent::acquire(&self.handle, profile, work)?;
         let submitted = crate::work_runtime::admitted(|| {
             self.handle
                 .submit_work_document(request.clone(), Some(profile))
@@ -210,7 +212,10 @@ impl WorkLeadService {
             return Err(WorkError::Invalid);
         }
         if replayed {
-            return Ok(*projection);
+            drop(starting);
+            let mut projection = *projection;
+            crate::work_runtime::project_driver_liveness(profile, &mut projection);
+            return Ok(projection);
         }
         let execution = projection
             .executions
@@ -233,6 +238,7 @@ impl WorkLeadService {
                 node,
             )
             .await?;
+        drop(starting);
         observe(attempt.observer());
         let original = attempt.attempt();
         let limits = attempt.specification().limits;
@@ -317,7 +323,18 @@ impl WorkLeadService {
         lead.name_work = unnamed;
         let outcome = lead.drive().await;
         drop(lead);
-        let status = conclude(&run, outcome).await?;
+        let status = match conclude(&run, outcome).await {
+            Ok(status) => status,
+            Err(error) => {
+                crate::work_trace::record(format_args!(
+                    "work: phase=lead stage=conclude_refused error={error:?}"
+                ));
+                return attempt
+                    .recover_owned()
+                    .await
+                    .map(|settlement| settlement.into_projection());
+            }
+        };
         let usage = settled_usage(&run, status).await;
         if let Ok(execution) = run.execution().await {
             let used = run.used();
@@ -366,6 +383,9 @@ async fn conclude(
         Err(_) => WorkAttemptStatus::Failed,
     };
     let execution = run.execution().await?;
+    if execution.status == WorkExecutionStatus::Cancelled {
+        return Ok(WorkAttemptStatus::Cancelled);
+    }
     let out_of_time = run.stop_cause() == Some(crate::work_runtime::WorkCancelCause::Deadline);
     let note = run.stop_note();
     for step in execution
@@ -373,16 +393,24 @@ async fn conclude(
         .iter()
         .filter(|step| step.status == WorkStepStatus::Running)
     {
-        let settled = match step.kind {
-            WorkStepKindV1::Search { .. }
-            | WorkStepKindV1::Read { .. }
-            | WorkStepKindV1::Discover { .. } => WorkStepStatus::OutcomeUnknown,
-            _ => WorkStepStatus::Cancelled,
-        };
+        let settled = step.interruption_status();
         run.settle(step.id, settled, None, Some(note.into()), None)
             .await?;
-        if settled == WorkStepStatus::OutcomeUnknown && !out_of_time {
-            status = WorkAttemptStatus::OutcomeUnknown;
+        if settled == WorkStepStatus::OutcomeUnknown {
+            // A lost optional page does not revoke the lead's published answer
+            // or override a person's Stop. Keep uncertain accounting explicit.
+            let limits = run.limits();
+            run.charge(WorkUsage {
+                model_tokens: limits.model_tokens,
+                cost_micro_usd: limits.cost_micro_usd,
+                operations: 0,
+                accounting: WorkUsageAccounting::ConservativeReservation,
+            });
+            if step.has_unconfirmed_effect()
+                || (status == WorkAttemptStatus::Failed && !out_of_time)
+            {
+                status = WorkAttemptStatus::OutcomeUnknown;
+            }
         }
     }
     for part in execution.parts.iter().filter(|p| !p.state.terminal()) {

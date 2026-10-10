@@ -355,26 +355,34 @@ fn apply(
         | WorkRequest::ReadMediaContext { .. }
         | WorkRequest::SiteAccess { .. }
         | WorkRequest::Personal(_) => return Err(WorkError::Invalid),
+        WorkRequest::AcknowledgeOrphan {
+            id,
+            expected,
+            command,
+            execution,
+        } => runtime_store::acknowledge_orphan(
+            tx,
+            profile,
+            runtime_session,
+            id,
+            expected,
+            command,
+            execution,
+        )?,
         WorkRequest::RuntimeAbandon {
             id,
             execution,
             attempt,
         } => {
             let expected = read(tx, profile, id)?.revision;
-            runtime_store::update(
+            runtime_store::abandon(
                 tx,
                 profile,
                 runtime_session,
                 id,
                 expected,
-                runtime::WorkRuntimeUpdate::Settle {
-                    execution,
-                    attempt,
-                    intervention: None,
-                    status: runtime::WorkAttemptStatus::OutcomeUnknown,
-                    usage: None,
-                    artifacts: vec![],
-                },
+                execution,
+                attempt,
             )?
         }
         WorkRequest::RuntimeRead { id } => (
