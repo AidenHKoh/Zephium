@@ -1884,6 +1884,8 @@ ACL and job adapters remain gated pending physical Windows qualification. Darwin
 spawn closes all non-stdio descriptors atomically; child reap and shutdown share
 the process registry lock. Stop is reported as confirmed only after exit is observed.
 
+`git_changes` compares 1–64 selected ordinary text paths with their current SHA-1 Git index content. A typed no-follow broker reads only index v2/v3 and selected loose or pack-v2/idx-v2 objects; it never reads source configuration, hooks, alternates or HEAD. Protected-path object IDs (including aliased IDs and delta bases) are refused. Checksums, CRCs, offsets, delta cycles/depth, input/output budgets and source identities are checked, and the index plus selected working files are revalidated before disclosure. Only validated text copies enter the qualified runner. This is a content comparison, excluding staged-versus-HEAD, untracked files, modes and filter transformations; unsupported layouts fail closed. The broker has a cooperative 5-second processing budget and an independent 10-second worker-await deadline. Windows implementation is source-checked but runtime-gated pending native qualification.
+
 An approved write or edit resolves through the same path policy, writes
 atomically after checking the prior digest. Unix creation, publication and cleanup
 are relative to held directory descriptors; Windows guard markers are created

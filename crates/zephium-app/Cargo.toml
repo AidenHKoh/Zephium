@@ -9,7 +9,7 @@ license.workspace = true
 # ordinary desktop graph does not enable it until a concrete lifecycle owner
 # and its full platform qualification are integrated.
 work-planning = ["dep:tokio", "dep:zephium-agentic", "zephium-agentic/provider-transport", "dep:lopdf"]
-work-runtime = ["work-planning", "dep:serde", "dep:sha2", "dep:regex", "dep:globset", "dep:libc", "dep:ignore", "dep:grep-searcher", "dep:grep-regex", "dep:grep-matcher", "dep:similar", "dep:zephium-mcp", "dep:tempfile", "dep:zephium-private-fs", "dep:objc2-foundation", "dep:objc2"]
+work-runtime = ["work-planning", "dep:serde", "dep:sha2", "dep:sha1", "dep:flate2", "dep:regex", "dep:globset", "dep:libc", "dep:ignore", "dep:grep-searcher", "dep:grep-regex", "dep:grep-matcher", "dep:similar", "dep:zephium-mcp", "dep:tempfile", "dep:zephium-private-fs", "dep:objc2-foundation", "dep:objc2"]
 # Explicit public synthesis diagnostics; agentic refuses probe-harness in optimized builds.
 work-synthesis-probe = ["work-runtime", "zephium-agentic/probe-harness"]
 agentic-browser = ["dep:zephium-agentic"]
@@ -26,6 +26,8 @@ zephium-private-fs = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 psl = "=2.1.220"
 sha2 = { version = "=0.10.9", optional = true }
+sha1 = { version = "=0.10.6", optional = true }
+flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"], optional = true }
 tokio = { workspace = true, optional = true, features = ["time", "process", "io-util", "net"] }
 chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 zephium-agentic = { workspace = true, optional = true }

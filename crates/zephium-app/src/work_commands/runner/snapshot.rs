@@ -40,7 +40,27 @@ impl Snapshot {
         Self::from_files(files)
     }
 
-    fn from_files(files: BTreeMap<PathBuf, Vec<u8>>) -> Result<Self, Failure> {
+    pub(super) fn from_files(files: BTreeMap<PathBuf, Vec<u8>>) -> Result<Self, Failure> {
+        if files.len() > MAX_FILES {
+            return Err(Failure::Limit);
+        }
+        let mut total = 0usize;
+        for (path, bytes) in &files {
+            if path.as_os_str().is_empty()
+                || path.is_absolute()
+                || protected_path(path)
+                || path.components().count() > MAX_DEPTH
+                || !path
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
+            {
+                return Err(Failure::Input);
+            }
+            total = total.checked_add(bytes.len()).ok_or(Failure::Limit)?;
+            if bytes.len() > MAX_FILE as usize || total > MAX_TOTAL {
+                return Err(Failure::Limit);
+            }
+        }
         for bytes in files.values() {
             reject_recognized_secret(bytes)?;
         }

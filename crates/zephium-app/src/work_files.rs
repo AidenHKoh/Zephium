@@ -10,6 +10,7 @@ use zephium_core::work::runtime::*;
 #[cfg(not(unix))]
 use zephium_core::work::WorkArtifactId;
 
+pub(crate) mod git_metadata;
 pub mod trash;
 
 #[cfg(unix)]

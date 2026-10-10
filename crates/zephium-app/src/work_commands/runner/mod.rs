@@ -1,4 +1,5 @@
 //! Typed operations over a brokered copy. The ordinary shell gate is independent.
+pub(crate) mod git_index;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -28,10 +29,10 @@ impl Failure {
     pub fn note(self) -> &'static str {
         match self {
             Self::Unavailable => {
-                "The approved-edit review is not supported on this operating-system build"
+                "Confined Git inspection is not supported on this operating-system build"
             }
             Self::ToolUnavailable => {
-                "The approved-edit review needs a supported local Git installation"
+                "Confined Git inspection needs a supported local Git installation"
             }
             Self::Input => "The folder could not be copied safely into a bounded workspace",
             Self::Limit => "The copied workspace or command exceeded its limit",
@@ -225,7 +226,14 @@ impl GitOperation {
                 "--no-gpg-sign",
                 "--message=Workspace baseline",
             ],
-            Self::IntentToAdd => &["add", "--intent-to-add", "--all", "--force", "--", "."],
+            Self::IntentToAdd => &[
+                "add",
+                "--intent-to-add",
+                "--ignore-removal",
+                "--force",
+                "--",
+                ".",
+            ],
             #[cfg(test)]
             Self::Read(ReadOperation::Files) => &["ls-files", "--cached"],
             Self::Read(ReadOperation::Status) => &[

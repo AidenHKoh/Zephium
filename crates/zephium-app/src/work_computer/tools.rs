@@ -1,4 +1,5 @@
 //! The bounded Computer tools, their schemas and what each returns to the model.
+mod git;
 mod recovery;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -105,6 +106,7 @@ pub fn definitions() -> Vec<WorkModelTool> {
                 "text": {"type": "string"}
             }, "required": ["path", "text"], "additionalProperties": false}),
         ),
+        tool("git_changes", "Inspect working-tree content changes against the current Git index for 1 to 64 selected relative file paths. diff shows patches, status lists content-changed paths, check finds whitespace errors. Excludes staged-versus-HEAD, untracked files, modes and filter transformations. Only ordinary text files and supported SHA-1 index/pack layouts are admitted; protected content is withheld. Runs fixed Git operations in a protected copy, never source configuration, hooks or project code. Requires a qualified operating-system build.", json!({"type":"object","properties":{"paths":{"type":"array","items":{"type":"string","maxLength":4096},"minItems":1,"maxItems":64},"operation":{"type":"string","enum":["diff","status","check"]}},"required":["paths","operation"],"additionalProperties":false})),
         tool(
             "review_changes",
             "Review this part's approved edits in a protected copy: diff shows the actual before/after patch, status lists those changed files, check finds whitespace errors. This is not the original repository's status or history, and it runs no project code or tests. Refuses files changed again outside these approved edits. Available only on a qualified operating-system build.",
@@ -331,6 +333,7 @@ impl ComputerTools {
             "recoveries" => self.recoveries(host).await,
             "restore_saved" => self.restore(host, args).await,
             "review_changes" => self.review_changes(host, args).await,
+            "git_changes" => self.git_changes(host, args).await,
             _ => Err(ToolReply::fault(format!("There is no `{name}` tool."))),
         };
         match reply {

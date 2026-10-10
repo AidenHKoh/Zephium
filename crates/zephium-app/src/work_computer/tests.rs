@@ -621,3 +621,69 @@ fn recognizable_secret_arguments_are_rejected_before_recording() {
         assert_eq!(*host.asked.lock().unwrap(), 0);
     });
 }
+
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "Native qualified current-index inspection over an inert repository"]
+fn current_index_tool_records_scoped_diff_and_honest_failures() {
+    serially(async {
+        use sha1::{Digest, Sha1};
+        use std::io::Write;
+        let (_home, tools, root) = project();
+        let path = root.join("src/lib.rs");
+        let before = std::fs::read(&path).unwrap();
+        let mut object = format!("blob {}\0", before.len()).into_bytes();
+        object.extend(&before);
+        let oid: [u8; 20] = Sha1::digest(&object).into();
+        let hex = oid
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let directory = root.join(".git/objects").join(&hex[..2]);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut compressed =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        compressed.write_all(&object).unwrap();
+        std::fs::write(directory.join(&hex[2..]), compressed.finish().unwrap()).unwrap();
+        let mut index = b"DIRC".to_vec();
+        index.extend(2u32.to_be_bytes());
+        index.extend(1u32.to_be_bytes());
+        let start = index.len();
+        let mut fixed = [0; 40];
+        fixed[24..28].copy_from_slice(&0o100644u32.to_be_bytes());
+        index.extend(fixed);
+        index.extend(oid);
+        index.extend(10u16.to_be_bytes());
+        index.extend(b"src/lib.rs\0");
+        while (index.len() - start) % 8 != 0 {
+            index.push(0);
+        }
+        index.extend(Sha1::digest(&index));
+        std::fs::write(root.join(".git/index"), index).unwrap();
+        std::fs::write(root.join(".git/config"), "not valid Git configuration [").unwrap();
+        std::fs::write(&path, "pub fn changed() {}\n").unwrap();
+        let host = Recorder::default();
+        let args = json!({"paths":["src/lib.rs"],"operation":"diff"});
+        let reply = tools.call(&host, "git_changes", &args).await;
+        assert!(!reply.is_error, "{}", reply.content);
+        assert!(reply.content.contains("working-tree") || reply.content.contains("Working-tree"));
+        assert!(reply.content.contains("current index"));
+        assert!(reply.content.contains("+pub fn changed() {}"));
+        assert!(reply.content.contains("Excludes staged-versus-HEAD"));
+        assert_eq!(*host.asked.lock().unwrap(), 0);
+        assert_eq!(host.settled.lock().unwrap()[0].0, WorkStepStatus::Succeeded);
+        let reply = tools
+            .call(
+                &host,
+                "git_changes",
+                &json!({"paths":[".env"],"operation":"diff"}),
+            )
+            .await;
+        assert!(reply.is_error);
+        assert_eq!(host.settled.lock().unwrap()[1].0, WorkStepStatus::Failed);
+        *host.on_cancel_check.lock().unwrap() = Some(Box::new(|| true));
+        let reply = tools.call(&host, "git_changes", &args).await;
+        assert!(reply.is_error);
+        assert_eq!(host.settled.lock().unwrap()[2].0, WorkStepStatus::Cancelled);
+    });
+}
