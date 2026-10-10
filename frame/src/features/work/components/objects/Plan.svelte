@@ -70,7 +70,7 @@
           onclick={addToCalendar}>{m.work_plan_add_to_calendar()}</button
         >{/if}
     </header>{/if}
-  {#if weeks}<PlanCalendar {object} {weeks} glyphs={GLYPH} {actions} />{/if}
+  {#if weeks}<PlanCalendar {object} {weeks} {actions} />{/if}
   {#if !weeks || centre}<div class="grid">
       <ol class="steps">
         {#each object.steps as step, index (index)}

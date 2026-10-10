@@ -1008,6 +1008,7 @@ const studyMonth: PlanView = {
     { when: "Sun 18 Oct", date: "2026-10-18", title: "Searching", kind: "task" },
     { when: "Mon 19 Oct", date: "2026-10-19", title: "Big-O analysis", kind: "task" },
     { when: "Tue 20 Oct", date: "2026-10-20", title: "Recurrences", kind: "task" },
+    { when: "Tue 20 Oct", date: "2026-10-20", title: "Office hours with the TA", kind: "event" },
     { when: "Wed 21 Oct", date: "2026-10-21", title: "Divide and conquer", kind: "task" },
     { when: "Thu 22 Oct", date: "2026-10-22", title: "Greedy algorithms", kind: "task" },
     { when: "Fri 23 Oct", date: "2026-10-23", title: "Dynamic programming", kind: "task" },
@@ -1593,7 +1594,7 @@ export const looks: Record<string, { object: ObjectView; width: number }[]> = {
   ],
   flights: [{ object: flights, width: 460 }],
   plans: [
-    { object: studyMonth, width: 932 },
+    { object: studyMonth, width: 904 },
     { object: trip, width: 720 },
     { object: roadmap, width: 560 },
   ],

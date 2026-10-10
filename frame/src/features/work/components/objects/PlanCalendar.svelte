@@ -1,6 +1,5 @@
 <script lang="ts">
   import Icon from "$shared/ui/Icon";
-  import type { IconSvgElement } from "@hugeicons/svelte";
   import type { ObjectActions, PlanView } from "../../lib/board/types";
   import { CALENDAR, firstWeekday, type CalendarDay } from "../../lib/board/plan-calendar";
   import { Tick02Icon } from "./icons";
@@ -8,12 +7,10 @@
   let {
     object,
     weeks,
-    glyphs,
     actions = {},
   }: {
     object: PlanView;
     weeks: CalendarDay[][];
-    glyphs: Record<PlanView["steps"][number]["kind"], IconSvgElement>;
     actions?: ObjectActions;
   } = $props();
   /** Steps a day shows before it counts the rest. */
@@ -44,70 +41,81 @@
   role="grid"
   aria-label={object.title}
   style:--cell={`${CALENDAR.cell}px`}
-  style:--gap={`${CALENDAR.gap}px`}
   style:--row={`${CALENDAR.row}px`}
   style:--head={`${CALENDAR.head}px`}
 >
   <div class="weekdays" role="row">
     {#each weekdays as weekday (weekday)}<span role="columnheader">{weekday}</span>{/each}
   </div>
-  {#each weeks as week, row (row)}<div class="week" role="row">
-      {#each week as day (day.date)}<div
-          class="day"
-          class:outside={day.outside}
-          class:busy={day.steps.length > 0}
-          role="gridcell"
-          aria-label={spoken(day)}
-        >
-          <span class="number" class:today={day.today} class:opens={day.opens}>{label(day)}</span>
-          {#if day.steps.length}<ul
-              style:--lines={day.steps.length >= SHOWN ? 1 : day.steps.length === 2 ? 2 : 3}
-            >
-              {#each day.steps.slice(0, SHOWN) as index (index)}
-                {@const step = object.steps[index]!}
-                <li
-                  class:done={step.done}
-                  title={step.detail ? `${step.title} — ${step.detail}` : step.title}
-                >
-                  {#if object.checkable && actions.check}<button
-                      type="button"
-                      class="step nodrag nopan"
-                      aria-pressed={!!step.done}
-                      onclick={() => actions.check?.(object.id, index, !step.done)}
-                      ><Icon icon={step.done ? Tick02Icon : glyphs[step.kind]} size={11} /><span
-                        >{step.title}</span
-                      ></button
-                    >{:else}<span class="step"
-                      ><Icon icon={step.done ? Tick02Icon : glyphs[step.kind]} size={11} /><span
-                        >{step.title}</span
-                      ></span
-                    >{/if}
-                </li>
-              {/each}
-            </ul>
-            {#if day.steps.length > SHOWN}<span class="more">+{day.steps.length - SHOWN}</span>{/if}
-          {/if}
-        </div>{/each}
-    </div>{/each}
+  <div class="days">
+    {#each weeks as week, row (row)}<div class="week" role="row">
+        {#each week as day (day.date)}<div
+            class="day"
+            class:outside={day.outside}
+            class:today={day.today}
+            role="gridcell"
+            aria-label={spoken(day)}
+          >
+            <span class="number" class:opens={day.opens}>{label(day)}</span>
+            {#if day.steps.length}<ul
+                style:--lines={day.steps.length >= SHOWN ? 1 : day.steps.length === 2 ? 2 : 3}
+              >
+                {#each day.steps.slice(0, SHOWN) as index (index)}
+                  {@const step = object.steps[index]!}
+                  <li
+                    class="chip {step.kind}"
+                    class:done={step.done}
+                    title={step.detail ? `${step.title} — ${step.detail}` : step.title}
+                  >
+                    {#if object.checkable && actions.check}<button
+                        type="button"
+                        class="step nodrag nopan"
+                        aria-pressed={!!step.done}
+                        onclick={() => actions.check?.(object.id, index, !step.done)}
+                        >{#if step.done}<Icon icon={Tick02Icon} size={11} />{/if}<span
+                          >{step.title}</span
+                        ></button
+                      >{:else}<span class="step"
+                        >{#if step.done}<Icon icon={Tick02Icon} size={11} />{/if}<span
+                          >{step.title}</span
+                        ></span
+                      >{/if}
+                  </li>
+                {/each}
+              </ul>
+              {#if day.steps.length > SHOWN}<span class="more">+{day.steps.length - SHOWN}</span
+                >{/if}
+            {/if}
+          </div>{/each}
+      </div>{/each}
+  </div>
 </div>
 
 <style>
+  /* A month view: one frame, hairlines between the days, the week's names on top. */
   .calendar {
     display: flex;
     flex-direction: column;
-    gap: var(--gap);
+    inline-size: max-content;
+    overflow: hidden;
+    border-radius: var(--radius-card);
+    background: var(--color-surface);
+    box-shadow:
+      0 0 0 1px var(--color-border),
+      var(--shadow-raised);
   }
 
   .weekdays,
   .week {
     display: grid;
     grid-template-columns: repeat(7, var(--cell));
-    gap: var(--gap);
+    gap: 1px;
   }
 
   .weekdays {
-    block-size: calc(var(--head) - var(--gap));
-    align-items: end;
+    align-items: center;
+    block-size: var(--head);
+    border-block-end: 1px solid var(--color-border);
     color: var(--color-muted);
     font-size: var(--text-caption);
     font-weight: 600;
@@ -116,40 +124,45 @@
   }
 
   .weekdays span {
-    padding-inline: 8px;
+    padding-inline: 10px;
+  }
+
+  .days {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    background: var(--color-border);
   }
 
   .day {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 5px;
     box-sizing: border-box;
     block-size: var(--row);
     min-inline-size: 0;
     padding: 7px 7px 6px;
     overflow: hidden;
-    border-radius: var(--radius-inset);
-    background: var(--color-fill);
-  }
-
-  .day.busy {
     background: var(--color-surface);
-    box-shadow: var(--shadow-raised);
+    transition: background-color var(--motion-fast) var(--ease-out);
   }
 
-  .day.outside {
-    background: transparent;
+  .day:hover {
+    background: var(--color-control-hover);
   }
 
   .number {
     align-self: flex-start;
-    padding: 0 5px;
+    min-inline-size: 20px;
+    padding: 0 6px;
     border-radius: var(--radius-capsule);
-    color: var(--color-muted);
-    font-size: var(--text-caption);
+    box-sizing: border-box;
+    color: var(--color-label-secondary);
+    font-size: var(--text-label);
     font-variant-numeric: tabular-nums;
     font-weight: 600;
-    line-height: 17px;
+    line-height: 20px;
+    text-align: center;
   }
 
   .number.opens {
@@ -160,7 +173,7 @@
     color: var(--color-faint);
   }
 
-  .number.today {
+  .today .number {
     background: var(--color-accent);
     color: var(--color-on-accent);
   }
@@ -168,38 +181,65 @@
   ul {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 3px;
     min-inline-size: 0;
     margin: 0;
     padding: 0;
     list-style: none;
   }
 
+  /* An event as a calendar draws it: a tinted chip with its kind's edge. */
+  .chip {
+    --tone: var(--color-muted);
+
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--tone) 14%, transparent);
+    box-shadow: inset 2px 0 0 var(--tone);
+  }
+
+  .chip.milestone {
+    --tone: var(--color-warning);
+  }
+
+  .chip.travel {
+    --tone: var(--color-info);
+  }
+
+  .chip.stay {
+    --tone: var(--color-success);
+  }
+
+  .chip.event {
+    --tone: var(--color-info);
+  }
+
   .step {
     display: flex;
     align-items: flex-start;
-    gap: 5px;
+    gap: 4px;
+    box-sizing: border-box;
     inline-size: 100%;
     min-inline-size: 0;
-    padding: 1px 2px;
+    padding: 2px 6px 2px 7px;
     border: 0;
-    border-radius: var(--radius-control-compact);
+    border-radius: inherit;
     background: none;
     color: var(--color-text);
     font: inherit;
     font-size: var(--text-caption);
-    line-height: 15px;
+    font-weight: 500;
+    line-height: 14px;
     text-align: start;
     cursor: default;
   }
 
   .step :global(svg) {
     flex: none;
-    margin-block-start: 2px;
-    color: var(--color-muted);
+    margin-block-start: 1px;
+    color: var(--color-success);
   }
 
-  /* A day's few steps share its room: one reads in three lines, three in one each. */
+  /* A day's few events share its room: one reads in three lines, three in one each. */
   .step span {
     display: -webkit-box;
     overflow: hidden;
@@ -210,7 +250,12 @@
   }
 
   button.step:hover {
-    background: var(--color-control-hover);
+    background: color-mix(in srgb, var(--tone) 12%, transparent);
+  }
+
+  button.step:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 1px;
   }
 
   .done .step span {
@@ -219,8 +264,9 @@
   }
 
   .more {
-    padding-inline: 4px;
+    padding-inline: 6px;
     color: var(--color-muted);
     font-size: var(--text-caption);
+    font-weight: 500;
   }
 </style>

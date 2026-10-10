@@ -86,7 +86,8 @@ export function planWeeks(
 }
 
 /** The calendar's size on the canvas: seven columns of days, a row a week. */
-export const CALENDAR = { cell: 124, gap: 6, row: 96, head: 28 } as const;
-export const calendarWidth = () => 7 * CALENDAR.cell + 6 * CALENDAR.gap;
+export const CALENDAR = { cell: 128, row: 100, head: 34 } as const;
+/** Seven days, the hairlines between them and the frame's edge. */
+export const calendarWidth = () => 7 * CALENDAR.cell + 6 + 2;
 export const calendarHeight = (weeks: number) =>
-  CALENDAR.head + weeks * CALENDAR.row + (weeks - 1) * CALENDAR.gap;
+  CALENDAR.head + 1 + weeks * CALENDAR.row + (weeks - 1) + 2;
