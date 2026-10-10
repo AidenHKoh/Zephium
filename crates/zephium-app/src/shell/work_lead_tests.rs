@@ -1741,7 +1741,7 @@ async fn a_same_site_redirect_is_read_again_as_one_fresh_read_of_its_destination
 }
 
 #[tokio::test]
-async fn a_cross_site_redirect_goes_back_to_the_lead_and_a_chain_stops_at_its_bound_or_a_loop() {
+async fn a_public_cross_site_redirect_is_isolated_and_chains_stop_at_their_bound_or_loop() {
     fn turns(turn: usize, seen: &str) -> Vec<WorkModelPart> {
         match turn {
             0 => vec![
@@ -1765,7 +1765,7 @@ async fn a_cross_site_redirect_goes_back_to_the_lead_and_a_chain_stops_at_its_bo
             ],
             1 => {
                 assert!(
-                    seen.contains("Failed: The page redirects to https://other.example.net/plans\nRead https://other.example.net/plans if it is what you need: this read did not follow the redirect there."),
+                    seen.contains("https://plans.example.com/a redirects to https://other.example.net/plans; this is a read of https://other.example.net/plans.") && seen.contains("The destination lists its plans"),
                     "{seen}"
                 );
                 assert!(
@@ -1790,6 +1790,13 @@ async fn a_cross_site_redirect_goes_back_to_the_lead_and_a_chain_stops_at_its_bo
             "https://round.example.org/a" => redirected("https://round.example.org/b"),
             "https://round.example.org/b" => redirected("https://round.example.org/a"),
             "https://plans.example.com/a" => redirected("https://other.example.net/plans"),
+            "https://other.example.net/plans" => {
+                assert!(request.private_run);
+                assert_eq!(request.session, crate::work_sites::SiteSession::Private);
+                assert!(!request.allow_edits);
+                assert!(matches!(request.step, WorkStepKindV1::Read { goal: None, .. }));
+                notes(request, "The destination lists its plans")
+            },
             "https://loop.example.org/a" => redirected("https://loop.example.org/b"),
             "https://loop.example.org/b" => redirected("https://loop.example.org/c"),
             "https://loop.example.org/c" => redirected("https://loop.example.org/d"),
@@ -1801,9 +1808,9 @@ async fn a_cross_site_redirect_goes_back_to_the_lead_and_a_chain_stops_at_its_bo
     assert_eq!(run.status, WorkExecutionStatus::NeedsReview);
     let urls: Vec<String> = reads(&run).into_iter().map(|(url, ..)| url).collect();
     // Each address is read once: the bound ends one chain, the loop another.
-    assert_eq!(urls.len(), 7, "{urls:?}");
+    assert_eq!(urls.len(), 8, "{urls:?}");
     assert!(urls.iter().any(|url| url == "https://example.com/"));
-    assert!(!urls.iter().any(|url| url.contains("other.example.net")));
+    assert_eq!(urls.iter().filter(|url| url.contains("other.example.net")).count(), 1);
     assert!(!urls.iter().any(|url| url.ends_with("/d")));
 }
 

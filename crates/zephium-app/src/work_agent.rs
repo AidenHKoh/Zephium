@@ -45,8 +45,8 @@ pub struct WorkAgentBrowseRequest {
     pub view: bool,
     /// A search step's results page: Rust reads its results, no model.
     pub results: Option<WorkResultsPage>,
-    /// A new read of where an earlier read's first load was redirected on
-    /// its own site: the address that redirected here.
+    /// A new read of where an earlier public read's first load was redirected:
+    /// the address that redirected here. Cross-site successors use empty storage.
     pub redirected_from: Option<String>,
     /// A private run: pages without the person's session keep the run's own
     /// empty storage instead of Work's memory.

@@ -416,7 +416,8 @@ impl Driver {
 
 impl Driver {
     /// A new read of the address a public page task's first load was
-    /// redirected to on its own site: its own step citing that address,
+    /// redirected to: its own step citing that address. A cross-site successor
+    /// is a research read in fresh isolated storage, never an account/task replay,
     /// within what the first read left of its share, never an address the
     /// chain already read, and at most `MAX_REDIRECT_HOPS` of them. The
     /// host still admits it as it would a read asked for directly.
@@ -432,9 +433,12 @@ impl Driver {
             return Ok(None);
         };
         let kind = redirected_kind(&request.step, destination);
-        let same_site = kind.is_some();
+        let same_site = zephium_agentic::ContextNavigationTarget::parse(url)
+            .ok()
+            .zip(zephium_agentic::ContextNavigationTarget::parse(destination).ok())
+            .is_some_and(|(from, to)| zephium_agentic::same_work_site(&from, &to));
         let followed = read.len().saturating_sub(1);
-        let follows = same_site
+        let follows = kind.is_some()
             && request.results.is_none()
             && request.session == crate::work_sites::SiteSession::Private
             && followed < MAX_REDIRECT_HOPS
@@ -474,6 +478,8 @@ impl Driver {
             step: kind,
             limits,
             redirected_from: Some(url.clone()),
+            // A different site never inherits Work's saved website data.
+            private_run: request.private_run || !same_site,
             ..request.clone()
         }))
     }
@@ -490,11 +496,17 @@ fn redirected_kind(step: &WorkStepKindV1, destination: &str) -> Option<WorkStepK
     };
     let from = zephium_agentic::ContextNavigationTarget::parse(url).ok()?;
     let to = zephium_agentic::ContextNavigationTarget::parse(destination).ok()?;
-    zephium_agentic::same_work_site(&from, &to).then(|| WorkStepKindV1::Read {
-        url: destination.to_owned(),
-        goal: goal.clone(),
-        collection: collection.clone(),
-    })
+    let public_destination =
+        zephium_agentic::AgentNavigationDiscovery::try_new_public_page(to.clone()).is_ok();
+    let public_read = goal.is_none()
+        && zephium_agentic::AgentNavigationDiscovery::try_new_public_page(from.clone()).is_ok();
+    (public_destination && (zephium_agentic::same_work_site(&from, &to) || public_read)).then(
+        || WorkStepKindV1::Read {
+            url: destination.to_owned(),
+            goal: goal.clone(),
+            collection: collection.clone(),
+        },
+    )
 }
 
 // Short-lived coordination only: durable Ask/Read facts remain authoritative.
@@ -1499,7 +1511,7 @@ mod tests {
     }
 
     #[test]
-    fn first_load_redirect_preserves_task_and_collection_without_crossing_sites() {
+    fn first_load_redirect_preserves_reads_but_never_moves_tasks_to_another_site() {
         for goal in [
             None,
             Some("Compare the listed products without buying".into()),
@@ -1523,13 +1535,20 @@ mod tests {
                 redirected_kind(&step, "https://www.example.com/products/"),
                 Some(WorkStepKindV1::Read {
                     url: "https://www.example.com/products/".into(),
-                    goal,
+                    goal: goal.clone(),
                     collection,
                 })
             );
+            assert_eq!(
+                redirected_kind(&step, "https://other.example.net/products").is_some(),
+                goal.is_none()
+            );
             for destination in [
-                "https://example.com.evil.test/products",
-                "https://other.example.net/products",
+                "http://example.com/products",
+                "https://127.0.0.1/products",
+                "https://intranet.local/products",
+                "https://example.com/products?access_token=private-value",
+                "https://other.example.net/products?access_token=private-value",
                 "file:///etc/passwd",
             ] {
                 assert!(redirected_kind(&step, destination).is_none());
