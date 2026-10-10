@@ -7,6 +7,7 @@ import { artifactView } from "../project-work";
 import { plain } from "./text";
 import { siteKey, siteName } from "../run/site";
 import { leadRun } from "../agent-steps";
+import { pickCandidates } from "../link-media";
 import type {
   Block,
   Board,
@@ -605,7 +606,7 @@ function leadView(
           const amount = numberOf(item.price?.amount);
           const rating = numberOf(item.rating?.value);
           // The first candidate the canvas admitted is the item's own picture; its logo else.
-          const admitted = (item.image_candidates ?? [])
+          const admitted = pickCandidates(item)
             .map((candidate) => fetched.get(pictureKey(candidate)))
             .find((picture) => !!picture);
           const src = admitted ? mediaUrl(admitted.profile, admitted.digest) : null;

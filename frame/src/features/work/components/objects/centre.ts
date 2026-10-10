@@ -91,3 +91,19 @@ export function picksSheet(picks: PicksView): SheetView {
     })),
   };
 }
+
+/**
+ * Whether a set holds things to weigh against each other: two or more with a
+ * price or a rating, or sharing at least two facts. Videos, articles and
+ * facts about one thing have nothing to line up.
+ */
+export function comparable(picks: PicksView): boolean {
+  if (picks.items.length < 2 || picks.facet === "video" || picks.facet === "article") return false;
+  const measured = picks.items.filter((item) => item.price || item.rating).length;
+  if (measured >= 2) return true;
+  const counts = new Map<string, number>();
+  for (const item of picks.items)
+    for (const label of new Set(item.facts.map((fact) => fact.label.toLowerCase())))
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+  return [...counts.values()].filter((count) => count >= 2).length >= 2;
+}

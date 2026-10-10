@@ -30,6 +30,17 @@ export function youtubeThumbnail(url: string): string | null {
   return id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : null;
 }
 
+/** A pick's picture candidates: its own, else the thumbnail of the video it links to. */
+export function pickCandidates(item: {
+  image_candidates?: readonly string[] | null;
+  url?: string | null;
+}): string[] {
+  const own = item.image_candidates ?? [];
+  if (own.length) return [...own];
+  const thumbnail = item.url ? youtubeThumbnail(item.url) : null;
+  return thumbnail ? [thumbnail] : [];
+}
+
 /** The start a YouTube address asks for: `t=90`, `t=1m30s` or `start=90`, in seconds. */
 function startOf(url: string): number | undefined {
   let parsed: URL;

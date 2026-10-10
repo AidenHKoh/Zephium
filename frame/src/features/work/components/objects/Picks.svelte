@@ -5,10 +5,10 @@
   import FlightCard from "./FlightCard.svelte";
   import Title from "./Title.svelte";
   import Sheet from "./Sheet.svelte";
-  import { picksSheet } from "./centre";
+  import { comparable, picksSheet } from "./centre";
   import PageFace from "../run/PageFace.svelte";
-  /** A card's least width, pictured or plain, and the gap between cards. */
-  const CARD = { pictured: 200, plain: 220, gap: 16 } as const;
+  /** A card's least and widest width, pictured or plain, and the gap between cards. */
+  const CARD = { pictured: 200, plain: 220, widest: 248, gap: 16 } as const;
   /** Things to choose between, side by side; the set opens as a sheet to compare. */
   let {
     object,
@@ -39,34 +39,33 @@
     !!pick.route;
   const flights = $derived(object.facet === "flight" && object.items.every(routed));
   const pictured = $derived(object.items.some((item) => item.picture));
-  /** Each thing stands under the page it was taken from, when the set came from several. */
-  const sourced = $derived(!flights && !centre && object.items.some((item) => item.from));
+  /**
+   * Each thing stands under the page it was taken from, when every one came
+   * from its own page; things that share a page leave it to their part's row.
+   */
+  const sourced = $derived.by(() => {
+    if (flights || centre || !object.items.some((item) => item.from)) return false;
+    const pages = object.items.map((item) => item.from?.page);
+    return pages.every((page) => page) && new Set(pages).size === pages.length;
+  });
+  const weighable = $derived(!!actions.compare && !flights && comparable(object));
   /** The column looked at: its page and its thing light up together. */
   let lit = $state<number | null>(null);
-  /** What a card holds under its name: a set shares one height only when its cards hold alike. */
-  const holds = (pick: PickView) =>
-    pick.facts.length || pick.price || pick.why ? `${pick.facts.length}|${!!pick.price}` : "";
-  /** Only a set of pictured, alike cards shares one height; the rest keep their own. */
-  const mixed = $derived(
-    !object.items.every((item) => item.picture) ||
-      object.items.some((item) => !holds(item)) ||
-      new Set(object.items.map(holds)).size > 1,
-  );
 </script>
 
 <section
   class="picks"
   class:flights
   class:pictured
-  class:mixed
   aria-label={object.title}
   bind:clientWidth={width}
   style:--across={across}
+  style:--card-widest={`${CARD.widest}px`}
 >
-  {#if object.title || (actions.compare && object.items.length > 1)}
+  {#if object.title || weighable}
     <header>
       {#if object.title}<Title text={object.title} />{/if}
-      {#if actions.compare && object.items.length > 1}<button
+      {#if weighable}<button
           type="button"
           class="compare nodrag nopan"
           onclick={() => actions.compare?.(object.id)}>{m.work_pick_compare()}</button
@@ -99,6 +98,7 @@
             {pick}
             {actions}
             video={object.facet === "video"}
+            product={object.facet === "product"}
             onopen={actions.open ? () => actions.open?.(object.id, index) : undefined}
           />
         </div>
@@ -106,6 +106,7 @@
           {pick}
           {actions}
           video={object.facet === "video"}
+          product={object.facet === "product"}
           onopen={actions.open ? () => actions.open?.(object.id, index) : undefined}
         />{/if}
     {/each}
@@ -123,7 +124,11 @@
     inline-size: 100%;
   }
 
+  /* As wide as its cards, so Compare ends where the last card does. */
   header {
+    box-sizing: border-box;
+    inline-size: calc(var(--across) * var(--card-widest) + (var(--across) - 1) * 16px);
+    max-inline-size: 100%;
     display: flex;
     align-items: baseline;
     justify-content: space-between;
@@ -139,29 +144,21 @@
     font: inherit;
     font-size: var(--text-label);
     font-weight: 500;
-    opacity: 0;
     cursor: default;
-    transition: opacity var(--motion-fast) var(--ease-out);
+    transition: color var(--motion-fast) var(--ease-out);
   }
 
   .compare:hover {
     color: var(--color-text);
   }
 
-  .compare:focus-visible,
-  .picks:hover .compare {
-    opacity: 1;
-  }
-
+  /* Cards keep their own width: a wide set never stretches a photo past it. */
   .set {
     display: grid;
-    grid-template-columns: repeat(var(--across), minmax(0, 1fr));
+    grid-template-columns: repeat(var(--across), minmax(0, var(--card-widest)));
     align-items: stretch;
+    justify-content: start;
     gap: 16px;
-  }
-
-  .mixed .set {
-    align-items: start;
   }
 
   /* A page over what was taken from it: the window, a short stem, the thing. */

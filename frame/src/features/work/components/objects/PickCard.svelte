@@ -18,12 +18,15 @@
   let {
     pick,
     video = false,
+    product = false,
     actions = {},
     onopen,
   }: {
     pick: PickView;
     /** A video: the picture is its poster, with its length and a play mark. */
     video?: boolean;
+    /** A product: its photo is shown whole on a plate, never cropped. */
+    product?: boolean;
     actions?: ObjectActions;
     onopen?: () => void;
   } = $props();
@@ -99,7 +102,7 @@
   class:pictured={!!picture}
 >
   {#if picture}
-    <div class="photo" class:video>
+    <div class="photo" class:video class:product>
       <!-- The photo at the size its card shows it: the full-size picture isn't kept. -->
       <canvas
         data-picture={picture.src}
@@ -244,6 +247,17 @@
     inline-size: 100%;
     block-size: 100%;
     object-fit: cover;
+  }
+
+  /* A product shot on white: whole, on a plate its white melts into. */
+  .photo.product {
+    padding: 12px;
+    background: var(--color-product-plate);
+  }
+
+  .photo.product canvas {
+    object-fit: contain;
+    mix-blend-mode: multiply;
   }
 
   .play {

@@ -6,7 +6,7 @@ import {
 } from "$shared/ipc/bindings";
 import type { MediaAssetV1 } from "$domain/resources";
 import type { WorkEnvironmentSession } from "$domain/work-environment";
-import { youtubeThumbnail } from "../link-media";
+import { pickCandidates, youtubeThumbnail } from "../link-media";
 import { subjectImageCandidates, subjectsOf } from "../subjects";
 
 function canonical(url: string): string {
@@ -107,7 +107,7 @@ export class PictureQueue {
         if (artifact?.data.kind !== "picks") return [];
         return artifact.data.items.flatMap((item, index): Owed[] => {
           const key = `${element.id}#${index}`;
-          const candidates = (item.image_candidates ?? []).slice(0, ITEM_CANDIDATES);
+          const candidates = pickCandidates(item).slice(0, ITEM_CANDIDATES);
           if (!candidates.length || this.#admittedFor.has(`${current.id} ${key}`)) return [];
           const own = candidates.map(canonical);
           const done = (snapshot: WorkEnvironmentSnapshot) => {

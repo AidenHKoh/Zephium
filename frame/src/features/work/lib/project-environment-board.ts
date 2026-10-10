@@ -592,8 +592,8 @@ export function environmentStages(
   return stages;
 }
 
-/** What a part found stands at its row's end no wider than this, so the result keeps the view. */
-const FOUND = 760;
+/** What a part found stands at its row's end no wider than this (four cards), so the result keeps the view. */
+const FOUND = 880;
 /** The Sources under a result: a reading column of rows. */
 const SOURCES = 560;
 /** Rows the Sources show before Show all. */
