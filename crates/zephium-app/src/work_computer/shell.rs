@@ -72,9 +72,6 @@ pub fn tests(output: &str) -> Option<TestSummary> {
     static GO: OnceLock<Regex> = OnceLock::new();
     static MOCHA: OnceLock<Regex> = OnceLock::new();
     static XCTEST: OnceLock<Regex> = OnceLock::new();
-    static UNITTEST: OnceLock<Regex> = OnceLock::new();
-    static UNITTEST_END: OnceLock<Regex> = OnceLock::new();
-    static UNITTEST_FAIL: OnceLock<Regex> = OnceLock::new();
     let mut summary = TestSummary::default();
     let mut seen = false;
 
@@ -174,26 +171,8 @@ pub fn tests(output: &str) -> Option<TestSummary> {
         return Some(summary);
     }
 
-    if let Some(ran) = re(&UNITTEST, r"(?m)^Ran (?P<total>\d+) tests? in [\d.]+s")
-        .captures_iter(output)
-        .last()
-    {
-        let total = number(&ran, "total")?;
-        if let Some(end) = re(
-            &UNITTEST_END,
-            r"(?m)^(?:OK|FAILED)(?: \((?:failures=(?P<failures>\d+))?(?:, )?(?:errors=(?P<errors>\d+))?(?:, )?(?:skipped=(?P<skipped>\d+))?[^)]*\))?\s*$",
-        )
-        .captures_iter(output)
-        .last()
-        {
-            summary.failed = number(&end, "failures")?.checked_add(number(&end, "errors")?)?;
-            summary.skipped = number(&end, "skipped")?;
-            summary.passed = total.checked_sub(summary.failed.checked_add(summary.skipped)?)?;
-            for c in re(&UNITTEST_FAIL, r"(?m)^(?:FAIL|ERROR): (?P<name>\S+)").captures_iter(output) {
-                failure(&mut summary, &c["name"]);
-            }
-            return Some(summary);
-        }
+    if let Some(summary) = unittest(output) {
+        return Some(summary);
     }
 
     if let Some(c) = re(
@@ -209,6 +188,68 @@ pub fn tests(output: &str) -> Option<TestSummary> {
         return Some(summary);
     }
     (!summary.is_empty()).then_some(summary)
+}
+
+/// A selected unittest run must not be mistaken for a different runner mentioned
+/// in its fixture output. Counts remain checked and malformed totals are unknown.
+pub fn unittest(output: &str) -> Option<TestSummary> {
+    if zephium_agentic::contains_recognized_secret(output) {
+        return None;
+    }
+    static UNITTEST: OnceLock<Regex> = OnceLock::new();
+    static UNITTEST_END: OnceLock<Regex> = OnceLock::new();
+    static UNITTEST_FAIL: OnceLock<Regex> = OnceLock::new();
+    let mut summary = TestSummary::default();
+    if let Some(ran) = re(&UNITTEST, r"(?m)^Ran (?P<total>\d+) tests? in [\d.]+s")
+        .captures_iter(output)
+        .last()
+    {
+        let total = number(&ran, "total")?;
+        if let Some(end) = re(
+            &UNITTEST_END,
+            r"(?m)^(?P<status>OK|FAILED)(?: \((?P<counts>[^)\r\n]*)\))?\s*$",
+        )
+        .captures_iter(output)
+        .last()
+        {
+            if end.get(0)?.start() < ran.get(0)?.end() {
+                return None;
+            }
+            if let Some(counts) = end.name("counts") {
+                let mut seen = std::collections::BTreeSet::new();
+                for count in counts.as_str().split(',') {
+                    let (kind, value) = count.trim().split_once('=')?;
+                    if !seen.insert(kind)
+                        || value.is_empty()
+                        || !value.bytes().all(|byte| byte.is_ascii_digit())
+                    {
+                        return None;
+                    }
+                    let count: u32 = value.parse().ok()?;
+                    match kind {
+                        "failures" | "errors" | "unexpected successes" => {
+                            summary.failed = summary.failed.checked_add(count)?
+                        }
+                        "skipped" | "expected failures" => {
+                            summary.skipped = summary.skipped.checked_add(count)?
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            if (&end["status"] == "FAILED") != (summary.failed > 0) {
+                return None;
+            }
+            summary.passed = total.checked_sub(summary.failed.checked_add(summary.skipped)?)?;
+            for c in re(&UNITTEST_FAIL, r"(?m)^(?:FAIL|ERROR): (?P<name>\S+)").captures_iter(output)
+            {
+                failure(&mut summary, &c["name"]);
+            }
+            return Some(summary);
+        }
+    }
+
+    None
 }
 
 fn is_failure_line(line: &str) -> bool {
@@ -281,6 +322,16 @@ mod tests {
         let sensitive = "test result: ok. 1 passed; 0 failed; 0 ignored\nghp_inertFixtureToken";
         assert!(tests(sensitive).is_none());
         assert!(!excerpt(sensitive).contains("ghp_"));
+    }
+
+    #[test]
+    fn unittest_counts_expected_failures_without_mistaking_fixture_output() {
+        let output = "test result: ok. 999 passed; 0 failed; 0 ignored\nRan 3 tests in 0.01s\nOK (skipped=1, expected failures=1)\n";
+        let counts = unittest(output).unwrap();
+        assert_eq!((counts.passed, counts.failed, counts.skipped), (1, 0, 2));
+        let counts = unittest("Ran 1 test in 0.01s\nFAILED (unexpected successes=1)\n").unwrap();
+        assert_eq!((counts.passed, counts.failed), (0, 1));
+        assert!(unittest("Ran 1 test in 0.01s\nOK (unknown=1)\n").is_none());
     }
 
     #[test]

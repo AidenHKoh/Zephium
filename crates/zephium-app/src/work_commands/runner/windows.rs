@@ -174,7 +174,7 @@ impl Profile {
             Reserved: 0,
         }
     }
-    fn grant_copy(&self, snapshot: &Snapshot) -> Result<(), Failure> {
+    fn grant_copy(&self, snapshot: &Snapshot, read_only: bool) -> Result<(), Failure> {
         let owner = owner_sid()?;
         let package = sid_string(PSID(self.sid.as_ptr().cast_mut().cast()))?;
         let mut pending = vec![snapshot.root.clone()];
@@ -204,8 +204,9 @@ impl Profile {
             {
                 return Err(Failure::Storage);
             }
-            let writable = path.starts_with(snapshot.work.join(".git"))
-                || path.starts_with(&snapshot.temporary);
+            let writable = !read_only
+                && (path.starts_with(snapshot.work.join(".git"))
+                    || path.starts_with(&snapshot.temporary));
             let access = if writable { "FA" } else { "GRGX" };
             let sddl = wide(OsStr::new(&format!(
                 "D:P(A;OICI;FA;;;{owner})(A;OICI;FA;;;SY)(A;OICI;{access};;;{package})S:(ML;OICI;NW;;;LW)"
@@ -319,6 +320,49 @@ where
     C: Fn() -> CF,
     CF: Future<Output = bool>,
 {
+    run_mode(snapshot, program, arguments, cancelled, false).await
+}
+
+pub(super) async fn python<C, CF>(
+    snapshot: &Snapshot,
+    modules: &[String],
+    cancelled: &C,
+) -> Result<Output, Failure>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+{
+    // A future qualified package broker must supply this complete pinned runtime
+    // closure. Ambient PATH, installed user Python and user site-packages are
+    // never admitted. The shared Windows availability gate remains closed.
+    let runtime = snapshot.root.join("tool/python");
+    let program = runtime.join("python.exe");
+    if !program.is_file() {
+        return Err(Failure::PythonUnavailable);
+    }
+    let request = serde_json::json!({"platform":"windows","root":snapshot.work,"home":snapshot.home,"temporary":snapshot.temporary,"stdlib":[runtime.join("Lib"),runtime.join("DLLs")],"modules":modules});
+    let arguments = vec![
+        "-I".into(),
+        "-S".into(),
+        "-B".into(),
+        "-c".into(),
+        super::python::BOOTSTRAP.into(),
+        request.to_string().into(),
+    ];
+    run_mode(snapshot, &program, &arguments, cancelled, true).await
+}
+
+async fn run_mode<C, CF>(
+    snapshot: &Snapshot,
+    program: &Path,
+    arguments: &[OsString],
+    cancelled: &C,
+    read_only: bool,
+) -> Result<Output, Failure>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+{
     if super::cancellation_requested(cancelled).await {
         return Err(Failure::Stopped);
     }
@@ -326,7 +370,7 @@ where
         return Err(Failure::Input);
     }
     let profile = Profile::create()?;
-    profile.grant_copy(snapshot)?;
+    profile.grant_copy(snapshot, read_only)?;
     #[allow(unused_mut)]
     let mut environment = vec![
         ("HOME".into(), snapshot.home.as_os_str().into()),
@@ -378,7 +422,7 @@ where
             _ = tick.tick() => {
                 if process.quitting() || super::cancellation_requested(cancelled).await { break Err(Failure::Stopped); }
                 match process.status().map_err(|_| Failure::Failed) {
-                    Ok(Some(code)) if closed => break if code == 0 { Ok(()) } else { Err(Failure::Failed) },
+                    Ok(Some(code)) if closed => break Ok(code),
                     Err(error) => break Err(error), _ => {}
                 }
             }
@@ -396,12 +440,12 @@ where
     if settled.is_err() {
         return Err(Failure::StopUnconfirmed);
     }
-    result?;
+    let exit = result?;
     let text = super::output_text(output)?;
     Ok(Output {
         text,
-        success: true,
-        exit: 0,
+        success: exit == 0,
+        exit: exit as i32,
     })
 }
 

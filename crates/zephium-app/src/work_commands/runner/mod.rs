@@ -3,7 +3,10 @@ pub(crate) mod git_index;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
+mod macos_python;
+#[cfg(target_os = "macos")]
 mod macos_spawn;
+pub(crate) mod python;
 mod snapshot;
 #[cfg(windows)]
 mod windows;
@@ -24,6 +27,7 @@ pub(crate) enum Failure {
     Failed,
     Changed,
     Sensitive,
+    PythonUnavailable,
 }
 impl Failure {
     pub fn note(self) -> &'static str {
@@ -41,6 +45,7 @@ impl Failure {
             Self::Stopped => "The confined process stopped",
             Self::StopUnconfirmed => "Stop was requested, but process exit has not been confirmed",
             Self::Failed => "The operation in the copied workspace failed",
+            Self::PythonUnavailable => "Python tests require qualified macOS build 25G83 and the pinned Apple Command Line Tools Python 3.9 runtime; Windows awaits runtime packaging and native qualification",
             Self::Sensitive => "Recognizable credential content was withheld from the review",
             Self::Changed => "An approved file changed again; read it before reviewing these edits",
         }

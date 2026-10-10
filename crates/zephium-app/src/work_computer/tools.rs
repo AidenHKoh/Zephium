@@ -1,5 +1,6 @@
 //! The bounded Computer tools, their schemas and what each returns to the model.
 mod git;
+mod python;
 mod recovery;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -106,6 +107,7 @@ pub fn definitions() -> Vec<WorkModelTool> {
                 "text": {"type": "string"}
             }, "required": ["path", "text"], "additionalProperties": false}),
         ),
+        tool("python_tests", "Run 1 to 64 selected stdlib unittest modules with supplied supporting text files in a read-only copy. Requires the qualified Apple Command Line Tools Python 3.9 runtime on macOS; Windows is unavailable. Tests use relative .py paths with ordinary ASCII module names. List every needed supporting file explicitly. No third-party dependencies, subprocesses, network, file writes, pytest or general builds. Limited to 15 seconds of execution, 256 MiB memory footprint and 64 KiB output; input preparation has separate bounded checks.", json!({"type":"object","properties":{"tests":{"type":"array","items":{"type":"string","maxLength":1024},"minItems":1,"maxItems":64},"files":{"type":"array","items":{"type":"string","maxLength":1024},"maxItems":2000}},"required":["tests"],"additionalProperties":false})),
         tool("git_changes", "Inspect working-tree content changes against the current Git index for 1 to 64 selected relative file paths. diff shows patches, status lists content-changed paths, check finds whitespace errors. Excludes staged-versus-HEAD, untracked files, modes and filter transformations. Only ordinary text files and supported SHA-1 index/pack layouts are admitted; protected content is withheld. Runs fixed Git operations in a protected copy, never source configuration, hooks or project code. Requires a qualified operating-system build.", json!({"type":"object","properties":{"paths":{"type":"array","items":{"type":"string","maxLength":4096},"minItems":1,"maxItems":64},"operation":{"type":"string","enum":["diff","status","check"]}},"required":["paths","operation"],"additionalProperties":false})),
         tool(
             "review_changes",
@@ -334,6 +336,7 @@ impl ComputerTools {
             "restore_saved" => self.restore(host, args).await,
             "review_changes" => self.review_changes(host, args).await,
             "git_changes" => self.git_changes(host, args).await,
+            "python_tests" => self.python_tests(host, args).await,
             _ => Err(ToolReply::fault(format!("There is no `{name}` tool."))),
         };
         match reply {

@@ -152,12 +152,24 @@ where
     C: Fn() -> CF,
     CF: Future<Output = bool>,
 {
+    monitor(cancelled, false, || process(snapshot, program, args)).await
+}
+
+pub(super) async fn monitor<C, CF>(
+    cancelled: &C,
+    include_errors: bool,
+    spawn: impl FnOnce() -> Result<super::macos_spawn::Child, Failure>,
+) -> Result<Output, Failure>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+{
     if super::cancellation_requested(cancelled).await {
         return Err(Failure::Stopped);
     }
     let (mut child, mut group) = crate::work_commands::groups::Group::launch(
         || {
-            let child = process(snapshot, program, args)?;
+            let child = spawn()?;
             let id = child.id();
             Ok((child, id))
         },
@@ -222,6 +234,15 @@ where
         });
     }
     let success = status.is_some_and(|status| status.success());
+    if include_errors && !errors.is_empty() {
+        if output.len() + errors.len() + 10 > OUTPUT_LIMIT {
+            return Err(Failure::Limit);
+        }
+        if !output.is_empty() {
+            output.extend_from_slice(b"\n[stderr]\n");
+        }
+        output.extend_from_slice(&errors);
+    }
     // A native diagnostic is not model evidence: it may contain attempted paths.
     if !success && output.is_empty() {
         return Err(Failure::Failed);

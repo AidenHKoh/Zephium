@@ -41,6 +41,14 @@ impl Snapshot {
     }
 
     pub(super) fn from_files(files: BTreeMap<PathBuf, Vec<u8>>) -> Result<Self, Failure> {
+        Self::prepare(files, true)
+    }
+
+    pub(super) fn read_only(files: BTreeMap<PathBuf, Vec<u8>>) -> Result<Self, Failure> {
+        Self::prepare(files, false)
+    }
+
+    fn prepare(files: BTreeMap<PathBuf, Vec<u8>>, git_metadata: bool) -> Result<Self, Failure> {
         if files.len() > MAX_FILES {
             return Err(Failure::Limit);
         }
@@ -89,13 +97,15 @@ impl Snapshot {
         for directory in [&result.work, &result.home, &result.temporary, &result.empty] {
             fs::create_dir(directory).map_err(|_| Failure::Storage)?;
         }
-        fs::create_dir(result.work.join(".git")).map_err(|_| Failure::Storage)?;
-        fs::create_dir(result.work.join(".git/info")).map_err(|_| Failure::Storage)?;
-        // Git's highest-priority attributes are broker-owned: copied attribute
-        // files are data and cannot transform, hide, or disable checks of edits.
-        fs::write(result.work.join(".git/info/attributes"),
+        if git_metadata {
+            fs::create_dir(result.work.join(".git")).map_err(|_| Failure::Storage)?;
+            fs::create_dir(result.work.join(".git/info")).map_err(|_| Failure::Storage)?;
+            // Git's highest-priority attributes are broker-owned: copied attribute
+            // files are data and cannot transform, hide, or disable checks of edits.
+            fs::write(result.work.join(".git/info/attributes"),
             b"* -filter -ident -text -eol -working-tree-encoding diff whitespace=blank-at-eol,blank-at-eof,space-before-tab\n")
             .map_err(|_| Failure::Storage)?;
+        }
         for (path, bytes) in &result.files {
             // Create-only catches case/normalization aliases that collide on
             // the destination filesystem instead of silently merging files.

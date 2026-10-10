@@ -139,7 +139,32 @@ pub(super) fn spawn(
     arguments: &[OsString],
     environment: &[(OsString, OsString)],
 ) -> Result<Child, Failure> {
-    let executable = CString::new("/usr/bin/sandbox-exec").unwrap();
+    spawn_program(
+        cwd,
+        Path::new("/usr/bin/sandbox-exec"),
+        arguments,
+        environment,
+        false,
+    )
+}
+
+pub(super) fn spawn_direct_read_only(
+    cwd: &Path,
+    program: &Path,
+    arguments: &[OsString],
+    environment: &[(OsString, OsString)],
+) -> Result<Child, Failure> {
+    spawn_program(cwd, program, arguments, environment, true)
+}
+
+fn spawn_program(
+    cwd: &Path,
+    program: &Path,
+    arguments: &[OsString],
+    environment: &[(OsString, OsString)],
+    fatal_footprint: bool,
+) -> Result<Child, Failure> {
+    let executable = string(program.as_os_str())?;
     let cwd = string(cwd.as_os_str())?;
     let argv: Vec<CString> = std::iter::once(Ok(executable.clone()))
         .chain(arguments.iter().map(|arg| string(arg)))
@@ -166,6 +191,29 @@ pub(super) fn spawn(
     let mut raw = std::ptr::null_mut();
     checked(unsafe { libc::posix_spawnattr_init(&mut raw) })?;
     let mut attributes = Attributes(raw);
+    if fatal_footprint {
+        // Private ABI qualified only for the explicitly admitted OS. Configure
+        // both active and inactive fatal limits on the final interpreter, never
+        // on an exec wrapper that can reset them. Missing SPI fails closed.
+        type SetFootprint = unsafe extern "C" fn(
+            *mut libc::posix_spawnattr_t,
+            libc::c_short,
+            libc::c_int,
+            libc::c_int,
+            libc::c_int,
+        ) -> libc::c_int;
+        let symbol = unsafe {
+            libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"posix_spawnattr_setjetsam_ext".as_ptr(),
+            )
+        };
+        if symbol.is_null() {
+            return Err(Failure::PythonUnavailable);
+        }
+        let set: SetFootprint = unsafe { std::mem::transmute(symbol) };
+        checked(unsafe { set(&mut attributes.0, 0x04 | 0x08, -1, 256, 256) })?;
+    }
     let mut raw = std::ptr::null_mut();
     checked(unsafe { libc::posix_spawn_file_actions_init(&mut raw) })?;
     let mut actions = Actions(raw);

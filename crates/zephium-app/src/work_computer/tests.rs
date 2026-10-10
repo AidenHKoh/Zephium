@@ -17,6 +17,8 @@ struct Recorder {
     settled: Mutex<Vec<(WorkStepStatus, Option<String>)>>,
     decisions: Mutex<Vec<Decision>>,
     asked: Mutex<u32>,
+    progress_calls: Mutex<u32>,
+    evidence_count: Mutex<u32>,
     on_cancel_check: Mutex<Option<Box<dyn FnMut() -> bool + Send>>>,
 }
 impl Recorder {
@@ -54,6 +56,9 @@ impl ComputerHost for Recorder {
         settled: Settled,
         note: Option<String>,
     ) -> HostFuture<'_, Result<Option<String>, WorkError>> {
+        if !matches!(&settled, Settled::Nothing) {
+            *self.evidence_count.lock().unwrap() += 1;
+        }
         if let Settled::Command(command) = &settled {
             command.validate().unwrap();
         }
@@ -65,6 +70,7 @@ impl ComputerHost for Recorder {
         Box::pin(async move { Ok(key) })
     }
     fn progress(&self, _: WorkStepId, _: WorkCommandOutputV1) -> HostFuture<'_, ()> {
+        *self.progress_calls.lock().unwrap() += 1;
         Box::pin(async {})
     }
     fn decision(&self, _: WorkStepId) -> HostFuture<'_, Result<Decision, WorkError>> {
@@ -685,5 +691,42 @@ fn current_index_tool_records_scoped_diff_and_honest_failures() {
         let reply = tools.call(&host, "git_changes", &args).await;
         assert!(reply.is_error);
         assert_eq!(host.settled.lock().unwrap()[2].0, WorkStepStatus::Cancelled);
+    });
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "Native qualified Python tool receipts and held-output privacy; inert sources only"]
+fn selected_python_tests_record_truthful_outcomes_without_live_output() {
+    serially(async {
+        let (_home, tools, root) = project();
+        let host = Recorder::default();
+        let path = root.join("test_inert.py");
+        let args = json!({"tests":["test_inert.py"]});
+        std::fs::write(&path,"import unittest\nclass Inert(unittest.TestCase):\n def test_value(self): self.assertEqual(2+2,4)\n").unwrap();
+        let result = tools.call(&host, "python_tests", &args).await;
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("1 passed"));
+        assert_eq!(host.settled.lock().unwrap()[0].0, WorkStepStatus::Succeeded);
+        std::fs::write(&path,"import unittest\nclass Inert(unittest.TestCase):\n def test_value(self): self.assertEqual(2+2,5)\n").unwrap();
+        let result = tools.call(&host, "python_tests", &args).await;
+        assert!(result.is_error && result.content.contains("1 failed"));
+        assert_eq!(host.settled.lock().unwrap()[1].0, WorkStepStatus::Failed);
+        assert_eq!(*host.evidence_count.lock().unwrap(), 2);
+        std::fs::write(&path,"import sys,time,unittest\nclass Inert(unittest.TestCase):\n def test_output(self):\n  sys.stdout.write('ghp_');sys.stdout.flush();time.sleep(.01);sys.stdout.write('inertFixtureToken');sys.stdout.flush()\n").unwrap();
+        let result = tools.call(&host, "python_tests", &args).await;
+        assert!(result.is_error && !result.content.contains("ghp_"));
+        assert_eq!(host.settled.lock().unwrap()[2].0, WorkStepStatus::Failed);
+        assert_eq!(*host.evidence_count.lock().unwrap(), 2);
+        std::fs::write(&path, "# No test cases\n").unwrap();
+        let result = tools.call(&host, "python_tests", &args).await;
+        assert!(result.is_error && result.content.contains("No tests discovered"));
+        assert_eq!(host.settled.lock().unwrap()[3].0, WorkStepStatus::Failed);
+        *host.on_cancel_check.lock().unwrap() = Some(Box::new(|| true));
+        let result = tools.call(&host, "python_tests", &args).await;
+        assert!(result.is_error);
+        assert_eq!(host.settled.lock().unwrap()[4].0, WorkStepStatus::Cancelled);
+        assert_eq!(*host.progress_calls.lock().unwrap(), 0);
+        assert_eq!(*host.asked.lock().unwrap(), 0);
     });
 }
