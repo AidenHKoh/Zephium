@@ -2,7 +2,7 @@
 use super::*;
 use sha2::{Digest, Sha256};
 use zephium_core::work::{
-    artifact::WorkArtifactV1,
+    artifact::{WorkArtifactDataV1, WorkArtifactV1},
     parts::{MAX_WORK_INPUTS, MAX_WORK_PARTS},
     runtime::*,
 };
@@ -625,14 +625,28 @@ fn command_observed(
                 .into_iter()
                 .find(|r| r.fact.id == execution)
                 .ok_or(WorkError::NotFound)?;
-            if !matches!(
-                row.fact.status,
-                WorkExecutionStatus::NeedsReview | WorkExecutionStatus::Completed
-            ) {
+            let original = row
+                .fact
+                .artifacts
+                .iter()
+                .find(|a| a.id == artifact)
+                .ok_or(WorkError::NotFound)?;
+            let live_draft = row.fact.status == WorkExecutionStatus::Running
+                && matches!(
+                    &intent,
+                    WorkRuntimeIntent::EditArtifact {
+                        data: WorkArtifactDataV1::Draft { .. },
+                        ..
+                    }
+                )
+                && matches!(&original.data, WorkArtifactDataV1::Draft { .. });
+            if !live_draft
+                && !matches!(
+                    row.fact.status,
+                    WorkExecutionStatus::NeedsReview | WorkExecutionStatus::Completed
+                )
+            {
                 return Err(WorkError::Conflict);
-            }
-            if !row.fact.artifacts.iter().any(|a| a.id == artifact) {
-                return Err(WorkError::NotFound);
             }
             let index = match row
                 .fact
@@ -665,11 +679,13 @@ fn command_observed(
                 }
                 _ => unreachable!(),
             }
-            row.fact.status = if row.fact.needs_review() {
-                WorkExecutionStatus::NeedsReview
-            } else {
-                WorkExecutionStatus::Completed
-            };
+            if !live_draft {
+                row.fact.status = if row.fact.needs_review() {
+                    WorkExecutionStatus::NeedsReview
+                } else {
+                    WorkExecutionStatus::Completed
+                };
+            }
             row.fact.validate(
                 &read_plan(tx, id, row.fact.spec.plan_revision)?,
                 expected.next()?,

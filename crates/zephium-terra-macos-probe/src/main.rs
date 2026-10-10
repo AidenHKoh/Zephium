@@ -27,6 +27,8 @@ mod work_app_views;
 mod work_application;
 #[cfg(target_os = "macos")]
 mod work_artifact_cleanup;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod work_blocks;
 #[cfg(any(target_os = "macos", test))]
 mod work_commerce;
 #[cfg(all(target_os = "macos", feature = "durable-runtime"))]

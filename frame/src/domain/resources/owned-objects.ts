@@ -7,12 +7,14 @@ import type {
   WorkArtifactDataV1_Serialize as ObjectRead,
 } from "$shared/ipc/bindings";
 import { resourceCall } from "./transport";
+import { events } from "$shared/ipc/native-events";
+import { newerRevision } from "./resource-model";
 
 const RETRY_DELAYS = [500, 1500, 4000];
 /** A pause in typing before the words are written: one write per thought, not per key. */
 const WRITE_AFTER_MS = 450;
 
-export type OwnedObject = { id: string; title: string; data: ObjectRead };
+export type OwnedObject = { id: string; revision: string; title: string; data: ObjectRead };
 
 /** What is kept of an edit: a row still being typed (no words yet) is shown, never written. */
 function kept(data: ObjectData): ObjectData {
@@ -32,6 +34,8 @@ function kept(data: ObjectData): ObjectData {
  */
 export class OwnedObjects {
   readonly #profile: string;
+  #stop: (() => void) | null = null;
+  #epoch = 0;
   readonly #records = new SvelteMap<string, ResourceRecord>();
   /** Edits not yet settled, shown over the record they will replace. */
   readonly #pending = new SvelteMap<string, ObjectData>();
@@ -45,13 +49,64 @@ export class OwnedObjects {
     this.#profile = profile;
   }
 
+  /** Agent edits arrive through the same authoritative resource event as user edits. */
+  async start() {
+    const epoch = ++this.#epoch;
+    const stop = await events.resourceChanged.listen(({ payload }) => {
+      if (
+        epoch !== this.#epoch ||
+        payload.profile !== this.#profile ||
+        payload.kind !== "object" ||
+        (!this.#read.has(payload.id) &&
+          !this.#records.has(payload.id) &&
+          !this.#loading.has(payload.id))
+      )
+        return;
+      if (this.#pending.has(payload.id)) return; // Keep its old basis: a conflict must not overwrite remote edits.
+      void this.#call({ kind: "get", id: payload.id }).then((response) => {
+        if (epoch === this.#epoch && !this.#pending.has(payload.id) && response.kind === "record")
+          this.#admit(response.record);
+      });
+    });
+    if (epoch !== this.#epoch) stop();
+    else this.#stop = stop;
+  }
+
+  stop() {
+    ++this.#epoch;
+    this.#stop?.();
+    this.#stop = null;
+    void this.flushAll();
+  }
+
+  #admit(record: ResourceRecord) {
+    const current = this.#records.get(record.id);
+    if (!current || newerRevision(record.revision, current.revision))
+      this.#records.set(record.id, record);
+  }
+
   /** The object as the person last left it, or undefined until it is read. */
   get(id: string): OwnedObject | undefined {
     const record = this.#records.get(id);
-    if (record?.draft.content.kind !== "object") return undefined;
+    if (record?.trashed || record?.draft.content.kind !== "object") return undefined;
     const data =
       (this.#pending.get(id) as ObjectRead | undefined) ?? record.draft.content.object.data;
-    return { id, title: record.draft.title, data };
+    return { id, revision: record.revision, title: record.draft.title, data };
+  }
+
+  /** Durable identity tokens only; unsaved drafts are not admitted as context. */
+  revisions(): ReadonlyMap<string, string> {
+    return new Map(
+      [...this.#records]
+        .filter(([id, record]) => !record.trashed && !this.#pending.has(id))
+        .map(([id, record]) => [id, record.revision]),
+    );
+  }
+
+  /** Settle local typing before a request reads or edits these blocks. */
+  async flushAll(): Promise<boolean> {
+    await Promise.all([...this.#pending.keys()].map((id) => this.flush(id)));
+    return this.#pending.size === 0;
   }
 
   /** Whether a resource has been read: until then, whether it is an object is not known. */
@@ -67,7 +122,7 @@ export class OwnedObjects {
       void this.#call({ kind: "get", id })
         .then((response) => {
           if (response.kind === "record" && response.record.draft.content.kind === "object")
-            this.#records.set(id, response.record);
+            this.#admit(response.record);
         })
         .finally(() => {
           this.#loading.delete(id);
@@ -118,7 +173,7 @@ export class OwnedObjects {
     await next;
   }
 
-  async #write(id: string, retried = false): Promise<void> {
+  async #write(id: string): Promise<void> {
     const shown = this.#pending.get(id);
     const data = shown && kept(shown);
     const record = this.#records.get(id);
@@ -149,12 +204,8 @@ export class OwnedObjects {
       if (this.#pending.get(id) === shown) this.#pending.delete(id);
       return;
     }
-    // Written elsewhere meanwhile: the person's latest edit still wins, once.
-    if (response.kind === "error" && response.error === "conflict" && !retried) {
-      const fresh = await this.#call({ kind: "get", id });
-      if (fresh.kind === "record") this.#records.set(id, fresh.record);
-      await this.#write(id, true);
-    }
+    // Preserve the local draft on conflicts. Replacing the entire fresh record
+    // here would erase disjoint changes made by a running block tool.
   }
 
   async #mutate(command: ResourceCommand): Promise<ResourceResponse> {

@@ -55,7 +55,7 @@
   import WorksMenu from "./top/WorksMenu.svelte";
   import ContextManifest from "./composer/ContextManifest.svelte";
   import OpenTabsChip from "./composer/OpenTabsChip.svelte";
-  import { contextSelection } from "../lib/context-selection";
+  import { contextSelection, referencesCanvasBlock } from "../lib/context-selection";
   import WorkTabPicker from "./WorkTabPicker.svelte";
   import WorkMediaPicker from "./WorkMediaPicker.svelte";
   import { mediaSize, mediaUrl } from "$domain/resources";
@@ -148,6 +148,12 @@
   /** The person's own tables, checklists and calendars on this canvas. */
   const owned = untrack(() => new OwnedObjects(session.profile));
   onMount(() => {
+    void owned.start().catch(() => {
+      blockSaveFailed = true;
+    });
+    return () => owned.stop();
+  });
+  onMount(() => {
     void human.start();
     return () => human.dispose();
   });
@@ -215,8 +221,10 @@
         notes: context.notes,
         objectives: context.objectives,
         media: context.mediaRevisions,
+        objects: owned.revisions(),
       },
       openTabs,
+      referencesCanvasBlock(session.composer),
     ),
   );
   let cardHost = $state<HTMLElement>();
@@ -1899,9 +1907,12 @@
     if (url) openPane({ kind: "url", url }, card);
   }
   /** One field, one meaning: the first message starts the work, the rest continue it. */
+  let blockSaveFailed = $state(false);
   async function send() {
     const text = session.composer.trim();
     if (!text || busy) return;
+    blockSaveFailed = !(await owned.flushAll());
+    if (blockSaveFailed) return;
     const current = objectiveSession;
     if (runningObjective && current) {
       const context = contextSel;
@@ -2783,6 +2794,7 @@
     >
   {/if}
   <div class="bar-dock" bind:clientHeight={dockHeight}>
+    {#if blockSaveFailed}<p role="alert">{m.resource_conflict()}</p>{/if}
     {#if aiEnabled}<WorkBar
         bind:ref={composerElement}
         bind:value={session.composer}

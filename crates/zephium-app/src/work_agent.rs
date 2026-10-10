@@ -2347,12 +2347,7 @@ impl Driver {
         self.thread = thread.into_iter().rev().take(16).rev().collect();
     }
     fn inherit_private(&mut self, projection: &WorkRuntimeProjection) {
-        for text in private_artifact_texts(
-            projection
-                .executions
-                .iter()
-                .map(|execution| (execution.steps.as_slice(), execution.artifacts.as_slice())),
-        ) {
+        for text in projection_private_artifact_texts(projection) {
             if !self.private.contains(&text) {
                 self.private.push(text.clone());
                 // Derived objects may combine accounts: no destination receives
@@ -2486,6 +2481,15 @@ impl WorkPartDriver {
     }
     pub(crate) fn inherit_private(&mut self, projection: &WorkRuntimeProjection) {
         self.0.inherit_private(projection);
+    }
+    /// Private block reads join the same destination/query boundary as private pages.
+    pub(crate) fn inherit_private_texts(&mut self, texts: &[String]) {
+        for text in texts {
+            if !self.0.private.contains(text) {
+                self.0.private.push(text.clone());
+                self.0.private_sites.push((String::new(), text.clone()));
+            }
+        }
     }
     /// Runs searches, page reads and tasks, and file and command steps. A
     /// terminal status means the run cannot go on (stopped, lost outcome).
@@ -2830,6 +2834,7 @@ fn step_kind_label(kind: &WorkStepKindV1) -> &'static str {
         WorkStepKindV1::Ask { .. } => "ask",
         WorkStepKindV1::Confirm { confirm: _ } => "confirm",
         WorkStepKindV1::Call { .. } => "call",
+        WorkStepKindV1::EditBlock { .. } => "edit_block",
         WorkStepKindV1::Steer { .. } => "person",
         WorkStepKindV1::List { .. } => "list",
         WorkStepKindV1::ReadFile { .. } => "read_file",
@@ -3008,6 +3013,38 @@ pub(crate) fn private_artifact_texts<'a>(
         .map(|artifact| artifact.data.plain_text())
         .filter(|text| !text.is_empty())
         .collect()
+}
+
+pub(crate) fn has_private_blocks(projection: &WorkRuntimeProjection) -> bool {
+    use zephium_core::work::context::{WorkContextItemKind, WorkContextVisibility};
+    projection.executions.iter().any(|execution| {
+        execution.spec.context.as_ref().is_some_and(|context| {
+            context.blocks
+                || context.items.iter().any(|item| {
+                    item.kind == WorkContextItemKind::Object
+                        && item.visibility == WorkContextVisibility::Private
+                })
+        })
+    })
+}
+
+pub(crate) fn projection_private_artifact_texts(projection: &WorkRuntimeProjection) -> Vec<String> {
+    if has_private_blocks(projection) {
+        projection
+            .executions
+            .iter()
+            .flat_map(|e| &e.artifacts)
+            .map(|a| a.data.plain_text())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        private_artifact_texts(
+            projection
+                .executions
+                .iter()
+                .map(|e| (e.steps.as_slice(), e.artifacts.as_slice())),
+        )
+    }
 }
 
 /// Unknown legacy/unfinished rows cannot establish order within an execution.

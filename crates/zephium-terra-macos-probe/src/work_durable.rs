@@ -173,6 +173,17 @@ pub(super) fn run_lead(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure
         .iter()
         .find(|scenario| name == scenario.name)
         .ok_or(super::ProbeFailure::Authority)?;
+    if scenario.name.starts_with("blocks-")
+        && [
+            "ZEPHIUM_PROBE_PROFILE",
+            "ZEPHIUM_PROBE_SEEDED_PROFILE",
+            "ZEPHIUM_PROBE_WORK_MEMORY",
+        ]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some())
+    {
+        return Err(super::ProbeFailure::Authority);
+    }
     let _ = LEAD_SCENARIO.set(scenario);
     run_mode(Mode::Lead)
 }
@@ -482,7 +493,11 @@ pub(super) fn replay_agent_turn(
 fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
     zephium_app::work_trace::install(Arc::new(|line: std::fmt::Arguments<'_>| {
-        if std::env::var_os("ZEPHIUM_EVAL_PUBLIC_EXPORT").is_none() {
+        if std::env::var_os("ZEPHIUM_EVAL_PUBLIC_EXPORT").is_none()
+            && !LEAD_SCENARIO
+                .get()
+                .is_some_and(|scenario| scenario.name.starts_with("blocks-"))
+        {
             let _ = writeln!(std::io::stdout().lock(), "trace: {line}");
         }
     }));
@@ -640,6 +655,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
                                         &worker_handle,
                                         &composition,
                                         profile,
+                                        space,
                                         planning_key,
                                         browser_keys,
                                         mode,
@@ -1160,6 +1176,7 @@ async fn workflow(
     handle: &zephium_app::Handle,
     composition: &MacosWorkComposition,
     profile: ProfileId,
+    space: SpaceId,
     planning_key: zephium_agentic::AgentProviderCredential,
     mut browser_keys: Vec<zephium_agentic::AgentProviderCredential>,
     mode: Mode,
@@ -1204,6 +1221,7 @@ async fn workflow(
             handle,
             composition,
             profile,
+            space,
             binding,
             browser_keys,
             scenario,

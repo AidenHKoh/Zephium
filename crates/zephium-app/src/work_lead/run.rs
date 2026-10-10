@@ -69,6 +69,7 @@ struct State {
 }
 
 pub(crate) struct LeadRun {
+    pub blocks: super::blocks::BlockScope,
     pub probe: WorkAttemptProbe,
     pub handle: crate::Handle,
     pub profile: ProfileId,
@@ -116,6 +117,7 @@ impl LeadRun {
         diagnostic: Option<fn(super::WorkLeadDiagnostic)>,
     ) -> Self {
         Self {
+            blocks: super::blocks::BlockScope::default(),
             probe,
             handle,
             profile,

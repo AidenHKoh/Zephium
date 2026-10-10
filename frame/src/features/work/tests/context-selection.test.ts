@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { contextSelection, formatBytes } from "../lib/context-selection";
+import { contextSelection, formatBytes, referencesCanvasBlock } from "../lib/context-selection";
 import type { WorkEnvironmentSnapshot, WorkRuntimeProjection } from "$shared/ipc/bindings";
 import { tabFixture } from "$shared/testing/fixtures";
 
@@ -103,4 +103,25 @@ describe("contextSelection", () => {
     expect(formatBytes(2048)).toBe("2.0 KB");
     expect(formatBytes(20 * 1024)).toBe("20 KB");
   });
+});
+
+test("implicit block context requires a concrete reference and carries no unrelated items", () => {
+  const known = { notes: [], objectives: new Map() };
+  expect(referencesCanvasBlock("Summarize the news")).toBe(false);
+  expect(referencesCanvasBlock("What is a calendar?")).toBe(false);
+  expect(referencesCanvasBlock("Append lunch to my calendar")).toBe(true);
+  expect(referencesCanvasBlock("Update this table and my checklist")).toBe(false);
+  expect(contextSelection(snapshot, [], [], known, false, false)).toBeNull();
+  expect(contextSelection(snapshot, ["e-unknown"], [], known, false, true)).toBeNull();
+  expect(contextSelection(snapshot, [], [], known, false, true)).toEqual({
+    environment: "env",
+    items: [],
+    blocks: true,
+  });
+  expect(
+    contextSelection(snapshot, ["e-unknown"], [], {
+      ...known,
+      objects: new Map([["note-missing", "44"]]),
+    }),
+  ).toEqual({ environment: "env", items: [{ element: "e-unknown", revision: "44" }] });
 });

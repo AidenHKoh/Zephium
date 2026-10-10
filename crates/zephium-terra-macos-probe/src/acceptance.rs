@@ -405,9 +405,14 @@ fn public_export_allowed(state: &zephium_core::work::runtime::WorkRuntimeProject
         execution.agent_grant().is_some_and(|grant| {
             grant.private && grant.folders.is_empty() && grant.accounts.is_empty()
         }) && execution
-            .inputs
-            .iter()
-            .all(|input| input.kind == WorkInputKindV1::Skill)
+            .spec
+            .context
+            .as_ref()
+            .is_none_or(|context| !context.requires_review())
+            && execution
+                .inputs
+                .iter()
+                .all(|input| input.kind == WorkInputKindV1::Skill)
             && execution.steps.iter().all(|step| {
                 step.account.is_none()
                     && !step
@@ -415,7 +420,10 @@ fn public_export_allowed(state: &zephium_core::work::runtime::WorkRuntimeProject
                         .and_then(|m| m.resolved_handoff)
                         .is_some_and(|kind| kind.includes(WorkPageHandoffKindV1::SignIn))
                     && !step.kind.files()
-                    && !matches!(step.kind, WorkStepKindV1::RunCommand { .. })
+                    && !matches!(
+                        step.kind,
+                        WorkStepKindV1::RunCommand { .. } | WorkStepKindV1::EditBlock { .. }
+                    )
             })
     })
 }
@@ -462,6 +470,8 @@ fn export_eval(
         })).collect();
         let artifacts: Vec<_> = if public { execution.artifacts.iter().map(|artifact| serde_json::json!({
             "id": artifact.id, "published": published.contains(&&artifact.id),
+            "revises": artifact.revises,
+            "current": !execution.artifacts.iter().any(|later| later.revises == Some(artifact.id)),
             "data": artifact.data, "evidence": artifact.evidence, "general_knowledge": artifact.general_knowledge,
         })).collect() } else { Vec::new() };
         serde_json::json!({
@@ -489,7 +499,10 @@ fn export_eval(
 /// The lead and helper turns of a page check: start one browser part, browse
 /// the start page toward the goal with records, then finish.
 pub(super) use super::loopback_support::Scripted;
-pub(super) const LEAD_SCENARIOS: [LeadScenario; 20] = [
+pub(super) const LEAD_SCENARIOS: [LeadScenario; 23] = [
+    LeadScenario { name: "blocks-checklist", requests: &["In this checklist, mark Pack passport done and append Book taxi due 2026-11-21. Preserve the other dates and completion flags. Update the existing block."], answer:"", folder:false, site:None },
+    LeadScenario { name: "blocks-table", requests: &["In this table, update the row named Item120 so Status is Ready, then append Item200 with Owner Ada and Status Todo. Preserve every existing column and all other rows. Update the existing block."], answer:"", folder:false, site:None },
+    LeadScenario { name: "blocks-calendar", requests: &["In my calendar, move Lunch to 2026-11-22 at 13:00 and append Walk on 2026-11-23 at 09:00. Preserve Train unchanged. Update the existing block."], answer:"", folder:false, site:None },
     // A fact the person states once is kept and shapes a later request.
     LeadScenario {
         name: "memory",
@@ -1113,6 +1126,7 @@ pub(super) async fn lead_workflow(
     handle: &zephium_app::Handle,
     composition: &zephium_work_composition::MacosWorkComposition,
     profile: zephium_core::ids::ProfileId,
+    space: zephium_core::ids::SpaceId,
     binding: zephium_app::AgentWorkProfileBinding,
     mut keys: Vec<zephium_agentic::AgentProviderCredential>,
     scenario: &'static LeadScenario,
@@ -1126,9 +1140,10 @@ pub(super) async fn lead_workflow(
     use zephium_ipc::work::*;
     let export = public_eval_path(scenario)?;
     let public_eval = export.is_some();
+    let block_probe = scenario.name.starts_with("blocks-");
     let eval_started = Instant::now();
     let local_diagnostics = Arc::new(Mutex::new(EvalDiagnostics::default()));
-    if public_eval {
+    if public_eval || block_probe {
         let _ = zephium_app::work_models::view(profile).await;
         for role in [
             WorkModelRole::Lead,
@@ -1147,7 +1162,7 @@ pub(super) async fn lead_workflow(
     };
     // A named page model, as a person picks one in Settings → AI.
     if let Ok(id) = std::env::var("ZEPHIUM_PROBE_PAGE_MODEL").and_then(|id| {
-        if public_eval {
+        if public_eval || block_probe {
             Err(std::env::VarError::NotPresent)
         } else {
             Ok(id)
@@ -1165,7 +1180,7 @@ pub(super) async fn lead_workflow(
         .await
         .unwrap_or_else(|| page.clone());
     let model_setup = serde_json::json!({ "lead": lead.entry, "page": page.entry, "light": light.entry, "public_search_model": PUBLIC_SEARCH_MODEL });
-    if public_eval {
+    if public_eval || block_probe {
         for (role, model) in [
             ("lead", &mut lead),
             ("page", &mut page),
@@ -1301,6 +1316,7 @@ pub(super) async fn lead_workflow(
     if scenario.name == "day" {
         seed_tasks(handle, profile).await?;
     }
+    let block_fixture = super::work_blocks::seed(handle, profile, space, scenario.name).await?;
     let pick = if scenario.name == "save" {
         Some(save_folder()?)
     } else {
@@ -1312,7 +1328,7 @@ pub(super) async fn lead_workflow(
         work,
         scenario.answer,
         pick.clone(),
-        public_eval,
+        public_eval || block_probe,
     ));
     let keys = Arc::new(Mutex::new(keys));
     let callback = handle.callback_handle();
@@ -1368,7 +1384,7 @@ pub(super) async fn lead_workflow(
                                 .map(|f| f.to_string_lossy().into_owned())
                                 .collect(),
                             accounts: vec![],
-                            private: public_eval,
+                            private: public_eval || block_probe,
                             lead: None,
                             skill: None,
                             search_fallback: None,
@@ -1382,7 +1398,9 @@ pub(super) async fn lead_workflow(
                         },
                     },
                 },
-                None,
+                block_fixture
+                    .as_ref()
+                    .map(super::work_blocks::Fixture::selection),
                 models.clone(),
                 &search,
                 |probe, request| {
@@ -1404,7 +1422,7 @@ pub(super) async fn lead_workflow(
                         settings.access =
                             zephium_agent_controller::AgentBrowserModelAccess::Chosen(chosen_page);
                         settings.decision_model = chosen_light;
-                        if public_eval {
+                        if public_eval || block_probe {
                             settings.stage_diagnostic = None;
                             settings.model_diagnostic = None;
                             settings.resource_diagnostic = None;
@@ -1438,7 +1456,7 @@ pub(super) async fn lead_workflow(
             execution,
             started.elapsed().as_millis(),
         );
-        if !public_eval {
+        if !public_eval && !block_probe {
             page_rows(execution);
             part_rows(execution);
         }
@@ -1491,6 +1509,11 @@ pub(super) async fn lead_workflow(
         }
     }
     let state = state.ok_or("lead_no_run")?;
+    if let Some(fixture) = &block_fixture {
+        if let Err(error) = super::work_blocks::verify(handle, profile, fixture, &state).await {
+            failure = failure.or(Some(error));
+        }
+    }
     if let Some(path) = export {
         export_eval(
             &path,
@@ -1499,7 +1522,7 @@ pub(super) async fn lead_workflow(
             &local_diagnostics,
             eval_started.elapsed().as_millis(),
         )?;
-    } else {
+    } else if !block_probe {
         let directory = std::path::Path::new("target/work-runtime-proof/lead");
         let _ = std::fs::create_dir_all(directory);
         let _ = std::fs::write(

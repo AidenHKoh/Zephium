@@ -2225,3 +2225,159 @@ fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
         [Some(10.into()), Some(20.into())]
     );
 }
+
+#[test]
+fn live_draft_edit_preserves_running_agent_and_exact_user_copy() {
+    use zephium_core::resources::*;
+    let mut f = AgentSettlementFixture::new();
+    let draft_data = |body: &str| artifact::WorkArtifactDataV1::Draft {
+        destination: zephium_core::work::objects::WorkDraftDestinationV1::Email,
+        to: Some("Example colleague".into()),
+        subject: Some("Synthetic draft".into()),
+        body: body.into(),
+        target_url: None,
+    };
+    let original = artifact::WorkArtifactV1 {
+        version: 1,
+        id: 901.into(),
+        execution: f.execution,
+        attempt: f.attempt,
+        node: f.node,
+        output: "Result".into(),
+        title: "Synthetic draft".into(),
+        data: draft_data("Original agent body"),
+        review: WorkOutputReview::SourceMappedNeedsReview,
+        presentation: artifact::WorkArtifactPresentationV1::Automatic,
+        evidence: vec![],
+        general_knowledge: true,
+        part: None,
+        revises: None,
+    };
+    f.step(
+        10,
+        WorkStepKindV1::Publish,
+        WorkStepStatus::Succeeded,
+        vec![original.clone()],
+    )
+    .unwrap();
+    let before = read_runtime(&mut f.hub, &f.work);
+    let edited = f
+        .hub
+        .work_document(
+            f.work.profile,
+            WorkRequest::RuntimeCommand {
+                id: f.work.id,
+                expected: before.work.revision,
+                command: 700.into(),
+                intent: WorkRuntimeIntent::EditArtifact {
+                    execution: f.execution,
+                    artifact: original.id,
+                    data: draft_data("User-edited body"),
+                    evidence: vec![],
+                },
+            },
+        )
+        .unwrap();
+    let WorkReply::RuntimeCommand { projection, .. } = edited else {
+        panic!("edited draft")
+    };
+    assert_eq!(
+        projection.executions[0].status,
+        WorkExecutionStatus::Running
+    );
+    assert_eq!(projection.executions[0].artifacts[0], original);
+    assert_eq!(
+        projection.executions[0].attempts,
+        before.executions[0].attempts
+    );
+    let user = &projection.executions[0].user_artifacts[0];
+    assert_eq!(user.edited_data, Some(draft_data("User-edited body")));
+    let revision = user.revision;
+    let copy = f.hub.resource_call(
+        f.work.profile,
+        ResourceCall::Mutate {
+            command: Box::new(ResourceCommand {
+                version: 1,
+                request_id: "copy-live-draft-0001".into(),
+                intent: ResourceIntent::PreserveArtifact {
+                    objective: f.work.id,
+                    execution: f.execution,
+                    artifact: original.id,
+                    basis: WorkObjectBasis::UserRevision { revision },
+                    title: None,
+                },
+            }),
+        },
+    );
+    let ResourceResponse::Applied { record, .. } = copy else {
+        panic!("preserved user revision: {copy:?}")
+    };
+    let ResourceContent::Object { object } = record.draft.content else {
+        panic!()
+    };
+    assert_eq!(object.data, draft_data("User-edited body"));
+    assert_eq!(
+        object.provenance.unwrap().basis,
+        WorkObjectBasis::UserRevision { revision }
+    );
+    // A later stop remains legal and does not erase the user's durable draft.
+    let current = read_runtime(&mut f.hub, &f.work);
+    f.hub
+        .work_document(
+            f.work.profile,
+            WorkRequest::RuntimeCommand {
+                id: f.work.id,
+                expected: current.work.revision,
+                command: 701.into(),
+                intent: WorkRuntimeIntent::Cancel {
+                    execution: f.execution,
+                    intervention: None,
+                },
+            },
+        )
+        .unwrap();
+    let stopped = read_runtime(&mut f.hub, &f.work);
+    assert_eq!(
+        stopped.executions[0].user_artifacts[0].edited_data,
+        Some(draft_data("User-edited body"))
+    );
+    assert_eq!(stopped.executions[0].artifacts[0], original);
+}
+
+#[test]
+fn an_interrupted_block_edit_remains_unknown_effect_debt() {
+    let mut f = AgentSettlementFixture::new();
+    f.step(
+        40,
+        WorkStepKindV1::EditBlock {
+            resource: "01M4K000000000000000000001".into(),
+            expected_revision: "1".into(),
+        },
+        WorkStepStatus::Running,
+        vec![],
+    )
+    .unwrap();
+    let current = read_runtime(&mut f.hub, &f.work);
+    f.hub
+        .work_document(
+            f.work.profile,
+            WorkRequest::RuntimeCommand {
+                id: f.work.id,
+                expected: current.work.revision,
+                command: 800.into(),
+                intent: WorkRuntimeIntent::Cancel {
+                    execution: f.execution,
+                    intervention: None,
+                },
+            },
+        )
+        .unwrap();
+    let stopped = read_runtime(&mut f.hub, &f.work);
+    let step = stopped.executions[0]
+        .steps
+        .iter()
+        .find(|s| s.id == WorkStepId::from(40))
+        .unwrap();
+    assert_eq!(step.status, WorkStepStatus::OutcomeUnknown);
+    assert!(step.has_unconfirmed_effect());
+}

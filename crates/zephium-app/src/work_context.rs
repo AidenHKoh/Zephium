@@ -174,10 +174,12 @@ impl WorkContextAdmission {
         // Decisions are durable user context for reviewed work. They never ride
         // a public search query.
         let mut implicit = Vec::new();
-        if matches!(
-            purpose,
-            WorkContextPurpose::Planning | WorkContextPurpose::Agent
-        ) {
+        if !selection.blocks
+            && matches!(
+                purpose,
+                WorkContextPurpose::Planning | WorkContextPurpose::Agent
+            )
+        {
             let mut decisions: Vec<_> = environment.decisions.iter().collect();
             decisions.sort_by_key(|decision| decision.element);
             for decision in decisions {
@@ -238,7 +240,7 @@ impl WorkContextAdmission {
         Ok(tabs)
     }
 
-    async fn environment(
+    pub(crate) async fn environment(
         &self,
         profile: ProfileId,
         id: WorkEnvironmentId,
@@ -471,8 +473,8 @@ impl WorkContextAdmission {
                     if *completed { "completed" } else { "open" }
                 ),
             ),
-            ResourceContent::Object { object } => {
-                (WorkContextItemKind::Object, object.data.plain_text())
+            ResourceContent::Object { .. } => {
+                (WorkContextItemKind::Object, block_context_body(&record))
             }
             ResourceContent::Media { asset } => {
                 let text = if asset.kind == zephium_core::resources::MediaKind::Image {
@@ -572,5 +574,29 @@ impl WorkContextAdmission {
             found.data = edited;
         }
         Ok((found, visibility))
+    }
+}
+
+/// Structured identity is never inferred from lossy text. Large blocks are read
+/// in bounded pages by the context-bound tools before any edit is accepted.
+fn block_context_body(record: &zephium_core::resources::ResourceRecord) -> String {
+    let ResourceContent::Object { object } = &record.draft.content else {
+        return String::new();
+    };
+    let data = serde_json::to_value(&object.data).unwrap_or_default();
+    if let Some(rows) = data
+        .get("rows")
+        .or_else(|| data.get("items"))
+        .or_else(|| data.get("steps"))
+        .and_then(serde_json::Value::as_array)
+    {
+        return serde_json::json!({"resource":record.id,"revision":record.revision,"kind":data["kind"],"count":rows.len(),"read_required":true}).to_string();
+    }
+    let body = serde_json::json!({"resource":record.id,"revision":record.revision,"data":data})
+        .to_string();
+    if body.len() <= MAX_CONTEXT_ITEM_BYTES {
+        body
+    } else {
+        serde_json::json!({"resource":record.id,"revision":record.revision,"kind":data["kind"],"read_required":true}).to_string()
     }
 }

@@ -271,6 +271,102 @@ pub(crate) async fn work_operation(
     }
 }
 
+/// Persist only the user's draft body. The original agent artifact and a live
+/// execution remain unchanged; the returned user revision can be preserved.
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn work_edit_draft(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    work: WorkId,
+    expected_revision: zephium_core::work::WorkRevision,
+    command: WorkCommandId,
+    execution: zephium_core::work::WorkExecutionId,
+    artifact: zephium_core::work::WorkArtifactId,
+    body: String,
+) -> WorkResponseV1 {
+    use zephium_core::work::{
+        artifact::WorkArtifactDataV1, port::WorkReply, runtime::WorkRuntimeIntent,
+    };
+    let result = async {
+        if !super::authorize(&caller, super::CallerPolicy::Main, "work_edit_draft")
+            || super::shutdown_started(&app)
+            || body.len() > 16_000
+        {
+            return Err(WorkError::Invalid);
+        }
+        let profile = ProfileId::parse(&expected_profile)
+            .filter(|id| id.to_string() == expected_profile)
+            .ok_or(WorkError::Invalid)?;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            app.state::<zephium_app::Handle>()
+                .work_projection(profile, work)?,
+        )
+        .await
+        .map_err(|_| WorkError::Unavailable)??;
+        if response.profile != profile {
+            return Err(WorkError::ProfileUnavailable);
+        }
+        let WorkReply::Runtime(projection) = response.reply else {
+            return Err(WorkError::Invalid);
+        };
+        if projection.work.revision != expected_revision {
+            return Err(WorkError::Conflict);
+        }
+        let execution = projection
+            .executions
+            .iter()
+            .find(|e| e.id == execution)
+            .ok_or(WorkError::NotFound)?;
+        let original = execution
+            .artifacts
+            .iter()
+            .find(|a| a.id == artifact)
+            .ok_or(WorkError::NotFound)?;
+        let edited = execution
+            .user_artifacts
+            .iter()
+            .find(|u| u.artifact == artifact && u.edited_data.is_some());
+        let mut data = edited
+            .and_then(|u| u.edited_data.clone())
+            .unwrap_or_else(|| original.data.clone());
+        let WorkArtifactDataV1::Draft { body: current, .. } = &mut data else {
+            return Err(WorkError::Invalid);
+        };
+        *current = body;
+        let evidence = edited.map_or_else(|| original.evidence.clone(), |u| u.evidence.clone());
+        data.validate(evidence.len())?;
+        Ok(WorkCallV1::Execute {
+            command: zephium_ipc::work::WorkCommandV1 {
+                version: 1,
+                work,
+                expected_revision,
+                command,
+                intent: WorkRuntimeIntent::EditArtifact {
+                    execution: execution.id,
+                    artifact,
+                    data,
+                    evidence,
+                },
+            },
+        })
+    }
+    .await;
+    match result {
+        Ok(call) => work_call(caller, app, expected_profile, call).await,
+        Err(error) => WorkResponseV1 {
+            version: 1,
+            profile: expected_profile,
+            reply: zephium_ipc::work::WorkReplyV1::Error {
+                error: error.into(),
+            },
+        },
+    }
+}
+
 /// Manifest preview for the composer. Bodies never cross this boundary.
 #[tauri::command]
 #[specta::specta]

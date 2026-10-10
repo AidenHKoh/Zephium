@@ -2374,6 +2374,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
         environment: 1.into(),
         items: vec![],
         tabs: true,
+        blocks: false,
     }
     .validate()
     .is_ok());
@@ -2385,6 +2386,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
         items: vec![],
         total_bytes: 0,
         tabs: vec![tab.clone(); MAX_CONTEXT_TABS],
+        blocks: false,
     };
     disclosure.validate().unwrap();
     assert!(disclosure.requires_review());

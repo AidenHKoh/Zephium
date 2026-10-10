@@ -293,6 +293,9 @@ where
                 run.mark_private();
             }
             driver.inherit_private(&projection);
+            if crate::work_agent::has_private_blocks(&projection) {
+                run.mark_private();
+            }
         }
         Self {
             run,
@@ -330,12 +333,9 @@ where
             .runtime_projection()
             .await
             .map_err(|_| WorkAttemptStatus::Failed)?;
-        let private = crate::work_agent::private_artifact_texts(
-            projection
-                .executions
-                .iter()
-                .map(|execution| (execution.steps.as_slice(), execution.artifacts.as_slice())),
-        );
+        let mut private = crate::work_agent::projection_private_artifact_texts(&projection);
+        let block_texts = self.run.blocks.private_texts();
+        private.extend(block_texts.iter().cloned());
         if projection.executions.iter().any(|execution| {
             execution
                 .steps
@@ -344,7 +344,14 @@ where
         }) {
             self.run.mark_private();
         }
-        self.driver.lock().await.inherit_private(&projection);
+        {
+            let mut driver = self.driver.lock().await;
+            driver.inherit_private(&projection);
+            driver.inherit_private_texts(&block_texts);
+        }
+        if crate::work_agent::has_private_blocks(&projection) {
+            self.run.mark_private();
+        }
         let mut refused = Vec::new();
         let mut admitted = Vec::with_capacity(requests.len());
         for request in requests {

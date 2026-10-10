@@ -65,6 +65,8 @@ function describe(step: Step): Pick<TimelineRow, "glyph" | "what" | "where"> | n
       return { glyph: "file", what: m.work_timeline_searched(), where: kind.query };
     case "write_file":
       return { glyph: "file", what: m.work_timeline_wrote(), where: fileName(kind.path) };
+    case "edit_block":
+      return { glyph: "done", what: m.work_timeline_changed(), where: m.work_tool_blocks() };
     case "edit_file":
       return { glyph: "file", what: m.work_timeline_changed(), where: fileName(kind.path) };
     case "move_file":

@@ -3,6 +3,7 @@
 //! the canvas, and records every step durably through the attempt, so the
 //! frame's subscriptions see it as it happens. The model only proposes;
 //! Rust admits every tool call.
+pub(crate) mod blocks;
 mod call;
 mod folders;
 mod found;
@@ -159,6 +160,7 @@ impl WorkLeadService {
         grant.validate()?;
         let work = command.work;
         let command_id = command.command;
+        let block_selection = selection.clone();
         let (request, bodies, tabs) = match selection {
             Some(selection) => {
                 let admitted = crate::work_context::WorkContextAdmission::new(self.handle.clone())
@@ -254,6 +256,7 @@ impl WorkLeadService {
             self.diagnostic,
         );
         let objective = attempt.disclosure_objective()?;
+        run.blocks.bind(block_selection, &objective);
         let named = if grant.private {
             Vec::new()
         } else {
@@ -290,6 +293,9 @@ impl WorkLeadService {
             &grant,
         );
         context.push_str(&folders::context(&run, &named));
+        if run.blocks.available() {
+            context.push_str("\nCanvas blocks: read_block resolves only the specifically requested checklist, table or calendar. Read it before revise_block; do not inspect unrelated blocks or replace unseen rows. If several match, ask the person to select one.\n");
+        }
         if unnamed {
             context.push_str("\nThe work has no name yet: finish names it with title.\n");
         }

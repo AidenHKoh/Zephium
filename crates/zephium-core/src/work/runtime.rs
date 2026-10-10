@@ -1303,6 +1303,11 @@ pub enum WorkStepKindV1 {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         collection: Option<super::collection::WorkBrowseCollection>,
     },
+    /// A revision-checked edit of an admitted owned block.
+    EditBlock {
+        resource: String,
+        expected_revision: String,
+    },
     /// Objects the agent placed on the canvas from this turn.
     Publish,
     Ask {
@@ -1768,6 +1773,17 @@ impl WorkStepKindV1 {
                 }
                 Ok(())
             }
+            Self::EditBlock {
+                resource,
+                expected_revision,
+            } => {
+                if !crate::resources::valid_id(resource)
+                    || crate::resources::revision(expected_revision).is_none()
+                {
+                    return Err(WorkError::Invalid);
+                }
+                Ok(())
+            }
             Self::Confirm { confirm } => confirm.validate(),
             Self::Call { call } => call.validate(),
             Self::Turn | Self::Publish => Ok(()),
@@ -1833,8 +1849,10 @@ impl WorkStepFact {
         matches!(
             self.status,
             WorkStepStatus::Running | WorkStepStatus::OutcomeUnknown
-        ) && (matches!(self.kind, WorkStepKindV1::RunCommand { .. })
-            || (self.kind.proposes_write() && self.kind.file_decision() == Some(true))
+        ) && (matches!(
+            self.kind,
+            WorkStepKindV1::RunCommand { .. } | WorkStepKindV1::EditBlock { .. }
+        ) || (self.kind.proposes_write() && self.kind.file_decision() == Some(true))
             || (matches!(self.kind, WorkStepKindV1::Read { goal: Some(_), .. })
                 && self.measurements.is_none_or(|m| m.native_actions != 0)))
     }
@@ -2165,10 +2183,14 @@ impl WorkExecutionFact {
                         .flat_map(|a| &a.evidence)
                         .any(|original| original == link)
                 })
-                || !matches!(
+                || (!matches!(
                     self.status,
                     WorkExecutionStatus::Completed | WorkExecutionStatus::NeedsReview
-                )
+                ) && !(edit.decision.is_none()
+                    && matches!(&edit.edited_data, Some(WorkArtifactDataV1::Draft { .. }))
+                    && self.artifacts.iter().any(|a| {
+                        a.id == edit.artifact && matches!(&a.data, WorkArtifactDataV1::Draft { .. })
+                    })))
             {
                 return Err(WorkError::Invalid);
             }

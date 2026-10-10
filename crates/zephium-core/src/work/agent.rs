@@ -220,6 +220,7 @@ impl WorkAgentTurnDisclosure {
                     WorkStepKindV1::Read { url, .. } => ("read", url.clone()),
                     WorkStepKindV1::Discover { query, .. } => ("discover", query.clone()),
                     WorkStepKindV1::Publish => ("publish", String::new()),
+                    WorkStepKindV1::EditBlock { resource, .. } => ("edit_block", resource.clone()),
                     WorkStepKindV1::Ask { prompt, answer, .. } => (
                         "ask",
                         match answer {

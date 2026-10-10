@@ -21,6 +21,10 @@ pub struct WorkContextSelectionV1 {
     /// the current window as context: title, host and path, never content.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub tabs: bool,
+    /// This request may resolve a specifically referenced block on its canvas.
+    /// No other block bodies or titles are disclosed implicitly.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocks: bool,
 }
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -31,7 +35,9 @@ pub struct WorkContextSelectionItem {
 }
 impl WorkContextSelectionV1 {
     pub fn validate(&self) -> Result<(), WorkError> {
-        if (self.items.is_empty() && !self.tabs) || self.items.len() > MAX_CONTEXT_ITEMS {
+        if (self.items.is_empty() && !self.tabs && !self.blocks)
+            || self.items.len() > MAX_CONTEXT_ITEMS
+        {
             return Err(WorkError::Invalid);
         }
         let mut seen = std::collections::HashSet::new();
@@ -135,6 +141,9 @@ pub struct WorkContextDisclosureV1 {
     /// cards without a read.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tabs: Vec<WorkContextTabV1>,
+    /// Request-bound canvas access for uniquely resolved block tools.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocks: bool,
 }
 pub const MAX_CONTEXT_TABS: usize = 60;
 pub const MAX_CONTEXT_TAB_TITLE_BYTES: usize = 256;
@@ -204,7 +213,7 @@ impl WorkContextTabV1 {
 impl WorkContextDisclosureV1 {
     pub fn validate(&self) -> Result<(), WorkError> {
         if self.version != 1
-            || (self.items.is_empty() && self.tabs.is_empty())
+            || (self.items.is_empty() && self.tabs.is_empty() && !self.blocks)
             || self.items.len() > MAX_CONTEXT_ITEMS
             || self.tabs.len() > MAX_CONTEXT_TABS
         {
@@ -233,7 +242,8 @@ impl WorkContextDisclosureV1 {
         Ok(())
     }
     pub fn requires_review(&self) -> bool {
-        !self.tabs.is_empty()
+        self.blocks
+            || !self.tabs.is_empty()
             || self
                 .items
                 .iter()
@@ -361,6 +371,7 @@ impl WorkAdmittedContext {
             items,
             total_bytes: total as u32,
             tabs,
+            blocks: selection.blocks,
         };
         disclosure.validate()?;
         if purpose == WorkContextPurpose::PublicRead && disclosure.requires_review() {
@@ -520,6 +531,7 @@ mod tests {
                 })
                 .collect(),
             tabs: false,
+            blocks: false,
         }
     }
 
@@ -625,6 +637,7 @@ mod implicit_tests {
                 revision: "art-1".into(),
             }],
             tabs: false,
+            blocks: false,
         };
         let source = |kind, revision: &str, text: &str| WorkContextSource {
             element,
