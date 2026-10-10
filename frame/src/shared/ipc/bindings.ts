@@ -3710,6 +3710,7 @@ export type WorkElementPlacement_Deserialize = {
 	/**
 	 *  0: an absolute position from before lanes, which the canvas re-derives;
 	 *  2: `x, y` are the card's offset from its lane-derived position.
+	 *  3: the person pinned the block relative to its result's corner.
 	 */
 	revision?: number,
 };
@@ -3727,6 +3728,7 @@ export type WorkElementPlacement_Serialize = {
 	/**
 	 *  0: an absolute position from before lanes, which the canvas re-derives;
 	 *  2: `x, y` are the card's offset from its lane-derived position.
+	 *  3: the person pinned the block relative to its result's corner.
 	 */
 	revision?: number,
 };
