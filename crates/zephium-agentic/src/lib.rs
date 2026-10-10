@@ -144,6 +144,8 @@ mod semantic_settle_coordinator;
 mod semantic_verify;
 mod semantic_wait;
 mod semantic_wire;
+mod secret_shapes;
+pub use secret_shapes::contains_recognized_secret;
 mod sign_in_handoff;
 
 pub use agent_action_metrics::{

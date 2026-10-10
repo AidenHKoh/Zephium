@@ -776,67 +776,7 @@ const fn hex_digit(value: u8) -> Option<u8> {
 }
 
 pub(crate) fn looks_like_secret_value(value: &str) -> bool {
-    let trimmed = value.trim();
-    if trimmed.len() < 8 {
-        return false;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.contains("-----begin private key-----")
-        || lower.contains("-----begin rsa private key-----")
-        || lower.contains("-----begin ec private key-----")
-        || contains_authorization_value(&lower)
-    {
-        return true;
-    }
-    trimmed
-        .split(|character: char| {
-            !character.is_ascii_alphanumeric() && !matches!(character, '_' | '-' | '.')
-        })
-        .filter(|token| token.len() >= 8)
-        .any(looks_like_secret_token)
-}
-
-fn contains_authorization_value(value: &str) -> bool {
-    let mut prior_was_scheme = false;
-    for word in value.split_ascii_whitespace() {
-        let word = word.trim_matches(|character: char| !character.is_ascii_alphanumeric());
-        if prior_was_scheme && word.len() >= 12 {
-            return true;
-        }
-        prior_was_scheme = matches!(word, "bearer" | "basic");
-    }
-    false
-}
-
-fn looks_like_secret_token(token: &str) -> bool {
-    let lower = token.to_ascii_lowercase();
-    if lower.starts_with("sk-")
-        || lower.starts_with("sk_live_")
-        || lower.starts_with("rk_live_")
-        || lower.starts_with("ghp_")
-        || lower.starts_with("github_pat_")
-        || lower.starts_with("glpat-")
-        || lower.starts_with("xoxb-")
-        || lower.starts_with("xoxp-")
-        || token.starts_with("AKIA")
-        || token.starts_with("ASIA")
-        || token.starts_with("AIza")
-    {
-        return true;
-    }
-    let mut jwt_parts = token.split('.');
-    matches!(
-        (
-            jwt_parts.next(),
-            jwt_parts.next(),
-            jwt_parts.next(),
-            jwt_parts.next()
-        ),
-        (Some(header), Some(payload), Some(signature), None)
-            if header.starts_with("eyJ")
-                && payload.len() >= 8
-                && signature.len() >= 8
-    )
+    crate::contains_recognized_secret(value)
 }
 
 #[derive(Deserialize)]
