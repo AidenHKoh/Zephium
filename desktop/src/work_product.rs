@@ -124,6 +124,47 @@ async fn selected_work(
     Ok(profile)
 }
 
+/// Saves a plan's calendar where the person chooses. Only a calendar: the
+/// text must be one, and the name stays a plain file name.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_save_calendar(caller: WebviewWindow, name: String, text: String) -> bool {
+    use tauri_plugin_dialog::DialogExt;
+    if !super::authorize(&caller, super::CallerPolicy::Main, "work_save_calendar")
+        || !calendar_file(&name, &text)
+    {
+        return false;
+    }
+    let app = caller.app_handle().clone();
+    let picked = tokio::task::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_file_name(&name)
+            .add_filter("Calendar", &["ics"])
+            .blocking_save_file()
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(path) = picked.and_then(|picked| picked.into_path().ok()) else {
+        return false;
+    };
+    matches!(
+        tokio::task::spawn_blocking(move || std::fs::write(path, text)).await,
+        Ok(Ok(()))
+    )
+}
+
+fn calendar_file(name: &str, text: &str) -> bool {
+    name.len() <= 120
+        && name.ends_with(".ics")
+        && !name.starts_with('.')
+        && !name.chars().any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
+        && text.len() <= 1024 * 1024
+        && text.starts_with("BEGIN:VCALENDAR\r\n")
+        && text.trim_end().ends_with("END:VCALENDAR")
+}
+
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn work_activity(
@@ -539,5 +580,18 @@ mod admission_tests {
             refusal("environment:checkpoint", WorkError::Conflict, fault, zero),
             "work: phase=call call=environment:checkpoint refused=Conflict waited_ms=0"
         );
+    }
+}
+
+#[cfg(test)]
+mod calendar_tests {
+    #[test]
+    fn only_a_calendar_under_a_plain_name_is_saved() {
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n";
+        assert!(super::calendar_file("CS exam plan.ics", ics));
+        assert!(!super::calendar_file("../plan.ics", ics));
+        assert!(!super::calendar_file(".plan.ics", ics));
+        assert!(!super::calendar_file("plan.sh", ics));
+        assert!(!super::calendar_file("plan.ics", "#!/bin/sh\n"));
     }
 }

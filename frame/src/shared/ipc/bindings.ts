@@ -6,6 +6,11 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 /** Commands */
 export const commands = {
 	workCall: (expectedProfile: string, call: WorkCallV1_Deserialize) => __TAURI_INVOKE<WorkResponseV1_Serialize>("work_call", { expectedProfile, call }),
+	/**
+	 *  Saves a plan's calendar where the person chooses. Only a calendar: the
+	 *  text must be one, and the name stays a plain file name.
+	 */
+	workSaveCalendar: (name: string, text: string) => __TAURI_INVOKE<boolean>("work_save_calendar", { name, text }),
 	workOperation: (expectedProfile: string, operation: WorkCommandId, input: WorkOperationV1_Deserialize) => __TAURI_INVOKE<WorkOperationResponseV1_Serialize>("work_operation", { expectedProfile, operation, input }),
 	workOperationStatus: (expectedProfile: string, work: WorkId, operation: WorkCommandId, acknowledge: boolean) => __TAURI_INVOKE<WorkOperationResponseV1_Serialize>("work_operation_status", { expectedProfile, work, operation, acknowledge }),
 	/**  Manifest preview for the composer. Bodies never cross this boundary. */

@@ -1538,6 +1538,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
         .commands(collect_commands![
             work_product::work_call,
+            work_product::work_save_calendar,
             work_product::work_operation,
             work_product::work_operation_status,
             work_product::work_context_preview,

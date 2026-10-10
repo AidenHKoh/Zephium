@@ -6,6 +6,9 @@
   import Title from "./Title.svelte";
   import PlanCalendar from "./PlanCalendar.svelte";
   import { planWeeks } from "../../lib/board/plan-calendar";
+  import { icsFileName, planIcs } from "../../lib/board/plan-ics";
+  import { commands } from "$shared/ipc/bindings";
+  import * as m from "$shared/i18n/messages";
   import {
     AirplaneTakeOff01Icon,
     BedDoubleIcon,
@@ -37,6 +40,18 @@
   const priced = $derived(object.steps.some((step) => step.cost));
   /** A long dated plan stands as its weeks; the centre keeps every step's words beneath. */
   const weeks = $derived(planWeeks(object));
+  const onDays = $derived(object.steps.some((step) => step.date));
+  let saving = $state(false);
+  async function addToCalendar() {
+    const text = planIcs(object);
+    if (!text || saving) return;
+    saving = true;
+    try {
+      await commands.workSaveCalendar(icsFileName(object), text);
+    } finally {
+      saving = false;
+    }
+  }
   /** A step names its day only where the day changes. */
   const dated = $derived(
     object.steps.map((step, index) =>
@@ -46,7 +61,15 @@
 </script>
 
 <section class="plan" class:priced class:calendar={!!weeks} aria-label={object.title}>
-  {#if object.title}<Title text={object.title} />{/if}
+  {#if object.title || onDays}<header>
+      {#if object.title}<Title text={object.title} />{/if}
+      {#if onDays}<button
+          type="button"
+          class="calendar-add nodrag nopan"
+          disabled={saving}
+          onclick={addToCalendar}>{m.work_plan_add_to_calendar()}</button
+        >{/if}
+    </header>{/if}
   {#if weeks}<PlanCalendar {object} {weeks} glyphs={GLYPH} {actions} />{/if}
   {#if !weeks || centre}<div class="grid">
       <ol class="steps">
@@ -120,6 +143,35 @@
 
   .plan.calendar {
     max-inline-size: none;
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .calendar-add {
+    flex: none;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--color-muted);
+    font: inherit;
+    font-size: var(--text-label);
+    font-weight: 500;
+    cursor: default;
+    transition: color var(--motion-fast) var(--ease-out);
+  }
+
+  .calendar-add:hover {
+    color: var(--color-text);
+  }
+
+  .calendar-add:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
   }
 
   /* One grid for every step: the date column is as wide as its longest label. */
