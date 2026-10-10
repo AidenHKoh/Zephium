@@ -203,6 +203,13 @@ pub struct WorkAgentProviders<'a> {
     pub search: &'a dyn WorkPublicSearchProvider,
 }
 
+fn local_step_is_disclosable(kind: &WorkStepKindV1) -> bool {
+    if !kind.files() && !matches!(kind, WorkStepKindV1::RunCommand { .. }) {
+        return true;
+    }
+    serde_json::to_string(kind).ok().is_some_and(|wire| !zephium_agentic::contains_recognized_secret(&wire))
+}
+
 /// Tokens a turn must still be able to spend before the loop stops itself.
 const TURN_TOKEN_FLOOR: u32 = 12_000;
 /// Consecutive refused, idle or dropped turns before the run gives up.
@@ -725,6 +732,10 @@ impl Driver {
     ) -> Result<WorkStepId, WorkError> {
         let id = step.id;
         let kind = step_kind_label(&step.kind);
+        if !local_step_is_disclosable(&step.kind) {
+            crate::work_trace::record(format_args!("work: phase=step stage=admission kind={kind} reason=recognized_secret; content=redacted"));
+            return Err(WorkError::Invalid);
+        }
         if let Err(error) = self
             .probe
             .commit_step(WorkRuntimeUpdate::BeginStep {
@@ -1557,6 +1568,10 @@ impl Driver {
         &mut self,
         kind: WorkStepKindV1,
     ) -> Result<Option<WorkAttemptStatus>, WorkError> {
+        if !local_step_is_disclosable(&kind) {
+            self.notice("The local step was withheld because its arguments contain a recognized credential or private key");
+            return Ok(None);
+        }
         let Some(files) = self.files.clone() else {
             self.notice("No folder is granted in this run. Ask the person to add a folder to the canvas before reading or changing files.");
             return Ok(None);
@@ -3191,6 +3206,23 @@ fn execution_summary(execution: &WorkExecutionFact) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_local_steps_withhold_recognized_secrets_before_admission() {
+        let secret = "sk-fixture-never-a-real-credential-value";
+        for value in [
+            serde_json::json!({"kind":"read_file","path":format!("/project/{secret}")}),
+            serde_json::json!({"kind":"write_file","path":"/project/code.rs","content":secret}),
+            serde_json::json!({"kind":"edit_file","path":"/project/code.rs","old":"before","new":"after","replacements":[{"old":secret,"new":"after"}]}),
+            serde_json::json!({"kind":"search_files","path":"/project","query":secret}),
+            serde_json::json!({"kind":"run_command","cwd":"/project","command":format!("echo {secret}")}),
+        ] {
+            let kind: WorkStepKindV1 = serde_json::from_value(value).unwrap();
+            assert!(!local_step_is_disclosable(&kind));
+        }
+        let safe: WorkStepKindV1 = serde_json::from_value(serde_json::json!({"kind":"write_file","path":"/project/code.rs","content":"let authorization = env::var(\"API_KEY\");"})).unwrap();
+        assert!(local_step_is_disclosable(&safe));
+    }
+
     use super::*;
     #[test]
     fn repeated_read_reuses_results_but_failed_or_changed_requests_can_run() {
