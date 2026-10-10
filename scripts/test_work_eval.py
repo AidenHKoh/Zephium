@@ -51,6 +51,45 @@ class GradingTests(unittest.TestCase):
             if mutation == 'link': evidence['executions'][0]['artifacts'][1]['evidence'] = []
             self.assertEqual(eval.grade(task, evidence, reference, manifest)['task_outcome'], 'failed')
 
+    def test_unrelated_published_object_cannot_supply_answer_provenance(self):
+        task, evidence, reference, manifest = fixture()
+        artifacts = evidence['executions'][0]['artifacts']
+        unrelated = copy.deepcopy(artifacts[0])
+        unrelated.update(id='unrelated', published=True)
+        artifacts.append(unrelated)
+        artifacts[1]['evidence'] = []
+        self.assertEqual(eval.grade(task, evidence, reference, manifest)['task_outcome'], 'failed')
+
+    def test_revision_inherits_publication_but_not_old_correctness_or_citations(self):
+        task, evidence, reference, manifest = fixture()
+        artifacts = evidence['executions'][0]['artifacts']
+        for artifact in artifacts:
+            artifact['revises'] = None
+        revised = copy.deepcopy(artifacts[1])
+        revised.update(id='revised', revises='answer', published=False)
+        revised['data']['text'] = '{"title":"Wrong","count":3}'
+        artifacts.append(revised)
+        self.assertEqual(eval.grade(task, evidence, reference, manifest)['task_outcome'], 'failed')
+        revised['data']['text'] = artifacts[1]['data']['text']
+        self.assertEqual(eval.grade(task, evidence, reference, manifest)['task_outcome'], 'passed')
+        revised['evidence'] = []
+        self.assertEqual(eval.grade(task, evidence, reference, manifest)['task_outcome'], 'failed')
+
+    def test_ambiguous_legacy_answers_and_broken_revision_history_stay_unknown(self):
+        task, evidence, reference, manifest = fixture()
+        artifacts = evidence['executions'][0]['artifacts']
+        second = copy.deepcopy(artifacts[1])
+        second['id'] = 'second'
+        artifacts.append(second)
+        self.assertEqual(eval.grade(task, evidence, reference, manifest)['reason'], 'legacy_artifact_revisions_unknown')
+        for artifact in artifacts:
+            artifact['revises'] = None
+        second['revises'] = 'missing'
+        self.assertEqual(eval.grade(task, evidence, reference, manifest)['reason'], 'invalid_artifact_revision_history')
+        second['revises'] = 'answer'
+        artifacts[1]['revises'] = 'second'
+        self.assertEqual(eval.grade(task, evidence, reference, manifest)['reason'], 'invalid_artifact_revision_history')
+
     def test_private_wrong_model_and_tuned_contamination_stay_unknown(self):
         for mutation in ('private', 'model', 'tuned', 'case'):
             task, evidence, reference, manifest = fixture()

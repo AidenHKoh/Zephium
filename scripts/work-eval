@@ -246,6 +246,36 @@ def evidence_key(link):
     return (link.get("extraction_id"), link.get("source_id"))
 
 
+def current_publications(artifacts):
+    by_id = {artifact["id"]: artifact for artifact in artifacts}
+    revised = {artifact.get("revises") for artifact in artifacts if artifact.get("revises")}
+    current = []
+    for artifact in artifacts:
+        if artifact["id"] in revised:
+            continue
+        at, seen, published = artifact, set(), False
+        while at is not None:
+            if at["id"] in seen:
+                raise ValueError("cyclic artifact revision history")
+            seen.add(at["id"])
+            published |= bool(at.get("published"))
+            prior = at.get("revises")
+            if prior and prior not in by_id:
+                raise ValueError("missing artifact revision predecessor")
+            at = by_id.get(prior)
+        if published:
+            current.append(dict(artifact, published=True))
+    # A cycle with no current head would otherwise silently disappear.
+    for artifact in artifacts:
+        at, seen = artifact, set()
+        while at is not None:
+            if at["id"] in seen:
+                raise ValueError("cyclic artifact revision history")
+            seen.add(at["id"])
+            at = by_id.get(at.get("revises"))
+    return current
+
+
 def answer_object(artifacts):
     candidates = [artifact for artifact in artifacts if artifact.get("published")
                   and artifact["data"].get("kind") in ("code", "reply")]
@@ -315,7 +345,14 @@ def grade(task, evidence, reference, manifest):
     if not reference or reference.get("state") != "ready":
         return dict(result, reason="reference_unavailable")
     artifacts = [artifact for execution in executions for artifact in execution.get("artifacts", [])]
-    answer, published = answer_object(artifacts)
+    try:
+        current = current_publications(artifacts)
+    except ValueError:
+        return dict(result, reason="invalid_artifact_revision_history")
+    candidates = [artifact for artifact in current if answer_object([artifact])[0] is not None]
+    if len(candidates) > 1 and any("revises" not in artifact for artifact in artifacts):
+        return dict(result, reason="legacy_artifact_revisions_unknown")
+    answer, published = answer_object(current)
     if answer is None:
         return dict(result, task_outcome="failed", reason="required_answer_object_missing_or_invalid")
     checks = [{"id": "exact_answer_keys", "state": "passed" if set(answer) == set(reference["expected"]) else "failed"}]
@@ -326,7 +363,7 @@ def grade(task, evidence, reference, manifest):
         else:
             passed = type(actual) is type(expected) and actual == expected
         checks.append({"id": key, "state": "passed" if passed else "failed"})
-    answer_evidence = {evidence_key(link) for artifact in artifacts if artifact.get("published") for link in artifact.get("evidence", [])}
+    answer_evidence = {evidence_key(link) for link in published.get("evidence", [])}
     by_id = {artifact["id"]: artifact for artifact in artifacts}
     for index, url in enumerate(task["urls"]):
         reads = [step for step in steps if step.get("kind") == "read" and step.get("status") == "succeeded"
