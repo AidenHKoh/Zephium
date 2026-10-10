@@ -585,11 +585,13 @@ pub(crate) fn sign_in_wall(observation: &SemanticObservation) -> bool {
         matches!(node.role(), SemanticRole::Heading | SemanticRole::Button)
             && names_any(&label(node), &SIGN_IN_PHRASES)
     });
-    // A visible password field is a wall; one without layout facts counts
-    // only beside a sign-in heading or button.
-    if nodes
-        .iter()
-        .any(|node| node.role() == SemanticRole::Password && (node.geometry().is_some() || asks))
+    // Password controls also appear in public examples and account settings.
+    // The control alone is secret, not proof that reading the page needs login.
+    // Trusted login/SSO routes are checked separately by the controller.
+    if asks
+        && nodes
+            .iter()
+            .any(|node| node.role() == SemanticRole::Password)
     {
         return true;
     }
@@ -1644,6 +1646,7 @@ mod tests {
         let sign_in = page(vec![
             json!({"k":1,"r":"document","o":16}),
             json!({"k":2,"p":0,"r":"password","n":"Password","q":"secret","o":2,"b":{"x":1,"y":1,"w":200,"h":30}}),
+            json!({"k":3,"p":0,"r":"heading","n":"Sign in to your account","l":1}),
         ]);
         let check = page(vec![
             json!({"k":1,"r":"document","o":16}),
@@ -2491,8 +2494,28 @@ mod tests {
     }
 
     #[test]
-    fn a_password_or_a_small_sign_in_form_is_a_wall() {
-        assert!(sign_in_wall(&page(vec![
+    fn visible_password_examples_and_settings_do_not_block_public_reading() {
+        for title in ["Web form", "Form controls", "Account settings"] {
+            let observation = page(vec![
+                json!({"k":1,"r":"document","o":16}),
+                json!({"k":2,"p":0,"r":"heading","n":title,"l":1}),
+                json!({"k":3,"p":0,"r":"password","n":"Password","q":"secret","o":2,"b":{"x":10,"y":10,"w":200,"h":30}}),
+                json!({"k":4,"p":0,"r":"button","n":"Submit","o":1,"ak":1}),
+            ]);
+            assert!(!sign_in_wall(&observation), "{title}");
+            assert_eq!(reading_wall(&observation), None, "{title}");
+            let password = observation.frames()[0]
+                .nodes()
+                .iter()
+                .find(|node| node.role() == SemanticRole::Password)
+                .unwrap();
+            assert_eq!(password.sensitivity(), SemanticSensitivity::Secret);
+        }
+    }
+
+    #[test]
+    fn a_password_requires_sign_in_context_and_small_identity_forms_are_walls() {
+        assert!(!sign_in_wall(&page(vec![
             json!({"k":1,"r":"document","o":16}),
             json!({"k":2,"p":0,"r":"password","n":"Password","q":"secret","o":2,"b":{"x":10,"y":10,"w":200,"h":30}}),
         ])));
