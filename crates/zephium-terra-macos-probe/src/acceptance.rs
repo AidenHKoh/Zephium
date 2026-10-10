@@ -893,6 +893,33 @@ fn say(line: std::fmt::Arguments<'_>) {
     let _ = writeln!(std::io::stdout().lock(), "[{at:>7}ms] {line}");
 }
 
+fn public_page_diagnostic_enabled(
+    public_eval: bool,
+    account_probe: bool,
+    value: Option<&str>,
+) -> bool {
+    public_eval && !account_probe && value == Some("1")
+}
+
+fn public_page_diagnostic(
+    _: zephium_core::work::WorkAttemptId,
+    snapshot: zephium_app::RetainedWorkSnapshot,
+) {
+    let disposition = snapshot.record.map(|record| record.disposition());
+    let human_reason = snapshot
+        .record
+        .and_then(|record| record.human_handoff())
+        .map(|handoff| handoff.reason());
+    let human_wait =
+        disposition.map(|value| value == zephium_agentic::AgentWorkDisposition::WaitingForHuman);
+    say(format_args!(
+        "public-page-phase: phase={:?} disposition={disposition:?} artifact_present={} artifact_read_present={} human_wait={human_wait:?} human_reason={human_reason:?}",
+        snapshot.phase,
+        snapshot.artifact.is_some(),
+        snapshot.artifact_read.is_some(),
+    ));
+}
+
 /// Stands in for the person: answers the lead's questions with the
 /// scenario's answer, lets sites in for this run, approves file changes
 /// and commands in the granted folder, and declines every held step that
@@ -1500,6 +1527,15 @@ pub(super) async fn lead_workflow(
                         settings.resource_diagnostic = None;
                         settings.diagnostic = None;
                     }
+                    if public_page_diagnostic_enabled(
+                        public_eval,
+                        account_probe,
+                        std::env::var("ZEPHIUM_EVAL_PAGE_PHASE_DIAGNOSTIC")
+                            .ok()
+                            .as_deref(),
+                    ) {
+                        settings.diagnostic = Some(public_page_diagnostic);
+                    }
                     composition
                         .run_agent_step(callback, &probe, request, settings)
                         .await
@@ -1619,6 +1655,16 @@ pub(super) async fn lead_workflow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_page_diagnostic_is_explicit_and_never_for_accounts() {
+        assert!(public_page_diagnostic_enabled(true, false, Some("1")));
+        for value in [None, Some(""), Some("true"), Some("1")] {
+            assert!(!public_page_diagnostic_enabled(false, false, value));
+            assert!(!public_page_diagnostic_enabled(true, true, value));
+        }
+        assert!(!public_page_diagnostic_enabled(true, false, None));
+    }
 
     #[test]
     fn a_child_writing_more_than_a_mebibyte_completes_and_a_hung_one_is_stopped() {
