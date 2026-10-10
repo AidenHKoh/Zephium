@@ -28,6 +28,9 @@ use super::work_durable::{browser_settings, WorkflowResult};
 #[path = "work_site_human.rs"]
 mod human_fixture;
 
+#[path = "work_site_media.rs"]
+mod media_fixture;
+
 /// The person's site as the Work contract sees it, and another site.
 const ACCOUNT: &str = "https://account.probe.test";
 const OTHER: &str = "https://other.probe.test";
@@ -121,6 +124,8 @@ enum Check {
     SlackWrite,
     /// The same message sent with Enter from the composer, not its button.
     SlackEnter,
+    /// Source-bound synthetic fetched images, local crops and negative gates.
+    Media(media_fixture::Scenario),
     /// A new issue from a dialog of rich editors and a pointer-down picker.
     LinearWrite,
     /// A line added to a page of blocks that saves as it is typed.
@@ -318,6 +323,15 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("memory") => vec![Check::Memory],
         Some("slackwrite") => vec![Check::SlackWrite],
         Some("slackenter") => vec![Check::SlackEnter],
+        Some("media") => vec![
+            Check::Media(media_fixture::Scenario::Mixed),
+            Check::Media(media_fixture::Scenario::Anonymous),
+            Check::Media(media_fixture::Scenario::Held),
+        ],
+        Some("media-anonymous") => vec![Check::Media(media_fixture::Scenario::Anonymous)],
+        Some("media-crop") => vec![Check::Media(media_fixture::Scenario::Canvas)],
+        Some("media-record") => vec![Check::Media(media_fixture::Scenario::Record)],
+        Some("media-held") => vec![Check::Media(media_fixture::Scenario::Held)],
         Some("linearwrite") => vec![Check::LinearWrite],
         Some("notionwrite") => vec![Check::NotionWrite],
         Some("writes") => vec![
@@ -519,6 +533,12 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
             path: path.clone(),
             cookie: cookie.clone(),
         });
+    }
+    if site == Site::Account
+        && method == "GET"
+        && media_fixture::serve(&mut stream, &path, signed_in)
+    {
+        return;
     }
     let page = |title: &str, body: &str| {
         format!("<!doctype html><html><head><title>{title}</title></head><body><main>{body}</main></body></html>")
@@ -1554,11 +1574,28 @@ pub(super) async fn workflow(
     if !seeded || !seed.asked.is_empty() {
         return Err("seed");
     }
+    if checks.iter().any(|check| {
+        matches!(
+            check,
+            Check::Media(
+                media_fixture::Scenario::Mixed
+                    | media_fixture::Scenario::Canvas
+                    | media_fixture::Scenario::Record
+            )
+        )
+    }) {
+        media_fixture::seed_session(&context).await?;
+    }
     let mut failure = None;
     let mut last = seed.state;
     let goal = "Report what the page shows";
     for check in checks {
         let passed = match check {
+            Check::Media(scenario) => {
+                let (run, passed) = media_fixture::run(&context, scenario).await?;
+                last = run.state;
+                passed
+            }
             Check::Human(scenario) => {
                 let (run, passed) = human_fixture::run(&context, scenario).await?;
                 last = run.state;
