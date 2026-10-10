@@ -333,6 +333,45 @@ fn public_eval_path(scenario: &LeadScenario) -> Result<Option<std::path::PathBuf
     Ok(Some(path))
 }
 
+fn eval_read_decisions(
+    value: Option<&str>,
+) -> Result<
+    (
+        zephium_work_composition::durable_runtime::WorkDecisionPreference,
+        &'static str,
+    ),
+    &'static str,
+> {
+    use zephium_work_composition::durable_runtime::WorkDecisionPreference as Preference;
+    match value {
+        None | Some("recommended") => Ok((Preference::Recommended, "recommended")),
+        Some("emulation") => Ok((Preference::Emulation, "emulation")),
+        Some("disabled") => Ok((Preference::Disabled, "disabled")),
+        _ => Err("eval_read_decisions"),
+    }
+}
+
+#[cfg(test)]
+mod read_decision_tests {
+    use super::*;
+    #[test]
+    fn ablation_mode_is_explicit_and_never_changes_the_default() {
+        use zephium_work_composition::durable_runtime::WorkDecisionPreference as P;
+        assert_eq!(
+            eval_read_decisions(None),
+            Ok((P::Recommended, "recommended"))
+        );
+        for (value, expected) in [
+            ("recommended", P::Recommended),
+            ("emulation", P::Emulation),
+            ("disabled", P::Disabled),
+        ] {
+            assert_eq!(eval_read_decisions(Some(value)), Ok((expected, value)));
+        }
+        assert!(eval_read_decisions(Some("unknown")).is_err());
+    }
+}
+
 #[derive(Default)]
 struct EvalDiagnostics {
     calls: Vec<serde_json::Value>,
@@ -1140,6 +1179,17 @@ pub(super) async fn lead_workflow(
     use zephium_ipc::work::*;
     let export = public_eval_path(scenario)?;
     let public_eval = export.is_some();
+    let read_decision_env = if public_eval {
+        std::env::var("ZEPHIUM_EVAL_READ_DECISIONS")
+            .map(Some)
+            .or_else(|error| match error {
+                std::env::VarError::NotPresent => Ok(None),
+                _ => Err("eval_read_decisions"),
+            })?
+    } else {
+        None
+    };
+    let (read_decisions, read_decision_name) = eval_read_decisions(read_decision_env.as_deref())?;
     let block_probe = scenario.name.starts_with("blocks-");
     let eval_started = Instant::now();
     let local_diagnostics = Arc::new(Mutex::new(EvalDiagnostics::default()));
@@ -1179,7 +1229,7 @@ pub(super) async fn lead_workflow(
     let mut light = resolve(WorkModelRole::Light)
         .await
         .unwrap_or_else(|| page.clone());
-    let model_setup = serde_json::json!({ "lead": lead.entry, "page": page.entry, "light": light.entry, "public_search_model": PUBLIC_SEARCH_MODEL });
+    let model_setup = serde_json::json!({ "lead": lead.entry, "page": page.entry, "light": light.entry, "public_search_model": PUBLIC_SEARCH_MODEL, "read_triage": read_decision_name });
     if public_eval || block_probe {
         for (role, model) in [
             ("lead", &mut lead),
@@ -1422,6 +1472,9 @@ pub(super) async fn lead_workflow(
                         settings.access =
                             zephium_agent_controller::AgentBrowserModelAccess::Chosen(chosen_page);
                         settings.decision_model = chosen_light;
+                        if public_eval {
+                            settings.decisions = read_decisions;
+                        }
                         if public_eval || block_probe {
                             settings.stage_diagnostic = None;
                             settings.model_diagnostic = None;
