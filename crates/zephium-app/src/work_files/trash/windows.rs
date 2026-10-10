@@ -1,5 +1,7 @@
 //! Windows source backend; runtime admission remains closed pending native QA.
 //! A handle-bound same-volume stage precedes an exact IFileOperation recycle ack.
+#[path = "windows_move.rs"]
+mod move_file;
 use super::{digest, journal::Record, Failure, MAX_BYTES};
 use crate::work_files::{open_checked_file, opened_at, pin_mutation_directory, single_link};
 use ::windows::{
@@ -17,6 +19,7 @@ use ::windows::{
         UI::Shell::*,
     },
 };
+pub(super) use move_file::Destination;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom},
@@ -113,6 +116,17 @@ impl Prepared {
         directory: &Path,
         cancelled: &std::sync::atomic::AtomicBool,
     ) -> Result<PathBuf, Failure> {
+        self.apply_at_with(directory, cancelled, |file, target| {
+            drop(file);
+            native_trash(target, self.identity)
+        })
+    }
+    fn apply_at_with<T>(
+        &self,
+        directory: &Path,
+        cancelled: &std::sync::atomic::AtomicBool,
+        publish: impl FnOnce(File, &Path) -> Result<T, Failure>,
+    ) -> Result<T, Failure> {
         let _source_guards = pin_mutation_directory(self.path.parent().ok_or(Failure::Input)?)
             .map_err(Failure::File)?;
         let _stage_guards = pin_mutation_directory(directory).map_err(Failure::File)?;
@@ -184,11 +198,10 @@ impl Prepared {
         if !opened_at(&file, &target) || identity(&file)? != self.identity {
             return Err(Failure::RecoveryPending);
         }
-        drop(file);
         if cancelled.load(std::sync::atomic::Ordering::Acquire) {
             return Err(Failure::RecoveryPending);
         }
-        native_trash(&target, self.identity)
+        publish(file, &target)
     }
 }
 fn item_path(item: &IShellItem) -> windows::core::Result<PathBuf> {

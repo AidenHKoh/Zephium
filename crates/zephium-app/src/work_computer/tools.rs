@@ -56,6 +56,7 @@ pub fn definitions() -> Vec<WorkModelTool> {
     };
     let path = json!({"type": "string", "description": "Relative to the working folder, or absolute inside a granted folder."});
     vec![
+        tool("move_file", "Move one previously read ordinary text file (at most 64 KiB) between granted folders after approval, retaining its identity and permissions and a separate recovery copy in Trash. Never overwrites. Requires qualified macOS support; directories, binaries, cross-volume moves and Windows are unavailable.", json!({"type":"object","properties":{"from":path,"to":path},"required":["from","to"],"additionalProperties":false})),
         tool("trash", "Move one previously read text file (at most 64 KiB) to OS Trash after approval, retaining a private recovery copy. Requires qualified native support; directories, binary files, cross-volume moves and Windows are unavailable.", json!({"type":"object","properties":{"path":path},"required":["path"],"additionalProperties":false})),
         tool("recoveries", "List private recovery receipts for the current profile and granted folders. Does not list OS Trash or restore anything.", json!({"type":"object","properties":{},"additionalProperties":false})),
         tool("restore_saved", "Propose restoring the saved text for a recovery receipt to its original granted path. Requires approval and refuses to overwrite an existing file.", json!({"type":"object","properties":{"receipt":{"type":"string"}},"required":["receipt"],"additionalProperties":false})),
@@ -331,6 +332,7 @@ impl ComputerTools {
             "edit" => self.edit(host, args).await,
             "write" => self.write(host, args).await,
             "bash" => self.bash(host, args).await,
+            "move_file" => self.move_file(host, args).await,
             "trash" => self.trash(host, args).await,
             "recoveries" => self.recoveries(host).await,
             "restore_saved" => self.restore(host, args).await,

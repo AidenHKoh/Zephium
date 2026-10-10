@@ -1,7 +1,10 @@
 //! The original is staged on the same volume before the native Trash call.
 //! No pathname replacement can turn that call into deletion of an unchecked file.
+#[path = "macos_move.rs"]
+mod move_file;
 use super::{digest, journal::Record, Failure, MAX_BYTES};
 use crate::work_files::{open_unix, single_link};
+pub(super) use move_file::Destination;
 use objc2_foundation::{NSFileManager, NSString, NSURL};
 use std::{
     ffi::CString,
@@ -231,6 +234,7 @@ mod tests {
             digest: prepared.digest.clone(),
             bytes: prepared.text.len(),
             step: "fixture".into(),
+            destination: None,
         };
         let record = journal.prepare(receipt, prepared.text.as_bytes()).unwrap();
         let stage = record.stage().unwrap();

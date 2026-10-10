@@ -1,6 +1,6 @@
 //! Recovery is explicit and approved. Journal discovery never reads OS Trash.
 use super::*;
-use crate::work_files::trash::{self, PreparedTrash};
+use crate::work_files::trash::{self, PreparedMove, PreparedTrash};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -114,6 +114,108 @@ impl ComputerTools {
             }
         }
     }
+    pub(super) async fn move_file(
+        &self,
+        host: &dyn ComputerHost,
+        args: &Value,
+    ) -> Result<ToolReply, ToolReply> {
+        let profile = profile(host)?;
+        let path = self.absolute(text(args, "from")?);
+        let to = self.absolute(text(args, "to")?);
+        let file = self
+            .files
+            .resolve(&path, false)
+            .map_err(|error| file_fault(error, &path))?;
+        let seen = self
+            .seen(&file)
+            .ok_or_else(|| ToolReply::fault("Read the source file before proposing a move"))?;
+        let prepared = PreparedMove::prepare(&self.files, &path, &to, &seen)
+            .map_err(|error| ToolReply::fault(error.note()))?;
+        let id = prepared.original.id.clone();
+        let destination = prepared.destination.clone();
+        let bytes = prepared.original.bytes();
+        let fact = prepared.fact();
+        let digest = fact.before_digest.clone().unwrap_or_default();
+        let step = host
+            .begin(
+                WorkStepKindV1::MoveFile {
+                    from: path.clone(),
+                    to: to.clone(),
+                    decision: None,
+                },
+                Some(fact),
+            )
+            .await
+            .map_err(stopped)?;
+        self.recovery_decision(host, step).await?;
+        if crate::work_commands::runner::cancellation_requested(&|| host.cancelled()).await {
+            return self.recovery_stopped(host, step).await;
+        }
+        let step_key = step.to_string();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let _cancel_on_drop = CancelOnDrop(cancelled.clone());
+        let worker_cancel = cancelled.clone();
+        let mut worker = tokio::task::spawn_blocking(move || {
+            prepared.apply(&profile, &step_key, &worker_cancel)
+        });
+        let mut tick = tokio::time::interval(Duration::from_millis(25));
+        let outcome = loop {
+            tokio::select! {
+                outcome = &mut worker => break outcome,
+                _ = tick.tick() => if crate::work_commands::runner::cancellation_requested(&|| host.cancelled()).await { cancelled.store(true, Ordering::Release); }
+            }
+        };
+        match outcome {
+            Ok(Err(trash::Failure::Stopped)) => self.recovery_stopped(host, step).await,
+            Ok(Ok(())) => {
+                if let Ok(mut reads) = self.reads.lock() {
+                    reads.remove(&file);
+                    reads.insert(destination.clone(), digest.clone());
+                }
+                let evidence = WorkFileEvidenceV1 {
+                    path: destination.to_string_lossy().into_owned(),
+                    name: destination
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                    kind: WorkFileKindV1::Moved,
+                    bytes,
+                    digest: digest.clone(),
+                    text: format!("Move confirmed; a separate recovery copy is in Trash. Recovery receipt: {id}"),
+                    truncated: false,
+                    before_digest: Some(digest.clone()),
+                    after_digest: Some(digest),
+                    lines: None,
+                };
+                self.settle(host, step, Ok(evidence), |_| {
+                    format!("Move confirmed; recovery {id}")
+                })
+                .await?;
+                Ok(ToolReply::ok(format!(
+                    "Moved {} to {}. Recovery receipt: {id}",
+                    self.shown(&file),
+                    self.shown(&destination)
+                )))
+            }
+            failure => {
+                let note = match failure {
+                    Ok(Err(error)) => error.note(),
+                    _ => "The move result is unknown; check private recovery before retrying",
+                };
+                let note = format!("{note}. Check recoveries for reference {id} before retrying.");
+                host.settle(
+                    step,
+                    WorkStepStatus::Failed,
+                    Settled::Nothing,
+                    Some(note.clone()),
+                )
+                .await
+                .map_err(stopped)?;
+                Err(ToolReply::fault(note))
+            }
+        }
+    }
     pub(super) async fn recoveries(&self, host: &dyn ComputerHost) -> Result<ToolReply, ToolReply> {
         let rows = trash::recoveries(&self.files, &profile(host)?)
             .map_err(|error| ToolReply::fault(error.note()))?;
@@ -121,7 +223,12 @@ impl ComputerTools {
         let total = rows.len();
         let mut shown = 0;
         for row in rows {
-            if text.len() + row.path.as_os_str().len() + 160 > 16 * 1024 {
+            if text.len()
+                + row.path.as_os_str().len()
+                + row.destination.as_ref().map_or(0, |p| p.as_os_str().len())
+                + 240
+                > 16 * 1024
+            {
                 break;
             }
             shown += 1;
@@ -129,10 +236,20 @@ impl ComputerTools {
                 "{} — {} — {}\n",
                 row.id,
                 self.shown(&row.path),
-                if row.confirmed {
-                    "Trash confirmed"
+                if row.moved {
+                    format!(
+                        "move confirmed{}; saved copy available",
+                        row.destination
+                            .as_ref()
+                            .map(|path| format!(" to {}", self.shown(path)))
+                            .unwrap_or_default()
+                    )
+                } else if row.backup_confirmed {
+                    "move interrupted; backup Trash acknowledged; saved copy available".into()
+                } else if row.confirmed {
+                    "Trash confirmed".into()
                 } else {
-                    "interrupted; saved copy available"
+                    "interrupted; saved copy available".into()
                 }
             ));
         }

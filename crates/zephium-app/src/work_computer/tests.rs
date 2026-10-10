@@ -601,6 +601,56 @@ fn recovery_tools_require_approval_and_restore_without_overwrite() {
         );
         assert_eq!(std::fs::read_to_string(&restored).unwrap(), "newer text");
         assert_eq!(*host.asked.lock().unwrap(), 3);
+
+        // Move uses the same approval and cancel-on-drop boundary. No queued
+        // worker may move a file after its calling future has been dropped.
+        let moved_source = root.join("move-fixture.txt");
+        std::fs::write(&moved_source, "inert move text").unwrap();
+        let move_host = Recorder::deciding(&[Decision::Declined, Decision::Approved]);
+        let move_args = json!({"from":"move-fixture.txt","to":"moved-fixture.txt"});
+        assert!(
+            tools
+                .call(&move_host, "move_file", &move_args)
+                .await
+                .is_error
+        );
+        assert_eq!(*move_host.asked.lock().unwrap(), 0);
+        assert!(
+            !tools
+                .call(&move_host, "read", &json!({"path":"move-fixture.txt"}))
+                .await
+                .is_error
+        );
+        assert!(
+            tools
+                .call(&move_host, "move_file", &move_args)
+                .await
+                .is_error
+        );
+        assert_eq!(*move_host.asked.lock().unwrap(), 1);
+        assert!(matches!(
+            move_host.kinds().last(),
+            Some(WorkStepKindV1::MoveFile { .. })
+        ));
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _ = held.recv();
+        });
+        let mut queued = Box::pin(tools.call(&move_host, "move_file", &move_args));
+        tokio::select! {
+            _ = &mut queued => panic!("the blocking lane is held"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(30)) => {}
+        }
+        assert_eq!(*move_host.asked.lock().unwrap(), 2);
+        drop(queued);
+        drop(release);
+        blocker.await.unwrap();
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&moved_source).unwrap(),
+            "inert move text"
+        );
+        assert!(!root.join("moved-fixture.txt").exists());
     });
 }
 

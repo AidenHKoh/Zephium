@@ -1,5 +1,7 @@
 //! Approved, recoverable removal. Generic file deletion remains unavailable.
 mod journal;
+mod move_file;
+pub(crate) use move_file::PreparedMove;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(windows)]
@@ -39,21 +41,23 @@ pub(crate) enum Failure {
     Changed,
     CrossVolume,
     RecoveryPending,
+    Destination,
     Stopped,
     File(WorkFileError),
 }
 impl Failure {
     pub fn note(self) -> &'static str {
         match self {
-            Self::Unavailable => "Recoverable Trash is not available on this system",
+            Self::Destination => "The destination must be absent in the approved granted directory",
+            Self::Unavailable => "Recoverable file changes are not available on this system",
             Self::Stopped => "Stopped before moving the file",
-            Self::Input => "Trash accepts only ordinary text files up to 64 KiB",
+            Self::Input => "Recoverable file changes accept only ordinary text files up to 64 KiB",
             Self::Storage => "The private recovery journal could not be verified",
             Self::Capacity => "The private recovery journal is full; no file was removed",
-            Self::Changed => "The file changed since it was read; no deletion was admitted",
+            Self::Changed => "The file changed since it was read; no new change was admitted",
             Self::CrossVolume => "Trash across volumes is not supported; no file was removed",
             Self::RecoveryPending => {
-                "The Trash result is not confirmed; a private recovery copy was retained"
+                "The file change is not confirmed; a private recovery copy was retained"
             }
             Self::File(error) => error.note(),
         }
@@ -180,6 +184,7 @@ impl PreparedTrash {
                 digest: self.native.digest.clone(),
                 bytes: self.native.text.len(),
                 step: step.into(),
+                destination: None,
             };
             let record = journal.prepare(receipt, self.native.text.as_bytes())?;
             let stage = record.stage()?;
@@ -200,6 +205,9 @@ pub(crate) struct Recovery {
     pub id: String,
     pub path: PathBuf,
     pub confirmed: bool,
+    pub destination: Option<PathBuf>,
+    pub moved: bool,
+    pub backup_confirmed: bool,
 }
 pub(crate) fn recoveries(grant: &WorkFileGrant, profile: &str) -> Result<Vec<Recovery>, Failure> {
     available()?;
@@ -227,10 +235,26 @@ fn recoveries_at(
             continue;
         }
         let confirmed = record.marked("trashed")?;
+        let moved = record.marked("moved")?;
+        let backup_confirmed = record.marked("move_backup_trashed")?;
+        let destination = record
+            .receipt
+            .destination
+            .as_ref()
+            .filter(|path| {
+                path.to_str()
+                    .and_then(|path| grant.resolve(path, true).ok())
+                    .as_ref()
+                    == Some(*path)
+            })
+            .cloned();
         found.push(Recovery {
             id: record.receipt.id,
             path: record.receipt.path,
             confirmed,
+            destination,
+            moved,
+            backup_confirmed,
         });
     }
     Ok(found)
@@ -310,6 +334,7 @@ pub(crate) fn seed_recovery_fixture(
                 digest: digest(text.as_bytes()),
                 bytes: text.len(),
                 step: "fixture".into(),
+                destination: None,
             },
             text.as_bytes(),
         )

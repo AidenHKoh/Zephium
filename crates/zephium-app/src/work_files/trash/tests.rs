@@ -37,6 +37,7 @@ impl Fixture {
             digest: digest(text.as_bytes()),
             bytes: text.len(),
             step: "inert-step".into(),
+            destination: None,
         }
     }
 }
@@ -392,4 +393,112 @@ fn refuses_in_grant_symlink_spelling_instead_of_trashing_its_target() {
     )
     .is_err());
     assert_eq!(fs::read_to_string(target).unwrap(), "inert");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn move_preparation_rejects_protected_outside_alias_and_existing_targets() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    let source = f.files.join("note.txt");
+    fs::write(&source, "saved").unwrap();
+    let prepare = |to: &Path| {
+        PreparedMove::prepare_checked(
+            &f.grant,
+            source.to_str().unwrap(),
+            to.to_str().unwrap(),
+            &digest(b"saved"),
+        )
+    };
+    fs::write(f.files.join("existing.txt"), "keep").unwrap();
+    fs::create_dir(f.files.join("dir")).unwrap();
+    symlink(f.files.join("dir"), f.files.join("alias")).unwrap();
+    for to in [
+        f.files.join(".env"),
+        f.storage.join("outside.txt"),
+        f.files.join("existing.txt"),
+        f.files.join("alias/new.txt"),
+    ] {
+        assert!(prepare(&to).is_err());
+    }
+    assert_eq!(fs::read_to_string(&source).unwrap(), "saved");
+    assert!(!f.storage.join(".zephium-work-recovery").exists());
+    assert!(prepare(&f.files.join("new.txt")).is_ok());
+}
+#[test]
+fn move_receipt_is_backward_compatible_and_only_discloses_granted_destination() {
+    let f = Fixture::new();
+    let mut receipt = f.receipt("saved");
+    let old = serde_json::to_vec(&receipt).unwrap();
+    assert!(!std::str::from_utf8(&old).unwrap().contains("destination"));
+    assert!(serde_json::from_slice::<journal::Receipt>(&old)
+        .unwrap()
+        .destination
+        .is_none());
+    receipt.destination = Some(f.files.join("moved.txt"));
+    let journal = journal::Journal::open(&f.storage, "profile", true)
+        .unwrap()
+        .unwrap();
+    let record = journal.prepare(receipt, b"saved").unwrap();
+    record.mark("move_backup_trashed").unwrap();
+    drop(record);
+    drop(journal);
+    let rows = recoveries_at(&f.storage, &f.grant, "profile").unwrap();
+    assert_eq!(
+        rows[0].destination.as_ref(),
+        Some(&f.files.join("moved.txt"))
+    );
+    assert!(rows[0].backup_confirmed);
+    assert!(!rows[0].moved);
+    assert!(
+        !rows[0].confirmed,
+        "backup acknowledgment must not claim original was trashed"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Native recovery qualification: moves inert scratch files and cleans only exact acknowledged Trash backups"]
+fn native_move_journals_confirmation_and_explicit_saved_text_restore() {
+    use std::os::unix::fs::MetadataExt;
+    let f = Fixture::new();
+    let source = f.files.join("note.txt");
+    let target = f.files.join("moved.txt");
+    fs::write(&source, "saved move text").unwrap();
+    let before = fs::metadata(&source).unwrap();
+    let prepared = PreparedMove::prepare_checked(
+        &f.grant,
+        source.to_str().unwrap(),
+        target.to_str().unwrap(),
+        &digest(b"saved move text"),
+    )
+    .unwrap();
+    let id = prepared.original.id.clone();
+    let acknowledged = prepared
+        .apply_at(
+            &f.storage,
+            "profile",
+            "inert",
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+    let after = fs::metadata(&target).unwrap();
+    assert_eq!(
+        (before.dev(), before.ino(), before.mode()),
+        (after.dev(), after.ino(), after.mode())
+    );
+    assert!(!source.exists());
+    let rows = recoveries_at(&f.storage, &f.grant, "profile").unwrap();
+    assert_eq!(rows[0].id, id);
+    assert!(rows[0].moved && rows[0].backup_confirmed && !rows[0].confirmed);
+    let (_, change, restored, text) =
+        restore_proposal_at(&f.storage, &f.grant, "profile", &id).unwrap();
+    assert_eq!(restored, source);
+    assert_eq!(text, "saved move text");
+    f.grant.apply(change).unwrap();
+    assert_eq!(fs::read_to_string(&source).unwrap(), text);
+    assert_eq!(fs::read_to_string(&target).unwrap(), text);
+    assert!(restore_proposal_at(&f.storage, &f.grant, "profile", &id).is_err());
+    // Exact fixture backup only, never a Trash inventory.
+    fs::remove_file(acknowledged).unwrap();
 }

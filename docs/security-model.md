@@ -1911,6 +1911,16 @@ handle-bound staging and IFileOperation backend requiring recycle pre-admission,
 exact returned-item acknowledgment and no abort; its runtime gate stays closed
 until the private namespace and Recycle Bin matrix pass on Windows.
 
+The qualified macOS `move_file` tool uses the same text, approval, grant and
+same-volume bounds. It stages the verified original, requires native Trash
+acknowledgment for a separate recovery copy, then publishes the original with an
+exclusive handle-relative rename into the approved destination directory. The
+original identity and permissions survive. Durable receipts distinguish backup
+acknowledgment from confirmed publication; cancellation, destination conflicts or
+unknown native results retain recovery without replay or overwrite. Restoring a
+saved copy is a separate approved action and does not undo a completed move.
+Windows contains the matching pinned-handle implementation but remains runtime-gated.
+
 Process groups, Windows JobObjects and command classification are lifecycle/approval
 mechanisms, not a sandbox. The retained runner uses a fixed environment and no Unix
 login shell. Native Windows runtime qualification remains outstanding. This policy

@@ -23,6 +23,8 @@ pub(super) struct Receipt {
     pub digest: String,
     pub bytes: usize,
     pub step: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<PathBuf>,
 }
 impl Receipt {
     fn valid(&self) -> bool {
@@ -35,6 +37,9 @@ impl Receipt {
             && self.step.len() <= 64
             && self.path.is_absolute()
             && !super::super::protected_path(&self.path)
+            && self.destination.as_ref().is_none_or(|path| {
+                path.is_absolute() && path != &self.path && !super::super::protected_path(path)
+            })
     }
 }
 pub(super) struct Journal {
@@ -139,8 +144,25 @@ impl Record {
             .create_new_private_child(&component("stage")?)
             .map_err(|_| Failure::Storage)
     }
+    pub fn backup(&self) -> Result<PrivateDirectory, Failure> {
+        let directory = self
+            .directory
+            .create_new_private_child(&component("backup")?)
+            .map_err(|_| Failure::Storage)?;
+        directory
+            .write_new_synced(
+                &component("recovery.txt")?,
+                self.saved()?.as_bytes(),
+                limit(MAX_BYTES),
+            )
+            .map_err(|_| Failure::Storage)?;
+        Ok(directory)
+    }
     pub fn mark(&self, phase: &str) -> Result<(), Failure> {
-        if !matches!(phase, "trashed" | "restored") {
+        if !matches!(
+            phase,
+            "trashed" | "restored" | "move_backup_trashed" | "moved"
+        ) {
             return Err(Failure::Storage);
         }
         self.directory
