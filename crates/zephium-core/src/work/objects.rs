@@ -745,17 +745,38 @@ fn measured(value: &str) -> WorkTextFound {
 
 /// Bytes of person-visible text one object may hold in total.
 pub const MAX_OBJECT_TEXT_BYTES: usize = 32 * 1024;
-pub(super) struct Budget(usize);
+pub(super) struct Budget {
+    used: usize,
+    /// The person's own object: a table, list or plan may stand empty while
+    /// they fill it.
+    owned: bool,
+}
 impl Budget {
     pub(super) fn new() -> Self {
-        Self(0)
+        Self {
+            used: 0,
+            owned: false,
+        }
+    }
+    pub(super) fn owned() -> Self {
+        Self {
+            used: 0,
+            owned: true,
+        }
     }
     fn add(&mut self, value: &str) -> Checked {
-        self.0 += value.len();
-        if self.0 > MAX_OBJECT_TEXT_BYTES {
+        self.used += value.len();
+        if self.used > MAX_OBJECT_TEXT_BYTES {
             return Err(fault(F::Text));
         }
         Ok(())
+    }
+    /// `count`, except that the person's own object may hold none yet.
+    fn gathered(&self, len: usize, max: usize, field: F, at: Place) -> Checked {
+        if self.owned && len == 0 {
+            return Ok(());
+        }
+        count(len, max, field, at)
     }
 }
 
@@ -1204,7 +1225,7 @@ pub(super) fn check_plan(
     steps: &[WorkPlanStepV1],
     total: &Option<WorkLabelledV1>,
 ) -> Checked {
-    count(
+    budget.gathered(
         steps.len(),
         MAX_PLAN_STEPS,
         F::PlanSteps,
@@ -1293,7 +1314,7 @@ pub(super) fn check_list(
     items: &[WorkListItemV1],
 ) -> Checked {
     use WorkFaultDrop::Remove;
-    count(
+    budget.gathered(
         items.len(),
         MAX_LIST_ITEMS,
         F::ListItems,
@@ -1439,7 +1460,7 @@ pub(super) fn check_sheet(
             );
         }
     }
-    count(
+    budget.gathered(
         rows.len(),
         MAX_SHEET_ROWS,
         F::SheetRows,

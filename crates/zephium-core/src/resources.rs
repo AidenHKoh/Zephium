@@ -523,7 +523,7 @@ impl WorkObjectV1 {
             return false;
         }
         !matches!(self.data, WorkArtifactDataV1::BrowserResourcePreview { .. })
-            && self.data.validate(self.evidence.len()).is_ok()
+            && self.data.validate_owned(self.evidence.len()).is_ok()
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

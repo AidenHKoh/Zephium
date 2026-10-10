@@ -812,3 +812,17 @@ fn a_plan_step_date_is_a_real_day_or_goes() {
         assert_eq!(fault.drop, Some(WorkFaultDrop::Remove("steps[].date")));
     }
 }
+
+#[test]
+fn the_persons_own_table_list_or_plan_may_stand_empty() {
+    let empty = [
+        json!({"kind":"plan","steps":[]}),
+        json!({"kind":"list","style":"todo","items":[]}),
+        json!({"kind":"sheet","columns":[{"label":"Name","kind":"text"}],"rows":[]}),
+    ];
+    for shape in empty {
+        let data = data(shape);
+        assert!(data.validate(0).is_err(), "{}", data.kind_name());
+        assert!(data.validate_owned(0).is_ok(), "{}", data.kind_name());
+    }
+}

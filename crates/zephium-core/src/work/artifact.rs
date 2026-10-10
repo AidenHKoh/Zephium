@@ -966,7 +966,22 @@ impl WorkArtifactDataV1 {
     /// `evidence_len` is the artifact's evidence array length; claim-level
     /// indices must address it.
     pub fn validate(&self, evidence_len: usize) -> Result<(), WorkError> {
-        self.check(evidence_len, &mut WorkArtifactField::Content, &mut None)
+        self.check(
+            evidence_len,
+            &mut WorkArtifactField::Content,
+            &mut None,
+            false,
+        )
+    }
+    /// `validate` for the person's own object, which may stand empty while
+    /// they fill it.
+    pub fn validate_owned(&self, evidence_len: usize) -> Result<(), WorkError> {
+        self.check(
+            evidence_len,
+            &mut WorkArtifactField::Content,
+            &mut None,
+            true,
+        )
     }
     /// The first part that fails `validate`, for a notice the model can act on.
     pub fn fault(&self, evidence_len: usize) -> Option<WorkArtifactField> {
@@ -976,7 +991,7 @@ impl WorkArtifactDataV1 {
     pub fn fault_at(&self, evidence_len: usize) -> Option<WorkObjectFault> {
         let mut at = WorkArtifactField::Content;
         let mut detail = None;
-        match self.check(evidence_len, &mut at, &mut detail) {
+        match self.check(evidence_len, &mut at, &mut detail, false) {
             Ok(()) => None,
             Err(WorkError::Capacity) => Some(WorkObjectFault::of(WorkArtifactField::Text)),
             Err(_) => Some(detail.unwrap_or(WorkObjectFault::of(at))),
@@ -1097,11 +1112,16 @@ impl WorkArtifactDataV1 {
         evidence_len: usize,
         at: &mut WorkArtifactField,
         detail: &mut Option<WorkObjectFault>,
+        owned: bool,
     ) -> Result<(), WorkError> {
         use WorkArtifactField as F;
         let mut budget = TextBudget(0);
         let subjects_ok = validate_subjects;
-        let mut object = super::objects::Budget::new();
+        let mut object = if owned {
+            super::objects::Budget::owned()
+        } else {
+            super::objects::Budget::new()
+        };
         let mut objects = |checked: Result<(), WorkObjectFault>| match checked {
             Ok(()) => Ok(()),
             Err(fault) => {
