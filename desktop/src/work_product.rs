@@ -159,7 +159,9 @@ fn calendar_file(name: &str, text: &str) -> bool {
     name.len() <= 120
         && name.ends_with(".ics")
         && !name.starts_with('.')
-        && !name.chars().any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
         && text.len() <= 1024 * 1024
         && text.starts_with("BEGIN:VCALENDAR\r\n")
         && text.trim_end().ends_with("END:VCALENDAR")

@@ -470,7 +470,7 @@ export type ProjectView = ObjectBase & {
   git?: { branch?: string; changed: number; ahead?: number; behind?: number };
 };
 
-export type SubjectTone = "active" | "done" | "waiting" | "blocked" | "closed";
+type SubjectTone = "active" | "done" | "waiting" | "blocked" | "closed";
 /** The one thing a request is about, shaped like its service: a pull request, an issue, a thread. */
 export type SubjectView = ObjectBase & {
   kind: "subject";
