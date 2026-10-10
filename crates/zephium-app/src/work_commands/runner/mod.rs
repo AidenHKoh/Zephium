@@ -22,6 +22,7 @@ pub(crate) enum Failure {
     StopUnconfirmed,
     Failed,
     Changed,
+    Sensitive,
 }
 impl Failure {
     pub fn note(self) -> &'static str {
@@ -39,6 +40,7 @@ impl Failure {
             Self::Stopped => "The confined process stopped",
             Self::StopUnconfirmed => "Stop was requested, but process exit has not been confirmed",
             Self::Failed => "The operation in the copied workspace failed",
+            Self::Sensitive => "Recognizable credential content was withheld from the review",
             Self::Changed => "An approved file changed again; read it before reviewing these edits",
         }
     }
@@ -269,5 +271,37 @@ where
     {
         let _ = (snapshot, operation, cancelled);
         Err(Failure::Unavailable)
+    }
+}
+
+fn output_text(bytes: Vec<u8>) -> Result<String, Failure> {
+    let text = String::from_utf8(bytes).map_err(|_| Failure::Failed)?;
+    if zephium_agentic::contains_recognized_secret(&text) {
+        return Err(Failure::Sensitive);
+    }
+    if text
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t' && c != '\r')
+    {
+        return Err(Failure::Failed);
+    }
+    Ok(text)
+}
+
+#[cfg(test)]
+mod disclosure_tests {
+    use super::*;
+    #[test]
+    fn full_diff_output_is_checked_before_evidence_clipping() {
+        let output = format!("{}\n+ghp_inertFixtureToken", "ordinary\n".repeat(2500));
+        assert_eq!(output_text(output.into_bytes()), Err(Failure::Sensitive));
+        assert_eq!(
+            output_text(b"+-----BEGIN OPENSSH PRIVATE KEY-----".to_vec()),
+            Err(Failure::Sensitive)
+        );
+        assert_eq!(
+            output_text(b"+ordinary change".to_vec()).unwrap(),
+            "+ordinary change"
+        );
     }
 }

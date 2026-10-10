@@ -41,6 +41,9 @@ impl Snapshot {
     }
 
     fn from_files(files: BTreeMap<PathBuf, Vec<u8>>) -> Result<Self, Failure> {
+        for bytes in files.values() {
+            reject_recognized_secret(bytes)?;
+        }
         let mut builder = tempfile::Builder::new();
         builder.prefix("zephium-work-copy-");
         #[cfg(target_os = "macos")]
@@ -117,6 +120,7 @@ impl Snapshot {
         {
             return Err(Failure::Input);
         }
+        reject_recognized_secret(bytes)?;
         let path = self.work.join(relative);
         fs::create_dir_all(path.parent().ok_or(Failure::Input)?).map_err(|_| Failure::Storage)?;
         fs::write(path, bytes).map_err(|_| Failure::Storage)
@@ -201,5 +205,34 @@ mod tests {
             collect(&root, &["alias.rs".into()]),
             Err(Failure::Input)
         ));
+    }
+}
+
+fn reject_recognized_secret(bytes: &[u8]) -> Result<(), Failure> {
+    if std::str::from_utf8(bytes).is_ok_and(zephium_agentic::contains_recognized_secret) {
+        return Err(Failure::Sensitive);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod disclosure_tests {
+    use super::*;
+    #[test]
+    fn secret_baseline_and_overlay_never_enter_a_snapshot() {
+        let secret = b"-----BEGIN PRIVATE KEY-----";
+        assert!(matches!(
+            Snapshot::from_files([(PathBuf::from("ordinary.txt"), secret.to_vec())].into()),
+            Err(Failure::Sensitive)
+        ));
+        let snapshot = Snapshot::fixture(&[("ordinary.txt", b"ordinary")]);
+        assert_eq!(
+            snapshot.write(Path::new("ordinary.txt"), secret),
+            Err(Failure::Sensitive)
+        );
+        assert_eq!(
+            fs::read(snapshot.work.join("ordinary.txt")).unwrap(),
+            b"ordinary"
+        );
     }
 }

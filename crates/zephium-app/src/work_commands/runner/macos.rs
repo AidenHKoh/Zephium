@@ -226,13 +226,7 @@ where
     if !success && output.is_empty() {
         return Err(Failure::Failed);
     }
-    let text = String::from_utf8(output).map_err(|_| Failure::Failed)?;
-    if text
-        .chars()
-        .any(|c| c.is_control() && c != '\n' && c != '\t' && c != '\r')
-    {
-        return Err(Failure::Failed);
-    }
+    let text = super::output_text(output)?;
     Ok(Output {
         text,
         success,

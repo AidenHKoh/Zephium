@@ -1856,6 +1856,8 @@ updates mitigate some of these risks but do not remove them.
 
 ### Work Computer capability gate
 
+Bounded file text, tool arguments, copied review inputs and command output are also checked for recognized credential and private-key shapes before model disclosure or evidence persistence. Matching content is withheld with a fixed refusal; matching names are excluded from listings and searches. This heuristic does not identify arbitrary secrets.
+
 Computer inspects granted folders and proposes file writes and edits that the
 person approves one diff at a time. A shared
 path policy excludes `.env*`, named credential stores, private-key extensions and

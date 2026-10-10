@@ -141,6 +141,7 @@ fn optional_number(args: &Value, key: &str) -> Option<u64> {
 fn file_fault(error: WorkFileError, path: &str) -> ToolReply {
     ToolReply::fault(match error {
         WorkFileError::Denied => "This path is not available to Work.".into(),
+        WorkFileError::Sensitive => WorkFileError::Sensitive.note().into(),
         WorkFileError::NotFound => format!("{path}: no such file or folder."),
         WorkFileError::Changed => {
             format!("{path} changed since you read it. Read it again before changing it.")
@@ -311,6 +312,9 @@ impl ComputerTools {
     }
 
     pub async fn call(&self, host: &dyn ComputerHost, name: &str, args: &Value) -> ToolReply {
+        if zephium_agentic::contains_recognized_secret(name) || sensitive_arguments(args) {
+            return ToolReply::fault(WorkFileError::Sensitive.note());
+        }
         if matches!(name, "bash" | "delegate") {
             if let Err(reason) = crate::work_commands::ensure_available() {
                 return ToolReply::fault(reason);
@@ -1287,4 +1291,41 @@ fn search_evidence(root: &Path, total: usize, text: &str, partial: bool) -> Work
         after_digest: None,
         lines: None,
     }
+}
+
+// Inspect the original bounded strings before recording a step or clipping text.
+fn sensitive_arguments(value: &Value) -> bool {
+    let mut pending = vec![value];
+    let mut visited = 0usize;
+    while let Some(value) = pending.pop() {
+        visited += 1;
+        if visited > 16_384 || pending.len() > 16_384 {
+            return true;
+        }
+        match value {
+            Value::String(text) if zephium_agentic::contains_recognized_secret(text) => {
+                return true
+            }
+            Value::Array(values) => {
+                if values.len() > 16_384 - pending.len() {
+                    return true;
+                }
+                pending.extend(values);
+            }
+            Value::Object(values) => {
+                if values
+                    .keys()
+                    .any(|key| zephium_agentic::contains_recognized_secret(key))
+                {
+                    return true;
+                }
+                if values.len() > 16_384 - pending.len() {
+                    return true;
+                }
+                pending.extend(values.values());
+            }
+            _ => {}
+        }
+    }
+    false
 }

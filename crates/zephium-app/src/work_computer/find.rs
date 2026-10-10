@@ -482,6 +482,38 @@ mod tests {
     }
 
     #[test]
+    fn search_withholds_recognized_secret_body_and_filename() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::write(root.join("plain.txt"), "needle ordinary").unwrap();
+        std::fs::write(root.join("body.txt"), "needle\nghp_inertFixtureToken").unwrap();
+        std::fs::write(
+            root.join("key.txt"),
+            "needle\n-----BEGIN PGP PRIVATE KEY BLOCK-----",
+        )
+        .unwrap();
+        std::fs::write(root.join("ghp_inertFixtureFilename.txt"), "needle").unwrap();
+        let found = grep(
+            &root,
+            &GrepQuery {
+                pattern: "needle",
+                glob: None,
+                output: GrepOutput::Lines,
+                context: 0,
+                case_insensitive: false,
+                limit: None,
+            },
+        )
+        .unwrap();
+        assert!(found.text.contains("plain.txt"));
+        assert!(!found.text.contains("body.txt"));
+        assert!(!found.text.contains("key.txt"));
+        assert!(!found.text.contains("ghp_"));
+        let found = glob(&root, "*.txt").unwrap();
+        assert!(!found.text.contains("ghp_"));
+    }
+
+    #[test]
     fn child_whitelist_overrides_parent_ignore_rule() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();

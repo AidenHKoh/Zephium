@@ -397,13 +397,7 @@ where
         return Err(Failure::StopUnconfirmed);
     }
     result?;
-    let text = String::from_utf8(output).map_err(|_| Failure::Failed)?;
-    if text
-        .chars()
-        .any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t')
-    {
-        return Err(Failure::Failed);
-    }
+    let text = super::output_text(output)?;
     Ok(Output {
         text,
         success: true,

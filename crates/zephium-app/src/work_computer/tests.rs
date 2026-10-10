@@ -597,3 +597,27 @@ fn recovery_tools_require_approval_and_restore_without_overwrite() {
         assert_eq!(*host.asked.lock().unwrap(), 3);
     });
 }
+
+#[test]
+fn recognizable_secret_arguments_are_rejected_before_recording() {
+    serially(async {
+        let (_home, tools, _) = project();
+        let host = Recorder::default();
+        for (name, args) in [
+            (
+                "write",
+                json!({"path":"new.txt","text":"ghp_inertFixtureToken"}),
+            ),
+            ("read", json!({"path":"ghp_inertFixtureFilename.txt"})),
+            ("grep", json!({"pattern":"-----BEGIN PRIVATE KEY-----"})),
+        ] {
+            let reply = tools.call(&host, name, &args).await;
+            assert!(reply.is_error);
+            assert!(!reply.content.contains("ghp_"));
+            assert!(!reply.content.contains("-----BEGIN"));
+        }
+        assert!(host.kinds().is_empty());
+        assert!(host.settled.lock().unwrap().is_empty());
+        assert_eq!(*host.asked.lock().unwrap(), 0);
+    });
+}

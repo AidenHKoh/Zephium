@@ -44,6 +44,7 @@ pub enum WorkFileError {
     NotAFile,
     TooLarge,
     Binary,
+    Sensitive,
     Ambiguous,
     Io,
     Changed,
@@ -62,6 +63,7 @@ impl WorkFileError {
             Self::NotAFile => "Not a file",
             Self::TooLarge => "Larger than the read limit",
             Self::Binary => "Not a text file",
+            Self::Sensitive => "Recognizable credential content is not available to Work",
             Self::Ambiguous => "The passage to replace is missing or not unique",
             Self::Changed => "The file changed since it was read",
             Self::Exists => "The destination already exists",
@@ -444,6 +446,9 @@ impl WorkFileGrant {
         let mut next = None;
         let proposal = match kind {
             WorkStepKindV1::WriteFile { content, .. } => {
+                if zephium_agentic::contains_recognized_secret(content) {
+                    return Err(WorkFileError::Sensitive);
+                }
                 if binary_looking(content) {
                     return Err(WorkFileError::Binary);
                 }
@@ -498,6 +503,9 @@ impl WorkFileGrant {
                 }
                 if binary_looking(&edited) {
                     return Err(WorkFileError::Binary);
+                }
+                if zephium_agentic::contains_recognized_secret(&edited) {
+                    return Err(WorkFileError::Sensitive);
                 }
                 let proposal = replacement_diff(text, &edited, &spans);
                 next = Some(edited);
@@ -657,6 +665,9 @@ pub(crate) fn protected_path(path: &Path) -> bool {
         let Some(name) = name.to_str() else {
             return true;
         };
+        if zephium_agentic::contains_recognized_secret(name.trim_start_matches('.')) {
+            return true;
+        }
         // Case-insensitive filesystems also equate characters whose uppercase
         // expands to ASCII (for example long-s ſ with s). Lowercase alone misses
         // these aliases, and macOS realpath preserves the caller's spelling.
@@ -1370,6 +1381,9 @@ pub(crate) fn read_text_limited(
     let byte_count = bytes.len() as u32;
     let digest = format!("{:x}", Sha256::digest(&bytes));
     let text = match String::from_utf8(bytes) {
+        Ok(text) if zephium_agentic::contains_recognized_secret(&text) => {
+            return Err(WorkFileError::Sensitive);
+        }
         Ok(text) if !text.contains('\0') => Some(text),
         _ => None,
     };
@@ -1682,6 +1696,44 @@ mod tests {
         ]);
         assert_eq!(refused.len(), 4);
         (home, grant, project)
+    }
+
+    #[test]
+    fn recognized_secret_content_is_refused_before_excerpt_or_edit() {
+        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_home, grant, project) = home_grant();
+        let path = project.join("ordinary.txt");
+        for secret in [
+            "-----BEGIN OPENSSH PRIVATE KEY-----",
+            "ghp_inertFixtureToken",
+        ] {
+            std::fs::write(
+                &path,
+                format!("ordinary first line\n{}\n{secret}", "filler\n".repeat(500)),
+            )
+            .unwrap();
+            let error = grant.read_at(&path.to_string_lossy(), 1, 1).unwrap_err();
+            assert_eq!(error, WorkFileError::Sensitive);
+            assert!(!error.note().contains(secret));
+        }
+        std::fs::write(&path, "ordinary first line\n").unwrap();
+        let kind = WorkStepKindV1::WriteFile {
+            path: path.to_string_lossy().into_owned(),
+            content: "ghp_inertFixtureToken".into(),
+            decision: None,
+        };
+        assert!(matches!(
+            grant.prepare(&kind, None),
+            Err(WorkFileError::Sensitive)
+        ));
+        for name in ["ghp_inertFixtureToken.txt", ".ghp_inertFixtureToken"] {
+            std::fs::write(project.join(name), "ordinary").unwrap();
+            assert!(protected_path(&project.join(name)));
+        }
+        let listed = grant.list(&project.to_string_lossy()).unwrap();
+        assert!(!listed.text.contains("ghp_"));
     }
 
     #[test]
