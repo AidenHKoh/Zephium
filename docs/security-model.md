@@ -1871,7 +1871,7 @@ descriptions use those same guarded readers/listings; their Git state is explici
 unavailable and does not launch an independent Git process.
 
 Arbitrary commands and coding-agent hand-offs fail before spawning, regardless of
-prior approval. The separate `review_changes` tool reviews only the current part's
+prior approval. Legacy Connection CLI execution, login-shell discovery and automatic `gh` status probes are also gated; service consent cannot enable that path. Configured MCP servers remain separately authorized service capabilities, not Computer subprocess grants. The separate `review_changes` tool reviews only the current part's
 approved before/after edits in a private copy, with a synthetic Git baseline. It
 refuses intervening file changes and never reports original repository status or
 history. Only macOS build `25G83` is admitted: its tested Seatbelt profile denies

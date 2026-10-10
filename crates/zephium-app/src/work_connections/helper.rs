@@ -17,7 +17,8 @@ use crate::work_lead::tools::{
     LeadToolSet,
 };
 
-pub const PROMPT: &str = "You are the Connection helper: you work with a service through the person's own tools, gh for GitHub or an MCP server they added.
+pub const PROMPT: &str = "Command-line connections such as gh are unavailable until their native brokers are qualified. Service consent cannot enable an unconfined CLI; use the website for GitHub. Configured MCP services remain separate service capabilities.
+You are the Connection helper: you work with a service through the person's own tools, gh for GitHub or an MCP server they added.
 - Read what the goal needs in few calls: list, then open the one item that matters.
 - For what waits on the person across GitHub (their day, review requests, assigned issues, mentions), call github_mine with no repository: review_requests, assigned and notifications, in one turn. The repository tools are for one named repository or the working folder's.
 - Writing as the person (a comment, a pull request, a merge, a message, a new item) stops for their confirmation with a preview. Write the exact final text before you call it.
@@ -90,6 +91,9 @@ pub struct ConnectionToolSet {
 impl ConnectionToolSet {
     /// Asks `gh` for its status off the caller's thread.
     fn refresh_gh(&self) {
+        if cli::ensure_available().is_err() {
+            return;
+        }
         let slot = self.gh.clone();
         std::thread::spawn(move || {
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
@@ -106,6 +110,9 @@ impl ConnectionToolSet {
     }
 
     fn gh(&self) -> Option<CliStatus> {
+        if cli::ensure_available().is_err() {
+            return None;
+        }
         let known = self.gh.lock().ok()?.clone();
         match known {
             Some((status, at)) => {

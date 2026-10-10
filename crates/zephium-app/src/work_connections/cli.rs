@@ -1,6 +1,5 @@
-//! Command-line tools the person already has, found the way their Terminal
-//! finds them, and whether each is signed in. Statuses are read from the
-//! tools' own status commands; no secret is ever read.
+//! Command-line discovery and legacy adapters. Ambient CLI execution is closed
+//! until replaced by qualified, typed brokers; consent does not provide confinement.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -8,6 +7,13 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::Value;
+
+/// This gate applies to legacy ambient execution, not qualified typed runners.
+/// A newly qualified operation must migrate to its own broker rather than open
+/// this generic path (which can load login files, credentials and repository config).
+pub(crate) fn ensure_available() -> Result<(), &'static str> {
+    Err("Command-line connections are unavailable until their file, credential and network access is confined. Use the website instead.")
+}
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
@@ -161,6 +167,7 @@ fn usual_folders() -> Vec<PathBuf> {
 /// Runs `script` in the person's login shell, within a few seconds.
 #[cfg(unix)]
 fn login_shell(script: &str) -> Option<String> {
+    ensure_available().ok()?;
     let shell = std::env::var_os("SHELL")
         .map(PathBuf::from)
         .filter(|s| s.is_absolute() && executable(s))?;
@@ -226,6 +233,16 @@ pub fn locate(cli: Cli) -> Option<PathBuf> {
 /// Native tool search PATH, including login-shell paths on Unix.
 /// Cached for the process. Blocking.
 pub fn login_path() -> String {
+    if ensure_available().is_err() {
+        return std::env::join_paths(
+            usual_folders()
+                .into_iter()
+                .filter(|path| path.is_absolute()),
+        )
+        .ok()
+        .and_then(|value| value.into_string().ok())
+        .unwrap_or_default();
+    }
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(|| {
         #[cfg(unix)]
@@ -282,6 +299,7 @@ pub async fn run(
     stdin: Option<&str>,
     timeout: Duration,
 ) -> Option<(bool, String, String)> {
+    ensure_available().ok()?;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut command = tokio::process::Command::new(program);
     #[cfg(windows)]
@@ -451,6 +469,74 @@ pub async fn statuses() -> Vec<CliStatus> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn startup_discovery_and_legacy_calls_cannot_execute_shell_or_gh() {
+        use std::os::unix::fs::PermissionsExt;
+        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert!(ensure_available().is_err());
+        let directory = tempfile::Builder::new()
+            .prefix("work-cli-gate-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let marker = directory.path().join("executed");
+        let program = directory.path().join("fixture-cli");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\nprintf ran > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        struct Restore {
+            shell: Option<std::ffi::OsString>,
+            located: Option<Option<PathBuf>>,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.shell {
+                    Some(value) => std::env::set_var("SHELL", value),
+                    None => std::env::remove_var("SHELL"),
+                }
+                let mut cache = located().lock().unwrap();
+                match &self.located {
+                    Some(value) => {
+                        cache.insert("gh", value.clone());
+                    }
+                    None => {
+                        cache.remove("gh");
+                    }
+                }
+            }
+        }
+        let previous = located()
+            .lock()
+            .unwrap()
+            .insert("gh", Some(program.clone()));
+        let _restore = Restore {
+            shell: std::env::var_os("SHELL"),
+            located: previous,
+        };
+        std::env::set_var("SHELL", &program);
+        assert!(login_shell("ignored").is_none());
+        let _ = login_path();
+        assert!(!super::super::helper::ConnectionHelper::new().gh_ready());
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                assert!(run(&program, &[], None, None, Duration::from_secs(1))
+                    .await
+                    .is_none());
+                let status = status(Cli::Gh).await;
+                assert!(!status.usable());
+                assert_eq!(status.auth, CliAuth::Unknown);
+            });
+        assert!(!marker.exists());
+    }
+
     #[test]
     fn statuses_from_recorded_output() {
         let gh = r#"{"hosts":{"github.com":[{"state":"success","active":true,"host":"github.com","login":"octo","tokenSource":"keyring","scopes":"repo","gitProtocol":"https"}]}}"#;
@@ -508,6 +594,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[ignore = "Legacy ambient CLI execution remains closed pending qualified broker replacement"]
     async fn run_is_bounded_and_feeds_stdin() {
         let (ok, out, _) = run(
             Path::new("/bin/cat"),
