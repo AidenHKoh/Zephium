@@ -1806,3 +1806,245 @@ async fn a_cross_site_redirect_goes_back_to_the_lead_and_a_chain_stops_at_its_bo
     assert!(!urls.iter().any(|url| url.contains("other.example.net")));
     assert!(!urls.iter().any(|url| url.ends_with("/d")));
 }
+
+struct FolderHandoffModel {
+    root: String,
+    helper_calls: std::sync::atomic::AtomicUsize,
+}
+impl WorkModelClient for FolderHandoffModel {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let lead = request.tools.iter().any(|tool| tool.name == "start_part");
+            let turn = request
+                .messages
+                .iter()
+                .filter(|message| matches!(message, WorkModelMessage::Assistant(_)))
+                .count();
+            let assistant = if lead {
+                match turn {
+                    0 => ["First", "Second"].into_iter().enumerate().map(|(i,title)| call(&format!("part-{i}"), "start_part", json!({"title":title,"helper":"computer","goal":"Use the chosen project folder for this synthetic handoff fixture"}))).collect(),
+                    1 => vec![call("part-again","start_part",json!({"title":"Again","helper":"computer","goal":"Use the same folder for this synthetic handoff fixture"}))],
+                    _ => vec![call("reply","create",json!({"kind":"reply","title":"Folder handoff","data":{"headline":"Folder handoff recorded","text":"This synthetic fixture performed no file changes."}})),call("finish","finish",json!({"say":"The fixture is complete."}))],
+                }
+            } else {
+                let context = request
+                    .messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        WorkModelMessage::User(parts) => Some(
+                            parts
+                                .iter()
+                                .filter_map(|part| match part {
+                                    WorkModelPart::Text(text) => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect::<String>(),
+                        ),
+                        _ => None,
+                    })
+                    .collect::<String>();
+                assert!(
+                    context.contains(&self.root),
+                    "the helper receives only the chosen root"
+                );
+                self.helper_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                vec![call(
+                    "helper-finish",
+                    "finish",
+                    json!({"summary":"Scoped","digest":"Synthetic permission routing only; no file reads or changes.","found":true}),
+                )]
+            };
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    input_tokens: 100,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 20,
+                    reasoning_tokens: 0,
+                    cost_micros: Some(1),
+                },
+                assistant,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn zero_folder_computer_parts_share_picker_and_only_accept_real_choice() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let folder = tempfile::Builder::new()
+        .prefix("zephium-picker-home-")
+        .tempdir()
+        .unwrap();
+    let _home = crate::work_files::TestGrantHome::new(folder.path().canonicalize().unwrap());
+    let project = folder.path().join("Documents/project");
+    std::fs::create_dir_all(&project).unwrap();
+    let root = project
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    for mode in ["picked", "cancelled", "bare-label", "stopped"] {
+        let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+        let (mut shell, queue, handle, profile) = fixture(store);
+        let create = handle
+            .work_document(WorkIntent::Create {
+                objective: "Inspect my project with the Computer helper".into(),
+            })
+            .unwrap();
+        let work = create.work_id().unwrap();
+        drive(&mut shell, &queue, create).await.unwrap();
+        let client = Arc::new(FolderHandoffModel {
+            root: root.clone(),
+            helper_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let lead = model(client.clone());
+        let models = WorkLeadModels {
+            lead: lead.clone(),
+            page: lead.clone(),
+            light: lead,
+        };
+        let answered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let answering = {
+            let handle = handle.clone();
+            let answered = answered.clone();
+            let root = root.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    let Ok(read) = handle.work_projection(profile, work) else {
+                        continue;
+                    };
+                    let zephium_ipc::work::WorkReplyV1::Projection { projection } =
+                        read.response(profile).await.reply
+                    else {
+                        continue;
+                    };
+                    let Some(execution) = projection.executions.last() else {
+                        continue;
+                    };
+                    let Some(step) = execution.steps.iter().find(|step| {
+                        step.status == WorkStepStatus::Running
+                            && matches!(
+                                step.kind,
+                                WorkStepKindV1::Ask {
+                                    purpose: Some(WorkAskPurposeV1::Folder),
+                                    ..
+                                }
+                            )
+                    }) else {
+                        continue;
+                    };
+                    assert!(step
+                        .local
+                        .as_ref()
+                        .is_some_and(|local| local.folder.is_none()));
+                    assert!(execution
+                        .parts
+                        .iter()
+                        .any(|part| part.state == WorkPartStateV1::Waiting
+                            && part.need == Some(WorkPartNeedV1::ChooseFolder)));
+                    assert_eq!(
+                        answered.load(std::sync::atomic::Ordering::SeqCst),
+                        0,
+                        "a declined or granted shared picker is not asked again"
+                    );
+                    let intent = if mode == "stopped" {
+                        WorkRuntimeIntent::Cancel {
+                            execution: execution.id,
+                            intervention: None,
+                        }
+                    } else {
+                        WorkRuntimeIntent::AnswerStep {
+                            execution: execution.id,
+                            step: step.id,
+                            answer: match mode {
+                                "picked" => root.clone(),
+                                "bare-label" => "Choose folder…".into(),
+                                _ => "Not now".into(),
+                            },
+                        }
+                    };
+                    let result = handle
+                        .work_command(
+                            profile,
+                            WorkCommandV1 {
+                                version: 1,
+                                work,
+                                expected_revision: projection.work.revision,
+                                command: WorkCommandId::generate(),
+                                intent,
+                            },
+                        )
+                        .unwrap()
+                        .await;
+                    if result.is_ok() {
+                        answered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            })
+        };
+        let service = WorkLeadService::new(handle.clone());
+        let result = drive(
+            &mut shell,
+            &queue,
+            tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                service.run(
+                    profile,
+                    command(work, WorkRevision::INITIAL),
+                    None,
+                    models,
+                    &Search,
+                    |_, _| async { panic!("no web browsing in folder fixture") },
+                    |_| {},
+                ),
+            ),
+        )
+        .await;
+        answering.abort();
+        let projection = result.expect("bounded handoff").expect("settled handoff");
+        assert_eq!(answered.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let execution = &projection.executions[0];
+        assert!(execution.parts.iter().all(|part| part.state.terminal()));
+        assert!(!execution
+            .steps
+            .iter()
+            .any(|step| step.status == WorkStepStatus::Running));
+        if mode == "picked" {
+            assert!(
+                client
+                    .helper_calls
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    >= 2
+            );
+            assert!(execution
+                .parts
+                .iter()
+                .all(|part| part.need != Some(WorkPartNeedV1::ChooseFolder)));
+        } else {
+            assert_eq!(
+                client
+                    .helper_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+            assert!(
+                execution
+                    .parts
+                    .iter()
+                    .all(|part| part.need == Some(WorkPartNeedV1::ChooseFolder)),
+                "{mode}"
+            );
+        }
+        assert!(!execution.steps.iter().any(|step| step.kind.files()));
+    }
+}

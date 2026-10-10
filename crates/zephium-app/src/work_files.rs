@@ -884,13 +884,51 @@ pub(crate) fn read_directory(path: &Path) -> Result<DirectoryEntries, WorkFileEr
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_GRANT_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Current-thread fixture home; never mutates HOME or changes production policy.
+#[cfg(test)]
+pub(crate) struct TestGrantHome {
+    previous: Option<PathBuf>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+#[cfg(test)]
+impl TestGrantHome {
+    pub(crate) fn new(home: PathBuf) -> Self {
+        let previous = TEST_GRANT_HOME.with(|slot| slot.replace(Some(home)));
+        Self {
+            previous,
+            _thread: std::marker::PhantomData,
+        }
+    }
+}
+#[cfg(test)]
+impl Drop for TestGrantHome {
+    fn drop(&mut self) {
+        TEST_GRANT_HOME.with(|slot| {
+            slot.replace(self.previous.take());
+        });
+    }
+}
+
 #[cfg(not(windows))]
 fn grant_home() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(home) = TEST_GRANT_HOME.with(|slot| slot.borrow().clone()) {
+        return Some(home);
+    }
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
 #[cfg(windows)]
 fn grant_home() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(home) = TEST_GRANT_HOME.with(|slot| slot.borrow().clone()) {
+        return Some(home);
+    }
     #[cfg(test)]
     if let Some(home) = std::env::var_os("HOME") {
         return Some(home.into());

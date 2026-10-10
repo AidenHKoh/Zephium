@@ -646,6 +646,8 @@ function needView(need: NonNullable<RunPart["need"]>, host?: string): PartNeed {
     case "check":
     case "allow_site":
       return { kind: need.kind, target: siteName(need.host), address: `https://${need.host}` };
+    case "choose_folder":
+      return { kind: need.kind, target: "" };
     case "allow_folder":
       return {
         kind: need.kind,

@@ -46,7 +46,14 @@
   import WorkBar from "./bar/WorkBar.svelte";
   import { centreSize, picksSheet } from "./objects/centre";
   import { partAsks } from "./asks/actions";
-  import { ASK_WORDS, asksOf, exchangeOf, openAsks, registrableSite } from "./asks/asks";
+  import {
+    ASK_WORDS,
+    asksOf,
+    exchangeOf,
+    folderChoice,
+    openAsks,
+    registrableSite,
+  } from "./asks/asks";
   import BarTool from "./bar/BarTool.svelte";
   import NotePanel from "./bar/NotePanel.svelte";
   import TasksPanel from "./bar/TasksPanel.svelte";
@@ -493,7 +500,10 @@
     ) => {
       // A closed wall requires a fresh execution; steering the blocked one
       // cannot recreate the retained page or grant a retry.
-      if (activeExecution && (need.kind === "sign_in" || need.kind === "check"))
+      if (
+        activeExecution &&
+        (need.kind === "sign_in" || need.kind === "check" || need.kind === "choose_folder")
+      )
         void current.enqueue(text);
       else if (activeExecution)
         void current.steer(text).then((taken) => taken || current.enqueue(text));
@@ -519,6 +529,41 @@
       case "allow_site":
         if (need.address) preallowed.add(registrableSite(new URL(need.address).hostname));
         return again();
+      case "choose_folder": {
+        const projection = current.projection;
+        const waiting = projection?.executions.flatMap((execution) =>
+          (execution.steps ?? [])
+            .filter(
+              (step) =>
+                step.status === "running" &&
+                step.kind.kind === "ask" &&
+                step.kind.purpose === "folder" &&
+                !!step.local &&
+                !step.local.folder,
+            )
+            .map((step) => ({ execution: execution.id, step: step.id })),
+        )[0];
+        void commands
+          .workChooseFolder(session.profile, null)
+          .then(async (picked) => {
+            if (objectiveSession !== current || current.projection?.work.id !== part.objective)
+              return;
+            if (picked.status !== "ok" || picked.data?.kind === "refused") return;
+            const choice =
+              picked.status === "ok" && picked.data?.kind === "admitted" ? picked.data.path : null;
+            if (waiting) {
+              await current.answerStep(waiting.execution, waiting.step, choice ?? ASK_WORDS.notNow);
+              return;
+            }
+            if (!choice || !(await placing.addFolder(choice))) return;
+            if (objectiveSession !== current || current.projection?.work.id !== part.objective)
+              return;
+            current.folders = [...new Set([...current.folders, choice])];
+            again();
+          })
+          .catch(() => undefined);
+        return;
+      }
       case "allow_folder":
         if (need.address) void placing.addFolder(need.address).then((added) => added && again());
         return;
@@ -537,15 +582,20 @@
     const execution = objectiveSession?.projection?.executions.at(-1);
     for (const step of execution?.steps ?? []) {
       const kind = step.kind;
-      const folder = step.local?.folder;
-      if (kind.kind !== "ask" || kind.purpose !== "folder" || !folder) continue;
+      if (kind.kind !== "ask" || kind.purpose !== "folder" || !step.local) continue;
       if (!kind.answer) {
         if (step.status === "running") folderAsks[step.id] = true;
         continue;
       }
       if (!folderAsks[step.id]) continue;
       delete folderAsks[step.id];
-      if (kind.answer !== kind.options[0]) continue;
+      if (step.status !== "succeeded") continue;
+      const folder =
+        folderChoice(kind.answer) ??
+        (kind.answer === kind.options[0] && kind.options[0] !== ASK_WORDS.chooseFolder
+          ? step.local.folder
+          : null);
+      if (!folder) continue;
       const placed = snapshot?.elements.some(
         (element) => element.reference.kind === "folder" && element.reference.path === folder,
       );

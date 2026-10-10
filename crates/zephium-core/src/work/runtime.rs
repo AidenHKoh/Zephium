@@ -1874,11 +1874,7 @@ impl WorkStepFact {
             ..
         } = &self.kind
         {
-            if self
-                .local
-                .as_ref()
-                .is_none_or(|local| local.folder.is_none())
-            {
+            if self.local.is_none() {
                 return Err(WorkError::Invalid);
             }
         }

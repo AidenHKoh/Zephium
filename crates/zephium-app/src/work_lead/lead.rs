@@ -1384,6 +1384,7 @@ fn part_words(part: &zephium_core::work::parts::WorkPartFactV1) -> String {
             format!("{title} needs you to pass the human check on {host}")
         }
         Some(Need::AllowSite { host }) => format!("{title} needs your OK to work on {host}"),
+        Some(Need::ChooseFolder) => format!("{title} needs you to choose a folder"),
         Some(Need::AllowFolder { path }) => format!(
             "{title} needs your OK to read {}",
             path.rsplit('/').find(|n| !n.is_empty()).unwrap_or(path)

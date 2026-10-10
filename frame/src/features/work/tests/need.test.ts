@@ -34,3 +34,10 @@ test("a part a check stopped offers another try, and the island names the site",
   const slow = { kind: "retry" as const, target: "", reason: "no_answer" as const };
   expect(needWords(slow, "Prices", "row").action).toBe("Try again");
 });
+
+test("a missing folder offers the native picker without an invented location", () => {
+  expect(needWords({ kind: "choose_folder", target: "" }, "Project", "row")).toEqual({
+    text: "Choose a folder",
+    action: "Choose folder…",
+  });
+});

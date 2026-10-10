@@ -65,6 +65,8 @@ pub enum WorkPartNeedV1 {
     Check { host: String },
     /// Let the agent work on the site as the person.
     AllowSite { host: String },
+    /// Choose a folder in the native picker before this part can work.
+    ChooseFolder,
     /// Let the agent read a folder on this Mac.
     AllowFolder { path: String },
     /// Use an installed tool or connected service: "gh", "Linear"; the
@@ -92,6 +94,7 @@ impl WorkPartNeedV1 {
             Self::SignIn { host } | Self::Check { host } | Self::AllowSite { host } => {
                 host_ok(host)
             }
+            Self::ChooseFolder => true,
             Self::AllowFolder { path } => super::runtime::validate_file_path(path).is_ok(),
             Self::UseConnection { connection, .. } | Self::Connect { connection } => {
                 words(connection, 40).is_ok()

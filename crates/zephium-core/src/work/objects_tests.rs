@@ -724,6 +724,8 @@ fn a_folder_question_names_its_folder() {
         .validate()
         .is_ok());
     assert!(ask(None).validate().is_err());
+    assert!(ask(Some(WorkLocalStepV1::default())).validate().is_ok());
+    assert!(WorkPartNeedV1::ChooseFolder.validate().is_ok());
     assert!(ask(Some(folder("Dev/Lunios"))).validate().is_err());
     let mut question = ask(Some(folder("/Users/ana/Dev/Lunios")));
     question.kind = WorkStepKindV1::Ask {

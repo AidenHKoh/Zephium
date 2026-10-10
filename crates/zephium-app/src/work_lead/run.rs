@@ -70,6 +70,8 @@ struct State {
 
 pub(crate) struct LeadRun {
     pub blocks: super::blocks::BlockScope,
+    /// One native choose-folder handoff per run; siblings share its outcome.
+    pub folder_picker: tokio::sync::Mutex<Option<bool>>,
     pub probe: WorkAttemptProbe,
     pub handle: crate::Handle,
     pub profile: ProfileId,
@@ -118,6 +120,7 @@ impl LeadRun {
     ) -> Self {
         Self {
             blocks: super::blocks::BlockScope::default(),
+            folder_picker: tokio::sync::Mutex::new(None),
             probe,
             handle,
             profile,

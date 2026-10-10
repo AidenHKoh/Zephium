@@ -70,6 +70,8 @@ export function needWords(
       };
     case "allow_site":
       return { text: m.work_need_allow_site({ site: need.target }), action: m.work_ask_allow() };
+    case "choose_folder":
+      return { text: m.work_start_choose_folder(), action: m.work_ask_folder_choose() };
     case "allow_folder":
       return { text: m.work_need_allow_folder({ name: need.target }), action: m.work_ask_allow() };
     case "use_connection":

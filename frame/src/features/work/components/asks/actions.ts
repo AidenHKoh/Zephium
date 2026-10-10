@@ -16,7 +16,7 @@ export type AskActions = {
   /** The person says they signed in: the held page carries on from where it waits. */
   signedIn?(page: WorkHumanPageV1): Promise<boolean>;
   /** The system's folder panel, opened at a folder: the admitted choice, or null. */
-  chooseFolder?(start: string): Promise<string | null>;
+  chooseFolder?(start: string | null): Promise<string | null>;
 };
 
 /** The run's own operations: Confirm steps through ApproveStep, questions through AnswerStep. */
@@ -37,8 +37,10 @@ export function runActions(
       }),
     answer: (step, text) => session.answerStep(execution, step, text),
     chooseFolder: async (start) => {
-      const chosen = await commands.workChooseFolder(session.profile, start).catch(() => null);
-      return chosen?.status === "ok" && chosen.data?.kind === "admitted" ? chosen.data.path : null;
+      const chosen = await commands.workChooseFolder(session.profile, start);
+      if (chosen.status !== "ok" || chosen.data?.kind === "refused")
+        throw new Error("Folder choice unavailable");
+      return chosen.data?.kind === "admitted" ? chosen.data.path : null;
     },
     ...(openPage ? { openPage } : {}),
     ...(human

@@ -633,6 +633,41 @@ where
     }
 
     async fn helper(&self, part: WorkPartId, spec: &PartSpec) -> PartReport {
+        if spec.helper == WorkHelperV1::Computer && self.run.files().is_none() {
+            if let Ok(execution) = self.run.execution().await {
+                if let Some(mut fact) = execution.parts.into_iter().find(|fact| fact.id == part) {
+                    fact.state = WorkPartStateV1::Waiting;
+                    fact.need = Some(WorkPartNeedV1::ChooseFolder);
+                    let _ = self.run.part(fact).await;
+                }
+            }
+            if !super::folders::choose(
+                self.run,
+                "Choose the folder this computer work should use.",
+                Some(part),
+            )
+            .await
+            {
+                let mut report = PartReport::ended(
+                    if self.run.cancelled().await {
+                        WorkPartStateV1::Stopped
+                    } else {
+                        WorkPartStateV1::Failed
+                    },
+                    "No folder was chosen; no computer work was performed.",
+                    Vec::new(),
+                );
+                report.need = Some(WorkPartNeedV1::ChooseFolder);
+                return report;
+            }
+            if let Ok(execution) = self.run.execution().await {
+                if let Some(mut fact) = execution.parts.into_iter().find(|fact| fact.id == part) {
+                    fact.state = WorkPartStateV1::Running;
+                    fact.need = None;
+                    let _ = self.run.part(fact).await;
+                }
+            }
+        }
         let kit = self.kit(spec.helper);
         let (prompt_text, role, max_turns) = match &kit {
             Kit::Browser => (prompt::BROWSER.to_owned(), WorkModelRole::Page, PART_TURNS),
@@ -1324,6 +1359,12 @@ where
                 {
                     return None
                 }
+                WorkPartNeedV1::ChooseFolder
+                    if spec.helper == WorkHelperV1::Computer && self.run.files().is_none() =>
+                {
+                    WorkPartNeedV1::ChooseFolder
+                }
+                WorkPartNeedV1::ChooseFolder => return None,
                 WorkPartNeedV1::AllowFolder { path } => {
                     let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
                     let folder = super::folders::folder_for(std::path::Path::new(&path), &home)?;
@@ -1391,7 +1432,10 @@ where
             None
         });
         if let (Some(offer), Some(need)) = (&spec.declined, &report.need) {
-            if !matches!(need, WorkPartNeedV1::AllowFolder { .. }) {
+            if !matches!(
+                need,
+                WorkPartNeedV1::AllowFolder { .. } | WorkPartNeedV1::ChooseFolder
+            ) {
                 let reason = match need {
                     WorkPartNeedV1::SignIn { .. } => Some(WorkPartReasonV1::SignedOut),
                     WorkPartNeedV1::Check { .. } => Some(WorkPartReasonV1::BlockedByCheck),
@@ -1930,6 +1974,7 @@ fn need_arg(value: Option<&Value>) -> Option<WorkPartNeedV1> {
         "allow_site" => WorkPartNeedV1::AllowSite {
             host: host(target)?,
         },
+        "choose_folder" => WorkPartNeedV1::ChooseFolder,
         "allow_folder" => WorkPartNeedV1::AllowFolder { path: target? },
         "use_connection" => WorkPartNeedV1::UseConnection {
             connection: target?,
@@ -1949,6 +1994,7 @@ fn need_words(need: &WorkPartNeedV1) -> String {
         WorkPartNeedV1::SignIn { host } => format!("the person to sign in on {host}"),
         WorkPartNeedV1::Check { host } => format!("the person to pass the human check on {host}"),
         WorkPartNeedV1::AllowSite { host } => format!("the person to allow work on {host}"),
+        WorkPartNeedV1::ChooseFolder => "the person to choose a folder".into(),
         WorkPartNeedV1::AllowFolder { path } => format!("the person to allow reading {path}"),
         WorkPartNeedV1::UseConnection { connection, .. } => {
             format!("the person to choose their {connection} connection instead of its website")

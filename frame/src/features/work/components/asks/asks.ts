@@ -90,7 +90,7 @@ export type FolderAsk = Base & {
   kind: "folder";
   /** The folder's own name: "Lunios". */
   name: string;
-  path: string;
+  path: string | null;
   /** Rust's option words, as they go back: allow first, then not now. */
   allow: string;
   decline: string;
@@ -292,10 +292,10 @@ function folderOf(
   step: WorkStepFact,
   { prompt, options, answer }: Words,
 ): FolderAsk | null {
-  const path = step.local?.folder?.trim();
-  if (!path) return null;
-  const name = folderName(path);
+  const path = step.local?.folder?.trim() || null;
   const choose = options[0] === ASK_WORDS.chooseFolder;
+  if (!path && (!choose || !step.local)) return null;
+  const name = path ? folderName(path) : "";
   const reason = choose ? prompt.replace(/^[^?]*\?\s*/u, "").trim() : "";
   return {
     ...base,
@@ -311,7 +311,17 @@ function folderOf(
 }
 
 /** A folder's own name, the last part of its path: "Documents". */
-export const folderName = (path: string) => path.replace(/\/+$/u, "").split("/").at(-1) || path;
+export const folderName = (path: string) =>
+  path
+    .replace(/[\\/]+$/u, "")
+    .split(/[\\/]/u)
+    .at(-1) || path;
+/** Display shape only; Rust admits the actual native choice and its protected-path policy. */
+export const folderChoice = (answer: string | null | undefined): string | null =>
+  answer &&
+  (/^\/(?!\/)/u.test(answer) || /^[a-z]:[\\/]/iu.test(answer) || answer.startsWith("\\\\"))
+    ? answer
+    : null;
 
 function fromAsk(
   step: WorkStepFact,

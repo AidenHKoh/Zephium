@@ -93,7 +93,7 @@ pub struct WorkLocalStepV1 {
     pub proposal: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_digest: Option<String>,
-    /// The folder a `folder` question asks to read, as an absolute path.
+    /// A folder question's known starting path; absent for a choose-any-folder picker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
 }
@@ -146,7 +146,7 @@ impl WorkLocalStepV1 {
         );
         match &self.folder {
             Some(folder) if folder_ask => validate_file_path(folder)?,
-            None if !folder_ask => {}
+            None => {}
             _ => return Err(WorkError::Invalid),
         }
         Ok(())

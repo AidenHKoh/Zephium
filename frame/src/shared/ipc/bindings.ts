@@ -55,7 +55,7 @@ export const commands = {
 	 *  Opens the folder panel at `start` (or its nearest existing folder) and
 	 *  admits the person's choice.
 	 */
-	workChooseFolder: (expectedProfile: string, start: string) => typedError<
+	workChooseFolder: (expectedProfile: string, start: string | null) => typedError<
 /**  The canonical path and display name to place as a Folder element. */
 { kind: "admitted"; path: string; name: string } | 
 /**
@@ -4401,7 +4401,7 @@ export type WorkLocalStepV1_Deserialize = {
 	output?: WorkCommandOutputV1 | null,
 	proposal?: string | null,
 	before_digest?: string | null,
-	/**  The folder a `folder` question asks to read, as an absolute path. */
+	/**  A folder question's known starting path; absent for a choose-any-folder picker. */
 	folder?: string | null,
 };
 
@@ -4412,7 +4412,7 @@ export type WorkLocalStepV1_Serialize = {
 	output?: WorkCommandOutputV1 | null,
 	proposal?: string | null,
 	before_digest?: string | null,
-	/**  The folder a `folder` question asks to read, as an absolute path. */
+	/**  A folder question's known starting path; absent for a choose-any-folder picker. */
 	folder?: string | null,
 };
 
@@ -4921,6 +4921,8 @@ export type WorkPartNeedV1_Deserialize =
 ({ kind: "check"; host: string }) & { connection?: never; path?: never; reason?: never } | 
 /**  Let the agent work on the site as the person. */
 ({ kind: "allow_site"; host: string }) & { connection?: never; path?: never; reason?: never } | 
+/**  Choose a folder in the native picker before this part can work. */
+({ kind: "choose_folder" }) & { connection?: never; host?: never; path?: never; reason?: never } | 
 /**  Let the agent read a folder on this Mac. */
 ({ kind: "allow_folder"; path: string }) & { connection?: never; host?: never; reason?: never } | 
 /**
@@ -4947,6 +4949,8 @@ export type WorkPartNeedV1_Serialize =
 ({ kind: "check"; host: string }) & { connection?: never; path?: never; reason?: never } | 
 /**  Let the agent work on the site as the person. */
 ({ kind: "allow_site"; host: string }) & { connection?: never; path?: never; reason?: never } | 
+/**  Choose a folder in the native picker before this part can work. */
+({ kind: "choose_folder" }) & { connection?: never; host?: never; path?: never; reason?: never } | 
 /**  Let the agent read a folder on this Mac. */
 ({ kind: "allow_folder"; path: string }) & { connection?: never; host?: never; reason?: never } | 
 /**

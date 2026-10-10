@@ -31,7 +31,8 @@
 
   let sending = $state<string | null>(null);
   let refused = $state<string | null>(null);
-  const busy = $derived(sending === ask.step && ask.state === "open");
+  let picking = $state(false);
+  const busy = $derived((picking || sending === ask.step) && ask.state === "open");
 
   async function send(work: () => Promise<boolean>) {
     if (sending) return;
@@ -48,11 +49,24 @@
   });
   const decide = (decision: ConfirmDecision) => send(() => actions.confirm(ask.step, decision));
   const answer = (text: string) => send(() => actions.answer(ask.step, text));
-  /** The system's folder panel; closing it leaves the question open, as it was. */
-  async function choose(start: string) {
-    if (sending || !actions.chooseFolder) return;
-    const path = await actions.chooseFolder(start).catch(() => null);
+  /** A named-folder panel may be reopened; cancelling an unscoped picker settles it. */
+  async function choose(start: string | null) {
+    if (sending || picking || !actions.chooseFolder) return;
+    const step = ask.step;
+    picking = true;
+    refused = null;
+    let path: string | null;
+    try {
+      path = await actions.chooseFolder(start);
+    } catch {
+      refused = step;
+      return;
+    } finally {
+      picking = false;
+    }
+    if (ask.step !== step || ask.state !== "open") return;
     if (path) await answer(path);
+    else if (start === null && ask.kind === "folder") await answer(ask.decline);
   }
 </script>
 

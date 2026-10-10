@@ -79,7 +79,7 @@ test("Choose folder opens the panel at the folder and answers with the folder ch
   const { session, execution } = sessionWith(f.documentsAsk);
   const answer = vi.spyOn(session, "answerStep").mockResolvedValue(true);
   const chooseFolder = vi
-    .fn<(start: string) => Promise<string | null>>()
+    .fn<(start: string | null) => Promise<string | null>>()
     .mockResolvedValueOnce(null)
     .mockResolvedValueOnce("/Users/crynta/Documents/Notes");
   const screen = await render(AskCard, {
@@ -319,5 +319,51 @@ test("Check again opens an unpresented page and reports transport failure honest
     .element(presented.getByRole("status"))
     .toHaveTextContent("Couldn’t check the page. Try again.");
   await presented.unmount();
+  session.dispose();
+});
+
+test("an unscoped folder picker has no default path and cancellation settles its ask", async () => {
+  const step = structuredClone(f.documentsAsk);
+  step.local = {};
+  const { session, execution } = sessionWith(step);
+  const answer = vi.spyOn(session, "answerStep").mockResolvedValue(true);
+  const chooseFolder = vi
+    .fn<(start: string | null) => Promise<string | null>>()
+    .mockResolvedValue(null);
+  const screen = await render(AskCard, {
+    ask: asksOf(execution)[0]!,
+    actions: { ...runActions(session, execution.id), chooseFolder },
+  });
+  await expect.element(screen.getByText("Choose a folder", { exact: true })).toBeVisible();
+  await screen.getByRole("button", { name: "Choose folder…", exact: true }).click();
+  expect(chooseFolder).toHaveBeenCalledExactlyOnceWith(null);
+  await vi.waitFor(() =>
+    expect(answer).toHaveBeenCalledExactlyOnceWith(execution.id, step.id, "Not now"),
+  );
+  await screen.unmount();
+  session.dispose();
+});
+
+test("a refused unscoped picker does not forge a decline or grant", async () => {
+  const step = structuredClone(f.documentsAsk);
+  step.local = {};
+  const { session, execution } = sessionWith(step);
+  const answer = vi.spyOn(session, "answerStep").mockResolvedValue(true);
+  const chooseFolder = vi
+    .fn<(start: string | null) => Promise<string | null>>()
+    .mockRejectedValue(new Error("Refused"));
+  const screen = await render(AskCard, {
+    ask: asksOf(execution)[0]!,
+    actions: { ...runActions(session, execution.id), chooseFolder },
+  });
+  expect(chooseFolder).not.toHaveBeenCalled();
+  await screen.getByRole("button", { name: "Choose folder…", exact: true }).click();
+  await vi.waitFor(() => expect(chooseFolder).toHaveBeenCalledOnce());
+  expect(answer).not.toHaveBeenCalled();
+  await screen.getByRole("button", { name: "Not now", exact: true }).click();
+  await vi.waitFor(() =>
+    expect(answer).toHaveBeenCalledExactlyOnceWith(execution.id, step.id, "Not now"),
+  );
+  await screen.unmount();
   session.dispose();
 });
