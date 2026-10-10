@@ -110,6 +110,7 @@ fn serially(body: impl std::future::Future<Output = ()>) {
 }
 
 #[test]
+#[ignore = "Requires the currently unavailable confined Computer writer or runner; retained for qualification"]
 fn edits_need_a_read_a_unique_match_and_an_approval() {
     serially(async {
         let (_home, tools, root) = project();
@@ -181,6 +182,7 @@ fn edits_need_a_read_a_unique_match_and_an_approval() {
 }
 
 #[test]
+#[ignore = "Requires the currently unavailable confined Computer writer or runner; retained for qualification"]
 fn a_file_changed_since_it_was_read_is_read_again() {
     serially(async {
         let (_home, tools, root) = project();
@@ -210,6 +212,7 @@ fn a_file_changed_since_it_was_read_is_read_again() {
 }
 
 #[test]
+#[ignore = "Requires the currently unavailable confined Computer writer or runner; retained for qualification"]
 fn writes_create_freely_but_replace_only_what_was_read() {
     serially(async {
         let (_home, tools, root) = project();
@@ -285,6 +288,7 @@ fn finding_files_respects_gitignore() {
 }
 
 #[test]
+#[ignore = "Requires the currently unavailable confined Computer writer or runner; retained for qualification"]
 fn commands_keep_their_approval_classes() {
     serially(async {
         let (_home, tools, root) = project();
@@ -327,6 +331,7 @@ fn commands_keep_their_approval_classes() {
 }
 
 #[test]
+#[ignore = "Requires the currently unavailable confined Computer writer or runner; retained for qualification"]
 fn test_output_is_summarised() {
     serially(async {
         let (_home, tools, _root) = project();
@@ -348,5 +353,49 @@ fn test_output_is_summarised() {
             host.settled.lock().unwrap().last().unwrap().1.as_deref(),
             Some("1 failed")
         );
+    });
+}
+
+#[test]
+fn unavailable_capabilities_refuse_before_approval_and_keep_reads_useful() {
+    serially(async {
+        let (_home, tools, root) = project();
+        let host = Recorder::deciding(&[Decision::Approved]);
+        for (name, args) in [
+            ("bash", json!({"command": "touch escaped"})),
+            (
+                "edit",
+                json!({"path": "src/lib.rs", "old": "a + 2", "new": "a + 1"}),
+            ),
+            ("write", json!({"path": "escaped", "text": "changed"})),
+        ] {
+            let result = tools.call(&host, name, &args).await;
+            assert!(
+                result.is_error && result.content.contains("unavailable"),
+                "{}",
+                result.content
+            );
+        }
+        assert_eq!(*host.asked.lock().unwrap(), 0);
+        assert!(host.begun.lock().unwrap().is_empty());
+        assert!(!root.join("escaped").exists());
+        let result = tools
+            .call(&host, "read", &json!({"path": "src/lib.rs"}))
+            .await;
+        assert!(!result.is_error && result.content.contains("a + 2"));
+        std::fs::write(root.join(".env"), "fixture-private").unwrap();
+        std::fs::hard_link(root.join(".env"), root.join("notes.txt")).unwrap();
+        for path in [".env", "notes.txt"] {
+            let result = tools.call(&host, "read", &json!({"path": path})).await;
+            assert!(result.is_error && !result.content.contains("fixture-private"));
+        }
+        let result = tools
+            .call(
+                &host,
+                "grep",
+                &json!({"pattern": "fixture-private", "output": "lines"}),
+            )
+            .await;
+        assert!(!result.content.contains("fixture-private"));
     });
 }

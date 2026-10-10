@@ -1,11 +1,12 @@
-//! Bounded command execution. No app credentials or app state are injected.
+//! Command lifecycle plumbing, gated until an OS-enforced runner is available.
+//! Approval and working-directory selection are not filesystem confinement.
 pub mod policy;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(any(unix, windows, test))]
 use sha2::{Digest, Sha256};
 #[cfg(any(unix, windows, test))]
-use std::{collections::VecDeque, ffi::OsStr};
+use std::collections::VecDeque;
 #[cfg(any(unix, windows))]
 use std::{
     ffi::OsString,
@@ -89,61 +90,29 @@ impl Output {
     }
 }
 
-/// Defense in depth on inherited state. Login startup files are the person's trusted configuration.
-#[cfg(any(unix, windows, test))]
-fn environment_allowed(name: &OsStr, value: &OsStr) -> bool {
-    let Some(name) = name.to_str() else {
-        return false;
-    };
-    let name = name.to_ascii_uppercase();
-    if [
-        "TOKEN",
-        "SECRET",
-        "PASSWORD",
-        "PRIVATE_KEY",
-        "API_KEY",
-        "ZEPHIUM",
-        "TAURI",
-        "KEYCHAIN",
-    ]
-    .iter()
-    .any(|part| name.contains(part))
-        || matches!(
-            name.as_str(),
-            "AWS_ACCESS_KEY_ID"
-                | "AWS_SESSION_TOKEN"
-                | "AWS_SECRET_ACCESS_KEY"
-                | "NPM_TOKEN"
-                | "CARGO_REGISTRY_TOKEN"
-                | "OPENAI_API_KEY"
-                | "ANTHROPIC_API_KEY"
-        )
-    {
-        return false;
-    }
-    let value = value
-        .to_string_lossy()
-        .replace('\\', "/")
-        .to_ascii_lowercase();
-    !value.contains("/library/application support")
-        && !value.contains("/library/keychains")
-        && !value.contains("app.zephium")
+/// Fail closed on every platform, including previously approved commands.
+/// A future native runner must enforce grants, protected paths and network
+/// policy before this gate can be replaced. Approval never overrides it.
+pub(crate) fn ensure_available() -> Result<(), &'static str> {
+    Err("Commands and coding-agent hand-offs are unavailable until an OS-enforced runner can confine file and network access. Use the read, glob and grep tools.")
 }
+
 #[cfg(any(unix, windows))]
 fn environment() -> Vec<(OsString, OsString)> {
-    std::env::vars_os()
-        .filter(|(k, v)| environment_allowed(k, v))
-        .collect()
+    // No inherited variables: arbitrary names and shell startup variables can
+    // carry credentials just as readily as TOKEN or API_KEY.
+    #[cfg(unix)]
+    let environment = vec![
+        ("LANG".into(), "C.UTF-8".into()),
+        ("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into()),
+    ];
+    #[cfg(windows)]
+    let environment = vec![("LANG".into(), "C.UTF-8".into())];
+    environment
 }
 #[cfg(unix)]
 fn shell() -> OsString {
-    std::env::var_os("SHELL")
-        .filter(|s| {
-            Path::new(s).is_absolute()
-                && Path::new(s).is_file()
-                && environment_allowed(OsStr::new("SHELL"), s)
-        })
-        .unwrap_or_else(|| "/bin/sh".into())
+    "/bin/sh".into()
 }
 
 #[cfg(unix)]
@@ -247,12 +216,30 @@ where
     P: Fn(WorkCommandOutputV1) -> PF,
     PF: Future<Output = ()>,
 {
+    ensure_available()?;
+    run_unconfined(cwd, command, timeout_secs, cancelled, progress).await
+}
+
+#[cfg(unix)]
+async fn run_unconfined<C, CF, P, PF>(
+    cwd: &Path,
+    command: &str,
+    timeout_secs: u32,
+    cancelled: C,
+    progress: P,
+) -> Result<CommandResult, &'static str>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+    P: Fn(WorkCommandOutputV1) -> PF,
+    PF: Future<Output = ()>,
+{
     use std::{os::unix::process::ExitStatusExt, process::Stdio};
     use tokio::{io::AsyncReadExt, process::Command};
     let started = Instant::now();
     let mut process = Command::new(shell());
     process
-        .arg("-lc")
+        .arg("-c")
         .arg(command)
         .current_dir(cwd)
         .env_clear()
@@ -358,40 +345,25 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn work_environment_denylist() {
-        for name in [
-            "TOKEN",
-            "MY_SECRET",
-            "PASSWORD",
-            "SSH_PRIVATE_KEY",
-            "API_KEY",
-            "AWS_ACCESS_KEY_ID",
-            "AWS_SESSION_TOKEN",
-            "AWS_SECRET_ACCESS_KEY",
-            "NPM_TOKEN",
-            "CARGO_REGISTRY_TOKEN",
-            "OPENAI_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "ZEPHIUM_HOME",
-            "TAURI_ENV_DEBUG",
-            "KEYCHAIN_VALUE",
-        ] {
-            assert!(
-                !environment_allowed(OsStr::new(name), OsStr::new("value")),
-                "{name}"
-            );
-        }
-        for name in ["PATH", "HOME", "LANG", "SHELL"] {
-            assert!(environment_allowed(
-                OsStr::new(name),
-                OsStr::new("/usr/bin")
-            ));
-        }
-        assert!(!environment_allowed(
-            OsStr::new("DATA"),
-            OsStr::new("/Users/person/Library/Application Support/app.zephium")
-        ));
+    #[tokio::test]
+    async fn commands_are_refused_before_spawn_or_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("must-not-exist");
+        let error = run(
+            dir.path(),
+            "touch must-not-exist",
+            1,
+            || async { false },
+            |_| async { panic!("blocked command published output") },
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.contains("OS-enforced runner"));
+        assert!(!sentinel.exists());
+        let env = environment();
+        assert_eq!(env.len(), if cfg!(windows) { 1 } else { 2 });
+        assert!(env.iter().all(|(name, _)| name == "LANG" || name == "PATH"));
     }
     #[test]
     fn work_output_cap_hash_and_utf8() {
@@ -419,7 +391,7 @@ mod tests {
     async fn work_quiet_command_publishes_start_and_elapsed_time() {
         let dir = tempfile::tempdir().unwrap();
         let updates = std::sync::Mutex::new(Vec::new());
-        let result = run(
+        let result = run_unconfined(
             dir.path(),
             "sleep 1",
             10,
@@ -445,7 +417,7 @@ mod tests {
     #[tokio::test]
     async fn work_shell_read_timeout_and_stop() {
         let dir = tempfile::tempdir().unwrap();
-        let result = run(
+        let result = run_unconfined(
             dir.path(),
             "printf hello; printf error >&2",
             10,
@@ -458,7 +430,7 @@ mod tests {
         assert!(result.evidence.text.contains("hello"));
         assert!(result.evidence.text.contains("error"));
         let started = Instant::now();
-        let result = run(
+        let result = run_unconfined(
             dir.path(),
             "trap '' TERM; sleep 30 & wait",
             1,
@@ -470,7 +442,7 @@ mod tests {
         assert_eq!(result.note, "Stopped after 1 s");
         assert!(started.elapsed() < Duration::from_secs(4));
         let started = Instant::now();
-        let result = run(
+        let result = run_unconfined(
             dir.path(),
             "/bin/sh -c 'trap \"\" TERM; sleep 30 & printf \"%s\" \"$!\"; wait'",
             30,

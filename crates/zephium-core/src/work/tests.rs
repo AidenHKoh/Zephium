@@ -1,6 +1,60 @@
 use super::*;
 
 #[test]
+fn empty_local_evidence_does_not_prevent_the_next_agent_turn() {
+    use super::{agent::*, artifact::*, runtime::*};
+    let mut preview = WorkEvidencePreviewV1 {
+        version: 1,
+        link: WorkEvidenceLink {
+            extraction_id: 40.into(),
+            source_id: 1,
+        },
+        origin: "file:///Users/person/project".into(),
+        role: "file".into(),
+        text: String::new(),
+        truncated: false,
+        source_bytes: "0".into(),
+        link_destination: None,
+        source: WorkEvidenceSourceV1::File {
+            path: "/Users/person/project".into(),
+            name: "No search matches".into(),
+            file_kind: WorkFileKindV1::Search,
+        },
+    };
+    let disclose = |preview: &WorkEvidencePreviewV1| {
+        WorkAgentTurnDisclosure::try_new(
+            "Inspect this folder",
+            vec![],
+            vec![],
+            &[],
+            std::slice::from_ref(preview),
+            &[],
+            WorkAgentBudget {
+                turns_left: 3,
+                steps_left: 8,
+                browse_available: true,
+            },
+            WorkExecutionLimits {
+                model_tokens: 8000,
+                cost_micro_usd: 10000,
+                operations: 8,
+                timeout_seconds: 60,
+                max_workers: 1,
+            },
+            vec![],
+        )
+    };
+    assert!(disclose(&preview).is_ok());
+    preview.text = "\0".into();
+    assert!(disclose(&preview).is_err());
+    preview.text = "x".repeat(MAX_WORK_FILE_TEXT_BYTES + 1);
+    assert!(disclose(&preview).is_err());
+    preview.text.clear();
+    preview.source = WorkEvidenceSourceV1::NativeExtraction;
+    assert!(disclose(&preview).is_err());
+}
+
+#[test]
 fn native_link_handoff_admits_exact_observed_targets_without_promoting_prose() {
     use super::{agent::*, artifact::*, runtime::*};
     let target = "https://shop.example.test/products/42?variant=blue";

@@ -1,7 +1,6 @@
-//! The Computer helper: a coding agent's tools over the folders the person
-//! granted. Files resolve through `WorkFileGrant`, changes wait for the
-//! person as proposed diffs, and commands keep their approval classes from
-//! `work_commands::policy`; nothing here widens what a run may touch.
+//! The Computer helper inspects files through `WorkFileGrant`. Mutations and
+//! command execution remain explicitly unavailable until native confinement
+//! is qualified; an approval cannot widen that capability boundary.
 pub mod delegate;
 pub mod diff;
 pub mod find;

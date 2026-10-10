@@ -1531,6 +1531,13 @@ impl Driver {
         if let Some(Ok(change)) = &prepared {
             step.local = Some(Box::new(change.fact()));
         }
+        if let Some(Err(error)) = &prepared {
+            step.status = WorkStepStatus::Failed;
+            step.note = Some(error.note().into());
+            self.begin(step, vec![], None).await?;
+            self.notice(error.note());
+            return Ok(None);
+        }
         let id = self.begin(step, vec![], None).await?;
         let outcome = match (&kind, prepared) {
             (_, Some(Ok(change))) => return self.await_decision(id, &files, change).await,

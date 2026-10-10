@@ -70,6 +70,7 @@ fn finish_local() -> WorkAgentTurnOutput {
 }
 
 #[test]
+#[ignore = "Requires the currently closed native writer/command confinement gate; retained for qualification"]
 fn work_local_file_and_command_approval_journal() {
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
         .lock()
@@ -246,6 +247,7 @@ async fn work_local_file_and_command_approval_journal_inner() {
 }
 
 #[test]
+#[ignore = "Requires the currently closed native writer/command confinement gate; retained for qualification"]
 fn work_local_command_timeout_and_stop_settle_with_output() {
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
         .lock()
@@ -382,6 +384,7 @@ async fn work_local_command_timeout_and_stop_settle_with_output_inner() {
 }
 
 #[test]
+#[ignore = "Requires the currently closed native writer/command confinement gate; retained for qualification"]
 fn work_local_quit_recovers_command_as_failed_without_replay() {
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
         .lock()
@@ -447,4 +450,171 @@ async fn work_local_quit_recovers_command_as_failed_without_replay_inner() {
     assert_eq!(step.status, WorkStepStatus::Failed);
     assert_eq!(step.note.as_deref(), Some("Stopped when the app quit"));
     assert!(!root.join("replayed").exists());
+}
+
+#[test]
+fn work_local_inspection_survives_while_unsafe_capabilities_fail_without_approval() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let home = Home::new();
+            let root = home.project();
+            let file = root.join("version.txt").to_string_lossy().into_owned();
+            let moved = root.join("moved.txt").to_string_lossy().into_owned();
+            std::fs::write(&file, "version=1\n").unwrap();
+            std::fs::write(root.join(".env"), "fixture-secret-value\n").unwrap();
+            let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+            let (mut shell, queue, handle, profile) = fixture(store);
+            let work = new_work(&mut shell, &queue, &handle, "Inspect the local fixture").await;
+            let script = Script::default();
+            script.play([
+                output(vec![
+                    WorkAgentFetch::ReadFile {
+                        path: file.clone(),
+                        offset: None,
+                        limit: None,
+                    },
+                    WorkAgentFetch::ReadFile {
+                        path: root.join(".env").to_string_lossy().into_owned(),
+                        offset: None,
+                        limit: None,
+                    },
+                    WorkAgentFetch::List {
+                        path: root.to_string_lossy().into_owned(),
+                        depth: Some(1),
+                    },
+                    WorkAgentFetch::SearchFiles {
+                        path: root.to_string_lossy().into_owned(),
+                        query: "version".into(),
+                        glob: None,
+                        regex: None,
+                    },
+                ]),
+                output(vec![
+                    WorkAgentFetch::SearchFiles {
+                        path: root.to_string_lossy().into_owned(),
+                        query: "fixture-secret".into(),
+                        glob: None,
+                        regex: None,
+                    },
+                    WorkAgentFetch::WriteFile {
+                        path: file.clone(),
+                        content: "overwritten".into(),
+                    },
+                    WorkAgentFetch::EditFile {
+                        path: file.clone(),
+                        old: "version=1".into(),
+                        new: "version=2".into(),
+                        replacements: vec![],
+                    },
+                    WorkAgentFetch::MoveFile {
+                        from: file.clone(),
+                        to: moved.clone(),
+                    },
+                ]),
+                output(vec![
+                    WorkAgentFetch::DeleteFile { path: file.clone() },
+                    run(&root, WRITE_FIRST, None),
+                ]),
+                finish_local(),
+            ]);
+            let service = WorkAgentService::new(handle.clone());
+            let sources = Sources::default();
+            // No approval task runs: all unavailable operations must settle by themselves.
+            let result = drive(&mut shell, &queue, async {
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    service.run(
+                        profile,
+                        local_begin(work, WorkRevision::INITIAL, &root),
+                        None,
+                        WorkAgentProviders {
+                            turn: &script,
+                            search: &sources,
+                        },
+                        |probe, request| page(probe, request, false),
+                        |_| {},
+                    ),
+                )
+                .await
+                .expect("an unavailable operation waited for approval")
+            })
+            .await
+            .unwrap();
+            let execution = &result.executions[0];
+            assert!(execution.folder_approvals.is_empty());
+            assert!(execution.command_evidence.is_empty());
+            let rejected: Vec<_> = execution
+                .steps
+                .iter()
+                .filter(|step| step.kind.proposes_write())
+                .collect();
+            assert_eq!(
+                rejected.len(),
+                5,
+                "steps: {:?}; notices: {:?}",
+                execution
+                    .steps
+                    .iter()
+                    .map(|step| (&step.kind, &step.note))
+                    .collect::<Vec<_>>(),
+                script
+                    .seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|seen| &seen.notices)
+                    .collect::<Vec<_>>()
+            );
+            for step in rejected {
+                assert_eq!(step.status, WorkStepStatus::Failed);
+                assert!(
+                    step.note
+                        .as_deref()
+                        .is_some_and(|note| note.contains("unavailable")),
+                    "{:?}",
+                    step.note
+                );
+                assert!(step.kind.file_decision().is_none());
+                assert!(step
+                    .local
+                    .as_ref()
+                    .and_then(|local| local.proposal.as_ref())
+                    .is_none());
+            }
+            assert!(execution
+                .file_evidence
+                .iter()
+                .any(|record| record.file.kind == WorkFileKindV1::Text
+                    && record.file.text.contains("version=1")));
+            assert!(execution
+                .file_evidence
+                .iter()
+                .any(|record| record.file.kind == WorkFileKindV1::Directory
+                    && record.file.text.contains("version.txt")));
+            assert!(
+                execution
+                    .file_evidence
+                    .iter()
+                    .any(|record| record.file.kind == WorkFileKindV1::Search
+                        && record.file.bytes == 1)
+            );
+            assert!(execution
+                .file_evidence
+                .iter()
+                .any(|record| record.file.kind == WorkFileKindV1::Search
+                    && record.file.bytes == 0
+                    && record.file.text.is_empty()));
+            assert!(!serde_json::to_string(&execution.file_evidence)
+                .unwrap()
+                .contains("fixture-secret-value"));
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "version=1\n");
+            assert!(!Path::new(&moved).exists());
+            assert!(!root.join("result.txt").exists());
+        });
 }

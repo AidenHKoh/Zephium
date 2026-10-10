@@ -19,12 +19,8 @@ const READ_LINES: u32 = 400;
 const MAX_READ_LINES: u32 = 2000;
 const COMMAND_TIMEOUT: u32 = 120;
 const MAX_COMMAND_TIMEOUT: u32 = 600;
-const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
-#[cfg(windows)]
-const SHELL_DESCRIPTION: &str = "Run a Windows PowerShell command in the working folder, or in `cwd` inside a granted folder: tests, builds, git and gh. The shell is Windows PowerShell with no profile and non-interactive UTF-8 output; use PowerShell syntax and cmdlets, not POSIX shell syntax. Literal reading commands run at once; literal commands that change files ask the person once per folder; network, privileged, compound or unusual commands ask each time. You get the exit status, duration, test counts and the lines that matter; the full output is kept with the step. Use glob, grep and read to look at files.";
-#[cfg(not(windows))]
-const SHELL_DESCRIPTION: &str = "Run a shell command in the working folder, or in `cwd` inside a granted folder: tests, builds, git and gh. Reading commands run at once; commands that change files ask the person once per folder; network, privileged or unusual commands ask each time. You get the exit status, duration, test counts and the lines that matter; the full output is kept with the step. Use glob, grep and read to look at files, not cat, find or grep.";
+const SHELL_DESCRIPTION: &str = "Currently unavailable: commands require an OS-enforced runner to confine file and network access. Use read, glob and grep.";
 
 /// A tool's answer: compact text for the model and whether it failed.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,7 +85,7 @@ pub fn definitions() -> Vec<WorkModelTool> {
         ),
         tool(
             "edit",
-            "Replace an exact passage in a file you have read. `old` must match the file exactly, whitespace included, without the line-number prefix, and occur once; include surrounding lines to make it unique, or set replace_all to change every occurrence. Keep edits minimal. The person approves each change before it is written.",
+            "Currently unavailable until confined native writes are supported. Replace an exact passage in a file you have read. `old` must match the file exactly, whitespace included, without the line-number prefix, and occur once; include surrounding lines to make it unique, or set replace_all to change every occurrence. Keep edits minimal. The person approves each change before it is written.",
             json!({"type": "object", "properties": {
                 "path": path,
                 "old": {"type": "string"},
@@ -99,7 +95,7 @@ pub fn definitions() -> Vec<WorkModelTool> {
         ),
         tool(
             "write",
-            "Create a file, or replace a file you have read, with its complete text. Use edit to change part of an existing file. The person approves it before it is written.",
+            "Currently unavailable until confined native writes are supported. Create a file, or replace a file you have read, with its complete text. Use edit to change part of an existing file. The person approves it before it is written.",
             json!({"type": "object", "properties": {
                 "path": path,
                 "text": {"type": "string"}
@@ -133,7 +129,7 @@ fn optional_number(args: &Value, key: &str) -> Option<u64> {
 
 fn file_fault(error: WorkFileError, path: &str) -> ToolReply {
     ToolReply::fault(match error {
-        WorkFileError::Denied => format!("{path}: outside the granted folders."),
+        WorkFileError::Denied => "This path is not available to Work.".into(),
         WorkFileError::NotFound => format!("{path}: no such file or folder."),
         WorkFileError::Changed => {
             format!("{path} changed since you read it. Read it again before changing it.")
@@ -304,6 +300,16 @@ impl ComputerTools {
     }
 
     pub async fn call(&self, host: &dyn ComputerHost, name: &str, args: &Value) -> ToolReply {
+        if matches!(name, "bash" | "delegate") {
+            if let Err(reason) = crate::work_commands::ensure_available() {
+                return ToolReply::fault(reason);
+            }
+        }
+        if matches!(name, "write" | "edit") {
+            if let Err(reason) = crate::work_files::ensure_mutations_available() {
+                return ToolReply::fault(reason.note());
+            }
+        }
         let reply = match name {
             "glob" => self.glob(host, args).await,
             "grep" => self.grep(host, args).await,
@@ -471,7 +477,9 @@ impl ComputerTools {
         };
         let (evidence, content) = match outcome {
             Ok((target, found)) => {
-                let content = if found.total == 0 {
+                let content = if found.total == 0 && found.partial {
+                    "No matches in the inspected files. The search stopped early; results may be incomplete.".to_owned()
+                } else if found.total == 0 {
                     "No matches.".to_owned()
                 } else if output == GrepOutput::Lines {
                     let mut content = found.text.clone();
@@ -586,13 +594,11 @@ impl ComputerTools {
     }
 
     fn current_text(file: &Path) -> Result<Option<String>, WorkFileError> {
-        match std::fs::metadata(file) {
-            Err(_) => Ok(None),
-            Ok(meta) if !meta.is_file() => Err(WorkFileError::NotAFile),
-            Ok(meta) if meta.len() > MAX_FILE_BYTES => Err(WorkFileError::TooLarge),
-            Ok(_) => std::fs::read_to_string(file)
-                .map(Some)
-                .map_err(|_| WorkFileError::Binary),
+        match crate::work_files::read_text(file) {
+            Ok((_, _, Some(text))) => Ok(Some(text)),
+            Ok(_) => Err(WorkFileError::Binary),
+            Err(WorkFileError::NotFound) => Ok(None),
+            Err(error) => Err(error),
         }
     }
 
@@ -984,6 +990,9 @@ pub(super) async fn hand_off(
     delegates: &[Delegate],
     arguments: &Value,
 ) -> ToolReply {
+    if let Err(reason) = crate::work_commands::ensure_available() {
+        return ToolReply::fault(reason);
+    }
     let Some(agent) = arguments["agent"]
         .as_str()
         .and_then(Delegate::parse)

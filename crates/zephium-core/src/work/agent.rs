@@ -142,7 +142,10 @@ impl WorkAgentTurnDisclosure {
                 return Err(WorkError::Invalid);
             }
             validate_text(&preview.origin, 4096)?;
-            if matches!(preview.source, WorkEvidenceSourceV1::Command { .. }) {
+            if matches!(
+                preview.source,
+                WorkEvidenceSourceV1::Command { .. } | WorkEvidenceSourceV1::File { .. }
+            ) {
                 validate_local_text(&preview.text)?;
             } else {
                 validate_text(&preview.text, 8192)?;
