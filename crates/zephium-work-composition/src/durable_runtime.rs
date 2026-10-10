@@ -2066,7 +2066,9 @@ fn failure_note(failure: AgentWorkFailure) -> &'static str {
             "The page led somewhere the read may not follow"
         }
         AgentWorkFailure::Browser(Browser::Action(_)) => "An action on the page did not work",
-        AgentWorkFailure::Browser(Browser::Authority) => "The read ran out of page operations",
+        AgentWorkFailure::Browser(Browser::Authority) => {
+            "Work could not validate the page operation's authority"
+        }
         AgentWorkFailure::Browser(_) => "The page could not be read",
         AgentWorkFailure::TaskPhase { .. } => "Work refused the action in this task phase",
         AgentWorkFailure::Contract => "Work could not validate its internal page-task contract",
