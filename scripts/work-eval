@@ -38,6 +38,18 @@ INSTRUMENTATION = {
 }
 
 
+FORM_INSTRUMENTATION = {
+    "crates/zephium-engine/src/host/work_resource.rs",
+    "crates/zephium-engine/src/host/work_resource_form_oracle.rs",
+    "crates/zephium-engine/src/host/work_form_oracle.js",
+}
+FORM_CHECK_COUNTS = {
+    "form-httpbin-draft": 11, "form-selenium-controls": 3, "form-selenium-date": 2,
+    "form-expand-inputs": 3, "form-heroku-numeric": 2, "form-heroku-dropdown": 1,
+    "form-heroku-checkboxes": 2, "form-heroku-editor": 1, "form-qa-select": 1, "form-qa-date": 1,
+}
+
+
 def digest_bytes(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -195,8 +207,14 @@ def freeze(args):
     source = Path(args.source_root).resolve()
     patch = git(source, "diff", "--binary", args.base_ref)
     changed = set(git(source, "diff", "--name-only", args.base_ref).decode().splitlines())
-    if args.label == "baseline" and not changed <= INSTRUMENTATION:
+    forms = getattr(args, "form_oracle", False)
+    allowed = INSTRUMENTATION | (FORM_INSTRUMENTATION if forms else set())
+    if args.label == "baseline" and not changed <= allowed:
         raise ValueError("baseline source includes production changes after base revision")
+    if forms:
+        # New instrumentation must actually be represented in the recorded patch.
+        for name in sorted(FORM_INSTRUMENTATION):
+            git(source, "ls-files", "--error-unmatch", name)
     probe = Path(args.probe).resolve()
     signed = signature(probe, args.identifier)
     original_hash = digest(probe)
@@ -220,7 +238,15 @@ def freeze(args):
               "manifest_sha256": digest(out / "manifest.json"), "references_sha256": digest(out / "references.json"),
               "runner_sha256": digest(out / "work-eval.py"), "model": MODEL,
               "platform": list(os.uname()), "python": sys.version, "timeout_seconds": args.timeout,
-              "oracle_scope": "deterministic subset plus explicit source-audit predicates; no LLM judge"}
+              "oracle_scope": "deterministic predicates and separately identified human or agent source audits; form network effects remain unverified"}
+    if forms:
+        directory = out / "form-observer"
+        directory.mkdir(mode=0o700)
+        record["form_oracle"] = {"version": 1, "files": {}}
+        for name in sorted(FORM_INSTRUMENTATION):
+            copied = "form-observer/" + Path(name).name
+            write_private(out / copied, (source / name).read_bytes())
+            record["form_oracle"]["files"][copied] = digest(out / copied)
     write_private(out / "freeze.json", record)
     print(out / "freeze.json")
 
@@ -232,6 +258,9 @@ def verify_freeze(path):
                       ("work-eval.py", "runner_sha256"), ("source.patch", "source_patch_sha256")]:
         if digest(root / name) != record[key]:
             raise ValueError(f"frozen {name} changed")
+    for name, expected in record.get("form_oracle", {}).get("files", {}).items():
+        if not name.startswith("form-observer/") or Path(name).name != name.split("/", 1)[1] or digest(root / name) != expected:
+            raise ValueError("frozen form observer changed")
     if digest(__file__) != record["runner_sha256"]:
         raise ValueError("invoke the frozen work-eval.py to preserve grading behavior")
     return root, record
@@ -399,6 +428,35 @@ def stop_child(child):
         child.wait()
 
 
+def grade_form(task, evidence, log):
+    unknown = {"task_outcome": "unknown", "reason": "form_observation_unavailable", "predicates": [
+        {"id": "p1", "state": "unknown"}, {"id": "p2", "state": "unknown"}]}
+    if evidence.get("case_id") != task["id"] or evidence.get("public_artifacts") != "exported":
+        return unknown
+    observations = []
+    for line in log.splitlines():
+        if not line.startswith("form-oracle: "):
+            continue
+        try:
+            row = json.loads(line.removeprefix("form-oracle: "))
+        except ValueError:
+            return unknown
+        if row.get("case") == task["id"]:
+            observations.append(row)
+    # Multiple pages cannot be silently resolved by selecting the best result.
+    if len(observations) != 1:
+        return unknown
+    row = observations[0]
+    checks = row.get("checks")
+    if row.get("version") != 1 or row.get("reason") != "observed" or row.get("content_exported") is not False or not isinstance(checks, list) or len(checks) != FORM_CHECK_COUNTS.get(task["id"]) or any(value is not None and type(value) is not bool for value in checks):
+        return unknown
+    state = "failed" if False in checks else "unknown" if None in checks else "passed"
+    return {"task_outcome": "failed" if state == "failed" else "unknown", "reason": "native_form_predicates_network_unverified",
+            "predicates": [{"id": "p1", "state": state, "checks": checks},
+                           {"id": "p2", "state": "unknown", "reason": "No complete native HTTP submission/request observer; declined actions are not network proof."}],
+            "form_observer": row, "grading_evidence": "native_fixed_form_predicates"}
+
+
 def run_case(root, frozen, task, reference, manifest, out):
     directory = out / task["id"]
     directory.mkdir(mode=0o700)
@@ -408,6 +466,11 @@ def run_case(root, frozen, task, reference, manifest, out):
         if key.startswith("ZEPHIUM_") or key in ("RUST_LOG", "RUST_BACKTRACE"):
             env.pop(key)
     env.update(ZEPHIUM_EVAL_PUBLIC_EXPORT=str(export), ZEPHIUM_EVAL_CASE_ID=task["id"])
+    form = task.get("eligibility") == "pending_form_state_oracle"
+    if form:
+        if frozen.get("form_oracle", {}).get("version") != 1 or task["id"] not in FORM_CHECK_COUNTS:
+            raise ValueError("form task requires an explicit frozen observer")
+        env["ZEPHIUM_EVAL_FORM_ORACLE"] = task["id"]
     if digest(root / "probe") != frozen["probe_sha256"]:
         raise ValueError("frozen probe changed before launch")
     command = [str(root / "probe"), "--live-lead-request", task["prompt"],
@@ -434,6 +497,11 @@ def run_case(root, frozen, task, reference, manifest, out):
     row = {"id": task["id"], "eligibility": "eligible_public", "exit": code, "timed_out": timed_out,
            "process_ms": wall, "process_completed": code == 0, "evidence_sha256": digest(export) if export.exists() else None,
            "log_sha256": digest(log_path), "metrics": metrics(evidence, log), **grade(task, evidence, reference, manifest)}
+    if form:
+        row["eligibility"] = "eligible_form_observer"
+        if row.get("reason") == "source_audit_required":
+            row.update(grade_form(task, evidence, log))
+        row["instrumentation_timeout"] = any('"reason":"timed_out"' in line.replace(" ", "") for line in log.splitlines() if line.startswith("form-oracle: "))
     write_private(directory / "result.json", row)
     return row
 
@@ -476,7 +544,7 @@ def run(args):
             reason = task["eligibility"]
             if not selected:
                 row = {"id": task["id"], "eligibility": reason, "task_outcome": "pending", "reason": "not_selected"}
-            elif reason != "eligible_public":
+            elif reason != "eligible_public" and not (reason == "pending_form_state_oracle" and frozen.get("form_oracle", {}).get("version") == 1):
                 row = {"id": task["id"], "eligibility": reason, "task_outcome": "pending", "reason": reason}
             elif task.get("oracle") and references.get(task["id"], {}).get("state") != "ready":
                 row = {"id": task["id"], "eligibility": "blocked_reference", "task_outcome": "pending", "reason": "reference_unavailable"}
@@ -555,6 +623,7 @@ def main():
     freezing.add_argument("--source-root", required=True)
     freezing.add_argument("--base-ref", default="3fcd07c5")
     freezing.add_argument("--label", choices=["baseline", "candidate"], required=True)
+    freezing.add_argument("--form-oracle", action="store_true", help="freeze exact probe-only public-form observer; network non-submission remains unknown")
     freezing.add_argument("--timeout", type=int, default=300)
     freezing.add_argument("--out", required=True)
     running = commands.add_parser("run")

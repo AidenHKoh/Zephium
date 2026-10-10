@@ -56,6 +56,10 @@ enum DocumentFinalizationProgress {
 #[path = "work_resource_witness.rs"]
 mod witness;
 
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[path = "work_resource_form_oracle.rs"]
+mod form_oracle;
+
 #[path = "work_resource_action.rs"]
 mod action;
 #[path = "work_frame_schedule.rs"]
@@ -201,6 +205,8 @@ pub(super) struct WorkNativeResource {
     document_finalization_ready:
         Option<crate::platform::work_document_navigation::WorkDocumentFinalizationTicket>,
     hand_on_wake: Option<crate::platform::imp::ContentPolicyTimeout>,
+    #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+    form_oracle: form_oracle::State,
     pub(super) last_invocation: u64,
     /// The document a look last completed on: a document's first look waits
     /// longer for a heavy app still starting its own scripts.
@@ -299,6 +305,8 @@ impl WorkNativeResource {
             document_finalization_wake: None,
             document_finalization_ready: None,
             hand_on_wake: None,
+            #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+            form_oracle: form_oracle::State::default(),
             last_invocation: 0,
             looked_document: None,
             document_started: false,
@@ -851,6 +859,10 @@ impl WorkNativeResource {
         }
     }
     fn retire_page(&mut self) -> bool {
+        #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+        if !form_oracle::before_retire(self) {
+            return false;
+        }
         if let Some(media) = &self.media_batch {
             media.cancel();
             return false;
@@ -1392,6 +1404,8 @@ impl EngineHost {
             document_finalization_wake: None,
             document_finalization_ready: None,
             hand_on_wake: None,
+            #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+            form_oracle: form_oracle::State::default(),
             last_invocation: 0,
             looked_document: None,
             document_started: false,

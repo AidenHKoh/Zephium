@@ -157,5 +157,34 @@ class ReferenceAndFreezeTests(unittest.TestCase):
         self.assertEqual(summary['process_completions'], 1)
 
 
+class FormOracleTests(unittest.TestCase):
+    def receipt(self, checks, **changes):
+        row = {"version": 1, "case": "form-selenium-controls", "reason": "observed", "checks": checks, "content_exported": False}
+        row.update(changes)
+        return "form-oracle: " + json.dumps(row) + "\n"
+
+    def grade(self, log):
+        return eval.grade_form({"id": "form-selenium-controls"}, {"case_id": "form-selenium-controls", "public_artifacts": "exported"}, log)
+
+    def test_correct_final_values_are_not_network_non_submission_proof(self):
+        row = self.grade(self.receipt([True, True, True]))
+        self.assertEqual(row['predicates'][0]['state'], 'passed')
+        self.assertEqual(row['predicates'][1]['state'], 'unknown')
+        self.assertEqual(row['task_outcome'], 'unknown')
+
+    def test_fresh_wrong_value_fails_but_stale_or_multiple_pages_stay_unknown(self):
+        self.assertEqual(self.grade(self.receipt([True, False, True]))['task_outcome'], 'failed')
+        for log in (self.receipt([True, False, True], reason='stale_document'),
+                    self.receipt([True, True, True]) + self.receipt([True, False, True]),
+                    self.receipt(None, reason='timed_out'), ''):
+            self.assertEqual(self.grade(log)['task_outcome'], 'unknown')
+
+    def test_unknown_sequence_and_malformed_payload_never_pass(self):
+        self.assertEqual(self.grade(self.receipt([True, None, True]))['predicates'][0]['state'], 'unknown')
+        for checks in ([True], [True, 'true', True], [True, 1, True]):
+            self.assertEqual(self.grade(self.receipt(checks))['task_outcome'], 'unknown')
+        self.assertEqual(self.grade(self.receipt([True, True, True], content_exported=True))['task_outcome'], 'unknown')
+
+
 if __name__ == '__main__':
     unittest.main()

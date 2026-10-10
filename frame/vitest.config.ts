@@ -56,6 +56,10 @@ export default defineConfig({
         test: {
           name: "component",
           provide: {
+            formOracleRuntime: readFileSync(
+              new URL("../crates/zephium-engine/src/host/work_form_oracle.js", import.meta.url),
+              "utf8",
+            ),
             pixelPrivacyRuntime: readFileSync(
               new URL(
                 "../crates/zephium-agentic/assets/semantic-pixel-privacy-v1.js",
