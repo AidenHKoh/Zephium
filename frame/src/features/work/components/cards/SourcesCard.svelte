@@ -2,6 +2,7 @@
   import { getContext, untrack } from "svelte";
   import Icon from "$shared/ui/Icon";
   import HostGlyph from "./HostGlyph.svelte";
+  import Popover from "../board/Popover.svelte";
   import { ArrowDown01Icon } from "../../lib/icons";
   import type { CanvasItem } from "../../lib/canvas-model";
   import { canvasBoard, type BoardActions } from "../../lib/canvas-context";
@@ -22,9 +23,13 @@
     );
     return [...first, ...framed.filter((row) => !first.includes(row))].slice(0, 4);
   });
-  let all = $state(false);
-  let missed = $state(false);
-  const shown = $derived(all ? rows : rows.slice(0, SOURCE_ROWS));
+  /** The whole list, or the pages that would not open, over the canvas: the card never grows. */
+  let sheet = $state<"all" | "missed" | null>(null);
+  const shown = $derived(rows.slice(0, SOURCE_ROWS));
+  const toggle = (which: "all" | "missed") => (event: MouseEvent) => {
+    event.stopPropagation();
+    sheet = sheet === which ? null : which;
+  };
 
   function open(row: RunSource) {
     if (row.file)
@@ -97,53 +102,75 @@
             </button>
           </li>{/each}
       </ul>{/if}
-    {#if rows.length > SOURCE_ROWS}<button
-        type="button"
-        class="quiet nodrag nopan"
-        aria-expanded={all}
-        onclick={(event) => {
-          event.stopPropagation();
-          all = !all;
-        }}
-        >{all ? m.work_sources_fewer() : m.work_sources_all({ count: rows.length })}<Icon
-          icon={ArrowDown01Icon}
-          size={11}
-        /></button
-      >{/if}
-    {#if unread.length}
-      <button
-        type="button"
-        class="quiet missed nodrag nopan"
-        aria-expanded={missed}
-        onclick={(event) => {
-          event.stopPropagation();
-          missed = !missed;
-        }}
-        >{unread.length === 1
-          ? m.work_sources_unread_one()
-          : m.work_sources_unread({ count: unread.length })}<Icon
-          icon={ArrowDown01Icon}
-          size={11}
-        /></button
-      >
-      {#if missed}<ul class="rows unread" aria-label={m.work_env_unread_list()}>
-          {#each unread as page (page.key)}<li>
-              <button
-                type="button"
-                class="row nodrag nopan"
-                title={page.url}
-                onclick={(event) => {
-                  event.stopPropagation();
-                  board?.page(page.url);
-                }}
-              >
-                <span class="mark"><HostGlyph host={page.host} url={page.url} size={16} /></span>
-                <span class="site">{page.host}</span>
-                <span class="title">{page.note}</span>
-              </button>
-            </li>{/each}
-        </ul>{/if}
-    {/if}
+    {#if rows.length > SOURCE_ROWS || unread.length}<div class="more">
+        {#if rows.length > SOURCE_ROWS}<button
+            type="button"
+            class="quiet nodrag nopan"
+            aria-expanded={sheet === "all"}
+            onclick={toggle("all")}
+            >{m.work_sources_all({ count: rows.length })}<Icon
+              icon={ArrowDown01Icon}
+              size={11}
+            /></button
+          >{/if}
+        {#if unread.length}<button
+            type="button"
+            class="quiet missed nodrag nopan"
+            aria-expanded={sheet === "missed"}
+            onclick={toggle("missed")}
+            >{unread.length === 1
+              ? m.work_sources_unread_one()
+              : m.work_sources_unread({ count: unread.length })}<Icon
+              icon={ArrowDown01Icon}
+              size={11}
+            /></button
+          >{/if}
+        {#if sheet}<Popover
+            label={sheet === "all" ? m.work_sources() : m.work_env_unread_list()}
+            side="below"
+            width={440}
+            onclose={() => (sheet = null)}
+          >
+            <ul
+              class="rows listed"
+              class:unread={sheet === "missed"}
+              aria-label={sheet === "missed" ? m.work_env_unread_list() : undefined}
+            >
+              {#if sheet === "all"}{#each rows as row (row.key)}<li>
+                    <button
+                      type="button"
+                      class="row nodrag nopan"
+                      title={row.url || row.file?.path}
+                      onclick={() => open(row)}
+                    >
+                      <span class="mark"
+                        ><HostGlyph
+                          host={row.host}
+                          url={row.url}
+                          file={!!row.file}
+                          size={16}
+                        /></span
+                      >
+                      <span class="site">{row.host}</span>
+                      {#if row.title !== row.host}<span class="title">{row.title}</span>{/if}
+                    </button>
+                  </li>{/each}{:else}{#each unread as page (page.key)}<li>
+                    <button
+                      type="button"
+                      class="row nodrag nopan"
+                      title={page.url}
+                      onclick={() => board?.page(page.url)}
+                    >
+                      <span class="mark"
+                        ><HostGlyph host={page.host} url={page.url} size={16} /></span
+                      >
+                      <span class="site">{page.host}</span>
+                      <span class="title">{page.note}</span>
+                    </button>
+                  </li>{/each}{/if}
+            </ul>
+          </Popover>{/if}
+      </div>{/if}
   </div>
 </section>
 
@@ -267,7 +294,6 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    margin-block-start: 6px;
     padding: 0;
     border: 0;
     background: transparent;
@@ -283,9 +309,23 @@
     color: var(--color-text);
   }
 
-  .missed {
+  .more {
+    position: relative;
     display: flex;
+    flex-wrap: wrap;
+    gap: 0 16px;
+    margin-block-start: 6px;
+  }
+
+  .missed {
     color: var(--color-faint);
+  }
+
+  .listed {
+    max-block-size: 360px;
+    margin: -6px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
 
   .quiet :global(svg) {

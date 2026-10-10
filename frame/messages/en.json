@@ -808,7 +808,6 @@
   "work_browser_preview_only": "Descriptive preview. Opening or taking over this resource requires native authorization.",
   "work_sources": "Sources",
   "work_sources_all": "Show all {count}",
-  "work_sources_fewer": "Show fewer",
   "work_sources_unread_one": "One page couldn’t be opened",
   "work_sources_unread": "{count} pages couldn’t be opened",
   "work_code_line": "Line {line}",
