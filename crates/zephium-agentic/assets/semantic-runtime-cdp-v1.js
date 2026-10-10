@@ -41,7 +41,7 @@ const stack=[node];let text="",visited=0;
 while(stack.length) {
 const current=stack.pop();if(++visited>64)return null;
 if(current.nodeType===3){const value=current.nodeValue;if(value.length+text.length>2048)return null;text+=value;}
-else if(current.nodeType===1) {for(const child of current.childNodes)stack.push(child);if(stack.length>64)return null;}
+else if(current.nodeType===1) {for(const child of current.childNodes){if(stack.length>=64)return null;stack.push(child);}}
 }
 const aria=node.getAttribute("aria-label")||"";return aria.length<=2048?text+"|"+aria:null;
 }
@@ -73,29 +73,38 @@ const key=i+":"+g;snapshots.delete(key);snapshots.set(key,entries);
 while(snapshots.size>8)snapshots.delete(snapshots.keys().next().value);
 }
 function evidence(records, invocation, generation, helpers) {
-const {apply,read,weakMapGet,weakMapSet,nodeContains,elementRect,tagName,nodeType,nodeParentGetter,imageCompleteGetter,imageNaturalWidthGetter,pageTitleText}=helpers;
-const candidates = records.filter(record => record.media !== null && record.sensitivity !== "secret" &&
-(record.media === "page_image" || record.wire.b && record.wire.b.w >= 64 && record.wire.b.h >= 48));
-const titles=records.filter(record=>record.wire.r === "heading"), counts=new WeakMap();
+const {apply,read,nodeContains,elementRect,tagName,nodeType,nodeParentGetter,imageCompleteGetter,imageNaturalWidthGetter,pageTitleText}=helpers;
+const candidates=records.filter(record=>record.media!==null && record.sensitivity!=="secret" &&
+(record.media==="page_image" || record.wire.b && record.wire.b.w>=64 && record.wire.b.h>=48));
 let work=0;
-const boundaries=new WeakMap();
+const counts=new WeakMap(),textOwners=new WeakSet(),imageOwners=new WeakMap(),boundaries=new WeakMap();
+const indexAncestors=(items,visit)=>{
+for(let index=0;index<items.length;index++) {
+let node=items[index].element,depth=0;
+while(node && nodeType(node)===1 && !["html","body"].includes(tagName(node))) {
+if(++work>16384 || ++depth>64)return false;
+visit(node,index);node=read(nodeParentGetter,node);
+}
+}
+return true;
+};
+const titles=records.filter(record=>record.wire.r==="heading");
 const identities=records.filter(record=>
 ["heading","paragraph"].includes(record.wire.r) && (record.wire.n || record.wire.t) ||
-record.wire.r==="link" && (label(record.element)?.split("|")[0].trim()));
-const ownsText=element=>{
-for(const item of identities){if(++work>16384)return true;if(apply(nodeContains,element,[item.element]))return true;}
-return false;
-};
+record.wire.r==="link" && label(record.element)?.split("|")[0].trim());
+if(!indexAncestors(titles,node=>counts.set(node,Math.min(2,(counts.get(node)||0)+1))) ||
+!indexAncestors(identities,node=>textOwners.add(node)))return [];
 const cardBoundary=element=>{
 const tag=tagName(element),role=element.getAttribute("role");
 if(tag==="article" || tag==="li" || role==="listitem")return true;
 if(!["div","section","figure"].includes(tag) && !tag.includes("-") && role!=="group")return false;
 if(boundaries.has(element))return boundaries.get(element);
 const parent=element.parentElement;let boundary=false;
-if(parent && ownsText(element)) {
+if(parent && textOwners.has(element)) {
 if(parent.children.length>64)boundary=true;
 else for(const peer of parent.children) {
-if(peer!==element && peer.localName===tag && ownsText(peer)){boundary=true;break;}
+if(++work>16384)return true;
+if(peer!==element && peer.localName===tag && textOwners.has(peer)){boundary=true;break;}
 }
 }
 boundaries.set(element,boundary);return boundary;
@@ -106,56 +115,49 @@ if(record.media!=="record" || images.length>=48)continue;
 const node=record.element,b=record.wire.b;
 if(b.w*b.h>innerWidth*innerHeight/2 || label(node)===null || node.children.length>64 ||
 node.querySelector("input,textarea,select,iframe,frame,object,embed,[contenteditable]"))continue;
-let nested=false,heads=0;
+let nested=false;
 for(const other of candidates) {
 if(++work>16384)return [];
 if(other!==record && other.media==="record" && apply(nodeContains,node,[other.element])){nested=true;break;}
 }
-if(nested)continue;
-for(const title of titles){if(++work>16384)return [];if(apply(nodeContains,node,[title.element]))heads++;}
-if(heads>1 || [...node.children].some(child=>cardBoundary(child)))continue;
+if(nested || (counts.get(node)||0)>1 || [...node.children].some(child=>cardBoundary(child)))continue;
 images.push(record);
 }
 if(work>16384 || !images.length)return [];
-const rows = images.map(record => ({k:record.wire.k,t:record.media,r:[],l:record.media !== "image" ||
-read(imageCompleteGetter,record.element) === true && read(imageNaturalWidthGetter,record.element) >= 32}));
-const inside = (outer,inner) => outer && inner && inner.x >= outer.x - 2 && inner.y >= outer.y - 2 &&
-inner.x + inner.w <= outer.x + outer.width + 2 && inner.y + inner.h <= outer.y + outer.height + 2;
-for (const record of records) {
-if (!["heading","link","paragraph","document","list_item"].includes(record.wire.r) ||
-!(record.wire.n || record.wire.t) || record.sensitivity === "secret") continue;
-let parent = record.element;
-for (let depth=0; depth<8 && parent && parent !== document; depth+=1) {
-if (nodeType(parent) !== 1) break;
-const tag = tagName(parent);
-if (["html","body","main","nav","header","footer","aside"].includes(tag)) break;
-let count=apply(weakMapGet,counts,[parent]);
-if (count === undefined) {
-count=0;
-for (const title of titles) {
-if (++work > 16384) return [];
-if (apply(nodeContains,parent,[title.element]) && ++count > 1) break;
-}
-apply(weakMapSet,counts,[parent,count]);
-}
-if (count > 1) break;
-const box = elementRect(parent), related=[];
-for (let index=0; index<images.length; index+=1) {
-if (++work > 16384) return [];
+if(!indexAncestors(images,(node,index)=>{
+const entries=imageOwners.get(node)||[];entries.push(index);imageOwners.set(node,entries);
+}))return [];
+const rows=images.map(record=>({k:record.wire.k,t:record.media,r:[],l:record.media!=="image" ||
+read(imageCompleteGetter,record.element)===true && read(imageNaturalWidthGetter,record.element)>=32}));
+const inside=(outer,inner)=>outer && inner && inner.x>=outer.x-2 && inner.y>=outer.y-2 &&
+inner.x+inner.w<=outer.x+outer.width+2 && inner.y+inner.h<=outer.y+outer.height+2;
+association: for(const record of records) {
+if(!["heading","link","paragraph","document","list_item"].includes(record.wire.r) ||
+!(record.wire.n || record.wire.t) || record.sensitivity==="secret")continue;
+let parent=record.element;
+for(let depth=0;depth<8 && parent && parent!==document;depth++) {
+if(++work>16384)break association;
+if(nodeType(parent)!==1 || ["html","body","main","nav","header","footer","aside"].includes(tagName(parent)))break;
+if((counts.get(parent)||0)>1)break;
+const box=elementRect(parent),related=[];
+for(const index of imageOwners.get(parent)||[]) {
+if(++work>16384)break association;
 const image=images[index];
-if (image.media !== "page_image" && apply(nodeContains,parent,[image.element]) &&
-inside(box,image.wire.b) && inside(box,record.wire.b)) related.push(index);
+if(image.media!=="page_image" && inside(box,image.wire.b) && inside(box,record.wire.b))related.push(index);
 }
-if (related.length) {
-for (const index of related) if (rows[index].r.length < 8) rows[index].r.push(record.wire.k);
+if(related.length) {
+for(const index of related)if(rows[index].r.length<8)rows[index].r.push(record.wire.k);
 break;
 }
 if(cardBoundary(parent))break;
-if(work>16384)return [];
+if(work>16384)break association;
 parent=read(nodeParentGetter,parent);
 }
-if (pageTitleText(record.element,tagName(record.element)) !== null) {
-for (let index=0;index<images.length;index+=1) if (images[index].media === "page_image" && rows[index].r.length<4) rows[index].r.push(record.wire.k);
+if(pageTitleText(record.element,tagName(record.element))!==null) {
+for(let index=0;index<images.length;index++) {
+if(++work>16384)break association;
+if(images[index].media==="page_image" && rows[index].r.length<4)rows[index].r.push(record.wire.k);
+}
 }
 }
 remember(invocation,generation,records,rows);

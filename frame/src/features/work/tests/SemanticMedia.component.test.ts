@@ -16,7 +16,7 @@ type Media = { k: number; t: string; r: number[]; l: boolean };
 type Snapshot = { n: Node[]; m?: Media[] };
 const pixel = (color: string) =>
   `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="160" height="110"><rect width="160" height="110" fill="${color}"/></svg>`)}`;
-async function capture(body: string): Promise<Snapshot> {
+async function capture(body: string, nodes = 128): Promise<Snapshot> {
   const frame = document.createElement("iframe");
   frame.width = "800";
   frame.height = "600";
@@ -26,7 +26,7 @@ async function capture(body: string): Promise<Snapshot> {
   frame.srcdoc = `<style>body{margin:8px}main{display:flex;gap:16px}article{width:200px}img,video,canvas,.photo{display:block;width:160px;height:110px}h2{font:16px sans-serif}</style>${body}<script>${inject("semanticMediaRuntime")}
   addEventListener("load", () => {
     const api=globalThis.__zephiumSemanticRuntimeV1;
-    const b={n:128,t:16384,w:65536,x:4096,geo:true};
+    const b={n:${nodes},t:${nodes > 128 ? 32768 : 16384},w:${nodes > 128 ? 131072 : 65536},x:${nodes > 128 ? 16384 : 4096},geo:true};
     const first=JSON.parse(api.invoke(JSON.stringify({v:1,i:1,g:1,s:{k:"initial"},b})));
     const result=api.invoke(JSON.stringify({v:1,i:2,g:2,s:{k:"subtree",a:first.n[0].k},b}));
     document.documentElement.dataset.capture=result;
@@ -172,5 +172,62 @@ test("explicit text-only records have separate native rectangles, never a shared
   ]) {
     const refused = await capture(body);
     expect(refused.m?.filter((item) => item.t === "record") ?? []).toHaveLength(0);
+  }
+});
+
+test("a bounded busy listing preserves completed same-card associations", async () => {
+  const cards = Array.from(
+    { length: 24 },
+    (_, index) =>
+      `<div style="width:200px;flex:none"><img alt="" src="${pixel("red")}"><h2>Listing ${index}</h2>${Array.from({ length: 8 }, (_, field) => `<p>Detail ${index} ${field}</p>`).join("")}</div>`,
+  ).join("");
+  const snapshot = await capture(
+    `<main><section style="display:flex">${cards}</section></main>`,
+    320,
+  );
+  expect(snapshot.n.filter((node) => node.r === "image").length).toBeGreaterThan(12);
+  const first = snapshot.n.find((node) => node.r === "heading" && node.n === "Listing 0")!;
+  expect(snapshot.m?.some((item) => item.r.includes(first.k))).toBe(true);
+});
+
+test("deep repeated listing wrappers cannot erase already checked card images at the work cap", async () => {
+  const cards = Array.from({ length: 16 }, (_, index) => {
+    let detail = `<h2>Deep listing ${index}</h2>${Array.from({ length: 6 }, (_, field) => `<p>Detail ${index} ${field}</p>`).join("")}`;
+    for (let depth = 0; depth < 5; depth++) detail = `<div>${detail}</div>`;
+    return `<article style="width:200px;flex:none"><img alt="" src="${pixel("red")}">${detail}</article>`;
+  }).join("");
+  const snapshot = await capture(
+    `<main><section style="display:flex">${cards}</section></main>`,
+    320,
+  );
+  const first = snapshot.n.find((node) => node.r === "heading" && node.n === "Deep listing 0")!;
+  expect(first).toBeDefined();
+  expect(snapshot.m?.some((item) => item.t === "image" && item.r.includes(first.k))).toBe(true);
+});
+
+test("record labels stop child iteration at the existing stack bound", async () => {
+  const original = inject("semanticMediaRuntime");
+  const anchor = "Object.freeze({evidence,invoke})";
+  expect(original.split(anchor)).toHaveLength(2);
+  const fixed = original.replace(anchor, "Object.freeze({evidence,invoke,testLabel:label})");
+  const frame = document.createElement("iframe");
+  const loaded = new Promise<void>((done) =>
+    frame.addEventListener("load", () => done(), { once: true }),
+  );
+  frame.srcdoc = `<script>${fixed}
+    const label=globalThis.__zephiumRecordMediaV1.testLabel;
+    let iterated=0,refused=false,threw=false;
+    const node=count=>({nodeType:1,getAttribute:()=>"",childNodes:{*[Symbol.iterator](){for(let i=0;i<count;i++){if(++iterated>1000)throw new Error();yield {nodeType:3,nodeValue:"x"};}}}});
+    const accepted=label(node(63))==="x".repeat(63)+"|";
+    iterated=0;try{refused=label(node(1000000))===null;}catch(_){threw=true;}
+    document.documentElement.dataset.result=JSON.stringify({accepted,refused,threw,iterated});
+  </script>`;
+  document.body.append(frame);
+  try {
+    await loaded;
+    const result = JSON.parse(frame.contentDocument!.documentElement.dataset.result!);
+    expect(result).toEqual({ accepted: true, refused: true, threw: false, iterated: 65 });
+  } finally {
+    frame.remove();
   }
 });

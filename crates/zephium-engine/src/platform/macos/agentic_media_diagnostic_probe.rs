@@ -12,8 +12,8 @@ pub(super) fn source(original: &str) -> Option<String> {
     let replacements = [
         ("const snapshots=new Map(), style=", "let md=[0,0,0,0];const snapshots=new Map(), style="),
         ("function evidence(records, invocation, generation, helpers) {", "function evidence(records, invocation, generation, helpers) {md=[0,0,0,0];"),
-        ("    let work=0;\n    const boundaries", "    let work=0;md[1]=candidates.length;\n    const exhausted=()=>{md[0]=2;md[2]=Math.min(work,16385);return [];};\n    const boundaries"),
-        ("if(work>16384 || !images.length)return [];", "if(work>16384)return exhausted();if(!images.length){md[0]=1;return []; }"),
+        ("    let work=0;", "    let work=0;md[1]=candidates.length;"),
+        ("if(work>16384 || !images.length)return [];", "if(work>16384)return (md[0]=2,md[2]=Math.min(work,16385),[]);if(!images.length)return (md[0]=1,[]);"),
         ("    remember(invocation,generation,records,rows);", "    md[2]=Math.min(work,16385);md[3]=rows.length;remember(invocation,generation,records,rows);"),
         ("Object.freeze({evidence,invoke})", "Object.freeze({evidence,invoke,diagnostic:()=>md})"),
         ("  function mediaEvidence(records, request) {", "  let mediaDiagnostic=[0,0,0,0];\n  function mediaEvidence(records, request) {"),
@@ -32,19 +32,15 @@ pub(super) fn source(original: &str) -> Option<String> {
     let start = source.find("  function evidence(")?;
     let end = source[start..].find("\n  function target(")? + start;
     let body = &source[start..end];
-    let compact = "if(++work>16384)return [];";
-    let spaced = "if (++work > 16384) return [];";
-    let final_check = "if(work>16384)return [];";
-    if body.matches(compact).count() != 2
-        || body.matches(spaced).count() != 2
-        || body.matches(final_check).count() != 1
-    {
+    if body.matches("return [];").count() != 3 || body.matches("break association;").count() != 4 {
         return None;
     }
     let body = body
-        .replace(compact, "if(++work>16384)return exhausted();")
-        .replace(spaced, "if (++work > 16384) return exhausted();")
-        .replace(final_check, "if(work>16384)return exhausted();");
+        .replace(
+            "return [];",
+            "return (md[0]=2,md[2]=Math.min(work,16385),[]);",
+        )
+        .replace("break association;", "{md[0]=2;break association;}");
     source.replace_range(start..end, &body);
     (source.len() <= original.len() + 4096).then_some(source)
 }
