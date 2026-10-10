@@ -482,7 +482,9 @@ pub(super) fn replay_agent_turn(
 fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
     zephium_app::work_trace::install(Arc::new(|line: std::fmt::Arguments<'_>| {
-        let _ = writeln!(std::io::stdout().lock(), "trace: {line}");
+        if std::env::var_os("ZEPHIUM_EVAL_PUBLIC_EXPORT").is_none() {
+            let _ = writeln!(std::io::stdout().lock(), "trace: {line}");
+        }
     }));
     let coordinated = !matches!(mode, Mode::Public | Mode::MoneyNode);
     let data = tempfile::Builder::new()

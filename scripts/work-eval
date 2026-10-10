@@ -1,0 +1,548 @@
+#!/usr/bin/env python3
+"""Local Work evaluation: prepare references, freeze a signed build, run serially, grade.
+
+Public artifacts are opt-in. Account/form/local-fixture lanes remain pending until
+an appropriate scoped runner and oracle are provided. Process completion is never
+semantic correctness. All output files are private and baseline files immutable.
+"""
+import argparse
+import collections
+import contextlib
+import datetime
+import fcntl
+import hashlib
+import html.parser
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+import urllib.request
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_MANIFEST = ROOT / "eval/work-heldout-v1.json"
+MODEL = "gpt-6-luna"
+SCHEMA = 1
+EXPORT_SCHEMA = 1
+INSTRUMENTATION = {
+    "crates/zephium-terra-macos-probe/src/acceptance.rs",
+    "crates/zephium-terra-macos-probe/src/work_durable.rs",
+    "crates/zephium-terra-macos-probe/src/loopback_support.rs",
+}
+
+
+def digest_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def digest(path):
+    with open(path, "rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def write_private(path, value):
+    path = Path(path)
+    data = value if isinstance(value, bytes) else (json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode()
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "wb") as output:
+        output.write(data)
+
+
+def read_json(path, maximum=32 * 1024 * 1024):
+    path = Path(path)
+    if path.is_symlink() or path.stat().st_size > maximum:
+        raise ValueError(f"unsafe or oversized evidence: {path}")
+    return json.loads(path.read_text())
+
+
+def host(url):
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("references must be public HTTPS URLs without credentials")
+    return parsed.hostname.lower().removeprefix("www.")
+
+
+def excluded(url, manifest):
+    value = host(url)
+    return any(value == domain or value.endswith("." + domain) for domain in manifest["excluded_domains"])
+
+
+def load_manifest(path):
+    manifest = read_json(path)
+    if manifest.get("schema_version") != SCHEMA or len(manifest["tasks"]) != 100:
+        raise ValueError("expected the versioned 100-task manifest")
+    ids = [task["id"] for task in manifest["tasks"]]
+    if len(set(ids)) != len(ids) or any(not re.fullmatch(r"[a-z0-9-]{1,64}", name) for name in ids):
+        raise ValueError("invalid or duplicate task IDs")
+    if len(manifest["tuned_cases"]) != 23 or "unsplash" not in {case["id"] for case in manifest["tuned_cases"]}:
+        raise ValueError("the exact tuned 23-case exclusion inventory is required")
+    for task in manifest["tasks"]:
+        if not task["predicates"] or len(task["prompt"].encode()) > 2400 or "\n" in task["prompt"]:
+            raise ValueError(f"invalid task contract: {task['id']}")
+        for url in task.get("urls", []):
+            if excluded(url, manifest):
+                exceptions = manifest.get("domain_overlap_exceptions", {}).get(task.get("holdout_scope"), [])
+                allowed = task["eligibility"] == "pending_user_session" and any(host(url) == domain or host(url).endswith("." + domain) for domain in exceptions)
+                if not allowed:
+                    raise ValueError(f"tuned/recipe site in holdout: {task['id']}")
+        for source in task.get("oracle", {}).get("sources", {}).values():
+            if excluded(source["url"], manifest):
+                raise ValueError(f"tuned/recipe oracle in holdout: {task['id']}")
+    return manifest
+
+
+class Metadata(html.parser.HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.values = collections.defaultdict(list)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "meta" and attrs.get("name") and "content" in attrs:
+            self.values[attrs["name"]].append(attrs["content"])
+
+
+def reference_fields(source, body):
+    if source["format"] == "json":
+        data = json.loads(body)
+    elif source["format"] == "html_meta":
+        parser = Metadata()
+        parser.feed(body.decode("utf-8"))
+        data = dict(parser.values)
+    else:
+        raise ValueError("unknown reference format")
+    result = {}
+    for name, rule in source["fields"].items():
+        value = data
+        for key in rule["path"]:
+            value = value[key]
+        if rule.get("transform") == "length":
+            value = len(value)
+        if not isinstance(value, (str, int, float, bool, type(None))):
+            raise ValueError("reference predicate must yield a scalar")
+        result[name] = value
+    return result
+
+
+def prepare_references(args):
+    manifest = load_manifest(args.manifest)
+    directory = Path(args.out).resolve()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+    references = {"schema_version": SCHEMA, "manifest_sha256": digest(args.manifest), "captured_at": now(), "tasks": {}}
+    cache = {}
+    for task in manifest["tasks"]:
+        if not task.get("oracle"):
+            continue
+        expected, sources = {}, []
+        try:
+            for name, source in task["oracle"]["sources"].items():
+                url = source["url"]
+                if url not in cache:
+                    request = urllib.request.Request(url, headers={"User-Agent": "Zephium-local-evaluation/1.0 (public reference capture)"})
+                    with urllib.request.urlopen(request, timeout=25) as response:
+                        final = response.geturl()
+                        if host(final) != host(url):
+                            raise ValueError("reference redirected to a different host")
+                        body = response.read(2 * 1024 * 1024 + 1)
+                        if len(body) > 2 * 1024 * 1024:
+                            raise ValueError("reference too large")
+                        cache[url] = body
+                body = cache[url]
+                values = reference_fields(source, body)
+                if set(values) & set(expected):
+                    raise ValueError("duplicate oracle fields")
+                expected.update(values)
+                sources.append({"name": name, "url": url, "sha256": digest_bytes(body)})
+                saved = directory / (digest_bytes(body) + ".source")
+                if not saved.exists():
+                    write_private(saved, body)
+            references["tasks"][task["id"]] = {"state": "ready", "expected": expected, "sources": sources}
+        except Exception as error:
+            references["tasks"][task["id"]] = {"state": "blocked_reference", "reason": type(error).__name__}
+        print(task["id"], references["tasks"][task["id"]]["state"], flush=True)
+    write_private(directory / "references.json", references)
+    print(directory / "references.json")
+
+
+def signature(probe, identifier=None):
+    subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(probe)], check=True, capture_output=True)
+    shown = subprocess.run(["/usr/bin/codesign", "-dv", "--verbose=4", str(probe)], check=True, capture_output=True, text=True).stderr.splitlines()
+    required = "Identifier=" + identifier if identifier else None
+    if (required is not None and required not in shown) or not any(line.startswith("Identifier=") for line in shown):
+        raise ValueError("probe signing identifier mismatch")
+    return [line for line in shown if line.startswith(("Identifier=", "CDHash=", "TeamIdentifier=", "Authority="))]
+
+
+def git(root, *args):
+    return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True).stdout
+
+
+def freeze(args):
+    manifest = load_manifest(args.manifest)
+    references = read_json(args.references)
+    if references["manifest_sha256"] != digest(args.manifest):
+        raise ValueError("reference/manifest mismatch")
+    source = Path(args.source_root).resolve()
+    patch = git(source, "diff", "--binary", args.base_ref)
+    changed = set(git(source, "diff", "--name-only", args.base_ref).decode().splitlines())
+    if args.label == "baseline" and not changed <= INSTRUMENTATION:
+        raise ValueError("baseline source includes production changes after base revision")
+    probe = Path(args.probe).resolve()
+    signed = signature(probe, args.identifier)
+    original_hash = digest(probe)
+    out = Path(args.out).resolve()
+    out.mkdir(mode=0o700, parents=True, exist_ok=False)
+    binary = out / "probe"
+    shutil.copyfile(probe, binary)
+    if digest(binary) != original_hash or digest(probe) != original_hash:
+        raise ValueError("probe changed during freeze")
+    os.chmod(binary, 0o500)
+    if signature(binary) != signed:
+        raise ValueError("copied signature mismatch")
+    for target, raw in [("manifest.json", Path(args.manifest).read_bytes()), ("references.json", Path(args.references).read_bytes()),
+                        ("source.patch", patch), ("work-eval.py", Path(__file__).read_bytes())]:
+        write_private(out / target, raw)
+    record = {"schema_version": SCHEMA, "label": args.label, "frozen_at": now(),
+              "base_revision": git(source, "rev-parse", args.base_ref).decode().strip(),
+              "source_head": git(source, "rev-parse", "HEAD").decode().strip(), "source_root": str(source),
+              "source_patch_sha256": digest_bytes(patch), "changed_files": sorted(changed),
+              "probe_sha256": original_hash, "signature": signed,
+              "manifest_sha256": digest(out / "manifest.json"), "references_sha256": digest(out / "references.json"),
+              "runner_sha256": digest(out / "work-eval.py"), "model": MODEL,
+              "platform": list(os.uname()), "python": sys.version, "timeout_seconds": args.timeout,
+              "oracle_scope": "deterministic subset plus explicit source-audit predicates; no LLM judge"}
+    write_private(out / "freeze.json", record)
+    print(out / "freeze.json")
+
+
+def verify_freeze(path):
+    root = Path(path).resolve().parent
+    record = read_json(path)
+    for name, key in [("probe", "probe_sha256"), ("manifest.json", "manifest_sha256"), ("references.json", "references_sha256"),
+                      ("work-eval.py", "runner_sha256"), ("source.patch", "source_patch_sha256")]:
+        if digest(root / name) != record[key]:
+            raise ValueError(f"frozen {name} changed")
+    if digest(__file__) != record["runner_sha256"]:
+        raise ValueError("invoke the frozen work-eval.py to preserve grading behavior")
+    return root, record
+
+
+def normal_url(url):
+    parsed = urllib.parse.urlsplit(url)
+    return (parsed.scheme, parsed.hostname.removeprefix("www.") if parsed.hostname else "", parsed.port, parsed.path.rstrip("/"), parsed.query)
+
+
+def evidence_key(link):
+    return (link.get("extraction_id"), link.get("source_id"))
+
+
+def answer_object(artifacts):
+    candidates = [artifact for artifact in artifacts if artifact.get("published")
+                  and artifact["data"].get("kind") in ("code", "reply")]
+    for artifact in reversed(candidates):
+        data = artifact["data"]
+        if data.get("kind") == "code" and data.get("language", "").lower() != "json":
+            continue
+        text = data.get("text", "").strip()
+        if text.startswith("```json") and text.endswith("```"):
+            text = text[7:-3].strip()
+        try:
+            value = json.loads(text)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(value, dict):
+            return value, artifact
+    return None, None
+
+
+def metrics(evidence, log):
+    executions = evidence.get("executions", [])
+    attempts = [attempt for execution in executions for attempt in execution.get("attempts", [])]
+    usage = [attempt.get("usage") for attempt in attempts]
+    steps = [step for execution in executions for step in execution.get("steps", [])]
+    calls = evidence.get("model_calls", [])
+    failures = collections.Counter()
+    handoffs = collections.Counter()
+    for step in steps:
+        measured = step.get("measurements") or {}
+        outcome = measured.get("outcome") or {}
+        if outcome.get("kind") not in (None, "completed"):
+            failures[outcome["kind"] + (":" + outcome["stage"] if "stage" in outcome else "")] += 1
+        if measured.get("resolved_handoff"):
+            handoffs[measured["resolved_handoff"]] += 1
+    internal = collections.Counter(re.findall(r"lead-run: event=(ObjectRefused|CommitRefused|ModelRefused|BudgetSpent|Closed)\b", log))
+    reasons = collections.Counter(re.findall(r"ObjectRefused \{ reason: Some\((\w+)\)", log))
+    return {"wall_ms": evidence.get("wall_ms"), "selected_model_call_attempts": len(calls),
+            "model_call_scope": evidence.get("model_call_scope", "unavailable"),
+            "unsettled_model_calls": sum(call.get("state") == "unsettled" for call in calls),
+            "reported_cost_micro_usd": sum(item["cost_micro_usd"] for item in usage) if usage and all(item is not None for item in usage) else None,
+            "reported_tokens": sum(item["model_tokens"] for item in usage) if usage and all(item is not None for item in usage) else None,
+            "accounting_bases": [item["accounting"] if item else "unknown" for item in usage],
+            "page_model_calls": sum((step.get("measurements") or {}).get("planner_calls", 0) for step in steps),
+            "search_steps": sum(step.get("kind") == "search" for step in steps),
+            "asks": sum(step.get("kind") == "ask" for step in steps), "confirmations": sum(step.get("kind") == "confirm" for step in steps),
+            "failure_taxonomy": dict(failures), "resolved_handoffs": dict(handoffs),
+            "internal_failures": dict(internal), "object_refusal_reasons": dict(reasons)}
+
+
+def grade(task, evidence, reference, manifest):
+    result = {"task_outcome": "unknown", "predicates": [], "review": None}
+    if evidence.get("schema_version") != EXPORT_SCHEMA or evidence.get("case_id") != task["id"]:
+        return dict(result, reason="missing_or_mismatched_evidence")
+    if evidence.get("public_artifacts") != "exported":
+        return dict(result, reason="private_evidence_withheld")
+    for role in ("lead", "page", "light"):
+        model = evidence.get("models", {}).get(role, {}).get("model", {})
+        if model.get("provider") != "open_ai" or model.get("model") != MODEL:
+            return dict(result, reason="model_policy_mismatch")
+    executions = evidence.get("executions", [])
+    steps = [step for execution in executions for step in execution.get("steps", [])]
+    for step in steps:
+        if step.get("url") and excluded(step["url"], manifest):
+            return dict(result, reason="tuned_site_contamination")
+    if task["grading"] == "source_audit":
+        return dict(result, reason="source_audit_required", predicates=[{"id": p["id"], "state": "unreviewed"} for p in task["predicates"]])
+    if not reference or reference.get("state") != "ready":
+        return dict(result, reason="reference_unavailable")
+    artifacts = [artifact for execution in executions for artifact in execution.get("artifacts", [])]
+    answer, published = answer_object(artifacts)
+    if answer is None:
+        return dict(result, task_outcome="failed", reason="required_answer_object_missing_or_invalid")
+    checks = [{"id": "exact_answer_keys", "state": "passed" if set(answer) == set(reference["expected"]) else "failed"}]
+    for key, expected in reference["expected"].items():
+        actual = answer.get(key)
+        if isinstance(expected, str):
+            passed = isinstance(actual, str) and " ".join(actual.split()).casefold() == " ".join(expected.split()).casefold()
+        else:
+            passed = type(actual) is type(expected) and actual == expected
+        checks.append({"id": key, "state": "passed" if passed else "failed"})
+    answer_evidence = {evidence_key(link) for artifact in artifacts if artifact.get("published") for link in artifact.get("evidence", [])}
+    by_id = {artifact["id"]: artifact for artifact in artifacts}
+    for index, url in enumerate(task["urls"]):
+        reads = [step for step in steps if step.get("kind") == "read" and step.get("status") == "succeeded"
+                 and step.get("url") and normal_url(step["url"]) == normal_url(url)]
+        proven = any(any(answer_evidence & {evidence_key(link) for link in by_id.get(identity, {}).get("evidence", [])}
+                         for identity in step.get("artifacts", [])) for step in reads)
+        checks.append({"id": f"native_source_{index + 1}", "state": "passed" if proven else "failed"})
+    return dict(result, task_outcome="passed" if checks and all(check["state"] == "passed" for check in checks) else "failed", predicates=checks)
+
+
+@contextlib.contextmanager
+def live_lease():
+    descriptor = os.open("/private/tmp/zephium-native-probe.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def stop_child(child):
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        child.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
+
+
+def run_case(root, frozen, task, reference, manifest, out):
+    directory = out / task["id"]
+    directory.mkdir(mode=0o700)
+    export = directory / "evidence.json"
+    env = dict(os.environ)
+    for key in list(env):
+        if key.startswith("ZEPHIUM_") or key in ("RUST_LOG", "RUST_BACKTRACE"):
+            env.pop(key)
+    env.update(ZEPHIUM_EVAL_PUBLIC_EXPORT=str(export), ZEPHIUM_EVAL_CASE_ID=task["id"])
+    if digest(root / "probe") != frozen["probe_sha256"]:
+        raise ValueError("frozen probe changed before launch")
+    command = [str(root / "probe"), "--live-lead-request", task["prompt"],
+               "Use only the specified public sources. Do not sign in, submit forms, send messages, or access local files."]
+    started = time.monotonic()
+    timed_out = False
+    log_path = directory / "run.log"
+    with open(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as log:
+        child = subprocess.Popen(command, cwd=directory, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            code = child.wait(timeout=frozen["timeout_seconds"])
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            stop_child(child)
+            code = child.returncode
+        except BaseException:
+            stop_child(child)
+            raise
+    wall = int((time.monotonic() - started) * 1000)
+    if digest(root / "probe") != frozen["probe_sha256"]:
+        raise ValueError("frozen probe changed during launch")
+    evidence = read_json(export) if export.exists() else {}
+    log = log_path.read_text(errors="replace")
+    row = {"id": task["id"], "eligibility": "eligible_public", "exit": code, "timed_out": timed_out,
+           "process_ms": wall, "process_completed": code == 0, "evidence_sha256": digest(export) if export.exists() else None,
+           "log_sha256": digest(log_path), "metrics": metrics(evidence, log), **grade(task, evidence, reference, manifest)}
+    write_private(directory / "result.json", row)
+    return row
+
+
+def summarize(rows):
+    attempted = [row for row in rows if "exit" in row]
+    outcomes = collections.Counter(row.get("task_outcome", "pending") for row in rows)
+    eligible = sum(row["eligibility"] == "eligible_public" for row in rows)
+    costs = [row["metrics"]["reported_cost_micro_usd"] for row in attempted]
+    times = sorted(row["process_ms"] for row in attempted)
+    internal, taxonomy, handoffs = collections.Counter(), collections.Counter(), collections.Counter()
+    for row in attempted:
+        internal.update(row["metrics"]["internal_failures"])
+        taxonomy.update(row["metrics"]["failure_taxonomy"])
+        handoffs.update(row["metrics"]["resolved_handoffs"])
+    return {"tasks": len(rows), "eligible_public": eligible, "attempted": len(attempted), "task_outcomes": dict(outcomes),
+            "verified_passes_of_attempted": f"{outcomes['passed']}/{len(attempted)}",
+            "process_completions": sum(row["process_completed"] for row in attempted),
+            "reported_cost_micro_usd_known": sum(cost for cost in costs if cost is not None), "unknown_cost_runs": sum(cost is None for cost in costs),
+            "latency_median_ms": statistics.median(times) if times else None,
+            "selected_model_call_attempts": sum(row["metrics"]["selected_model_call_attempts"] for row in attempted),
+            "internal_failures": dict(internal), "failure_taxonomy": dict(taxonomy), "resolved_handoffs": dict(handoffs),
+            "qualification": "Constrained deterministic predicates or recorded source audits only; operational completion and historical tuned-site passes are not task correctness."}
+
+
+def run(args):
+    root, frozen = verify_freeze(args.freeze)
+    manifest = load_manifest(root / "manifest.json")
+    references = read_json(root / "references.json")["tasks"]
+    requested = set(args.tasks or [])
+    if requested - {task["id"] for task in manifest["tasks"]}:
+        raise ValueError("unknown requested task")
+    out = Path(args.out).resolve()
+    out.mkdir(mode=0o700, parents=True, exist_ok=False)
+    rows = []
+    with live_lease():
+        signature(root / "probe")
+        for task in manifest["tasks"]:
+            selected = not requested or task["id"] in requested
+            reason = task["eligibility"]
+            if not selected:
+                row = {"id": task["id"], "eligibility": reason, "task_outcome": "pending", "reason": "not_selected"}
+            elif reason != "eligible_public":
+                row = {"id": task["id"], "eligibility": reason, "task_outcome": "pending", "reason": reason}
+            elif task.get("oracle") and references.get(task["id"], {}).get("state") != "ready":
+                row = {"id": task["id"], "eligibility": "blocked_reference", "task_outcome": "pending", "reason": "reference_unavailable"}
+            else:
+                print(f"{task['id']}: running", flush=True)
+                row = run_case(root, frozen, task, references.get(task["id"]), manifest, out)
+                print(f"{task['id']}: task={row['task_outcome']} process={row['exit']} {row['process_ms']}ms", flush=True)
+            row.update(category=task["category"], grading=task["grading"])
+            rows.append(row)
+            # Append-only progress survives interruptions; a resumed run gets a new directory.
+            with open(os.open(out / "progress.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a") as stream:
+                stream.write(json.dumps(row) + "\n")
+    record = {"schema_version": SCHEMA, "freeze": str(Path(args.freeze).resolve()), "freeze_sha256": digest(args.freeze),
+              "started_from": frozen["label"], "finished_at": now(), "rows": rows, "summary": summarize(rows)}
+    write_private(out / "run.json", record)
+    print(json.dumps(record["summary"], indent=2))
+    print(out / "run.json")
+
+
+def review(args):
+    run = read_json(args.run)
+    audit = read_json(args.audit)
+    if audit.get("run_sha256") != digest(args.run) or audit.get("reviewer_type") not in ("human", "agent_source_audit"):
+        raise ValueError("audit must identify its exact run and source-audit reviewer type")
+    if not audit.get("reviewer"):
+        raise ValueError("audit reviewer is required")
+    manifest = load_manifest(Path(run["freeze"]).parent / "manifest.json")
+    tasks = {task["id"]: task for task in manifest["tasks"]}
+    rows = {row["id"]: row for row in run["rows"]}
+    for entry in audit["tasks"]:
+        task, row = tasks[entry["id"]], rows[entry["id"]]
+        if task["grading"] != "source_audit" or "exit" not in row or row.get("reason") != "source_audit_required":
+            raise ValueError("only attempted, uncontaminated source-audit tasks can be reviewed")
+        checks = entry["predicates"]
+        if {check["id"] for check in checks} != {check["id"] for check in task["predicates"]} or len(checks) != len(task["predicates"]):
+            raise ValueError("audit must address every declared predicate exactly once")
+        if any(check["state"] not in ("passed", "failed", "unknown") or not check.get("evidence") or not check.get("reason") for check in checks):
+            raise ValueError("each audit result needs concrete evidence references and reasoning")
+        row["task_outcome"] = "failed" if any(check["state"] == "failed" for check in checks) else "passed" if all(check["state"] == "passed" for check in checks) else "unknown"
+        row["predicates"] = checks
+        row["review"] = {"reviewer": audit["reviewer"], "type": audit["reviewer_type"], "audit_sha256": digest(args.audit)}
+        row["reason"] = "recorded_source_audit"
+    run["parent_run_sha256"] = digest(args.run)
+    run["summary"] = summarize(run["rows"])
+    write_private(args.out, run)
+    print(json.dumps(run["summary"], indent=2))
+
+
+def compare(args):
+    a, b = read_json(args.before), read_json(args.after)
+    freezes = [read_json(run["freeze"]) for run in (a, b)]
+    matching = all(freezes[0].get(key) == freezes[1].get(key) for key in
+                   ("manifest_sha256", "references_sha256", "runner_sha256", "model", "platform", "python", "timeout_seconds"))
+    if not matching:
+        raise ValueError("unmatched manifest/reference/grader/model/platform/setup; no comparative success claim")
+    old = {row["id"]: row for row in a["rows"]}
+    changes = [{"id": row["id"], "before": old.get(row["id"], {}).get("task_outcome", "missing"),
+                "after": row["task_outcome"], "before_metrics": old.get(row["id"], {}).get("metrics"), "after_metrics": row.get("metrics")}
+               for row in b["rows"]]
+    print(json.dumps({"comparison": "matched recorded setup; live-site drift and stochastic variation remain", "rows": changes}, indent=2))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    listing = commands.add_parser("list")
+    listing.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    preparation = commands.add_parser("prepare")
+    preparation.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    preparation.add_argument("--out", required=True)
+    freezing = commands.add_parser("freeze")
+    freezing.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    freezing.add_argument("--references", required=True)
+    freezing.add_argument("--probe", required=True)
+    freezing.add_argument("--identifier", default="app.zephium.work-integration.probe")
+    freezing.add_argument("--source-root", required=True)
+    freezing.add_argument("--base-ref", default="3fcd07c5")
+    freezing.add_argument("--label", choices=["baseline", "candidate"], required=True)
+    freezing.add_argument("--timeout", type=int, default=300)
+    freezing.add_argument("--out", required=True)
+    running = commands.add_parser("run")
+    running.add_argument("--freeze", required=True)
+    running.add_argument("--out", required=True)
+    running.add_argument("--tasks", nargs="*")
+    reviewing = commands.add_parser("review")
+    reviewing.add_argument("--run", required=True)
+    reviewing.add_argument("--audit", required=True)
+    reviewing.add_argument("--out", required=True)
+    comparison = commands.add_parser("compare")
+    comparison.add_argument("before")
+    comparison.add_argument("after")
+    args = parser.parse_args()
+    if args.command == "list":
+        manifest = load_manifest(args.manifest)
+        print(json.dumps({"tasks": len(manifest["tasks"]), "eligibility": dict(collections.Counter(task["eligibility"] for task in manifest["tasks"])),
+                          "grading": dict(collections.Counter(task["grading"] for task in manifest["tasks"])),
+                          "tuned_cases_excluded": len(manifest["tuned_cases"]), "ids": [task["id"] for task in manifest["tasks"]]}, indent=2))
+    else:
+        {"prepare": prepare_references, "freeze": freeze, "run": run, "review": review, "compare": compare}[args.command](args)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        sys.exit(f"work-eval: {error}")

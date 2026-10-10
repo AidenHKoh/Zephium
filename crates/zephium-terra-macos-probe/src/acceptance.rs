@@ -308,6 +308,184 @@ pub(super) fn request_scenario(request: &str, answer: &str) -> &'static LeadScen
     }))
 }
 
+/// Opt-in local evaluation output. This mode is limited to public requests in
+/// a fresh private profile and never exports account/file/context contents.
+fn public_eval_path(scenario: &LeadScenario) -> Result<Option<std::path::PathBuf>, &'static str> {
+    let Some(path) = std::env::var_os("ZEPHIUM_EVAL_PUBLIC_EXPORT") else {
+        return Ok(None);
+    };
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute()
+        || path.exists()
+        || scenario.name != "request"
+        || scenario.folder
+        || [
+            "ZEPHIUM_PROBE_PROFILE",
+            "ZEPHIUM_PROBE_SEEDED_PROFILE",
+            "ZEPHIUM_PROBE_WORK_MEMORY",
+            "ZEPHIUM_PROBE_WORK_MEMORY_CLEAR",
+        ]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some())
+    {
+        return Err("eval_public_scope");
+    }
+    Ok(Some(path))
+}
+
+#[derive(Default)]
+struct EvalDiagnostics {
+    calls: Vec<serde_json::Value>,
+    truncated: bool,
+}
+struct EvalModelClient {
+    inner: Arc<dyn zephium_core::work::model::WorkModelClient>,
+    role: &'static str,
+    diagnostics: Arc<Mutex<EvalDiagnostics>>,
+}
+impl zephium_core::work::model::WorkModelClient for EvalModelClient {
+    fn call<'a>(
+        &'a self,
+        request: zephium_core::work::model::WorkModelRequest,
+        events: &'a (dyn Fn(zephium_core::work::model::WorkModelEvent) + Send + Sync),
+    ) -> zephium_core::work::model::WorkModelFuture<'a> {
+        Box::pin(async move {
+            let started = Instant::now();
+            let index = {
+                let mut local = self.diagnostics.lock().unwrap_or_else(|e| e.into_inner());
+                if local.calls.len() >= 4096 {
+                    local.truncated = true;
+                    None
+                } else {
+                    let index = local.calls.len();
+                    local.calls.push(serde_json::json!({
+                        "role": self.role, "model": request.model, "reasoning": request.reasoning,
+                        "max_output_tokens": request.max_output_tokens, "native_search": request.native_search,
+                        "parallel_tools": request.parallel_tools, "state": "unsettled",
+                    }));
+                    Some(index)
+                }
+            };
+            let result = self.inner.call(request, events).await;
+            if let Some(index) = index {
+                let mut local = self.diagnostics.lock().unwrap_or_else(|e| e.into_inner());
+                let row = &mut local.calls[index];
+                row["wall_ms"] = serde_json::json!(started.elapsed().as_millis());
+                match &result {
+                    Ok(outcome) => {
+                        let usage = outcome.usage;
+                        row["state"] = serde_json::json!("settled");
+                        row["input_tokens"] = serde_json::json!(usage.input_tokens);
+                        row["cached_input_tokens"] = serde_json::json!(usage.cached_input_tokens);
+                        row["cache_write_input_tokens"] =
+                            serde_json::json!(usage.cache_write_input_tokens);
+                        row["output_tokens"] = serde_json::json!(usage.output_tokens);
+                        row["reasoning_tokens"] = serde_json::json!(usage.reasoning_tokens);
+                        row["cost_micro_usd"] = serde_json::json!(usage.cost_micros);
+                        row["cost_basis"] = serde_json::json!(if usage.cost_micros.is_some() {
+                            "model_client_reported"
+                        } else {
+                            "unavailable"
+                        });
+                    }
+                    Err(error) => {
+                        row["state"] = serde_json::json!("refused");
+                        row["failure"] = serde_json::json!(format!("{error:?}"));
+                    }
+                }
+            }
+            result
+        })
+    }
+}
+
+fn public_export_allowed(state: &zephium_core::work::runtime::WorkRuntimeProjection) -> bool {
+    use zephium_core::work::{parts::WorkInputKindV1, runtime::*};
+    state.executions.iter().all(|execution| {
+        execution.agent_grant().is_some_and(|grant| {
+            grant.private && grant.folders.is_empty() && grant.accounts.is_empty()
+        }) && execution
+            .inputs
+            .iter()
+            .all(|input| input.kind == WorkInputKindV1::Skill)
+            && execution.steps.iter().all(|step| {
+                step.account.is_none()
+                    && !step
+                        .measurements
+                        .and_then(|m| m.resolved_handoff)
+                        .is_some_and(|kind| kind.includes(WorkPageHandoffKindV1::SignIn))
+                    && !step.kind.files()
+                    && !matches!(step.kind, WorkStepKindV1::RunCommand { .. })
+            })
+    })
+}
+
+#[cfg(unix)]
+fn write_eval_file(path: &Path, value: &serde_json::Value) -> Result<(), &'static str> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|_| "eval_export_open")?;
+    serde_json::to_writer_pretty(&mut file, value).map_err(|_| "eval_export_write")?;
+    file.flush().map_err(|_| "eval_export_write")
+}
+#[cfg(not(unix))]
+fn write_eval_file(_path: &Path, _value: &serde_json::Value) -> Result<(), &'static str> {
+    Err("eval_export_permissions_unqualified")
+}
+
+fn export_eval(
+    path: &Path,
+    state: &zephium_core::work::runtime::WorkRuntimeProjection,
+    models: &serde_json::Value,
+    diagnostics: &Arc<Mutex<EvalDiagnostics>>,
+    wall_ms: u128,
+) -> Result<(), &'static str> {
+    use zephium_core::work::runtime::*;
+    let public = public_export_allowed(state);
+    let kind = |value: serde_json::Value| {
+        value
+            .get("kind")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    };
+    let executions: Vec<_> = state.executions.iter().enumerate().map(|(index, execution)| {
+        let published: Vec<_> = execution.steps.iter().filter(|step| matches!(step.kind, WorkStepKindV1::Publish))
+            .flat_map(|step| step.artifacts.iter()).collect();
+        let steps: Vec<_> = execution.steps.iter().map(|step| serde_json::json!({
+            "id": step.id, "kind": kind(serde_json::to_value(&step.kind).unwrap_or_default()),
+            "status": step.status, "artifacts": step.artifacts, "measurements": step.measurements,
+            "url": match &step.kind { WorkStepKindV1::Read { url, .. } if public => Some(url), _ => None },
+        })).collect();
+        let artifacts: Vec<_> = if public { execution.artifacts.iter().map(|artifact| serde_json::json!({
+            "id": artifact.id, "published": published.contains(&&artifact.id),
+            "data": artifact.data, "evidence": artifact.evidence, "general_knowledge": artifact.general_knowledge,
+        })).collect() } else { Vec::new() };
+        serde_json::json!({
+            "request": index + 1, "status": execution.status, "limits": execution.spec.limits,
+            "attempts": execution.attempts.iter().map(|attempt| serde_json::json!({ "status": attempt.status, "usage": attempt.usage })).collect::<Vec<_>>(),
+            "steps": steps, "artifacts": artifacts,
+            "parts": execution.parts.iter().map(|part| serde_json::json!({ "helper": part.helper, "state": part.state,
+                "need_kind": part.need.as_ref().and_then(|need| serde_json::to_value(need).ok()).map(kind) })).collect::<Vec<_>>(),
+        })
+    }).collect();
+    let local = diagnostics.lock().unwrap_or_else(|e| e.into_inner());
+    write_eval_file(
+        path,
+        &serde_json::json!({
+            "schema_version": 1, "case_id": std::env::var("ZEPHIUM_EVAL_CASE_ID").ok(),
+            "public_artifacts": if public { "exported" } else { "withheld_private_provenance" },
+            "profile_mode": "fresh_private", "stand_in": "decline_effects", "wall_ms": wall_ms,
+            "models": models, "model_calls": local.calls, "model_calls_truncated": local.truncated,
+            "model_call_scope": "selected Work model clients; direct public-search transport is not included; do not add page diagnostics to this count",
+            "executions": executions,
+        }),
+    )
+}
+
 /// The lead and helper turns of a page check: start one browser part, browse
 /// the start page toward the goal with records, then finish.
 pub(super) use super::loopback_support::Scripted;
@@ -673,6 +851,7 @@ async fn stand_in(
     work: zephium_core::work::WorkId,
     answer: &'static str,
     pick: Option<std::path::PathBuf>,
+    public_eval: bool,
 ) {
     use zephium_core::work::{runtime::*, *};
     use zephium_ipc::work::*;
@@ -685,12 +864,14 @@ async fn stand_in(
         let WorkReplyV1::Projection { projection } = request.response(profile).await.reply else {
             continue;
         };
-        // Kept as it goes, so a run the host stops can still be read.
-        let _ = std::fs::create_dir_all("target/work-runtime-proof/lead");
-        let _ = std::fs::write(
-            "target/work-runtime-proof/lead/latest.json",
-            serde_json::to_vec_pretty(&projection).unwrap_or_default(),
-        );
+        if !public_eval {
+            // Kept as it goes, so a run the host stops can still be read.
+            let _ = std::fs::create_dir_all("target/work-runtime-proof/lead");
+            let _ = std::fs::write(
+                "target/work-runtime-proof/lead/latest.json",
+                serde_json::to_vec_pretty(&projection).unwrap_or_default(),
+            );
+        }
         let Some(execution) = projection
             .executions
             .iter()
@@ -708,7 +889,21 @@ async fn stand_in(
         };
         let intent = match &step.kind {
             WorkStepKindV1::Ask { options, .. } => {
-                let reply = if options.iter().any(|o| o == "Keep going") {
+                let reply = if public_eval {
+                    match &step.kind {
+                        WorkStepKindV1::Ask {
+                            purpose: Some(WorkAskPurposeV1::Question),
+                            ..
+                        } => answer.to_owned(),
+                        _ => options
+                            .iter()
+                            .find(|option| {
+                                matches!(option.as_str(), "Not now" | "Decline" | "Stop" | "No")
+                            })
+                            .cloned()
+                            .unwrap_or_else(|| "Not now".into()),
+                    }
+                } else if options.iter().any(|o| o == "Keep going") {
                     kept_going += 1;
                     if kept_going <= 2 {
                         "Keep going"
@@ -761,11 +956,14 @@ async fn stand_in(
                 }
             }
             _ => {
-                say(format_args!("lead-person: approved proposed change"));
+                say(format_args!(
+                    "lead-person: proposed change approved={}",
+                    !public_eval
+                ));
                 WorkRuntimeIntent::ApproveStep {
                     execution: execution.id,
                     step: step.id,
-                    approve: true,
+                    approve: !public_eval,
                     for_run: false,
                 }
             }
@@ -926,6 +1124,21 @@ pub(super) async fn lead_workflow(
     use zephium_app::work_lead::{LeadModel, WorkLeadModels, WorkLeadService};
     use zephium_core::work::{model::WorkModelRole, runtime::*, search::*, *};
     use zephium_ipc::work::*;
+    let export = public_eval_path(scenario)?;
+    let public_eval = export.is_some();
+    let eval_started = Instant::now();
+    let local_diagnostics = Arc::new(Mutex::new(EvalDiagnostics::default()));
+    if public_eval {
+        let _ = zephium_app::work_models::view(profile).await;
+        for role in [
+            WorkModelRole::Lead,
+            WorkModelRole::Page,
+            WorkModelRole::Light,
+        ] {
+            zephium_app::work_models::choose(profile, role, Some("openai/gpt-6-luna"))
+                .map_err(|_| "eval_model_choice")?;
+        }
+    }
     let resolve = |role| async move {
         zephium_app::work_models::resolve_entry(profile, role)
             .await
@@ -933,18 +1146,44 @@ pub(super) async fn lead_workflow(
             .map(|(entry, client)| LeadModel { entry, client })
     };
     // A named page model, as a person picks one in Settings → AI.
-    if let Ok(id) = std::env::var("ZEPHIUM_PROBE_PAGE_MODEL") {
+    if let Ok(id) = std::env::var("ZEPHIUM_PROBE_PAGE_MODEL").and_then(|id| {
+        if public_eval {
+            Err(std::env::VarError::NotPresent)
+        } else {
+            Ok(id)
+        }
+    }) {
         let _ = zephium_app::work_models::view(profile).await;
         zephium_app::work_models::choose(profile, WorkModelRole::Page, Some(&id))
             .map_err(|_| "page_model_choice")?;
     }
-    let lead = resolve(WorkModelRole::Lead).await.ok_or("lead_model")?;
-    let page = resolve(WorkModelRole::Page)
+    let mut lead = resolve(WorkModelRole::Lead).await.ok_or("lead_model")?;
+    let mut page = resolve(WorkModelRole::Page)
         .await
         .unwrap_or_else(|| lead.clone());
-    let light = resolve(WorkModelRole::Light)
+    let mut light = resolve(WorkModelRole::Light)
         .await
         .unwrap_or_else(|| page.clone());
+    let model_setup = serde_json::json!({ "lead": lead.entry, "page": page.entry, "light": light.entry, "public_search_model": PUBLIC_SEARCH_MODEL });
+    if public_eval {
+        for (role, model) in [
+            ("lead", &mut lead),
+            ("page", &mut page),
+            ("light", &mut light),
+        ] {
+            if model.entry.model.provider != zephium_core::work::model::WorkModelProvider::OpenAi
+                || model.entry.model.model != "gpt-6-luna"
+                || PUBLIC_SEARCH_MODEL != "gpt-6-luna"
+            {
+                return Err("eval_model_policy");
+            }
+            model.client = Arc::new(EvalModelClient {
+                inner: model.client.clone(),
+                role,
+                diagnostics: local_diagnostics.clone(),
+            });
+        }
+    }
     say(format_args!(
         "lead-run: models lead={} page={} light={}",
         lead.entry.id, page.entry.id, light.entry.id
@@ -1073,6 +1312,7 @@ pub(super) async fn lead_workflow(
         work,
         scenario.answer,
         pick.clone(),
+        public_eval,
     ));
     let keys = Arc::new(Mutex::new(keys));
     let callback = handle.callback_handle();
@@ -1128,7 +1368,7 @@ pub(super) async fn lead_workflow(
                                 .map(|f| f.to_string_lossy().into_owned())
                                 .collect(),
                             accounts: vec![],
-                            private: false,
+                            private: public_eval,
                             lead: None,
                             skill: None,
                             search_fallback: None,
@@ -1164,6 +1404,12 @@ pub(super) async fn lead_workflow(
                         settings.access =
                             zephium_agent_controller::AgentBrowserModelAccess::Chosen(chosen_page);
                         settings.decision_model = chosen_light;
+                        if public_eval {
+                            settings.stage_diagnostic = None;
+                            settings.model_diagnostic = None;
+                            settings.resource_diagnostic = None;
+                            settings.diagnostic = None;
+                        }
                         composition
                             .run_agent_step(callback, &probe, request, settings)
                             .await
@@ -1192,8 +1438,10 @@ pub(super) async fn lead_workflow(
             execution,
             started.elapsed().as_millis(),
         );
-        page_rows(execution);
-        part_rows(execution);
+        if !public_eval {
+            page_rows(execution);
+            part_rows(execution);
+        }
         media_row(execution).await;
         if !matches!(
             execution.status,
@@ -1243,12 +1491,22 @@ pub(super) async fn lead_workflow(
         }
     }
     let state = state.ok_or("lead_no_run")?;
-    let directory = std::path::Path::new("target/work-runtime-proof/lead");
-    let _ = std::fs::create_dir_all(directory);
-    let _ = std::fs::write(
-        directory.join(format!("{}.json", scenario.name)),
-        serde_json::to_vec_pretty(&state).unwrap_or_default(),
-    );
+    if let Some(path) = export {
+        export_eval(
+            &path,
+            &state,
+            &model_setup,
+            &local_diagnostics,
+            eval_started.elapsed().as_millis(),
+        )?;
+    } else {
+        let directory = std::path::Path::new("target/work-runtime-proof/lead");
+        let _ = std::fs::create_dir_all(directory);
+        let _ = std::fs::write(
+            directory.join(format!("{}.json", scenario.name)),
+            serde_json::to_vec_pretty(&state).unwrap_or_default(),
+        );
+    }
     Ok(super::work_durable::WorkflowResult { state, failure })
 }
 
