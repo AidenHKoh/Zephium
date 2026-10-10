@@ -5502,6 +5502,8 @@ pub fn run() {
                 updates::restore(app.handle(), &data_dir);
                 #[cfg(feature = "work-product")]
                 zephium_app::work_lead::skills::install_root(data_dir.clone());
+                #[cfg(feature = "work-product")]
+                zephium_app::work_files::trash::install_root(data_dir.clone());
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;

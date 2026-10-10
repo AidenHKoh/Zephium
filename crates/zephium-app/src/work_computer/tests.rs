@@ -36,6 +36,9 @@ impl Recorder {
     }
 }
 impl ComputerHost for Recorder {
+    fn recovery_profile(&self) -> Option<String> {
+        Some("computer-test-profile".into())
+    }
     fn begin(
         &self,
         kind: WorkStepKindV1,
@@ -113,6 +116,7 @@ fn serially(body: impl std::future::Future<Output = ()>) {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
         .enable_all()
         .build()
         .unwrap()
@@ -496,5 +500,100 @@ fn reviews_only_actual_approved_before_after_edits() {
             std::fs::read_to_string(root.join("src/lib.rs")).unwrap(),
             "concurrent external edit\n"
         );
+    });
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn recovery_tools_require_approval_and_restore_without_overwrite() {
+    serially(async {
+        let (_home, tools, root) = project();
+        let storage = tempfile::Builder::new()
+            .prefix("work-recovery-app-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        crate::work_files::trash::install_root(storage.path().canonicalize().unwrap());
+        let file = root.join("trash-fixture.txt");
+        std::fs::write(&file, "approved text").unwrap();
+        let host = Recorder::deciding(&[Decision::Declined, Decision::Stopped, Decision::Approved]);
+        let unread = tools
+            .call(&host, "trash", &json!({"path":"trash-fixture.txt"}))
+            .await;
+        assert!(unread.is_error);
+        assert_eq!(*host.asked.lock().unwrap(), 0);
+        assert!(
+            !tools
+                .call(&host, "read", &json!({"path":"trash-fixture.txt"}))
+                .await
+                .is_error
+        );
+        assert!(
+            tools
+                .call(&host, "trash", &json!({"path":"trash-fixture.txt"}))
+                .await
+                .is_error
+        );
+        assert!(
+            tools
+                .call(&host, "trash", &json!({"path":"trash-fixture.txt"}))
+                .await
+                .is_error
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "approved text");
+        assert_eq!(*host.asked.lock().unwrap(), 2);
+        assert!(host
+            .settled
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(status, _)| *status == WorkStepStatus::Cancelled));
+        // Hold the sole blocking lane, submit an approved Trash request, then
+        // drop its future before the worker can begin. No delayed removal may run.
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _ = held.recv();
+        });
+        let cancelling_host = Recorder::deciding(&[Decision::Approved]);
+        let request = json!({"path":"trash-fixture.txt"});
+        let mut queued = Box::pin(tools.call(&cancelling_host, "trash", &request));
+        tokio::select! {
+            _ = &mut queued => panic!("the blocking lane is held"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(30)) => {}
+        }
+        assert_eq!(*cancelling_host.asked.lock().unwrap(), 1);
+        drop(queued);
+        drop(release);
+        blocker.await.unwrap();
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "approved text");
+        assert!(!storage.path().join(".zephium-work-recovery").exists());
+
+        let restored = root
+            .join("restored-fixture.txt")
+            .canonicalize()
+            .unwrap_or_else(|_| root.canonicalize().unwrap().join("restored-fixture.txt"));
+        let receipt = crate::work_files::trash::seed_recovery_fixture(
+            storage.path(),
+            "computer-test-profile",
+            restored.clone(),
+            "saved fixture",
+        );
+        let rows = tools.call(&host, "recoveries", &json!({})).await;
+        assert!(!rows.is_error && rows.content.contains(&receipt));
+        let result = tools
+            .call(&host, "restore_saved", &json!({"receipt":receipt}))
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(std::fs::read_to_string(&restored).unwrap(), "saved fixture");
+        assert_eq!(*host.asked.lock().unwrap(), 3);
+        std::fs::write(&restored, "newer text").unwrap();
+        assert!(
+            tools
+                .call(&host, "restore_saved", &json!({"receipt":receipt}))
+                .await
+                .is_error
+        );
+        assert_eq!(std::fs::read_to_string(&restored).unwrap(), "newer text");
+        assert_eq!(*host.asked.lock().unwrap(), 3);
     });
 }

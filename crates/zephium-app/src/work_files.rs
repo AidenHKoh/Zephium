@@ -1,13 +1,16 @@
 //! Bounded file steps inside folders the person granted for one run.
 //! Paths resolve through granted roots and protected names are excluded.
 //! Read handles refuse symlinks and hard links. Approved writes and edits are
-//! atomic; moving and deleting remain gated on recoverable deletion.
+//! atomic. The separate qualified text Trash path keeps durable recovery; generic
+//! moves and deletes remain unavailable.
 use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 use zephium_core::work::runtime::*;
 #[cfg(not(unix))]
 use zephium_core::work::WorkArtifactId;
+
+pub mod trash;
 
 #[cfg(unix)]
 mod unix_write;
@@ -660,7 +663,7 @@ pub(crate) fn protected_path(path: &Path) -> bool {
         let name = name.to_uppercase().to_lowercase();
         name.starts_with(".env")
             || matches!(name.as_str(),
-                ".ssh" | ".gnupg" | ".aws" | ".azure" | ".kube" | ".config"
+                ".zephium-work-recovery" | ".ssh" | ".gnupg" | ".aws" | ".azure" | ".kube" | ".config"
                 | ".git" | ".gitconfig" | ".git-credentials" | ".npmrc" | ".netrc" | "_netrc" | ".pypirc"
                 | ".docker" | ".codex" | ".claude" | ".gem" | ".bundle"
                 | "credentials" | "credentials.json" | "credentials.toml"

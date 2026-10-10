@@ -1873,8 +1873,8 @@ prior approval. The separate `review_changes` tool reviews only the current part
 approved before/after edits in a private copy, with a synthetic Git baseline. It
 refuses intervening file changes and never reports original repository status or
 history. Only macOS build `25G83` is admitted: its tested Seatbelt profile denies
-network access, fork and child spawning and permits writes only to generated Git metadata
-and scratch. System startup requires read access to the literal `/` directory;
+network access, fork and child spawning and permits writes only to generated Git
+metadata and scratch. System startup requires read access to the literal `/` directory;
 there is no recursive root grant. User-home/private-root and symlink probes use
 open-only helpers that never consume secret bytes or directory names; absent
 real targets are reported separately from denial evidence. Windows LPAC token,
@@ -1887,9 +1887,25 @@ atomically after checking the prior digest. Unix creation, publication and clean
 are relative to held directory descriptors; Windows guard markers are created
 relative to the held parent before pathname-based publication. These checks reject
 observed changes; they are not a compare-and-swap against hostile same-user writers.
-Moving and deleting files fail while recoverable deletion is unavailable; no
-permanent deletion is offered. Process groups, Windows JobObjects and command
-classification are lifecycle/approval
+Generic moves and deletes remain unavailable. The qualified macOS `trash` tool
+accepts regular text files up to 64 KiB, matching the approved restore contract.
+It binds source identity and digest across approval, durably stores a private
+saved copy and receipt before same-volume staging, then requires NSFileManager's
+returned Trash item to match the original inode. No permanent fallback exists.
+A dropped or cancelled queued request cannot start a later removal; a native
+request already dispatched is settled from its actual acknowledgment. Uncertain
+results retain recovery and are never replayed automatically. `recoveries` is
+profile- and current-grant-scoped; `restore_saved` requires ordinary file approval
+and exclusive creation at the original path. It restores saved text, not original
+metadata. Recovery storage is protected from all Computer paths and snapshots.
+The journal currently retains at most 64 records per profile and refuses further
+removal at capacity; it does not discard pending or restored copies automatically.
+Binary files, directories and cross-volume Trash remain refused. Windows has a
+handle-bound staging and IFileOperation backend requiring recycle pre-admission,
+exact returned-item acknowledgment and no abort; its runtime gate stays closed
+until the private namespace and Recycle Bin matrix pass on Windows.
+
+Process groups, Windows JobObjects and command classification are lifecycle/approval
 mechanisms, not a sandbox. The retained runner uses a fixed environment and no Unix
 login shell. Native Windows runtime qualification remains outstanding. This policy
 cannot identify secrets stored in arbitrary ordinary file contents and is not a

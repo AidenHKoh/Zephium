@@ -2461,14 +2461,29 @@ impl LockedPrivateNamespace {
     /// inspection. The Windows validation adapter additionally requires local
     /// NTFS and protected explicit private-node DACLs.
     pub fn open_or_create(root: impl Into<PathBuf>) -> Result<Self, PrivateFsError> {
+        Self::open(root.into(), true)
+    }
+
+    /// Opens an existing private namespace without creating its root or lock.
+    ///
+    /// Missing storage returns [`PrivateFsError::NotFound`]. Existing lock
+    /// staging is checked and settled by the same exact-marker protocol as
+    /// normal admission; payload files are never changed by this operation.
+    pub fn open_existing(root: impl Into<PathBuf>) -> Result<Self, PrivateFsError> {
+        Self::open(root.into(), false)
+    }
+
+    fn open(root: PathBuf, create: bool) -> Result<Self, PrivateFsError> {
         platform::admit_namespace_support()?;
-        let root = root.into();
         if !root.is_absolute() || root.file_name().is_none() {
             return Err(PrivateFsError::Unsafe);
         }
         let root_created = match fs::symlink_metadata(&root) {
             Ok(_) => false,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !create {
+                    return Err(PrivateFsError::NotFound);
+                }
                 let parent = root.parent().ok_or(PrivateFsError::Unsafe)?;
                 validate_directory_chain(parent, false)?;
                 #[cfg(target_os = "windows")]
@@ -2503,7 +2518,12 @@ impl LockedPrivateNamespace {
         };
         let lock_component = canonical_lock_component()?;
         let lock_staging_component = lock_staging_component()?;
-        let lock = acquire_lock(&core, &lock_component, &lock_staging_component)?;
+        let lock = if create {
+            acquire_lock(&core, &lock_component, &lock_staging_component)?
+        } else {
+            let lock = open_lock_regular(&core, &lock_component)?;
+            admit_existing_lock(&core, &lock_component, &lock_staging_component, lock)?
+        };
         let lease_root_handle = core
             .handle
             .try_clone()
@@ -3410,6 +3430,38 @@ fn private_directory_builder() -> fs::DirBuilder {
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
+    #[test]
+    fn opening_existing_namespace_never_creates_missing_storage() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().canonicalize().unwrap().join("missing");
+        assert!(matches!(
+            LockedPrivateNamespace::open_existing(&root),
+            Err(PrivateFsError::NotFound)
+        ));
+        assert!(!root.exists());
+        private_directory_builder().create(&root).unwrap();
+        assert!(matches!(
+            LockedPrivateNamespace::open_existing(&root),
+            Err(PrivateFsError::NotFound)
+        ));
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        let namespace = LockedPrivateNamespace::open_or_create(&root).unwrap();
+        let record = PrivateComponent::new("record").unwrap();
+        namespace
+            .directory()
+            .write_new_synced(&record, b"inert", ByteLimit::new(5).unwrap())
+            .unwrap();
+        drop(namespace);
+        let reopened = LockedPrivateNamespace::open_existing(&root).unwrap();
+        assert_eq!(
+            reopened
+                .directory()
+                .read_bounded_regular(&record, ByteLimit::new(5).unwrap())
+                .unwrap(),
+            Some(b"inert".to_vec())
+        );
+    }
+
     #[test]
     fn metadata_length_is_bounded_for_writable_and_sealed_files() {
         let (_parent, namespace) = test_namespace("file-length-test");

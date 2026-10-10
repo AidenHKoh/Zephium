@@ -1,4 +1,5 @@
 //! The bounded Computer tools, their schemas and what each returns to the model.
+mod recovery;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -53,6 +54,9 @@ pub fn definitions() -> Vec<WorkModelTool> {
     };
     let path = json!({"type": "string", "description": "Relative to the working folder, or absolute inside a granted folder."});
     vec![
+        tool("trash", "Move one previously read text file (at most 64 KiB) to OS Trash after approval, retaining a private recovery copy. Requires qualified native support; directories, binary files, cross-volume moves and Windows are unavailable.", json!({"type":"object","properties":{"path":path},"required":["path"],"additionalProperties":false})),
+        tool("recoveries", "List private recovery receipts for the current profile and granted folders. Does not list OS Trash or restore anything.", json!({"type":"object","properties":{},"additionalProperties":false})),
+        tool("restore_saved", "Propose restoring the saved text for a recovery receipt to its original granted path. Requires approval and refuses to overwrite an existing file.", json!({"type":"object","properties":{"receipt":{"type":"string"}},"required":["receipt"],"additionalProperties":false})),
         tool(
             "glob",
             "Find files by name pattern, newest first: `**/*.rs`, `src/**/*.test.ts`, `Cargo.toml`. A pattern without `/` matches at any depth. Skips .gitignored, hidden and dependency folders. Returns at most 100 paths.",
@@ -319,6 +323,9 @@ impl ComputerTools {
             "edit" => self.edit(host, args).await,
             "write" => self.write(host, args).await,
             "bash" => self.bash(host, args).await,
+            "trash" => self.trash(host, args).await,
+            "recoveries" => self.recoveries(host).await,
+            "restore_saved" => self.restore(host, args).await,
             "review_changes" => self.review_changes(host, args).await,
             _ => Err(ToolReply::fault(format!("There is no `{name}` tool."))),
         };
