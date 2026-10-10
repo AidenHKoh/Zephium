@@ -464,7 +464,24 @@ export type ProjectView = ObjectBase & {
   git?: { branch?: string; changed: number; ahead?: number; behind?: number };
 };
 
+export type SubjectTone = "active" | "done" | "waiting" | "blocked" | "closed";
+/** The one thing a request is about, shaped like its service: a pull request, an issue, a thread. */
+export type SubjectView = ObjectBase & {
+  kind: "subject";
+  /** The service's word for it: Pull request, Issue, Thread. */
+  noun: string;
+  reference?: string;
+  heading: string;
+  status?: { label: string; tone: SubjectTone };
+  people: readonly { role: string; name: string }[];
+  facts: readonly { label: string; value: string }[];
+  labels: readonly string[];
+  summary?: string;
+  url: string;
+};
+
 export type ObjectView =
+  | SubjectView
   | ProjectView
   | ReplyView
   | PicksView

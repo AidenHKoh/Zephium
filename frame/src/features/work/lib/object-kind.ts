@@ -37,6 +37,7 @@ const ICONS: Record<ObjectKind, IconSvgElement> = {
   file: File01Icon,
   folder: Folder01Icon,
   project: CubeIcon,
+  subject: Doc01Icon,
 };
 
 const LABELS: Record<ObjectKind, () => string> = {
@@ -57,6 +58,7 @@ const LABELS: Record<ObjectKind, () => string> = {
   file: m.work_object_kind_file,
   folder: m.work_object_kind_folder,
   project: m.work_object_kind_project,
+  subject: m.work_object_kind_subject,
 };
 
 /** The mark an object is known by in a list or an opened view's header. */

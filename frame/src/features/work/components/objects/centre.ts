@@ -23,6 +23,7 @@ export function centreSize(object: ObjectView): { width: number; height: number 
     case "reply":
     case "list":
     case "draft":
+    case "subject":
     case "note":
     case "file":
       return { width: 760, height: 860 };

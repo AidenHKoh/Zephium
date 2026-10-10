@@ -76,6 +76,8 @@ export function objectWidth(view: ObjectView): Range {
       return { min: 520, ideal: 680, max: 860 };
     case "draft":
       return { min: 420, ideal: 520, max: 600 };
+    case "subject":
+      return { min: 440, ideal: 560, max: 640 };
     case "media":
       return view.media === "audio"
         ? { min: 320, ideal: 400, max: 480 }
@@ -156,6 +158,14 @@ export function objectHeight(view: ObjectView, width: number): number {
       );
     case "draft":
       return 120 + lines(view.body, width, 8) * 22;
+    case "subject":
+      return (
+        92 +
+        lines(view.heading, width - 48, 11) * 28 +
+        (view.summary ? 8 + lines(view.summary, width - 48, 7.5) * 21 : 0) +
+        (view.people.length || view.facts.length ? 70 : 0) +
+        (view.labels.length ? 44 : 0)
+      );
     case "media":
       return view.media === "audio" ? 72 : Math.round(width * 0.5625) + 40;
     case "page":

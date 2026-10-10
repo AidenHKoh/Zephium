@@ -1863,6 +1863,7 @@
   "work_object_kind_file": "File",
   "work_object_kind_folder": "Folder",
   "work_object_kind_project": "Project",
+  "work_object_kind_subject": "Summary",
   "work_answer_read": "Read the answer",
   "work_answer_copy": "Copy",
   "work_answer_copied": "Copied",

@@ -51,6 +51,7 @@ const NEW_KINDS = new Set([
   "draft",
   "media",
   "project",
+  "subject",
 ]);
 /** Whether an artifact is one of the lead's objects rather than a legacy result. */
 export const leadObject = (artifact: WorkArtifactV1) => NEW_KINDS.has(artifact.data.kind);
@@ -807,6 +808,20 @@ function leadView(
               },
             }
           : {}),
+      };
+    case "subject":
+      return {
+        ...base,
+        kind: "subject",
+        noun: data.noun,
+        ...(data.reference ? { reference: data.reference } : {}),
+        heading: data.title,
+        ...(data.state ? { status: { label: data.state.label, tone: data.state.tone } } : {}),
+        people: (data.people ?? []).map((person) => ({ role: person.label, name: person.value })),
+        facts: (data.facts ?? []).map((fact) => ({ label: fact.label, value: fact.value })),
+        labels: data.labels ?? [],
+        ...(data.summary ? { summary: data.summary } : {}),
+        url: data.url,
       };
     default:
       return null;

@@ -18,6 +18,7 @@ import type {
   ProjectView,
   ReplyView,
   SheetView,
+  SubjectView,
 } from "../lib/board/types";
 import { centreSize } from "../components/objects/centre";
 
@@ -959,6 +960,24 @@ const project: ProjectView = {
   git: { branch: "editor-sync", changed: 3, ahead: 2 },
 };
 
+const pullRequest: SubjectView = {
+  id: "obj-subject",
+  kind: "subject",
+  noun: "Pull request",
+  reference: "crynta/terax#1337",
+  heading: "feat(explorer): support pasting files from OS clipboard",
+  status: { label: "Open", tone: "active" },
+  people: [{ role: "Author", name: "drunkardleo-10" }],
+  facts: [
+    { label: "Changed files", value: "6" },
+    { label: "Checks", value: "Passing" },
+    { label: "Review", value: "Changes requested" },
+  ],
+  labels: ["enhancement", "area: explorer"],
+  summary: "Adds pasting files from the **OS clipboard** into the explorer with `Cmd+V`.",
+  url: "https://github.com/crynta/terax/pull/1337",
+};
+
 const roadmap: PlanView = {
   kind: "plan",
   id: "roadmap",
@@ -1009,6 +1028,7 @@ export const allObjects: readonly ObjectView[] = [
   ...files,
   folder,
   project,
+  pullRequest,
 ];
 
 const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun"];
@@ -1500,6 +1520,47 @@ export const looks: Record<string, { object: ObjectView; width: number }[]> = {
     { object: failedPage, width: 480 },
   ],
   notes: [{ object: note, width: 420 }],
+  subjects: [
+    { object: pullRequest, width: 560 },
+    {
+      object: {
+        id: "obj-subject-issue",
+        kind: "subject",
+        noun: "Issue",
+        reference: "#103",
+        heading: "Rerun workflows like Playwright",
+        status: { label: "Open", tone: "active" },
+        people: [{ role: "Opened by", name: "crynta" }],
+        facts: [
+          { label: "Assignee", value: "None" },
+          { label: "Comments", value: "0" },
+        ],
+        labels: ["area: work", "enhancement"],
+        summary:
+          "Asks for an agent that learns which REST request powers an action and reuses it instead of driving the page.",
+        url: "https://github.com/zephium-browser/Zephium/issues/103",
+      },
+      width: 560,
+    },
+    {
+      object: {
+        id: "obj-subject-merged",
+        kind: "subject",
+        noun: "Pull request",
+        reference: "#48",
+        heading: "perf: tab sleeping tiers",
+        status: { label: "Merged", tone: "done" },
+        people: [
+          { role: "Author", name: "crynta" },
+          { role: "Merged by", name: "crynta" },
+        ],
+        facts: [{ label: "Changed files", value: "14" }],
+        labels: [],
+        url: "https://github.com/zephium-browser/Zephium/pull/48",
+      },
+      width: 480,
+    },
+  ],
   files: [...files.map((object) => ({ object, width: 280 })), { object: folder, width: 300 }],
   projects: [
     { object: project, width: 720 },
