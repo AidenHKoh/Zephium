@@ -827,7 +827,7 @@ fn unarchivable_result_classifies_its_row_and_the_page_still_closes() {
     });
     assert!(!REFUSE_PUBLICATION.load(Ordering::Acquire));
     assert_eq!(work.phase(), AdmissionPhase::Uncertain);
-    assert_eq!(work.failures(), (Some(AgentWorkFailure::Contract), None));
+    assert_eq!(work.failures(), (Some(AgentWorkFailure::ArtifactPublication(AgentWorkJournalError::Uncertain)), None));
     assert!(work.artifact().is_none());
     assert!(work.take_extraction().is_none());
     assert!(store.pending_artifact.lock().unwrap().is_none());

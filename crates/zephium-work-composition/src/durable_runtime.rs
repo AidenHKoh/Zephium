@@ -1585,7 +1585,7 @@ impl NativeWorkComposition {
                         measurements: measure.settle(started, model_in_flight),
                         helped,
                         redirect: None,
-                    });
+                    }.with_failure(snapshot.failure));
                 }
                 RetainedWorkPhase::Uncertain => {
                     trace("close:uncertain");
@@ -1843,6 +1843,11 @@ impl NativeWorkComposition {
                         Some(format!("The page left {host}")),
                         measure.settle(started, model_in_flight),
                         helped,
+                    ));
+                }
+                if let Err(error) = &result {
+                    zephium_app::work_trace::record(format_args!(
+                        "work: phase=page event=artifact_conversion_refused error={error:?}; content=redacted"
                     ));
                 }
                 let note = match disposition {
@@ -2126,9 +2131,16 @@ fn failure_note(failure: AgentWorkFailure) -> &'static str {
         AgentWorkFailure::Browser(Browser::Authority) => {
             "Work could not validate the page operation's authority"
         }
+        AgentWorkFailure::Browser(Browser::RequestEncoding) => {
+            "Work could not encode the page request"
+        }
+        AgentWorkFailure::ScreenshotRequest(_) => {
+            "Work could not safely bind a screenshot to the current page observation"
+        }
         AgentWorkFailure::Browser(_) => "The page could not be read",
         AgentWorkFailure::TaskPhase { .. } => "Work refused the action in this task phase",
         AgentWorkFailure::Contract => "Work could not validate its internal page-task contract",
+        AgentWorkFailure::ArtifactPublication(_) => "Work could not preserve the extracted page result",
         _ => "The page could not be read",
     }
 }
@@ -2175,7 +2187,11 @@ impl Drop for PageSettle {
 
 impl BrowserRun {
     fn with_failure(mut self, failure: Option<AgentWorkFailure>) -> Self {
-        if self.measurements.outcome == Some(WorkPageOutcomeV1::Incomplete) {
+        let outcome = self.measurements.outcome.unwrap_or_else(|| {
+            page_outcome(self.status, self.intervention.as_ref())
+        });
+        self.measurements.outcome = Some(outcome);
+        if outcome == WorkPageOutcomeV1::Incomplete {
             self.measurements.outcome = failure
                 .map(page_failure_outcome)
                 .or(self.measurements.outcome);
@@ -2191,7 +2207,9 @@ impl BrowserRun {
         mut measurements: WorkStepMeasurementsV1,
         helped: bool,
     ) -> Self {
-        let conversion_failed = result.is_err();
+        let empty = matches!(result, Err(WorkError::Unavailable));
+        let conversion_failed = result.is_err() && !empty;
+        let note = note.or_else(|| empty.then(|| "The page produced no source-backed findings for this request".to_owned()));
         let (status, artifacts) = match result {
             Ok(result) => result,
             Err(WorkError::OutcomeUnknown) => (WorkAttemptStatus::OutcomeUnknown, vec![]),
@@ -2250,7 +2268,9 @@ fn page_failure_outcome(failure: AgentWorkFailure) -> WorkPageOutcomeV1 {
             return Outcome::TooManySteps
         }
         AgentWorkFailure::Contract | AgentWorkFailure::TaskPhase { .. } => Stage::Admission,
-        AgentWorkFailure::Observation(_) | AgentWorkFailure::Screenshot(_) => Stage::Observation,
+        AgentWorkFailure::Observation(_)
+        | AgentWorkFailure::Screenshot(_)
+        | AgentWorkFailure::ScreenshotRequest(_) => Stage::Observation,
         AgentWorkFailure::Browser(Browser::Extraction(_) | Browser::NoExtractionEvidence) => {
             Stage::Extraction
         }
@@ -2264,6 +2284,7 @@ fn page_failure_outcome(failure: AgentWorkFailure) -> WorkPageOutcomeV1 {
         AgentWorkFailure::Browser(
             Browser::RequestPolicy(_)
             | Browser::RequestContract(_)
+            | Browser::RequestEncoding
             | Browser::Account(_)
             | Browser::Authority,
         ) => Stage::Admission,
@@ -2292,7 +2313,7 @@ fn page_failure_outcome(failure: AgentWorkFailure) -> WorkPageOutcomeV1 {
             | Browser::Proposal,
         ) => Stage::Provider,
         AgentWorkFailure::Browser(_) => Stage::Runtime,
-        AgentWorkFailure::Audit => Stage::Storage,
+        AgentWorkFailure::Audit | AgentWorkFailure::ArtifactPublication(_) => Stage::Storage,
         AgentWorkFailure::Deadline | AgentWorkFailure::ContextLost => return Outcome::Incomplete,
         _ => Stage::Runtime,
     };
@@ -2302,6 +2323,20 @@ fn page_failure_outcome(failure: AgentWorkFailure) -> WorkPageOutcomeV1 {
 #[cfg(test)]
 mod closed_result_tests {
     use super::*;
+
+    #[test]
+    fn anonymous_early_failure_keeps_its_stage_without_overriding_a_wall() {
+        let failed = |intervention| BrowserRun {
+            status: WorkAttemptStatus::Failed, usage: None, artifacts: vec![],
+            intervention, note: None, measurements: WorkStepMeasurementsV1::default(),
+            helped: false, redirect: None,
+        };
+        let failure = AgentWorkFailure::ArtifactPublication(zephium_agentic::AgentWorkJournalError::Uncertain);
+        assert_eq!(failed(None).with_failure(Some(failure)).measurements.outcome,
+            Some(WorkPageOutcomeV1::Refused { stage: WorkPageFailureStageV1::Storage }));
+        assert_eq!(failed(Some(WorkInterventionV1 { kind: WorkInterventionKindV1::SignIn, origin: None }))
+            .with_failure(Some(failure)).measurements.outcome, Some(WorkPageOutcomeV1::NeedsSignIn));
+    }
 
     #[test]
     fn page_outcomes_preserve_walls_uncertainty_and_internal_failure_stages() {
@@ -2810,6 +2845,12 @@ mod closed_result_tests {
             assert_eq!(run.status, expected);
             assert_eq!(run.usage, Some(usage));
             assert!(run.artifacts.is_empty());
+            if error == WorkError::Unavailable {
+                assert_eq!(run.measurements.outcome, Some(WorkPageOutcomeV1::Incomplete));
+                assert_eq!(run.note.as_deref(), Some("The page produced no source-backed findings for this request"));
+            } else if error != WorkError::OutcomeUnknown {
+                assert_eq!(run.measurements.outcome, Some(WorkPageOutcomeV1::Refused { stage: WorkPageFailureStageV1::Extraction }));
+            }
         }
     }
 }

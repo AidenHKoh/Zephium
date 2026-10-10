@@ -1462,6 +1462,7 @@ impl AgentWorkController {
                     sign_in_refusals: 0,
                     loading_extract_waits: 0,
                     failure: None,
+                    cleanup_failure: None,
                     observation: None,
                     native_terminal: None,
                     model_human_request: None,
@@ -1527,6 +1528,7 @@ struct WorkState {
     audit: Arc<dyn AgentAuditPort>,
     task: Box<dyn AgentWorkTask>,
     failure: Option<AgentWorkFailure>,
+    cleanup_failure: Option<AgentWorkFailure>,
     observation: Option<SemanticObservation>,
     native_terminal: Option<SemanticActionNativeSettlement>,
     model_human_request: Option<AgentWorkHumanRequest>,
@@ -2089,9 +2091,12 @@ impl AgentRuntimeController for AgentWorkController {
                         session.cancel();
                     }
                     let deadline = controller.drain_recovery(&mut worker, &browser).await;
-                    let _ = controller
+                    let cleanup = controller
                         .close_unsuccessful(&mut worker, &browser, deadline)
                         .await;
+                    if let (Err(failure), Some(state)) = (cleanup, controller.state.as_mut()) {
+                        state.cleanup_failure = Some(failure);
+                    }
                 }
             }
         })
@@ -4956,7 +4961,7 @@ impl AgentWorkController {
             deadline,
             budget,
         )
-        .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?;
+        .map_err(AgentWorkFailure::ScreenshotRequest)?;
         let (pending, native) = state
             .native
             .screenshots
@@ -5228,6 +5233,7 @@ impl AgentWorkController {
                 Ok(screenshot) => Some(screenshot),
                 Err(
                     AgentWorkFailure::Screenshot(_)
+                    | AgentWorkFailure::ScreenshotRequest(_)
                     | AgentWorkFailure::Context
                     | AgentWorkFailure::ContextLost
                     | AgentWorkFailure::Browser(AgentBrowserProviderError::Authority),
@@ -6574,6 +6580,8 @@ pub enum AgentWorkFailure {
     Observation(SemanticRuntimePortFailure),
     /// Exact bounded native viewport-capture refusal.
     Screenshot(SemanticScreenshotNativeFailure),
+    /// Exact content-free refusal to bind a capture to its delivered observation.
+    ScreenshotRequest(zephium_agentic::SemanticScreenshotRequestError),
     /// Renderer or navigation authority changed; stale refs are revoked.
     ContextLost,
     /// The public page's first load was redirected before it was ready.
@@ -6597,6 +6605,8 @@ pub enum AgentWorkFailure {
     Supervisor(AgentSupervisorRuntimeError),
     /// Durable audit delivery or acknowledgement was refused.
     Audit,
+    /// The successful extraction could not be admitted for durable publication.
+    ArtifactPublication(AgentWorkJournalError),
     /// Native or provider resources could not prove terminal drain.
     Shutdown,
     /// Trusted input, clock, state, or task contract was invalid.

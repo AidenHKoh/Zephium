@@ -1089,6 +1089,7 @@ impl RetainedWork {
                     match lifecycle.drain_until(drain_deadline) {
                         AgentRuntimeScopedDrain::Drained(drained) => active.drained = Some(drained),
                         AgentRuntimeScopedDrain::Unproven => {
+                            crate::diagnostic!("work: phase=page event=terminal_refused stage=scoped_drain; content=redacted");
                             failure = Some(AgentWorkFailure::Contract)
                         }
                     }
@@ -1101,6 +1102,14 @@ impl RetainedWork {
                         }) => {
                             active.accepted = Some(settlement);
                             active.extraction = Some(extraction);
+                        }
+                        Some(AgentWorkRetainedOutcome::Recovery(recovery)) => {
+                            crate::diagnostic!(
+                                "work: phase=page event=retained_recovery failure={:?} cleanup_failure={:?}; content=redacted",
+                                recovery.failure(),
+                                recovery.cleanup_failure()
+                            );
+                            active.outcome = Some(AgentWorkRetainedOutcome::Recovery(recovery));
                         }
                         outcome => active.outcome = outcome,
                     }
@@ -1199,8 +1208,9 @@ impl RetainedWork {
                                     // archived, so the run is no success. Classify its
                                     // exact Running row like a run stopped before it
                                     // could finish, through the same resent CAS.
-                                    Err(_) => {
-                                        self.fail(AgentWorkFailure::Contract);
+                                    Err(error) => {
+                                        crate::diagnostic!("work: phase=page event=terminal_refused stage=artifact_publication error={error:?}; content=redacted");
+                                        self.fail(AgentWorkFailure::ArtifactPublication(error));
                                         match AgentWorkJournalMutation::transition(
                                             record,
                                             AgentWorkDisposition::FailedClosed,
@@ -1223,7 +1233,10 @@ impl RetainedWork {
                                 self.dispatch(AgentWorkJournalRequest::CompareAndSet(terminal));
                             }
                         }
-                        Err(_) => self.fail(AgentWorkFailure::Contract),
+                        Err(error) => {
+                            crate::diagnostic!("work: phase=page event=terminal_refused stage=journal_terminal error={error:?}; content=redacted");
+                            self.fail(AgentWorkFailure::Contract)
+                        }
                     }
                 }
             }

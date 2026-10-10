@@ -292,6 +292,10 @@ impl AgentWorkRetainedRecovery {
     pub const fn failure(&self) -> AgentWorkFailure {
         self.0.failure
     }
+    /// Closed reason the original unsuccessful cleanup could not settle.
+    pub fn cleanup_failure(&self) -> Option<AgentWorkFailure> {
+        self.0.state.cleanup_failure
+    }
     /// Content-free original audit debt; not reconciliation or closure authority.
     pub fn audit_status(&mut self) -> Result<AgentAuditLedgerStatus, AgentWorkFailure> {
         self.0.audit_reconciliation_status()
@@ -711,10 +715,16 @@ impl zephium_agent_runtime::AgentRuntimeScopedController for AgentWorkRetainedCo
                                 .is_ok_and(|journal| journal.audit.is_quiescent())
                         })
                     {
-                        let _ = controller.publish_terminal(&mut worker).await;
+                        let cleanup = controller.publish_terminal(&mut worker).await;
+                        if let (Err(failure), Some(state)) = (cleanup, controller.state.as_mut()) {
+                            state.cleanup_failure = Some(failure);
+                        }
                     }
                 } else {
-                    let _ = controller.close_retained(&mut worker, Some(deadline)).await;
+                    let cleanup = controller.close_retained(&mut worker, Some(deadline)).await;
+                    if let (Err(failure), Some(state)) = (cleanup, controller.state.as_mut()) {
+                        state.cleanup_failure = Some(failure);
+                    }
                 }
             }
         })
