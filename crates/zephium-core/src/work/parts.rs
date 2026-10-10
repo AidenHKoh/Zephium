@@ -59,8 +59,10 @@ pub enum WorkPartReasonV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkPartNeedV1 {
-    /// Sign in on the site, then the part can run again.
+    /// Sign in on the retained page so the part can continue.
     SignIn { host: String },
+    /// Pass the site's human check on the retained page.
+    Check { host: String },
     /// Let the agent work on the site as the person.
     AllowSite { host: String },
     /// Let the agent read a folder on this Mac.
@@ -87,7 +89,9 @@ impl WorkPartNeedV1 {
     pub fn validate(&self) -> Result<(), WorkError> {
         let host_ok = |host: &str| super::artifact::public_host(host);
         let ok = match self {
-            Self::SignIn { host } | Self::AllowSite { host } => host_ok(host),
+            Self::SignIn { host } | Self::Check { host } | Self::AllowSite { host } => {
+                host_ok(host)
+            }
             Self::AllowFolder { path } => super::runtime::validate_file_path(path).is_ok(),
             Self::UseConnection { connection, .. } | Self::Connect { connection } => {
                 words(connection, 40).is_ok()

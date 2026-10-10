@@ -16,14 +16,14 @@ struct State {
     id: ContextRunId,
     profile: ProfileId,
     work: WorkId,
-    deadline: Instant,
     retirement: Mutex<Retirement>,
 }
-#[derive(Default)]
 struct Retirement {
     closed: bool,
     registered: bool,
     callback: Option<Box<dyn FnOnce() + Send>>,
+    time: crate::WorkBrowserHumanTime,
+    human_holds: u32,
 }
 impl WorkBrowserSession {
     /// Creates a fresh storage scope, without allocating native resources.
@@ -32,8 +32,13 @@ impl WorkBrowserSession {
             id: ContextRunId::generate(),
             profile,
             work,
-            deadline,
-            retirement: Mutex::new(Retirement::default()),
+            retirement: Mutex::new(Retirement {
+                closed: false,
+                registered: false,
+                callback: None,
+                time: crate::WorkBrowserHumanTime::new(deadline),
+                human_holds: 0,
+            }),
         }))
     }
     /// Opaque storage key; never a native resource or execution capability.
@@ -50,7 +55,10 @@ impl WorkBrowserSession {
     }
     /// Whether the original session is alive and within its deadline.
     pub fn is_current(&self) -> bool {
-        Instant::now() < self.0.deadline && self.0.retirement.lock().is_ok_and(|s| !s.closed)
+        self.0.retirement.lock().is_ok_and(|state| {
+            let now = Instant::now();
+            !state.closed && now < state.time.deadline(now)
+        })
     }
     /// Observes lifetime without keeping the scope alive.
     pub fn downgrade(&self) -> WeakWorkBrowserSession {
@@ -61,16 +69,40 @@ impl WorkBrowserSession {
         let Ok(mut state) = self.0.retirement.lock() else {
             return false;
         };
-        if state.closed || state.registered || Instant::now() >= self.0.deadline {
+        if state.closed || state.registered || Instant::now() >= state.time.deadline(Instant::now())
+        {
             return false;
         }
         state.registered = true;
         state.callback = Some(callback);
         true
     }
+    /// Keeps the same anonymous storage scope during a genuine retained human
+    /// handoff, within one total human-time cap. Closed/expired scopes refuse it.
+    pub fn hold_for_person(&self) -> Option<WorkBrowserSessionHumanHold> {
+        let mut state = self.0.retirement.lock().ok()?;
+        if state.closed || !state.time.set_held(true, Instant::now()) {
+            return None;
+        }
+        state.human_holds = state.human_holds.checked_add(1)?;
+        Some(WorkBrowserSessionHumanHold(self.clone()))
+    }
     /// Revokes future attachment immediately; existing resources still drain normally.
     pub fn close(&self) {
         self.0.close();
+    }
+}
+/// Original session's bounded human hold; dropping it returns active time.
+#[must_use]
+pub struct WorkBrowserSessionHumanHold(WorkBrowserSession);
+impl Drop for WorkBrowserSessionHumanHold {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0 .0.retirement.lock() {
+            state.human_holds = state.human_holds.saturating_sub(1);
+            if state.human_holds == 0 {
+                state.time.set_held(false, Instant::now());
+            }
+        }
     }
 }
 impl State {
@@ -121,6 +153,46 @@ mod tests {
             WorkId::from(2_u128),
             Instant::now() + Duration::from_secs(60),
         )
+    }
+
+    #[test]
+    fn anonymous_human_hold_keeps_the_same_session_past_active_deadline_and_stop_still_revokes() {
+        let now = Instant::now();
+        let start = now - Duration::from_secs(90);
+        let session = WorkBrowserSession::new(
+            1_u128.into(),
+            WorkId::generate(),
+            start + Duration::from_secs(30),
+        );
+        {
+            let mut state = session.0.retirement.lock().unwrap();
+            // Inject controlled monotonic time for the original handoff,
+            // rather than sleeping through a person's sign-in in a unit test.
+            assert!(state.time.set_held(true, start + Duration::from_secs(5)));
+        }
+        let original = session.id();
+        let hold = session
+            .hold_for_person()
+            .expect("same active-time remainder after the human wait");
+        assert!(session.is_current());
+        assert_eq!(session.id(), original);
+        session.close();
+        assert!(
+            !session.is_current(),
+            "Stop is independent of human clock credit"
+        );
+        assert!(session.hold_for_person().is_none());
+        drop(hold);
+        assert!(
+            !session.is_current(),
+            "dropping a hold never resurrects the closed scope"
+        );
+        let expired = WorkBrowserSession::new(
+            1_u128.into(),
+            WorkId::generate(),
+            now - Duration::from_secs(1),
+        );
+        assert!(expired.hold_for_person().is_none());
     }
 
     #[test]

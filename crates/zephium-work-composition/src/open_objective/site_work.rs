@@ -554,6 +554,33 @@ pub(crate) fn sign_in_wall(observation: &SemanticObservation) -> bool {
         .filter(|(index, _)| !offers.iter().any(|(range, _)| range.contains(index)))
         .map(|(_, node)| node)
         .collect::<Vec<_>>();
+    // Account/tenant selectors and SSO entry pages can contain no password
+    // field. They are still identity boundaries, not public-page sign-in offers.
+    let chooser = nodes.iter().any(|node| {
+        matches!(node.role(), SemanticRole::Heading | SemanticRole::Dialog)
+            && names_any(
+                &label(node),
+                &[
+                    "find your workspace",
+                    "enter your workspace",
+                    "choose a workspace",
+                    "choose your workspace",
+                    "select a workspace",
+                    "select your workspace",
+                    "choose an account",
+                    "choose your account",
+                    "select an account",
+                    "select your account",
+                    "choose an organization",
+                    "select your organization",
+                    "single sign on",
+                    "sign in with sso",
+                ],
+            )
+    });
+    if chooser && nodes.len() <= 160 && !open_page(nodes.iter().copied()) {
+        return true;
+    }
     let asks = nodes.iter().any(|node| {
         matches!(node.role(), SemanticRole::Heading | SemanticRole::Button)
             && names_any(&label(node), &SIGN_IN_PHRASES)
@@ -574,6 +601,18 @@ pub(crate) fn sign_in_wall(observation: &SemanticObservation) -> bool {
                 && (node.sensitivity() != SemanticSensitivity::Public
                     || names_any(&label(node), &["email", "username", "phone", "e-mail"]))
         })
+}
+
+/// The same non-interactive wall classification applies to public research,
+/// signed-in reading and results pages before their content can be extracted.
+pub(crate) fn reading_wall(observation: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
+    if sign_in_wall(observation) {
+        Some(AgentBrowserHumanReason::SignIn)
+    } else if embedded_human_challenge(observation) {
+        Some(AgentBrowserHumanReason::HumanChallenge)
+    } else {
+        secret_entry(observation)
+    }
 }
 
 /// Titles a challenge widget's own frame carries. The frame is never read;
@@ -984,12 +1023,12 @@ struct GateState {
     asked: bool,
     /// The entry question waits on the start page's first view.
     entry: EntryCheck,
-    /// The person finished a sign-in in a tab while the page waited.
-    signed_in_elsewhere: bool,
     /// Rust pressed a cookie banner's refusal on this page.
     consent_pressed: bool,
     /// The task reads a daily app's view as its records.
     view: bool,
+    /// The original task expects the person's account, even outside app views.
+    account_expected: bool,
     /// The app's views still to open for the read, in order.
     views: Vec<zephium_agentic::AppView>,
     /// The views Rust opened, oldest first.
@@ -1026,6 +1065,10 @@ impl SiteGate {
     }
     /// The task only reads what a daily app's views list, going through
     /// the views its goal asks for.
+    pub(crate) fn expecting_account(self, expected: bool) -> Self {
+        self.state().account_expected = expected;
+        self
+    }
     pub(crate) fn reading_view(self, url: &str, goal: &str) -> Self {
         {
             let mut state = self.state();
@@ -1073,15 +1116,6 @@ impl SiteGate {
                 last.name()
             ),
         })
-    }
-    pub(crate) fn site(&self) -> String {
-        self.state().site.clone()
-    }
-    pub(crate) fn signed_in_now(&self) {
-        self.state().signed_in_elsewhere = true;
-    }
-    pub(crate) fn signed_in_elsewhere(&self) -> bool {
-        self.state().signed_in_elsewhere
     }
     pub(crate) fn consent_pressing(&self, pressing: bool) {
         self.state().consent_pressed |= pressing;
@@ -1308,7 +1342,11 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
     }
 
     fn sign_in_optional(&self, observation: &SemanticObservation) -> bool {
-        !self.gate.state().view && !sign_in_wall(observation) && secret_entry(observation).is_none()
+        let state = self.gate.state();
+        !state.view
+            && !state.account_expected
+            && !sign_in_wall(observation)
+            && secret_entry(observation).is_none()
     }
 
     fn patient_checks(&self) -> bool {
@@ -1578,6 +1616,57 @@ mod tests {
     }
 
     #[test]
+    fn an_account_task_can_request_an_unfamiliar_sign_in_without_spending_refusal_turns() {
+        let unfamiliar = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"heading","n":"Continue to your team","l":1}),
+            json!({"k":3,"p":0,"r":"button","n":"Continue","o":1,"ak":1}),
+        ]);
+        let account = SiteWorkPolicy {
+            gate: Arc::new(SiteGate::default().expecting_account(true)),
+            asks: true,
+        };
+        assert!(!account.sign_in_optional(&unfamiliar));
+        let public = SiteWorkPolicy {
+            gate: Arc::new(SiteGate::default()),
+            asks: true,
+        };
+        assert!(public.sign_in_optional(&unfamiliar));
+    }
+
+    #[test]
+    fn research_readers_raise_visible_sign_in_and_check_walls_before_extraction() {
+        let sign_in = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"password","n":"Password","q":"secret","o":2,"b":{"x":1,"y":1,"w":200,"h":30}}),
+        ]);
+        let check = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"frame_boundary","n":"hCaptcha challenge","b":{"x":1,"y":1,"w":300,"h":90}}),
+        ]);
+        let results = super::super::results_page::ResultsPagePolicy {
+            reader: Arc::new(super::super::results_page::ResultsReader::new(
+                zephium_core::search::SearchEngine::Google,
+                None,
+            )),
+        };
+        for (look, reason) in [
+            (sign_in, AgentBrowserHumanReason::SignIn),
+            (check, AgentBrowserHumanReason::HumanChallenge),
+        ] {
+            assert_eq!(
+                super::super::read_interactions::ReadingInteractionPolicy.human_wall(&look),
+                Some(reason)
+            );
+            assert_eq!(
+                super::super::read_interactions::SessionReadingPolicy.human_wall(&look),
+                Some(reason)
+            );
+            assert_eq!(results.human_wall(&look), Some(reason));
+        }
+    }
+
+    #[test]
     fn an_account_view_can_request_sign_in_without_a_password_form() {
         let picker = page(vec![
             json!({"k":1,"r":"document","o":16}),
@@ -1594,7 +1683,18 @@ mod tests {
             gate: Arc::new(SiteGate::default()),
             asks: true,
         };
-        assert!(public.sign_in_optional(&picker));
+        assert!(
+            !public.sign_in_optional(&picker),
+            "a credential-free workspace chooser is still a wall"
+        );
+        assert_eq!(
+            public.human_wall(&picker),
+            Some(AgentBrowserHumanReason::SignIn)
+        );
+        assert_eq!(
+            super::super::read_interactions::ReadingInteractionPolicy.human_wall(&picker),
+            Some(AgentBrowserHumanReason::SignIn)
+        );
     }
 
     fn effect(observation: &SemanticObservation, key: u64, kind: SemanticActionKind) -> SiteEffect {

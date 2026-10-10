@@ -2532,7 +2532,16 @@ impl AgentWorkController {
         state: &mut WorkState,
         observation: &SemanticObservation,
     ) -> Result<bool, AgentWorkFailure> {
-        let Some(reason) = state.task.human_wall(observation) else {
+        let Some(reason) = state.task.human_wall(observation).or_else(|| {
+            state
+                .native
+                .retained
+                .as_ref()
+                .filter(|browser| {
+                    challenge::sign_in_route(browser.binding().document(), observation)
+                })
+                .map(|_| AgentBrowserHumanReason::SignIn)
+        }) else {
             return Ok(false);
         };
         state
@@ -2960,11 +2969,9 @@ impl AgentWorkController {
             // Boxed: the read loop's future must stay well inside the
             // runtime worker's stack.
             // A first look reads the whole document, landmarks and all.
-            let kind = if first_look {
-                SemanticExpansionKind::Subtree
-            } else {
-                SemanticExpansionKind::Region
-            };
+            // A whole-page read must materialize content under main/landmark
+            // boundaries, within the same bounded native observation budget.
+            let kind = SemanticExpansionKind::Subtree;
             Box::pin(Self::whole_page_capture(
                 state,
                 worker,
@@ -2976,15 +2983,14 @@ impl AgentWorkController {
         } else {
             Self::fit_model_observation(observation)?
         };
-        // The task reads its own walls: a challenge is not waited out here.
-        if state.task.reads_results_page() {
-            return Box::pin(Self::read_results_page(state, worker, browser, observation)).await;
-        }
         let (mut observation, challenged) =
             Self::settle_human_challenge(state, worker, browser, observation).await?;
         if challenged {
             state.observation = Some(observation);
             return Ok(());
+        }
+        if state.task.reads_results_page() {
+            return Box::pin(Self::read_results_page(state, worker, browser, observation)).await;
         }
         if state.task.reads_app_view() {
             if let Some(look) = Box::pin(Self::read_app_rows(state, worker, browser)).await? {
@@ -3023,12 +3029,12 @@ impl AgentWorkController {
             state.observation = Some(observation);
             return Ok(());
         }
-        // The page planner starts from an ordinary fitted capture.
+        // Fit the exact current bounded whole-page capture. Replacing it with
+        // another compact initial look loses content beneath landmark anchors
+        // and leaves a title-only extraction after a legitimate human resume.
         if whole_page {
             state.refresh_account(worker, browser)?;
-            observation = Self::fit_model_observation(
-                Box::pin(Self::observe(state, worker, browser)).await?,
-            )?;
+            observation = Self::fit_model_observation(observation)?;
             // A banner or offer the page put up after its first look (a
             // consent dialog its scripts add late) is cleared the same way.
             observation = Box::pin(Self::clear_offers(state, worker, browser, observation)).await?;
@@ -5200,7 +5206,7 @@ impl AgentWorkController {
             && state
                 .session
                 .as_ref()
-                .is_some_and(|session| session.supports_vision())
+                .is_some_and(|session| session.supports_viewport_mapping())
             && state
                 .native
                 .retained

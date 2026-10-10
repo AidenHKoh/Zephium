@@ -1648,6 +1648,103 @@ impl AgentSettlementFixture {
 }
 
 #[test]
+fn page_settlement_revisions_are_store_owned_and_follow_commit_order() {
+    let mut f = AgentSettlementFixture::new();
+    for id in [1, 2] {
+        f.step(
+            id,
+            WorkStepKindV1::Read {
+                url: "https://example.com/inbox".into(),
+                goal: None,
+                collection: None,
+            },
+            WorkStepStatus::Running,
+            vec![],
+        )
+        .unwrap();
+    }
+    let before = read_runtime(&mut f.hub, &f.work);
+    let mut forged = before.executions[0].steps[0].clone();
+    forged.id = 3.into();
+    forged.measurements = Some(WorkStepMeasurementsV1 {
+        settled_revision: WorkRevision::new(999_999),
+        ..Default::default()
+    });
+    assert!(
+        matches!(
+            f.update(WorkRuntimeUpdate::BeginStep {
+                execution: f.execution,
+                attempt: f.attempt,
+                step: forged,
+                artifacts: vec![],
+                evidence: None,
+                file: None,
+            }),
+            Err(WorkError::Invalid)
+        ),
+        "Begin cannot invent a settlement receipt"
+    );
+    let mut assigned = Vec::new();
+    for id in [2u128, 1] {
+        let expected = read_runtime(&mut f.hub, &f.work)
+            .work
+            .revision
+            .next()
+            .unwrap();
+        f.update(WorkRuntimeUpdate::SettleStep {
+            execution: f.execution,
+            attempt: f.attempt,
+            step: id.into(),
+            status: WorkStepStatus::Failed,
+            usage: Some(WorkUsage::default()),
+            artifacts: vec![],
+            evidence: None,
+            file: None,
+            note: None,
+            measurements: Some(WorkStepMeasurementsV1 {
+                outcome: Some(WorkPageOutcomeV1::NeedsCheck),
+                settled_revision: WorkRevision::new(999_999),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
+        let measured = f
+            .fact()
+            .steps
+            .into_iter()
+            .find(|step| step.id == id.into())
+            .unwrap()
+            .measurements
+            .unwrap();
+        assert_eq!(measured.settled_revision, Some(expected));
+        assigned.push(expected);
+    }
+    assert!(assigned[0] < assigned[1]);
+    let snapshot = read_runtime(&mut f.hub, &f.work);
+    let fact = &snapshot.executions[0];
+    assert_eq!(fact.steps[0].id, 1.into(), "Begin order remains unchanged");
+    assert!(
+        fact.steps[0].measurements.unwrap().settled_revision
+            > fact.steps[1].measurements.unwrap().settled_revision
+    );
+    for invalid in [
+        fact.approved_revision,
+        snapshot.work.revision.next().unwrap(),
+    ] {
+        let mut corrupted = fact.clone();
+        corrupted.steps[0]
+            .measurements
+            .as_mut()
+            .unwrap()
+            .settled_revision = Some(invalid);
+        assert_eq!(
+            corrupted.validate(snapshot.work.plan.as_ref().unwrap(), snapshot.work.revision),
+            Err(WorkError::Invalid)
+        );
+    }
+}
+
+#[test]
 fn worker_contention_is_capacity_and_does_not_leave_an_unsent_step() {
     let mut f = AgentSettlementFixture::new();
     for id in [1, 2] {

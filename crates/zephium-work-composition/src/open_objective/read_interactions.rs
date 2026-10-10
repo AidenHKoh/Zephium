@@ -350,6 +350,10 @@ fn consequential(text: &str) -> bool {
 }
 
 impl AgentWorkLocalActionPolicy for ReadingInteractionPolicy {
+    fn human_wall(&self, observation: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
+        super::site_work::reading_wall(observation)
+    }
+
     fn decision_action_recipe(
         &self,
         operation: &DecisionOperation,
@@ -536,6 +540,10 @@ impl AgentWorkLocalActionPolicy for ReadingInteractionPolicy {
 pub(super) struct SessionReadingPolicy;
 
 impl AgentWorkLocalActionPolicy for SessionReadingPolicy {
+    fn human_wall(&self, observation: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
+        super::site_work::reading_wall(observation)
+    }
+
     fn decision_action_recipe(
         &self,
         operation: &DecisionOperation,

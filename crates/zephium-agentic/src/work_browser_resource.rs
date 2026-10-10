@@ -1320,7 +1320,7 @@ impl WorkBrowserResources {
 mod human;
 pub use human::{
     brand_family, same_work_human_site, WorkBrowserHumanProgress, WorkBrowserHumanRegion,
-    MAX_WORK_HUMAN_WAIT_MILLIS,
+    WorkBrowserHumanTime, MAX_WORK_HUMAN_WAIT_MILLIS,
 };
 
 #[path = "work_browser_observation.rs"]

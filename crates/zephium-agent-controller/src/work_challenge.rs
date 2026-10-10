@@ -121,6 +121,61 @@ pub(super) fn known_check(observation: &SemanticObservation) -> Option<KnownChec
     None
 }
 
+/// A native SSO/login route together with an identity control is a wall,
+/// including providers that name their only button merely "Continue".
+/// Route text alone never turns documentation or an empty app shell into proof.
+pub(super) fn sign_in_route(
+    document: &ContextNavigationTarget,
+    observation: &SemanticObservation,
+) -> bool {
+    let route = document
+        .as_url()
+        .path_segments()
+        .into_iter()
+        .flatten()
+        .any(|part| {
+            matches!(
+                part.to_ascii_lowercase().as_str(),
+                "login"
+                    | "signin"
+                    | "sign-in"
+                    | "sign_in"
+                    | "sso"
+                    | "oauth"
+                    | "authorize"
+                    | "mfa"
+                    | "2fa"
+                    | "otp"
+                    | "accountchooser"
+            )
+        });
+    route
+        && observation
+            .frames()
+            .iter()
+            .flat_map(SemanticSnapshot::nodes)
+            .any(|node| {
+                node.geometry().is_some()
+                    && (node.role() == SemanticRole::Password
+                        || (node.role() == SemanticRole::Textbox
+                            && (node.sensitivity() != SemanticSensitivity::Public
+                                || node.name().is_some_and(|name| {
+                                    let name = name.as_str().to_ascii_lowercase();
+                                    [
+                                        "email",
+                                        "username",
+                                        "workspace",
+                                        "organization",
+                                        "verification",
+                                        "authentication",
+                                        "code",
+                                    ]
+                                    .iter()
+                                    .any(|word| name.contains(word))
+                                }))))
+            })
+}
+
 /// A page that is only an embedded frame it cannot read: DataDome and
 /// similar checks, which either clear by themselves or show a captcha.
 fn frame_only(observation: &SemanticObservation) -> bool {
@@ -217,6 +272,21 @@ mod tests {
                 .unwrap();
         }
         assembler.finish().unwrap()
+    }
+
+    #[test]
+    fn sso_route_requires_a_visible_identity_control_not_just_a_url() {
+        let field = look(
+            r#"{"k":1,"r":"document","o":16},{"k":2,"p":0,"r":"textbox","n":"Email","q":"sensitive","o":2,"b":{"x":1,"y":1,"w":200,"h":30}}"#,
+        );
+        let shell = look(r#"{"k":1,"r":"document","o":16}"#);
+        let sso = ContextNavigationTarget::parse("https://login.example.test/sso/start").unwrap();
+        assert!(sign_in_route(&sso, &field));
+        assert!(!sign_in_route(&sso, &shell));
+        assert!(!sign_in_route(
+            &ContextNavigationTarget::parse("https://example.test/contact").unwrap(),
+            &field
+        ));
     }
 
     #[test]

@@ -65,7 +65,7 @@ pub use work_browser_resource::{
     WorkBrowserActionDispatch, WorkBrowserActionEvent, WorkBrowserActionRefusal,
     WorkBrowserActionRequest, WorkBrowserExecutionLease, WorkBrowserHistoryBackCompletionCallback,
     WorkBrowserHistoryBackDispatch, WorkBrowserHistoryBackRequest, WorkBrowserHumanProgress,
-    WorkBrowserHumanRegion, WorkBrowserLeaseDeliveryCompletion,
+    WorkBrowserHumanRegion, WorkBrowserHumanTime, WorkBrowserLeaseDeliveryCompletion,
     WorkBrowserLeaseDeliveryNotification, WorkBrowserLeaseDeliveryPollError,
     WorkBrowserLeaseDeliveryProof, WorkBrowserLeaseDeliveryReceipt,
     WorkBrowserLeaseDeliveryRefusal, WorkBrowserLeaseDeliveryTicket, WorkBrowserLeaseEnded,
@@ -83,7 +83,9 @@ pub use work_browser_resource::{
     WorkBrowserResourcePhase, WorkBrowserResourceRequest, WorkBrowserResources, WorkId,
     MAX_WORK_HUMAN_WAIT_MILLIS,
 };
-pub use work_browser_session::{WeakWorkBrowserSession, WorkBrowserSession};
+pub use work_browser_session::{
+    WeakWorkBrowserSession, WorkBrowserSession, WorkBrowserSessionHumanHold,
+};
 #[cfg(feature = "probe-harness")]
 mod contract;
 #[cfg(feature = "probe-harness")]

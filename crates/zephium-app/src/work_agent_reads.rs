@@ -1,5 +1,8 @@
 use super::*;
 use zephium_core::work::collection::*;
+use zephium_core::work::parts::{
+    WorkPartFactV1, WorkPartNeedV1, WorkPartReasonV1, WorkPartStateV1,
+};
 
 const MAX_CONCURRENT_PAGE_READS: usize = 3;
 /// New reads one plain read may become by following its own site's
@@ -30,7 +33,10 @@ impl Driver {
         // Page tasks whose entry question waits on their start page.
         let mut entries: Vec<String> = Vec::new();
         let mut viewing: Vec<String> = Vec::new();
-        let behind_check = self.sites_behind_check().await;
+        let state = self.probe.runtime_projection().await?;
+        let blockers = WorkAgentService::site_blockers(&state);
+        let mut retrying = std::collections::BTreeSet::new();
+        let mut retry_claims = Vec::new();
         for kind in browses {
             if matches!(kind, WorkStepKindV1::Discover { .. }) {
                 self.notice("Native discovery is not available in this run: provider search covers the web. Use search for facts and read for exact URLs listed in sources.");
@@ -43,12 +49,42 @@ impl Driver {
             let Some(site) = crate::work_sites::site_of(url) else {
                 continue;
             };
-            if behind_check.contains(&site) {
-                let name = crate::work_sites::site_name(&site);
-                self.notice(&format!(
-                    "{name} is behind a human check the person has not passed: its pages are not opened again in this run. Use other sources, and say in the reply that {name} needs the person to pass its check."
-                ));
-                continue;
+            if let Some(blocked) = blockers.iter().find(|blocked| blocked.site == site) {
+                if !retrying.insert(site.clone()) {
+                    self.notice(&blocked.notice());
+                    continue;
+                }
+                let Some(claim) = SiteRetryClaim::acquire(
+                    self.profile,
+                    state.work.id,
+                    self.probe.execution(),
+                    &site,
+                ) else {
+                    self.notice(&blocked.notice());
+                    continue;
+                };
+                retry_claims.push(claim);
+                // Another part may have asked while this batch was being built.
+                let fresh = self.probe.runtime_projection().await?;
+                let decision = site_retry(&fresh, self.probe.execution(), blocked);
+                let allowed = match decision {
+                    Some(allowed) => allowed,
+                    None => match self
+                        .ask_person(
+                            retry_prompt(&site),
+                            vec![OPEN_BLOCKED_SITE.into(), DEFER_BLOCKED_SITE.into()],
+                            WorkAskPurposeV1::Confirm,
+                        )
+                        .await?
+                    {
+                        Ok(answer) => answer == OPEN_BLOCKED_SITE,
+                        Err(status) => return Ok(Some(status)),
+                    },
+                };
+                if !allowed {
+                    self.notice(&blocked.notice());
+                    continue;
+                }
             }
             let session = match goal.clone() {
                 Some(goal) => {
@@ -383,23 +419,6 @@ impl Driver {
 }
 
 impl Driver {
-    /// Sites whose last settled page in this run, in any part, ended behind
-    /// a bot check the person did not pass; a page of the site that later
-    /// read cleanly clears it.
-    async fn sites_behind_check(&self) -> Vec<String> {
-        let Ok(state) = self.probe.runtime_projection().await else {
-            return Vec::new();
-        };
-        let Some(execution) = state
-            .executions
-            .iter()
-            .find(|execution| execution.id == self.probe.execution())
-        else {
-            return Vec::new();
-        };
-        behind_check(&execution.steps)
-    }
-
     /// A new read of the address a plain public read's first load was
     /// redirected to on its own site: its own step citing that address,
     /// within what the first read left of its share, never an address the
@@ -473,33 +492,368 @@ impl Driver {
     }
 }
 
-fn behind_check(steps: &[WorkStepFact]) -> Vec<String> {
-    let mut sites: Vec<String> = Vec::new();
-    for step in steps {
-        let WorkStepKindV1::Read { url, .. } = &step.kind else {
-            continue;
-        };
-        let Some(site) = crate::work_sites::site_of(url) else {
-            continue;
-        };
-        match step.status {
-            WorkStepStatus::Succeeded => sites.retain(|known| *known != site),
-            WorkStepStatus::Failed
-                if match step.measurements.and_then(|m| m.outcome) {
-                    Some(WorkPageOutcomeV1::NeedsCheck) => true,
-                    None => step
-                        .note
-                        .as_deref()
-                        .is_some_and(zephium_core::work::runtime::read_note::is_human_check),
-                    _ => false,
-                } && !sites.contains(&site) =>
-            {
-                sites.push(site)
-            }
-            _ => {}
+// Short-lived coordination only: durable Ask/Read facts remain authoritative.
+// Keep one opener per site while concurrent parts prepare their own batches.
+type RetryKey = (ProfileId, WorkId, WorkExecutionId, String);
+fn retry_claims() -> &'static std::sync::Mutex<Vec<RetryKey>> {
+    static CLAIMS: std::sync::OnceLock<std::sync::Mutex<Vec<RetryKey>>> =
+        std::sync::OnceLock::new();
+    CLAIMS.get_or_init(Default::default)
+}
+struct SiteRetryClaim(RetryKey);
+impl SiteRetryClaim {
+    fn acquire(
+        profile: ProfileId,
+        work: WorkId,
+        execution: WorkExecutionId,
+        site: &str,
+    ) -> Option<Self> {
+        let key = (profile, work, execution, site.to_owned());
+        let mut claims = retry_claims()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if claims.len() >= 64 || claims.contains(&key) {
+            return None;
+        }
+        claims.push(key.clone());
+        Some(Self(key))
+    }
+}
+impl Drop for SiteRetryClaim {
+    fn drop(&mut self) {
+        retry_claims()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retain(|key| *key != self.0);
+    }
+}
+
+const OPEN_BLOCKED_SITE: &str = "Open the page";
+const DEFER_BLOCKED_SITE: &str = "Not now";
+
+fn retry_prompt(site: &str) -> String {
+    format!("Work could not access {site}. Open its page to try again or resolve the sign-in or human check?")
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SiteBlockKind {
+    SignIn,
+    Check,
+    Unreachable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WorkSiteBlocker {
+    pub(crate) site: String,
+    url: String,
+    execution: WorkExecutionId,
+    kind: SiteBlockKind,
+    account: Option<Box<WorkPageAccountV1>>,
+    precise: bool,
+    settled_revision: Option<WorkRevision>,
+}
+impl WorkSiteBlocker {
+    pub(crate) fn need(&self) -> WorkPartNeedV1 {
+        match self.kind {
+            SiteBlockKind::SignIn => WorkPartNeedV1::SignIn {
+                host: self.site.clone(),
+            },
+            SiteBlockKind::Check => WorkPartNeedV1::Check {
+                host: self.site.clone(),
+            },
+            SiteBlockKind::Unreachable => WorkPartNeedV1::Retry {
+                host: Some(self.site.clone()),
+                reason: Some(WorkPartReasonV1::SiteError),
+            },
         }
     }
-    sites
+    fn reason(&self) -> &'static str {
+        match self.kind {
+            SiteBlockKind::SignIn => "needs sign-in",
+            SiteBlockKind::Check => "needs a human check",
+            SiteBlockKind::Unreachable => "was unavailable",
+        }
+    }
+    pub(crate) fn notice(&self) -> String {
+        let reason = self.reason();
+        format!("{} {reason}, recorded earlier in this Work. Keep that need visible. Do not reopen its pages without the person's explicit retry; opening a page is not proof the problem is resolved. Public help/docs are not evidence of personal account content. You can explain this recorded failure without opening any page.", self.site)
+    }
+}
+
+impl WorkAgentService {
+    /// Fold bounded durable executions; no mutable process cache or new storage.
+    pub(crate) fn site_blockers(state: &WorkRuntimeProjection) -> Vec<WorkSiteBlocker> {
+        let mut executions: Vec<_> = state.executions.iter().collect();
+        executions.sort_by_key(|execution| execution.approved_revision);
+        fold_site_blockers(executions.into_iter().map(|execution| {
+            (
+                execution.id,
+                execution.steps.as_slice(),
+                execution.parts.as_slice(),
+            )
+        }))
+    }
+
+    pub(crate) fn site_blocker_context(state: &WorkRuntimeProjection) -> String {
+        let blocked = Self::site_blockers(state);
+        if blocked.is_empty() {
+            return String::new();
+        }
+        let mut text = "\nUnresolved site access in this Work (durable observations):\nExplain these facts without opening pages. Retrying requires the person to choose Open the page; that choice is not resolution. Public help/docs do not stand for personal account content.\n".to_owned();
+        for site in blocked.iter().take(16) {
+            text.push_str(&format!("{}: {}", site.site, site.reason()));
+            text.push('\n');
+        }
+        if blocked.len() > 16 {
+            text.push_str("Additional sites remain blocked; each attempted read checks their durable state.\n");
+        }
+        text
+    }
+}
+
+fn same_target(left: &str, right: &str) -> bool {
+    let target = |value: &str| {
+        url::Url::parse(value).ok().map(|mut url| {
+            url.set_fragment(None);
+            url
+        })
+    };
+    target(left)
+        .zip(target(right))
+        .is_some_and(|(left, right)| left == right)
+}
+
+fn fold_site_blockers<'a>(
+    executions: impl IntoIterator<Item = (WorkExecutionId, &'a [WorkStepFact], &'a [WorkPartFactV1])>,
+) -> Vec<WorkSiteBlocker> {
+    let mut blocked: Vec<WorkSiteBlocker> = Vec::new();
+    for (execution, steps, parts) in executions {
+        let mut ordered: Vec<_> = steps.iter().collect();
+        ordered.sort_by_key(|step| read_settlement_order(step));
+        for step in ordered {
+            let WorkStepKindV1::Read { url, goal, .. } = &step.kind else {
+                continue;
+            };
+            let Some(site) = crate::work_sites::site_of(url) else {
+                continue;
+            };
+            let measurements = step.measurements;
+            let settled_revision = measurements.and_then(|m| m.settled_revision);
+            blocked.retain(|prior| {
+                let later = prior.execution != execution
+                    || prior
+                        .settled_revision
+                        .zip(settled_revision)
+                        .is_some_and(|(before, after)| before < after);
+                if !later
+                    || prior.site != site
+                    || !same_target(&prior.url, url)
+                    || prior.account != step.account
+                {
+                    return true;
+                }
+                let receipt = measurements.and_then(|m| m.resolved_handoff).is_some_and(
+                    |receipt| match prior.kind {
+                        SiteBlockKind::SignIn => receipt.includes(WorkPageHandoffKindV1::SignIn),
+                        SiteBlockKind::Check => receipt.includes(WorkPageHandoffKindV1::Check),
+                        SiteBlockKind::Unreachable => false,
+                    },
+                );
+                let read_target = step.status == WorkStepStatus::Succeeded
+                    && measurements
+                        .is_some_and(|m| m.outcome == Some(WorkPageOutcomeV1::Completed))
+                    && !step.artifacts.is_empty()
+                    && (prior.account.is_none() || goal.is_some());
+                !(receipt || read_target)
+            });
+            let kind = match (step.status, measurements.and_then(|m| m.outcome)) {
+                (
+                    WorkStepStatus::Failed
+                    | WorkStepStatus::OutcomeUnknown
+                    | WorkStepStatus::Cancelled,
+                    Some(WorkPageOutcomeV1::NeedsSignIn),
+                ) => Some(SiteBlockKind::SignIn),
+                (
+                    WorkStepStatus::Failed
+                    | WorkStepStatus::OutcomeUnknown
+                    | WorkStepStatus::Cancelled,
+                    Some(WorkPageOutcomeV1::NeedsCheck),
+                ) => Some(SiteBlockKind::Check),
+                (
+                    WorkStepStatus::Failed | WorkStepStatus::OutcomeUnknown,
+                    Some(WorkPageOutcomeV1::SiteError),
+                ) => Some(SiteBlockKind::Unreachable),
+                // Only old settled rows without a typed outcome use closed notes.
+                (WorkStepStatus::Failed | WorkStepStatus::OutcomeUnknown, None) => {
+                    match step.note.as_deref() {
+                        Some("The page asked to sign in") => Some(SiteBlockKind::SignIn),
+                        Some(note) if read_note::is_human_check(note) => Some(SiteBlockKind::Check),
+                        Some(read_note::SLOW_SITE) => Some(SiteBlockKind::Unreachable),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            let precise = kind.is_some();
+            let kind = kind.or_else(|| waiting_part_wall(step, steps, parts, &site));
+            if let Some(kind) = kind {
+                // Coarse part state cannot relocate or replace a precise native wall.
+                if !precise
+                    && blocked
+                        .iter()
+                        .any(|prior| prior.site == site && prior.precise)
+                {
+                    for prior in blocked.iter_mut().filter(|prior| {
+                        prior.site == site
+                            && same_target(&prior.url, url)
+                            && prior.account == step.account
+                            && prior.kind == kind
+                    }) {
+                        prior.execution = execution;
+                        prior.settled_revision = None;
+                    }
+                    continue;
+                }
+                if kind == SiteBlockKind::Unreachable
+                    && blocked.iter().any(|prior| {
+                        prior.site == site
+                            && same_target(&prior.url, url)
+                            && prior.account == step.account
+                            && prior.kind != kind
+                    })
+                {
+                    continue;
+                }
+                // A new ordered failure cannot erase uncertainty about another
+                // unsequenced observation in this same execution.
+                let unresolved_order = blocked.iter().any(|prior| {
+                    prior.execution == execution
+                        && prior.site == site
+                        && same_target(&prior.url, url)
+                        && prior.account == step.account
+                        && prior.kind == kind
+                        && prior.settled_revision.is_none()
+                });
+                blocked.retain(|prior| {
+                    !(prior.site == site
+                        && same_target(&prior.url, url)
+                        && prior.account == step.account
+                        && prior.kind == kind)
+                });
+                blocked.push(WorkSiteBlocker {
+                    site,
+                    url: url.clone(),
+                    execution,
+                    kind,
+                    account: step.account.clone(),
+                    precise,
+                    settled_revision: if unresolved_order {
+                        None
+                    } else {
+                        settled_revision
+                    },
+                });
+            }
+        }
+    }
+    blocked
+}
+
+/// Immediate Stop can close the Read before its native wall outcome arrives.
+/// Preserve only its own Waiting/Stopped part's typed handoff, at this Read's
+/// position in history, so a later same-site resolution still wins.
+fn waiting_part_wall(
+    step: &WorkStepFact,
+    steps: &[WorkStepFact],
+    parts: &[WorkPartFactV1],
+    site: &str,
+) -> Option<SiteBlockKind> {
+    if !matches!(
+        step.status,
+        WorkStepStatus::Running | WorkStepStatus::OutcomeUnknown | WorkStepStatus::Cancelled
+    ) || step
+        .measurements
+        .is_some_and(|m| m.resolved_handoff.is_some())
+    {
+        return None;
+    }
+    let part = parts.iter().find(|part| {
+        Some(part.id) == step.part
+            && matches!(
+                part.state,
+                WorkPartStateV1::Waiting | WorkPartStateV1::Stopped
+            )
+    })?;
+    // A part may have several pages. Its coarse need cannot identify which
+    // uncertain page held the wall, so never guess a target in that case.
+    if steps
+        .iter()
+        .filter(|candidate| {
+            candidate.part == Some(part.id)
+                && matches!(
+                    candidate.status,
+                    WorkStepStatus::Running
+                        | WorkStepStatus::OutcomeUnknown
+                        | WorkStepStatus::Cancelled
+                )
+                && candidate
+                    .measurements
+                    .is_none_or(|m| m.resolved_handoff.is_none())
+                && matches!(&candidate.kind, WorkStepKindV1::Read { url, .. }
+                if crate::work_sites::site_of(url).as_deref() == Some(site))
+        })
+        .count()
+        != 1
+    {
+        return None;
+    }
+    let (host, kind) = match part.need.as_ref()? {
+        WorkPartNeedV1::SignIn { host } => (host, SiteBlockKind::SignIn),
+        WorkPartNeedV1::Check { host } => (host, SiteBlockKind::Check),
+        _ => return None,
+    };
+    (crate::work_sites::site_of(&format!("https://{host}/")).as_deref() == Some(site))
+        .then_some(kind)
+}
+
+/// One explicit page-opening decision per site and follow-up. It grants an
+/// attempt, never clears a blocker; only resulting native/read evidence can.
+fn site_retry(
+    state: &WorkRuntimeProjection,
+    current: WorkExecutionId,
+    blocked: &WorkSiteBlocker,
+) -> Option<bool> {
+    let execution = state
+        .executions
+        .iter()
+        .find(|execution| execution.id == current)?;
+    site_retry_steps(current, blocked, &execution.steps)
+}
+
+fn site_retry_steps(
+    current: WorkExecutionId,
+    blocked: &WorkSiteBlocker,
+    steps: &[WorkStepFact],
+) -> Option<bool> {
+    if blocked.execution == current || steps.iter().any(|step| {
+        matches!(&step.kind, WorkStepKindV1::Read { url, .. } if crate::work_sites::site_of(url).as_deref() == Some(blocked.site.as_str()))
+    }) { return Some(false); }
+    steps.iter().rev().find_map(|step| match &step.kind {
+        WorkStepKindV1::Ask {
+            prompt,
+            options,
+            answer,
+            purpose: Some(WorkAskPurposeV1::Confirm),
+        } if *prompt == retry_prompt(&blocked.site)
+            && options == &[OPEN_BLOCKED_SITE.to_owned(), DEFER_BLOCKED_SITE.to_owned()] =>
+        {
+            Some(
+                step.status == WorkStepStatus::Succeeded
+                    && answer.as_deref() == Some(OPEN_BLOCKED_SITE),
+            )
+        }
+        _ => None,
+    })
 }
 
 /// A held step's Confirm step while its page task runs.
@@ -771,14 +1125,13 @@ impl Driver {
                 fact.state = zephium_core::work::parts::WorkPartStateV1::Waiting;
                 fact.summary = Some(format!("Needs you on {site}"));
                 // A sign-in says so on the row, with its fix.
-                use zephium_core::work::parts::{WorkPartNeedV1, WorkPartReasonV1};
+                use zephium_core::work::parts::WorkPartNeedV1;
                 fact.need = Some(match wait {
                     crate::work_agent::WorkPageWait::SignIn => WorkPartNeedV1::SignIn {
                         host: site.to_owned(),
                     },
-                    crate::work_agent::WorkPageWait::Check => WorkPartNeedV1::Retry {
-                        host: Some(site.to_owned()),
-                        reason: Some(WorkPartReasonV1::BlockedByCheck),
+                    crate::work_agent::WorkPageWait::Check => WorkPartNeedV1::Check {
+                        host: site.to_owned(),
                     },
                 })
                 .filter(|need| need.validate().is_ok());
@@ -1076,9 +1429,12 @@ pub(super) fn combined_usage(
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_site_stays_closed_after_a_check_nobody_passed_until_a_page_of_it_reads() {
-        let read = |url: &str, status, note: Option<&str>| WorkStepFact {
+    fn blocker_read(
+        url: &str,
+        status: WorkStepStatus,
+        outcome: Option<WorkPageOutcomeV1>,
+    ) -> WorkStepFact {
+        WorkStepFact {
             id: WorkStepId::generate(),
             turn: 1,
             kind: WorkStepKindV1::Read {
@@ -1090,43 +1446,631 @@ mod tests {
             usage: None,
             artifacts: vec![],
             evidence: None,
-            note: note.map(str::to_owned),
-            measurements: None,
+            note: None,
+            measurements: outcome.map(|outcome| WorkStepMeasurementsV1 {
+                outcome: Some(outcome),
+                ..Default::default()
+            }),
             local: None,
             account: None,
             part: None,
             model_fault: None,
-        };
-        let skipped = Some("state.gov asks for a human check; its page was skipped");
-        let mut steps = vec![
-            read(
-                "https://travel.state.gov/visas.html",
+        }
+    }
+    fn blocked_then(earlier: &[WorkStepFact], later: &[WorkStepFact]) -> Vec<WorkSiteBlocker> {
+        fold_site_blockers([
+            (WorkExecutionId::generate(), earlier, &[][..]),
+            (WorkExecutionId::generate(), later, &[][..]),
+        ])
+    }
+
+    #[test]
+    fn site_blockers_persist_across_followups_and_ignore_internal_failures() {
+        let first = [
+            blocker_read(
+                "https://mail.example.com/inbox",
                 WorkStepStatus::Failed,
-                skipped,
+                Some(WorkPageOutcomeV1::NeedsSignIn),
             ),
-            read(
-                "https://www.cbp.gov/travel",
+            blocker_read(
+                "https://airbnb.com/search",
                 WorkStepStatus::Failed,
-                Some("The page could not be read"),
+                Some(WorkPageOutcomeV1::NeedsCheck),
             ),
-            read(
-                "https://www.airbnb.com/s/x/homes",
+            blocker_read(
+                "https://example.org/listings",
                 WorkStepStatus::Failed,
-                Some("Airbnb needs you to continue"),
+                Some(WorkPageOutcomeV1::SiteError),
             ),
-            read(
-                "https://travel.state.gov/other.html",
-                WorkStepStatus::Running,
-                None,
+            blocker_read(
+                "https://internal.test/",
+                WorkStepStatus::Failed,
+                Some(WorkPageOutcomeV1::Refused {
+                    stage: WorkPageFailureStageV1::Provider,
+                }),
             ),
         ];
-        assert_eq!(behind_check(&steps), ["state.gov", "airbnb.com"]);
-        steps.push(read(
-            "https://travel.state.gov/other.html",
+        let blockers = blocked_then(&first, &[]);
+        assert_eq!(blockers.len(), 3);
+        assert!(blockers.iter().any(|site| site.need()
+            == WorkPartNeedV1::Check {
+                host: "airbnb.com".into()
+            }));
+        assert!(blockers.iter().any(|site| site.need()
+            == WorkPartNeedV1::SignIn {
+                host: "example.com".into()
+            }));
+        assert!(blockers.iter().all(|site| site.site != "internal.test"));
+    }
+
+    #[test]
+    fn help_pages_empty_results_and_model_success_do_not_clear_an_account_wall() {
+        let mut first = [blocker_read(
+            "https://example.com/inbox",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::NeedsSignIn),
+        )];
+        first[0].account = Some(Box::new(WorkPageAccountV1 {
+            host: "example.com".into(),
+            badge: true,
+        }));
+        let mut help = blocker_read(
+            "https://example.com/help/login",
             WorkStepStatus::Succeeded,
-            None,
+            Some(WorkPageOutcomeV1::Completed),
+        );
+        help.artifacts.push(WorkArtifactId::generate());
+        let empty = blocker_read(
+            "https://example.com/inbox",
+            WorkStepStatus::Succeeded,
+            Some(WorkPageOutcomeV1::Completed),
+        );
+        let untyped = blocker_read("https://example.com/inbox", WorkStepStatus::Succeeded, None);
+        assert_eq!(blocked_then(&first, &[help, empty, untyped]).len(), 1);
+        let mut public = blocker_read(
+            "https://example.com/inbox",
+            WorkStepStatus::Succeeded,
+            Some(WorkPageOutcomeV1::Completed),
+        );
+        public.artifacts.push(WorkArtifactId::generate());
+        assert_eq!(blocked_then(&first, &[public.clone()]).len(), 1);
+        public.account = Some(Box::new(WorkPageAccountV1 {
+            host: "example.com".into(),
+            badge: true,
+        }));
+        if let WorkStepKindV1::Read { goal, .. } = &mut public.kind {
+            *goal = Some("Read my inbox".into());
+        }
+        assert!(blocked_then(&first, &[public]).is_empty());
+    }
+
+    #[test]
+    fn verified_native_resolution_clears_only_the_matching_site_and_handoff() {
+        let first = [blocker_read(
+            "https://example.com/inbox",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::NeedsSignIn),
+        )];
+        let mut resumed = blocker_read(
+            "https://example.com/inbox",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::Refused {
+                stage: WorkPageFailureStageV1::Extraction,
+            }),
+        );
+        resumed.measurements.as_mut().unwrap().resolved_handoff =
+            Some(WorkPageHandoffKindV1::Check);
+        assert_eq!(blocked_then(&first, &[resumed.clone()]).len(), 1);
+        resumed.measurements.as_mut().unwrap().resolved_handoff =
+            Some(WorkPageHandoffKindV1::SignIn);
+        assert!(blocked_then(&first, &[resumed.clone()]).is_empty());
+        if let WorkStepKindV1::Read { url, .. } = &mut resumed.kind {
+            *url = "https://different.test/".into();
+        }
+        assert_eq!(blocked_then(&first, &[resumed]).len(), 1);
+    }
+
+    #[test]
+    fn reachability_needs_real_same_target_success_and_does_not_replace_a_check() {
+        let first = [blocker_read(
+            "https://example.com/search",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::SiteError),
+        )];
+        let mut completed = blocker_read(
+            "https://example.com/search#results",
+            WorkStepStatus::Succeeded,
+            Some(WorkPageOutcomeV1::Completed),
+        );
+        completed.artifacts.push(WorkArtifactId::generate());
+        assert!(blocked_then(&first, &[completed]).is_empty());
+        let first = [blocker_read(
+            "https://example.com/search",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::NeedsCheck),
+        )];
+        let unavailable = blocker_read(
+            "https://example.com/search",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::SiteError),
+        );
+        assert_eq!(
+            blocked_then(&first, &[unavailable])[0].kind,
+            SiteBlockKind::Check
+        );
+    }
+
+    #[test]
+    fn legacy_notes_migrate_but_never_override_a_typed_outcome() {
+        let mut old = blocker_read("https://example.com/", WorkStepStatus::Failed, None);
+        old.note = Some(read_note::HUMAN_CHECK.into());
+        assert_eq!(
+            blocked_then(&[old.clone()], &[])[0].kind,
+            SiteBlockKind::Check
+        );
+        old.measurements = Some(WorkStepMeasurementsV1 {
+            outcome: Some(WorkPageOutcomeV1::Refused {
+                stage: WorkPageFailureStageV1::Runtime,
+            }),
+            ..Default::default()
+        });
+        assert!(blocked_then(&[old], &[]).is_empty());
+    }
+
+    #[test]
+    fn opening_decision_is_one_retry_not_a_resolution_or_repeated_probe() {
+        let previous = WorkExecutionId::generate();
+        let current = WorkExecutionId::generate();
+        let failed = blocker_read(
+            "https://example.com/",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::NeedsCheck),
+        );
+        let blocker = fold_site_blockers([(previous, &[failed][..], &[][..])]).remove(0);
+        assert_eq!(site_retry_steps(current, &blocker, &[]), None);
+        let mut answer = blocker_read("https://example.com/", WorkStepStatus::Succeeded, None);
+        answer.kind = WorkStepKindV1::Ask {
+            purpose: Some(WorkAskPurposeV1::Confirm),
+            prompt: retry_prompt("example.com"),
+            options: vec![OPEN_BLOCKED_SITE.into(), DEFER_BLOCKED_SITE.into()],
+            answer: Some(OPEN_BLOCKED_SITE.into()),
+        };
+        assert_eq!(
+            site_retry_steps(current, &blocker, &[answer.clone()]),
+            Some(true)
+        );
+        assert_eq!(
+            site_retry_steps(previous, &blocker, &[answer.clone()]),
+            Some(false)
+        );
+        let attempted = blocker_read(
+            "https://example.com/",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::Refused {
+                stage: WorkPageFailureStageV1::Provider,
+            }),
+        );
+        assert_eq!(
+            site_retry_steps(current, &blocker, &[answer.clone(), attempted]),
+            Some(false)
+        );
+        if let WorkStepKindV1::Ask { answer, .. } = &mut answer.kind {
+            *answer = Some(DEFER_BLOCKED_SITE.into());
+        }
+        assert_eq!(site_retry_steps(current, &blocker, &[answer]), Some(false));
+    }
+
+    #[test]
+    fn stopped_native_wait_persists_across_followup_and_later_resolution_wins() {
+        use zephium_core::work::parts::WorkHelperV1;
+        for kind in [WorkPageHandoffKindV1::SignIn, WorkPageHandoffKindV1::Check] {
+            let mut part = WorkPartFactV1 {
+                id: zephium_core::work::WorkPartId::generate(),
+                title: "Inbox".into(),
+                helper: WorkHelperV1::Browser,
+                service: None,
+                goal: "Read my inbox".into(),
+                state: WorkPartStateV1::Stopped,
+                started_ms: Some("1".into()),
+                ended_ms: Some("2".into()),
+                summary: None,
+                need: Some(match kind {
+                    WorkPageHandoffKindV1::SignIn => WorkPartNeedV1::SignIn {
+                        host: "example.com".into(),
+                    },
+                    WorkPageHandoffKindV1::Check | WorkPageHandoffKindV1::SignInAndCheck => {
+                        WorkPartNeedV1::Check {
+                            host: "example.com".into(),
+                        }
+                    }
+                }),
+            };
+            let mut stopped = blocker_read(
+                "https://example.com/inbox",
+                WorkStepStatus::OutcomeUnknown,
+                Some(WorkPageOutcomeV1::OutcomeUnknown),
+            );
+            stopped.part = Some(part.id);
+            stopped.measurements.as_mut().unwrap().settled_revision = WorkRevision::new(10);
+            let first = WorkExecutionId::generate();
+            let second = WorkExecutionId::generate();
+            for state in [WorkPartStateV1::Waiting, WorkPartStateV1::Stopped] {
+                part.state = state;
+                let blocked = fold_site_blockers([
+                    (first, &[stopped.clone()][..], &[part.clone()][..]),
+                    (second, &[][..], &[][..]),
+                ]);
+                assert_eq!(blocked.len(), 1);
+                assert_eq!(blocked[0].need(), part.need.clone().unwrap());
+            }
+            // An arbitrary helper's failed need is not a native waiting receipt.
+            part.state = WorkPartStateV1::Failed;
+            assert!(
+                fold_site_blockers([(first, &[stopped.clone()][..], &[part.clone()][..])])
+                    .is_empty()
+            );
+            part.state = WorkPartStateV1::Stopped;
+            let mut resolved = blocker_read(
+                "https://example.com/inbox",
+                WorkStepStatus::Failed,
+                Some(WorkPageOutcomeV1::Refused {
+                    stage: WorkPageFailureStageV1::Extraction,
+                }),
+            );
+            resolved.part = Some(part.id);
+            resolved.measurements.as_mut().unwrap().settled_revision = WorkRevision::new(20);
+            resolved.measurements.as_mut().unwrap().resolved_handoff = Some(kind);
+            // A stale stopped-part need cannot overwrite a later verified resume,
+            // whether that receipt is in this execution or the next follow-up.
+            assert!(fold_site_blockers([(
+                first,
+                &[stopped.clone(), resolved.clone()][..],
+                &[part.clone()][..]
+            )])
+            .is_empty());
+            assert!(fold_site_blockers([
+                (first, &[stopped.clone()][..], &[part.clone()][..]),
+                (second, &[resolved.clone()][..], &[][..])
+            ])
+            .is_empty());
+            stopped.measurements.as_mut().unwrap().resolved_handoff = Some(kind);
+            assert!(
+                fold_site_blockers([(first, &[stopped.clone()][..], &[part.clone()][..])])
+                    .is_empty()
+            );
+            stopped.measurements.as_mut().unwrap().resolved_handoff = None;
+            part.need = Some(WorkPartNeedV1::Check {
+                host: "different.test".into(),
+            });
+            assert!(fold_site_blockers([(first, &[stopped][..], &[part][..])]).is_empty());
+        }
+    }
+
+    #[test]
+    fn manual_page_dismissal_keeps_a_typed_wall_but_not_an_untyped_cancel() {
+        for outcome in [
+            WorkPageOutcomeV1::NeedsSignIn,
+            WorkPageOutcomeV1::NeedsCheck,
+        ] {
+            let dismissed = blocker_read(
+                "https://example.com/",
+                WorkStepStatus::Cancelled,
+                Some(outcome),
+            );
+            assert_eq!(blocked_then(&[dismissed], &[]).len(), 1);
+        }
+        let dismissed = blocker_read(
+            "https://example.com/",
+            WorkStepStatus::Cancelled,
+            Some(WorkPageOutcomeV1::Cancelled),
+        );
+        assert!(blocked_then(&[dismissed], &[]).is_empty());
+    }
+
+    #[test]
+    fn handoff_receipts_require_original_target_and_account_provenance() {
+        let mut wall = blocker_read(
+            "https://mail.example.com/inbox",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::NeedsSignIn),
+        );
+        wall.measurements.as_mut().unwrap().settled_revision = WorkRevision::new(10);
+        wall.account = Some(Box::new(WorkPageAccountV1 {
+            host: "mail.example.com".into(),
+            badge: true,
+        }));
+        let mut resumed = blocker_read(
+            "https://docs.example.com/login",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::Refused {
+                stage: WorkPageFailureStageV1::Extraction,
+            }),
+        );
+        resumed.measurements.as_mut().unwrap().settled_revision = WorkRevision::new(20);
+        resumed.account = wall.account.clone();
+        resumed.measurements.as_mut().unwrap().resolved_handoff =
+            Some(WorkPageHandoffKindV1::SignInAndCheck);
+        assert_eq!(blocked_then(&[wall.clone()], &[resumed.clone()]).len(), 1);
+        assert!(!read_handoff_resolves(
+            &wall,
+            &resumed,
+            WorkPageHandoffKindV1::SignIn
         ));
-        assert_eq!(behind_check(&steps), ["airbnb.com"]);
+        if let WorkStepKindV1::Read { url, .. } = &mut resumed.kind {
+            *url = "https://mail.example.com/inbox".into();
+        }
+        resumed.account = None;
+        assert_eq!(blocked_then(&[wall.clone()], &[resumed.clone()]).len(), 1);
+        assert!(!read_handoff_resolves(
+            &wall,
+            &resumed,
+            WorkPageHandoffKindV1::SignIn
+        ));
+        resumed.account = wall.account.clone();
+        assert!(blocked_then(&[wall.clone()], &[resumed.clone()]).is_empty());
+        assert!(read_handoff_resolves(
+            &wall,
+            &resumed,
+            WorkPageHandoffKindV1::SignIn
+        ));
+        // An anonymous page can genuinely sign in during its own native handoff.
+        wall.account = None;
+        resumed.account = None;
+        assert!(blocked_then(&[wall.clone()], &[resumed.clone()]).is_empty());
+        wall.measurements.as_mut().unwrap().outcome = Some(WorkPageOutcomeV1::NeedsCheck);
+        assert!(blocked_then(&[wall], &[resumed]).is_empty());
+    }
+
+    #[test]
+    fn check_resolution_does_not_erase_an_unresolved_sign_in_on_the_same_target() {
+        let sign_in = blocker_read(
+            "https://mail.example.com/inbox",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::NeedsSignIn),
+        );
+        let check = blocker_read(
+            "https://mail.example.com/inbox",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::NeedsCheck),
+        );
+        let mut resumed = blocker_read(
+            "https://mail.example.com/inbox",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::Refused {
+                stage: WorkPageFailureStageV1::Extraction,
+            }),
+        );
+        resumed.measurements.as_mut().unwrap().resolved_handoff =
+            Some(WorkPageHandoffKindV1::Check);
+        let blocked = blocked_then(&[sign_in.clone(), check.clone()], &[resumed.clone()]);
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].kind, SiteBlockKind::SignIn);
+        resumed.measurements.as_mut().unwrap().resolved_handoff =
+            Some(WorkPageHandoffKindV1::SignInAndCheck);
+        assert!(blocked_then(&[sign_in, check], &[resumed]).is_empty());
+    }
+
+    #[test]
+    fn different_origin_walls_on_one_site_remain_independent() {
+        let inbox = blocker_read(
+            "https://mail.example.com/inbox",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::NeedsSignIn),
+        );
+        let docs = blocker_read(
+            "https://docs.example.com/login",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::NeedsSignIn),
+        );
+        let mut resumed = blocker_read(
+            "https://docs.example.com/login",
+            WorkStepStatus::Succeeded,
+            Some(WorkPageOutcomeV1::Completed),
+        );
+        resumed.measurements.as_mut().unwrap().resolved_handoff =
+            Some(WorkPageHandoffKindV1::SignIn);
+        let blocked = blocked_then(&[inbox, docs], &[resumed]);
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].url, "https://mail.example.com/inbox");
+    }
+
+    #[test]
+    fn coarse_part_need_never_relocates_native_wall_or_guesses_between_pages() {
+        let part = WorkPartFactV1 {
+            id: zephium_core::work::WorkPartId::generate(),
+            title: "Inbox".into(),
+            helper: zephium_core::work::parts::WorkHelperV1::Browser,
+            service: None,
+            goal: "Read my inbox".into(),
+            state: WorkPartStateV1::Stopped,
+            started_ms: Some("1".into()),
+            ended_ms: Some("2".into()),
+            summary: None,
+            need: Some(WorkPartNeedV1::SignIn {
+                host: "example.com".into(),
+            }),
+        };
+        let mut inbox = blocker_read(
+            "https://mail.example.com/inbox",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::NeedsSignIn),
+        );
+        inbox.part = Some(part.id);
+        inbox.measurements.as_mut().unwrap().settled_revision = WorkRevision::new(10);
+        let mut docs = blocker_read(
+            "https://docs.example.com/help",
+            WorkStepStatus::Cancelled,
+            Some(WorkPageOutcomeV1::Cancelled),
+        );
+        docs.part = Some(part.id);
+        let mut success = blocker_read(
+            "https://docs.example.com/help",
+            WorkStepStatus::Succeeded,
+            Some(WorkPageOutcomeV1::Completed),
+        );
+        success.artifacts.push(WorkArtifactId::generate());
+        success.measurements.as_mut().unwrap().settled_revision = WorkRevision::new(20);
+        let blocked = fold_site_blockers([(
+            WorkExecutionId::generate(),
+            &[inbox.clone(), docs.clone(), success][..],
+            &[part.clone()][..],
+        )]);
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].url, "https://mail.example.com/inbox");
+        inbox.status = WorkStepStatus::OutcomeUnknown;
+        inbox.measurements.as_mut().unwrap().settled_revision = None;
+        inbox.measurements.as_mut().unwrap().outcome = Some(WorkPageOutcomeV1::OutcomeUnknown);
+        assert!(
+            fold_site_blockers([(WorkExecutionId::generate(), &[inbox, docs][..], &[part][..])])
+                .is_empty(),
+            "ambiguous coarse needs must not invent a page target"
+        );
+    }
+
+    #[test]
+    fn anonymous_sign_in_then_check_keeps_source_and_followup_objects_private() {
+        let mut read = blocker_read(
+            "https://mail.example.com/inbox",
+            WorkStepStatus::Succeeded,
+            Some(WorkPageOutcomeV1::Completed),
+        );
+        let artifact = |id: u128, text: &str| WorkArtifactV1 {
+            revises: None,
+            part: None,
+            version: 1,
+            id: id.into(),
+            execution: 1.into(),
+            node: 1.into(),
+            attempt: 1.into(),
+            output: "results".into(),
+            title: "Notes".into(),
+            data: WorkArtifactDataV1::Document {
+                paragraphs: vec![text.into()],
+                formatted: None,
+            },
+            evidence: vec![],
+            review: WorkOutputReview::SourceMappedNeedsReview,
+            presentation: WorkArtifactPresentationV1::Automatic,
+            general_knowledge: false,
+        };
+        let source = [artifact(
+            1,
+            "Confidential customer invoice total is 47219 euros",
+        )];
+        let summary = [artifact(
+            2,
+            "My private account renewal budget is 99317 euros",
+        )];
+        read.measurements.as_mut().unwrap().resolved_handoff = Some(WorkPageHandoffKindV1::Check);
+        assert!(!private_page_step(&read));
+        read.measurements.as_mut().unwrap().resolved_handoff =
+            Some(WorkPageHandoffKindV1::SignInAndCheck);
+        assert!(private_page_step(&read));
+        assert!(measurements_resolved_sign_in(read.measurements));
+        let private =
+            private_artifact_texts([(&[read.clone()][..], &source[..]), (&[][..], &summary[..])]);
+        assert_eq!(private.len(), 2);
+        assert!(query_discloses(
+            "Confidential customer invoice total is 47219 euros",
+            &private
+        ));
+        assert!(query_discloses(
+            "My private account renewal budget is 99317 euros",
+            &private
+        ));
+        assert!(!query_discloses("weather in Warsaw", &private));
+        assert!(
+            read.account.is_none(),
+            "privacy classification must not invent account permission"
+        );
+    }
+
+    #[test]
+    fn blocker_history_uses_settlement_revision_in_both_reverse_orders() {
+        let execution = WorkExecutionId::generate();
+        let mut failed = blocker_read(
+            "https://example.com/inbox",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::NeedsCheck),
+        );
+        let mut success = blocker_read(
+            "https://example.com/inbox",
+            WorkStepStatus::Succeeded,
+            Some(WorkPageOutcomeV1::Completed),
+        );
+        success.artifacts.push(WorkArtifactId::generate());
+        // Begin(failed), Begin(success), Settle(success), Settle(failed).
+        failed.measurements.as_mut().unwrap().settled_revision = WorkRevision::new(30);
+        success.measurements.as_mut().unwrap().settled_revision = WorkRevision::new(20);
+        assert_eq!(
+            fold_site_blockers([(execution, &[failed.clone(), success.clone()][..], &[][..])])
+                .len(),
+            1
+        );
+        // Begin(resolved), Begin(failed), Settle(failed), Settle(resolved).
+        failed.measurements.as_mut().unwrap().settled_revision = WorkRevision::new(20);
+        success.measurements.as_mut().unwrap().settled_revision = WorkRevision::new(30);
+        success.measurements.as_mut().unwrap().resolved_handoff =
+            Some(WorkPageHandoffKindV1::Check);
+        assert!(
+            fold_site_blockers([(execution, &[success.clone(), failed.clone()][..], &[][..])])
+                .is_empty()
+        );
+        if let WorkStepKindV1::Read { url, .. } = &mut success.kind {
+            *url = "https://docs.example.com/inbox".into();
+        }
+        assert_eq!(
+            fold_site_blockers([(execution, &[success, failed][..], &[][..])]).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn legacy_or_unordered_observations_cannot_clear_a_current_execution_wall() {
+        let execution = WorkExecutionId::generate();
+        let mut failed = blocker_read(
+            "https://example.com/inbox",
+            WorkStepStatus::Failed,
+            Some(WorkPageOutcomeV1::NeedsCheck),
+        );
+        let mut resolved = blocker_read(
+            "https://example.com/inbox",
+            WorkStepStatus::Succeeded,
+            Some(WorkPageOutcomeV1::Completed),
+        );
+        resolved.artifacts.push(WorkArtifactId::generate());
+        resolved.measurements.as_mut().unwrap().resolved_handoff =
+            Some(WorkPageHandoffKindV1::Check);
+        resolved.measurements.as_mut().unwrap().settled_revision = WorkRevision::new(30);
+        assert_eq!(
+            fold_site_blockers([(execution, &[failed.clone(), resolved.clone()][..], &[][..])])
+                .len(),
+            1
+        );
+        failed.measurements.as_mut().unwrap().settled_revision = WorkRevision::new(20);
+        resolved.measurements.as_mut().unwrap().settled_revision = None;
+        assert_eq!(
+            fold_site_blockers([(execution, &[failed.clone(), resolved.clone()][..], &[][..])])
+                .len(),
+            1
+        );
+        // A new execution is itself a trustworthy boundary after the old one ended.
+        assert!(blocked_then(&[failed], &[resolved]).is_empty());
+    }
+
+    #[test]
+    fn concurrent_site_retry_claims_are_single_and_release_on_drop() {
+        let profile = ProfileId::generate();
+        let work = WorkId::generate();
+        let execution = WorkExecutionId::generate();
+        let first = SiteRetryClaim::acquire(profile, work, execution, "example.com").unwrap();
+        assert!(SiteRetryClaim::acquire(profile, work, execution, "example.com").is_none());
+        assert!(
+            SiteRetryClaim::acquire(profile, WorkId::generate(), execution, "example.com")
+                .is_some()
+        );
+        drop(first);
+        assert!(SiteRetryClaim::acquire(profile, work, execution, "example.com").is_some());
     }
 
     #[test]

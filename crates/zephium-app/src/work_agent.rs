@@ -1892,7 +1892,12 @@ impl Driver {
                         if let Some(usage) = outcome.usage {
                             self.charge(usage);
                         }
-                        let signed_in = self.session_steps.contains(&id);
+                        let signed_in = self.session_steps.contains(&id)
+                            || measurements_resolved_sign_in(outcome.measurements);
+                        if signed_in && !self.session_steps.contains(&id) {
+                            // Privacy provenance only; do not mint an account grant/badge.
+                            self.session_steps.push(id);
+                        }
                         if outcome.held_back {
                             self.report(WorkAgentDiagnostic::HeldBack);
                             self.notice(HELD_BACK);
@@ -2272,6 +2277,7 @@ impl Driver {
     /// whole from the last few runs, plus older ones the request names; a
     /// question the last run stopped on is answered by this request.
     async fn inherit(&mut self, projection: &WorkRuntimeProjection, current: WorkExecutionId) {
+        self.inherit_private(projection);
         let earlier: Vec<&WorkExecutionFact> = projection
             .executions
             .iter()
@@ -2339,6 +2345,21 @@ impl Driver {
             thread.pop();
         }
         self.thread = thread.into_iter().rev().take(16).rev().collect();
+    }
+    fn inherit_private(&mut self, projection: &WorkRuntimeProjection) {
+        for text in private_artifact_texts(
+            projection
+                .executions
+                .iter()
+                .map(|execution| (execution.steps.as_slice(), execution.artifacts.as_slice())),
+        ) {
+            if !self.private.contains(&text) {
+                self.private.push(text.clone());
+                // Derived objects may combine accounts: no destination receives
+                // implicit permission to reuse their private text.
+                self.private_sites.push((String::new(), text));
+            }
+        }
     }
     fn remember(&mut self, record: &WorkProviderSearchRecordV1) {
         let preferred = record
@@ -2462,6 +2483,9 @@ impl WorkPartDriver {
             typing_allowed: Vec::new(),
             redirects: Vec::new(),
         })
+    }
+    pub(crate) fn inherit_private(&mut self, projection: &WorkRuntimeProjection) {
+        self.0.inherit_private(projection);
     }
     /// Runs searches, page reads and tasks, and file and command steps. A
     /// terminal status means the run cannot go on (stopped, lost outcome).
@@ -2952,6 +2976,85 @@ fn publish_note(artifacts: &[WorkArtifactV1]) -> String {
         "Placed {} on the canvas",
         kinds.join(", ").replace('_', " ")
     )
+}
+
+pub(crate) fn measurements_resolved_sign_in(measurements: Option<WorkStepMeasurementsV1>) -> bool {
+    measurements
+        .and_then(|m| m.resolved_handoff)
+        .is_some_and(|kind| kind.includes(WorkPageHandoffKindV1::SignIn))
+}
+
+pub(crate) fn private_page_step(step: &WorkStepFact) -> bool {
+    matches!(step.kind, WorkStepKindV1::Read { .. })
+        && (step.account.is_some() || measurements_resolved_sign_in(step.measurements))
+}
+
+/// Retained summaries may include personal source facts too. Conservatively
+/// protect the execution's objects once any page acquired personal provenance.
+pub(crate) fn private_artifact_texts<'a>(
+    executions: impl IntoIterator<Item = (&'a [WorkStepFact], &'a [WorkArtifactV1])>,
+) -> Vec<String> {
+    let executions: Vec<_> = executions.into_iter().collect();
+    if !executions
+        .iter()
+        .any(|(steps, _)| steps.iter().any(private_page_step))
+    {
+        return Vec::new();
+    }
+    // A follow-up can summarize an earlier private read without opening a page.
+    executions
+        .iter()
+        .flat_map(|(_, artifacts)| artifacts.iter())
+        .map(|artifact| artifact.data.plain_text())
+        .filter(|text| !text.is_empty())
+        .collect()
+}
+
+/// Unknown legacy/unfinished rows cannot establish order within an execution.
+pub(crate) fn read_settlement_order(step: &WorkStepFact) -> (u8, u64) {
+    match step.measurements.and_then(|m| m.settled_revision) {
+        Some(revision) => (1, revision.get()),
+        // Unsequenced cleanup/waits may be newer than every settled page.
+        None if matches!(
+            step.status,
+            WorkStepStatus::Running | WorkStepStatus::OutcomeUnknown | WorkStepStatus::Cancelled
+        ) =>
+        {
+            (2, 0)
+        }
+        None => (0, 0),
+    }
+}
+
+pub(crate) fn read_handoff_resolves(
+    prior: &WorkStepFact,
+    next: &WorkStepFact,
+    kind: WorkPageHandoffKindV1,
+) -> bool {
+    let (WorkStepKindV1::Read { url: before, .. }, WorkStepKindV1::Read { url: after, .. }) =
+        (&prior.kind, &next.kind)
+    else {
+        return false;
+    };
+    let target = |value: &str| {
+        url::Url::parse(value).ok().map(|mut url| {
+            url.set_fragment(None);
+            url
+        })
+    };
+    prior
+        .measurements
+        .and_then(|m| m.settled_revision)
+        .zip(next.measurements.and_then(|m| m.settled_revision))
+        .is_some_and(|(before, after)| before < after)
+        && prior.account == next.account
+        && target(before)
+            .zip(target(after))
+            .is_some_and(|(before, after)| before == after)
+        && next
+            .measurements
+            .and_then(|m| m.resolved_handoff)
+            .is_some_and(|receipt| receipt.includes(kind))
 }
 
 /// Search text may not repeat a private context body: a 24-character window

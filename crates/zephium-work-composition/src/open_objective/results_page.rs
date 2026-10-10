@@ -37,6 +37,10 @@ pub(super) struct ResultsPagePolicy {
 }
 
 impl AgentWorkLocalActionPolicy for ResultsPagePolicy {
+    fn human_wall(&self, observation: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
+        super::site_work::reading_wall(observation)
+    }
+
     fn model_action_operations(
         &self,
         _: &SemanticNode,

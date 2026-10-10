@@ -1538,9 +1538,41 @@ fn step_measurements_name_their_cost_basis_and_read_older_records() {
         read(r#","cost_exact":false"#).cost_basis,
         WorkCostBasis::Reserved
     );
+    assert_eq!(read("").settled_revision, None);
+    let sequenced = read(r#","settled_revision":"42""#);
+    assert_eq!(sequenced.settled_revision, WorkRevision::new(42));
+    assert_eq!(
+        serde_json::from_str::<WorkStepMeasurementsV1>(&serde_json::to_string(&sequenced).unwrap())
+            .unwrap(),
+        sequenced
+    );
     let priced = read(r#","cost_basis":"priced""#);
     assert_eq!(priced.cost_basis, WorkCostBasis::Priced);
     assert_eq!(priced.outcome, None);
+    assert_eq!(priced.resolved_handoff, None);
+    for (wire, kind) in [
+        ("sign_in", runtime::WorkPageHandoffKindV1::SignIn),
+        ("check", runtime::WorkPageHandoffKindV1::Check),
+        (
+            "sign_in_and_check",
+            runtime::WorkPageHandoffKindV1::SignInAndCheck,
+        ),
+    ] {
+        let resolved = read(&format!(",\"resolved_handoff\":\"{wire}\""));
+        assert_eq!(resolved.resolved_handoff, Some(kind));
+        assert_eq!(
+            serde_json::from_str::<WorkStepMeasurementsV1>(
+                &serde_json::to_string(&resolved).unwrap()
+            )
+            .unwrap(),
+            resolved
+        );
+    }
+    assert!(runtime::WorkPageHandoffKindV1::SignInAndCheck
+        .includes(runtime::WorkPageHandoffKindV1::SignIn));
+    assert!(runtime::WorkPageHandoffKindV1::SignInAndCheck
+        .includes(runtime::WorkPageHandoffKindV1::Check));
+    assert!(!runtime::WorkPageHandoffKindV1::Check.includes(runtime::WorkPageHandoffKindV1::SignIn));
     let checked = read(",\"outcome\":{\"kind\":\"needs_check\"}");
     assert_eq!(
         checked.outcome,

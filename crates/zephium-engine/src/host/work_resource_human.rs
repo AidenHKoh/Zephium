@@ -1,6 +1,7 @@
 use super::*;
 
 const HUMAN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const HUMAN_WALL_SURVEY: &str = include_str!("work_human_wall.js");
 
 #[cfg(all(
     target_os = "macos",
@@ -101,6 +102,11 @@ impl WorkNativeResource {
                     )?;
                     self.human_presentation = Some(presentation);
                     self.human_progress = request.human_progress();
+                    if let Some(progress) = &self.human_progress {
+                        view.work_navigation()
+                            .ok_or(())?
+                            .bind_human_progress(progress.clone());
+                    }
                     if !self
                         .human_presentation
                         .as_mut()
@@ -122,6 +128,21 @@ impl WorkNativeResource {
                     Ok(Some(effective))
                 }
                 Operation::ContinueAfterHuman => {
+                    if let Some(revision) = request
+                        .human_progress()
+                        .and_then(|progress| progress.wall_continuation_revision())
+                    {
+                        let gate = self
+                            .view
+                            .as_ref()
+                            .and_then(|view| view.work_navigation())
+                            .ok_or(())?;
+                        if gate.human_revision() != Some(revision)
+                            || !gate.human_verified_wall_clear()
+                        {
+                            return Err(());
+                        }
+                    }
                     if !self
                         .human_presentation
                         .as_ref()
@@ -197,6 +218,51 @@ impl WorkNativeResource {
         self.human_wake.is_some()
     }
 
+    fn sample_human_wall(&self) {
+        let Some(progress) = self.human_progress.as_ref() else {
+            return;
+        };
+        let Some(view) = self.view.as_ref() else {
+            return;
+        };
+        let Some(gate) = view.work_navigation().cloned() else {
+            return;
+        };
+        let Some(stamp) = gate.human_wall_probe() else {
+            return;
+        };
+        if !progress.begin_wall_probe() {
+            return;
+        }
+        let progress = progress.clone();
+        let completed = progress.clone();
+        let admitted = gate.clone();
+        let guard = self.guard.clone();
+        let answered = std::sync::atomic::AtomicBool::new(false);
+        let sampled = Instant::now();
+        if view
+            .view()
+            .evaluate_script_with_callback(HUMAN_WALL_SURVEY, move |result| {
+                if answered.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+                if work_browser_monotonic_now()
+                    .is_some_and(|now| guard.human_current(Operation::PresentHuman, now))
+                {
+                    admitted.record_human_wall_clear(
+                        stamp,
+                        result == "true" && sampled.elapsed() <= Duration::from_secs(1),
+                    );
+                }
+                completed.finish_wall_probe();
+            })
+            .is_err()
+        {
+            gate.record_human_wall_clear(stamp, false);
+            progress.finish_wall_probe();
+        }
+    }
+
     pub(super) fn progress_human(&mut self, erased: bool) {
         let Some(presentation) = self.human_presentation.as_ref() else {
             return;
@@ -210,12 +276,16 @@ impl WorkNativeResource {
             );
         }
         if let Some(progress) = &self.human_progress {
-            progress.record_clear_of_sign_in(
-                self.view
-                    .as_ref()
-                    .and_then(|view| view.work_navigation())
-                    .is_some_and(|gate| gate.human_clear_of_sign_in()),
-            );
+            // Polling can revoke stale proof, never renew it. Only a fresh
+            // DOM callback timestamps positive evidence.
+            if !self
+                .view
+                .as_ref()
+                .and_then(|view| view.work_navigation())
+                .is_some_and(|gate| gate.human_verified_wall_clear())
+            {
+                progress.record_verified_wall_clear(false);
+            }
         }
         if let Some((progress, revision)) = self.human_progress.as_ref().zip(
             self.view
@@ -224,6 +294,9 @@ impl WorkNativeResource {
                 .and_then(|gate| gate.human_revision()),
         ) {
             progress.record_revision(revision);
+        }
+        if !erased && presentation.current() {
+            self.sample_human_wall();
         }
         if erased
             || !presentation.current()

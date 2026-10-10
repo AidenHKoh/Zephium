@@ -523,7 +523,18 @@ where
         }
         // A site whose search or listings would not read often still serves
         // its product and listing pages, which a search finds.
-        let public_retry = matches!(fact.need, None | Some(WorkPartNeedV1::Retry { .. }));
+        let public_retry = matches!(
+            fact.need,
+            None | Some(WorkPartNeedV1::Retry {
+                reason: None
+                    | Some(
+                        WorkPartReasonV1::CouldntRead
+                            | WorkPartReasonV1::NotFound
+                            | WorkPartReasonV1::NoAnswer
+                    ),
+                ..
+            })
+        );
         if let (Some(site), true, true, true) = (
             &site,
             report.objects.is_empty(),
@@ -1247,16 +1258,44 @@ where
     /// what its steps show. A web part for a service the person has a
     /// connection for offers the connection.
     async fn settle_need(&self, part: WorkPartId, spec: &PartSpec, report: &mut PartReport) {
-        if report.state == WorkPartStateV1::Done {
-            report.need = None;
-            return;
-        }
-        let execution = self.run.execution().await.ok();
+        let projection = self.run.probe.runtime_projection().await.ok();
+        let execution = projection.as_ref().and_then(|projection| {
+            projection
+                .executions
+                .iter()
+                .find(|execution| execution.id == self.run.probe.execution())
+        });
         let steps: Vec<&WorkStepFact> = execution
             .iter()
             .flat_map(|e| e.steps.iter())
             .filter(|s| s.part == Some(part))
             .collect();
+        let persistent = projection.as_ref().and_then(|projection| {
+            let blocked = crate::work_agent::WorkAgentService::site_blockers(projection);
+            let sites = part_site(spec)
+                .into_iter()
+                .chain(steps.iter().filter_map(|step| match &step.kind {
+                    WorkStepKindV1::Read { url, .. } => crate::work_sites::site_of(url),
+                    _ => None,
+                }));
+            sites
+                .into_iter()
+                .find_map(|site| blocked.iter().find(|blocked| blocked.site == site).cloned())
+        });
+        if let Some(blocked) = persistent {
+            // A help page or optimistic helper report does not resolve an
+            // account wall. Preserve the typed need even across follow-ups.
+            if report.state != WorkPartStateV1::Stopped {
+                report.state = WorkPartStateV1::Failed;
+            }
+            report.need = Some(blocked.need());
+            report.digest.push_str(&format!("\n{}", blocked.notice()));
+            return;
+        }
+        if report.state == WorkPartStateV1::Done {
+            report.need = None;
+            return;
+        }
         let service_host = spec.service.as_ref().and_then(|s| s.host.clone());
         let hosts: Vec<String> = service_host
             .iter()
@@ -1273,33 +1312,18 @@ where
             _ => None,
         };
         let reason = step_reason(&steps, report.objects.is_empty(), helper_reason);
-        // A page that waited on a sign-in wall and ended there needs a
-        // sign-in, whatever else went wrong around it.
-        let sign_in = match execution
-            .as_ref()
-            .and_then(|e| e.parts.iter().find(|p| p.id == part))
-            .and_then(|p| p.need.clone())
-        {
-            Some(need @ WorkPartNeedV1::SignIn { .. }) => Some(need),
-            _ => steps.iter().find_map(|s| match &s.kind {
-                WorkStepKindV1::Read { url, .. }
-                    if s.status != WorkStepStatus::Succeeded
-                        && match s.measurements.and_then(|m| m.outcome) {
-                            Some(WorkPageOutcomeV1::NeedsSignIn) => true,
-                            None => s.note.as_deref() == Some(SIGN_IN_NOTE),
-                            _ => false,
-                        } =>
-                {
-                    crate::work_sites::site_of(url)
-                        .or_else(|| service_host.clone())
-                        .map(|host| WorkPartNeedV1::SignIn { host })
-                }
-                _ => None,
-            }),
-        }
-        .filter(|need| need.validate().is_ok());
         let named = report.need.take().and_then(|need| {
             let need = match need {
+                WorkPartNeedV1::SignIn { ref host }
+                    if handoff_resolved(&steps, host, WorkPageHandoffKindV1::SignIn) =>
+                {
+                    return None
+                }
+                WorkPartNeedV1::Check { ref host }
+                    if handoff_resolved(&steps, host, WorkPageHandoffKindV1::Check) =>
+                {
+                    return None
+                }
                 WorkPartNeedV1::AllowFolder { path } => {
                     let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
                     let folder = super::folders::folder_for(std::path::Path::new(&path), &home)?;
@@ -1333,7 +1357,7 @@ where
             };
             need.validate().is_ok().then_some(need)
         });
-        report.need = sign_in.or(named).or_else(|| {
+        report.need = named.or_else(|| {
             let declined_entry = steps.iter().any(|s| match &s.kind {
                 WorkStepKindV1::Ask {
                     purpose: Some(WorkAskPurposeV1::Entry),
@@ -1370,6 +1394,7 @@ where
             if !matches!(need, WorkPartNeedV1::AllowFolder { .. }) {
                 let reason = match need {
                     WorkPartNeedV1::SignIn { .. } => Some(WorkPartReasonV1::SignedOut),
+                    WorkPartNeedV1::Check { .. } => Some(WorkPartReasonV1::BlockedByCheck),
                     WorkPartNeedV1::Retry { reason, .. } => *reason,
                     _ => reason,
                 };
@@ -1901,6 +1926,9 @@ fn need_arg(value: Option<&Value>) -> Option<WorkPartNeedV1> {
         "sign_in" => WorkPartNeedV1::SignIn {
             host: host(target)?,
         },
+        "check" => WorkPartNeedV1::Check {
+            host: host(target)?,
+        },
         "allow_site" => WorkPartNeedV1::AllowSite {
             host: host(target)?,
         },
@@ -1921,6 +1949,7 @@ fn need_arg(value: Option<&Value>) -> Option<WorkPartNeedV1> {
 fn need_words(need: &WorkPartNeedV1) -> String {
     match need {
         WorkPartNeedV1::SignIn { host } => format!("the person to sign in on {host}"),
+        WorkPartNeedV1::Check { host } => format!("the person to pass the human check on {host}"),
         WorkPartNeedV1::AllowSite { host } => format!("the person to allow work on {host}"),
         WorkPartNeedV1::AllowFolder { path } => format!("the person to allow reading {path}"),
         WorkPartNeedV1::UseConnection { connection, .. } => {
@@ -1957,6 +1986,35 @@ fn need_words(need: &WorkPartNeedV1) -> String {
     }
 }
 
+fn page_handoff(step: &WorkStepFact) -> Option<WorkPageHandoffKindV1> {
+    match step.measurements.and_then(|m| m.outcome) {
+        Some(WorkPageOutcomeV1::NeedsSignIn) => Some(WorkPageHandoffKindV1::SignIn),
+        Some(WorkPageOutcomeV1::NeedsCheck) => Some(WorkPageHandoffKindV1::Check),
+        Some(_) => None,
+        None => match step.note.as_deref() {
+            Some(SIGN_IN_NOTE) => Some(WorkPageHandoffKindV1::SignIn),
+            Some(note) if read_note::is_human_check(note) => Some(WorkPageHandoffKindV1::Check),
+            _ => None,
+        },
+    }
+}
+
+fn handoff_resolved(steps: &[&WorkStepFact], host: &str, kind: WorkPageHandoffKindV1) -> bool {
+    let site = crate::work_sites::site_of(&format!("https://{host}/"));
+    steps.iter().any(|prior| {
+        let WorkStepKindV1::Read { url, .. } = &prior.kind else {
+            return false;
+        };
+        let matching_wall = page_handoff(prior) == Some(kind);
+        site.is_some()
+            && crate::work_sites::site_of(url) == site
+            && matching_wall
+            && steps
+                .iter()
+                .any(|next| crate::work_agent::read_handoff_resolves(prior, next, kind))
+    })
+}
+
 /// Why a part's steps show it could not do its job: the last failed page or
 /// search in closed words, else what the helper named, else nothing found
 /// where its pages read cleanly.
@@ -1965,14 +2023,27 @@ fn step_reason(
     nothing_placed: bool,
     named: Option<WorkPartReasonV1>,
 ) -> Option<WorkPartReasonV1> {
-    let failed = steps.iter().rev().find(|s| {
-        matches!(
-            s.kind,
+    let failed = steps.iter().rev().find_map(|step| {
+        if !matches!(
+            step.kind,
             WorkStepKindV1::Read { .. } | WorkStepKindV1::Search { .. }
-        ) && matches!(
-            s.status,
+        ) || !matches!(
+            step.status,
             WorkStepStatus::Failed | WorkStepStatus::OutcomeUnknown
-        )
+        ) {
+            return None;
+        }
+        if let WorkStepKindV1::Read { .. } = &step.kind {
+            let handoff = page_handoff(step);
+            if handoff.is_some_and(|kind| {
+                steps
+                    .iter()
+                    .any(|next| crate::work_agent::read_handoff_resolves(step, next, kind))
+            }) {
+                return None;
+            }
+        }
+        Some(*step)
     });
     if let Some(reason) = failed.and_then(|step| match step.measurements.and_then(|m| m.outcome) {
         Some(WorkPageOutcomeV1::NeedsSignIn) => Some(WorkPartReasonV1::SignedOut),
@@ -2347,6 +2418,87 @@ mod tests {
         assert!(zephium_core::search::SearchEngine::DuckDuckGo
             .search(&operator_last("site:x-kom.pl LEGO 42115"))
             .is_some());
+    }
+
+    #[test]
+    fn named_handoff_need_requires_same_original_read_and_account_receipt() {
+        let read = |url: &str, outcome| WorkStepFact {
+            id: WorkStepId::generate(),
+            turn: 1,
+            kind: WorkStepKindV1::Read {
+                url: url.into(),
+                goal: None,
+                collection: None,
+            },
+            status: WorkStepStatus::Failed,
+            usage: Some(WorkUsage::default()),
+            artifacts: vec![],
+            evidence: None,
+            note: None,
+            measurements: Some(WorkStepMeasurementsV1 {
+                outcome: Some(outcome),
+                ..Default::default()
+            }),
+            local: None,
+            account: None,
+            part: None,
+            model_fault: None,
+        };
+        let mut wall = read(
+            "https://mail.example.com/inbox",
+            WorkPageOutcomeV1::NeedsSignIn,
+        );
+        let mut receipt = read(
+            "https://docs.example.com/",
+            WorkPageOutcomeV1::Refused {
+                stage: WorkPageFailureStageV1::Extraction,
+            },
+        );
+        wall.measurements.as_mut().unwrap().settled_revision = WorkRevision::new(10);
+        receipt.measurements.as_mut().unwrap().settled_revision = WorkRevision::new(20);
+        receipt.measurements.as_mut().unwrap().resolved_handoff =
+            Some(WorkPageHandoffKindV1::SignInAndCheck);
+        assert!(!handoff_resolved(
+            &[&wall, &receipt],
+            "example.com",
+            WorkPageHandoffKindV1::SignIn
+        ));
+        if let WorkStepKindV1::Read { url, .. } = &mut receipt.kind {
+            *url = "https://mail.example.com/inbox".into();
+        }
+        assert!(handoff_resolved(
+            &[&wall, &receipt],
+            "example.com",
+            WorkPageHandoffKindV1::SignIn
+        ));
+        assert!(
+            handoff_resolved(
+                &[&receipt, &wall],
+                "example.com",
+                WorkPageHandoffKindV1::SignIn
+            ),
+            "Store settlement order wins even when receipt's Read began first"
+        );
+        wall.account = Some(Box::new(WorkPageAccountV1 {
+            host: "mail.example.com".into(),
+            badge: true,
+        }));
+        assert!(!handoff_resolved(
+            &[&wall, &receipt],
+            "example.com",
+            WorkPageHandoffKindV1::SignIn
+        ));
+        receipt.account = wall.account.clone();
+        wall.measurements = None;
+        wall.note = Some(SIGN_IN_NOTE.into());
+        assert!(
+            !handoff_resolved(
+                &[&wall, &receipt],
+                "example.com",
+                WorkPageHandoffKindV1::SignIn
+            ),
+            "unsequenced legacy outcomes do not prove ordering inside one execution"
+        );
     }
 
     #[test]

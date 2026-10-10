@@ -1291,6 +1291,13 @@ pub(super) fn update(
             {
                 return Err(WorkError::Conflict);
             }
+            // Only Store settlement may author an ordering receipt.
+            if step
+                .measurements
+                .is_some_and(|m| m.settled_revision.is_some())
+            {
+                return Err(WorkError::Invalid);
+            }
             step.validate()?;
             // Parts share this limit. Contention is retryable capacity, not
             // an invalid request; queued work must not become a running step.
@@ -1417,7 +1424,7 @@ pub(super) fn update(
             evidence,
             file,
             note,
-            measurements,
+            mut measurements,
             ..
         } => {
             if status == WorkStepStatus::Running {
@@ -1466,8 +1473,15 @@ pub(super) fn update(
             if note.is_some() {
                 settled.note = note;
             }
+            if let Some(measured) = &mut measurements {
+                // Ignore any revision supplied by an adapter; this exact durable
+                // transition establishes ordering independently of Begin order.
+                measured.settled_revision = Some(expected.next()?);
+            }
             if measurements.is_some() {
                 settled.measurements = measurements;
+            } else if let Some(measured) = &mut settled.measurements {
+                measured.settled_revision = Some(expected.next()?);
             }
         }
         WorkRuntimeUpdate::Part { attempt, part, .. } => {

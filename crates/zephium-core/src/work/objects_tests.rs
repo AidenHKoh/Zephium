@@ -618,6 +618,20 @@ fn a_part_needs_something_only_once_it_cannot_go_on() {
     };
     assert!(with(WorkPartStateV1::Failed, sign_in()).validate().is_ok());
     assert!(with(WorkPartStateV1::Waiting, sign_in()).validate().is_ok());
+    let check = WorkPartNeedV1::Check {
+        host: "state.gov".into(),
+    };
+    assert!(with(WorkPartStateV1::Waiting, check.clone())
+        .validate()
+        .is_ok());
+    assert_eq!(
+        serde_json::to_value(&check).unwrap(),
+        json!({"kind":"check", "host":"state.gov"})
+    );
+    assert_eq!(
+        serde_json::from_value::<WorkPartNeedV1>(serde_json::to_value(&check).unwrap()).unwrap(),
+        check
+    );
     assert!(with(
         WorkPartStateV1::Stopped,
         WorkPartNeedV1::Retry {
@@ -637,6 +651,9 @@ fn a_part_needs_something_only_once_it_cannot_go_on() {
     for need in [
         WorkPartNeedV1::SignIn {
             host: "https://slack.com".into(),
+        },
+        WorkPartNeedV1::Check {
+            host: "https://state.gov/check?token=private".into(),
         },
         WorkPartNeedV1::AllowFolder {
             path: "Dev/Lunios".into(),

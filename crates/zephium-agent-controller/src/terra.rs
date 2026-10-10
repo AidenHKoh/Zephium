@@ -2545,6 +2545,15 @@ impl AgentBrowserSession {
             .is_none_or(zephium_agentic::AgentProviderModelClient::supports_vision)
     }
 
+    /// Optional viewport attachment to extraction has a narrower transport
+    /// contract than the standalone Screenshot tool. Exact-count credentials
+    /// cannot use its provider-reported image reservation/encoding path.
+    pub(crate) fn supports_viewport_mapping(&self) -> bool {
+        self.config.input_accounting_mode()
+            == zephium_agentic::AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation
+            && self.chosen.as_ref().is_some_and(zephium_agentic::AgentProviderModelClient::supports_vision)
+    }
+
     fn next_model_call_request_with_budget(
         &mut self,
         budget: AgentModelCallBudget,
@@ -2775,7 +2784,7 @@ impl AgentBrowserSession {
         // Pixels reach only a model that sees, only a whole-look mapping, and
         // only within the image allowance that keeps the request admitted.
         let viewport = viewport.filter(|screenshot| {
-            self.supports_vision()
+            self.supports_viewport_mapping()
                 && previous.is_none()
                 && screenshot.as_png().len() <= MAX_AGENT_PROVIDER_VIEWPORT_IMAGE_PNG_BYTES
         });
@@ -4689,6 +4698,15 @@ mod tests {
         max_model_calls: u8,
         max_actions: u64,
     ) -> (AgentBrowserSession, SemanticObservation) {
+        browser_fixture_with_access(budget, max_model_calls, max_actions, None)
+    }
+
+    fn browser_fixture_with_access(
+        budget: AgentRunBudget,
+        max_model_calls: u8,
+        max_actions: u64,
+        chosen: Option<zephium_agentic::AgentProviderModelClient>,
+    ) -> (AgentBrowserSession, SemanticObservation) {
         // Platform TLS initialization is fixture setup, not approved execution
         // time. Freeze the test deadline only after this undispatched owner exists.
         let transport = AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
@@ -4831,12 +4849,76 @@ mod tests {
         let session = AgentBrowserSession::try_new_with_transport(
             input,
             BrowserSessionTransport(transport),
-            credential.into(),
+            chosen.map_or_else(|| credential.into(), AgentBrowserModelAccess::Chosen),
             AgentBrowserModel::Luna,
             AgentBrowserRetention::Stateless,
         )
         .expect("session");
         (session, observation)
+    }
+
+    #[test]
+    fn viewport_mapping_capability_matches_model_and_accounting_transport() {
+        use zephium_agentic::work_model::*;
+        struct NeverCalled;
+        impl WorkModelClient for NeverCalled {
+            fn call<'a>(
+                &'a self,
+                _: WorkModelRequest,
+                _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+            ) -> WorkModelFuture<'a> {
+                Box::pin(async { panic!("capability negotiation never dispatches a provider") })
+            }
+        }
+        let (exact, _) = browser_fixture();
+        assert_eq!(
+            exact.config.input_accounting_mode(),
+            AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+        );
+        assert!(
+            exact.supports_vision(),
+            "the separately supported explicit Screenshot tool remains available"
+        );
+        assert!(
+            !exact.supports_viewport_mapping(),
+            "exact credentials cannot enter provider-reported image attachment"
+        );
+        for vision in [false, true] {
+            let entry = WorkModelEntry {
+                id: "fixture/page".into(),
+                model: WorkModelRef {
+                    provider: WorkModelProvider::OpenAi,
+                    wire: WorkModelWire::OpenAiResponses,
+                    model: "fixture-page".into(),
+                },
+                display_name: "Fixture page".into(),
+                roles: vec![WorkModelRole::Page],
+                recommended: false,
+                context_window: 200_000,
+                max_output: 32_000,
+                price: None,
+                supports: WorkModelSupports {
+                    tools: true,
+                    vision,
+                    prompt_cache: false,
+                    reasoning: false,
+                    native_search: false,
+                },
+            };
+            let client = AgentProviderModelClient::try_new(&entry, Arc::new(NeverCalled)).unwrap();
+            let (session, _) = browser_fixture_with_access(
+                AgentRunBudget::try_new(16, 300_000, 1_000_000, 1).unwrap(),
+                MAX_BROWSER_MODEL_TURNS,
+                MAX_BROWSER_ACTIONS,
+                Some(client),
+            );
+            assert_eq!(
+                session.config.input_accounting_mode(),
+                AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation
+            );
+            assert_eq!(session.supports_vision(), vision);
+            assert_eq!(session.supports_viewport_mapping(), vision);
+        }
     }
 
     fn reserved_browser_input(

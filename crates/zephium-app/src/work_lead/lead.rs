@@ -1380,6 +1380,9 @@ fn part_words(part: &zephium_core::work::parts::WorkPartFactV1) -> String {
     let title = &part.title;
     match &part.need {
         Some(Need::SignIn { host }) => format!("{title} needs you to sign in to {host}"),
+        Some(Need::Check { host }) => {
+            format!("{title} needs you to pass the human check on {host}")
+        }
         Some(Need::AllowSite { host }) => format!("{title} needs your OK to work on {host}"),
         Some(Need::AllowFolder { path }) => format!(
             "{title} needs your OK to read {}",

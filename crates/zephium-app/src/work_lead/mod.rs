@@ -654,6 +654,9 @@ fn context_text(
         .filter(|e| e.id != current)
         .collect();
     out.push_str(&earlier_text(objective, &earlier));
+    out.push_str(&crate::work_agent::WorkAgentService::site_blocker_context(
+        projection,
+    ));
     let canvas = objects::view(&objects::canvas(projection, current));
     if !canvas.is_empty() {
         out.push_str("\nOn the canvas (read_canvas returns an object's data):\n");

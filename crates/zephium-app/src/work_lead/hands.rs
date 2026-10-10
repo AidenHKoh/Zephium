@@ -272,7 +272,7 @@ where
         limits: WorkExecutionLimits,
         objective: String,
     ) -> Self {
-        let driver = WorkPartDriver::new(
+        let mut driver = WorkPartDriver::new(
             run.handle.clone(),
             run.profile,
             run.probe.clone(),
@@ -283,6 +283,17 @@ where
             part,
         )
         .await;
+        if let Ok(projection) = run.probe.runtime_projection().await {
+            if projection.executions.iter().any(|execution| {
+                execution
+                    .steps
+                    .iter()
+                    .any(crate::work_agent::private_page_step)
+            }) {
+                run.mark_private();
+            }
+            driver.inherit_private(&projection);
+        }
         Self {
             run,
             attempt,
@@ -313,9 +324,40 @@ where
         &self,
         requests: Vec<Request>,
     ) -> Result<Vec<(String, String, bool)>, WorkAttemptStatus> {
+        let projection = self
+            .run
+            .probe
+            .runtime_projection()
+            .await
+            .map_err(|_| WorkAttemptStatus::Failed)?;
+        let private = crate::work_agent::private_artifact_texts(
+            projection
+                .executions
+                .iter()
+                .map(|execution| (execution.steps.as_slice(), execution.artifacts.as_slice())),
+        );
+        if projection.executions.iter().any(|execution| {
+            execution
+                .steps
+                .iter()
+                .any(crate::work_agent::private_page_step)
+        }) {
+            self.run.mark_private();
+        }
+        self.driver.lock().await.inherit_private(&projection);
         let mut refused = Vec::new();
         let mut admitted = Vec::with_capacity(requests.len());
         for request in requests {
+            if matches!(&request.kind, WorkStepKindV1::Search { query } | WorkStepKindV1::Discover { query, .. }
+                if crate::work_agent::query_discloses(query, &private))
+            {
+                refused.push((
+                    request.call,
+                    "A search would repeat private page content and was not sent.".into(),
+                    true,
+                ));
+                continue;
+            }
             if let WorkStepKindV1::Read { url, .. } = &request.kind {
                 if self.run.browser_down() {
                     refused.push((
@@ -508,7 +550,7 @@ where
             self.run.set_browser_down();
         }
         if new.iter().any(|step| {
-            step.account.is_some()
+            crate::work_agent::private_page_step(step)
                 || matches!(
                     step.kind,
                     WorkStepKindV1::List { .. }

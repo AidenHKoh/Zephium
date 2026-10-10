@@ -118,6 +118,7 @@ struct ReadMeasure {
     model_tokens: u32,
     cost_micro_usd: u32,
     basis: WorkCostBasis,
+    resolved_handoff: Option<zephium_core::work::runtime::WorkPageHandoffKindV1>,
 }
 
 /// Only closed tool kinds, refusal reasons and counts survive a failed page. This
@@ -220,6 +221,7 @@ impl Default for ReadMeasure {
             model_tokens: 0,
             cost_micro_usd: 0,
             basis: WorkCostBasis::Exact,
+            resolved_handoff: None,
         }
     }
 }
@@ -266,9 +268,20 @@ impl ReadMeasure {
         });
     }
 
+    fn resolve_handoff(&mut self, kind: zephium_core::work::runtime::WorkPageHandoffKindV1) {
+        use zephium_core::work::runtime::WorkPageHandoffKindV1::SignInAndCheck;
+        self.resolved_handoff = Some(match self.resolved_handoff {
+            None => kind,
+            Some(previous) if previous == kind => previous,
+            Some(_) => SignInAndCheck,
+        });
+    }
+
     fn settle(self, started: Instant, in_flight: bool) -> WorkStepMeasurementsV1 {
         WorkStepMeasurementsV1 {
+            settled_revision: None,
             outcome: None,
+            resolved_handoff: self.resolved_handoff,
             wall_millis: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
             decision_calls: self.decision_calls,
             emulation_calls: self.emulation_calls,
@@ -457,6 +470,21 @@ impl NativeWorkComposition {
             goal: None,
             collection: None,
         };
+        let resume_plan = ResumePlan {
+            request: request.clone(),
+            profile: settings.profile,
+            model: settings.model,
+            chosen: match &settings.access {
+                AgentBrowserModelAccess::Chosen(model) => Some(model.clone()),
+                AgentBrowserModelAccess::Exact(_) => None,
+            },
+            config: settings.config.clone(),
+            decisions: WorkDecisionPreference::Disabled,
+            decision_model: None,
+            results: Some(reader.clone()),
+            #[cfg(feature = "public-qualification")]
+            loopback_anonymous: settings.loopback_anonymous,
+        };
         let admission = probe.admit_read_page(id).await?;
         let invocation = compile_page_step(
             probe,
@@ -480,7 +508,7 @@ impl NativeWorkComposition {
                 Some((id, url)),
                 diagnostics,
                 WorkDecisionPreference::Disabled,
-                None,
+                Some(resume_plan),
                 None,
             )
             .await?;
@@ -494,10 +522,10 @@ impl NativeWorkComposition {
             },
             usage: run.usage,
             artifacts: vec![],
-            intervention: None,
+            intervention: run.intervention,
             note: run.note,
             measurements: Some(run.measurements),
-            helped: false,
+            helped: run.helped,
             held_back: false,
             rerun: false,
             search,
@@ -602,7 +630,9 @@ impl NativeWorkComposition {
             config: settings.config.clone(),
             decisions,
             decision_model: settings.decision_model.clone(),
-            deadline: probe.deadline().min(Instant::now() + MAX_STEP_DURATION),
+            results: None,
+            #[cfg(feature = "public-qualification")]
+            loopback_anonymous: settings.loopback_anonymous,
         };
         // Every page of a run shares its page group: reads and page tasks,
         // anonymous or in the person's session, each in its own store.
@@ -631,7 +661,8 @@ impl NativeWorkComposition {
             request.allow_edits,
             request.entry,
         )
-        .holding_typing(request.hold_typing);
+        .holding_typing(request.hold_typing)
+        .expecting_account(signed_in.is_some() || request.entry);
         let gate = std::sync::Arc::new(match &request.step {
             WorkStepKindV1::Read {
                 url,
@@ -704,10 +735,9 @@ impl NativeWorkComposition {
         // Saving a cookie refusal that loads another document ends the page
         // before the model ever worked on it: it runs again once, with the
         // choice in place.
-        let rerun = gate.signed_in_elsewhere()
-            || (gate.pressed_consent()
-                && run.status == WorkAttemptStatus::Failed
-                && run.measurements.planner_calls == 0);
+        let rerun = gate.pressed_consent()
+            && run.status == WorkAttemptStatus::Failed
+            && run.measurements.planner_calls == 0;
         Ok(WorkBrowserOutcome {
             status: match run.status {
                 WorkAttemptStatus::Running => WorkStepStatus::Running,
@@ -866,7 +896,6 @@ impl NativeWorkComposition {
         let mut mapping_artifact = false;
         let mut verifying_action = false;
         let mut next_cancel_check = Instant::now();
-        let mut cleanup_deadline = attempt.deadline() + Duration::from_secs(30);
         let mut close_grace: Option<Instant> = None;
         let mut retired_at: Option<Instant> = None;
         let mut human_wait: Option<Instant> = None;
@@ -898,14 +927,16 @@ impl NativeWorkComposition {
         let mut handing: Option<u32> = None;
         let mut entry_asked = false;
         let mut entry_told = false;
-        // Tab loads on the site while the page waits on a sign-in.
-        let mut site_loads: Option<(u64, Instant)> = None;
         let task = resume_plan
             .as_ref()
             .is_some_and(|plan| page_task(&plan.request));
         // Time the person held the page: it never spends the task's own time.
         let mut waited = Duration::ZERO;
-        let mut clear_since: Option<(u32, Instant)> = None;
+        let mut clear_since: Option<(u32, u64, Instant)> = None;
+        let mut pending_resolution: Option<(
+            ContextRunId,
+            zephium_core::work::runtime::WorkPageHandoffKindV1,
+        )> = None;
         let mut settled = WorkUsage::default();
         let mut model_in_flight = false;
         let mut paused = false;
@@ -1093,15 +1124,7 @@ impl NativeWorkComposition {
             // Its close ended without a clean close: destroyed and audited,
             // its debt recorded. Waiting longer cannot change the outcome.
             let lost = guard.0.is_lost();
-            if !settle_retired
-                && !lost
-                && cleanup_expired(
-                    now,
-                    cleanup_deadline,
-                    close_grace.unwrap_or(attempt.deadline() + Duration::from_secs(30)),
-                    retired,
-                )
-            {
+            if !settle_retired && !lost && cleanup_expired(now, close_grace) {
                 if anonymous {
                     // Nothing was written anywhere: a resource that cannot
                     // close is one failed page, charged with what settled.
@@ -1136,37 +1159,44 @@ impl NativeWorkComposition {
                 if matches!(
                     person,
                     Some(
-                        Phase::Presenting
+                        Phase::WaitingForHuman
+                            | Phase::Presenting
                             | Phase::Presented
                             | Phase::Continuing
-                            | Phase::ReadyToResume
                     )
                 ) {
                     person_hold.get_or_insert_with(|| attempt.hold_for_person());
                 } else {
                     person_hold = None;
                 }
-                // A sign-in the person finished continues the page by itself
-                // once their navigation settles back on the site.
+                // Native DOM proof (including same-URL changes), not a timer
+                // or navigation alone, lets the original page continue.
                 if let Some(human) = guard.0.human_snapshot().filter(|human| {
-                    human.reason == AgentBrowserHumanReason::SignIn
+                    !requested_close
+                        && matches!(
+                            human.reason,
+                            AgentBrowserHumanReason::SignIn
+                                | AgentBrowserHumanReason::HumanChallenge
+                        )
                         && human.phase == Phase::Presented
                         && human.can_continue
-                        && human.clear_of_sign_in
-                        && human.document_revision > 0
+                        && human.verified_wall_clear
                 }) {
                     match clear_since {
-                        Some((generation, since))
+                        Some((generation, revision, since))
                             if generation == human.generation
-                                && now >= since + SIGNED_IN_SETTLE =>
+                                && revision == human.document_revision
+                                && now >= since + WALL_CLEAR_SETTLE =>
                         {
                             clear_since = None;
                             if guard.0.continue_human(human.generation) {
-                                trace("human:signed_in");
+                                trace("human:wall_cleared");
                             }
                         }
-                        Some((generation, _)) if generation == human.generation => {}
-                        _ => clear_since = Some((human.generation, now)),
+                        Some((generation, revision, _))
+                            if generation == human.generation
+                                && revision == human.document_revision => {}
+                        _ => clear_since = Some((human.generation, human.document_revision, now)),
                     }
                 } else {
                     clear_since = None;
@@ -1187,31 +1217,8 @@ impl NativeWorkComposition {
                         }
                     }
                     if let Some(human) = guard.0.human_snapshot() {
-                        // A sign-in the person finishes in a tab: a new page
-                        // load there wakes the held page, which starts over.
-                        if human.reason == AgentBrowserHumanReason::SignIn
-                            && human.phase == Phase::WaitingForHuman
-                            && task
-                            && !requested_close
-                            && site_loads.is_none_or(|(_, at)| now >= at + SITE_LOAD_POLL)
-                        {
-                            if let Some(count) = zephium_app::work_context::site_loads(
-                                attempt.profile(),
-                                gate.site(),
-                            )
-                            .await
-                            {
-                                match site_loads {
-                                    Some((before, _)) if count > before => {
-                                        trace("close:signed_in_elsewhere");
-                                        gate.signed_in_now();
-                                        requested_close = true;
-                                    }
-                                    Some((before, _)) => site_loads = Some((before, now)),
-                                    None => site_loads = Some((count, now)),
-                                }
-                            }
-                        }
+                        // A load in another tab is not evidence that this
+                        // retained page's wall cleared. Keep this exact page.
                         if human.reason == AgentBrowserHumanReason::UserDecision
                             && gate.entry() == EntryCheck::Asking
                             && human.phase == Phase::WaitingForHuman
@@ -1357,7 +1364,20 @@ impl NativeWorkComposition {
                         settings.decisions = plan.decisions;
                         settings.decision_model = plan.decision_model.clone();
                         settings.refusal_diagnostic = refusals.product;
-                        let mut invocation = compile_step(
+                        #[cfg(feature = "public-qualification")]
+                        {
+                            settings.loopback_anonymous = plan.loopback_anonymous;
+                        }
+                        let owner_deadline =
+                            guard.0.active_deadline().ok_or(WorkError::Unavailable)?;
+                        let resume_deadline = owner_deadline.min(attempt.deadline()).min(if task {
+                            Instant::now()
+                                + PAGE_TASK_ACTIVE
+                                    .saturating_sub(started.elapsed().saturating_sub(waited))
+                        } else {
+                            owner_deadline
+                        });
+                        let mut invocation = compile_page_step(
                             attempt,
                             request,
                             settings,
@@ -1365,31 +1385,23 @@ impl NativeWorkComposition {
                             Some(ResumeCompile {
                                 context: resume.context,
                                 document_policy: original_spec.document_policy,
-                                deadline: if task {
-                                    // The held time comes back: a page task
-                                    // keeps its own working time after a sign-in.
-                                    attempt.deadline().min(
-                                        Instant::now()
-                                            + PAGE_TASK_ACTIVE.saturating_sub(
-                                                started.elapsed().saturating_sub(waited),
-                                            ),
-                                    )
-                                } else {
-                                    original_deadline.min(plan.deadline)
-                                },
+                                deadline: resume_deadline,
                                 max_model_calls: remaining.1,
                                 max_actions: remaining.2,
                                 account,
                                 notice: successor_notice.take(),
                             }),
                             gate.clone(),
+                            plan.results.clone(),
                         )?;
-                        configure_decisions(
-                            &mut invocation,
-                            plan.decisions,
-                            original_deadline.min(plan.deadline),
-                        )
-                        .await?;
+                        configure_decisions(&mut invocation, plan.decisions, resume_deadline)
+                            .await?;
+                        let successor_run = invocation
+                            .input
+                            .retained_resource_spec()
+                            .map_err(|_| WorkError::Invalid)?
+                            .identity
+                            .owner();
                         let prepared = zephium_app::PreparedRetainedContinuation::try_new(
                             resume.generation,
                             invocation.input,
@@ -1400,6 +1412,18 @@ impl NativeWorkComposition {
                         .map_err(|_| WorkError::Invalid)?;
                         if !guard.0.resume_after_human(prepared) {
                             return Err(WorkError::Unavailable);
+                        }
+                        if resume.verified_wall_clear {
+                            let kind = match resume.reason {
+                                AgentBrowserHumanReason::SignIn => {
+                                    Some(zephium_core::work::runtime::WorkPageHandoffKindV1::SignIn)
+                                }
+                                AgentBrowserHumanReason::HumanChallenge => {
+                                    Some(zephium_core::work::runtime::WorkPageHandoffKindV1::Check)
+                                }
+                                _ => None,
+                            };
+                            pending_resolution = kind.map(|kind| (successor_run, kind));
                         }
                         charged_record = guard.0.snapshot().record;
                         prior_usage = total;
@@ -1424,6 +1448,22 @@ impl NativeWorkComposition {
                 }
             }
             let snapshot = guard.0.snapshot();
+            if let Some((run, kind)) = pending_resolution {
+                // Queueing Continue is not a receipt: the owner must accept
+                // the exact successor and leave its old human handoff first.
+                if snapshot.run == run
+                    && guard.0.human_resume().is_none()
+                    && matches!(
+                        snapshot.phase,
+                        RetainedWorkPhase::Running
+                            | RetainedWorkPhase::Closing
+                            | RetainedWorkPhase::Terminal
+                    )
+                {
+                    measure.resolve_handoff(kind);
+                    pending_resolution = None;
+                }
+            }
             failure_trace.report(&snapshot, &measure);
             if last_phase != Some(snapshot.phase) {
                 last_phase = Some(snapshot.phase);
@@ -1626,7 +1666,11 @@ impl NativeWorkComposition {
                         let held_for = registration
                             .as_ref()
                             .map_or(cap, |registration| registration.wait_for(since, cap));
-                        if human_wait_expired(now, since, original_deadline, human, held_for) {
+                        let human_deadline = guard
+                            .0
+                            .human_snapshot()
+                            .map_or(original_deadline, |human| human.deadline);
+                        if human_wait_expired(now, since, human_deadline, human, held_for) {
                             gave_up_on_person = cap < MAX_WORK_HUMAN_WAIT_MILLIS;
                             // Nobody took the page within the wait: release it
                             // and settle the read with the page's own words.
@@ -1658,8 +1702,7 @@ impl NativeWorkComposition {
             if requested_close {
                 // Failure/cancellation starts cleanup immediately. It cannot
                 // spend the unused execution budget waiting for terminal debt.
-                cleanup_deadline = cleanup_deadline.min(now + Duration::from_secs(30));
-                close_grace.get_or_insert(cleanup_deadline);
+                begin_close(&mut close_grace, now);
                 attempt.record_activity(match disposition {
                     _ if user_cancelled => zephium_ipc::work::WorkActivityV1::Cancelling,
                     Some(AgentWorkDisposition::Succeeded) => {
@@ -1892,6 +1935,7 @@ fn human_wait_cap(
     match intervention.map(|intervention| intervention.kind) {
         Some(Kind::Challenge) if !task && check_waiting_elsewhere => 0,
         Some(Kind::Challenge) => HUMAN_CHECK_WAIT_MILLIS,
+        Some(Kind::SignIn) => MAX_WORK_HUMAN_WAIT_MILLIS,
         _ if !task && anonymous => 0,
         Some(Kind::Permission | Kind::UnsupportedInteraction) => HUMAN_CHECK_WAIT_MILLIS,
         _ => MAX_WORK_HUMAN_WAIT_MILLIS,
@@ -1986,11 +2030,11 @@ impl StageOnce {
     }
 }
 
-fn cleanup_expired(now: Instant, local: Instant, group: Instant, locally_retired: bool) -> bool {
-    // A retired page has no local cleanup debt. Until close, its original
-    // attempt bounds waiting for peer reads and the Shell's global native
-    // proof; once asked to close, the grace does.
-    now >= group || (now >= local && !locally_retired)
+fn begin_close(deadline: &mut Option<Instant>, now: Instant) -> Instant {
+    *deadline.get_or_insert(now + Duration::from_secs(30))
+}
+fn cleanup_expired(now: Instant, deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| now >= deadline)
 }
 
 struct BrowserRun {
@@ -2518,7 +2562,10 @@ mod closed_result_tests {
             human_wait_cap(Some(&sign_in), false, false, false),
             MAX_WORK_HUMAN_WAIT_MILLIS
         );
-        assert_eq!(human_wait_cap(Some(&sign_in), false, true, false), 0);
+        assert_eq!(
+            human_wait_cap(Some(&sign_in), false, true, false),
+            MAX_WORK_HUMAN_WAIT_MILLIS
+        );
         assert_eq!(
             human_wait_cap(Some(&sign_in), true, true, false),
             MAX_WORK_HUMAN_WAIT_MILLIS
@@ -2544,20 +2591,31 @@ mod closed_result_tests {
     }
 
     #[test]
-    fn group_join_never_extends_pending_resource_cleanup_or_the_original_deadline() {
+    fn cleanup_starts_once_at_real_close_and_never_borrows_human_credit() {
         let start = Instant::now();
-        let local = start + Duration::from_secs(30);
-        let group = start + Duration::from_secs(180);
-        assert!(!cleanup_expired(
-            local - Duration::from_millis(1),
-            local,
-            group,
-            false
-        ));
-        assert!(cleanup_expired(local, local, group, false));
-        assert!(!cleanup_expired(local, local, group, true));
-        assert!(cleanup_expired(group, local, group, true));
-        assert!(cleanup_expired(group, local, group, false));
+        let original_active_deadline = start + Duration::from_secs(30);
+        let after_human = start + Duration::from_secs(90);
+        let mut close = None;
+        assert!(
+            !cleanup_expired(after_human, close),
+            "active/human lifetime is governed by its owner, not a precomputed cleanup timer"
+        );
+        let fixed = begin_close(&mut close, after_human);
+        assert_eq!(fixed, after_human + Duration::from_secs(30));
+        assert!(after_human > original_active_deadline);
+        for later in [
+            after_human + Duration::from_secs(5),
+            fixed,
+            fixed + Duration::from_secs(600),
+        ] {
+            assert_eq!(
+                begin_close(&mut close, later),
+                fixed,
+                "repeated close, group waits and human events cannot renew cleanup"
+            );
+        }
+        assert!(!cleanup_expired(fixed - Duration::from_millis(1), close));
+        assert!(cleanup_expired(fixed, close));
     }
 
     #[test]
@@ -2565,10 +2623,8 @@ mod closed_result_tests {
         // The recorded spin: the attempt deadline had passed, the page was
         // Failed and locally retired, and a stuck peer held the group open.
         let start = Instant::now();
-        let deadline = start - Duration::from_secs(1);
         let stages = StageOnce::default();
         let mut logged = 0;
-        let mut cleanup_deadline = deadline + Duration::from_secs(30);
         let mut grace = None;
         let mut retired_at = None;
         let mut passes = 0;
@@ -2583,12 +2639,10 @@ mod closed_result_tests {
             if settles_retired(now, grace, retired_at, disposition, false) {
                 break Some(now);
             }
-            let group = grace.unwrap_or(deadline + Duration::from_secs(30));
-            if cleanup_expired(now, cleanup_deadline, group, true) {
+            if cleanup_expired(now, grace) {
                 break None;
             }
-            cleanup_deadline = cleanup_deadline.min(now + Duration::from_secs(30));
-            grace.get_or_insert(cleanup_deadline);
+            begin_close(&mut grace, now);
         };
         assert_eq!(settled, Some(start + Duration::from_millis(50)));
         assert_eq!(logged, 2);
@@ -2652,6 +2706,22 @@ mod closed_result_tests {
 
     fn disposition_failed() -> Option<AgentWorkDisposition> {
         Some(AgentWorkDisposition::Failed)
+    }
+
+    #[test]
+    fn later_check_clearance_never_erases_prior_sign_in_privacy_evidence() {
+        use zephium_core::work::runtime::WorkPageHandoffKindV1 as Kind;
+        for kinds in [[Kind::SignIn, Kind::Check], [Kind::Check, Kind::SignIn]] {
+            let mut measure = ReadMeasure::default();
+            for kind in kinds {
+                measure.resolve_handoff(kind);
+            }
+            measure.resolve_handoff(Kind::Check);
+            assert_eq!(
+                measure.settle(Instant::now(), false).resolved_handoff,
+                Some(Kind::SignInAndCheck)
+            );
+        }
     }
 
     #[test]
@@ -2775,7 +2845,9 @@ struct ResumePlan {
     config: AgentWorkApplicationConfig,
     decisions: WorkDecisionPreference,
     decision_model: Option<AgentProviderModelClient>,
-    deadline: Instant,
+    results: Option<std::sync::Arc<crate::open_objective::results_page::ResultsReader>>,
+    #[cfg(feature = "public-qualification")]
+    loopback_anonymous: bool,
 }
 async fn configure_decisions(
     invocation: &mut crate::TrustedWorkRequest,
@@ -2987,8 +3059,6 @@ const MAX_SEAT_WAIT: Duration = Duration::from_secs(120);
 /// person's pace: looked at four times a second instead of twenty, for the
 /// minutes a sign-in can take.
 const HELD_PAGE_POLL: Duration = Duration::from_millis(250);
-/// How often a page held on a sign-in looks for the person's tab loads.
-const SITE_LOAD_POLL: Duration = Duration::from_secs(2);
 /// A page task's own working time and step ceilings. Held time for the
 /// person does not count against it.
 const PAGE_TASK_ACTIVE: Duration = Duration::from_secs(480);
@@ -3030,8 +3100,8 @@ fn page_task_cost(access: &AgentBrowserModelAccess, model_tokens: u32) -> u32 {
 const PUBLIC_READ_CALLS: u8 = 6;
 const PAGE_TASK_ACTIONS: u64 = 60;
 const PAGE_TASK_HOPS: usize = 16;
-/// How long a finished sign-in's page must stay settled before the page continues.
-const SIGNED_IN_SETTLE: Duration = Duration::from_millis(1500);
+/// Debounce after positive native DOM proof, never a clearance detector itself.
+const WALL_CLEAR_SETTLE: Duration = Duration::from_millis(1500);
 
 fn page_task(request: &WorkAgentBrowseRequest) -> bool {
     matches!(request.step, WorkStepKindV1::Read { goal: Some(_), .. })

@@ -364,6 +364,7 @@ pub struct RetainedWorkSnapshot {
     pub refusal: Option<(RetainedRefusal, RetainedLaneFacts)>,
 }
 struct Projection {
+    active_deadline: Instant,
     human: Option<RetainedHumanSnapshot>,
     human_resume: Option<RetainedHumanResume>,
     human_command: Option<HumanCommand>,
@@ -399,6 +400,15 @@ pub struct RetainedWorkHandle {
     callback: CallbackHandle,
 }
 impl RetainedWorkHandle {
+    /// Original resource's remaining active-time deadline, crediting only its
+    /// bounded genuine human handoffs. This grants no new scope or budget.
+    pub fn active_deadline(&self) -> Option<Instant> {
+        self.signal
+            .projection
+            .lock()
+            .ok()
+            .map(|projection| projection.active_deadline)
+    }
     pub fn human_snapshot(&self) -> Option<RetainedHumanSnapshot> {
         self.signal.projection.lock().ok()?.human
     }
@@ -617,6 +627,7 @@ impl CallbackHandle {
             group_locally_retired: AtomicBool::new(false),
             lost: AtomicBool::new(false),
             projection: Mutex::new(Projection {
+                active_deadline: prepared.spec.deadline,
                 human: None,
                 human_resume: None,
                 human_command: None,
@@ -656,7 +667,9 @@ impl CallbackHandle {
             runtime_group: None,
             group_shutdown: false,
             clock: prepared.spec.clock.clone(),
-            deadline: prepared.spec.deadline,
+            human_time: zephium_agentic::WorkBrowserHumanTime::new(prepared.spec.deadline),
+            anonymous_session: prepared.anonymous_session.clone(),
+            human_session_hold: None,
             prepared: Some(prepared),
             coordinator: None,
             request: None,
@@ -690,7 +703,9 @@ pub(crate) struct ProductWork {
     native_uncertain: bool,
     deadline_expired: bool,
     clock: Arc<dyn TerraControllerClock>,
-    deadline: Instant,
+    human_time: zephium_agentic::WorkBrowserHumanTime,
+    anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
+    human_session_hold: Option<zephium_agentic::WorkBrowserSessionHumanHold>,
     signal: Arc<ProductSignal>,
     callback: CallbackHandle,
 }
@@ -767,7 +782,8 @@ impl ProductWork {
     /// prove a clean close. It keeps its debt and its shutdown duty, but it
     /// must not hold the one retained slot against fresh pages.
     pub(crate) fn is_stuck(&self) -> bool {
-        (self.signal.close.load(Ordering::Acquire) || Instant::now() >= self.deadline)
+        (self.signal.close.load(Ordering::Acquire)
+            || Instant::now() >= self.human_time.deadline(Instant::now()))
             && !self.is_closed()
             && self.signal.projection.lock().is_ok_and(|projection| {
                 matches!(
@@ -859,7 +875,7 @@ impl ProductWork {
                 && std::ptr::addr_eq(Arc::as_ptr(store), Arc::as_ptr(&prepared.journal))
                 && std::ptr::addr_eq(Arc::as_ptr(store), Arc::as_ptr(&prepared.audit))
                 && readiness == AgentWorkProfileReadiness::Ready(prepared.profile)
-                && self.deadline > Instant::now()
+                && self.human_time.deadline(Instant::now()) > Instant::now()
                 && !self.signal.stop.load(Ordering::Acquire)
         })
     }
@@ -878,7 +894,9 @@ impl ProductWork {
             self.refuse(RetainedRefusal::Stale, RetainedLaneFacts::default());
             return;
         };
-        if now >= prepared.spec.expires_at || Instant::now() >= self.deadline {
+        if now >= prepared.spec.expires_at
+            || Instant::now() >= self.human_time.deadline(Instant::now())
+        {
             self.refuse(RetainedRefusal::Expired, RetainedLaneFacts::default());
             return;
         }
@@ -963,7 +981,29 @@ impl ProductWork {
         let Some(work) = &mut self.coordinator else {
             return;
         };
-        if !self.deadline_expired && Instant::now() >= self.deadline {
+        let human_held = !self.signal.close.load(Ordering::Acquire)
+            && !self.signal.stop.load(Ordering::Acquire)
+            && work.human_snapshot().is_some_and(|human| {
+                matches!(
+                    human.phase,
+                    RetainedHumanPhase::WaitingForHuman
+                        | RetainedHumanPhase::Presenting
+                        | RetainedHumanPhase::Presented
+                        | RetainedHumanPhase::Continuing
+                )
+            });
+        self.human_time.set_held(human_held, Instant::now());
+        if human_held {
+            if self.human_session_hold.is_none() {
+                self.human_session_hold = self
+                    .anonymous_session
+                    .as_ref()
+                    .and_then(zephium_agentic::WorkBrowserSession::hold_for_person);
+            }
+        } else {
+            self.human_session_hold = None;
+        }
+        if !self.deadline_expired && Instant::now() >= self.human_time.deadline(Instant::now()) {
             self.deadline_expired = true;
             self.signal.stop.store(true, Ordering::Release);
         }
@@ -1009,7 +1049,7 @@ impl ProductWork {
                             && resume.context == continuation.spec.identity.id()
                             && resume.document == continuation.spec.target
                     })
-                    && continuation.spec.deadline <= self.deadline
+                    && continuation.spec.deadline <= self.human_time.deadline(Instant::now())
                     && continuation.spec.deadline > Instant::now();
                 if valid {
                     if let Ok(mut projection) = self.signal.projection.lock() {
@@ -1077,7 +1117,30 @@ impl ProductWork {
             };
             projection.events.push_back(event);
         }
-        work.start_human_wait(self.deadline, now);
+        work.start_human_wait(self.human_time.handoff_deadline(Instant::now()), now);
+        // Start credit in the same poll that publishes the durable handoff;
+        // there may be no other wake before its original active deadline.
+        let human_held = !self.signal.close.load(Ordering::Acquire)
+            && !self.signal.stop.load(Ordering::Acquire)
+            && work.human_snapshot().is_some_and(|human| {
+                matches!(
+                    human.phase,
+                    RetainedHumanPhase::WaitingForHuman
+                        | RetainedHumanPhase::Presenting
+                        | RetainedHumanPhase::Presented
+                        | RetainedHumanPhase::Continuing
+                )
+            });
+        self.human_time.set_held(human_held, Instant::now());
+        if human_held && self.human_session_hold.is_none() {
+            self.human_session_hold = self
+                .anonymous_session
+                .as_ref()
+                .and_then(zephium_agentic::WorkBrowserSession::hold_for_person);
+        } else if !human_held {
+            self.human_session_hold = None;
+        }
+        projection.active_deadline = self.human_time.deadline(Instant::now());
         projection.human = work.human_snapshot();
         projection.human_resume = work.human_resume();
         retain_latest_frame(&mut projection.frame, work.latest_frame());
@@ -1149,11 +1212,13 @@ impl ProductWork {
                         .coordinator
                         .as_ref()
                         .is_some_and(|work| work.phase() != AdmissionPhase::Terminal))
-                .then_some(self.deadline),
+                .then_some(self.human_time.deadline(Instant::now())),
             )
             .min()
     }
     pub(crate) fn begin_shutdown(&mut self) {
+        self.human_time.set_held(false, Instant::now());
+        self.human_session_hold = None;
         self.prepared.take();
         self.request.take();
         self.signal.close.store(true, Ordering::Release);

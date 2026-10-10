@@ -13,8 +13,18 @@ pub(super) struct HumanNavigation {
     finished: bool,
     revision: u64,
     deadline: Instant,
+    progress: Option<zephium_agentic::WorkBrowserHumanProgress>,
+    wall_clear_samples: u8,
+    wall_sampled: Option<Instant>,
     #[cfg(target_os = "windows")]
     write_navigation: Option<(wry::NavigationId, u64, ContextNavigationTarget)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WorkHumanDocumentStamp {
+    epoch: u64,
+    revision: u64,
+    native_id: wry::NavigationId,
 }
 
 impl HumanNavigation {
@@ -25,45 +35,79 @@ impl HumanNavigation {
                     || (self.open && target.as_url().scheme() == "https"))
         })
     }
-    /// Settled back on the page's own site and off any sign-in path.
-    fn clear_of_sign_in(&self) -> bool {
+    /// This URL may hold the resumed task. URL checks alone never prove that
+    /// a password, account chooser or challenge disappeared from the document.
+    fn back_on_site(&self) -> bool {
         self.finished
             && self.loading.is_none()
             && zephium_agentic::same_work_human_site(&self.source, &self.current)
-            && !self
-                .current
-                .as_url()
-                .path_segments()
-                .into_iter()
-                .flatten()
-                .any(|segment| {
-                    let segment = segment.to_ascii_lowercase();
-                    [
-                        "login",
-                        "signin",
-                        "sign-in",
-                        "sign_in",
-                        "log-in",
-                        "logon",
-                        "sso",
-                        "auth",
-                        "oauth",
-                        "authorize",
-                        "2fa",
-                        "mfa",
-                        "2sv",
-                        "otp",
-                        "totp",
-                        "two-factor",
-                        "two_factor",
-                        "twofactor",
-                        "verify",
-                        "verification",
-                        "challenge",
-                        "checkpoint",
-                    ]
-                    .contains(&segment.as_str())
-                })
+            && !self.current.as_url().host_str().is_some_and(|host| {
+                [
+                    "accounts.",
+                    "login.",
+                    "signin.",
+                    "auth.",
+                    "sso.",
+                    "identity.",
+                    "idp.",
+                ]
+                .iter()
+                .any(|prefix| host.starts_with(prefix))
+            })
+            && (self.source.as_url().origin() == self.current.as_url().origin()
+                || !self
+                    .current
+                    .as_url()
+                    .path_segments()
+                    .into_iter()
+                    .flatten()
+                    .any(|segment| {
+                        let segment = segment.to_ascii_lowercase();
+                        [
+                            "login",
+                            "signin",
+                            "sign-in",
+                            "sign_in",
+                            "log-in",
+                            "logon",
+                            "sso",
+                            "auth",
+                            "oauth",
+                            "authorize",
+                            "2fa",
+                            "mfa",
+                            "2sv",
+                            "otp",
+                            "totp",
+                            "two-factor",
+                            "two_factor",
+                            "twofactor",
+                            "verify",
+                            "verification",
+                            "challenge",
+                            "checkpoint",
+                            "challenge-platform",
+                            "accountchooser",
+                            "select-account",
+                            "select_account",
+                        ]
+                        .contains(&segment.as_str())
+                    }))
+    }
+    fn invalidate_wall(&mut self) {
+        self.wall_clear_samples = 0;
+        self.wall_sampled = None;
+        if let Some(progress) = &self.progress {
+            progress.record_verified_wall_clear(false);
+        }
+    }
+    fn verified_wall_clear(&self) -> bool {
+        self.back_on_site()
+            && !self.requested
+            && self.wall_clear_samples >= 2
+            && self
+                .wall_sampled
+                .is_some_and(|at| at.elapsed() <= Duration::from_secs(2))
     }
     pub(super) fn allows(&mut self, raw: &str, main_frame: Option<bool>) -> bool {
         if Instant::now() >= self.deadline {
@@ -78,6 +122,7 @@ impl HumanNavigation {
         if self.loading.is_some() {
             return !self.committed;
         }
+        self.invalidate_wall();
         self.requested = true;
         self.finished = false;
         true
@@ -97,6 +142,7 @@ impl HumanNavigation {
             return Err(());
         }
         let target = self.target(&event.url).ok_or(())?;
+        self.invalidate_wall();
         match event.phase {
             E::Started if self.requested => {
                 self.requested = false;
@@ -149,6 +195,7 @@ impl HumanNavigation {
         if self.current == current {
             return Ok(false);
         }
+        self.invalidate_wall();
         self.current = current;
         self.revision = self.revision.checked_add(1).ok_or(())?;
         Ok(true)
@@ -203,14 +250,72 @@ impl WorkDocumentNavigation {
                         .is_some_and(|human| human.loading.is_none() && !human.requested)
             })
     }
-    pub(crate) fn human_clear_of_sign_in(&self) -> bool {
+    pub(crate) fn human_verified_wall_clear(&self) -> bool {
         self.0.lock().is_ok_and(|state| {
             state.phase == Phase::Human
                 && state
                     .human
                     .as_ref()
-                    .is_some_and(HumanNavigation::clear_of_sign_in)
+                    .is_some_and(HumanNavigation::verified_wall_clear)
         })
+    }
+    pub(crate) fn bind_human_progress(&self, progress: zephium_agentic::WorkBrowserHumanProgress) {
+        if let Ok(mut state) = self.0.lock() {
+            if let Some(human) = state.human.as_mut() {
+                progress.record_verified_wall_clear(false);
+                human.progress = Some(progress);
+            }
+        }
+    }
+    pub(crate) fn human_wall_probe(&self) -> Option<WorkHumanDocumentStamp> {
+        let state = self.0.lock().ok()?;
+        let human = state.human.as_ref()?;
+        (state.phase == Phase::Human
+            && Instant::now() < human.deadline
+            && human.back_on_site()
+            && !human.requested
+            && human
+                .wall_sampled
+                .is_none_or(|at| at.elapsed() >= Duration::from_millis(300)))
+        .then_some(WorkHumanDocumentStamp {
+            epoch: state.navigation_epoch,
+            revision: human.revision,
+            native_id: human.native_id,
+        })
+    }
+    /// A late callback from an old document/presentation cannot clear a wall.
+    pub(crate) fn record_human_wall_clear(
+        &self,
+        stamp: WorkHumanDocumentStamp,
+        clear: bool,
+    ) -> bool {
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        if state.phase != Phase::Human || state.navigation_epoch != stamp.epoch {
+            return false;
+        }
+        let Some(human) = state.human.as_mut() else {
+            return false;
+        };
+        if Instant::now() >= human.deadline
+            || human.revision != stamp.revision
+            || human.native_id != stamp.native_id
+            || !human.back_on_site()
+            || human.requested
+        {
+            return false;
+        }
+        human.wall_clear_samples = if clear {
+            human.wall_clear_samples.saturating_add(1).min(2)
+        } else {
+            0
+        };
+        human.wall_sampled = Some(Instant::now());
+        if let Some(progress) = &human.progress {
+            progress.record_verified_wall_clear(human.verified_wall_clear());
+        }
+        true
     }
     pub(crate) fn begin_human(
         &self,
@@ -245,6 +350,9 @@ impl WorkDocumentNavigation {
             finished: true,
             revision: 0,
             deadline,
+            progress: None,
+            wall_clear_samples: 0,
+            wall_sampled: None,
             #[cfg(target_os = "windows")]
             write_navigation: None,
         });
@@ -507,7 +615,7 @@ mod tests {
         gate.observe(event(2, E::Started, idp)).unwrap();
         gate.observe(event(2, E::Committed, idp)).unwrap();
         gate.observe(event(2, E::Finished, idp)).unwrap();
-        assert!(!gate.human_clear_of_sign_in());
+        assert!(!gate.human_verified_wall_clear());
         let revision = gate.human_revision().unwrap();
         assert!(gate.finish_human(idp, revision).is_err());
         let back = "https://example.test/home";
@@ -515,7 +623,18 @@ mod tests {
         gate.observe(event(3, E::Started, back)).unwrap();
         gate.observe(event(3, E::Committed, back)).unwrap();
         gate.observe(event(3, E::Finished, back)).unwrap();
-        assert!(gate.human_clear_of_sign_in());
+        assert!(
+            !gate.human_verified_wall_clear(),
+            "returning URL alone cannot clear a wall"
+        );
+        let stamp = gate.human_wall_probe().unwrap();
+        assert!(gate.record_human_wall_clear(stamp, true));
+        assert!(
+            !gate.human_verified_wall_clear(),
+            "one transient clear sample is insufficient"
+        );
+        assert!(gate.record_human_wall_clear(stamp, true));
+        assert!(gate.human_verified_wall_clear());
         gate.finish_human(back, gate.human_revision().unwrap())
             .unwrap();
     }
@@ -535,7 +654,135 @@ mod tests {
             gate.observe(event(id, E::Started, path)).unwrap();
             gate.observe(event(id, E::Committed, path)).unwrap();
             gate.observe(event(id, E::Finished, path)).unwrap();
-            assert!(!gate.human_clear_of_sign_in(), "{path}");
+            assert!(!gate.human_verified_wall_clear(), "{path}");
         }
+    }
+}
+
+#[cfg(test)]
+mod wall_proof_tests {
+    use super::super::tests::{ready_gate, URL};
+    use super::*;
+
+    fn human() -> (
+        WorkDocumentNavigation,
+        zephium_agentic::WorkBrowserHumanProgress,
+    ) {
+        let gate = ready_gate();
+        gate.begin_human(
+            &ContextNavigationTarget::parse(URL).unwrap(),
+            Instant::now() + Duration::from_secs(30),
+            true,
+        )
+        .unwrap();
+        let progress = zephium_agentic::WorkBrowserHumanProgress::default();
+        gate.bind_human_progress(progress.clone());
+        (gate, progress)
+    }
+
+    #[test]
+    fn same_document_wall_clear_requires_two_fresh_dom_samples_and_rejects_late_documents() {
+        let (gate, progress) = human();
+        let revision = gate.human_revision();
+        let stamp = gate.human_wall_probe().unwrap();
+        assert!(gate.record_human_wall_clear(stamp, false));
+        assert!(!progress.verified_wall_clear());
+        assert!(gate.record_human_wall_clear(stamp, true));
+        assert!(!progress.verified_wall_clear());
+        assert!(gate.record_human_wall_clear(stamp, true));
+        assert!(progress.verified_wall_clear());
+        assert_eq!(
+            gate.human_revision(),
+            revision,
+            "same-URL DOM proof is not a navigation"
+        );
+        {
+            let mut state = gate.0.lock().unwrap();
+            state
+                .human
+                .as_mut()
+                .unwrap()
+                .location_changed(Some("https://example.test/next"))
+                .unwrap();
+        }
+        assert!(
+            !progress.verified_wall_clear(),
+            "native location changes revoke proof immediately"
+        );
+        assert!(!gate.record_human_wall_clear(stamp, true));
+        let next = gate.human_wall_probe().unwrap();
+        assert!(gate.record_human_wall_clear(next, true));
+        assert!(gate.record_human_wall_clear(next, true));
+        assert!(gate.human_verified_wall_clear());
+        gate.retire();
+        assert!(
+            !gate.record_human_wall_clear(next, true),
+            "a stopped native page cannot recover authority"
+        );
+    }
+
+    #[test]
+    fn strong_dom_clearance_can_resume_the_same_sign_in_path_without_a_navigation() {
+        let (gate, progress) = human();
+        {
+            let mut state = gate.0.lock().unwrap();
+            state
+                .human
+                .as_mut()
+                .unwrap()
+                .location_changed(Some("https://example.test/human-fixture/signin/1"))
+                .unwrap();
+        }
+        let revision = gate.human_revision();
+        let stamp = gate
+            .human_wall_probe()
+            .expect("an unchanged sign-in route may replace its DOM in place");
+        assert!(gate.record_human_wall_clear(stamp, false));
+        assert!(
+            !progress.verified_wall_clear(),
+            "a credential/chooser observation is never bypassed by the URL"
+        );
+        assert!(gate.record_human_wall_clear(stamp, true));
+        assert!(gate.record_human_wall_clear(stamp, true));
+        assert!(progress.verified_wall_clear());
+        assert_eq!(gate.human_revision(), revision);
+        {
+            let mut state = gate.0.lock().unwrap();
+            state
+                .human
+                .as_mut()
+                .unwrap()
+                .location_changed(Some("https://accounts.google.com/home"))
+                .unwrap();
+        }
+        assert!(
+            gate.human_wall_probe().is_none(),
+            "identity hosts/outside sites are not task content even without a login path"
+        );
+        assert!(!progress.verified_wall_clear());
+    }
+
+    #[test]
+    fn expired_or_prior_presentation_proof_cannot_clear_the_current_wall() {
+        let (gate, _) = human();
+        let prior = gate.human_wall_probe().unwrap();
+        assert!(gate.record_human_wall_clear(prior, true));
+        assert!(gate.record_human_wall_clear(prior, true));
+        gate.0.lock().unwrap().human.as_mut().unwrap().wall_sampled =
+            Some(Instant::now() - Duration::from_secs(3));
+        assert!(!gate.human_verified_wall_clear());
+        gate.finish_human(URL, gate.human_revision().unwrap())
+            .unwrap();
+        gate.begin_human(
+            &ContextNavigationTarget::parse(URL).unwrap(),
+            Instant::now() + Duration::from_secs(30),
+            true,
+        )
+        .unwrap();
+        assert!(
+            !gate.record_human_wall_clear(prior, true),
+            "same URL/native id does not reuse a prior human epoch"
+        );
+        assert!(!gate.human_verified_wall_clear());
     }
 }

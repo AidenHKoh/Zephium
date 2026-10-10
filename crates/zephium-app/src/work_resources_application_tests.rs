@@ -2388,6 +2388,7 @@ fn human_handoff_contract(cancel: bool) {
             work.begin_shutdown();
         }
         let (request, callback) = native.human.lock().unwrap().take().unwrap();
+        let human_progress = request.human_progress().unwrap();
         finish_human_fixture(request, callback);
         work.poll(now());
         assert_eq!(
@@ -2399,15 +2400,23 @@ fn human_handoff_contract(cancel: bool) {
             }
         );
         if !cancel {
+            assert!(
+                !work.human_snapshot().unwrap().can_continue,
+                "navigation readiness alone cannot clear sign-in"
+            );
+            assert!(!work.continue_human(human.generation, now()));
+            human_progress.record_verified_wall_clear(true);
             assert!(work.human_snapshot().unwrap().can_continue);
             assert_eq!(native.acquisitions.load(Ordering::Acquire), 1);
             native.hold_human.store(false, Ordering::Release);
             assert!(work.continue_human(human.generation, now()));
+            human_progress.record_verified_wall_clear(false);
             work.poll(now());
             assert!(work.ready());
             let resumed = work.human_resume().unwrap();
             assert_eq!(resumed.model_calls, 1);
             assert_eq!(resumed.actions, 0);
+            assert!(resumed.verified_wall_clear, "successful native handback retains proof captured at Continue, not an expiring live flag");
             assert!(
                 !work.continue_human(human.generation, now()),
                 "continuation is consumed once"
