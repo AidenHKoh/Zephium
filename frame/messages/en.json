@@ -810,6 +810,7 @@
   "work_sources_all": "Show all {count}",
   "work_sources_unread_one": "One page couldn’t be opened",
   "work_sources_unread": "{count} pages couldn’t be opened",
+  "work_follow": "Follow",
   "work_code_line": "Line {line}",
   "work_code_lines": "Lines {from}–{to}",
   "work_code_notes": "Notes",
