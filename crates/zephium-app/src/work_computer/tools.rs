@@ -1,4 +1,4 @@
-//! The six tools, their schemas and what each returns to the model.
+//! The bounded Computer tools, their schemas and what each returns to the model.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -102,6 +102,13 @@ pub fn definitions() -> Vec<WorkModelTool> {
             }, "required": ["path", "text"], "additionalProperties": false}),
         ),
         tool(
+            "review_changes",
+            "Review this part's approved edits in a protected copy: diff shows the actual before/after patch, status lists those changed files, check finds whitespace errors. This is not the original repository's status or history, and it runs no project code or tests. Refuses files changed again outside these approved edits. Available only on a qualified operating-system build.",
+            json!({"type": "object", "properties": {
+                "operation": {"type": "string", "enum": ["diff", "status", "check"]}
+            }, "required": ["operation"], "additionalProperties": false}),
+        ),
+        tool(
             "bash",
             SHELL_DESCRIPTION,
             json!({"type": "object", "properties": {
@@ -162,7 +169,7 @@ fn duration(ms: u32) -> String {
 
 /// A change the person accepted, kept to build one diff per file.
 struct Changed {
-    before: String,
+    before: Option<String>,
     after: String,
 }
 
@@ -246,7 +253,7 @@ impl ComputerTools {
             changed.push((
                 file,
                 Changed {
-                    before: before.clone(),
+                    before: Some(before.clone()),
                     after: after.clone(),
                 },
             ));
@@ -270,7 +277,7 @@ impl ComputerTools {
         for (path, change) in changed.iter() {
             if !firsts.contains_key(path) {
                 order.push(path);
-                firsts.insert(path, &change.before);
+                firsts.insert(path, change.before.as_deref().unwrap_or_default());
             }
             lasts.insert(path, &change.after);
         }
@@ -312,6 +319,7 @@ impl ComputerTools {
             "edit" => self.edit(host, args).await,
             "write" => self.write(host, args).await,
             "bash" => self.bash(host, args).await,
+            "review_changes" => self.review_changes(host, args).await,
             _ => Err(ToolReply::fault(format!("There is no `{name}` tool."))),
         };
         match reply {
@@ -749,11 +757,173 @@ impl ComputerTools {
         }
         let (_, added, removed) = super::diff::hunks(&before, &after);
         if let Ok(mut changed) = self.changed.lock() {
-            changed.push((file.to_path_buf(), Changed { before, after }));
+            changed.push((
+                file.to_path_buf(),
+                Changed {
+                    before: known.map(|_| before),
+                    after,
+                },
+            ));
         }
         Ok(ToolReply::ok(format!(
             "Changed {shown} (+{added} −{removed})."
         )))
+    }
+
+    async fn review_changes(
+        &self,
+        host: &dyn ComputerHost,
+        args: &Value,
+    ) -> Result<ToolReply, ToolReply> {
+        use crate::work_commands::runner::{self, ApprovedChange, Failure, ReadOperation};
+        use sha2::{Digest, Sha256};
+        let operation = text(args, "operation")?;
+        let selected = match operation {
+            "diff" => ReadOperation::Diff,
+            "status" => ReadOperation::Status,
+            "check" => ReadOperation::Check,
+            _ => return Err(ToolReply::fault("operation is diff, status or check")),
+        };
+        runner::ensure_available().map_err(|error| ToolReply::fault(error.note()))?;
+        let (changes, generation): (Vec<ApprovedChange>, usize) = {
+            let recorded = self
+                .changed
+                .lock()
+                .map_err(|_| ToolReply::fault("The edits could not be inspected"))?;
+            let mut changes = std::collections::BTreeMap::<PathBuf, ApprovedChange>::new();
+            for (path, change) in recorded.iter() {
+                let Ok(relative) = path.strip_prefix(&self.root) else {
+                    continue;
+                };
+                match changes.entry(relative.to_owned()) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(ApprovedChange {
+                            path: relative.to_owned(),
+                            before: change.before.as_ref().map(|text| text.as_bytes().to_vec()),
+                            after: change.after.as_bytes().to_vec(),
+                        });
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        if change.before.as_deref().map(str::as_bytes)
+                            != Some(entry.get().after.as_slice())
+                        {
+                            return Err(ToolReply::fault(Failure::Changed.note()));
+                        }
+                        entry.get_mut().after = change.after.as_bytes().to_vec();
+                    }
+                }
+            }
+            (changes.into_values().collect(), recorded.len())
+        };
+        if changes.is_empty() {
+            return Ok(ToolReply::ok(
+                "No approved edits in this working folder to review.",
+            ));
+        }
+        let command = format!("review_changes {operation} (approved edits in a copied workspace)");
+        let root = self
+            .files
+            .roots()
+            .iter()
+            .filter(|root| self.root.starts_with(root))
+            .max_by_key(|root| root.components().count())
+            .ok_or_else(|| ToolReply::fault("The folder is not granted"))?;
+        let step = host
+            .begin(
+                WorkStepKindV1::RunCommand {
+                    cwd: self.root.to_string_lossy().into_owned(),
+                    command: command.clone(),
+                    timeout_secs: Some(90),
+                    decision: None,
+                },
+                Some(WorkLocalStepV1 {
+                    policy: Some(WorkCommandPolicyV1 {
+                        class: WorkCommandClassV1::Read,
+                        reason: WorkCommandReasonV1::Inspection,
+                        scope: WorkCommandApprovalScopeV1::None,
+                        root: root.to_string_lossy().into_owned(),
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(stopped)?;
+        let started = std::time::Instant::now();
+        let output = runner::review(&self.files, &self.root, &changes, selected, || async {
+            tokio::time::timeout(Duration::from_millis(100), host.cancelled())
+                .await
+                .unwrap_or(true)
+        })
+        .await;
+        let output = output.and_then(|output| {
+            if self.changed.lock().map_err(|_| Failure::Failed)?.len() != generation {
+                Err(Failure::Changed)
+            } else {
+                Ok(output)
+            }
+        });
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => {
+                host.settle(
+                    step,
+                    if error == Failure::Stopped {
+                        WorkStepStatus::Cancelled
+                    } else {
+                        WorkStepStatus::Failed
+                    },
+                    Settled::Nothing,
+                    Some(error.note().into()),
+                )
+                .await
+                .map_err(stopped)?;
+                return Err(ToolReply::fault(error.note()));
+            }
+        };
+        let content = output.text.replace('\r', "");
+        let kept = zephium_core::work::agent::clip_text(&content, MAX_WORK_FILE_TEXT_BYTES);
+        let evidence = WorkCommandEvidenceV1 {
+            cwd: self.root.to_string_lossy().into_owned(),
+            command,
+            exit: Some(output.exit),
+            signal: None,
+            elapsed_ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32,
+            bytes: content.len() as u32,
+            digest: format!("{:x}", Sha256::digest(content.as_bytes())),
+            truncated: kept.len() != content.len(),
+            text: kept.clone(),
+        };
+        let note = if output.success {
+            "Approved edits reviewed in a copied workspace"
+        } else {
+            "Issues found in the copied approved edits"
+        };
+        let key = host
+            .settle(
+                step,
+                if output.success {
+                    WorkStepStatus::Succeeded
+                } else {
+                    WorkStepStatus::Failed
+                },
+                Settled::Command(Box::new(evidence)),
+                Some(note.into()),
+            )
+            .await
+            .map_err(stopped)?;
+        let mut answer = format!("Review of {} approved file edits in a copied workspace ({operation}). This is not original repository status or history.\n", changes.len());
+        if kept.is_empty() {
+            answer.push_str("No findings.\n");
+        } else {
+            answer.push_str(&kept);
+        }
+        if let Some(key) = key {
+            answer.push_str(&format!("\n(source {key})"));
+        }
+        Ok(ToolReply {
+            content: answer,
+            is_error: !output.success,
+        })
     }
 
     async fn bash(&self, host: &dyn ComputerHost, args: &Value) -> Result<ToolReply, ToolReply> {

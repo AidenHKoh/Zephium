@@ -1868,8 +1868,21 @@ bounded reader and does not load parent or global ignore configuration. Project
 descriptions use those same guarded readers/listings; their Git state is explicitly
 unavailable and does not launch an independent Git process.
 
-Commands and coding-agent hand-offs fail before spawning, regardless of prior
-approval. An approved write or edit resolves through the same path policy, writes
+Arbitrary commands and coding-agent hand-offs fail before spawning, regardless of
+prior approval. The separate `review_changes` tool reviews only the current part's
+approved before/after edits in a private copy, with a synthetic Git baseline. It
+refuses intervening file changes and never reports original repository status or
+history. Only macOS build `25G83` is admitted: its tested Seatbelt profile denies
+network access, fork and child spawning and permits writes only to generated Git metadata
+and scratch. System startup requires read access to the literal `/` directory;
+there is no recursive root grant. User-home/private-root and symlink probes use
+open-only helpers that never consume secret bytes or directory names; absent
+real targets are reported separately from denial evidence. Windows LPAC token,
+ACL and job adapters remain gated pending physical Windows qualification. Darwin
+spawn closes all non-stdio descriptors atomically; child reap and shutdown share
+the process registry lock. Stop is reported as confirmed only after exit is observed.
+
+An approved write or edit resolves through the same path policy, writes
 atomically after checking the prior digest. Unix creation, publication and cleanup
 are relative to held directory descriptors; Windows guard markers are created
 relative to the held parent before pathname-based publication. These checks reject

@@ -1,6 +1,7 @@
 //! Command lifecycle plumbing, gated until an OS-enforced runner is available.
 //! Approval and working-directory selection are not filesystem confinement.
 pub mod policy;
+pub(crate) mod runner;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(any(unix, windows, test))]
@@ -122,6 +123,7 @@ mod groups {
         Arc, Mutex, OnceLock,
     };
     type Row = (i32, Arc<AtomicBool>);
+    static CLOSING: AtomicBool = AtomicBool::new(false);
     fn registry() -> &'static Mutex<Vec<Row>> {
         static GROUPS: OnceLock<Mutex<Vec<Row>>> = OnceLock::new();
         GROUPS.get_or_init(Default::default)
@@ -129,8 +131,31 @@ mod groups {
     pub struct Group {
         pub pid: i32,
         pub shutdown: Arc<AtomicBool>,
+        armed: bool,
     }
     impl Group {
+        /// Spawn and registration share shutdown's lock. Typed confined work
+        /// cannot start after the terminal process boundary or evade its drain.
+        pub fn launch<T, E>(
+            spawn: impl FnOnce() -> Result<(T, u32), E>,
+            stopped: E,
+        ) -> Result<(T, Self), E> {
+            let mut rows = registry().lock().unwrap_or_else(|e| e.into_inner());
+            if CLOSING.load(Ordering::Acquire) {
+                return Err(stopped);
+            }
+            let (child, pid) = spawn()?;
+            let shutdown = Arc::new(AtomicBool::new(false));
+            rows.push((pid as i32, shutdown.clone()));
+            Ok((
+                child,
+                Self {
+                    pid: pid as i32,
+                    shutdown,
+                    armed: true,
+                },
+            ))
+        }
         pub fn new(pid: u32) -> Self {
             let shutdown = Arc::new(AtomicBool::new(false));
             registry()
@@ -140,10 +165,33 @@ mod groups {
             Self {
                 pid: pid as i32,
                 shutdown,
+                armed: true,
             }
         }
+        /// Reap only a qualified single-process group while shutdown is excluded.
+        /// Removing its registry entry before releasing the lock prevents a
+        /// completed numeric PID from being signaled after it can be reused.
+        pub fn poll_single_process<T>(
+            &mut self,
+            poll: impl FnOnce() -> std::io::Result<Option<T>>,
+        ) -> std::io::Result<Option<T>> {
+            let mut rows = registry().lock().unwrap_or_else(|e| e.into_inner());
+            let result = poll();
+            if matches!(&result, Ok(Some(_)))
+                || result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.raw_os_error() == Some(libc::ECHILD))
+            {
+                self.armed = false;
+                rows.retain(|(pid, _)| *pid != self.pid);
+            }
+            result
+        }
         pub fn signal(&self, signal: i32) {
-            signal_group(self.pid, signal);
+            if self.armed {
+                signal_group(self.pid, signal);
+            }
         }
         pub fn quitting(&self) -> bool {
             self.shutdown.load(Ordering::Acquire)
@@ -167,6 +215,7 @@ mod groups {
         let started = std::time::Instant::now();
         {
             let rows = registry().lock().unwrap_or_else(|e| e.into_inner());
+            CLOSING.store(true, Ordering::Release);
             if rows.is_empty() {
                 return;
             }

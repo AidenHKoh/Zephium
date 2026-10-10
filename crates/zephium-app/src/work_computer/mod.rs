@@ -1,6 +1,6 @@
-//! The Computer helper inspects files through `WorkFileGrant`. Mutations and
-//! command execution remain explicitly unavailable until native confinement
-//! is qualified; an approval cannot widen that capability boundary.
+//! Computer inspects granted files, proposes approved edits, and reviews those
+//! edits in a confined copy on qualified platforms. Arbitrary execution and
+//! recoverable removal remain gated independently of approval.
 pub mod delegate;
 pub mod diff;
 pub mod find;

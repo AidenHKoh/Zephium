@@ -661,7 +661,7 @@ pub(crate) fn protected_path(path: &Path) -> bool {
         name.starts_with(".env")
             || matches!(name.as_str(),
                 ".ssh" | ".gnupg" | ".aws" | ".azure" | ".kube" | ".config"
-                | ".git" | ".npmrc" | ".netrc" | "_netrc" | ".pypirc"
+                | ".git" | ".gitconfig" | ".git-credentials" | ".npmrc" | ".netrc" | "_netrc" | ".pypirc"
                 | ".docker" | ".codex" | ".claude" | ".gem" | ".bundle"
                 | "credentials" | "credentials.json" | "credentials.toml"
                 | "secrets" | "secrets.json" | "secrets.yaml" | "secrets.yml"
@@ -719,7 +719,7 @@ fn open_unix(path: &Path, directory: bool) -> Result<std::fs::File, WorkFileErro
     Ok(parent)
 }
 
-fn single_link(file: &std::fs::File) -> Result<bool, WorkFileError> {
+pub(crate) fn single_link(file: &std::fs::File) -> Result<bool, WorkFileError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -1298,10 +1298,8 @@ pub(crate) fn directory_available(path: &Path) -> bool {
     !protected_path(path) && pin_directories(path).is_ok()
 }
 
-pub(crate) fn read_text_limited(
-    file: &Path,
-    limit: u64,
-) -> Result<(u32, String, Option<String>), WorkFileError> {
+/// Bounded payload for a private runner snapshot, under the shared path policy.
+pub(crate) fn snapshot_bytes(file: &Path, limit: u64) -> Result<Vec<u8>, WorkFileError> {
     if limit == 0 || limit > MAX_READ_BYTES {
         return Err(WorkFileError::Denied);
     }
@@ -1320,6 +1318,14 @@ pub(crate) fn read_text_limited(
     if bytes.len() as u64 > limit {
         return Err(WorkFileError::TooLarge);
     }
+    Ok(bytes)
+}
+
+pub(crate) fn read_text_limited(
+    file: &Path,
+    limit: u64,
+) -> Result<(u32, String, Option<String>), WorkFileError> {
+    let bytes = snapshot_bytes(file, limit)?;
     let byte_count = bytes.len() as u32;
     let digest = format!("{:x}", Sha256::digest(&bytes));
     let text = match String::from_utf8(bytes) {

@@ -17,6 +17,7 @@ struct Recorder {
     settled: Mutex<Vec<(WorkStepStatus, Option<String>)>>,
     decisions: Mutex<Vec<Decision>>,
     asked: Mutex<u32>,
+    on_cancel_check: Mutex<Option<Box<dyn FnMut() -> bool + Send>>>,
 }
 impl Recorder {
     fn deciding(decisions: &[Decision]) -> Self {
@@ -50,6 +51,9 @@ impl ComputerHost for Recorder {
         settled: Settled,
         note: Option<String>,
     ) -> HostFuture<'_, Result<Option<String>, WorkError>> {
+        if let Settled::Command(command) = &settled {
+            command.validate().unwrap();
+        }
         self.settled.lock().unwrap().push((status, note));
         let key = match settled {
             Settled::Nothing => None,
@@ -74,7 +78,13 @@ impl ComputerHost for Recorder {
         Box::pin(async { false })
     }
     fn cancelled(&self) -> HostFuture<'_, bool> {
-        Box::pin(async { false })
+        let cancelled = self
+            .on_cancel_check
+            .lock()
+            .unwrap()
+            .as_mut()
+            .is_some_and(|check| check());
+        Box::pin(async move { cancelled })
     }
 }
 
@@ -390,5 +400,101 @@ fn unavailable_capabilities_refuse_before_approval_and_keep_reads_useful() {
             )
             .await;
         assert!(!result.content.contains("fixture-private"));
+    });
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Native qualified Seatbelt review; inert approved file fixtures only"]
+fn reviews_only_actual_approved_before_after_edits() {
+    serially(async {
+        crate::work_commands::runner::ensure_available().unwrap();
+        let (_home, tools, root) = project();
+        let host =
+            Recorder::deciding(&[Decision::Approved, Decision::Approved, Decision::Approved]);
+        let empty = tools
+            .call(&host, "review_changes", &json!({"operation":"diff"}))
+            .await;
+        assert!(!empty.is_error && empty.content.contains("No approved edits"));
+        assert!(host.kinds().is_empty());
+        assert!(
+            !tools
+                .call(&host, "read", &json!({"path":"src/lib.rs"}))
+                .await
+                .is_error
+        );
+        assert!(
+            !tools
+                .call(
+                    &host,
+                    "edit",
+                    &json!({"path":"src/lib.rs", "old":"    a + 2\n}", "new":"    a + 1  \n}"})
+                )
+                .await
+                .is_error
+        );
+        assert!(
+            !tools
+                .call(
+                    &host,
+                    "write",
+                    &json!({"path":"new.txt", "text":"new approved file\n"})
+                )
+                .await
+                .is_error
+        );
+        assert!(!tools.call(&host, "write", &json!({"path":".gitattributes", "text":"* -diff -whitespace filter=untrusted working-tree-encoding=UTF-16\n"})).await.is_error);
+        let before = std::fs::read(root.join("src/lib.rs")).unwrap();
+        let patch = tools
+            .call(&host, "review_changes", &json!({"operation":"diff"}))
+            .await;
+        assert!(!patch.is_error, "{}", patch.content);
+        assert!(patch.content.contains("-    a + 2") && patch.content.contains("+    a + 1"));
+        assert!(patch.content.contains("+new approved file"));
+        assert!(
+            patch.content.contains("copied workspace")
+                && patch.content.contains("not original repository")
+        );
+        let check = tools
+            .call(&host, "review_changes", &json!({"operation":"check"}))
+            .await;
+        assert!(
+            check.is_error && check.content.contains("trailing whitespace"),
+            "{}",
+            check.content
+        );
+        assert_eq!(std::fs::read(root.join("src/lib.rs")).unwrap(), before);
+        assert_eq!(
+            *host.asked.lock().unwrap(),
+            3,
+            "read-only review adds no mutation approval"
+        );
+        std::fs::write(root.join("src/lib.rs"), "later external edit\n").unwrap();
+        let stale = tools
+            .call(&host, "review_changes", &json!({"operation":"diff"}))
+            .await;
+        assert!(stale.is_error && stale.content.contains("changed again"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/lib.rs")).unwrap(),
+            "later external edit\n"
+        );
+        std::fs::write(root.join("src/lib.rs"), &before).unwrap();
+        let path = root.join("src/lib.rs");
+        let mut checks = 0;
+        *host.on_cancel_check.lock().unwrap() = Some(Box::new(move || {
+            checks += 1;
+            if checks == 2 {
+                std::fs::write(&path, "concurrent external edit\n").unwrap();
+            }
+            false
+        }));
+        let raced = tools
+            .call(&host, "review_changes", &json!({"operation":"diff"}))
+            .await;
+        assert!(raced.is_error && raced.content.contains("changed again"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/lib.rs")).unwrap(),
+            "concurrent external edit\n"
+        );
     });
 }

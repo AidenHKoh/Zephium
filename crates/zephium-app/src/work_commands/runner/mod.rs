@@ -1,0 +1,273 @@
+//! Typed operations over a brokered copy. The ordinary shell gate is independent.
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+mod macos_spawn;
+mod snapshot;
+#[cfg(windows)]
+mod windows;
+use crate::work_files::WorkFileGrant;
+use snapshot::Snapshot;
+use std::{future::Future, path::Path};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Failure {
+    Unavailable,
+    ToolUnavailable,
+    Input,
+    Limit,
+    Storage,
+    Launch,
+    Stopped,
+    StopUnconfirmed,
+    Failed,
+    Changed,
+}
+impl Failure {
+    pub fn note(self) -> &'static str {
+        match self {
+            Self::Unavailable => {
+                "The approved-edit review is not supported on this operating-system build"
+            }
+            Self::ToolUnavailable => {
+                "The approved-edit review needs a supported local Git installation"
+            }
+            Self::Input => "The folder could not be copied safely into a bounded workspace",
+            Self::Limit => "The copied workspace or command exceeded its limit",
+            Self::Storage => "The private copied workspace could not be prepared",
+            Self::Launch => "The confined process could not be started",
+            Self::Stopped => "The confined process stopped",
+            Self::StopUnconfirmed => "Stop was requested, but process exit has not been confirmed",
+            Self::Failed => "The operation in the copied workspace failed",
+            Self::Changed => "An approved file changed again; read it before reviewing these edits",
+        }
+    }
+}
+
+/// A stalled actor/store query is not permission to continue. Bound this await
+/// independently of the process deadline so it cannot hold a select arm forever.
+pub(crate) async fn cancellation_requested<C, CF>(cancelled: &C) -> bool
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+{
+    tokio::time::timeout(std::time::Duration::from_millis(100), cancelled())
+        .await
+        .unwrap_or(true)
+}
+
+/// All results describe a copied workspace, never the source repository history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReadOperation {
+    #[cfg(test)]
+    Files,
+    Status,
+    Diff,
+    Check,
+}
+
+pub(crate) struct Output {
+    pub text: String,
+    pub success: bool,
+    pub exit: i32,
+}
+
+/// The first approved version and latest accepted version of one local file.
+pub(crate) struct ApprovedChange {
+    pub path: std::path::PathBuf,
+    pub before: Option<Vec<u8>>,
+    pub after: Vec<u8>,
+}
+
+/// Review exactly the approved edits, in a fresh private copy with synthetic
+/// baseline history. No original repository status, configuration or history.
+pub(crate) async fn review<C, CF>(
+    grant: &WorkFileGrant,
+    root: &Path,
+    changes: &[ApprovedChange],
+    operation: ReadOperation,
+    cancelled: C,
+) -> Result<Output, Failure>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+{
+    ensure_available()?;
+    if changes.is_empty() || changes.len() > 2_000 {
+        return Err(Failure::Input);
+    }
+    if cancellation_requested(&cancelled).await {
+        return Err(Failure::Stopped);
+    }
+    let selected: Vec<_> = changes.iter().map(|change| change.path.clone()).collect();
+    let snapshot = Snapshot::capture(grant, root, &selected)?;
+    prepare_baseline(&snapshot, changes)?;
+    for operation in [
+        GitOperation::Initialize,
+        GitOperation::CaptureIndex,
+        GitOperation::CommitBaseline,
+    ] {
+        if !execute(&snapshot, operation, &cancelled).await?.success {
+            return Err(Failure::Failed);
+        }
+    }
+    for change in changes {
+        snapshot.write(&change.path, &change.after)?;
+    }
+    if !execute(&snapshot, GitOperation::IntentToAdd, &cancelled)
+        .await?
+        .success
+    {
+        return Err(Failure::Failed);
+    }
+    let output = execute(&snapshot, GitOperation::Read(operation), &cancelled).await?;
+    for change in changes {
+        if crate::work_files::snapshot_bytes(&root.join(&change.path), 1024 * 1024)
+            .ok()
+            .as_ref()
+            != Some(&change.after)
+        {
+            return Err(Failure::Changed);
+        }
+    }
+    Ok(output)
+}
+
+fn prepare_baseline(snapshot: &Snapshot, changes: &[ApprovedChange]) -> Result<(), Failure> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut total: usize = snapshot.files.values().map(Vec::len).sum();
+    for change in changes {
+        if !seen.insert(&change.path) || snapshot.files.get(&change.path) != Some(&change.after) {
+            return Err(Failure::Changed);
+        }
+        total = total
+            .checked_sub(change.after.len())
+            .and_then(|total| total.checked_add(change.before.as_ref().map_or(0, Vec::len)))
+            .ok_or(Failure::Limit)?;
+        if total > snapshot::MAX_TOTAL {
+            return Err(Failure::Limit);
+        }
+        match &change.before {
+            Some(bytes) => snapshot.write(&change.path, bytes)?,
+            None => std::fs::remove_file(snapshot.work.join(&change.path))
+                .map_err(|_| Failure::Storage)?,
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_available() -> Result<(), Failure> {
+    #[cfg(target_os = "macos")]
+    if macos::qualified() {
+        return Ok(());
+    }
+    // Native Windows token/ACL/network/alias qualification is a separate gate.
+    Err(Failure::Unavailable)
+}
+
+#[derive(Clone, Copy)]
+enum GitOperation {
+    Initialize,
+    CaptureIndex,
+    CommitBaseline,
+    IntentToAdd,
+    Read(ReadOperation),
+}
+impl GitOperation {
+    fn arguments(self, snapshot: &Snapshot) -> Vec<std::ffi::OsString> {
+        let mut args: Vec<std::ffi::OsString> = [
+            "--no-pager",
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "index.threads=1",
+            "-c",
+            "core.untrackedCache=false",
+            "-c",
+            "core.quotePath=true",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "user.name=Work",
+            "-c",
+            "user.email=snapshot@local.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        args.push("-c".into());
+        let mut hooks = std::ffi::OsString::from("core.hooksPath=");
+        hooks.push(&snapshot.empty);
+        args.push(hooks);
+        let tail: &[&str] = match self {
+            Self::Initialize => &[
+                "init",
+                "--quiet",
+                "--initial-branch=work",
+                "--template=",
+                ".",
+            ],
+            Self::CaptureIndex => &["add", "--all", "--force", "--", "."],
+            Self::CommitBaseline => &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "--no-verify",
+                "--no-gpg-sign",
+                "--message=Workspace baseline",
+            ],
+            Self::IntentToAdd => &["add", "--intent-to-add", "--all", "--force", "--", "."],
+            #[cfg(test)]
+            Self::Read(ReadOperation::Files) => &["ls-files", "--cached"],
+            Self::Read(ReadOperation::Status) => &[
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignore-submodules=all",
+            ],
+            Self::Read(ReadOperation::Diff) => &[
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--",
+            ],
+            Self::Read(ReadOperation::Check) => {
+                &["diff", "--check", "--no-ext-diff", "--no-textconv", "--"]
+            }
+        };
+        args.extend(tail.iter().map(Into::into));
+        args
+    }
+}
+
+async fn execute<C, CF>(
+    snapshot: &Snapshot,
+    operation: GitOperation,
+    cancelled: &C,
+) -> Result<Output, Failure>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+{
+    #[cfg(target_os = "macos")]
+    {
+        macos::git(snapshot, operation, cancelled).await
+    }
+    #[cfg(windows)]
+    {
+        windows::git(snapshot, operation, cancelled).await
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = (snapshot, operation, cancelled);
+        Err(Failure::Unavailable)
+    }
+}
