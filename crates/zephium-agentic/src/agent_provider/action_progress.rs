@@ -92,7 +92,12 @@ impl AgentActionProgress {
         progress.last_observation = observation;
         progress.encoded = format!(
             "ZEPHIUM_HOST_ACTION_PROGRESS_V1\n{}",
-            serde_json::json!({"verified_results": progress.total, "omitted_older_results": progress.total.saturating_sub(progress.recent.len() as u64), "recent": progress.recent})
+            serde_json::json!({
+                "verified_results": progress.total,
+                "omitted_older_results": progress.total.saturating_sub(progress.recent.len() as u64),
+                "recent": progress.recent,
+                "guidance": "Each recorded action already ran once and satisfied its named page postcondition. Do not repeat it just to check whether it worked. Read the current state and extract when the task is complete. A page change alone does not prove a business outcome."
+            })
         );
         if progress.encoded.len() > MAX_BYTES {
             return Err(AgentProviderContinuationError::TranscriptLimit);

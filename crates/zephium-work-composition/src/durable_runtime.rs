@@ -727,6 +727,12 @@ impl NativeWorkComposition {
                 "The page did something I did not ask you about: {line}"
             ));
         }
+        if run.status != WorkAttemptStatus::Succeeded && gate.has_verified_approval() {
+            run.note = Some(format!(
+                "An approved action ran, but Work could not finish reading or preserving its result. Do not repeat the action automatically; inspect the existing result or ask the person. {}",
+                run.note.as_deref().unwrap_or("The page outcome is unverified.")
+            ));
+        }
         if let Some(host) = host.filter(|_| collection.is_none()) {
             for artifact in &mut run.artifacts {
                 artifact.title = format!("Notes from {host}");

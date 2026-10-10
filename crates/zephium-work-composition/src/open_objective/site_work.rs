@@ -1011,6 +1011,7 @@ struct GateState {
     /// The approved step was handed to the page and awaits verification.
     dispatched: Option<Consequence>,
     receipt: Option<Receipt>,
+    verified_approval: bool,
     declined: Vec<[u8; 32]>,
     /// Status lines seen before the last step, for the commit detector.
     status_before: Vec<String>,
@@ -1173,6 +1174,9 @@ impl SiteGate {
     /// Takes how the last approved step ended, once known.
     pub(crate) fn take_receipt(&self) -> Option<Receipt> {
         self.state().receipt.take()
+    }
+    pub(crate) fn has_verified_approval(&self) -> bool {
+        self.state().verified_approval
     }
     /// The page ended: an approved step still waiting ends here too.
     pub(crate) fn finish(&self) -> Option<Receipt> {
@@ -1591,6 +1595,7 @@ impl SiteWorkPolicy {
         let mut state = self.gate.state();
         if state.dispatched.take().is_some() {
             state.receipt = Some(Receipt::Committed);
+            state.verified_approval = true;
             state.status_before = status_lines(observation);
             return;
         }
@@ -2164,6 +2169,26 @@ mod tests {
             Err(AgentWorkFailure::ActionDenied)
         ));
         assert!(gate.pending().is_none());
+    }
+
+    #[test]
+    fn approved_action_history_survives_consuming_the_receipt() {
+        let gate = Arc::new(SiteGate::new("example.com".into(), false, false));
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        let observation = booking("$1,240.00");
+        let action = click(&observation, 6, SemanticEffectClass::Purchase);
+        assert!(!gate.has_verified_approval());
+        assert!(policy.assess(&action, &observation).is_err());
+        gate.approve(false).unwrap();
+        assert!(policy.assess(&action, &observation).is_ok());
+        assert!(!gate.has_verified_approval());
+        policy.after_step(&observation);
+        assert_eq!(gate.take_receipt(), Some(Receipt::Committed));
+        assert_eq!(gate.take_receipt(), None);
+        assert!(gate.has_verified_approval());
     }
 
     #[test]
