@@ -314,10 +314,27 @@ pub fn prepare_semantic_screenshot(
     if context.frame() != FrameId::MAIN {
         return Err(SemanticScreenshotRequestError::UnsupportedContext);
     }
-    if observation
-        .frames()
-        .iter()
-        .any(|frame| frame.completeness() != SemanticCompleteness::Complete)
+    let covers_viewport = match observation.request().scope() {
+        crate::SemanticScope::Initial => true,
+        crate::SemanticScope::Subtree(anchor) => {
+            observation.frames().first().is_some_and(|frame| {
+                anchor.frame().frame() == FrameId::MAIN
+                    && frame.nodes().first().is_some_and(|root| {
+                        root.role() == crate::SemanticRole::Document
+                            && root.parent().is_none()
+                            && root.key() == anchor.capability().node_key()
+                    })
+            })
+        }
+        _ => false,
+    };
+    // Completeness of a narrow subtree says nothing about secret fields
+    // elsewhere in the viewport that would appear in the same screenshot.
+    if !covers_viewport
+        || observation
+            .frames()
+            .iter()
+            .any(|frame| frame.completeness() != SemanticCompleteness::Complete)
         || observation.frame_boundaries().iter().any(|boundary| {
             !matches!(
                 boundary.status(),
@@ -918,6 +935,13 @@ pub struct SemanticScreenshot {
 }
 
 impl SemanticScreenshot {
+    pub(crate) fn matches_baseline(&self, baseline: &SemanticObservationAcknowledgement) -> bool {
+        self.observation == baseline.observation()
+            && self.observation_generation == baseline.generation()
+            && self.context == baseline.context()
+            && self.source_guard == baseline.guard()
+    }
+
     /// Exact screenshot attempt identity.
     pub const fn id(&self) -> SemanticScreenshotRequestId {
         self.id
@@ -1055,6 +1079,7 @@ impl SemanticScreenshotDeliveryAuthority {
             observation_generation: self.observation_generation,
             context: self.context,
             captured_at: self.captured_at,
+            source_guard: self.source_guard,
             guard: self.guard,
         }
     }
@@ -1089,10 +1114,20 @@ pub struct SemanticScreenshotDeliveryReceipt {
     observation_generation: SemanticObservationGeneration,
     context: ContextJoin,
     captured_at: SemanticCaptureInstant,
+    source_guard: [u8; 32],
     guard: [u8; 32],
 }
 
 impl SemanticScreenshotDeliveryReceipt {
+    /// Pixels do not mint references. Only the separately retained, previously
+    /// delivered semantic baseline can continue after this exact image.
+    #[cfg(any(test, feature = "provider-transport"))]
+    pub(crate) fn matches_baseline(&self, baseline: &SemanticObservationAcknowledgement) -> bool {
+        self.observation == baseline.observation()
+            && self.observation_generation == baseline.generation()
+            && self.context == baseline.context()
+            && self.source_guard == baseline.guard()
+    }
     /// Exact screenshot request delivered.
     pub const fn id(&self) -> SemanticScreenshotRequestId {
         self.id
@@ -2069,6 +2104,64 @@ mod tests {
         );
         assert!(!debug.contains("Private page pixels"));
         assert!(!debug.contains("shot-100"));
+    }
+
+    #[test]
+    fn complete_narrow_scopes_cannot_authorize_viewport_pixels() {
+        let base = observation(750);
+        let frame = base.frames()[0].frame().clone();
+        for (index, kind, allowed) in [
+            (0, crate::SemanticExpansionKind::Subtree, true),
+            (1, crate::SemanticExpansionKind::Subtree, false),
+            (0, crate::SemanticExpansionKind::Region, false),
+        ] {
+            let request = base
+                .begin_expansion(
+                    SemanticObservationId::new(900).unwrap(),
+                    base.frames()[0].nodes()[index].reference(),
+                    &frame,
+                    kind,
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                )
+                .unwrap();
+            let bytes = serde_json::to_vec(&json!({
+                "v": SEMANTIC_WIRE_VERSION, "i": 901, "g": 2, "c": "complete",
+                "n": [
+                    {"k":1,"r":"document","o":16},
+                    {"k":2,"p":0,"r":"paragraph","t":"Only this safe region"}
+                ]
+            }))
+            .unwrap();
+            let snapshot = decode_semantic_snapshot(
+                SemanticDecodeContext::new(
+                    SemanticInvocationId::new(901).unwrap(),
+                    frame.clone(),
+                    SemanticSnapshotGeneration::new(2).unwrap(),
+                ),
+                &bytes,
+            )
+            .unwrap();
+            let scoped = SemanticObservationAssembler::new(request, snapshot)
+                .unwrap()
+                .finish()
+                .unwrap();
+            let result = prepare_semantic_screenshot(
+                SemanticScreenshotRequestId::new(1).unwrap(),
+                &scoped,
+                &acknowledgement(&scoped),
+                SemanticCaptureInstant::from_millis(1_000),
+                SemanticCaptureInstant::from_millis(2_000),
+                SemanticScreenshotBudget::STANDARD,
+            );
+            if allowed {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    SemanticScreenshotRequestError::IncompleteObservation
+                );
+            }
+        }
     }
 
     #[test]

@@ -144,6 +144,54 @@ fn media_source_binds_exact_archive_and_schema_ordered_row() {
 }
 
 #[test]
+fn viewport_text_lists_remain_archivable_without_granting_nontext_pixel_claims() {
+    let mut doc = document();
+    doc.version = 2;
+    let source = &mut doc.sources[0];
+    source.role = "document".into();
+    source.field = 9;
+    source.observation = Some(4);
+    source.observation_generation = Some(1);
+    source.captured_millis = Some(5);
+    source.content = ArchivedSourceContent::Preview {
+        value: SEMANTIC_VIEWPORT_IMAGE_TEXT.into(),
+        source_bytes: SEMANTIC_VIEWPORT_IMAGE_TEXT.len() as u64,
+        truncated: false,
+    };
+    doc.fields = vec![ArchivedField {
+        name: "output_0".into(),
+        value: ArchivedValue::TextList {
+            items: vec![ArchivedText {
+                value: "Blue: 43".into(),
+                sources: vec![1],
+            }],
+            sources: vec![1],
+        },
+    }];
+    let (descriptor, bytes) = encode(&doc);
+    assert!(AgentWorkArchivedExtraction::decode(descriptor, &bytes).is_ok());
+    doc.version = 6;
+    for value in [
+        ArchivedValue::Boolean {
+            value: true,
+            sources: vec![1],
+        },
+        ArchivedValue::Unsigned {
+            value: 43,
+            sources: vec![1],
+        },
+        ArchivedValue::Url {
+            value: "https://fixture.invalid/".into(),
+            sources: vec![1],
+        },
+    ] {
+        doc.fields[0].value = value;
+        let (descriptor, bytes) = encode(&doc);
+        assert!(AgentWorkArchivedExtraction::decode(descriptor, &bytes).is_err());
+    }
+}
+
+#[test]
 fn archived_roundtrip_keeps_closed_values_quotes_and_redacted_debug() {
     let (descriptor, bytes) = encode(&document());
     let result = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();

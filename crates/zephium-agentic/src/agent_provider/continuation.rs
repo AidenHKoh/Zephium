@@ -554,7 +554,7 @@ impl AgentProviderTranscript {
         })
     }
 
-    fn try_bind(
+    pub(super) fn try_bind(
         mut self,
         correlation: AgentProviderToolCallCorrelation,
         tool_result: String,
@@ -842,8 +842,14 @@ impl AgentProviderContinuationSeed {
                 }
                 baseline
             }
-            AgentProviderInputEvidence::Extraction(_)
-            | AgentProviderInputEvidence::Screenshot(_) => {
+            AgentProviderInputEvidence::Screenshot(receipt) => {
+                let baseline = continuation_baseline?;
+                if !receipt.matches_baseline(&baseline) {
+                    return None;
+                }
+                baseline
+            }
+            AgentProviderInputEvidence::Extraction(_) => {
                 return None;
             }
         };
@@ -2357,8 +2363,8 @@ impl fmt::Debug for AgentProviderBoundExtractionContinuation {
 /// Move-only provider continuation bound to one exact viewport screenshot.
 ///
 /// The canonical PNG is retained only until the fixed provider body is
-/// serialized. This type cannot create another continuation or introduce
-/// opaque semantic references from pixels.
+/// serialized. A later continuation may retain only the already delivered
+/// semantic baseline; pixels cannot introduce opaque references.
 #[must_use]
 pub struct AgentProviderBoundScreenshotContinuation {
     prior_call: AgentProviderCallIdentity,

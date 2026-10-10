@@ -445,7 +445,7 @@ fn reasked_reason(request: &WorkModelRequest) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_malformed_call_is_asked_again_told_why_and_charged_as_reported() {
     let client = Scripted::answering_each(vec![
-        // A click with no target: the act schema refuses it.
+        // This observation offers only scroll: a click is refused by its schema.
         Ok(outcome(
             WorkModelStop::ToolUse,
             vec![tool(
@@ -465,7 +465,10 @@ async fn a_malformed_call_is_asked_again_told_why_and_charged_as_reported() {
         reason.starts_with("invalid_tool_call: nothing ran."),
         "{reason}"
     );
-    assert!(reason.contains("target"), "{reason}");
+    assert!(
+        reason.contains("arguments.actions[0].kind") && reason.contains("scroll"),
+        "{reason}"
+    );
     assert!(matches!(
         calls[1].messages.iter().rev().nth(1),
         Some(WorkModelMessage::Assistant(parts))

@@ -2540,16 +2540,19 @@ impl AgentBrowserSession {
 
     /// Whether the page model accepts screenshots.
     pub(crate) fn supports_vision(&self) -> bool {
-        self.chosen
-            .as_ref()
-            .is_none_or(zephium_agentic::AgentProviderModelClient::supports_vision)
+        self.policy
+            .permits_screenshot_sensitivity(self.lease.lease())
+            && self
+                .chosen
+                .as_ref()
+                .is_none_or(zephium_agentic::AgentProviderModelClient::supports_vision)
     }
 
     /// Optional viewport attachment to extraction has a narrower transport
     /// contract than the standalone Screenshot tool. Exact-count credentials
     /// cannot use its provider-reported image reservation/encoding path.
     pub(crate) fn supports_viewport_mapping(&self) -> bool {
-        self.config.input_accounting_mode()
+        self.supports_vision() && self.config.input_accounting_mode()
             == zephium_agentic::AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation
             && self.chosen.as_ref().is_some_and(zephium_agentic::AgentProviderModelClient::supports_vision)
     }
@@ -4538,6 +4541,9 @@ pub enum AgentBrowserProviderError {
     /// Fixed request configuration did not fit its exact admission contract.
     #[error("browser provider request contract was refused")]
     RequestContract(zephium_agentic::AgentProviderContractError),
+    /// Request serialization failed or exceeded its fixed byte ceiling.
+    #[error("browser provider request encoding was refused")]
+    RequestEncoding,
     /// Exact task-authorized native navigation policy refused its checkpoint.
     #[error("browser document navigation was refused")]
     Navigation(zephium_agentic::AgentPolicyError),
@@ -4650,6 +4656,7 @@ impl AgentBrowserProviderError {
         match error {
             AgentProviderRequestError::Policy(error) => Self::RequestPolicy(error),
             AgentProviderRequestError::Contract(error) => Self::RequestContract(error),
+            AgentProviderRequestError::Encoding => Self::RequestEncoding,
             _ => Self::Authority,
         }
     }

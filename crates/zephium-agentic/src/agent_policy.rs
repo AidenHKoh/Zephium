@@ -1189,6 +1189,18 @@ impl AgentRunPolicy {
         &self.manifest
     }
 
+    /// Whether the original run and lease permit sensitive viewport input.
+    /// Advisory only: capture, context, account, budget and delivery still need
+    /// their exact admission checks. This never broadens the approved scope.
+    pub fn permits_screenshot_sensitivity(&self, lease: AgentPlanLeaseId) -> bool {
+        !self.sealed
+            && self.manifest.scope().max_sensitivity() >= SemanticSensitivity::Sensitive
+            && self
+                .lease_index(lease)
+                .and_then(|index| self.manifest.plan_node(self.leases[index].binding.node()))
+                .is_some_and(|node| node.max_sensitivity() >= SemanticSensitivity::Sensitive)
+    }
+
     /// Persistent committed-model-input taint for all later effect checks.
     pub fn taints(&self) -> &[AgentTaintCohort] {
         &self.taints
@@ -2935,6 +2947,33 @@ fn provider_extraction_read_taints(
         }
         merge_taint(&mut candidates, source.clone());
     }
+    if read
+        .fragments()
+        .iter()
+        .any(|fragment| fragment.field() == crate::SemanticReadField::ViewportImage)
+    {
+        // Public DOM text cannot establish the sensitivity of viewport pixels.
+        // Keep the image cohort distinct and unable to mint action references.
+        let pixels = candidates
+            .iter()
+            .filter(|cohort| {
+                cohort.context == baseline.context()
+                    && cohort.observation == baseline.observation()
+                    && cohort.observation_generation == baseline.generation()
+                    && cohort.source_guard == baseline.guard()
+            })
+            .cloned()
+            .map(|mut cohort| {
+                cohort.source_guard = read.guard();
+                cohort.sensitivity = SemanticSensitivity::Sensitive;
+                cohort.references.clear();
+                cohort
+            })
+            .collect::<Vec<_>>();
+        for cohort in pixels {
+            merge_taint(&mut candidates, cohort);
+        }
+    }
     Ok(candidates)
 }
 
@@ -2993,10 +3032,18 @@ fn read_taints(
                 source_guard: read.guard(),
                 account: account.account(),
                 origin: provenance.origin().clone(),
-                sensitivity: provenance.sensitivity(),
+                sensitivity: if fragment.field() == crate::SemanticReadField::ViewportImage {
+                    SemanticSensitivity::Sensitive
+                } else {
+                    provenance.sensitivity()
+                },
                 trust: provenance.trust(),
                 attested_at: account.observed_at(),
-                references: vec![provenance.reference()],
+                references: if fragment.field() == crate::SemanticReadField::ViewportImage {
+                    Vec::new()
+                } else {
+                    vec![provenance.reference()]
+                },
             },
         );
     }
@@ -6893,6 +6940,81 @@ mod tests {
     }
 
     #[test]
+    fn viewport_mapping_keeps_sensitive_taint_without_granting_action_references() {
+        let source = origin("viewport-mapping");
+        let context = make_context(9_281, 9_282, 9_283);
+        let observation = actionable_observation(context, source.clone(), 1);
+        let baseline = observation_payload(&observation, 10)
+            .settle_delivery(SemanticModelDeliverySettlement::Committed)
+            .unwrap();
+        let schema = SemanticExtractionSchema::try_new(
+            crate::SemanticExtractionSchemaId::new(71).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_text("title".into(), true, 64).unwrap()],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema_with_viewport_image(
+            &observation,
+            crate::SemanticReadAuthority::Acknowledged(&baseline),
+            SemanticCaptureInstant::from_millis(NOW),
+            SemanticReadSensitivityLimit::PublicOnly,
+            crate::SemanticReadBudget::EXTRACTION,
+            &schema,
+        )
+        .unwrap();
+        assert!(read
+            .fragments()
+            .iter()
+            .any(|f| f.field() == crate::SemanticReadField::ViewportImage));
+        let screenshot = admitted_test_screenshot(&observation, &baseline, 83, 0x33);
+        assert!(screenshot.matches_baseline(&baseline));
+        let other = actionable_observation(context, source.clone(), 2);
+        let other_baseline = observation_payload(&other, 10)
+            .settle_delivery(SemanticModelDeliverySettlement::Committed)
+            .unwrap();
+        assert!(!screenshot.matches_baseline(&other_baseline));
+        let binding = account(context, NOW - 1);
+        let retained = observation_taints(&observation, binding).unwrap();
+        let cohorts =
+            provider_extraction_read_taints(&read, &baseline, binding, &retained).unwrap();
+        let pixels: Vec<_> = cohorts
+            .iter()
+            .filter(|c| c.source_guard == read.guard())
+            .collect();
+        assert!(!pixels.is_empty());
+        assert!(pixels
+            .iter()
+            .all(|c| c.sensitivity == SemanticSensitivity::Sensitive && c.references.is_empty()));
+        for sensitivity in [SemanticSensitivity::Public, SemanticSensitivity::Sensitive] {
+            let mut fixture = policy_fixture(
+                9_281,
+                9_282,
+                source.clone(),
+                sensitivity,
+                &[SemanticEffectClass::Read],
+                run_budget(10, 5_000, 10_000),
+            );
+            let allowed = sensitivity == SemanticSensitivity::Sensitive;
+            assert_eq!(
+                fixture.policy.permits_screenshot_sensitivity(fixture.lease),
+                allowed
+            );
+            assert!(!fixture
+                .policy
+                .permits_screenshot_sensitivity(AgentPlanLeaseId::generate()));
+            let manifest = fixture.policy.manifest();
+            let node = manifest.plan_node(AgentPlanNodeId::from_raw(1)).unwrap();
+            let admission = validate_context_scope(manifest, node, context, binding, &cohorts);
+            if allowed {
+                assert!(admission.is_ok());
+            } else {
+                assert_eq!(admission, Err(AgentPolicyError::Sensitivity));
+            }
+            fixture.policy.sealed = true;
+            assert!(!fixture.policy.permits_screenshot_sensitivity(fixture.lease));
+        }
+    }
+
+    #[test]
     fn screenshot_taint_covers_every_observed_frame_without_reference_authority() {
         let context = make_context(9_257, 9_258, 9_259);
         let observation = multi_origin_observation(context, 1);
@@ -7072,7 +7194,7 @@ mod tests {
                 .tokens(),
             120
         );
-        assert_eq!(committed.continuation_transcript_bytes(), None);
+        assert!(committed.continuation_transcript_bytes().is_some());
         let receipt = committed
             .input_evidence()
             .screenshot_receipt()
@@ -7105,8 +7227,8 @@ mod tests {
         assert_eq!(visual_taint.account(), AgentAccountScope::Anonymous);
         let (_, input, continuation) = committed.into_parts();
         assert!(
-            continuation.is_none(),
-            "visual pixels must never enter replay"
+            continuation.is_some(),
+            "the already delivered semantic baseline survives the one-shot visual input"
         );
         let (active, evidence) = input.into_parts();
         assert!(matches!(

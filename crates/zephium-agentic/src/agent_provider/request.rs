@@ -3050,6 +3050,8 @@ impl AgentProviderExtractionRequestDraft {
         if self.request.config.input_accounting_mode()
             != super::AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation
             || !viewport_image_fits(screenshot)
+            || !screenshot.matches_baseline(&self.baseline)
+            || !read.matches_acknowledgement(&self.baseline)
             || !read
                 .fragments()
                 .iter()
@@ -3767,6 +3769,8 @@ impl fmt::Debug for AgentPreparedLocateRequest {
 #[must_use]
 pub struct AgentProviderScreenshotRequestDraft {
     request: AgentProviderRequest,
+    baseline: SemanticObservationAcknowledgement,
+    continuation_transcript: AgentProviderTranscript,
     delivery: crate::semantic_screenshot::SemanticScreenshotDeliveryAuthority,
     screenshot_stats: SemanticScreenshotStats,
     transcript_bytes: usize,
@@ -3795,9 +3799,17 @@ impl AgentProviderScreenshotRequestDraft {
                 encode_anthropic_screenshot_continuation_body(&continuation)?
             }
         };
-        let (call, config, transcript, _correlation, _png, screenshot_stats, delivery) =
+        let baseline = continuation.baseline().clone();
+        let (call, config, transcript, correlation, _png, screenshot_stats, delivery) =
             continuation.into_request_parts();
-        let transcript_bytes = transcript.retained_bytes();
+        let continuation_transcript = transcript
+            .try_bind(correlation, "The viewport image was delivered once. It is not replayed. Only the existing semantic refs may be used for actions.".to_owned())
+            .map_err(|_| AgentProviderRequestError::Encoding)?
+            .into_transcript();
+        let transcript_bytes = continuation_transcript.retained_bytes();
+        if transcript_bytes > MAX_AGENT_PROVIDER_SCREENSHOT_TRANSCRIPT_BYTES {
+            return Err(AgentProviderRequestError::Encoding);
+        }
         Ok(Self {
             request: AgentProviderRequest {
                 call,
@@ -3805,6 +3817,8 @@ impl AgentProviderScreenshotRequestDraft {
                 endpoint,
                 body,
             },
+            baseline,
+            continuation_transcript,
             delivery,
             screenshot_stats,
             transcript_bytes,
@@ -3853,7 +3867,11 @@ impl AgentProviderScreenshotRequestDraft {
         observation: &SemanticObservation,
         counter: &dyn AgentProviderLocalInputTokenCounter,
     ) -> Result<AgentPreparedScreenshotRequest, AgentProviderRequestError> {
-        policy.reject_unstructured_navigation_input(call_request)?;
+        if !self.baseline.authenticates(observation) {
+            return Err(AgentPolicyError::PayloadMismatch.into());
+        }
+        self.continuation_transcript
+            .validate_navigation_checkpoint(policy, call_request)?;
         let structured_input = self
             .measure_structured_input(counter)
             .map_err(AgentProviderRequestError::InputTokenCounter)?;
@@ -3871,6 +3889,8 @@ impl AgentProviderScreenshotRequestDraft {
         debug_assert_eq!(call, AgentProviderCallIdentity::from_admission(&admission));
         Ok(AgentPreparedScreenshotRequest {
             request: self.request,
+            baseline: self.baseline,
+            continuation_transcript: self.continuation_transcript,
             admission,
             delivery: self.delivery,
             screenshot_stats: self.screenshot_stats,
@@ -3886,7 +3906,11 @@ impl AgentProviderScreenshotRequestDraft {
         call_request: AgentModelCallRequest,
         observation: &SemanticObservation,
     ) -> Result<AgentPreparedScreenshotRequest, AgentProviderRequestError> {
-        policy.reject_unstructured_navigation_input(call_request)?;
+        if !self.baseline.authenticates(observation) {
+            return Err(AgentPolicyError::PayloadMismatch.into());
+        }
+        self.continuation_transcript
+            .validate_navigation_checkpoint(policy, call_request)?;
         let structured_input = provider_count_preflight(&self.request, call_request, None)?;
         let call = self.request.call();
         let admission = policy.prepare_provider_screenshot_input(
@@ -3899,6 +3923,8 @@ impl AgentProviderScreenshotRequestDraft {
         debug_assert_eq!(call, AgentProviderCallIdentity::from_admission(&admission));
         Ok(AgentPreparedScreenshotRequest {
             request: self.request,
+            baseline: self.baseline,
+            continuation_transcript: self.continuation_transcript,
             admission,
             delivery: self.delivery,
             screenshot_stats: self.screenshot_stats,
@@ -3925,6 +3951,8 @@ impl fmt::Debug for AgentProviderScreenshotRequestDraft {
 #[must_use]
 pub struct AgentPreparedScreenshotRequest {
     request: AgentProviderRequest,
+    baseline: SemanticObservationAcknowledgement,
+    continuation_transcript: AgentProviderTranscript,
     admission: AgentModelCallAdmission,
     delivery: crate::semantic_screenshot::SemanticScreenshotDeliveryAuthority,
     screenshot_stats: SemanticScreenshotStats,
@@ -3970,9 +3998,10 @@ impl AgentPreparedScreenshotRequest {
                 delivery: self.delivery,
             },
             input_metrics,
-            // Visual bytes are deliberately one-shot and never replayed.
-            continuation_transcript: None,
-            continuation_baseline: None,
+            // Replay retains the earlier text observation and a closed receipt,
+            // never image bytes or new references derived from those pixels.
+            continuation_transcript: Some(self.continuation_transcript),
+            continuation_baseline: Some(self.baseline),
         }
     }
 
@@ -4534,15 +4563,20 @@ fn page_tool_definitions(
     config: &AgentProviderCallConfig,
     targets: Option<&AgentProviderActionTargets>,
 ) -> Result<Option<Vec<BrowserToolDefinition>>, AgentProviderRequestError> {
-    match targets.filter(|targets| targets.required_effect().is_some()) {
-        Some(targets) => constrained_browser_tool_definitions(config, Some(targets)),
-        None => Ok(None),
-    }
+    // Prompt-only target lists still let a strict model produce a structurally
+    // valid but impossible operation/ref pair. Keep the offered grammar bound
+    // to the current observation, including before an approval is requested.
+    constrained_browser_tool_definitions(config, targets)
 }
 
+// Whole-page reads can contain many more controls than an initial look.
+// Keep each action alternative bounded; a scoped inspection can expose a
+// later control without inflating every subsequent tool definition.
+const MAX_ACTION_REFS_PER_VARIANT: usize = 128;
+
 /// The act vocabulary of the current observation as a host fact at the end
-/// of the input, so the tool definitions stay the same across a page's calls.
-/// It narrows the prompt only: native binding still checks every target.
+/// of the input. It explains the constrained tools; native binding still
+/// checks every target independently of both the prompt and the schema.
 fn append_act_targets(
     body: Vec<u8>,
     config: &AgentProviderCallConfig,
@@ -4553,6 +4587,7 @@ fn append_act_targets(
     };
     let refs = |references: &mut dyn Iterator<Item = crate::SemanticReferenceId>| {
         references
+            .take(MAX_ACTION_REFS_PER_VARIANT)
             .map(|reference| Value::String(reference.model_token()))
             .collect::<Vec<_>>()
     };
@@ -4976,11 +5011,9 @@ fn encode_openai_screenshot_continuation_body(
         return Err(AgentProviderContractError::ProviderKind.into());
     }
     let transcript = continuation.transcript();
-    if transcript.navigation_checkpoint().is_some() {
-        return Err(AgentProviderRequestError::Encoding);
-    }
     let prior_input_items = transcript.turns().iter().try_fold(
-        2 + usize::from(transcript.inspection_checkpoint().is_some())
+        2 + usize::from(transcript.navigation_checkpoint().is_some())
+            + usize::from(transcript.inspection_checkpoint().is_some())
             + usize::from(transcript.inspection_recall().is_some()),
         |total, turn| {
             total
@@ -5013,6 +5046,12 @@ fn encode_openai_screenshot_continuation_body(
             }],
         },
     ));
+    if let Some(checkpoint) = transcript.navigation_checkpoint() {
+        input.push(OpenAiContinuationInputWire::Message(openai_text_message(
+            "developer",
+            checkpoint,
+        )));
+    }
     if let Some(checkpoint) = transcript.inspection_checkpoint() {
         input.push(OpenAiContinuationInputWire::Message(openai_text_message(
             "developer",
@@ -5309,9 +5348,6 @@ fn encode_anthropic_screenshot_continuation_body(
     let definitions = projected
         .as_deref()
         .unwrap_or_else(|| anthropic_browser_tool_definitions(config));
-    if transcript.navigation_checkpoint().is_some() {
-        return Err(AgentProviderRequestError::Encoding);
-    }
     let message_count = 3_usize
         .checked_add(
             transcript
@@ -5325,18 +5361,32 @@ fn encode_anthropic_screenshot_continuation_body(
     messages
         .try_reserve_exact(message_count)
         .map_err(|_| AgentProviderRequestError::Encoding)?;
+    let mut content = vec![
+        AnthropicContinuationContentWire::Text(AnthropicTextWire {
+            r#type: "text",
+            text: transcript.objective(),
+        }),
+        AnthropicContinuationContentWire::Text(AnthropicTextWire {
+            r#type: "text",
+            text: transcript.initial_observation(),
+        }),
+    ];
+    for text in [
+        transcript.navigation_checkpoint(),
+        transcript.inspection_checkpoint(),
+        transcript.inspection_recall(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        content.push(AnthropicContinuationContentWire::Text(AnthropicTextWire {
+            r#type: "text",
+            text,
+        }));
+    }
     messages.push(AnthropicContinuationMessageWire {
         role: "user",
-        content: vec![
-            AnthropicContinuationContentWire::Text(AnthropicTextWire {
-                r#type: "text",
-                text: transcript.objective(),
-            }),
-            AnthropicContinuationContentWire::Text(AnthropicTextWire {
-                r#type: "text",
-                text: transcript.initial_observation(),
-            }),
-        ],
+        content,
     });
     for turn in transcript.turns() {
         let correlation = turn.correlation();
@@ -6127,6 +6177,7 @@ fn constrained_browser_tool_definitions(
         };
         let references: Vec<_> = targets
             .permitted_references(kind)
+            .take(MAX_ACTION_REFS_PER_VARIANT)
             .map(|reference| Value::String(reference.model_token()))
             .collect();
         if references.is_empty() {
@@ -6147,6 +6198,7 @@ fn constrained_browser_tool_definitions(
         for reveal in [false, true] {
             let references: Vec<_> = targets
                 .scroll_references(reveal)
+                .take(MAX_ACTION_REFS_PER_VARIANT)
                 .map(|reference| reference.model_token())
                 .collect();
             if references.is_empty() {
@@ -8508,10 +8560,6 @@ mod tests {
             .unwrap();
             let wire: Value = serde_json::from_slice(&body).unwrap();
             if provider == AgentProviderKind::OpenAiResponses {
-                // OpenAI keeps its tools the same across a page's calls; the
-                // targets travel as the last host fact.
-                let generic: Value = serde_json::from_slice(&generic).unwrap();
-                assert_eq!(wire["tools"], generic["tools"]);
                 let fact = |wire: &Value| {
                     let input = wire["input"].as_array().unwrap();
                     let text = input.last().unwrap()["content"][0]["text"]
@@ -8528,21 +8576,6 @@ mod tests {
                     fact(&wire),
                     json!({"click": ["@a1", "@a3"], "fill": ["@a2", "@a3"]})
                 );
-                let empty = AgentProviderActionTargets::for_test(7, 9, &[]);
-                let body = encode_openai_observation_body_with_action_targets(
-                    &config,
-                    "objective",
-                    "observation",
-                    None,
-                    None,
-                    None,
-                    Some(&empty),
-                )
-                .unwrap();
-                let wire: Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(wire["tools"], generic["tools"]);
-                assert_eq!(fact(&wire), json!({}));
-                continue;
             }
             assert!(body.len() < generic.len());
             let act = wire["tools"]
@@ -8552,7 +8585,11 @@ mod tests {
                 .find(|tool| tool["name"] == "act")
                 .unwrap();
             assert_eq!(act["strict"], true);
-            let schema = &act["input_schema"];
+            let schema = &act[if provider == AgentProviderKind::OpenAiResponses {
+                "parameters"
+            } else {
+                "input_schema"
+            }];
             let variants = schema["properties"]["actions"]["items"]["anyOf"]
                 .as_array()
                 .unwrap();
@@ -8570,12 +8607,25 @@ mod tests {
             assert_eq!(variants.len(), 2, "unadvertised action kinds are absent");
 
             let empty = AgentProviderActionTargets::for_test(7, 9, &[]);
-            let body = encode_anthropic_body_with_action_targets(
-                &config,
-                "objective",
-                "observation",
-                Some(&empty),
-            )
+            let body = match provider {
+                AgentProviderKind::OpenAiResponses => {
+                    encode_openai_observation_body_with_action_targets(
+                        &config,
+                        "objective",
+                        "observation",
+                        None,
+                        None,
+                        None,
+                        Some(&empty),
+                    )
+                }
+                AgentProviderKind::AnthropicMessages => encode_anthropic_body_with_action_targets(
+                    &config,
+                    "objective",
+                    "observation",
+                    Some(&empty),
+                ),
+            }
             .unwrap();
             let wire: Value = serde_json::from_slice(&body).unwrap();
             assert!(wire["tools"]
@@ -8583,6 +8633,50 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|tool| tool["name"] != "act"));
+        }
+    }
+
+    #[test]
+    fn whole_page_action_vocabularies_are_bounded_per_operation() {
+        use crate::SemanticOperationClass::{Click, Fill, Press, Scroll, Select};
+        let operations = [Click, Fill, Press, Scroll, Select];
+        let entries = (1..=512)
+            .map(|id| (id, operations.as_slice()))
+            .collect::<Vec<_>>();
+        let targets = AgentProviderActionTargets::for_test(1, 1, &entries);
+        let config = provider_config(AgentProviderKind::OpenAiResponses);
+        let body = encode_openai_observation_body_with_action_targets(
+            &config,
+            "objective",
+            "observation",
+            None,
+            None,
+            None,
+            Some(&targets),
+        )
+        .unwrap();
+        let wire: Value = serde_json::from_slice(&body).unwrap();
+        let act = wire["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "act")
+            .unwrap();
+        for variant in act["parameters"]["properties"]["actions"]["items"]["anyOf"]
+            .as_array()
+            .unwrap()
+        {
+            let refs = variant["properties"]["target"]["enum"].as_array().unwrap();
+            assert!(!refs.is_empty() && refs.len() <= MAX_ACTION_REFS_PER_VARIANT);
+        }
+        let fact = wire["input"].as_array().unwrap().last().unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        let fact: Value =
+            serde_json::from_str(fact.strip_prefix("ZEPHIUM_HOST_ACT_TARGETS_V1\n").unwrap())
+                .unwrap();
+        for refs in fact.as_object().unwrap().values() {
+            assert!(refs.as_array().unwrap().len() <= MAX_ACTION_REFS_PER_VARIANT);
         }
     }
 

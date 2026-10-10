@@ -734,7 +734,8 @@ impl ArchivedDocument {
         }
         let (mut text_bytes, mut edges, mut values) = (0, 0, 0);
         let mut names = std::collections::BTreeSet::new();
-        // Only a text value may stand as read from the viewport image.
+        // Text and text-list items may stand as model-read pixels. Pixel
+        // citations never establish a URL, typed amount or native scalar.
         let mut cite = |ids: &[u16], pixels: bool| -> Result<(), AgentWorkJournalError> {
             if ids.is_empty()
                 || ids.len() > MAX_SEMANTIC_EXTRACTION_SOURCES_PER_VALUE
@@ -866,12 +867,12 @@ impl ArchivedDocument {
                         if items.len() > MAX_SEMANTIC_EXTRACTION_LIST_ITEMS {
                             return Err(invalid);
                         }
-                        cite(sources, false)?;
+                        cite(sources, true)?;
                         for item in items {
                             valid_text(&item.value, MAX_SEMANTIC_EXTRACTION_LIST_ITEM_BYTES)?;
                             text_bytes += item.value.len();
                             values += 1;
-                            cite(&item.sources, false)?;
+                            cite(&item.sources, true)?;
                         }
                     }
                 }
