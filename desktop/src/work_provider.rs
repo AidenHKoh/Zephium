@@ -27,6 +27,10 @@ impl WorkProviders {
         let _ = (engine, store);
         // The page lane and searches log their refusals as closed facts.
         zephium_app::work_trace::install(Arc::new(record_diagnostic));
+        record_diagnostic(format_args!(
+            "work: event=session_started build={} content=redacted",
+            option_env!("ZEPHIUM_BUILD_REVISION").unwrap_or("unknown")
+        ));
         // A request may offer a grant for a signed-in attached tab: the engine
         // answers whether the profile holds cookies for a site, nothing more.
         #[cfg(any(target_os = "macos", target_os = "windows"))]
