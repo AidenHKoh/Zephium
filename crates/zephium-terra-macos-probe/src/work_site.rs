@@ -25,6 +25,9 @@ use zephium_work_composition::NativeWorkComposition;
 
 use super::work_durable::{browser_settings, WorkflowResult};
 
+#[path = "work_site_human.rs"]
+mod human_fixture;
+
 /// The person's site as the Work contract sees it, and another site.
 const ACCOUNT: &str = "https://account.probe.test";
 const OTHER: &str = "https://other.probe.test";
@@ -76,6 +79,8 @@ enum Check {
     Held,
     /// A sign-in page stops for the person before any model call.
     Wall,
+    /// Native retained human presentation and same-document wall clearing.
+    Human(human_fixture::Scenario),
     /// A search form and a script filter load their results without asking.
     Search,
     /// An approved send runs once, exactly as previewed.
@@ -285,6 +290,17 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("autopost") => vec![Check::Autopost],
         Some("held") => vec![Check::Held],
         Some("wall") => vec![Check::Wall],
+        Some("human-signin") => vec![Check::Human(human_fixture::Scenario::SignIn)],
+        Some("human-check") => vec![Check::Human(human_fixture::Scenario::Check)],
+        Some("human-long-wait") => vec![Check::Human(human_fixture::Scenario::LongWait)],
+        Some("human-unresolved") => vec![Check::Human(human_fixture::Scenario::Unresolved)],
+        Some("human-cancel") => vec![Check::Human(human_fixture::Scenario::Cancel)],
+        Some("human-stale-document") => vec![Check::Human(human_fixture::Scenario::StaleDocument)],
+        Some("human") => human_fixture::SCENARIOS
+            .iter()
+            .copied()
+            .map(Check::Human)
+            .collect(),
         Some("search") => vec![Check::Search],
         Some("approve") => vec![Check::Approve],
         Some("changed") => vec![Check::Changed],
@@ -314,6 +330,13 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
     };
     let _ = CHECKS.set(checks);
     super::work_durable::run_loopback_site()
+}
+
+/// Only the explicit synthetic handoff checks expose a native human pane.
+pub(super) fn needs_human_presentation() -> bool {
+    CHECKS
+        .get()
+        .is_some_and(|checks| checks.iter().any(|check| matches!(check, Check::Human(_))))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -510,6 +533,9 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
         format!("<div role=\"dialog\" aria-modal=\"true\" aria-label=\"Before you continue\"><h2>Before you continue</h2><p>We use cookies and data to deliver and maintain our services.</p>{buttons}</div><main><p>Loading fares</p></main>")
     };
     let (status, headers, body) = match (site, method.as_str(), path.as_str()) {
+        (Site::Account, "GET", path) if path.starts_with("/human-fixture/") => (
+            "200 OK", String::new(), human_fixture::response(path),
+        ),
         (Site::Account, "POST", "/consent/save") => (
             "303 See Other",
             "Set-Cookie: zconsent=no; Path=/; Max-Age=3600\r\nLocation: /gconsent\r\n".into(),
@@ -842,6 +868,7 @@ struct Opened {
     status: Option<WorkStepStatus>,
     intervention: Option<WorkInterventionKindV1>,
     model_calls: Option<u16>,
+    resolved_handoff: Option<WorkPageHandoffKindV1>,
 }
 
 struct Run {
@@ -864,6 +891,7 @@ struct Context<'a> {
     tab_sign_in: AtomicBool,
     /// Changed declines a fresh model handoff after its sole approval.
     decline_changed_followup: AtomicBool,
+    human_fixture: Mutex<Option<human_fixture::Session>>,
 }
 impl Context<'_> {
     async fn create(&self, objective: &str) -> Result<(WorkId, WorkRevision), &'static str> {
@@ -919,8 +947,17 @@ impl Context<'_> {
                 .composition
                 .human_pages(self.profile, work)
                 .unwrap_or_default();
+            human_fixture::person(self, work, &pages).await;
             {
                 for page in &pages {
+                    if self.human_fixture.lock().is_ok_and(|state| state.is_some())
+                        && matches!(
+                            page.reason,
+                            WorkHumanReasonV1::SignIn | WorkHumanReasonV1::Challenge
+                        )
+                    {
+                        continue;
+                    }
                     // The person signs in in a tab instead of the pane.
                     if self.tab_sign_in.load(Ordering::Relaxed)
                         && page.reason == WorkHumanReasonV1::SignIn
@@ -1124,6 +1161,16 @@ impl Context<'_> {
         turns: Vec<Vec<WorkAgentFetch>>,
         decisions: Vec<(bool, bool)>,
     ) -> Result<Run, &'static str> {
+        let execution_timeout = self
+            .human_fixture
+            .lock()
+            .ok()
+            .and_then(|state| {
+                state
+                    .as_ref()
+                    .map(human_fixture::Session::execution_timeout_seconds)
+            })
+            .unwrap_or(1200);
         let decisions = Mutex::new(decisions);
         let confirmed = Mutex::new(Vec::new());
         let work = self.create(objective).await?;
@@ -1162,7 +1209,7 @@ impl Context<'_> {
                                 model_tokens: 1_000_000,
                                 cost_micro_usd: 3_000_000,
                                 operations: 512,
-                                timeout_seconds: 1200,
+                                timeout_seconds: execution_timeout,
                                 max_workers: 3,
                             },
                         },
@@ -1214,6 +1261,11 @@ impl Context<'_> {
                                         .ok()
                                         .and_then(|o| o.measurements)
                                         .map(|m| m.planner_calls),
+                                    resolved_handoff: outcome
+                                        .as_ref()
+                                        .ok()
+                                        .and_then(|o| o.measurements)
+                                        .and_then(|m| m.resolved_handoff),
                                 });
                             }
                             report(&outcome);
@@ -1345,6 +1397,11 @@ impl Context<'_> {
                                         .ok()
                                         .and_then(|o| o.measurements)
                                         .map(|m| m.planner_calls),
+                                    resolved_handoff: outcome
+                                        .as_ref()
+                                        .ok()
+                                        .and_then(|o| o.measurements)
+                                        .and_then(|m| m.resolved_handoff),
                                 });
                             }
                             report(&outcome);
@@ -1473,6 +1530,7 @@ pub(super) async fn workflow(
         sites: Sites::start()?,
         tab_sign_in: AtomicBool::new(false),
         decline_changed_followup: AtomicBool::new(false),
+        human_fixture: Mutex::new(None),
     };
     let line = |text: String| {
         let _ = writeln!(std::io::stdout().lock(), "loopback-site: {text}");
@@ -1501,6 +1559,11 @@ pub(super) async fn workflow(
     let goal = "Report what the page shows";
     for check in checks {
         let passed = match check {
+            Check::Human(scenario) => {
+                let (run, passed) = human_fixture::run(&context, scenario).await?;
+                last = run.state;
+                passed
+            }
             Check::Session => {
                 let run = context
                     .run(

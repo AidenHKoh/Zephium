@@ -61,7 +61,7 @@ pub(super) fn run_loopback_site() -> Result<(), ProbeFailure> {
     let owner_store = store.clone();
     let timeout = Duration::from_secs(840);
     zephium_engine::run_windows_work_application_with_input_probe(
-        profile, zephium_engine::MacosWorkProbeInput::LifecycleOnly, timeout + Duration::from_secs(30),
+        profile, if super::work_site::needs_human_presentation() { zephium_engine::MacosWorkProbeInput::Human } else { zephium_engine::MacosWorkProbeInput::LifecycleOnly }, timeout + Duration::from_secs(30),
         move |event| {
             match &event {
                 zephium_core::ports::engine::EngineEvent::UrlChanged { id, url }

@@ -581,7 +581,9 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     });
     let run = zephium_engine::run_macos_work_application_with_input_probe(
         profile,
-        if matches!(mode, Mode::AgentHumanGovernment) {
+        if matches!(mode, Mode::AgentHumanGovernment)
+            || (mode == Mode::LoopbackSite && super::work_site::needs_human_presentation())
+        {
             zephium_engine::MacosWorkProbeInput::Human
         } else {
             zephium_engine::MacosWorkProbeInput::LifecycleOnly
