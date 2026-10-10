@@ -235,6 +235,9 @@ pub struct WorkRouteV1 {
 pub struct WorkPlanStepV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
+    /// The day it falls on, `YYYY-MM-DD`, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -1168,6 +1171,32 @@ pub(super) fn picks_link(items: &[WorkPickV1]) -> bool {
         .any(|item| item.url.is_some() || !item.image_candidates.is_empty())
 }
 
+/// A real day written `YYYY-MM-DD`, between 1900 and 2199.
+fn calendar_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let number = |range: std::ops::Range<usize>| {
+        value
+            .get(range)
+            .filter(|digits| digits.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|digits| digits.parse::<u32>().ok())
+    };
+    let (Some(year), Some(month), Some(day)) = (number(0..4), number(5..7), number(8..10)) else {
+        return false;
+    };
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1900..2200).contains(&year) && (1..=days).contains(&day)
+}
+
 pub(super) fn check_plan(
     budget: &mut Budget,
     evidence: usize,
@@ -1189,6 +1218,14 @@ pub(super) fn check_plan(
             F::PlanStepWhen,
             place("steps[].when", i),
         )?;
+        if step
+            .date
+            .as_deref()
+            .is_some_and(|date| !calendar_date(date))
+        {
+            return Err(place("steps[].date", i)
+                .dropping(F::PlanStepDate, WorkFaultDrop::Remove("steps[].date")));
+        }
         line(
             budget,
             &step.title,

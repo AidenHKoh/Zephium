@@ -1010,21 +1010,21 @@ async fn a_refused_object_stands_on_its_second_try_without_its_optional_excess()
                 "create",
                 json!({"kind": "plan", "title": "Your trip", "data": {"steps": [
                     {"title": "Fly to SFO", "kind": "travel", "detail": "x".repeat(300)},
-                    {"title": "Check in", "kind": "stay", "date": "5 Jan"}]}}),
+                    {"title": "Check in", "kind": "stay", "day": "5 Jan"}]}}),
             )
         };
         match turn {
             0 => vec![plan()],
             1 => {
                 assert!(
-                    seen.contains("plan: steps[1].date is not a field of steps[1]"),
+                    seen.contains("plan: steps[1].day is not a field of steps[1]"),
                     "{seen}"
                 );
                 vec![plan()]
             }
             2 => {
                 assert!(
-                    seen.contains("Left out to place it: steps[1].date (not a field of plan); steps[0].detail (300 characters; the limit is 280)"),
+                    seen.contains("Left out to place it: steps[1].day (not a field of plan); steps[0].detail (300 characters; the limit is 280)"),
                     "{seen}"
                 );
                 vec![

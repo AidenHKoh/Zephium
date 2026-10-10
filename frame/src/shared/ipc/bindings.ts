@@ -5079,6 +5079,8 @@ export type WorkPlanStepV1 = WorkPlanStepV1_Serialize | WorkPlanStepV1_Deseriali
 
 export type WorkPlanStepV1_Deserialize = {
 	when?: string | null,
+	/**  The day it falls on, `YYYY-MM-DD`, when it has one. */
+	date?: string | null,
 	title: string,
 	detail?: string | null,
 	kind: WorkPlanStepKindV1,
@@ -5091,6 +5093,8 @@ export type WorkPlanStepV1_Deserialize = {
 
 export type WorkPlanStepV1_Serialize = {
 	when?: string | null,
+	/**  The day it falls on, `YYYY-MM-DD`, when it has one. */
+	date?: string | null,
 	title: string,
 	detail?: string | null,
 	kind: WorkPlanStepKindV1,

@@ -1781,6 +1781,7 @@ fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
     let plan = artifact::WorkArtifactDataV1::Plan {
         steps: vec![WorkPlanStepV1 {
             when: None,
+            date: None,
             title: "Fly".into(),
             detail: None,
             kind: WorkPlanStepKindV1::Travel,

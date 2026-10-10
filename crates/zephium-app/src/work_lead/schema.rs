@@ -123,6 +123,7 @@ pub(crate) fn data(kind: &str) -> Option<Value> {
             json!({
                 "steps": list(object(json!({
                     "when": text(L::STEP_WHEN),
+                    "date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
                     "title": text(L::STEP_TITLE),
                     "detail": text(L::STEP_DETAIL),
                     "kind": one_of(&["travel", "stay", "event", "task", "milestone", "note"]),
@@ -690,12 +691,12 @@ mod tests {
         assert!(found
             .words
             .starts_with("steps[1].kind is \"flight\"; it is one of travel"));
-        let extra = json!({"steps": [{"title": "Fly", "kind": "travel", "date": "5 Jan"}]});
+        let extra = json!({"steps": [{"title": "Fly", "kind": "travel", "day": "5 Jan"}]});
         let found = mismatch("plan", &extra).unwrap();
         assert!(found.unknown);
         assert!(found
             .words
-            .starts_with("steps[0].date is not a field of steps[0]"));
+            .starts_with("steps[0].day is not a field of steps[0]"));
         let missing = json!({"style": "todo", "items": [{"detail": "x"}]});
         assert_eq!(
             mismatch("list", &missing).unwrap().words,
@@ -709,7 +710,7 @@ mod tests {
         let fine = json!({"facet": "stay", "items": [{"name": "Loft", "price": {"display": "$90", "amount": 90}, "subtitle": null}]});
         assert_eq!(mismatch("picks", &fine), None);
         let mut pruned = extra.clone();
-        assert_eq!(prune("plan", &mut pruned), ["steps[0].date"]);
+        assert_eq!(prune("plan", &mut pruned), ["steps[0].day"]);
         assert_eq!(mismatch("plan", &pruned), None);
     }
 

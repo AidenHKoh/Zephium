@@ -30,7 +30,7 @@ fn every_kind_round_trips_its_wire_shape() {
             "rating":{"value":"4.5","max":5,"count":120},"why":"Only direct flight","tags":["direct"],
             "recommended":true,"route":{"from":"WAW","to":"SFO","depart":"10:05","arrive":"13:40",
             "duration":"12h 35m","stops":0,"carrier":"LOT","carrier_host":"lot.com"},"source":0}]}),
-        json!({"kind":"plan","steps":[{"when":"Mon 6 Jan","title":"Fly WAW to SFO","kind":"travel",
+        json!({"kind":"plan","steps":[{"when":"Mon 6 Jan","date":"2027-01-04","title":"Fly WAW to SFO","kind":"travel",
             "cost":"$1,240","place":"SFO","pick":{"artifact":"01J00000000000000000000000","index":0}}],
             "total":{"label":"Total","value":"$4,380"},"checkable":true}),
         json!({"kind":"list","style":"messages","items":[{"title":"Reply to Ana about the deck",
@@ -799,4 +799,16 @@ fn a_subject_needs_its_noun_title_and_address_and_sheds_what_overflows() {
     .unwrap();
     assert_eq!(people.field, F::SubjectPeople);
     assert_eq!(people.drop, Some(WorkFaultDrop::Keep("people")));
+}
+
+#[test]
+fn a_plan_step_date_is_a_real_day_or_goes() {
+    let step =
+        |date: &str| json!({"kind":"plan","steps":[{"date":date,"title":"Fly","kind":"travel"}]});
+    assert_eq!(field(step("2028-02-29")), None);
+    for wrong in ["2027-02-29", "2027-13-01", "9 Oct", "2027-1-04"] {
+        let fault = fault(step(wrong), 0).unwrap();
+        assert_eq!(fault.field, F::PlanStepDate, "{wrong}");
+        assert_eq!(fault.drop, Some(WorkFaultDrop::Remove("steps[].date")));
+    }
 }
