@@ -124,6 +124,10 @@ enum Check {
     SlackWrite,
     /// The same message sent with Enter from the composer, not its button.
     SlackEnter,
+    /// Declining the rich composer's send must leave the channel unchanged.
+    SlackDecline,
+    /// Facts painted in a canvas are available only through the visual path.
+    Visual,
     /// Source-bound synthetic fetched images, local crops and negative gates.
     Media(media_fixture::Scenario),
     /// A new issue from a dialog of rich editors and a pointer-down picker.
@@ -323,6 +327,9 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("memory") => vec![Check::Memory],
         Some("slackwrite") => vec![Check::SlackWrite],
         Some("slackenter") => vec![Check::SlackEnter],
+        Some("slackdecline") => vec![Check::SlackDecline],
+        Some("slack-actions") => vec![Check::SlackWrite, Check::SlackEnter, Check::SlackDecline],
+        Some("visual") => vec![Check::Visual],
         Some("media") => vec![
             Check::Media(media_fixture::Scenario::Mixed),
             Check::Media(media_fixture::Scenario::Anonymous),
@@ -603,6 +610,14 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
             "200 OK",
             String::new(),
             page("Landed", &format!("<h1>Front desk</h1><p>{LANDED_FACT}.</p>")),
+        ),
+        (Site::Account, _, "/visual") => (
+            "200 OK",
+            String::new(),
+            page("Chart", r##"<h1>Inventory chart</h1><canvas id="chart" width="700" height="420" aria-label="Inventory bar chart"></canvas><script>
+const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.fillRect(0,0,700,420);c.font='28px sans-serif';
+[['Red',17,'#b22222'],['Blue',43,'#1644bb'],['Green',29,'#16753e']].forEach(function(row,i){let y=55+i*115;c.fillStyle='black';c.fillText(row[0],20,y+28);c.fillStyle=row[2];c.fillRect(130,y,row[1]*10,45);c.fillStyle='black';c.fillText(String(row[1]),145+row[1]*10,y+30);});
+</script>"##),
         ),
         (Site::Account, _, "/app") => (
             "200 OK",
@@ -905,6 +920,7 @@ struct Context<'a> {
     composition: &'a NativeWorkComposition,
     profile: ProfileId,
     binding: zephium_app::AgentWorkProfileBinding,
+    chosen: Option<zephium_agentic::AgentProviderModelClient>,
     keys: Mutex<Vec<zephium_agentic::AgentProviderCredential>>,
     sites: Sites,
     /// Sign-in walls are passed in a tab rather than released.
@@ -1255,6 +1271,12 @@ impl Context<'_> {
                                 .map_err(|_| WorkError::Unavailable)?,
                             };
                             let mut settings = browser_settings(self.binding, key);
+                            if let Some(chosen) = &self.chosen {
+                                settings.access =
+                                    zephium_agent_controller::AgentBrowserModelAccess::Chosen(
+                                        chosen.clone(),
+                                    );
+                            }
                             // The person's pages are never retained at the provider.
                             settings.retain_public_responses = false;
                             settings.loopback_anonymous = true;
@@ -1541,11 +1563,36 @@ pub(super) async fn workflow(
     keys: Vec<zephium_agentic::AgentProviderCredential>,
 ) -> Result<WorkflowResult, &'static str> {
     let checks = CHECKS.get().cloned().unwrap_or_else(|| ALL.to_vec());
+    let chosen = if std::env::var_os("ZEPHIUM_PROBE_CHOSEN_PAGE_MODEL").is_some() {
+        use zephium_core::work::model::WorkModelRole;
+        let _ = zephium_app::work_models::view(profile).await;
+        zephium_app::work_models::choose(profile, WorkModelRole::Page, Some("openai/gpt-6-luna"))
+            .map_err(|_| "page_model_choice")?;
+        let (entry, client) = zephium_app::work_models::resolve_entry(profile, WorkModelRole::Page)
+            .await
+            .map_err(|_| "page_model")?;
+        Some(
+            zephium_agentic::AgentProviderModelClient::try_new(&entry, client)
+                .map_err(|_| "page_model")?,
+        )
+    } else {
+        None
+    };
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "loopback-site: page_transport={}",
+        if chosen.is_some() {
+            "chosen_luna"
+        } else {
+            "exact_luna"
+        }
+    );
     let context = Context {
         handle,
         composition,
         profile,
         binding,
+        chosen,
         keys: Mutex::new(keys),
         sites: Sites::start()?,
         tab_sign_in: AtomicBool::new(false),
@@ -1577,11 +1624,12 @@ pub(super) async fn workflow(
     if checks.iter().any(|check| {
         matches!(
             check,
-            Check::Media(
-                media_fixture::Scenario::Mixed
-                    | media_fixture::Scenario::Canvas
-                    | media_fixture::Scenario::Record
-            )
+            Check::Visual
+                | Check::Media(
+                    media_fixture::Scenario::Mixed
+                        | media_fixture::Scenario::Canvas
+                        | media_fixture::Scenario::Record
+                )
         )
     }) {
         media_fixture::seed_session(&context).await?;
@@ -1591,6 +1639,25 @@ pub(super) async fn workflow(
     let goal = "Report what the page shows";
     for check in checks {
         let passed = match check {
+            Check::Visual => {
+                let run = context.run(
+                    "Read the inventory chart",
+                    false,
+                    "Allow",
+                    vec![vec![browse("/visual", "Read the values painted in the inventory bar chart. Report each color and its count, and which count is largest. Use a screenshot if the text view cannot show the chart.")]],
+                ).await?;
+                let correct = mentions(&run, &["red", "17", "blue", "43", "green", "29"]);
+                let succeeded = run.opened.len() == 1
+                    && run.opened[0].yours
+                    && run.asked.len() == 1
+                    && run.opened[0].status == Some(WorkStepStatus::Succeeded);
+                line(format!(
+                    "check=visual correct={correct} succeeded={succeeded} pages=[{}]",
+                    pages_of(&run)
+                ));
+                last = run.state;
+                correct && succeeded
+            }
             Check::Media(scenario) => {
                 let (run, passed) = media_fixture::run(&context, scenario).await?;
                 last = run.state;
@@ -1873,7 +1940,7 @@ pub(super) async fn workflow(
                         )
                     && run.confirmed.first().is_some_and(|h| h.contains("#design"))
             }
-            Check::SlackWrite | Check::SlackEnter => {
+            Check::SlackWrite | Check::SlackEnter | Check::SlackDecline => {
                 let before = context.sites.written("/edit/slack/send").len();
                 let goal = if check == Check::SlackEnter {
                     "Type 'On my way, ten minutes out' in the message box and press Enter to send it"
@@ -1893,28 +1960,46 @@ pub(super) async fn workflow(
                             },
                             goal,
                         )]],
-                        vec![(true, false)],
+                        vec![(check != Check::SlackDecline, false)],
                     )
                     .await?;
                 let sent = context.sites.written("/edit/slack/send");
                 let sent = &sent[before.min(sent.len())..];
                 let held = confirms(&run);
+                let extracted = run.opened.len() == 1
+                    && run.opened[0].status == Some(WorkStepStatus::Succeeded)
+                    && run.state.executions.iter().any(|execution| {
+                        execution
+                            .artifacts
+                            .iter()
+                            .any(|artifact| !artifact.evidence.is_empty())
+                    });
                 line(format!(
-                    "check=slackwrite sent={} exact={} confirms={held:?} pages=[{}]",
+                    "check=slackwrite sent={} exact={} extracted={extracted} confirms={held:?} pages=[{}]",
                     sent.len(),
                     sent.first()
                         .is_some_and(|t| t == "On my way, ten minutes out"),
                     pages_of(&run)
                 ));
                 last = run.state;
-                sent.len() == 1
-                    && sent[0] == "On my way, ten minutes out"
-                    && held.len() == 1
-                    && held.first()
-                        == Some(&(
-                            Some(WorkConfirmDecisionV1::Approved),
-                            WorkStepStatus::Succeeded,
-                        ))
+                if check == Check::SlackDecline {
+                    sent.is_empty()
+                        && held
+                            == vec![(
+                                Some(WorkConfirmDecisionV1::Declined),
+                                WorkStepStatus::Cancelled,
+                            )]
+                } else {
+                    sent.len() == 1
+                        && sent[0] == "On my way, ten minutes out"
+                        && extracted
+                        && held.len() == 1
+                        && held.first()
+                            == Some(&(
+                                Some(WorkConfirmDecisionV1::Approved),
+                                WorkStepStatus::Succeeded,
+                            ))
+                }
             }
             Check::LinearWrite => {
                 let before = context.sites.written("/edit/linear/issue").len();

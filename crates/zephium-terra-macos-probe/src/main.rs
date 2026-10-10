@@ -512,6 +512,7 @@ impl ProbeFailure {
             Self::Provider(TerraProbeProviderError::RequestContract(_)) => {
                 "provider_request_contract"
             }
+            Self::Provider(TerraProbeProviderError::RequestEncoding) => "provider_request_encoding",
             Self::Provider(TerraProbeProviderError::ActionProposalLoop) => {
                 "provider_action_proposal_loop"
             }
