@@ -68,7 +68,8 @@ closed!(WorkListStyleV1 {
     Todo,
     Messages,
     Reading,
-    Requirements
+    Requirements,
+    Questions
 });
 closed!(WorkListPriorityV1 { High });
 closed!(WorkSheetColumnKindV1 {

@@ -60,7 +60,9 @@ export function objectWidth(view: ObjectView): Range {
       return { min: width, ideal: width, max: width };
     }
     case "list":
-      return { min: 400, ideal: 560, max: 640 };
+      return view.style === "questions"
+        ? { min: 584, ideal: 880, max: 920 }
+        : { min: 400, ideal: 560, max: 640 };
     case "sheet": {
       // A few named things compared stand as columns under a column of measures.
       if (versus(view)) {
@@ -140,6 +142,18 @@ export function objectHeight(view: ObjectView, width: number): number {
       return (view.title ? 40 : 0) + body + (view.total ? 48 : 0) + 16;
     }
     case "list":
+      if (view.style === "questions") {
+        const across = Math.max(1, Math.floor((width + 12) / (280 + 12)));
+        const tallest = (item: (typeof view.items)[number]) =>
+          Math.max(
+            24 + lines(item.title, width / across - 36, 7.5) * 19,
+            lines(item.title, width / across - 36, 7) * 17 +
+              lines(item.detail ?? "", width / across - 36, 7.5) * 19,
+          );
+        const rows = Math.ceil(view.items.length / across);
+        const row = Math.max(...view.items.map(tallest), 60) + 32 + 18;
+        return (view.title ? 40 : 0) + rows * row + (rows - 1) * 12;
+      }
       return (
         (view.title ? 40 : 0) +
         view.items.reduce((sum, item) => sum + (item.from ? 76 : item.detail ? 56 : 40), 0)

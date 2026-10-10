@@ -277,7 +277,7 @@ export type PlanView = ObjectBase & {
   checkable: boolean;
 };
 
-type ListStyle = "todo" | "messages" | "reading" | "requirements";
+type ListStyle = "todo" | "messages" | "reading" | "requirements" | "questions";
 type ListFrom = {
   /** A site or an app's host for its mark: `slack.com`. */
   host?: string;

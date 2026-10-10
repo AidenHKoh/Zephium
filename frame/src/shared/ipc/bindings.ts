@@ -4337,7 +4337,7 @@ export type WorkListItemV1_Serialize = {
 
 export type WorkListPriorityV1 = "high";
 
-export type WorkListStyleV1 = "todo" | "messages" | "reading" | "requirements";
+export type WorkListStyleV1 = "todo" | "messages" | "reading" | "requirements" | "questions";
 
 export type WorkLocalServerKindV1 = "ollama" | "lm_studio";
 

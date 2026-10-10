@@ -1030,6 +1030,41 @@ const studyMonth: PlanView = {
   ],
 };
 
+const practice: ListView = {
+  id: "obj-list-questions",
+  kind: "list",
+  style: "questions",
+  title: "Practice questions",
+  items: [
+    {
+      title: "What is the time complexity of two nested loops that each run n times?",
+      detail: "O(n²), because the inner loop runs n times for each of n outer iterations.",
+    },
+    {
+      title: "When is binary search valid, and what is its time complexity?",
+      detail:
+        "The search space must be ordered and support midpoint access; it takes O(log n) comparisons.",
+    },
+    {
+      title: "How does a hash table handle two keys with the same hash index?",
+      detail: "Chaining or open addressing; performance depends on load and probing.",
+    },
+    {
+      title: "What is the difference between a stack and a queue?",
+      detail: "A stack is LIFO; a queue is FIFO.",
+    },
+    {
+      title: "What invariant does a binary search tree maintain?",
+      detail: "Each node’s left-subtree keys are smaller and right-subtree keys are larger.",
+    },
+    {
+      title: "How do BFS and DFS differ, and when does BFS find shortest paths?",
+      detail:
+        "BFS explores by distance layers and finds shortest paths in an unweighted graph; DFS follows branches deeply first.",
+    },
+  ],
+};
+
 const roadmap: PlanView = {
   kind: "plan",
   id: "roadmap",
@@ -1573,6 +1608,7 @@ export const looks: Record<string, { object: ObjectView; width: number }[]> = {
     { object: failedPage, width: 480 },
   ],
   notes: [{ object: note, width: 420 }],
+  questions: [{ object: practice, width: 880 }],
   subjects: [
     { object: pullRequest, width: 560 },
     {

@@ -776,6 +776,7 @@
   "work_diff_added": "Added",
   "work_diff_removed": "Removed",
   "work_list_open_in": "Open in {app}",
+  "work_list_show_answer": "Show answer",
   "chart_kind_radar": "Radar chart",
   "chart_kind_heat": "Heat map",
   "chart_kind_spark": "Sparkline",

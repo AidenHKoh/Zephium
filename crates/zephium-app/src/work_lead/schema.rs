@@ -139,7 +139,7 @@ pub(crate) fn data(kind: &str) -> Option<Value> {
         ),
         "list" => object(
             json!({
-                "style": one_of(&["todo", "messages", "reading", "requirements"]),
+                "style": one_of(&["todo", "messages", "reading", "requirements", "questions"]),
                 "items": list(object(json!({
                     "title": text(L::ITEM_TITLE),
                     "detail": text(L::ITEM_DETAIL),
