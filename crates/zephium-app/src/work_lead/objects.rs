@@ -150,6 +150,7 @@ pub(crate) fn read(run: &LeadRun, objects: &[CanvasObject], ids: &[String]) -> S
             .map(|link| run.cite(link.clone(), "", None))
             .collect();
         let mut data = serde_json::to_value(&artifact.data).unwrap_or(Value::Null);
+        strip_native_media(&mut data);
         items_mut(&mut data, |item| {
             if let Some(index) = item.get("source").and_then(Value::as_u64) {
                 if let Some(key) = keys.get(index as usize) {
@@ -340,6 +341,7 @@ pub(crate) fn propose(
     };
     map.remove("kind");
     let mut data = Value::Object(map);
+    strip_native_media(&mut data);
     super::schema::strip_schema_words(kind, &mut data);
     let mut left_out: Vec<String> = Vec::new();
     if lenient {
@@ -876,6 +878,75 @@ pub(crate) fn part_holds<'a>(
     })
 }
 
+/// Native references never enter or survive the model JSON vocabulary.
+pub(crate) fn strip_native_media(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.remove("record_media");
+            object.remove("media_attempted");
+            for value in object.values_mut() {
+                strip_native_media(value);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_native_media(item);
+            }
+        }
+        _ => {}
+    }
+}
+/// Hydrates only exact archived evidence identities. Labels and URLs cannot
+/// borrow another record's pixels. Ambiguous source membership yields no image.
+pub(crate) fn hydrate_record_media(proposed: &mut Proposed, executions: &[WorkExecutionFact]) {
+    let lookup = |wanted: &WorkEvidenceLink| {
+        let mut matched = false;
+        let mut image = None;
+        let mut ambiguous = false;
+        for artifact in executions.iter().flat_map(|execution| &execution.artifacts) {
+            if let WorkArtifactDataV1::ComparisonMatrix {
+                subjects, cells, ..
+            } = &artifact.data
+            {
+                for (index, subject) in subjects
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, subject)| subject.media_attempted)
+                {
+                    let matches = cells.get(index).is_some_and(|cells| {
+                        cells
+                            .iter()
+                            .flat_map(|cell| &cell.evidence)
+                            .any(|index| artifact.evidence.get(usize::from(*index)) == Some(wanted))
+                    });
+                    if matches {
+                        if matched && image != subject.record_media {
+                            ambiguous = true;
+                        }
+                        matched = true;
+                        image = subject.record_media.clone();
+                    }
+                }
+            }
+        }
+        matched.then_some(if ambiguous { None } else { image })
+    };
+    if let WorkArtifactDataV1::Picks { items, .. } = &mut proposed.data {
+        for item in items {
+            item.record_media = None;
+            item.media_attempted = false;
+            let source = item
+                .source
+                .and_then(|index| proposed.evidence.get(usize::from(index)));
+            if let Some(image) = source.and_then(lookup) {
+                item.media_attempted = true;
+                item.record_media = image;
+                item.image_candidates.clear();
+            }
+        }
+    }
+}
+
 /// Removes picture addresses `shown` does not know from the pictures the
 /// canvas fetches on its own, and says how many went.
 fn keep_shown_pictures(data: &mut WorkArtifactDataV1, shown: impl Fn(&str) -> bool) -> usize {
@@ -902,6 +973,25 @@ fn keep_shown_pictures(data: &mut WorkArtifactDataV1, shown: impl Fn(&str) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_media_never_enters_model_input_or_survives_model_object_fields() {
+        let mut value = serde_json::json!({
+            "kind":"picks", "items":[{"name":"One", "source":0,
+                "record_media":{"origin":"native_crop","digest":"private-reference"},
+                "media_attempted":true,
+                "nested":[{"record_media":{"origin":"native_fetch"},"keep":"source text"}]
+            }]
+        });
+        strip_native_media(&mut value);
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind":"picks", "items":[{"name":"One","source":0,"nested":[{"keep":"source text"}]}]
+            })
+        );
+        assert!(!value.to_string().contains("private-reference"));
+    }
 
     #[test]
     fn a_private_run_keeps_only_the_pictures_pages_showed() {

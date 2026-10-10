@@ -147,6 +147,9 @@ pub(crate) struct Payload {
     /// The application actor has already asked the notes service about a
     /// resource reference, so a second pass goes straight to the store.
     pub(crate) notes_checked: bool,
+    /// Successful native pixels wait for a second actor-selected profile check.
+    /// This field is never accepted from a serialized request.
+    pub(crate) record_media_delivery: Option<WorkReply>,
 }
 #[derive(Clone)]
 pub struct WorkDocumentSubmission(std::sync::Arc<std::sync::Mutex<Option<Payload>>>);
@@ -172,6 +175,7 @@ impl WorkDocumentSubmission {
                 | WorkRequest::ReadEvidence { .. }
                 | WorkRequest::RuntimeUpdate { .. }
                 | WorkRequest::RuntimeAbandon { .. }
+                | WorkRequest::PutRecordMedia { .. }
         ) {
             return Err(WorkError::Invalid);
         }
@@ -241,6 +245,7 @@ impl WorkDocumentSubmission {
                 reply,
                 permit: Permit(pending.clone()),
                 notes_checked: false,
+                record_media_delivery: None,
             })))),
             WorkDocumentRequest {
                 owner,

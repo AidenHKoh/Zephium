@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { pictureUrl } from "$domain/resources";
   import Icon from "$shared/ui/Icon";
-  import { mediaUrl } from "$domain/resources";
+
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   import HostGlyph, { siteMark } from "../cards/HostGlyph.svelte";
   import Chips from "./Chips.svelte";
@@ -21,9 +22,7 @@
     /** The entity stands alone: its picture takes the block's width. */
     wide?: boolean;
   } = $props();
-  const picture = $derived(
-    entity.image ? mediaUrl(entity.image.profile, entity.image.digest) : null,
-  );
+  const picture = $derived(entity.image ? pictureUrl(entity.image) : null);
   let failed = $state(false);
   const host = $derived.by(() => {
     const first = entity.sources?.[0];

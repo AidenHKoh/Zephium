@@ -152,6 +152,12 @@ pub struct WorkPickV1 {
     /// Public HTTPS pictures of the subject itself, from its sources.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_candidates: Vec<String>,
+    /// Host-only immutable native record image; never supplied by model tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_media: Option<super::media::WorkRecordMediaRefV1>,
+    /// Native enrichment was attempted; absence never triggers a cookie-less refetch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub media_attempted: bool,
     /// A bare public host whose logo stands for the subject.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logo_host: Option<String>,
@@ -1012,6 +1018,14 @@ pub(super) fn check_picks(budget: &mut Budget, evidence: usize, items: &[WorkPic
             F::PickSubtitle,
             place("items[].subtitle", i),
         )?;
+        if item
+            .record_media
+            .as_ref()
+            .is_some_and(|media| media.validate().is_err() || !item.media_attempted)
+        {
+            return Err(place("items[].record_media", i)
+                .dropping(F::PickImages, Remove("items[].record_media")));
+        }
         extra(
             item.image_candidates.len(),
             L::PICK_IMAGES,

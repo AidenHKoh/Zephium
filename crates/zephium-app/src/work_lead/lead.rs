@@ -727,11 +727,12 @@ where
         }
         let data = args.get("data").cloned().unwrap_or(Value::Null);
         let sources = strings(args.get("sources"));
-        let proposed =
+        let mut proposed =
             match objects::propose(self.run, &canvas, kind, title, data, &sources, &[], lenient) {
                 Ok(proposed) => proposed,
                 Err((fault, reason)) => return self.refuse(&key, reason, fault),
             };
+        objects::hydrate_record_media(&mut proposed, &projection.executions);
         if helper {
             if let zephium_core::work::artifact::WorkArtifactDataV1::Sheet {
                 columns, rows, ..
@@ -830,7 +831,7 @@ where
             .to_owned();
         let data = args.get("data").cloned().unwrap_or(Value::Null);
         let sources = strings(args.get("sources"));
-        let proposed = match objects::propose(
+        let mut proposed = match objects::propose(
             self.run,
             &canvas,
             kind,
@@ -843,6 +844,7 @@ where
             Ok(proposed) => proposed,
             Err((fault, reason)) => return self.refuse(&key, reason, fault),
         };
+        objects::hydrate_record_media(&mut proposed, &projection.executions);
         if let Err(fault) = objects::honest(
             &proposed.data,
             &honesty(&projection, self.run.probe.execution(), &proposed),

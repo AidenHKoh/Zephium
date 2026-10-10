@@ -100,11 +100,15 @@ function subjects(
         descriptor?: string | null;
         homepage?: string | null;
         image_candidates?: readonly string[] | null;
+        record_media?: import("$shared/ipc/bindings").WorkRecordMediaRefV1 | null;
+        media_attempted?: boolean;
       }[]
     | undefined,
 ) {
   return (list ?? []).map((subject) => ({
     name: subject.name,
+    ...(subject.record_media ? { recordMedia: subject.record_media } : {}),
+    ...(subject.media_attempted ? { mediaAttempted: true } : {}),
     ...(subject.descriptor ? { descriptor: subject.descriptor } : {}),
     ...(subject.homepage ? { homepage: subject.homepage } : {}),
     ...(subject.image_candidates?.length

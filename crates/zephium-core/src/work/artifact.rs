@@ -162,6 +162,12 @@ pub struct WorkSubject {
     /// copy with provenance before anything renders.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_candidates: Vec<String>,
+    /// Host-only immutable native record image; never supplied by model tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_media: Option<super::media::WorkRecordMediaRefV1>,
+    /// Native enrichment was attempted; absence never triggers a cookie-less refetch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub media_attempted: bool,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -625,6 +631,12 @@ fn validate_subjects(
         if let Some(homepage) = &subject.homepage {
             budget.text(homepage)?;
             super::runtime::validate_public_reference_url(homepage)?;
+        }
+        if let Some(media) = &subject.record_media {
+            media.validate()?;
+            if !subject.media_attempted {
+                return Err(WorkError::Invalid);
+            }
         }
         if subject.image_candidates.len() > 3 {
             return Err(WorkError::Invalid);
@@ -2208,6 +2220,8 @@ mod tests {
             name: name.into(),
             descriptor: None,
             homepage: None,
+            record_media: None,
+            media_attempted: false,
             image_candidates: vec![],
         }
     }
@@ -2720,5 +2734,29 @@ mod tests {
             r#"{"kind":"findings","items":[],"html":"<b>"}"#
         )
         .is_err());
+    }
+}
+
+impl WorkArtifactDataV1 {
+    /// Model-authored data cannot mint or copy privileged native image references.
+    /// Exact host provenance hydration happens after this boundary.
+    pub fn clear_record_media(&mut self) {
+        match self {
+            Self::Picks { items, .. } => {
+                for item in items {
+                    item.record_media = None;
+                    item.media_attempted = false;
+                }
+            }
+            Self::ComparisonMatrix { subjects, .. }
+            | Self::Findings { subjects, .. }
+            | Self::EvidenceCollection { subjects, .. } => {
+                for subject in subjects {
+                    subject.record_media = None;
+                    subject.media_attempted = false;
+                }
+            }
+            _ => {}
+        }
     }
 }

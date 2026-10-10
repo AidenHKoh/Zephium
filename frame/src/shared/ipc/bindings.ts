@@ -5020,6 +5020,10 @@ export type WorkPickV1_Deserialize = {
 	subtitle?: string | null,
 	/**  Public HTTPS pictures of the subject itself, from its sources. */
 	image_candidates?: string[],
+	/**  Host-only immutable native record image; never supplied by model tools. */
+	record_media?: WorkRecordMediaRefV1 | null,
+	/**  Native enrichment was attempted; absence never triggers a cookie-less refetch. */
+	media_attempted?: boolean,
 	/**  A bare public host whose logo stands for the subject. */
 	logo_host?: string | null,
 	url?: string | null,
@@ -5041,6 +5045,10 @@ export type WorkPickV1_Serialize = {
 	subtitle?: string | null,
 	/**  Public HTTPS pictures of the subject itself, from its sources. */
 	image_candidates?: string[],
+	/**  Host-only immutable native record image; never supplied by model tools. */
+	record_media?: WorkRecordMediaRefV1 | null,
+	/**  Native enrichment was attempted; absence never triggers a cookie-less refetch. */
+	media_attempted?: boolean,
 	/**  A bare public host whose logo stands for the subject. */
 	logo_host?: string | null,
 	url?: string | null,
@@ -5542,6 +5550,23 @@ export type WorkRatingV1_Serialize = {
 	value: string,
 	max: number,
 	count?: number | null,
+};
+
+export type WorkRecordMediaOriginV1 = "native_fetch" | "native_crop";
+
+export type WorkRecordMediaRefV1 = {
+	profile: ProfileId,
+	work: WorkId,
+	execution: WorkExecutionId,
+	attempt: WorkAttemptId,
+	step: WorkStepId,
+	extraction: WorkArtifactId,
+	record: number,
+	source: string,
+	digest: string,
+	width: number,
+	height: number,
+	origin: WorkRecordMediaOriginV1,
 };
 
 export type WorkRelation = {
@@ -6279,6 +6304,10 @@ export type WorkSubject_Deserialize = {
 	 *  copy with provenance before anything renders.
 	 */
 	image_candidates?: string[],
+	/**  Host-only immutable native record image; never supplied by model tools. */
+	record_media?: WorkRecordMediaRefV1 | null,
+	/**  Native enrichment was attempted; absence never triggers a cookie-less refetch. */
+	media_attempted?: boolean,
 };
 
 /**  A named thing the work is about: a library, a listing, a flight, a concept. */
@@ -6293,6 +6322,10 @@ export type WorkSubject_Serialize = {
 	 *  copy with provenance before anything renders.
 	 */
 	image_candidates?: string[],
+	/**  Host-only immutable native record image; never supplied by model tools. */
+	record_media?: WorkRecordMediaRefV1 | null,
+	/**  Native enrichment was attempted; absence never triggers a cookie-less refetch. */
+	media_attempted?: boolean,
 };
 
 export type WorkSummary = {

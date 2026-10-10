@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { linkVideo, youtubeId, youtubeThumbnail } from "../lib/link-media";
+import { linkVideo, youtubeId } from "../lib/link-media";
 import { environmentItems } from "../lib/project-environment";
 import type { WorkEnvironmentSnapshot } from "$shared/ipc/bindings";
 import type { MediaAssetV1 } from "$domain/resources";
@@ -13,9 +13,6 @@ test("a video id comes from watch, youtu.be and shorts addresses only", () => {
   expect(youtubeId("https://www.youtube.com/@channel")).toBeNull();
   expect(youtubeId(`https://notyoutube.com/watch?v=${id}`)).toBeNull();
   expect(youtubeId("https://youtu.be/short")).toBeNull();
-  expect(youtubeThumbnail(`https://youtu.be/${id}`)).toBe(
-    `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
-  );
 });
 
 test("a link's admitted picture is its image, never a media card of its own", () => {

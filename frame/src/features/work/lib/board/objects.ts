@@ -1,3 +1,4 @@
+import { pictureUrl, recordMediaUrl } from "$domain/resources";
 import type { WorkArtifactV1, WorkExecutionFact } from "$shared/ipc/bindings";
 import type { CellView, DocumentNodeView, EvidenceReference } from "$shared/ui/data/Artifact";
 import { styleSpec, type ChartSpec } from "$shared/ui/data/Chart";
@@ -182,7 +183,7 @@ export function pickName(
 }
 
 function pickOf(entity: Entity, context: string): PickView {
-  const src = entity.image ? mediaUrl(entity.image.profile, entity.image.digest) : null;
+  const src = entity.image ? pictureUrl(entity.image) : null;
   const labelled = entity.facts.filter((fact) => fact.label.trim());
   const said = entity.facts.find((fact) => !fact.label.trim());
   const logo = hostOf(entity.homepage);
@@ -479,10 +480,13 @@ function namedPictures(
   };
   for (const artifact of execution.artifacts) {
     const data = artifact.data;
-    if (data.kind === "comparison_matrix")
-      for (const subject of data.subjects) add(subject.name, subject.image_candidates);
-    else if (data.kind === "picks")
-      for (const item of data.items) add(item.name, item.image_candidates);
+    if (data.kind === "comparison_matrix") {
+      for (const subject of data.subjects)
+        if (!subject.media_attempted) add(subject.name, subject.image_candidates);
+    } else if (data.kind === "picks") {
+      for (const item of data.items)
+        if (!item.media_attempted) add(item.name, item.image_candidates);
+    }
   }
   return named;
 }
@@ -609,11 +613,24 @@ function leadView(
           const admitted = pickCandidates(item)
             .map((candidate) => fetched.get(pictureKey(candidate)))
             .find((picture) => !!picture);
-          const src = admitted ? mediaUrl(admitted.profile, admitted.digest) : null;
+          const src = item.record_media
+            ? recordMediaUrl(item.record_media)
+            : admitted
+              ? pictureUrl(admitted)
+              : null;
           return {
             name: item.name,
             ...(item.subtitle ? { subtitle: item.subtitle } : {}),
-            ...(src ? { picture: { src } } : {}),
+            ...(src
+              ? {
+                  picture: {
+                    src,
+                    ...(item.record_media
+                      ? { width: item.record_media.width, height: item.record_media.height }
+                      : {}),
+                  },
+                }
+              : {}),
             ...(item.logo_host ? { logo: item.logo_host } : {}),
             ...(item.url ? { url: item.url } : {}),
             ...(item.price

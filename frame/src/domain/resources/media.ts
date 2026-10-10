@@ -1,4 +1,7 @@
-import type { MediaAssetV1_Deserialize as MediaAssetV1 } from "$shared/ipc/bindings";
+import type {
+  WorkRecordMediaRefV1,
+  MediaAssetV1_Deserialize as MediaAssetV1,
+} from "$shared/ipc/bindings";
 import { IS_MAC } from "$shared/platform";
 
 export type { MediaAssetV1 };
@@ -30,4 +33,29 @@ export function mediaSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** The host serves this exact immutable profile and record; it never fetches a URL. */
+export function recordMediaUrl(media: WorkRecordMediaRefV1): string | null {
+  if (
+    !PROFILE.test(media.profile) ||
+    !DIGEST.test(media.source) ||
+    !DIGEST.test(media.digest) ||
+    media.width < 1 ||
+    media.width > 320 ||
+    media.height < 1 ||
+    media.height > 240
+  )
+    return null;
+  const encoded = btoa(JSON.stringify(media))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/u, "");
+  return `${base}record/${encoded}`;
+}
+export type WorkPicture = { profile: string; digest: string; record?: WorkRecordMediaRefV1 };
+export function pictureUrl(picture: WorkPicture, width = 720): string | null {
+  return picture.record
+    ? recordMediaUrl(picture.record)
+    : mediaUrl(picture.profile, picture.digest, width);
 }

@@ -18,6 +18,9 @@ impl Hub {
         png: Option<&[u8]>,
     ) -> Result<Option<WorkMediaContext>, WorkError> {
         media.validate()?;
+        if media.profile != profile {
+            return Err(WorkError::NotFound);
+        }
         if self
             .work_profile_retired(profile)
             .map_err(|_| WorkError::Unavailable)?
@@ -128,6 +131,9 @@ fn read(
     profile: ProfileId,
     media: &WorkRecordMediaRefV1,
 ) -> Result<Vec<u8>, WorkError> {
+    if media.profile != profile {
+        return Err(WorkError::NotFound);
+    }
     let (metadata, png) = stored(connection, profile, media)?.ok_or(WorkError::NotFound)?;
     let record: WorkRecordMediaRefV1 =
         serde_json::from_slice(&metadata).map_err(|_| WorkError::Invalid)?;
@@ -144,6 +150,9 @@ fn put(
     media: &WorkRecordMediaRefV1,
     png: &[u8],
 ) -> Result<(), WorkError> {
+    if media.profile != profile {
+        return Err(WorkError::NotFound);
+    }
     validate_png(media, png)?;
     let metadata = serde_json::to_vec(media).map_err(|_| WorkError::Invalid)?;
     if metadata.len() > 2048 {
@@ -206,6 +215,7 @@ mod tests {
             .unwrap();
         let png = png.into_inner();
         let media = WorkRecordMediaRefV1 {
+            profile,
             work: WorkId::generate(),
             execution: WorkExecutionId::generate(),
             attempt: WorkAttemptId::generate(),
@@ -231,7 +241,7 @@ mod tests {
             read(&conn, ProfileId::generate(), &media),
             Err(WorkError::NotFound)
         );
-        for field in 0..10 {
+        for field in 0..11 {
             let mut changed = media.clone();
             match field {
                 0 => changed.work = WorkId::generate(),
@@ -243,6 +253,7 @@ mod tests {
                 6 => changed.source = "22".repeat(32),
                 7 => changed.digest = "22".repeat(32),
                 8 => changed.width += 1,
+                9 => changed.profile = ProfileId::generate(),
                 _ => changed.origin = WorkRecordMediaOriginV1::NativeFetch,
             }
             assert_eq!(read(&conn, profile, &changed), Err(WorkError::NotFound));

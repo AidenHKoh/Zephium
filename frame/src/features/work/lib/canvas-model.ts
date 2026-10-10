@@ -1,3 +1,4 @@
+import type { WorkPicture } from "$domain/resources";
 import type { MediaAssetV1 } from "$domain/resources";
 import type { IconRef } from "$shared/ipc/bindings";
 import type { ArtifactView, EvidenceReference, SubjectView } from "$shared/ui/data/Artifact";
@@ -150,7 +151,7 @@ export type CanvasItem = {
   /** An admitted media asset; the image URL is derived from profile and digest. */
   media?: { profile: string; asset: MediaAssetV1 };
   /** An admitted image related to this element, shown as its picture. */
-  image?: { profile: string; digest: string };
+  image?: WorkPicture;
 };
 /** A part's row head as the canvas shows it. */
 export type PartView = {

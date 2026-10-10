@@ -583,7 +583,9 @@ fn block_context_body(record: &zephium_core::resources::ResourceRecord) -> Strin
     let ResourceContent::Object { object } = &record.draft.content else {
         return String::new();
     };
-    let data = serde_json::to_value(&object.data).unwrap_or_default();
+    let mut visible = object.data.clone();
+    visible.clear_record_media();
+    let data = serde_json::to_value(&visible).unwrap_or_default();
     if let Some(rows) = data
         .get("rows")
         .or_else(|| data.get("items"))

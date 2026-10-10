@@ -1239,6 +1239,31 @@ impl WorkAttemptProbe {
         .await
         .map(|_| ())
     }
+    /// Publishes optional immutable media only for this exact still-live read.
+    pub async fn put_record_media(
+        &self,
+        media: zephium_core::work::media::WorkRecordMediaRefV1,
+        png: Vec<u8>,
+    ) -> Result<zephium_core::work::media::WorkRecordMediaRefV1, WorkError> {
+        if media.profile != self.profile
+            || media.work != self.work
+            || media.execution != self.execution
+            || media.attempt != self.attempt
+            || self.cached_cancellation().is_some()
+        {
+            return Err(WorkError::Conflict);
+        }
+        match request(
+            &self.handle,
+            self.profile,
+            WorkRequest::PutRecordMedia { media, png },
+        )
+        .await?
+        {
+            WorkReply::RecordMediaStored(media) => Ok(media),
+            _ => Err(WorkError::Invalid),
+        }
+    }
     /// Persists the observed public title of a running page-read step.
     pub async fn record_page_title(&self, step: WorkStepId, title: &str) -> Result<(), WorkError> {
         self.commit_step(WorkRuntimeUpdate::PageTitle {

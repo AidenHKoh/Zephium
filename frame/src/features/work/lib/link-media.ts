@@ -24,21 +24,13 @@ export function youtubeId(url: string): string | null {
   return id && VIDEO_ID.test(id) ? id : null;
 }
 
-/** The public thumbnail Rust admits as the link card's picture. */
-export function youtubeThumbnail(url: string): string | null {
-  const id = youtubeId(url);
-  return id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : null;
-}
-
-/** A pick's picture candidates: its own, else the thumbnail of the video it links to. */
+/** Only addresses actually observed by a source are candidates. */
 export function pickCandidates(item: {
   image_candidates?: readonly string[] | null;
+  media_attempted?: boolean;
   url?: string | null;
 }): string[] {
-  const own = item.image_candidates ?? [];
-  if (own.length) return [...own];
-  const thumbnail = item.url ? youtubeThumbnail(item.url) : null;
-  return thumbnail ? [thumbnail] : [];
+  return item.media_attempted ? [] : [...(item.image_candidates ?? [])];
 }
 
 /** The start a YouTube address asks for: `t=90`, `t=1m30s` or `start=90`, in seconds. */

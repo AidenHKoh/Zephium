@@ -39,6 +39,7 @@ impl Native {
         callback: WorkBrowserResourceCompletionCallback,
     ) {
         let outcome = match request.operation() {
+            WorkBrowserResourceOperation::ReadMedia => WorkBrowserResourceNativeOutcome::Refused,
             WorkBrowserResourceOperation::Construct => {
                 let reporter = request
                     .take_resource_health_reporter()

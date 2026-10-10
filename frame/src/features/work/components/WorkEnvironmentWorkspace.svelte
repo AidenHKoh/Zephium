@@ -86,7 +86,7 @@
   import { objectIcon, objectLabel } from "../lib/object-kind";
   import { clipText, defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
-  import { youtubeThumbnail } from "../lib/link-media";
+  import { youtubeId } from "../lib/link-media";
   import { resultPlan } from "../lib/plan-steps";
   import { stepPlan, WorkTasks, workTasksKey, type StepPlan } from "../lib/work-tasks";
   import { documentMarkdown, resultKey, WorkNotes } from "../lib/work-notes";
@@ -281,7 +281,7 @@
     }
     const reference = session.snapshot?.elements.find((element) => element.id === id)?.reference;
     if (reference?.kind === "link") {
-      if (youtubeThumbnail(reference.url)) playHere(id);
+      if (youtubeId(reference.url)) playHere(id);
       else openPane({ kind: "url", url: reference.url }, id);
       return;
     }
@@ -1591,6 +1591,12 @@
   function picturesOf(element: string) {
     const current = snapshot;
     if (!current) return [];
+    const subject = baseItems.find((item) => item.id === element)?.subject;
+    if (subject?.recordMedia) {
+      const record = subject.recordMedia;
+      return [{ profile: record.profile, digest: record.digest, record, name: subject.name }];
+    }
+    if (subject?.mediaAttempted) return [];
     const resources = new Map(
       current.elements.flatMap((entry) =>
         entry.reference.kind === "resource" ? [[entry.id, entry.reference.resource]] : [],

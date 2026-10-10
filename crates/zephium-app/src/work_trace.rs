@@ -16,3 +16,37 @@ pub fn record(arguments: std::fmt::Arguments<'_>) {
         sink(arguments);
     }
 }
+
+/// Closed optional-media facts. This channel cannot carry URLs, page text,
+/// account identity, source references, or pixel bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordMediaTrace {
+    /// Native source association and retained-owner admission.
+    Admitted {
+        plans: usize,
+        original_crop_permits: usize,
+        native_started: bool,
+    },
+    /// Native terminal output and immutable Store acknowledgement counts.
+    Settled {
+        native_images: usize,
+        native_fetch: usize,
+        native_crop: usize,
+        stored: usize,
+    },
+}
+
+type RecordMediaTraceSink = dyn Fn(RecordMediaTrace) + Send + Sync;
+static MEDIA_SINK: OnceLock<Arc<RecordMediaTraceSink>> = OnceLock::new();
+
+/// Installs an optional host-owned diagnostic sink; ordinary hosts install none.
+pub fn install_record_media(sink: Arc<RecordMediaTraceSink>) {
+    let _ = MEDIA_SINK.set(sink);
+}
+
+/// Records counts through the closed channel, independently of free-text traces.
+pub fn record_media(event: RecordMediaTrace) {
+    if let Some(sink) = MEDIA_SINK.get() {
+        sink(event);
+    }
+}

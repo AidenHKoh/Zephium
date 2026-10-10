@@ -1,11 +1,12 @@
 <script lang="ts">
+  import { pictureUrl } from "$domain/resources";
   import type {
     WorkEnvironmentReference,
     WorkPageV1,
     WorkRuntimeProjection,
   } from "$shared/ipc/bindings";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
-  import { mediaUrl, pageFrameUrl } from "$domain/resources";
+  import { pageFrameUrl } from "$domain/resources";
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
   import HostGlyph from "./cards/HostGlyph.svelte";
@@ -58,7 +59,7 @@
   const host = $derived(homepage ? displayHost(homepage) : "");
   let shown = $state(0);
   const picture = $derived(pictures[Math.min(shown, Math.max(0, pictures.length - 1))]);
-  const pictureSource = $derived(picture ? mediaUrl(picture.profile, picture.digest, 1600) : null);
+  const pictureSource = $derived(picture ? pictureUrl(picture, 1600) : null);
   const page = $derived(subjectPage(pages, homepage, detail.sources));
   const frameSource = $derived(
     page?.frame ? pageFrameUrl(page.attempt, page.step, page.frame.generation) : null,
@@ -144,7 +145,7 @@
                   aria-pressed={index === shown}
                   onclick={() => (shown = index)}
                 >
-                  <img src={mediaUrl(candidate.profile, candidate.digest, 160)} alt="" />
+                  <img src={pictureUrl(candidate, 160)} alt="" />
                 </button>
               </li>
             {/each}

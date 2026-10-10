@@ -1,3 +1,4 @@
+import type { WorkPicture } from "$domain/resources";
 import type { IconRef, WorkArtifactDataV1_Deserialize } from "$shared/ipc/bindings";
 import type {
   ArtifactContent,
@@ -42,7 +43,7 @@ export type EntityFacet =
   | "message"
   | "job";
 
-export type Picture = { profile: string; digest: string };
+export type Picture = WorkPicture;
 export type Fact = { label: string; value: string; sources?: string[] };
 export type Entity = {
   /** Merge key: one name, one entity, across the run's artifacts. */

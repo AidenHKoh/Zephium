@@ -498,6 +498,30 @@ impl WorkResourceOwner {
         PendingLifecycle::dispatch(self.shared.clone(), resource, request, None, None)
     }
 
+    fn media_lifecycle(
+        &self,
+        join: &WorkBrowserResourceJoin,
+        plans: Vec<zephium_agentic::SemanticRecordMediaPlan>,
+        now: AgentPolicyInstant,
+        deadline: AgentPolicyInstant,
+    ) -> Result<(PendingLifecycle, zephium_agentic::WorkBrowserMediaProgress), Refusal> {
+        let resource = self.shared.resource(join)?;
+        self.shared.current(&resource)?;
+        if resource.flights.load(Ordering::Acquire) != 0
+            || resource.orphaned_actions.load(Ordering::Acquire) != 0
+            || !resource.reusable.load(Ordering::Acquire)
+        {
+            return Err(Refusal::Busy);
+        }
+        let (request, progress) = self
+            .shared
+            .lock_rows()?
+            .read_record_media(join, plans, now, deadline)?;
+        resource.reusable.store(false, Ordering::Release);
+        PendingLifecycle::dispatch(self.shared.clone(), resource, request, None, None)
+            .map(|pending| (pending, progress))
+    }
+
     fn human_lifecycle(
         &self,
         join: &WorkBrowserResourceJoin,

@@ -243,6 +243,7 @@ impl AgentBrowserPort for Native {
             };
         }
         let outcome = match request.operation() {
+            WorkBrowserResourceOperation::ReadMedia => WorkBrowserResourceNativeOutcome::Refused,
             WorkBrowserResourceOperation::PresentHuman
             | WorkBrowserResourceOperation::ContinueAfterHuman => unreachable!("handled above"),
             WorkBrowserResourceOperation::Construct => {
@@ -2351,6 +2352,9 @@ fn finish_human_fixture(
     callback: WorkBrowserResourceCompletionCallback,
 ) {
     let completion = match request.operation() {
+        WorkBrowserResourceOperation::ReadMedia => {
+            request.complete(WorkBrowserResourceNativeOutcome::Refused)
+        }
         WorkBrowserResourceOperation::PresentHuman => {
             request.human_progress().unwrap().record_ready(true);
             request.complete(WorkBrowserResourceNativeOutcome::HumanPresented)

@@ -135,7 +135,12 @@ export function environmentItems(
   }
   return elementItems(snapshot, tabs, notes, objectives, media, owned).map((item) => {
     const decision = decisions.get(item.id);
-    const image = pictures.get(item.id);
+    const native = item.subject?.recordMedia;
+    const image = native
+      ? { profile: native.profile, digest: native.digest, record: native }
+      : item.subject?.mediaAttempted
+        ? undefined
+        : pictures.get(item.id);
     // A video's admitted thumbnail is its poster, read from the profile rather than the web.
     const src =
       image && item.object?.view.kind === "media" ? mediaUrl(image.profile, image.digest) : null;

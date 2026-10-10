@@ -617,6 +617,8 @@ async fn page(request: WorkAgentBrowseRequest) -> Result<WorkBrowserOutcome, Wor
         name: name.into(),
         descriptor: Some("Entire home".into()),
         homepage: Some(format!("https://www.airbnb.com/rooms/{}", name.len())),
+        record_media: None,
+        media_attempted: false,
         image_candidates: vec![image.into()],
     };
     Ok(WorkBrowserOutcome {

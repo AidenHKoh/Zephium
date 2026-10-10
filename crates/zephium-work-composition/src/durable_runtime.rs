@@ -19,15 +19,15 @@ use zephium_agent_controller::{
 use zephium_agent_provider_transport::AgentProviderCredential;
 use zephium_agentic::*;
 use zephium_app::{
+    AgentWorkApplicationConfig, AgentWorkProfileBinding, AgentWorkReviewDecision, CallbackHandle,
+    RetainedWorkHandle, RetainedWorkPhase,
     work_agent::{
         WorkAgentBrowseRequest, WorkBrowserOutcome, WorkSiteConfirmation, WorkSiteDecision,
         WorkSiteReceipt,
     },
     work_runtime::*,
-    AgentWorkApplicationConfig, AgentWorkProfileBinding, AgentWorkReviewDecision, CallbackHandle,
-    RetainedWorkHandle, RetainedWorkPhase,
 };
-use zephium_core::work::{artifact::*, runtime::*, WorkError, WorkStepId};
+use zephium_core::work::{WorkError, WorkStepId, artifact::*, runtime::*};
 
 /// Trusted provider preference; page/model output cannot change it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -730,7 +730,9 @@ impl NativeWorkComposition {
         if run.status != WorkAttemptStatus::Succeeded && gate.has_verified_approval() {
             run.note = Some(format!(
                 "An approved action ran, but Work could not finish reading or preserving its result. Do not repeat the action automatically; inspect the existing result or ask the person. {}",
-                run.note.as_deref().unwrap_or("The page outcome is unverified.")
+                run.note
+                    .as_deref()
+                    .unwrap_or("The page outcome is unverified.")
             ));
         }
         if let Some(host) = host.filter(|_| collection.is_none()) {
@@ -896,6 +898,11 @@ impl NativeWorkComposition {
         let mut resumed_generation = 0u32;
         let mut intervention: Option<WorkInterventionV1> = None;
         let mut archived = None;
+        let mut media_started = false;
+        let mut media_complete = false;
+        let mut media_plans = Vec::new();
+        let mut record_media = Vec::new();
+        let native_media = collection.is_some() && page.is_some();
         let mut requested_read = false;
         let mut requested_close = false;
         let mut user_cancelled = false;
@@ -1585,7 +1592,8 @@ impl NativeWorkComposition {
                         measurements: measure.settle(started, model_in_flight),
                         helped,
                         redirect: None,
-                    }.with_failure(snapshot.failure));
+                    }
+                    .with_failure(snapshot.failure));
                 }
                 RetainedWorkPhase::Uncertain => {
                     trace("close:uncertain");
@@ -1694,7 +1702,117 @@ impl NativeWorkComposition {
                     if archived.is_none() {
                         archived = guard.0.take_archived_extraction();
                     }
-                    if archived.is_some() || snapshot.artifact_read.is_some_and(|r| r != Ok(true)) {
+                    if native_media && archived.is_some() && !media_started {
+                        media_started = true;
+                        media_plans = guard
+                            .0
+                            .take_extraction()
+                            .map(|extraction| extraction.media().to_vec())
+                            .unwrap_or_default();
+                        let crop_permits = media_plans
+                            .iter()
+                            .filter(|plan| plan.local_crop_permitted(Instant::now()))
+                            .count();
+                        let native_started = !media_plans.is_empty()
+                            && guard.0.read_record_media(media_plans.clone());
+                        media_complete = !native_started;
+                        zephium_app::work_trace::record_media(
+                            zephium_app::work_trace::RecordMediaTrace::Admitted {
+                                plans: media_plans.len(),
+                                original_crop_permits: crop_permits,
+                                native_started,
+                            },
+                        );
+                        zephium_app::work_trace::record(format_args!(
+                            "work: phase=page event=record_media_admitted plans={} original_crop_permits={} native_started={native_started}; content=redacted",
+                            media_plans.len(),
+                            crop_permits,
+                        ));
+                    }
+                    if media_started && !media_complete {
+                        if let Some(images) = guard.0.take_record_media() {
+                            media_complete = true;
+                            let image_count = images.len();
+                            let crop_count = images
+                                .iter()
+                                .filter(|image| {
+                                    image.origin() == WorkBrowserRecordImageOrigin::NativeCrop
+                                })
+                                .count();
+                            let stored_before = record_media.len();
+                            if let (Some(archive), Some((step, _))) =
+                                (archived.as_ref(), page.as_ref())
+                            {
+                                for image in images {
+                                    if let Some(geometry) = image.crop_geometry() {
+                                        zephium_app::work_trace::record(format_args!(
+                                            "work: phase=page event=record_crop_geometry geometry={geometry:?}; content=redacted"
+                                        ));
+                                    }
+                                    if !media_plans.iter().any(|plan| {
+                                        plan.record() == image.record()
+                                            && plan.source() == image.source()
+                                    }) {
+                                        continue;
+                                    }
+                                    let Some(source) = archive.record_media_source(image.record())
+                                    else {
+                                        continue;
+                                    };
+                                    if attempt.cached_cancellation().is_some()
+                                        || Instant::now() >= attempt.deadline()
+                                    {
+                                        break;
+                                    }
+                                    use sha2::Digest as _;
+                                    let (width, height) = image.dimensions();
+                                    let media = zephium_core::work::media::WorkRecordMediaRefV1 {
+                                        profile: attempt.profile(),
+                                        work: attempt.work(),
+                                        execution: attempt.execution(),
+                                        attempt: attempt.attempt(),
+                                        step: *step,
+                                        extraction: zephium_core::work::WorkArtifactId::from(
+                                            u128::from_be_bytes(archive.descriptor().id()),
+                                        ),
+                                        record: image.record(),
+                                        source: source.iter().map(|byte| format!("{byte:02x}")).collect(),
+                                        digest: format!("{:x}", sha2::Sha256::digest(image.png())),
+                                        width,
+                                        height,
+                                        origin: match image.origin() {
+                                            WorkBrowserRecordImageOrigin::NativeFetch => zephium_core::work::media::WorkRecordMediaOriginV1::NativeFetch,
+                                            WorkBrowserRecordImageOrigin::NativeCrop => zephium_core::work::media::WorkRecordMediaOriginV1::NativeCrop,
+                                        },
+                                    };
+                                    if let Ok(Ok(media)) = tokio::time::timeout(
+                                        Duration::from_secs(1),
+                                        attempt.put_record_media(media, image.png().to_vec()),
+                                    )
+                                    .await
+                                    {
+                                        record_media.push(media);
+                                    }
+                                }
+                            }
+                            zephium_app::work_trace::record_media(
+                                zephium_app::work_trace::RecordMediaTrace::Settled {
+                                    native_images: image_count,
+                                    native_fetch: image_count - crop_count,
+                                    native_crop: crop_count,
+                                    stored: record_media.len() - stored_before,
+                                },
+                            );
+                            zephium_app::work_trace::record(format_args!(
+                                "work: phase=page event=record_media_settled native_images={image_count} native_fetch={} native_crop={crop_count} stored={}; content=redacted",
+                                image_count - crop_count,
+                                record_media.len() - stored_before,
+                            ));
+                        }
+                    }
+                    if (archived.is_some() && (!native_media || media_complete))
+                        || snapshot.artifact_read.is_some_and(|r| r != Ok(true))
+                    {
                         trace(if archived.is_some() {
                             "close:archived"
                         } else {
@@ -1807,7 +1925,14 @@ impl NativeWorkComposition {
                         Some(schema) => outputs
                             .first()
                             .ok_or(WorkError::Invalid)
-                            .and_then(|output| schema.artifact(attempt.profile(), output, &archive))
+                            .and_then(|output| {
+                                schema.artifact(
+                                    attempt.profile(),
+                                    output,
+                                    &archive,
+                                    native_media.then_some(record_media.as_slice()),
+                                )
+                            })
                             .map(|artifact| vec![artifact]),
                         None => map_archive(attempt.profile(), outputs, &archive),
                     }
@@ -1918,7 +2043,13 @@ fn refusal_line(snapshot: &zephium_app::RetainedWorkSnapshot, yours: bool) -> St
     match snapshot.refusal {
         Some((cause, lane)) => format!(
             "refused:{cause:?} session={session} live={} settled={} lost={} queued={} unsettled={} group_failed={} group_sealed={}",
-            lane.live, lane.settled, lane.lost, lane.queued, lane.unsettled, lane.group_failed, lane.group_sealed
+            lane.live,
+            lane.settled,
+            lane.lost,
+            lane.queued,
+            lane.unsettled,
+            lane.group_failed,
+            lane.group_sealed
         ),
         None => format!("refused:unstated session={session}"),
     }
@@ -2140,7 +2271,9 @@ fn failure_note(failure: AgentWorkFailure) -> &'static str {
         AgentWorkFailure::Browser(_) => "The page could not be read",
         AgentWorkFailure::TaskPhase { .. } => "Work refused the action in this task phase",
         AgentWorkFailure::Contract => "Work could not validate its internal page-task contract",
-        AgentWorkFailure::ArtifactPublication(_) => "Work could not preserve the extracted page result",
+        AgentWorkFailure::ArtifactPublication(_) => {
+            "Work could not preserve the extracted page result"
+        }
         _ => "The page could not be read",
     }
 }
@@ -2187,9 +2320,10 @@ impl Drop for PageSettle {
 
 impl BrowserRun {
     fn with_failure(mut self, failure: Option<AgentWorkFailure>) -> Self {
-        let outcome = self.measurements.outcome.unwrap_or_else(|| {
-            page_outcome(self.status, self.intervention.as_ref())
-        });
+        let outcome = self
+            .measurements
+            .outcome
+            .unwrap_or_else(|| page_outcome(self.status, self.intervention.as_ref()));
         self.measurements.outcome = Some(outcome);
         if outcome == WorkPageOutcomeV1::Incomplete {
             self.measurements.outcome = failure
@@ -2209,7 +2343,9 @@ impl BrowserRun {
     ) -> Self {
         let empty = matches!(result, Err(WorkError::Unavailable));
         let conversion_failed = result.is_err() && !empty;
-        let note = note.or_else(|| empty.then(|| "The page produced no source-backed findings for this request".to_owned()));
+        let note = note.or_else(|| {
+            empty.then(|| "The page produced no source-backed findings for this request".to_owned())
+        });
         let (status, artifacts) = match result {
             Ok(result) => result,
             Err(WorkError::OutcomeUnknown) => (WorkAttemptStatus::OutcomeUnknown, vec![]),
@@ -2258,14 +2394,14 @@ fn page_outcome(
 }
 
 fn page_failure_outcome(failure: AgentWorkFailure) -> WorkPageOutcomeV1 {
-    use zephium_agent_controller::AgentBrowserProviderError as Browser;
     use WorkPageFailureStageV1 as Stage;
     use WorkPageOutcomeV1 as Outcome;
+    use zephium_agent_controller::AgentBrowserProviderError as Browser;
     let stage = match failure {
         AgentWorkFailure::Redirected => return Outcome::Redirected,
         AgentWorkFailure::Cancelled => return Outcome::Cancelled,
         AgentWorkFailure::Browser(Browser::TurnLimit | Browser::ActionLimit) => {
-            return Outcome::TooManySteps
+            return Outcome::TooManySteps;
         }
         AgentWorkFailure::Contract | AgentWorkFailure::TaskPhase { .. } => Stage::Admission,
         AgentWorkFailure::Observation(_)
@@ -2327,15 +2463,37 @@ mod closed_result_tests {
     #[test]
     fn anonymous_early_failure_keeps_its_stage_without_overriding_a_wall() {
         let failed = |intervention| BrowserRun {
-            status: WorkAttemptStatus::Failed, usage: None, artifacts: vec![],
-            intervention, note: None, measurements: WorkStepMeasurementsV1::default(),
-            helped: false, redirect: None,
+            status: WorkAttemptStatus::Failed,
+            usage: None,
+            artifacts: vec![],
+            intervention,
+            note: None,
+            measurements: WorkStepMeasurementsV1::default(),
+            helped: false,
+            redirect: None,
         };
-        let failure = AgentWorkFailure::ArtifactPublication(zephium_agentic::AgentWorkJournalError::Uncertain);
-        assert_eq!(failed(None).with_failure(Some(failure)).measurements.outcome,
-            Some(WorkPageOutcomeV1::Refused { stage: WorkPageFailureStageV1::Storage }));
-        assert_eq!(failed(Some(WorkInterventionV1 { kind: WorkInterventionKindV1::SignIn, origin: None }))
-            .with_failure(Some(failure)).measurements.outcome, Some(WorkPageOutcomeV1::NeedsSignIn));
+        let failure = AgentWorkFailure::ArtifactPublication(
+            zephium_agentic::AgentWorkJournalError::Uncertain,
+        );
+        assert_eq!(
+            failed(None)
+                .with_failure(Some(failure))
+                .measurements
+                .outcome,
+            Some(WorkPageOutcomeV1::Refused {
+                stage: WorkPageFailureStageV1::Storage
+            })
+        );
+        assert_eq!(
+            failed(Some(WorkInterventionV1 {
+                kind: WorkInterventionKindV1::SignIn,
+                origin: None
+            }))
+            .with_failure(Some(failure))
+            .measurements
+            .outcome,
+            Some(WorkPageOutcomeV1::NeedsSignIn)
+        );
     }
 
     #[test]
@@ -2846,10 +3004,21 @@ mod closed_result_tests {
             assert_eq!(run.usage, Some(usage));
             assert!(run.artifacts.is_empty());
             if error == WorkError::Unavailable {
-                assert_eq!(run.measurements.outcome, Some(WorkPageOutcomeV1::Incomplete));
-                assert_eq!(run.note.as_deref(), Some("The page produced no source-backed findings for this request"));
+                assert_eq!(
+                    run.measurements.outcome,
+                    Some(WorkPageOutcomeV1::Incomplete)
+                );
+                assert_eq!(
+                    run.note.as_deref(),
+                    Some("The page produced no source-backed findings for this request")
+                );
             } else if error != WorkError::OutcomeUnknown {
-                assert_eq!(run.measurements.outcome, Some(WorkPageOutcomeV1::Refused { stage: WorkPageFailureStageV1::Extraction }));
+                assert_eq!(
+                    run.measurements.outcome,
+                    Some(WorkPageOutcomeV1::Refused {
+                        stage: WorkPageFailureStageV1::Extraction
+                    })
+                );
             }
         }
     }
@@ -3264,9 +3433,15 @@ fn compile_page_step(
             }
             .map_err(|_| refused(&settings, "navigation", WorkError::Invalid))?;
             let assignment = match goal {
-                Some(goal) => format!("Work on this site, starting at {url}\nGoal: {goal}\nWhen the goal is met or cannot go further, report what you found and what is ready, with exact names, figures and dates as the pages show them."),
-                None if signed_in.is_some() => format!("Read only this page: {url}\nIt is open with the person's own signed-in session. Report the facts on this page that matter for the objective, with exact figures, names and dates. Do not follow links: other page visits are separate assignments."),
-                None => format!("Read only this page: {url}\nReport the facts on this page that matter for the objective, with exact figures, names and dates. Include relevant observed link destinations as cited evidence so the coordinator can request subsequent pages. Do not follow links: other page visits are separate assignments."),
+                Some(goal) => format!(
+                    "Work on this site, starting at {url}\nGoal: {goal}\nWhen the goal is met or cannot go further, report what you found and what is ready, with exact names, figures and dates as the pages show them."
+                ),
+                None if signed_in.is_some() => format!(
+                    "Read only this page: {url}\nIt is open with the person's own signed-in session. Report the facts on this page that matter for the objective, with exact figures, names and dates. Do not follow links: other page visits are separate assignments."
+                ),
+                None => format!(
+                    "Read only this page: {url}\nReport the facts on this page that matter for the objective, with exact figures, names and dates. Include relevant observed link destinations as cited evidence so the coordinator can request subsequent pages. Do not follow links: other page visits are separate assignments."
+                ),
             };
             (navigation, assignment)
         }
@@ -3285,7 +3460,9 @@ fn compile_page_step(
                 2,
             )
             .map_err(|_| WorkError::Invalid)?,
-            format!("Search the public web for: {query}\nOpen the most relevant public results and report the facts that matter for the objective, with the exact figures, names and dates the pages state."),
+            format!(
+                "Search the public web for: {query}\nOpen the most relevant public results and report the facts that matter for the objective, with the exact figures, names and dates the pages state."
+            ),
         ),
         _ => return Err(WorkError::Invalid),
     };
@@ -3314,7 +3491,9 @@ fn compile_page_step(
         navigation
     };
     let public = navigation.document_policy().is_public();
-    let mut objective = String::from("\n\nContribute evidence for only the browser assignment below. Other assignments are coordinated separately; do not repeat the entire multi-page objective in this step. Preserve all user constraints.\n\nThis step: ");
+    let mut objective = String::from(
+        "\n\nContribute evidence for only the browser assignment below. Other assignments are coordinated separately; do not repeat the entire multi-page objective in this step. Preserve all user constraints.\n\nThis step: ",
+    );
     objective.push_str(&assignment);
     objective.push_str(if task {
         SITE_WORK
@@ -4030,17 +4209,19 @@ mod human_budget_tests {
         assert_eq!((calls, actions), (24, 51));
         assert!(remaining_read(limits, first, 40, 0, true).is_err());
         assert!(remaining_read(limits, first, 0, 61, true).is_err());
-        assert!(remaining_read(
-            limits,
-            WorkUsage {
-                model_tokens: 1000,
-                ..first
-            },
-            1,
-            0,
-            false
-        )
-        .is_err());
+        assert!(
+            remaining_read(
+                limits,
+                WorkUsage {
+                    model_tokens: 1000,
+                    ..first
+                },
+                1,
+                0,
+                false
+            )
+            .is_err()
+        );
         // A reservation bounds the spend from above: the remainder only shrinks.
         let (reserved, _, _) = remaining_read(
             limits,
@@ -4057,13 +4238,15 @@ mod human_budget_tests {
             reserved.model_tokens,
             limits.model_tokens - first.model_tokens
         );
-        assert!(add_usage(
-            first,
-            WorkUsage {
-                model_tokens: u32::MAX,
-                ..second
-            }
-        )
-        .is_none());
+        assert!(
+            add_usage(
+                first,
+                WorkUsage {
+                    model_tokens: u32::MAX,
+                    ..second
+                }
+            )
+            .is_none()
+        );
     }
 }

@@ -30,10 +30,14 @@ describe("picks shape", () => {
     ).toBe(true);
   });
 
-  it("falls back to a linked video's thumbnail", () => {
-    expect(pickCandidates({ url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" })).toEqual([
-      "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
-    ]);
+  it("uses observed candidates and never guesses a video thumbnail", () => {
+    expect(pickCandidates({ url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" })).toEqual([]);
+    expect(
+      pickCandidates({
+        media_attempted: true,
+        image_candidates: ["https://images.example/private.jpg"],
+      }),
+    ).toEqual([]);
     expect(
       pickCandidates({ image_candidates: ["https://a.test/x.jpg"], url: "https://youtu.be/x" }),
     ).toEqual(["https://a.test/x.jpg"]);

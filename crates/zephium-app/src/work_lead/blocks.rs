@@ -335,6 +335,7 @@ async fn read(context: LeadToolContext<'_>, args: Value) -> Result<String, Strin
     let object = object(&record)?;
     let (kind, key) = shape(&object.data).ok_or("Unsupported block")?;
     let mut data = serde_json::to_value(&object.data).map_err(|_| "Could not encode block")?;
+    super::objects::strip_native_media(&mut data);
     let all = data[key].as_array().ok_or("Invalid block rows")?;
     let count = all.len();
     if args.offset > count {
@@ -491,6 +492,8 @@ fn proposal(base: &ResourceRecord, args: &ReviseArgs) -> Result<ResourceDraft, S
         }
         rows.push(row.clone());
     }
+    let mut data = data;
+    super::objects::strip_native_media(&mut data);
     let data: WorkArtifactDataV1 = serde_json::from_value(data)
         .map_err(|_| "The changes do not match this block's structure")?;
     let mut draft = base.draft.clone();

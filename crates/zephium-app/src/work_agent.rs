@@ -1222,7 +1222,8 @@ impl Driver {
                     .artifacts
                     .into_iter()
                     .take(headroom)
-                    .filter_map(|artifact| {
+                    .filter_map(|mut artifact| {
+                        artifact.data.clear_record_media();
                         attempt
                             .mint_marked_artifact(
                                 WorkArtifactDraft {
@@ -3378,6 +3379,8 @@ mod tests {
                                     name: "Lisbon shortlist".into(),
                                     descriptor: None,
                                     homepage: None,
+                                    record_media: None,
+                                    media_attempted: false,
                                     image_candidates: vec![],
                                 }],
                                 items: vec![],

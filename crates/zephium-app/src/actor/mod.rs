@@ -702,6 +702,19 @@ impl Handle {
         self.submit_work_document(intent.into_request()?, None)
     }
 
+    /// Privileged chrome may read only this exact profile-bound immutable image.
+    /// The reference grants no fetch, execution, or additional profile access.
+    pub fn read_work_record_media(
+        &self,
+        media: zephium_core::work::media::WorkRecordMediaRefV1,
+    ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
+        let profile = media.profile;
+        media.validate()?;
+        self.submit_work_document(
+            zephium_core::work::port::WorkRequest::ReadRecordMedia { media },
+            Some(profile),
+        )
+    }
     pub(crate) fn submit_work_document(
         &self,
         request: zephium_core::work::port::WorkRequest,

@@ -215,7 +215,7 @@ impl WorkBrowseCollectionSchema {
                 SemanticExtractionValueKind::Boolean => "boolean",
                 SemanticExtractionValueKind::Unsigned => "unsigned",
                 SemanticExtractionValueKind::TextList | SemanticExtractionValueKind::Rows => {
-                    return Err(WorkError::Invalid)
+                    return Err(WorkError::Invalid);
                 }
             };
             write!(
@@ -243,6 +243,7 @@ impl WorkBrowseCollectionSchema {
         profile: zephium_core::ids::ProfileId,
         output: &str,
         archive: &AgentWorkArchivedExtraction,
+        media: Option<&[zephium_core::work::media::WorkRecordMediaRefV1]>,
     ) -> Result<WorkArtifactDraft, WorkError> {
         if archive.descriptor().profile() != profile
             || archive.fields().len() != 1
@@ -288,7 +289,7 @@ impl WorkBrowseCollectionSchema {
                 })
                 .collect()
         };
-        let data = self.comparison(items, &mut cite)?;
+        let data = self.comparison_media(items, &mut cite, media)?;
         data.validate(evidence.len())?;
         Ok(WorkArtifactDraft {
             output: output.to_owned(),
@@ -298,14 +299,23 @@ impl WorkBrowseCollectionSchema {
         })
     }
 
+    #[cfg(test)]
     fn comparison(
         &self,
         items: &[Vec<ArchivedField>],
         cite: &mut impl FnMut(&[u16]) -> Result<Vec<u16>, WorkError>,
     ) -> Result<WorkArtifactDataV1, WorkError> {
+        self.comparison_media(items, cite, None)
+    }
+    fn comparison_media(
+        &self,
+        items: &[Vec<ArchivedField>],
+        cite: &mut impl FnMut(&[u16]) -> Result<Vec<u16>, WorkError>,
+        media: Option<&[zephium_core::work::media::WorkRecordMediaRefV1]>,
+    ) -> Result<WorkArtifactDataV1, WorkError> {
         let mut subjects = Vec::new();
         let mut cells = Vec::new();
-        for row in items {
+        for (record, row) in items.iter().enumerate() {
             if row
                 .iter()
                 .any(|cell| !self.fields.iter().any(|field| field.name() == cell.name()))
@@ -335,6 +345,14 @@ impl WorkBrowseCollectionSchema {
                 name: name.clone(),
                 descriptor: None,
                 homepage: None,
+                record_media: media
+                    .and_then(|media| {
+                        media
+                            .iter()
+                            .find(|media| usize::from(media.record) == record)
+                    })
+                    .cloned(),
+                media_attempted: media.is_some(),
                 image_candidates: vec![],
             });
             let mut row_cells = Vec::new();
@@ -346,11 +364,17 @@ impl WorkBrowseCollectionSchema {
                         .find(|cell| cell.name() == field.name())
                         .map(ArchivedField::value)
                     {
-                        Some(ArchivedValue::ImageUrl { value, .. }) => subjects
-                            .last_mut()
-                            .ok_or(WorkError::Invalid)?
-                            .image_candidates
-                            .push(value.clone()),
+                        Some(ArchivedValue::ImageUrl { value, .. }) => {
+                            if media.is_none()
+                                && zephium_core::work::media::is_public_image_candidate(value)
+                            {
+                                subjects
+                                    .last_mut()
+                                    .ok_or(WorkError::Invalid)?
+                                    .image_candidates
+                                    .push(value.clone());
+                            }
+                        }
                         None => {}
                         Some(_) => return Err(WorkError::Invalid),
                     }
@@ -386,10 +410,12 @@ impl WorkBrowseCollectionSchema {
                         if field.kind() == SemanticExtractionValueKind::ImageUrl =>
                     {
                         cell_evidence.extend(cite(sources)?);
-                        if self
-                            .subject_image_fields
-                            .iter()
-                            .any(|name| name == field.name())
+                        if media.is_none()
+                            && zephium_core::work::media::is_public_image_candidate(value)
+                            && self
+                                .subject_image_fields
+                                .iter()
+                                .any(|name| name == field.name())
                         {
                             let images = &mut subjects
                                 .last_mut()
@@ -508,6 +534,53 @@ mod tests {
             currencies: vec!["USD".into(), "USD".into()],
         };
         assert!(WorkBrowseCollectionSchema::try_from(&invalid).is_err());
+    }
+
+    #[test]
+    fn native_image_attempt_never_republishes_local_sources_as_remote_candidates() {
+        let request: WorkBrowseCollection = serde_json::from_value(serde_json::json!({
+            "title":"Native card", "max_items":1, "columns":[
+                {"name":"description","required":true,"value":{"kind":"text"},"extraction":"verbatim"}
+            ]
+        })).unwrap();
+        let schema = WorkBrowseCollectionSchema::try_from(&request).unwrap();
+        for url in [
+            "http://127.0.0.1/image.png",
+            "blob:https://example.test/private",
+            "https://example.test/image.png",
+        ] {
+            let rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([[
+                {"name":"name","value":{"kind":"text","value":"Card","sources":[1]}},
+                {"name":"description","value":{"kind":"text","value":"Source-backed text","sources":[2]}},
+                {"name":"image","value":{"kind":"image_url","value":url,"sources":[3]}}
+            ]])).unwrap();
+            let data = schema
+                .comparison_media(
+                    &rows,
+                    &mut |ids| Ok(ids.iter().map(|id| id - 1).collect()),
+                    Some(&[]),
+                )
+                .unwrap();
+            data.validate(3).unwrap();
+            let WorkArtifactDataV1::ComparisonMatrix {
+                subjects, cells, ..
+            } = data
+            else {
+                panic!()
+            };
+            assert!(subjects[0].media_attempted);
+            assert!(subjects[0].image_candidates.is_empty());
+            assert!(
+                matches!(&cells[0][0].value, WorkCellValue::Text { text } if text == "Source-backed text")
+            );
+            // The older no-native path also omits an unsafe optional candidate,
+            // rather than discarding source-backed text or relaxing URL policy.
+            schema
+                .comparison(&rows, &mut |ids| Ok(ids.iter().map(|id| id - 1).collect()))
+                .unwrap()
+                .validate(3)
+                .unwrap();
+        }
     }
 
     #[test]
@@ -798,9 +871,11 @@ mod tests {
         assert!(matches!(cells[1][0].value, WorkCellValue::Unknown));
         assert!(matches!(cells[1][1].value, WorkCellValue::Unknown));
         assert_eq!(cells[1][0].evidence, [3]);
-        assert!(schema
-            .comparison(&rows, &mut |_| Err(WorkError::Invalid))
-            .is_err());
+        assert!(
+            schema
+                .comparison(&rows, &mut |_| Err(WorkError::Invalid))
+                .is_err()
+        );
     }
 
     #[test]

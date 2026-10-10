@@ -19,6 +19,7 @@ pub enum WorkRecordMediaOriginV1 {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkRecordMediaRefV1 {
+    pub profile: crate::ids::ProfileId,
     pub work: WorkId,
     pub execution: WorkExecutionId,
     pub attempt: WorkAttemptId,
@@ -49,4 +50,10 @@ impl WorkRecordMediaRefV1 {
         }
         Ok(())
     }
+}
+
+/// Whether a legacy public image candidate passes the shared public URL policy.
+/// This does not grant native session access or pixel-capture authority.
+pub fn is_public_image_candidate(value: &str) -> bool {
+    super::runtime::validate_public_reference_url(value).is_ok()
 }

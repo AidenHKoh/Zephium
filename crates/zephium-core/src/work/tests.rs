@@ -1625,6 +1625,8 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
             name: "Postgres".into(),
             descriptor: None,
             homepage: homepage.map(Into::into),
+            record_media: None,
+            media_attempted: false,
             image_candidates: vec![],
         }],
         items: vec![WorkFinding {
@@ -1809,6 +1811,8 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
             name: "Postgres".into(),
             descriptor: None,
             homepage: Some("https://www.postgresql.org/".into()),
+            record_media: None,
+            media_attempted: false,
             image_candidates: vec![],
         }],
         criteria: vec![WorkCriterion {
@@ -1864,6 +1868,8 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
             name: "Starter".into(),
             descriptor: None,
             homepage: None,
+            record_media: None,
+            media_attempted: false,
             image_candidates: vec![],
         }],
         criteria: vec![WorkCriterion {
@@ -2049,6 +2055,8 @@ fn charts_of_nothing_second_findings_and_malformed_objects_are_refused_by_cause(
                 name: (*name).into(),
                 descriptor: None,
                 homepage: None,
+                record_media: None,
+                media_attempted: false,
                 image_candidates: vec![],
             })
             .collect(),

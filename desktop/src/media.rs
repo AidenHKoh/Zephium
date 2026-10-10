@@ -307,6 +307,9 @@ fn resolve(
     query: Option<&str>,
 ) -> tauri::http::Response<Cow<'static, [u8]>> {
     let path = path.trim_start_matches('/');
+    if let Some(rest) = path.strip_prefix("record/") {
+        return serve_record_media(app, rest);
+    }
     let width = thumb::width(query);
     if let Some(rest) = path.strip_prefix("frame/") {
         return serve_page_frame(app, rest, width);
@@ -341,6 +344,49 @@ fn resolve(
         }
     }
     respond(200, bytes, mime)
+}
+
+/// Immutable native record bytes, served only through the authenticated active
+/// profile. No URL or fetch is derived from this descriptive reference.
+fn serve_record_media(app: &AppHandle, encoded: &str) -> tauri::http::Response<Cow<'static, [u8]>> {
+    use base64::Engine as _;
+    use zephium_core::work::{media::WorkRecordMediaRefV1, port::WorkReply};
+    if encoded.len() > 3072 || super::shutdown_started(app) {
+        return respond(404, Vec::new(), "text/plain");
+    }
+    let media = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .ok()
+        .filter(|bytes| bytes.len() <= 2048)
+        .and_then(|bytes| serde_json::from_slice::<WorkRecordMediaRefV1>(&bytes).ok())
+        .filter(|media| media.validate().is_ok());
+    let (Some(media), Some(shell)) = (media, app.try_state::<zephium_app::Handle>()) else {
+        return respond(404, Vec::new(), "text/plain");
+    };
+    let profile = media.profile;
+    let Some(reply) = shell.read_work_record_media(media).ok() else {
+        return respond(404, Vec::new(), "text/plain");
+    };
+    let response = tauri::async_runtime::block_on(async {
+        tokio::time::timeout(Duration::from_secs(3), reply).await
+    });
+    let Ok(Ok(response)) = response else {
+        return respond(404, Vec::new(), "text/plain");
+    };
+    if response.profile != profile {
+        return respond(404, Vec::new(), "text/plain");
+    }
+    let WorkReply::RecordMedia(bytes) = response.reply else {
+        return respond(404, Vec::new(), "text/plain");
+    };
+    let mut reply = respond(200, bytes.0, "image/png");
+    // Each request is actor-checked again after the Store callback; never
+    // bypass that check by reusing a response from another active profile.
+    reply.headers_mut().insert(
+        "Cache-Control",
+        tauri::http::HeaderValue::from_static("private, no-store"),
+    );
+    reply
 }
 
 /// `frame/<attempt>/<step>/<generation>`: the newest frame of one agent page.

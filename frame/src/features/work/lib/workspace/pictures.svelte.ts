@@ -6,7 +6,7 @@ import {
 } from "$shared/ipc/bindings";
 import type { MediaAssetV1 } from "$domain/resources";
 import type { WorkEnvironmentSession } from "$domain/work-environment";
-import { pickCandidates, youtubeThumbnail } from "../link-media";
+import { pickCandidates } from "../link-media";
 import { subjectImageCandidates, subjectsOf } from "../subjects";
 
 function canonical(url: string): string {
@@ -119,12 +119,6 @@ export class PictureQueue {
       }
       if (this.#admittedFor.has(`${current.id} ${element.id}`)) return [];
       const done = (snapshot: WorkEnvironmentSnapshot) => pictured(snapshot, element.id);
-      if (reference.kind === "link") {
-        // A video link's picture is its thumbnail, admitted like a subject's.
-        const thumbnail = youtubeThumbnail(reference.url);
-        if (!thumbnail || done(current)) return [];
-        return [{ element: element.id, key: element.id, candidates: [thumbnail], done }];
-      }
       if (reference.kind !== "subject" || done(current)) return [];
       const run = this.#deps
         .objectives()
@@ -132,7 +126,8 @@ export class PictureQueue {
         ?.executions.find((entry) => entry.id === reference.execution);
       const artifact = run?.artifacts.find((entry) => entry.id === reference.artifact);
       const subject = artifact ? subjectsOf(artifact)[reference.index] : undefined;
-      const candidates = subject && run ? subjectImageCandidates(run, subject) : [];
+      const candidates =
+        subject && run && !subject.media_attempted ? subjectImageCandidates(run, subject) : [];
       return candidates.length ? [{ element: element.id, key: element.id, candidates, done }] : [];
     });
     const near = this.#deps.near?.();

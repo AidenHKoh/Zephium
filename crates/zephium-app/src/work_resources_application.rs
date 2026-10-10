@@ -316,6 +316,8 @@ impl RetainedWorkGroup {
 }
 
 pub(super) struct RetainedWork {
+    media: Option<MediaReadState>,
+    media_result: Option<Vec<zephium_agentic::WorkBrowserRecordImage>>,
     runtime_group: Option<RetainedWorkGroup>,
     // Outlives the group itself: a page that left its group still audits
     // native state only when the Shell hands it the one audit turn.
@@ -409,6 +411,8 @@ impl RetainedWork {
         waker: Waker,
     ) -> Self {
         Self {
+            media: None,
+            media_result: None,
             runtime_group: None,
             grouped: false,
             group_shutdown: false,
@@ -877,6 +881,7 @@ impl RetainedWork {
     fn poll_before(&mut self, now: AgentPolicyInstant, deadline: Option<Instant>) {
         self.rearm();
         self.poll_human(now);
+        self.poll_media(now);
         if let Some(mut construction) = self.construction.take() {
             match construction.poll(now) {
                 Ok(None) => self.construction = Some(construction),
@@ -1514,6 +1519,9 @@ impl RetainedWork {
 
     /// Revokes actor execution only. It grants no rendering or human-input right.
     pub(super) fn cancel(&mut self) {
+        if let Some(media) = &self.media {
+            media.progress.cancel();
+        }
         if self.active.is_none()
             || self.request.is_some()
             || self.acquisition.is_some()
@@ -1933,5 +1941,77 @@ mod group_tests {
         group.fail();
         assert!(!group.owns_running(owner, running));
         assert!(group.admit(ContextId::generate(), foreign).is_err());
+    }
+}
+
+struct MediaReadState {
+    pending: PendingLifecycle,
+    progress: zephium_agentic::WorkBrowserMediaProgress,
+    deadline: AgentPolicyInstant,
+    published: bool,
+}
+impl RetainedWork {
+    pub(super) fn read_media(
+        &mut self,
+        plans: Vec<zephium_agentic::SemanticRecordMediaPlan>,
+        now: AgentPolicyInstant,
+        deadline: AgentPolicyInstant,
+    ) -> bool {
+        if self.media.is_some()
+            || self.stopping
+            || self.phase != AdmissionPhase::Terminal
+            || self
+                .record
+                .is_none_or(|record| record.disposition() != AgentWorkDisposition::Succeeded)
+            || self.artifact.is_none()
+        {
+            return false;
+        }
+        let Ok((pending, progress)) =
+            self.owner
+                .media_lifecycle(&self.resource, plans, now, deadline)
+        else {
+            return false;
+        };
+        self.media = Some(MediaReadState {
+            pending,
+            progress,
+            deadline,
+            published: false,
+        });
+        true
+    }
+    fn poll_media(&mut self, now: AgentPolicyInstant) {
+        let Some(mut media) = self.media.take() else {
+            return;
+        };
+        if self.stopping || now >= media.deadline {
+            media.progress.cancel();
+            if !media.published {
+                media.published = true;
+                self.media_result = Some(Vec::new());
+            }
+        }
+        match media.pending.poll(now) {
+            Ok(None) => self.media = Some(media),
+            Ok(Some(LifecycleResult::Event(WorkBrowserResourceEvent::Retained(resource))))
+                if resource == self.resource =>
+            {
+                if !media.published {
+                    self.media_result = Some(media.progress.take_result().unwrap_or_default());
+                }
+            }
+            _ => {
+                media.progress.cancel();
+                if !media.published {
+                    self.media_result = Some(Vec::new());
+                }
+            }
+        }
+    }
+    pub(super) fn take_media_result(
+        &mut self,
+    ) -> Option<Vec<zephium_agentic::WorkBrowserRecordImage>> {
+        self.media_result.take()
     }
 }

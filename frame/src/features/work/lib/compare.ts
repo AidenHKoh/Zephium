@@ -1,3 +1,4 @@
+import type { WorkPicture } from "$domain/resources";
 import type {
   CellView,
   CriterionView,
@@ -6,7 +7,7 @@ import type {
 } from "$shared/ui/data/Artifact";
 import { formatMoney, subjectKey } from "./subjects";
 
-export type ComparePicture = { profile: string; digest: string };
+export type ComparePicture = WorkPicture;
 type CompareColumn = {
   key: string;
   name: string;
@@ -225,7 +226,17 @@ export function compareModel(
       name: subject.name,
       ...(subject.descriptor ? { descriptor: subject.descriptor } : {}),
       ...(subject.homepage ? { homepage: subject.homepage } : {}),
-      ...(pictures.get(subjectKey(subject)) ? { picture: pictures.get(subjectKey(subject))! } : {}),
+      ...(subject.recordMedia
+        ? {
+            picture: {
+              profile: subject.recordMedia.profile,
+              digest: subject.recordMedia.digest,
+              record: subject.recordMedia,
+            },
+          }
+        : !subject.mediaAttempted && pictures.get(subjectKey(subject))
+          ? { picture: pictures.get(subjectKey(subject))! }
+          : {}),
       ...(money && money.kind !== "unknown" && money.kind !== "mark" ? { price: money.text } : {}),
       ...(cheapest.has(index) ? { best: true } : {}),
     };

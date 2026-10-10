@@ -364,6 +364,10 @@ pub struct RetainedWorkSnapshot {
     pub refusal: Option<(RetainedRefusal, RetainedLaneFacts)>,
 }
 struct Projection {
+    media_command: Option<Vec<zephium_agentic::SemanticRecordMediaPlan>>,
+    media_result: Option<Vec<zephium_agentic::WorkBrowserRecordImage>>,
+    media_requested: bool,
+
     active_deadline: Instant,
     human: Option<RetainedHumanSnapshot>,
     human_resume: Option<RetainedHumanResume>,
@@ -586,6 +590,39 @@ impl RetainedWorkHandle {
     /// Moves source-bound ModelMapped content only after original scoped drain
     /// and durable Succeeded ACK. When requested at admission, this additionally
     /// requires atomic artifact publication; the archived result remains in Store.
+    /// One optional same-page media batch after durable text success. Numeric
+    /// native source plans cannot add account, navigation, or action authority.
+    pub fn read_record_media(&self, plans: Vec<zephium_agentic::SemanticRecordMediaPlan>) -> bool {
+        if self.signal.close.load(Ordering::Acquire)
+            || self.signal.stop.load(Ordering::Acquire)
+            || plans.is_empty()
+            || plans.len() > 12
+        {
+            return false;
+        }
+        let Ok(mut projection) = self.signal.projection.lock() else {
+            return false;
+        };
+        if projection.media_requested
+            || projection.snapshot.phase != RetainedWorkPhase::Terminal
+            || projection
+                .snapshot
+                .record
+                .is_none_or(|record| record.disposition() != AgentWorkDisposition::Succeeded)
+            || Instant::now() >= projection.active_deadline
+        {
+            return false;
+        }
+        projection.media_requested = true;
+        projection.media_command = Some(plans);
+        drop(projection);
+        self.callback.dispatch(Command::WorkWake)
+    }
+    /// A terminal optional result; absence remains pending, an empty list is honest unavailability.
+    pub fn take_record_media(&self) -> Option<Vec<zephium_agentic::WorkBrowserRecordImage>> {
+        self.signal.projection.lock().ok()?.media_result.take()
+    }
+
     pub fn take_extraction(&self) -> Option<Box<SemanticOwnedExtractionResult>> {
         self.signal.projection.lock().ok()?.extraction.take()
     }
@@ -681,6 +718,9 @@ impl CallbackHandle {
             group_locally_retired: AtomicBool::new(false),
             lost: AtomicBool::new(false),
             projection: Mutex::new(Projection {
+                media_command: None,
+                media_result: None,
+                media_requested: false,
                 active_deadline: prepared.spec.deadline,
                 human: None,
                 human_resume: None,
@@ -1078,6 +1118,34 @@ impl ProductWork {
         if self.signal.reconcile.swap(false, Ordering::AcqRel) {
             work.reconcile();
         }
+        let media = self
+            .signal
+            .projection
+            .lock()
+            .ok()
+            .and_then(|mut projection| {
+                projection
+                    .media_command
+                    .take()
+                    .map(|plans| (plans, projection.active_deadline))
+            });
+        if let Some((plans, deadline)) = media {
+            let remaining = deadline
+                .saturating_duration_since(Instant::now())
+                .min(std::time::Duration::from_secs(8));
+            let expires = now
+                .millis()
+                .checked_add(u64::try_from(remaining.as_millis()).unwrap_or(0))
+                .map(AgentPolicyInstant::from_millis);
+            let accepted = !self.signal.close.load(Ordering::Acquire)
+                && !self.signal.stop.load(Ordering::Acquire)
+                && expires.is_some_and(|expires| work.read_media(plans, now, expires));
+            if !accepted {
+                if let Ok(mut projection) = self.signal.projection.lock() {
+                    projection.media_result = Some(Vec::new());
+                }
+            }
+        }
         let (human_command, continuation) = match self.signal.projection.lock() {
             Ok(mut projection) => (
                 projection.human_command.take(),
@@ -1243,6 +1311,9 @@ impl ProductWork {
             projection.snapshot.failure,
             projection.snapshot.persistence_failure,
         ) = work.failures();
+        if let Some(media) = work.take_media_result() {
+            projection.media_result = Some(media);
+        }
         if projection.extraction.is_none() {
             projection.extraction = work.take_extraction();
         }
