@@ -354,7 +354,7 @@ impl ICoreWebView2CapturePreviewCompletedHandler_Impl for CaptureCompletion_Impl
 }
 
 pub(super) fn capture_viewport(
-    view: &wry::WebView,
+    webview: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
     request: SemanticScreenshotNativeRequest,
     admitted_at: Instant,
     cancelled: Arc<AtomicBool>,
@@ -396,7 +396,7 @@ pub(super) fn capture_viewport(
     // same STA. WebView2 AddRefs the two COM arguments for asynchronous use;
     // `PendingCapture` also retains the stream until the one completion.
     let dispatched = unsafe {
-        view.webview().CapturePreview(
+        webview.CapturePreview(
             COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
             &stream,
             &handler,
@@ -590,6 +590,7 @@ fn deliver_frame_thumbnail(
     dimensions: (u32, u32),
     completion: FrameCompletion,
     capture_job: FrameCaptureJob,
+    crop: Option<crate::platform::record_media::Crop>,
 ) {
     let Some(permit) = FrameImageWorker::acquire() else {
         complete_frame(completion, None);
@@ -601,8 +602,9 @@ fn deliver_frame_thumbnail(
         .spawn(move || {
             let _permit = permit;
             let _capture_job = capture_job;
-            let image = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                work_frame_image::thumbnail(png, dimensions)
+            let image = std::panic::catch_unwind(AssertUnwindSafe(|| match crop {
+                Some(crop) => work_frame_image::region(png, dimensions, crop),
+                None => work_frame_image::thumbnail(png, dimensions),
             }))
             .ok()
             .flatten();
@@ -628,10 +630,58 @@ pub(crate) fn capture_work_frame(
     view: &wry::WebView,
     completion: impl FnOnce(Option<(u32, u32, Vec<u8>)>) + 'static,
 ) -> bool {
+    capture_work_frame_native(&view.webview(), &view.controller(), completion)
+}
+pub(crate) fn capture_work_frame_native(
+    core: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+    controller: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller,
+    completion: impl FnOnce(Option<(u32, u32, Vec<u8>)>) + 'static,
+) -> bool {
+    capture_person_frame_native(core, controller, None, completion)
+}
+/// WebView2 has no region CapturePreview API. Its existing bounded native
+/// stream/worker crops before encoding; only the admitted ROI is returned.
+pub(crate) fn capture_record_frame_native(
+    core: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+    controller: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller,
+    crop: crate::platform::record_media::Crop,
+    completion: crate::platform::record_media::FrameCompletion,
+) -> bool {
+    let Some(dimensions) = frame_dimensions(controller) else {
+        completion(None);
+        return false;
+    };
+    let Some(geometry) = work_frame_image::region_geometry(dimensions, crop) else {
+        completion(None);
+        return false;
+    };
+    capture_person_frame_native(core, controller, Some((crop, dimensions)), move |image| {
+        completion(
+            image.map(|(_, _, png)| crate::platform::record_media::RecordFrame { png, geometry }),
+        );
+    })
+}
+fn frame_dimensions(
+    controller: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller,
+) -> Option<(u32, u32)> {
+    let mut bounds = windows::Win32::Foundation::RECT::default();
+    // SAFETY: the exact controller and initialized output stay on their owning STA.
+    unsafe { controller.Bounds(&mut bounds) }.ok()?;
+    Some((
+        u32::try_from(bounds.right.checked_sub(bounds.left)?).ok()?,
+        u32::try_from(bounds.bottom.checked_sub(bounds.top)?).ok()?,
+    ))
+}
+fn capture_person_frame_native(
+    core: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+    controller: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller,
+    record: Option<(crate::platform::record_media::Crop, (u32, u32))>,
+    completion: impl FnOnce(Option<(u32, u32, Vec<u8>)>) + 'static,
+) -> bool {
     let mut bounds = windows::Win32::Foundation::RECT::default();
     // SAFETY: the exact controller and initialized output remain on its owning
     // STA. Bounds are physical pixels, including the host's DPI conversion.
-    let bounds_ok = unsafe { view.controller().Bounds(&mut bounds) }.is_ok();
+    let bounds_ok = unsafe { controller.Bounds(&mut bounds) }.is_ok();
     let dimensions = (
         bounds
             .right
@@ -651,6 +701,13 @@ pub(crate) fn capture_work_frame(
         return false;
     }
     let dimensions = (width, height);
+    if record
+        .as_ref()
+        .is_some_and(|(_, expected)| *expected != dimensions)
+    {
+        complete_frame(Box::new(completion), None);
+        return false;
+    }
     let Some(capture_job) = FrameCaptureJob::acquire() else {
         complete_frame(Box::new(completion), None);
         return false;
@@ -685,7 +742,13 @@ pub(crate) fn capture_work_frame(
             None
         };
         if let Some(png) = png {
-            deliver_frame_thumbnail(png, dimensions, completion, capture_job);
+            deliver_frame_thumbnail(
+                png,
+                dimensions,
+                completion,
+                capture_job,
+                record.map(|(crop, _)| crop),
+            );
         } else {
             complete_frame(completion, None);
         }
@@ -693,13 +756,12 @@ pub(crate) fn capture_work_frame(
     }));
     // SAFETY: exact live WebView2/stream/handler on the same STA. The callback retains its bounded stream through completion.
     let dispatched = unsafe {
-        view.webview()
-            .CapturePreview(
-                COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
-                &stream,
-                &handler,
-            )
-            .is_ok()
+        core.CapturePreview(
+            COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+            &stream,
+            &handler,
+        )
+        .is_ok()
     };
     if !dispatched {
         if let Some((completion, _, _, _)) = pending.borrow_mut().take() {

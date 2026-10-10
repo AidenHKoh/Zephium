@@ -197,6 +197,8 @@ pub enum WorkBrowserResourceError {
 /// Closed operation classes; none grants page-level or model authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkBrowserResourceOperation {
+    /// Optional bounded native media read on the drained same page.
+    ReadMedia,
     /// Construct one extension-free resource under its selected profile.
     Construct,
     /// Bind one run lease to the existing exact page.
@@ -251,7 +253,8 @@ struct ConstructionSettings {
 #[derive(Debug)]
 pub struct WorkBrowserResourceRequest {
     construction: Option<Box<ConstructionSettings>>,
-    operation: OperationJoin,
+    media: Option<Box<media::MediaRead>>,
+    operation: Box<OperationJoin>,
     storage: ContextProfileStorageClass,
     isolated_public: bool,
     document: Option<Arc<ContextNavigationTarget>>,
@@ -459,7 +462,7 @@ impl WorkBrowserResourceRequest {
         outcome: WorkBrowserResourceNativeOutcome,
     ) -> WorkBrowserResourceCompletion {
         WorkBrowserResourceCompletion {
-            operation: self.operation,
+            operation: *self.operation,
             outcome,
             delivery: self.delivery.map(|delivery| delivery.binding),
             effective_document: None,
@@ -506,6 +509,8 @@ impl WorkBrowserLeaseNativeDebt {
 /// Unsupported/refused/unknown facts must never be represented as success.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkBrowserResourceNativeOutcome {
+    /// Optional media terminal arrived; original resource remains owned.
+    MediaRead,
     /// Exact page/profile/channel construction and ownership were attested.
     Constructed,
     /// Same exact page was bound to the requested lease, without recreation.
@@ -838,7 +843,8 @@ impl WorkBrowserResources {
         );
         Ok(WorkBrowserResourceRequest {
             construction: None,
-            operation,
+            media: None,
+            operation: Box::new(operation),
             storage,
             isolated_public,
             document,
@@ -899,7 +905,8 @@ impl WorkBrowserResources {
         row.pending = Some(operation.clone());
         Ok(WorkBrowserResourceRequest {
             construction: None,
-            operation,
+            media: None,
+            operation: Box::new(operation),
             storage: row.storage,
             isolated_public: row.isolated_public,
             document: row.document.clone(),
@@ -962,7 +969,8 @@ impl WorkBrowserResources {
         row.pending = Some(operation.clone());
         Ok(WorkBrowserResourceRequest {
             construction: None,
-            operation,
+            media: None,
+            operation: Box::new(operation),
             storage: row.storage,
             isolated_public: row.isolated_public,
             document: row.document.clone(),
@@ -1033,7 +1041,8 @@ impl WorkBrowserResources {
         row.destruction = Some(operation.clone());
         Ok(WorkBrowserResourceRequest {
             construction: None,
-            operation,
+            media: None,
+            operation: Box::new(operation),
             storage: row.storage,
             isolated_public: row.isolated_public,
             document: row.document.clone(),
@@ -1108,6 +1117,13 @@ impl WorkBrowserResources {
             return Ok(human::settle(row, completion, now, sealed));
         }
         let failure = match (completion.operation.kind, completion.outcome) {
+            (
+                WorkBrowserResourceOperation::ReadMedia,
+                WorkBrowserResourceNativeOutcome::MediaRead,
+            ) => {
+                row.phase = WorkBrowserResourcePhase::Retained;
+                return Ok(WorkBrowserResourceEvent::Retained(row.join.clone()));
+            }
             (
                 WorkBrowserResourceOperation::Construct,
                 WorkBrowserResourceNativeOutcome::Constructed,
@@ -1190,11 +1206,11 @@ impl WorkBrowserResources {
     ) -> Result<WorkBrowserResourceEvent, WorkBrowserResourceError> {
         let row = self.row_mut(&request.operation.resource)?;
         let operation = request.operation.kind;
-        if row.destruction.as_ref() == Some(&request.operation) {
+        if row.destruction.as_ref() == Some(request.operation.as_ref()) {
             row.destruction = None;
             row.quarantine(WorkBrowserResourceFailure::NativeRefused);
         } else {
-            if row.pending.as_ref() != Some(&request.operation) {
+            if row.pending.as_ref() != Some(request.operation.as_ref()) {
                 return Err(WorkBrowserResourceError::Stale);
             }
             row.pending = None;
@@ -1220,7 +1236,8 @@ impl WorkBrowserResources {
                     WorkBrowserResourceOperation::Construct => {
                         row.phase = WorkBrowserResourcePhase::Destroyed
                     }
-                    WorkBrowserResourceOperation::Acquire => {
+                    WorkBrowserResourceOperation::Acquire
+                    | WorkBrowserResourceOperation::ReadMedia => {
                         row.phase = WorkBrowserResourcePhase::Retained;
                     }
                     WorkBrowserResourceOperation::Revoke
@@ -1389,3 +1406,10 @@ pub enum WorkBrowserResourceDispatch {
 #[cfg(test)]
 #[path = "work_browser_resource_tests.rs"]
 mod tests;
+
+#[path = "work_browser_media.rs"]
+mod media;
+pub use media::{
+    WorkBrowserCropGeometry, WorkBrowserMediaProgress, WorkBrowserRecordImage,
+    WorkBrowserRecordImageOrigin,
+};

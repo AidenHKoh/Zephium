@@ -998,6 +998,7 @@ impl SemanticExtractionStats {
 
 /// Validated structured mapping over one exact committed semantic read.
 pub struct SemanticExtractionResult<'a> {
+    media: Vec<crate::SemanticRecordMediaPlan>,
     page_title: Option<String>,
     schema: SemanticExtractionSchemaId,
     observation: SemanticObservationId,
@@ -1097,6 +1098,7 @@ impl<'a> SemanticExtractionResult<'a> {
             edges.push(u16::try_from(index).map_err(|_| SemanticExtractionError::Invariant)?);
         }
         Ok(SemanticOwnedExtractionResult {
+            media: self.media,
             page_title: self.page_title,
             schema: self.schema,
             observation: self.observation,
@@ -1215,6 +1217,7 @@ pub struct SemanticOwnedExtractionSource {
 /// Its only constructor consumes the validated result. It is not policy,
 /// task-completion, persistence or independent factual-verification proof.
 pub struct SemanticOwnedExtractionResult {
+    media: Vec<crate::SemanticRecordMediaPlan>,
     page_title: Option<String>,
     schema: SemanticExtractionSchemaId,
     observation: SemanticObservationId,
@@ -1230,6 +1233,75 @@ pub struct SemanticOwnedExtractionResult {
 }
 
 impl SemanticOwnedExtractionResult {
+    /// Carries the live original controller's existing screenshot permission
+    /// into local-only record plans before actor closure. No model/image data
+    /// or native request can call this through a serialized interface.
+    #[allow(clippy::too_many_arguments)]
+    pub fn carry_record_crop_permission(
+        &mut self,
+        config: &crate::AgentProviderCallConfig,
+        policy: &crate::AgentRunPolicy,
+        lease: crate::AgentPlanLeaseBinding,
+        remaining_native_actions: u64,
+        original_account: crate::AgentContextAccountBinding,
+        current_account: crate::AgentContextAccountBinding,
+        observation: &crate::SemanticObservation,
+        acknowledgement: &crate::SemanticObservationAcknowledgement,
+        now: std::time::Instant,
+        expires: std::time::Instant,
+    ) -> bool {
+        for plan in &mut self.media {
+            plan.crop = None;
+        }
+        let context = observation.request().context();
+        let remaining = policy
+            .remaining_operations(lease.lease())
+            .ok()
+            .unwrap_or(0)
+            .min(12)
+            .min(remaining_native_actions.min(12) as u32) as u8;
+        let admitted_source = policy.taints().iter().any(|cohort| {
+            cohort.context() == context
+                && cohort.account() == original_account.account()
+                && cohort.observation() == observation.request().id()
+                && cohort.observation_generation() == observation.request().generation()
+        });
+        let screenshot_scope = policy.permits_screenshot_sensitivity(lease.lease());
+        if !screenshot_scope
+            || !acknowledgement.matches(observation)
+            || policy.is_sealed()
+            || policy.pending_model_calls() != 0
+            || policy.pending_effects() != 0
+            || remaining == 0
+            || !admitted_source
+        {
+            return false;
+        }
+
+        let Some(mut permit) = crate::semantic_media::SemanticRecordCropPermit::admit(
+            observation.request().context(),
+            original_account,
+            current_account,
+            config.permits_viewport_screenshot(),
+            now,
+            expires,
+        ) else {
+            return false;
+        };
+        permit.remaining = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(remaining));
+        for plan in &mut self.media {
+            if plan.frame.context() == permit.context {
+                plan.crop = Some(permit.for_record());
+            }
+        }
+        self.media.iter().any(|plan| plan.crop.is_some())
+    }
+    /// Native-only bounded record candidates. Their live document and privacy
+    /// remain unverified until the retained owner completes media capture.
+    pub fn media(&self) -> &[crate::SemanticRecordMediaPlan] {
+        &self.media
+    }
+
     /// Public document title observed by the terminal read, never model output.
     pub fn page_title(&self) -> Option<&str> {
         self.page_title.as_deref()
@@ -1534,6 +1606,30 @@ pub(crate) fn extract_semantic_read_inner<'a>(
         false,
     )?;
 
+    let mut media = Vec::new();
+    let mut record = 0u16;
+    for field in &fields {
+        if let SemanticExtractedValue::Rows(rows) = field.value() {
+            for row in rows.items() {
+                if media.len() < 12 {
+                    if let Some(SemanticExtractedValue::Text(name)) =
+                        row.fields().first().map(SemanticExtractedField::value)
+                    {
+                        let span = name.source_span();
+                        let identity = sources[usize::from(span.start)
+                            ..usize::from(span.start) + usize::from(span.len)]
+                            .iter()
+                            .map(|source| source.fragment().id())
+                            .collect::<Vec<_>>();
+                        if let Some(plan) = read.media_for_record(record, &identity, result_guard) {
+                            media.push(plan);
+                        }
+                    }
+                }
+                record = record.saturating_add(1);
+            }
+        }
+    }
     let stats = SemanticExtractionStats {
         fields: u8::try_from(fields.len()).map_err(|_| SemanticExtractionError::Invariant)?,
         values: u16::try_from(counters.values).map_err(|_| SemanticExtractionError::Invariant)?,
@@ -1546,6 +1642,7 @@ pub(crate) fn extract_semantic_read_inner<'a>(
         dropped: u16::try_from(counters.dropped).unwrap_or(u16::MAX),
     };
     Ok(SemanticExtractionResult {
+        media,
         page_title: read.page_title().map(str::to_owned),
         schema: schema.id(),
         observation: read.observation(),
@@ -1562,6 +1659,11 @@ pub(crate) fn extract_semantic_read_inner<'a>(
         #[cfg(feature = "provider-transport")]
         schema_guard: crate::semantic_extract_model::extraction_schema_guard(schema),
     })
+}
+
+struct RecordIdentity {
+    name: String,
+    sources: Vec<SemanticReadFragmentId>,
 }
 
 /// `record`: the fields of one row, where an optional field whose own
@@ -1588,9 +1690,9 @@ fn admit_fields<'a>(
 
     let mut present = vec![false; schemas.len()];
     let mut previous_schema_index = None;
-    // A record's first text names its subject; its link and picture may be
-    // found by that name when the model cited the wrong fragment.
-    let mut subject: Option<String> = None;
+    // Keep exact name provenance for native card-to-image association. A
+    // model's copied name or picture label never creates that relationship.
+    let mut subject: Option<RecordIdentity> = None;
     let mut fields = Vec::with_capacity(raw_fields.len());
     for raw_field in raw_fields {
         let Some(schema_index) = schemas
@@ -1612,7 +1714,7 @@ fn admit_fields<'a>(
             sensitivity_limit,
             sources,
             counters,
-            subject.as_deref(),
+            subject.as_ref(),
         ) {
             Ok(value) => value,
             // An optional value whose own evidence fails is left out, at the
@@ -1628,7 +1730,15 @@ fn admit_fields<'a>(
         present[schema_index] = true;
         if record && subject.is_none() {
             if let SemanticExtractedValue::Text(text) = &value {
-                subject = Some(text.as_str().to_owned());
+                let span = text.source_span();
+                subject = Some(RecordIdentity {
+                    name: text.as_str().to_owned(),
+                    sources: sources[usize::from(span.start)
+                        ..(usize::from(span.start) + usize::from(span.len))]
+                        .iter()
+                        .map(|source| source.fragment().id())
+                        .collect(),
+                });
             }
         }
         fields.push(SemanticExtractedField {
@@ -1636,9 +1746,9 @@ fn admit_fields<'a>(
             value,
         });
     }
-    // A record's link or picture the model left out is the one whose own
-    // name is the record's subject, copied from the page with its citation.
-    if let Some(subject) = subject.as_deref().filter(|_| record) {
+    // Missing pictures use exact native ancestry; ordinary link repair keeps
+    // its existing evidence rules. Both copy only real cited source values.
+    if let Some(subject) = subject.as_ref().filter(|_| record) {
         for (index, field_schema) in schemas.iter().enumerate() {
             let (field, max_bytes) = match (&field_schema.spec, present[index]) {
                 (SemanticExtractionFieldSpec::Url { max_bytes }, false)
@@ -1737,7 +1847,7 @@ fn admit_value<'a>(
     sensitivity_limit: SemanticReadSensitivityLimit,
     sources: &mut Vec<SemanticExtractionSource<'a>>,
     counters: &mut ExtractionCounters,
-    subject: Option<&str>,
+    subject: Option<&RecordIdentity>,
 ) -> Result<SemanticExtractedValue, SemanticExtractionError> {
     match (&field.spec, raw) {
         (SemanticExtractionFieldSpec::Rows { fields, max_items }, RawValue::Rows { mut items }) => {
@@ -2373,13 +2483,13 @@ fn extraction_result_guard(
 /// is always the page's own exact address, never model text: a cited link or
 /// picture fragment; else that field of a cited node; else the one observed
 /// address the model's copy names; else, in a record, the link or picture
-/// whose own name is the record's subject.
+/// structurally bound to the record's exact native name provenance.
 fn resolve_source_url(
     proposed: Option<&str>,
     raw_sources: &[String],
     read: &SemanticReadResult<'_>,
     field: crate::SemanticReadField,
-    subject: Option<&str>,
+    subject: Option<&RecordIdentity>,
 ) -> Result<(String, String), SemanticExtractionError> {
     let observed = |fragment: SemanticReadFragment<'_>| {
         if fragment.field() != field {
@@ -2389,6 +2499,19 @@ fn resolve_source_url(
         (!preview.truncated() && exact_public_url(preview.text()))
             .then(|| (preview.text().to_owned(), fragment.id().model_token()))
     };
+    if field == crate::SemanticReadField::ImageSource {
+        if let Some(subject) = subject {
+            let candidates = read.images_for_record(&subject.sources);
+            return candidates
+                .iter()
+                .copied()
+                .filter_map(observed)
+                .find(|(url, _)| proposed == Some(url.as_str()))
+                .or_else(|| candidates.iter().copied().find_map(observed))
+                .ok_or(SemanticExtractionError::SourceInvalid);
+        }
+    }
+    let subject = subject.map(|subject| subject.name.as_str());
     if field == crate::SemanticReadField::DocumentAddress {
         return read
             .fragments()
@@ -2678,6 +2801,13 @@ mod tests {
     }
 
     fn observation_with_completeness(nodes: Value, completeness: &str) -> SemanticObservation {
+        observation_with_media(nodes, completeness, json!([]))
+    }
+    fn observation_with_media(
+        nodes: Value,
+        completeness: &str,
+        media: Value,
+    ) -> SemanticObservation {
         let identity = ContextIdentity::new(
             ContextId::from_raw(731),
             ContextRunId::from_raw(732),
@@ -2714,6 +2844,7 @@ mod tests {
             "i": 17,
             "g": 19,
             "c": completeness,
+            "m": media,
             "n": nodes
         }))
         .expect("wire");
@@ -3325,23 +3456,275 @@ mod tests {
     }
 
     #[test]
-    fn listing_records_find_their_own_link_and_picture_by_name() {
+    fn record_container_plan_is_exact_name_bound_and_lower_priority_than_a_loaded_picture() {
+        for loaded in [false, true] {
+            let observation = observation_with_media(
+                json!([
+                    {"k":1,"r":"document","fc":true},
+                    {"k":2,"p":0,"r":"document","b":{"x":0,"y":0,"w":220,"h":140},"fc":true},
+                    {"k":3,"p":1,"r":"heading","l":2,"n":"Amber record","fc":true},
+                    {"k":4,"p":1,"r":"image","b":{"x":10,"y":30,"w":128,"h":96},"m":"https://example.test/amber.png","fc":true},
+                    {"k":5,"p":0,"r":"document","b":{"x":230,"y":0,"w":220,"h":140},"fc":true},
+                    {"k":6,"p":4,"r":"heading","l":2,"n":"Blue record","fc":true}
+                ]),
+                "complete",
+                json!([
+                    {"k":2,"t":"record","r":[3],"l":true},
+                    {"k":4,"t":"image","r":[3],"l":loaded},
+                    {"k":5,"t":"record","r":[6],"l":true}
+                ]),
+            );
+            let read = read(&observation, 31);
+            let source = |name: &str| {
+                read.fragments()
+                    .iter()
+                    .find(|fragment| {
+                        fragment
+                            .content()
+                            .text()
+                            .is_some_and(|value| value.as_str() == name)
+                    })
+                    .unwrap()
+                    .id()
+            };
+            let amber = read
+                .media_for_record(0, &[source("Amber record")], [7; 32])
+                .unwrap();
+            let blue = read
+                .media_for_record(1, &[source("Blue record")], [7; 32])
+                .unwrap();
+            assert_eq!(amber.key, if loaded { 4 } else { 2 });
+            assert_eq!(blue.key, 5);
+            assert!(
+                !amber.local_crop_permitted(std::time::Instant::now()),
+                "DOM metadata cannot mint screenshot permission"
+            );
+            assert_ne!(amber.source(), blue.source());
+        }
+    }
+
+    #[test]
+    fn local_crop_permission_cannot_change_account_context_deadline_or_permission() {
+        use crate::{
+            AgentAccountAttestationId, AgentAccountId, AgentAccountScope,
+            AgentContextAccountBinding as Binding,
+        };
+        let context = observation().request().context();
+        let other = crate::ContextJoin::work_execution(
+            ContextIdentity::new(
+                ContextId::from_raw(999),
+                context.identity().owner(),
+                context.identity().profile(),
+                ContextKind::Owned,
+            ),
+            context.context_generation(),
+            context.navigation_epoch(),
+            context.frame_generation(),
+        );
+        let account = Binding::new(
+            AgentAccountAttestationId::generate(),
+            context,
+            AgentAccountScope::Authenticated(AgentAccountId::generate()),
+            crate::AgentPolicyInstant::from_millis(1),
+        );
+        let changed = Binding::new(
+            AgentAccountAttestationId::generate(),
+            context,
+            AgentAccountScope::Authenticated(AgentAccountId::generate()),
+            crate::AgentPolicyInstant::from_millis(1),
+        );
+        let refreshed = Binding::new(
+            AgentAccountAttestationId::generate(),
+            context,
+            account.account(),
+            crate::AgentPolicyInstant::from_millis(2),
+        );
+        let now = std::time::Instant::now();
+        let expires = now + std::time::Duration::from_secs(2);
+        assert!(crate::semantic_media::SemanticRecordCropPermit::admit(
+            context, account, account, true, now, expires
+        )
+        .is_some());
+        assert!(
+            crate::semantic_media::SemanticRecordCropPermit::admit(
+                context, account, refreshed, true, now, expires
+            )
+            .is_none(),
+            "a stale sample is never silently treated as the refreshed attestation"
+        );
+        assert!(
+            crate::semantic_media::SemanticRecordCropPermit::admit(
+                context, refreshed, refreshed, true, now, expires
+            )
+            .is_some(),
+            "only the verified sample frozen before mapping can remain exact"
+        );
+        assert!(crate::semantic_media::SemanticRecordCropPermit::admit(
+            context, account, account, false, now, expires
+        )
+        .is_none());
+        assert!(crate::semantic_media::SemanticRecordCropPermit::admit(
+            context, account, changed, true, now, expires
+        )
+        .is_none());
+        assert!(crate::semantic_media::SemanticRecordCropPermit::admit(
+            other, account, account, true, now, expires
+        )
+        .is_none());
+        assert!(crate::semantic_media::SemanticRecordCropPermit::admit(
+            context, account, account, true, now, now
+        )
+        .is_none());
+        assert!(crate::semantic_media::SemanticRecordCropPermit::admit(
+            context,
+            account,
+            account,
+            true,
+            now,
+            now + std::time::Duration::from_secs(9)
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn local_crop_budget_is_shared_one_shot_and_cannot_be_replayed_after_expiry() {
+        use crate::semantic_media::{SemanticRecordCropPermit, SemanticRecordMediaPlan};
+        use crate::{AgentAccountAttestationId, AgentAccountScope, AgentContextAccountBinding};
+        use std::sync::atomic::{AtomicU8, Ordering};
+        let observation = observation();
+        let context = observation.request().context();
+        let account = AgentContextAccountBinding::new(
+            AgentAccountAttestationId::generate(),
+            context,
+            AgentAccountScope::Anonymous,
+            crate::AgentPolicyInstant::from_millis(1),
+        );
+        let now = std::time::Instant::now();
+        let expires = now + std::time::Duration::from_secs(2);
+        let mut permission =
+            SemanticRecordCropPermit::admit(context, account, account, true, now, expires).unwrap();
+        permission.remaining = std::sync::Arc::new(AtomicU8::new(1));
+        let mut plan = SemanticRecordMediaPlan {
+            crop: None,
+            record: 0,
+            source: [1; 32],
+            frame: observation.frames()[0].frame().clone(),
+            invocation: crate::SemanticInvocationId::new(1).unwrap(),
+            snapshot: crate::SemanticSnapshotGeneration::new(1).unwrap(),
+            key: 2,
+            name_key: 3,
+        };
+        assert!(
+            !plan.begin_local_crop(now),
+            "an archive alone has no crop permission"
+        );
+        plan.crop = Some(permission.for_record());
+        let same_record = plan.clone();
+        let mut sibling = plan.clone();
+        sibling.record = 1;
+        sibling.crop = Some(permission.for_record());
+        assert!(plan.begin_local_crop(now));
+        assert!(
+            !same_record.begin_local_crop(now),
+            "clones cannot replay the reservation"
+        );
+        assert!(
+            !sibling.begin_local_crop(now),
+            "records share the original remaining budget"
+        );
+        assert_eq!(permission.remaining.load(Ordering::Acquire), 0);
+        assert!(plan.local_crop_reserved(now));
+        assert!(
+            !plan.local_crop_reserved(expires),
+            "a spent reservation cannot extend its original deadline"
+        );
+    }
+
+    #[test]
+    fn unassociated_optional_picture_never_discards_source_backed_text() {
+        let observation = observation_with_nodes(json!([
+            {"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"heading","l":1,"n":"Cabin Alpha"},
+            {"k":3,"p":0,"r":"image","n":"Cabin Alpha","m":"https://images.example.test/sibling.jpg"}
+        ]));
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows(
+                "records".into(),
+                true,
+                vec![
+                    SemanticExtractionFieldSchema::try_text("name".into(), true, 512).unwrap(),
+                    SemanticExtractionFieldSchema::try_image_url("photo".into(), false, 2048)
+                        .unwrap(),
+                ],
+                8,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+            &schema,
+        )
+        .unwrap();
+        let token = |field| {
+            read.fragments()
+                .iter()
+                .find(|fragment| fragment.field() == field)
+                .unwrap()
+                .id()
+                .model_token()
+        };
+        let output = json!({"v":1,"schema":1,"fields":[{"name":"records","value":{"k":"rows","items":[{"fields":[
+            {"name":"name","value":{"k":"text","value":"Cabin Alpha","sources":[token(crate::SemanticReadField::AccessibleName)]}},
+            {"name":"photo","value":{"k":"image_url","value":"https://images.example.test/sibling.jpg","sources":[token(crate::SemanticReadField::ImageSource)]}}
+        ]}]}}]});
+        let result = extract_semantic_read(
+            &schema,
+            &read,
+            &delivered(&read),
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&output).unwrap(),
+        )
+        .unwrap();
+        let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+            panic!("rows")
+        };
+        assert_eq!(rows.items().len(), 1);
+        assert_eq!(rows.items()[0].fields().len(), 1);
+        assert_eq!(rows.items()[0].fields()[0].name(), "name");
+        assert_eq!(result.stats().dropped(), 1);
+    }
+
+    #[test]
+    fn listing_records_bind_pictures_to_native_card_provenance_not_image_names() {
         // Shaped like the recorded amazon.com and x-kom.pl listings: the model
         // cites the card text for everything, or leaves the link out.
         let corvette = "https://www.amazon.com/LEGO-Technic-Chevrolet-Corvette-Stingray/dp/B0DFTPRHFK/ref=sr_1_1";
         let mclaren =
             "https://www.amazon.com/LEGO-Technic-McLaren-Hypercar/dp/B0CWH4RKRP/ref=sr_1_3";
-        let observation = observation_with_nodes(json!([
-            {"k":1,"r":"document","o":16},
-            {"k":2,"p":0,"r":"list_item","t":"LEGO 2K+ bought in past month Price, product page PLN 230.57"},
-            {"k":3,"p":0,"r":"image","n":"LEGO Technic Chevrolet Corvette Stingray Toy Car - Model Car Kit for ...","m":"https://m.media-amazon.com/images/I/810qnPKsqBL.jpg"},
-            {"k":4,"p":0,"r":"link","n":"Technic Chevrolet Corvette Stingray Toy Car - Model Car Kit for Display - 42205","u":corvette},
-            {"k":5,"p":0,"r":"link","n":"PLN 230.57","u":corvette},
-            {"k":6,"p":0,"r":"list_item","t":"LEGO Price, product page PLN 1 299,00 zł"},
-            {"k":7,"p":0,"r":"image","n":"LEGO Technic McLaren P1 Hypercar","m":"https://m.media-amazon.com/images/I/71mclaren.jpg"},
-            {"k":8,"p":0,"r":"link","n":"LEGO Technic McLaren P1 Hypercar","u":mclaren},
-            {"k":9,"p":0,"r":"paragraph","t":"1 299,00 zł"}
-        ]));
+        let observation = observation_with_media(
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"list_item","t":"LEGO 2K+ bought in past month Price, product page PLN 230.57"},
+                {"k":3,"p":0,"r":"image","n":"Wrong unrelated label","b":{"x":0,"y":0,"w":160,"h":110},"m":"https://m.media-amazon.com/images/I/810qnPKsqBL.jpg"},
+                {"k":4,"p":0,"r":"link","n":"Technic Chevrolet Corvette Stingray Toy Car - Model Car Kit for Display - 42205","u":corvette},
+                {"k":5,"p":0,"r":"link","n":"PLN 230.57","u":corvette},
+                {"k":6,"p":0,"r":"list_item","t":"LEGO Price, product page PLN 1 299,00 zł"},
+                {"k":7,"p":0,"r":"image","b":{"x":200,"y":0,"w":160,"h":110},"m":"https://m.media-amazon.com/images/I/71mclaren.jpg"},
+                {"k":8,"p":0,"r":"link","n":"LEGO Technic McLaren P1 Hypercar","u":mclaren},
+                {"k":9,"p":0,"r":"paragraph","t":"1 299,00 zł"}
+            ]),
+            "complete",
+            json!([
+                {"k":3,"t":"image","r":[2,4,5],"l":true},
+                {"k":7,"t":"image","r":[6,8,9],"l":true}
+            ]),
+        );
         let row = vec![
             SemanticExtractionFieldSchema::try_text("name".into(), true, 512).unwrap(),
             SemanticExtractionFieldSchema::try_text("price".into(), false, 1024)

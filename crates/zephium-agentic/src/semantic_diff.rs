@@ -1152,6 +1152,16 @@ fn hash_observation(hasher: &mut FingerprintHasher, observation: &SemanticObserv
         for node in frame.nodes() {
             hash_node(hasher, node);
         }
+        hasher.u64(frame.media().len() as u64);
+        for media in frame.media() {
+            hasher.u16(media.reference().get());
+            hasher.byte(media.kind() as u8);
+            hasher.byte(u8::from(media.loaded()));
+            hasher.u64(media.related().len() as u64);
+            for related in media.related() {
+                hasher.u16(related.get());
+            }
+        }
     }
     hasher.u64(observation.frame_boundaries().len() as u64);
     for boundary in observation.frame_boundaries() {

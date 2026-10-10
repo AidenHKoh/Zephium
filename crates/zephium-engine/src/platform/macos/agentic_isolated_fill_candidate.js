@@ -151,9 +151,9 @@ function commandEditorValue(witness) {
   return protectedCount === siblings.length ? value : commandRefuse("protected_count");
 }
 
-function runFixedFill(target, descriptor, request) {
+function runFixedFill(target, descriptor, request, finish) {
   if (fillControlKind(descriptor, request.z) !== 3)
-    return commandPreparationOnly ? "unsupported_interaction" : runSyntheticFill(target, descriptor, request);
+    return commandPreparationOnly ? "unsupported_interaction" : runSyntheticFill(target, descriptor, request, finish);
   // The proof consumes at most one command opportunity for the entire owned
   // document, even after a new observation, cancellation, exception or retry.
   if (commandEntered) return "applied_unverified";

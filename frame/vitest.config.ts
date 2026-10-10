@@ -56,6 +56,25 @@ export default defineConfig({
         test: {
           name: "component",
           provide: {
+            pixelPrivacyRuntime: readFileSync(
+              new URL(
+                "../crates/zephium-agentic/assets/semantic-pixel-privacy-v1.js",
+                import.meta.url,
+              ),
+              "utf8",
+            ),
+            semanticMediaRuntime:
+              readFileSync(
+                new URL(
+                  "../crates/zephium-agentic/assets/semantic-record-media-v1.js",
+                  import.meta.url,
+                ),
+                "utf8",
+              ) +
+              readFileSync(
+                new URL("../crates/zephium-agentic/assets/semantic-runtime-v1.js", import.meta.url),
+                "utf8",
+              ),
             humanWallSurvey: readFileSync(
               new URL("../crates/zephium-engine/src/host/work_human_wall.js", import.meta.url),
               "utf8",

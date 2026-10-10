@@ -171,7 +171,10 @@ impl WorkNativeResource {
         if self.frame_in_flight.load(Ordering::Acquire) {
             return true;
         }
-        self.construction_presentation.is_some()
+        self.media_batch
+            .as_ref()
+            .is_some_and(|media| media.presented())
+            || self.construction_presentation.is_some()
             || self.human_presentation.is_some()
             || self
                 .observation

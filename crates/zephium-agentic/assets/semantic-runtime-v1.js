@@ -63,6 +63,8 @@
   const stringTrim = String.prototype.trim;
   const stringStartsWith = String.prototype.startsWith;
   const stringIncludes = String.prototype.includes;
+  const stringIndexOf = String.prototype.indexOf;
+  const regexpExec = RegExp.prototype.exec;
 
   if (objectHasOwn(globalThis, GLOBAL_NAME)) {
     return;
@@ -168,6 +170,9 @@
     typeof HTMLInputElement === "function" ? getter(HTMLInputElement.prototype, "value") : null;
   const anchorHrefGetter =
     typeof HTMLAnchorElement === "function" ? getter(HTMLAnchorElement.prototype, "href") : null;
+  const imageCompleteGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "complete") : null;
+  const imageNaturalWidthGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "naturalWidth") : null;
+  const videoPosterGetter = typeof HTMLVideoElement === "function" ? getter(HTMLVideoElement.prototype, "poster") : null;
   const imageCurrentSrcGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "currentSrc") : null;
   const imageSrcGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "src") : null;
   const titleTextGetter = typeof HTMLTitleElement === "function" ? getter(HTMLTitleElement.prototype, "text") : null;
@@ -614,7 +619,11 @@
     if (
       lower.includes("-----begin private key-----") ||
       lower.includes("-----begin rsa private key-----") ||
-      lower.includes("-----begin ec private key-----")
+      lower.includes("-----begin ec private key-----") ||
+      lower.includes("-----begin openssh private key-----") ||
+      lower.includes("-----begin dsa private key-----") ||
+      lower.includes("-----begin encrypted private key-----") ||
+      lower.includes("-----begin pgp private key block-----")
     ) {
       return true;
     }
@@ -947,12 +956,18 @@
     const richText = editable && editableSupport === 7 && richTextShape(node);
     const explicit = explicitRole(node);
     if (explicit !== null) {
-      if (explicit.suppressed === true) return null;
+      if (explicit.suppressed === true) return isRenderedPhoto(node, tag) ? { role: "image", tag, inputType } : null;
       return { role: explicit.role, landmark: explicit.landmark, tag, inputType, contentEditable: editable, plainTextEditable, richText, editableSupport, editableStructure, editableEmpty: editableWitness && editableWitness.empty, editingContext: editableWitness && editableWitness.context };
     }
 
     if (editable) return { role: "textbox", tag, inputType, contentEditable: true, plainTextEditable, richText, editableSupport, editableStructure, editableEmpty: editableWitness.empty, editingContext: editableWitness.context };
 
+    if ((tag === "div" || tag === "span") && listLength(childNodes(node)) <= 1 && backgroundSource(node) !== null && isRenderedPhoto(node, tag)) {
+      return { role: "image", tag, inputType, mediaKind: "background" };
+    }
+    if (["video", "canvas", "svg"].includes(tag) && isRenderedPhoto(node, tag)) {
+      return { role: "image", tag, inputType, mediaKind: tag === "video" ? "poster" : tag };
+    }
     if (tag === "html" || tag === "body" || tag === "div" || tag === "fieldset" || tag === "details") {
       return tag === "fieldset" || tag === "details"
         ? { role: "group", tag, inputType }
@@ -1003,7 +1018,7 @@
     if (tag === "tr") return { role: "row", tag, inputType };
     if (tag === "th") return { role: "cell_header", tag, inputType };
     if (tag === "td") return { role: "cell", tag, inputType };
-    if (tag === "img" && attribute(node, "alt", 1) !== null) {
+    if (tag === "img" && (attribute(node, "alt", 1) !== null || isRenderedPhoto(node, tag))) {
       return { role: "image", tag, inputType };
     }
     if (isPageImageMeta(node, tag)) return { role: "image", tag, inputType, pageImage: true, headMeta: true };
@@ -1189,9 +1204,19 @@
   // carries the label; a photo drawn at a real size stays an image node,
   // while hidden icons and spacers still drop out.
   function isRenderedPhoto(element, tag) {
-    if (tag !== "img") return false;
+    if (!["img", "canvas", "svg"].includes(tag) &&
+        !(tag === "video" && attribute(element, "poster", 1) !== null) &&
+        !((tag === "div" || tag === "span") && listLength(childNodes(element)) <= 1 && backgroundSource(element) !== null)) return false;
     const rect = elementRect(element);
     return rect !== null && rect.width >= 64 && rect.height >= 64;
+  }
+
+  function backgroundSource(element) {
+    try {
+      const value = apply(getComputedStyleFixed, globalThis, [element]).backgroundImage;
+      const match = /^url\(["']?([^"'\\]+)["']?\)$/.exec(value);
+      return match && match[1].length <= 4096 ? match[1] : null;
+    } catch (_) { return null; }
   }
 
   // The label of the button or link an unnamed photo sits in.
@@ -2069,7 +2094,8 @@
     if (operations !== 0) wire.o = operations;
     if (rect !== null && state.request.b.geo) wire.b = wireRect(rect);
 
-    const record = { wire, sink: null, sinkBytes: 0, sensitivity: "public", element };
+    const record = { wire, sink: null, sinkBytes: 0, sensitivity: "public", element,
+      media: descriptor.mediaKind || (descriptor.tag === "article" || descriptor.role === "list_item" ? "record" : null) || (descriptor.role !== "image" ? null : descriptor.pageImage ? "page_image" : descriptor.tag === "img" ? "image" : ["canvas","svg"].includes(descriptor.tag) ? descriptor.tag : descriptor.tag === "video" ? "poster" : "graphic") };
     if (!isDocument) {
       const sensitivity = sensitivityFor(element);
       if (sensitivity !== "public") setSensitivity(record, sensitivity);
@@ -2086,7 +2112,7 @@
         appendSink(record, descriptor.pageTitle === true ? pageTitleText(element, descriptor.tag) || "" : descriptor.pageFacts, state);
         record.sink = null;
       }
-      const imageSource = descriptor.role === "image" && (descriptor.tag === "img" || descriptor.pageImage === true);
+      const imageSource = descriptor.role === "image" && (descriptor.tag === "img" || descriptor.pageImage === true || descriptor.mediaKind === "background" || descriptor.mediaKind === "poster");
       if (((descriptor.role === "link" && (descriptor.tag === "a" || descriptor.pageAddress === true)) || imageSource) &&
           record.sensitivity === "public") {
         let destination;
@@ -2094,6 +2120,8 @@
           if (descriptor.headMeta === true) {
             destination = attribute(element, descriptor.tag === "link" ? "href" : "content", 2048) || undefined;
           }
+          else if (descriptor.mediaKind === "background") destination = backgroundSource(element);
+          else if (descriptor.mediaKind === "poster") destination = read(videoPosterGetter, element);
           else destination = read(imageSource ? imageCurrentSrcGetter : anchorHrefGetter, element);
           if (imageSource && !destination && descriptor.headMeta !== true) destination = read(imageSrcGetter, element);
         } catch (_) { destination = undefined; }
@@ -2667,6 +2695,33 @@
       ["textbox", "password", "searchbox", "spinbutton", "combobox", "listbox", "option", "frame_boundary"].includes(role);
   }
 
+  function textSearchWindows(text, terms, literal) {
+    const windows = [], words = /[\p{Alphabetic}\p{N}]+/gu;
+    let covered = 0;
+    while (true) {
+      let at;
+      if (literal !== null) {
+        at = apply(stringIndexOf, text, [literal, covered]);
+        if (at < 0) break;
+      } else {
+        const match = apply(regexpExec, words, [text]);
+        if (match === null) break;
+        if (match.index < covered || !apply(stringSplit, lower(match[0]), [/[^\p{Alphabetic}\p{N}]+/u]).some(word => terms.has(word))) continue;
+        at = match.index;
+      }
+      let start = mathMax(0, at - 512);
+      if (start > 0) {
+        const space = apply(stringIndexOf, text, [" ", start]);
+        start = space >= 0 && space < at ? space + 1 : at;
+      }
+      const value = normalizeText(apply(stringSlice, text, [start]), 4096).value;
+      if (value === "" || start + value.length <= at) break;
+      covered = start + value.length;
+      windows.push(value);
+    }
+    return windows;
+  }
+
   function searchTextRecords(anchor, descriptor, state) {
     // Fixed native recipe: bounded literal-token matching over rendered source
     // passages. It does not query selectors, inspect hidden values, or execute
@@ -2728,10 +2783,19 @@
         const raw = read(characterDataGetter, current);
         if (typeof raw !== "string") continue;
         const remaining = 131072 - scannedBytes;
-        const normalized = normalizeText(raw, mathMin(4096, remaining), remaining);
+        const normalized = normalizeText(raw, remaining, remaining);
         scannedBytes += normalized.scannedBytes;
         if (normalized.truncated) mark(state, "scope_boundary", false);
-        if (normalized.value !== "") {
+        if (normalized.bytes > 4096) {
+          // A long text node is still one source. Keep only contiguous query
+          // windows, never stitch distant passages into a fabricated quote.
+          flush();
+          mark(state, "scope_boundary", false);
+          for (const text of textSearchWindows(normalized.value, terms, literal)) {
+            pending = { element: item.source, text, bytes: utf8Length(text, 4097), ordinal: ordinal++ };
+            flush();
+          }
+        } else if (normalized.value !== "") {
           if (pending !== null && pending.element !== item.source) flush();
           if (pending === null) pending = { element: item.source, text: "", bytes: 0, ordinal: ordinal++ };
           const part = normalizeText(normalized.value, mathMax(0, 4096 - pending.bytes - (pending.bytes === 0 ? 0 : 1)));
@@ -2795,6 +2859,12 @@
     return records;
   }
 
+  // Exact native node keys, never label similarity. Only the nearest shared
+  // non-page ancestor and its geometry associate an image with record text.
+  function mediaEvidence(records, request) {
+    try { return globalThis.__zephiumRecordMediaV1.evidence(records, request.i, request.g, {apply,read,weakMapGet,weakMapSet,nodeContains,elementRect,tagName,nodeType,nodeParentGetter,imageCompleteGetter,imageNaturalWidthGetter,pageTitleText}); } catch (_) { return []; }
+  }
+
   function encodeSnapshot(request, records, completeness) {
     let dialogSample = "";
     const pending = pendingDialogSample;
@@ -2844,7 +2914,13 @@
         parts.push(encodedNode);
         bytes += separator + nodeBytes;
       }
-      return { value: `${header}${parts.join(",")}]}`, truncated };
+      let value = `${header}${parts.join(",")}]}`;
+      const media = mediaEvidence(records.slice(0,parts.length),request);
+      if (media.length) {
+        const enriched = value.slice(0,-1) + ',"m":' + apply(jsonStringify,JSON,[media]) + '}';
+        if (utf8Length(enriched,request.b.w+1) <= request.b.w) value = enriched;
+      }
+      return { value, truncated };
     };
 
     let encoded = compose(completeness);
@@ -4121,8 +4197,17 @@
     return encodeSnapshot(request, records, state.completeness);
   }
 
+  function pixelPrivacy() {
+    try {
+      return globalThis.__zephiumPixelPrivacyV1.probe((element,value,field) => element === null
+        ? looksLikeSecret(value) || (field && classifyLiveValue(value) !== 2)
+        : credentialField(element, classify(element) || {role:"group",tag:tagName(element)}, attribute(element,"aria-label",512)||"") !== 0);
+    } catch (_) { return "E1:privacy"; }
+  }
   function invoke(encoded) {
     if (busy) return fault("busy");
+    if (typeof encoded === "string" && (encoded.startsWith("M1:") || encoded.startsWith("V1:"))) return globalThis.__zephiumRecordMediaV1.invoke(encoded, pixelPrivacy);
+    if (encoded === "P1:privacy") return pixelPrivacy();
     const request = parseRequest(encoded);
     if (request === null) return fault("invalid_request");
     busy = true;

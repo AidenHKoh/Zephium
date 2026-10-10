@@ -386,7 +386,7 @@ fn located_fixture_priced(
         {"k":1,"r":"document","fc":true},
         {"k":2,"p":0,"r":"heading","l":1,"n":"Public product","t":"Public product","fc":true},
         {"k":3,"p":0,"r":"paragraph","n":"Price","t":"$349.99","fc":true},
-        {"k":4,"p":0,"r":"image","n":"Product","m":"https://example.test/product.webp","fc":true},
+        {"k":4,"p":0,"r":"image","n":"Product","m":"https://example.test/product.webp","b":{"x":0,"y":0,"w":160,"h":110},"fc":true},
         {"k":5,"p":0,"r":"paragraph","t":"Product description","fc":true},
         {"k":6,"p":0,"r":"paragraph","t":"Nearby evidence","fc":true},
         {"k":7,"p":0,"r":"paragraph","t":"Personal value","q":"sensitive","fc":true},
@@ -400,7 +400,7 @@ fn located_fixture_priced(
             SemanticSnapshotGeneration::new(1).unwrap(),
         ),
         &serde_json::to_vec(
-            &json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":nodes}),
+            &json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":nodes,"m":[{"k":4,"t":"image","r":[2],"l":true}]}),
         )
         .unwrap(),
     )
@@ -3335,7 +3335,7 @@ fn a_catalog_read_copies_each_found_record_from_inside_it_or_leaves_the_planner(
             json!({"k":k,"p":1,"r":"list_item","fc":true}),
             json!({"k":k+1,"p":parent,"r":"document","t":text,"fc":true}),
             json!({"k":k+2,"p":k,"r":"link","n":name,"u":format!("https://shop.example.test/{slug}"),"fc":true}),
-            json!({"k":k+3,"p":k+1,"r":"image","n":"primary","m":format!("https://shop.example.test/{slug}.webp"),"fc":true}),
+            json!({"k":k+3,"p":k+1,"r":"image","n":"primary","m":format!("https://shop.example.test/{slug}.webp"),"b":{"x":0,"y":0,"w":160,"h":110},"fc":true}),
             json!({"k":k+4,"p":k,"r":"heading","l":3,"n":name,"fc":true}),
             json!({"k":k+5,"p":k,"r":"button","n":"Add to Bag","fc":true}),
         ]
@@ -3366,7 +3366,7 @@ fn a_catalog_read_copies_each_found_record_from_inside_it_or_leaves_the_planner(
             SemanticSnapshotGeneration::new(1).unwrap(),
         ),
         &serde_json::to_vec(
-            &json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":nodes}),
+            &json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":nodes,"m":[{"k":6,"t":"image","r":[4,5,7],"l":true},{"k":12,"t":"image","r":[10,11,13],"l":true},{"k":18,"t":"image","r":[16,17,19],"l":true}]}),
         )
         .unwrap(),
     )

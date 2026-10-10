@@ -837,6 +837,38 @@ impl AgentOwnedView {
     // The legacy screenshot port remains unadmitted on Windows. Retained Work
     // frames use capture_work_frame with their own exact resource/document fence.
     #[allow(dead_code)]
+    pub(crate) fn record_media_ports(
+        &self,
+    ) -> Option<(
+        crate::platform::record_media::MediaDispatch,
+        crate::platform::record_media::FrameCapture,
+        crate::platform::record_media::PrivacyDispatch,
+    )> {
+        let semantic = self.semantic()?.clone();
+        let native = self.view.webview();
+        let controller = self.view.controller();
+        let capture = Rc::new(
+            move |crop, completion: crate::platform::record_media::FrameCompletion| {
+                super::semantic_screenshot::capture_record_frame_native(
+                    &native,
+                    &controller,
+                    crop,
+                    completion,
+                )
+            },
+        );
+        let privacy_runtime = semantic.clone();
+        let privacy = Rc::new(move |reply| privacy_runtime.dispatch_privacy(reply));
+        let dispatch = Rc::new(
+            move |plan: &zephium_agentic::SemanticRecordMediaPlan,
+                  validate: bool,
+                  completion: crate::platform::record_media::MediaCompletion| {
+                semantic.dispatch_media(plan, validate, completion)
+            },
+        );
+        Some((dispatch, capture, privacy))
+    }
+
     pub(crate) fn dispatch_screenshot(
         &self,
         request: SemanticScreenshotNativeRequest,
@@ -854,14 +886,27 @@ impl AgentOwnedView {
         {
             return Err(SemanticScreenshotNativeFailure::NotReady);
         }
-        super::semantic_screenshot::capture_viewport(
-            &self.view,
-            request,
-            admitted_at,
+        let Some(semantic) = self.semantic().cloned() else {
+            return Err(SemanticScreenshotNativeFailure::NotReady);
+        };
+        let native = self.view.webview();
+        let capture_cancelled = cancelled.clone();
+        crate::platform::semantic_pixel_privacy::guarded_capture(
+            Rc::new(move |completion| semantic.dispatch_privacy(completion)),
+            move |completion| {
+                super::semantic_screenshot::capture_viewport(
+                    &native,
+                    request,
+                    admitted_at,
+                    capture_cancelled,
+                    completion,
+                    callback_panicked,
+                )
+            },
             cancelled,
             completion,
-            callback_panicked,
-        )
+        );
+        Ok(())
     }
 
     pub(crate) fn dispatch_retained_semantic_action(

@@ -1,3 +1,7 @@
+#[cfg(all(feature="agentic-browser",any(target_os="macos",target_os="windows",test)))]
+pub(crate) mod record_media;
+#[cfg(all(feature = "agentic-browser", any(target_os = "macos", target_os = "windows", test)))]
+pub(crate) mod semantic_pixel_privacy;
 #[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
 #[cfg_attr(all(target_os = "windows", not(test)), allow(dead_code))]
 mod agent_cookie_preflight;

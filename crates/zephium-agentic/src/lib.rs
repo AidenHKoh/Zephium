@@ -63,25 +63,27 @@ pub use work_browser_resource::{
     WorkBrowserActionCompletionCallback, WorkBrowserActionCompletionOwner,
     WorkBrowserActionDeliveryCompletion, WorkBrowserActionDeliveryTicket,
     WorkBrowserActionDispatch, WorkBrowserActionEvent, WorkBrowserActionRefusal,
-    WorkBrowserActionRequest, WorkBrowserExecutionLease, WorkBrowserHistoryBackCompletionCallback,
-    WorkBrowserHistoryBackDispatch, WorkBrowserHistoryBackRequest, WorkBrowserHumanCheck,
-    WorkBrowserHumanCheckState, WorkBrowserHumanProgress, WorkBrowserHumanRegion,
-    WorkBrowserHumanTime, WorkBrowserLeaseDeliveryCompletion, WorkBrowserLeaseDeliveryNotification,
+    WorkBrowserActionRequest, WorkBrowserCropGeometry, WorkBrowserExecutionLease,
+    WorkBrowserHistoryBackCompletionCallback, WorkBrowserHistoryBackDispatch,
+    WorkBrowserHistoryBackRequest, WorkBrowserHumanCheck, WorkBrowserHumanCheckState,
+    WorkBrowserHumanProgress, WorkBrowserHumanRegion, WorkBrowserHumanTime,
+    WorkBrowserLeaseDeliveryCompletion, WorkBrowserLeaseDeliveryNotification,
     WorkBrowserLeaseDeliveryPollError, WorkBrowserLeaseDeliveryProof,
     WorkBrowserLeaseDeliveryReceipt, WorkBrowserLeaseDeliveryRefusal,
     WorkBrowserLeaseDeliveryTicket, WorkBrowserLeaseEnded, WorkBrowserLeaseNativeDebt,
-    WorkBrowserNavigationCompletion, WorkBrowserNavigationCompletionCallback,
-    WorkBrowserNavigationDispatch, WorkBrowserNavigationEvent, WorkBrowserNavigationPreparation,
-    WorkBrowserNavigationRequest, WorkBrowserObservationCapability,
-    WorkBrowserObservationCompletion, WorkBrowserObservationCompletionCallback,
-    WorkBrowserObservationDispatch, WorkBrowserObservationEvent, WorkBrowserObservationRequest,
-    WorkBrowserReadBinding, WorkBrowserResourceCompletion, WorkBrowserResourceCompletionCallback,
-    WorkBrowserResourceDispatch, WorkBrowserResourceError, WorkBrowserResourceEvent,
-    WorkBrowserResourceFailure, WorkBrowserResourceHealth, WorkBrowserResourceHealthReporter,
-    WorkBrowserResourceHealthState, WorkBrowserResourceId, WorkBrowserResourceIdentity,
-    WorkBrowserResourceJoin, WorkBrowserResourceNativeOutcome, WorkBrowserResourceOperation,
-    WorkBrowserResourcePhase, WorkBrowserResourceRequest, WorkBrowserResources, WorkId,
-    MAX_WORK_HUMAN_WAIT_MILLIS,
+    WorkBrowserMediaProgress, WorkBrowserNavigationCompletion,
+    WorkBrowserNavigationCompletionCallback, WorkBrowserNavigationDispatch,
+    WorkBrowserNavigationEvent, WorkBrowserNavigationPreparation, WorkBrowserNavigationRequest,
+    WorkBrowserObservationCapability, WorkBrowserObservationCompletion,
+    WorkBrowserObservationCompletionCallback, WorkBrowserObservationDispatch,
+    WorkBrowserObservationEvent, WorkBrowserObservationRequest, WorkBrowserReadBinding,
+    WorkBrowserRecordImage, WorkBrowserRecordImageOrigin, WorkBrowserResourceCompletion,
+    WorkBrowserResourceCompletionCallback, WorkBrowserResourceDispatch, WorkBrowserResourceError,
+    WorkBrowserResourceEvent, WorkBrowserResourceFailure, WorkBrowserResourceHealth,
+    WorkBrowserResourceHealthReporter, WorkBrowserResourceHealthState, WorkBrowserResourceId,
+    WorkBrowserResourceIdentity, WorkBrowserResourceJoin, WorkBrowserResourceNativeOutcome,
+    WorkBrowserResourceOperation, WorkBrowserResourcePhase, WorkBrowserResourceRequest,
+    WorkBrowserResources, WorkId, MAX_WORK_HUMAN_WAIT_MILLIS,
 };
 pub use work_browser_session::{
     WeakWorkBrowserSession, WorkBrowserSession, WorkBrowserSessionHumanHold,
@@ -118,6 +120,12 @@ pub use provider_transport::lead;
 #[cfg(feature = "provider-transport")]
 pub mod public_asset;
 mod semantic;
+mod semantic_media;
+pub use semantic_media::{
+    SemanticMediaEvidence, SemanticMediaKind, SemanticRecordMediaPlan, MAX_SEMANTIC_MEDIA,
+    MAX_SEMANTIC_MEDIA_RELATIONS,
+};
+mod secret_shapes;
 mod semantic_action;
 mod semantic_action_batch_result;
 mod semantic_action_result;
@@ -144,7 +152,6 @@ mod semantic_settle_coordinator;
 mod semantic_verify;
 mod semantic_wait;
 mod semantic_wire;
-mod secret_shapes;
 pub use secret_shapes::contains_recognized_secret;
 mod sign_in_handoff;
 

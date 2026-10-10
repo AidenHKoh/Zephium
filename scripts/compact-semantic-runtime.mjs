@@ -8,7 +8,7 @@ const espreeRequire = createRequire(eslintRequire.resolve("espree"));
 const { parse, tokenizer } = espreeRequire("acorn");
 
 const assets = new URL("../crates/zephium-agentic/assets/", import.meta.url);
-const source = readFileSync(new URL("semantic-runtime-v1.js", assets), "utf8");
+const source = readFileSync(new URL("semantic-record-media-v1.js", assets), "utf8") + readFileSync(new URL("semantic-pixel-privacy-v1.js", assets), "utf8") + readFileSync(new URL("semantic-runtime-v1.js", assets), "utf8");
 let end = 0;
 let compact = "";
 for (const token of tokenizer(source, { ecmaVersion: "latest" })) {

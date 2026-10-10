@@ -5129,6 +5129,10 @@ impl AgentWorkController {
         state.check_task_contract()?;
         let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
         session.check_live().map_err(AgentWorkFailure::Browser)?;
+        // Original delivered baseline and original admitted account; neither
+        // can be minted or refreshed later by the local media owner.
+        let record_crop_baseline = turn.turn.continuation().baseline().clone();
+        let record_crop_config = session.config.clone();
         if session.turns >= session.max_model_calls {
             // Do not capture data when no mapping call can be admitted.
             return Err(AgentWorkFailure::Browser(
@@ -5244,6 +5248,14 @@ impl AgentWorkController {
             None
         };
         state.refresh_account(worker, browser)?;
+        // Freeze the independently verified sample after the existing refresh.
+        // That refresh refuses context/account changes; taking its fresh token
+        // here preserves exact equality without reauthorizing after closure.
+        let record_crop_account = state
+            .session
+            .as_ref()
+            .ok_or(AgentWorkFailure::Contract)?
+            .account;
         let schema = state
             .extraction_schema
             .as_ref()
@@ -5275,11 +5287,59 @@ impl AgentWorkController {
             return Err(AgentWorkFailure::Contract);
         }
         state.check_task_contract()?;
-        state.extraction = Some(
-            result
-                .into_owned()
-                .map_err(|_| AgentWorkFailure::Contract)?,
-        );
+        let mut owned = result
+            .into_owned()
+            .map_err(|_| AgentWorkFailure::Contract)?;
+        if state.viewport_screenshot && record_crop_config.permits_viewport_screenshot() {
+            state.native.check_control(worker, browser)?;
+            if let Some(current) = state
+                .session
+                .as_mut()
+                .filter(|session| session.check_live().is_ok())
+            {
+                if let Ok(policy_now) = current.policy_now() {
+                    let now = Instant::now();
+                    let policy_end = current
+                        .policy
+                        .manifest()
+                        .plan_node(current.lease.node())
+                        .map(|node| node.expires_at())
+                        .unwrap_or(policy_now)
+                        .min(current.policy.manifest().expires_at());
+                    let account_left = zephium_agentic::MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS
+                        .saturating_sub(
+                            policy_now
+                                .millis()
+                                .saturating_sub(record_crop_account.observed_at().millis()),
+                        );
+                    let expires = state
+                        .native
+                        .deadline
+                        .min(now + Duration::from_secs(8))
+                        .min(now + Duration::from_millis(account_left))
+                        .min(
+                            now + Duration::from_millis(
+                                policy_end.millis().saturating_sub(policy_now.millis()),
+                            ),
+                        );
+                    owned.carry_record_crop_permission(
+                        &record_crop_config,
+                        &current.policy,
+                        current.lease,
+                        current
+                            .max_actions
+                            .saturating_sub(current.next_action.saturating_sub(1)),
+                        record_crop_account,
+                        current.account,
+                        observation,
+                        &record_crop_baseline,
+                        now,
+                        expires,
+                    );
+                }
+            }
+        }
+        state.extraction = Some(owned);
         if dropped > 0 {
             state
                 .journal_mut()?

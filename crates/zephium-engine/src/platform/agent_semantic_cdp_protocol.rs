@@ -493,6 +493,78 @@ pub(crate) fn invoke_runtime_command(
     )
 }
 
+pub(crate) fn invoke_media_command(
+    context: &SemanticExecutionContext,
+    invocation: &crate::platform::record_media::MediaInvocation,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    command(
+        FixedSemanticCdpMethod::CallFunctionOn,
+        json!({"functionDeclaration":INVOKE_FUNCTION,
+        "arguments":[{"value":invocation.as_str()}],"silent":true,"returnByValue":true,"generatePreview":false,"userGesture":false,"awaitPromise":true,"uniqueContextId":context.unique_id()}),
+        MAX_INVOCATION_PARAMETERS_BYTES,
+        100 * 1024,
+    )
+}
+pub(crate) fn decode_media_response(
+    invocation: &crate::platform::record_media::MediaInvocation,
+    response: &str,
+) -> Result<crate::platform::record_media::NativeMediaResult, SemanticCdpInvocationError> {
+    let object =
+        parse_success_object(response, 100 * 1024).map_err(SemanticCdpInvocationError::Protocol)?;
+    let result = object
+        .get("result")
+        .and_then(Value::as_object)
+        .filter(|result| {
+            result.get("type").and_then(Value::as_str) == Some("string")
+                && !result.contains_key("subtype")
+        })
+        .and_then(|result| result.get("value"))
+        .and_then(Value::as_str)
+        .and_then(|value| invocation.decode(value.as_bytes()));
+    result.ok_or(SemanticCdpInvocationError::Protocol(
+        SemanticCdpProtocolError::InvalidResponse,
+    ))
+}
+
+pub(crate) fn invoke_privacy_command(
+    context: &SemanticExecutionContext,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    command(
+        FixedSemanticCdpMethod::CallFunctionOn,
+        json!({
+            "functionDeclaration":INVOKE_FUNCTION,
+            "arguments":[{"value":crate::platform::semantic_pixel_privacy::INVOCATION}],
+            "silent":true,"returnByValue":true,"generatePreview":false,"userGesture":false,"awaitPromise":false,
+            "uniqueContextId":context.unique_id(),
+        }),
+        MAX_INVOCATION_PARAMETERS_BYTES,
+        1024,
+    )
+}
+
+pub(crate) fn decode_privacy_response(
+    response: &str,
+) -> Result<crate::platform::semantic_pixel_privacy::PixelPrivacyProof, SemanticCdpInvocationError>
+{
+    let object =
+        parse_success_object(response, 1024).map_err(SemanticCdpInvocationError::Protocol)?;
+    let value = object
+        .get("result")
+        .and_then(Value::as_object)
+        .filter(|result| {
+            result.get("type").and_then(Value::as_str) == Some("string")
+                && !result.contains_key("subtype")
+        })
+        .and_then(|result| result.get("value"))
+        .and_then(Value::as_str)
+        .and_then(|value| {
+            crate::platform::semantic_pixel_privacy::PixelPrivacyProof::decode(value.as_bytes())
+        });
+    value.ok_or(SemanticCdpInvocationError::Protocol(
+        SemanticCdpProtocolError::InvalidResponse,
+    ))
+}
+
 pub(crate) fn prepare_action_command(
     context: &SemanticExecutionContext,
     invocation: &SemanticActionRuntimeInvocation,
@@ -1186,5 +1258,26 @@ mod tests {
         assert!(debug.contains("[redacted]"));
         assert!(!debug.contains("private-root-identifier"));
         assert!(!debug.contains("private-page-identifier"));
+    }
+}
+
+#[cfg(test)]
+mod pixel_privacy_tests {
+    use super::*;
+    #[test]
+    fn closed_pixel_reply_accepts_no_page_object_or_arbitrary_fields() {
+        let value = r#"{"v":1,"r":1,"c":true,"w":1280,"h":800,"x":0,"y":0}"#;
+        assert!(decode_privacy_response(
+            &json!({"result":{"type":"string","value":value}}).to_string()
+        )
+        .is_ok());
+        assert!(decode_privacy_response(
+            &json!({"result":{"type":"object","value":{}}}).to_string()
+        )
+        .is_err());
+        assert!(decode_privacy_response(
+            &json!({"result":{"type":"string","value":value},"exceptionDetails":{}}).to_string()
+        )
+        .is_err());
     }
 }

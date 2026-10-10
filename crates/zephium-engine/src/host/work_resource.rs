@@ -62,6 +62,8 @@ mod action;
 mod frame_schedule;
 #[path = "work_resource_human.rs"]
 mod human;
+#[path = "work_resource_media.rs"]
+mod media;
 #[path = "work_resource_navigation.rs"]
 mod navigation;
 #[path = "work_resource_observation.rs"]
@@ -166,6 +168,9 @@ impl EngineHost {
 }
 
 pub(super) struct WorkNativeResource {
+    media_pending: bool,
+    media_batch: Option<std::rc::Rc<media::Batch>>,
+    media_wake: Option<observation::ObservationWake>,
     pub(super) guard: Arc<WorkResourceGuard>,
     construction: Option<WorkLifecycleTask>,
     construction_presentation: Option<crate::platform::imp::WorkObservationPresentation>,
@@ -277,6 +282,9 @@ impl WorkNativeResource {
             action: None,
             reading_presentation: None,
             presentation_wake: None,
+            media_pending: false,
+            media_batch: None,
+            media_wake: None,
             frame_generation: 0,
             frame_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             frame_rendering_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -329,7 +337,8 @@ impl WorkNativeResource {
         self.history_back.is_some()
     }
     pub(super) fn pending(&self) -> bool {
-        self.construction.is_some()
+        self.media_pending
+            || self.construction.is_some()
             || self.revocation.is_some()
             || self.destruction.is_some()
             || self.observation.is_some()
@@ -620,9 +629,10 @@ impl WorkNativeResource {
             }
             Operation::Revoke => Stage::RevocationDrain,
             Operation::Destroy => Stage::DestructionDrain,
-            Operation::Acquire | Operation::PresentHuman | Operation::ContinueAfterHuman => {
-                Stage::Unattributed
-            }
+            Operation::Acquire
+            | Operation::PresentHuman
+            | Operation::ContinueAfterHuman
+            | Operation::ReadMedia => Stage::Unattributed,
         };
         ResourceFailureCause::LifecycleDeadline(stage)
     }
@@ -841,6 +851,10 @@ impl WorkNativeResource {
         }
     }
     fn retire_page(&mut self) -> bool {
+        if let Some(media) = &self.media_batch {
+            media.cancel();
+            return false;
+        }
         #[cfg(target_os = "windows")]
         if self.frame_in_flight.load(Ordering::Acquire) {
             // Revoke the transferred reading/action fences, but preserve the
@@ -1076,6 +1090,9 @@ impl EngineHost {
             return;
         };
         match operation {
+            Operation::ReadMedia => {
+                resource.handle_media(task);
+            }
             Operation::PresentHuman | Operation::ContinueAfterHuman => {
                 resource.handle_human(task, self.main_dispatch.clone());
             }
@@ -1344,6 +1361,9 @@ impl EngineHost {
             .reclassify(NativeResourceClass::AgentContext)
             .map_err(|_| ContextPortFailure::ResourceExhausted)?;
         let mut resource = WorkNativeResource {
+            media_pending: false,
+            media_batch: None,
+            media_wake: None,
             guard: guard.clone(),
             construction: None,
             construction_presentation: None,
@@ -1482,6 +1502,7 @@ impl EngineHost {
     pub(crate) fn progress_work_resource(&mut self, guard: &Arc<WorkResourceGuard>) {
         self.progress_work_action(guard);
         self.progress_work_observation(guard);
+        self.progress_work_media(guard);
         let id = guard.resource().identity().context();
         let Some(resource) = self
             .work_resources

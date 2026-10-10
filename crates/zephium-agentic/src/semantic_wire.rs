@@ -435,6 +435,7 @@ pub fn decode_semantic_snapshot(
     if let Some(sample) = &raw.scroll_sample {
         sample.validate()?;
     }
+    snapshot.media = crate::semantic_media::decode(raw.media, &snapshot)?;
     snapshot.scroll_sample = raw.scroll_sample;
     snapshot.page_dialog_sample = page_dialog_sample;
     Ok(snapshot)
@@ -782,6 +783,8 @@ pub(crate) fn looks_like_secret_value(value: &str) -> bool {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSnapshot {
+    #[serde(rename = "m", default)]
+    media: Vec<crate::semantic_media::RawMedia>,
     #[serde(rename = "j", default)]
     scroll_sample: Option<ScrollSample>,
     #[serde(rename = "u", default)]
@@ -1164,6 +1167,51 @@ mod tests {
             "n": nodes,
         }))
         .expect("encode")
+    }
+
+    #[test]
+    fn media_associations_are_bounded_local_references_and_never_secret_pixels() {
+        let base = json!({"v":1,"i":7,"g":9,"c":"complete","n":[
+            {"k":1,"r":"document"},
+            {"k":2,"p":0,"r":"image","b":{"x":0,"y":0,"w":160,"h":110}},
+            {"k":3,"p":0,"r":"heading","l":2,"n":"Alpha"}
+        ],"m":[{"k":2,"t":"image","r":[3],"l":true}]});
+        let read = |value: &serde_json::Value| {
+            decode_semantic_snapshot(decode_context(), &serde_json::to_vec(value).unwrap())
+        };
+        let mut snapshot = read(&base).unwrap();
+        assert_eq!(snapshot.media().len(), 1);
+        assert_eq!(
+            snapshot.media()[0].reference(),
+            snapshot.nodes()[1].reference()
+        );
+        assert_eq!(
+            snapshot.media()[0].related(),
+            &[snapshot.nodes()[2].reference()]
+        );
+        snapshot.retain_model_prefix(2);
+        assert!(
+            snapshot.media()[0].related().is_empty(),
+            "truncated-away text cannot remain a row association"
+        );
+        let mut secret = base.clone();
+        secret["n"][1]["q"] = json!("secret");
+        assert!(read(&secret).unwrap().media().is_empty());
+        for invalid in [
+            json!([4]),
+            json!([3, 3]),
+            json!([1, 2, 3, 4, 5, 6, 7, 8, 9]),
+        ] {
+            let mut value = base.clone();
+            value["m"][0]["r"] = invalid;
+            assert!(read(&value).is_err());
+        }
+        let mut value = base.clone();
+        value["m"][0]["t"] = json!("guessed_url");
+        assert!(read(&value).is_err());
+        let mut value = base.clone();
+        value["m"] = json!(vec![base["m"][0].clone(); 49]);
+        assert!(read(&value).is_err());
     }
 
     #[test]

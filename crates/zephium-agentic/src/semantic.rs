@@ -1269,6 +1269,7 @@ pub(crate) struct SemanticNodeInput {
 /// One exact bounded semantic frame snapshot.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SemanticSnapshot {
+    pub(crate) media: Vec<crate::SemanticMediaEvidence>,
     pub(crate) scroll_sample: Option<crate::semantic_wire::ScrollSample>,
     pub(crate) page_dialog_sample: Option<crate::semantic_wire::PageDialogSample>,
     invocation: SemanticInvocationId,
@@ -1284,6 +1285,11 @@ impl SemanticSnapshot {
     pub(crate) fn retain_model_prefix(&mut self, count: usize) {
         self.nodes.truncate(count);
         self.references.truncate(count);
+        let kept: Vec<_> = self.nodes.iter().map(SemanticNode::reference).collect();
+        self.media.retain(|media| kept.contains(&media.reference()));
+        for media in &mut self.media {
+            media.retain_references(&kept);
+        }
         self.completeness =
             SemanticCompleteness::Truncated(SemanticTruncation::ModelProjectionLimit);
         self.total_text_bytes = self
@@ -1345,6 +1351,11 @@ impl SemanticSnapshot {
     /// Complete bounded node cohort in deterministic preorder.
     pub fn nodes(&self) -> &[SemanticNode] {
         &self.nodes
+    }
+
+    /// Bounded historical media associations sampled in this exact document.
+    pub fn media(&self) -> &[crate::SemanticMediaEvidence] {
+        &self.media
     }
 
     /// Total retained page-derived UTF-8 bytes.
@@ -1500,6 +1511,7 @@ impl SemanticSnapshot {
             frame,
             generation,
             completeness,
+            media: Vec::new(),
             page_dialog_sample: None,
             scroll_sample: None,
             nodes,

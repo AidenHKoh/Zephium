@@ -76,6 +76,7 @@ struct Fragment {
 }
 
 struct Capture {
+    media: Vec<ReadMediaAssociation>,
     focused: bool,
     acknowledgement: SemanticObservationAcknowledgement,
     captured_at: SemanticCaptureInstant,
@@ -226,6 +227,7 @@ impl SemanticRetainedReadEvidence {
         }
         let mut frames: Vec<Arc<SemanticFrameJoin>> = Vec::new();
         let mut capture = Capture {
+            media: read.media.clone(),
             focused: read.focused,
             acknowledgement: acknowledgement.clone(),
             captured_at: read.captured_at(),
@@ -424,6 +426,7 @@ impl SemanticRetainedReadEvidence {
             if current.matches_acknowledgement(&capture.acknowledgement) {
                 continue;
             }
+            current.media.extend(capture.media.iter().cloned());
             current.historical.push(capture.acknowledgement.clone());
             current.omissions.0 |= capture.omissions.0;
             merge_omitted_stats(&mut current.stats, capture.stats);

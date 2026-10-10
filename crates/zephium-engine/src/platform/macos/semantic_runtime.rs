@@ -47,6 +47,9 @@ const SEMANTIC_RUNTIME_WORLD_NAME_PREFIX: &str = "zephium-semantic-runtime-v1-";
 const SEMANTIC_RUNTIME_FIXED_ERROR: &str = "zephium semantic channel refused";
 static NEXT_SEMANTIC_RUNTIME_WORLD: AtomicU64 = AtomicU64::new(1);
 
+use crate::platform::record_media::{MediaCompletion, MediaInvocation, NativeMediaResult};
+use crate::platform::semantic_pixel_privacy::{PixelPrivacyProof, PrivacyCompletion};
+
 type ReplyBlock = RcBlock<dyn Fn(*mut AnyObject, *mut NSString)>;
 type SemanticCompletion = Box<dyn FnOnce(Result<SemanticSnapshot, AgentSemanticRuntimeFailure>)>;
 type SemanticActionCompletion =
@@ -139,6 +142,13 @@ enum DocumentPhase {
 }
 
 enum PendingInvocation {
+    Media {
+        invocation: MediaInvocation,
+        completion: MediaCompletion,
+    },
+    Privacy {
+        completion: PrivacyCompletion,
+    },
     Observation {
         invocation: SemanticRuntimeInvocation,
         completion: SemanticCompletion,
@@ -153,6 +163,8 @@ enum PendingInvocation {
 impl PendingInvocation {
     fn as_str(&self) -> &str {
         match self {
+            Self::Privacy { .. } => crate::platform::semantic_pixel_privacy::INVOCATION,
+            Self::Media { invocation, .. } => invocation.as_str(),
             Self::Observation { invocation, .. } => invocation.as_str(),
             Self::Action { invocation, .. } => invocation.as_str(),
         }
@@ -194,6 +206,14 @@ impl ReplyAction {
 }
 
 enum CompletionAction {
+    Media {
+        completion: MediaCompletion,
+        outcome: Option<NativeMediaResult>,
+    },
+    Privacy {
+        completion: PrivacyCompletion,
+        outcome: Option<PixelPrivacyProof>,
+    },
     Observation {
         completion: SemanticCompletion,
         outcome: Result<Box<SemanticSnapshot>, AgentSemanticRuntimeFailure>,
@@ -209,7 +229,9 @@ impl CompletionAction {
     fn observation_outcome(self) -> Result<SemanticSnapshot, AgentSemanticRuntimeFailure> {
         match self {
             Self::Observation { outcome, .. } => outcome.map(|snapshot| *snapshot),
-            Self::Action { .. } => panic!("expected observation completion"),
+            Self::Action { .. } | Self::Privacy { .. } | Self::Media { .. } => {
+                panic!("expected observation completion")
+            }
         }
     }
 }
@@ -307,6 +329,31 @@ impl SemanticRuntimeChannelState {
             invocation,
             completion,
         });
+        Ok(self.prepare_pump())
+    }
+
+    fn dispatch_media(
+        &mut self,
+        invocation: MediaInvocation,
+        completion: MediaCompletion,
+    ) -> Result<ChannelActions, MediaCompletion> {
+        if self.admission_failure().is_some() {
+            return Err(completion);
+        }
+        self.pending = Some(PendingInvocation::Media {
+            invocation,
+            completion,
+        });
+        Ok(self.prepare_pump())
+    }
+    fn dispatch_privacy(
+        &mut self,
+        completion: PrivacyCompletion,
+    ) -> Result<ChannelActions, PrivacyCompletion> {
+        if self.admission_failure().is_some() {
+            return Err(completion);
+        }
+        self.pending = Some(PendingInvocation::Privacy { completion });
         Ok(self.prepare_pump())
     }
 
@@ -441,6 +488,17 @@ impl SemanticRuntimeChannelState {
     }
 
     fn cancel(&mut self) -> ChannelActions {
+        if matches!(
+            self.phase,
+            DocumentPhase::Ready | DocumentPhase::AuthorityRevoked
+        ) && self.awaiting_result
+            && matches!(
+                self.pending,
+                Some(PendingInvocation::Privacy { .. } | PendingInvocation::Media { .. })
+            )
+        {
+            return self.revoke_document_authority();
+        }
         let actions = self.invalidate_current(RuntimeChannelFailure::Cancelled);
         if self.phase != DocumentPhase::Retired {
             self.phase = DocumentPhase::Failed;
@@ -455,8 +513,15 @@ impl SemanticRuntimeChannelState {
         ) {
             return self.cancel();
         }
-        let handed_off =
-            self.awaiting_result && matches!(self.pending, Some(PendingInvocation::Action { .. }));
+        let handed_off = self.awaiting_result
+            && matches!(
+                self.pending,
+                Some(
+                    PendingInvocation::Action { .. }
+                        | PendingInvocation::Privacy { .. }
+                        | PendingInvocation::Media { .. }
+                )
+            );
         let mut actions = if handed_off || self.settling_action.is_some() {
             ChannelActions::default()
         } else {
@@ -581,6 +646,14 @@ impl SemanticRuntimeChannelState {
         }
         if let Some(pending) = self.pending.take() {
             actions.completion = Some(match pending {
+                PendingInvocation::Media { completion, .. } => CompletionAction::Media {
+                    completion,
+                    outcome: None,
+                },
+                PendingInvocation::Privacy { completion } => CompletionAction::Privacy {
+                    completion,
+                    outcome: None,
+                },
                 PendingInvocation::Observation { completion, .. } => {
                     CompletionAction::Observation {
                         completion,
@@ -682,6 +755,14 @@ impl SemanticRuntimeChannelState {
         let Some(completed) = self.completed_invocations.checked_add(1) else {
             let mut actions = self.fail_transport(Some(reply));
             actions.completion = Some(match pending {
+                PendingInvocation::Media { completion, .. } => CompletionAction::Media {
+                    completion,
+                    outcome: None,
+                },
+                PendingInvocation::Privacy { completion } => CompletionAction::Privacy {
+                    completion,
+                    outcome: None,
+                },
                 PendingInvocation::Observation { completion, .. } => {
                     CompletionAction::Observation {
                         completion,
@@ -703,6 +784,27 @@ impl SemanticRuntimeChannelState {
         }
 
         let (completion, recoverable) = match pending {
+            PendingInvocation::Media {
+                invocation,
+                completion,
+            } => (
+                CompletionAction::Media {
+                    completion,
+                    outcome: (self.phase == DocumentPhase::Ready)
+                        .then(|| invocation.decode(bytes))
+                        .flatten(),
+                },
+                true,
+            ),
+            PendingInvocation::Privacy { completion } => (
+                CompletionAction::Privacy {
+                    completion,
+                    outcome: (self.phase == DocumentPhase::Ready)
+                        .then(|| PixelPrivacyProof::decode(bytes))
+                        .flatten(),
+                },
+                true,
+            ),
             PendingInvocation::Observation {
                 invocation,
                 completion,
@@ -949,6 +1051,44 @@ impl AgentSemanticRuntimeController {
         }
     }
 
+    pub(crate) fn dispatch_media(
+        &self,
+        plan: &zephium_agentic::SemanticRecordMediaPlan,
+        validate: bool,
+        completion: MediaCompletion,
+    ) {
+        let dispatched = match self.state.try_borrow_mut() {
+            Ok(mut state) => state.dispatch_media(MediaInvocation::new(plan, validate), completion),
+            Err(_) => Err(completion),
+        };
+        match dispatched {
+            Ok(actions) => self.execute(actions),
+            Err(completion) => invoke_completion(
+                CompletionAction::Media {
+                    completion,
+                    outcome: None,
+                },
+                self.on_callback_panic.as_ref(),
+            ),
+        }
+    }
+    pub(crate) fn dispatch_privacy(&self, completion: PrivacyCompletion) {
+        let dispatched = match self.state.try_borrow_mut() {
+            Ok(mut state) => state.dispatch_privacy(completion),
+            Err(_) => Err(completion),
+        };
+        match dispatched {
+            Ok(actions) => self.execute(actions),
+            Err(completion) => invoke_completion(
+                CompletionAction::Privacy {
+                    completion,
+                    outcome: None,
+                },
+                self.on_callback_panic.as_ref(),
+            ),
+        }
+    }
+
     pub(crate) fn dispatch_action_guarded(
         &self,
         invocation: SemanticActionRuntimeInvocation,
@@ -1048,7 +1188,13 @@ impl AgentSemanticRuntimeController {
                 || (state.pull.is_none()
                     && (!pending
                         || (state.awaiting_result
-                            && matches!(state.pending, Some(PendingInvocation::Action { .. }))))))
+                            && matches!(
+                                state.pending,
+                                Some(
+                                    PendingInvocation::Action { .. }
+                                        | PendingInvocation::Privacy { .. }
+                                )
+                            )))))
             && (!state.awaiting_result || (pending && state.pull.is_none()))
             && (state.pull.is_none() || (!state.awaiting_result && !pending))
             && (!matches!(
@@ -1224,6 +1370,14 @@ fn reconcile_failed_reply_park_completion(
 
 fn invoke_completion(completion: CompletionAction, on_panic: &dyn Fn()) {
     if std::panic::catch_unwind(AssertUnwindSafe(|| match completion {
+        CompletionAction::Media {
+            completion,
+            outcome,
+        } => completion(outcome),
+        CompletionAction::Privacy {
+            completion,
+            outcome,
+        } => completion(outcome),
         CompletionAction::Observation {
             completion,
             outcome,
@@ -1501,7 +1655,7 @@ fn install_semantic_runtime_epoch(
     }
 
     #[cfg(not(feature = "native-agentic-semantic-probe"))]
-    let source = NSString::from_str(SEMANTIC_RUNTIME_PROGRAM.source());
+    let source = NSString::from_str(SEMANTIC_RUNTIME_PROGRAM.installation_source());
     #[cfg(feature = "native-agentic-semantic-probe")]
     let source = NSString::from_str(&program_probe::source());
     // SAFETY: `mtm` proves main-thread allocation; source and content world are
@@ -1912,7 +2066,7 @@ impl SemanticDocumentInstallation {
             )
         };
         #[cfg(not(feature = "native-agentic-semantic-probe"))]
-        let source_mismatch = source.to_string() != SEMANTIC_RUNTIME_PROGRAM.source();
+        let source_mismatch = source.to_string() != SEMANTIC_RUNTIME_PROGRAM.installation_source();
         #[cfg(feature = "native-agentic-semantic-probe")]
         let source_mismatch = source.to_string() != program_probe::source();
         if Retained::as_ptr(&script) != Retained::as_ptr(&active.script)
@@ -1954,6 +2108,33 @@ mod tests {
         SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
         SemanticOrigin, SemanticRuntimeBudget, SemanticRuntimeFault, SemanticSnapshotGeneration,
     };
+
+    #[test]
+    fn handed_off_privacy_probe_drains_after_stop_without_authorizing_capture() {
+        let mut state = SemanticRuntimeChannelState {
+            phase: DocumentPhase::Ready,
+            expected_view: Some(7),
+            active_world: Some(8),
+            ..SemanticRuntimeChannelState::default()
+        };
+        state
+            .dispatch_privacy(Box::new(|_| {}))
+            .unwrap_or_else(|_| panic!("admission"));
+        state.on_pull(reply());
+        let actions = state.cancel();
+        assert!(actions.completion.is_none());
+        assert!(state.awaiting_result);
+        assert_eq!(state.phase, DocumentPhase::AuthorityRevoked);
+        let result = state.on_result(
+            br#"{"v":1,"r":1,"c":true,"w":1280,"h":800,"x":0,"y":0}"#,
+            reply(),
+        );
+        assert!(matches!(
+            result.completion,
+            Some(CompletionAction::Privacy { outcome: None, .. })
+        ));
+        assert!(!state.awaiting_result && state.pending.is_none());
+    }
 
     fn pending_action(handed_off: bool) -> (SemanticRuntimeChannelState, SemanticActionAttemptId) {
         let native = crate::agent_context_port::WorkActionTask::native_for_test();
@@ -2258,7 +2439,7 @@ mod tests {
 
     #[test]
     fn owned_view_fill_is_private_isolated_recipe_without_page_entry_point() {
-        let source = SEMANTIC_RUNTIME_PROGRAM.source();
+        let source = SEMANTIC_RUNTIME_PROGRAM.installation_source();
         assert!(source.contains("function runFixedFill(target, descriptor, request, finish)"));
         assert!(source.contains("resolveKeyAtGeneration(request.t, request.g) !== target"));
         assert!(

@@ -678,8 +678,29 @@ impl SemanticReadStats {
     }
 }
 
+#[derive(Clone)]
+struct ReadMediaAssociation {
+    invocation: SemanticInvocationId,
+    key: u64,
+    observation: SemanticObservationId,
+    generation: SemanticObservationGeneration,
+    frame: std::sync::Arc<SemanticFrameJoin>,
+    snapshot: SemanticSnapshotGeneration,
+    media: crate::SemanticMediaEvidence,
+    area: u64,
+}
+impl ReadMediaAssociation {
+    fn same_capture(&self, source: SemanticReadProvenance<'_>) -> bool {
+        self.observation == source.observation()
+            && self.generation == source.observation_generation()
+            && self.frame.as_ref() == source.frame()
+            && self.snapshot == source.snapshot()
+    }
+}
+
 /// Bounded borrowed readable projection of one exact semantic observation.
 pub struct SemanticReadResult<'a> {
+    media: Vec<ReadMediaAssociation>,
     page_title: Option<String>,
     focused: bool,
     url_sources: u8,
@@ -720,6 +741,96 @@ impl<'a> SemanticReadResult<'a> {
     }
     pub(crate) const fn includes_image_sources(&self) -> bool {
         self.url_sources & 2 != 0
+    }
+
+    pub(crate) fn media_for_record(
+        &self,
+        record: u16,
+        identity: &[SemanticReadFragmentId],
+        guard: [u8; 32],
+    ) -> Option<crate::SemanticRecordMediaPlan> {
+        let (association, name) = self
+            .media
+            .iter()
+            .filter(|association| association.frame.frame() == crate::FrameId::MAIN)
+            .filter_map(|association| {
+                identity
+                    .iter()
+                    .filter_map(|id| self.fragment(*id))
+                    .find(|source| {
+                        association.same_capture(source.provenance())
+                            && association
+                                .media
+                                .related()
+                                .contains(&source.provenance().reference())
+                    })
+                    .map(|source| (association, source))
+            })
+            .max_by_key(|(association, _)| {
+                let priority =
+                    if association.media.kind() == crate::SemanticMediaKind::RecordContainer {
+                        1
+                    } else if association.media.loaded() {
+                        2
+                    } else {
+                        0
+                    };
+                (priority, association.area)
+            })?;
+        let mut hash = Sha256::new();
+        hash.update(b"zephium-record-media-v1");
+        hash.update(guard);
+        hash.update(record.to_be_bytes());
+        hash.update(association.invocation.get().to_be_bytes());
+        hash.update(association.snapshot.get().to_be_bytes());
+        hash.update(association.key.to_be_bytes());
+        hash.update(name.provenance().node_key.get().to_be_bytes());
+        Some(crate::SemanticRecordMediaPlan {
+            crop: None,
+            record,
+            source: hash.finalize().into(),
+            frame: association.frame.as_ref().clone(),
+            invocation: association.invocation,
+            snapshot: association.snapshot,
+            key: association.key,
+            name_key: name.provenance().node_key.get(),
+        })
+    }
+
+    /// Native card ownership of pictures, joined by exact source coordinates.
+    /// Names, alt text, and model-proposed URLs never establish this relation.
+    pub(crate) fn images_for_record(
+        &self,
+        identity: &[SemanticReadFragmentId],
+    ) -> Vec<SemanticReadFragment<'a>> {
+        let mut candidates: Vec<_> = self
+            .media
+            .iter()
+            .filter(|association| {
+                association.media.loaded()
+                    && identity
+                        .iter()
+                        .filter_map(|id| self.fragment(*id))
+                        .any(|source| {
+                            association.same_capture(source.provenance())
+                                && association
+                                    .media
+                                    .related()
+                                    .contains(&source.provenance().reference())
+                        })
+            })
+            .collect();
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.area));
+        candidates
+            .into_iter()
+            .flat_map(|association| {
+                self.fragments.iter().copied().filter(move |fragment| {
+                    fragment.field() == SemanticReadField::ImageSource
+                        && association.same_capture(fragment.provenance())
+                        && fragment.provenance().reference() == association.media.reference()
+                })
+            })
+            .collect()
     }
 
     /// Immutable trusted role selection for this read.
@@ -1029,8 +1140,9 @@ fn read_projection_with<'a>(
 
 /// A read of the newest observation that also carries one viewport-image
 /// fragment, for a mapping the host attaches the viewport screenshot to. The
-/// fragment is admitted only on a page whose look holds nothing sensitive or
-/// secret, so pixels never carry what the text read would withhold.
+/// fragment requires a look without known sensitive or secret nodes. That
+/// negative check does not establish public pixels: provider policy must still
+/// admit the screenshot as sensitive input under the original run scope.
 pub fn read_semantic_observation_for_schema_with_viewport_image<'a>(
     observation: &'a SemanticObservation,
     authority: SemanticReadAuthority<'_>,
@@ -1547,7 +1659,41 @@ impl<'a> SemanticReadBuilder<'a> {
             hasher.update(proof.target.get().to_be_bytes());
             guard = hasher.finalize().into();
         }
+        let media_observation = self.observation.request().id();
+        let media_generation = self.observation.request().generation();
+        let media = self
+            .observation
+            .frames()
+            .iter()
+            .flat_map(|snapshot| {
+                let frame = std::sync::Arc::new(snapshot.frame().clone());
+                snapshot.media().iter().filter_map(move |media| {
+                    Some(ReadMediaAssociation {
+                        invocation: snapshot.invocation(),
+                        key: snapshot
+                            .nodes()
+                            .iter()
+                            .find(|node| node.reference() == media.reference())?
+                            .key()
+                            .get(),
+                        observation: media_observation,
+                        generation: media_generation,
+                        frame: frame.clone(),
+                        snapshot: snapshot.generation(),
+                        media: media.clone(),
+                        area: snapshot
+                            .nodes()
+                            .iter()
+                            .find(|node| node.reference() == media.reference())
+                            .and_then(SemanticNode::geometry)
+                            .map_or(0, |rect| u64::from(rect.width()) * u64::from(rect.height())),
+                    })
+                })
+            })
+            .take(crate::MAX_SEMANTIC_MEDIA)
+            .collect();
         SemanticReadResult {
+            media,
             page_title: self.observation.frames().first().and_then(|frame| {
                 frame
                     .nodes()

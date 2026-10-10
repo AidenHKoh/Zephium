@@ -1,3 +1,353 @@
+
+(() => {
+"use strict";
+const NAME="__zephiumRecordMediaV1";
+if(Object.hasOwn(globalThis,NAME))return;
+const snapshots=new Map(), style=getComputedStyle, rect=Element.prototype.getBoundingClientRect;
+const fetchAsset=fetch, encode=btoa, stringify=JSON.stringify, parse=JSON.parse;
+const MAX_RAW=524288, MAX_OUTPUT=65536;
+let pending=null;
+addEventListener("pagehide",()=>{if(pending)pending.abort();snapshots.clear();},true);
+function source(node,kind) {
+if(kind==="image")return node.currentSrc||"";
+if(kind==="poster")return node.poster||"";
+if(kind==="page_image")return node.content||"";
+if(kind==="background") {
+const value=style(node).backgroundImage;
+const match=/^url\(["']?([^"'\\]+?)["']?\)$/.exec(value);
+return match && match[1].length<=4096?match[1]:"";
+}
+return "";
+}
+function observedImageSources(node) {
+const out=new Set();let work=0;
+const add=value=>{if(!value || value.length>4096 || ++work>32)return;try{out.add(new URL(value,document.baseURI).href);}catch(_){}};
+const sources=element=>{
+for(const attr of ["src","data-src"])add(element.getAttribute(attr));
+for(const attr of ["srcset","data-srcset"]) {
+const value=element.getAttribute(attr)||"";if(value.length>8192)continue;
+for(const item of value.split(",").slice(0,16)) {
+const match=/^\s*(\S+)(?:\s+(?:[0-9]+w|[0-9.]+x))?\s*$/.exec(item);
+if(match && !match[1].startsWith("data:"))add(match[1]);
+}
+}
+};
+sources(node);
+if(node.parentElement?.localName==="picture")for(const sibling of [...node.parentElement.children].slice(0,5))if(sibling.localName==="source")sources(sibling);
+return out;
+}
+function label(node) {
+const stack=[node];let text="",visited=0;
+while(stack.length) {
+const current=stack.pop();if(++visited>64)return null;
+if(current.nodeType===3){const value=current.nodeValue;if(value.length+text.length>2048)return null;text+=value;}
+else if(current.nodeType===1) {for(const child of current.childNodes)stack.push(child);if(stack.length>64)return null;}
+}
+const aria=node.getAttribute("aria-label")||"";return aria.length<=2048?text+"|"+aria:null;
+}
+function sharedCard(a,b) {
+let parent=b;
+for(let depth=0;depth<8 && parent && parent.nodeType===1;depth++,parent=parent.parentNode) {
+if(["html","body","main","nav","header","footer","aside"].includes(parent.localName))return null;
+if(parent.contains(a))return parent;
+}
+return null;
+}
+function remember(i,g,records,rows) {
+const entries=new Map();
+for(const row of rows) {
+const record=records.find(record=>record.wire.k===row.k);if(!record)continue;
+const names=new Map();
+for(const key of row.r) {
+const name=records.find(record=>record.wire.k===key);if(!name)continue;
+const card=sharedCard(record.element,name.element);
+const text=label(name.element);
+if(text!==null && (card || row.t==="page_image")) names.set(key,{node:new WeakRef(name.element),card:card?new WeakRef(card):null,text});
+}
+const url=source(record.element,row.t);if(url.length>4096)continue;
+const content=row.t==="record"?label(record.element):null;
+if(row.t==="record" && content===null)continue;
+entries.set(row.k,{node:new WeakRef(record.element),kind:row.t,content,source:url,lazy:row.t==="image" && !url?observedImageSources(record.element):null,names});
+}
+const key=i+":"+g;snapshots.delete(key);snapshots.set(key,entries);
+while(snapshots.size>8)snapshots.delete(snapshots.keys().next().value);
+}
+function evidence(records, invocation, generation, helpers) {
+const {apply,read,weakMapGet,weakMapSet,nodeContains,elementRect,tagName,nodeType,nodeParentGetter,imageCompleteGetter,imageNaturalWidthGetter,pageTitleText}=helpers;
+const candidates = records.filter(record => record.media !== null && record.sensitivity !== "secret" &&
+(record.media === "page_image" || record.wire.b && record.wire.b.w >= 64 && record.wire.b.h >= 48));
+const titles=records.filter(record=>record.wire.r === "heading"), counts=new WeakMap();
+let work=0;
+const boundaries=new WeakMap();
+const identities=records.filter(record=>
+["heading","paragraph"].includes(record.wire.r) && (record.wire.n || record.wire.t) ||
+record.wire.r==="link" && (label(record.element)?.split("|")[0].trim()));
+const ownsText=element=>{
+for(const item of identities){if(++work>16384)return true;if(apply(nodeContains,element,[item.element]))return true;}
+return false;
+};
+const cardBoundary=element=>{
+const tag=tagName(element),role=element.getAttribute("role");
+if(tag==="article" || tag==="li" || role==="listitem")return true;
+if(!["div","section","figure"].includes(tag) && !tag.includes("-") && role!=="group")return false;
+if(boundaries.has(element))return boundaries.get(element);
+const parent=element.parentElement;let boundary=false;
+if(parent && ownsText(element)) {
+if(parent.children.length>64)boundary=true;
+else for(const peer of parent.children) {
+if(peer!==element && peer.localName===tag && ownsText(peer)){boundary=true;break;}
+}
+}
+boundaries.set(element,boundary);return boundary;
+};
+const images=candidates.filter(record=>record.media!=="record").slice(0,48);
+for(const record of candidates) {
+if(record.media!=="record" || images.length>=48)continue;
+const node=record.element,b=record.wire.b;
+if(b.w*b.h>innerWidth*innerHeight/2 || label(node)===null || node.children.length>64 ||
+node.querySelector("input,textarea,select,iframe,frame,object,embed,[contenteditable]"))continue;
+let nested=false,heads=0;
+for(const other of candidates) {
+if(++work>16384)return [];
+if(other!==record && other.media==="record" && apply(nodeContains,node,[other.element])){nested=true;break;}
+}
+if(nested)continue;
+for(const title of titles){if(++work>16384)return [];if(apply(nodeContains,node,[title.element]))heads++;}
+if(heads>1 || [...node.children].some(child=>cardBoundary(child)))continue;
+images.push(record);
+}
+if(work>16384 || !images.length)return [];
+const rows = images.map(record => ({k:record.wire.k,t:record.media,r:[],l:record.media !== "image" ||
+read(imageCompleteGetter,record.element) === true && read(imageNaturalWidthGetter,record.element) >= 32}));
+const inside = (outer,inner) => outer && inner && inner.x >= outer.x - 2 && inner.y >= outer.y - 2 &&
+inner.x + inner.w <= outer.x + outer.width + 2 && inner.y + inner.h <= outer.y + outer.height + 2;
+for (const record of records) {
+if (!["heading","link","paragraph","document","list_item"].includes(record.wire.r) ||
+!(record.wire.n || record.wire.t) || record.sensitivity === "secret") continue;
+let parent = record.element;
+for (let depth=0; depth<8 && parent && parent !== document; depth+=1) {
+if (nodeType(parent) !== 1) break;
+const tag = tagName(parent);
+if (["html","body","main","nav","header","footer","aside"].includes(tag)) break;
+let count=apply(weakMapGet,counts,[parent]);
+if (count === undefined) {
+count=0;
+for (const title of titles) {
+if (++work > 16384) return [];
+if (apply(nodeContains,parent,[title.element]) && ++count > 1) break;
+}
+apply(weakMapSet,counts,[parent,count]);
+}
+if (count > 1) break;
+const box = elementRect(parent), related=[];
+for (let index=0; index<images.length; index+=1) {
+if (++work > 16384) return [];
+const image=images[index];
+if (image.media !== "page_image" && apply(nodeContains,parent,[image.element]) &&
+inside(box,image.wire.b) && inside(box,record.wire.b)) related.push(index);
+}
+if (related.length) {
+for (const index of related) if (rows[index].r.length < 8) rows[index].r.push(record.wire.k);
+break;
+}
+if(cardBoundary(parent))break;
+if(work>16384)return [];
+parent=read(nodeParentGetter,parent);
+}
+if (pageTitleText(record.element,tagName(record.element)) !== null) {
+for (let index=0;index<images.length;index+=1) if (images[index].media === "page_image" && rows[index].r.length<4) rows[index].r.push(record.wire.k);
+}
+}
+remember(invocation,generation,records,rows);
+return rows;
+}
+function target(request) {
+const entry=snapshots.get(request.i+":"+request.g)?.get(request.k),name=entry?.names.get(request.n);
+const node=entry?.node.deref(),named=name?.node.deref(),card=name?.card?.deref();
+if(!node?.isConnected || !named?.isConnected || label(named)!==name.text ||
+(entry.kind!=="page_image" && (!card?.isConnected || !card.contains(node) || !card.contains(named))))return null;
+if(entry.kind==="record" && label(node)!==entry.content)return null;
+const url=source(node,entry.kind);
+if(url!==entry.source && !(entry.kind==="image" && entry.lazy?.has(url) && node.complete && node.naturalWidth>=32))return null;
+return {entry,node,url};
+}
+function crop(request,privacy) {
+const current=target(request);if(!current || current.entry.kind==="page_image")return {v:1,s:"unavailable"};
+const box=rect.call(current.node),computed=style(current.node);
+if(computed.visibility!=="visible" || computed.display==="none" || box.width<64 || box.height<48 ||
+box.x<0 || box.y<0 || box.right>innerWidth || box.bottom>innerHeight)return {v:1,s:"unavailable"};
+if(current.entry.kind==="image" && (!current.node.complete || current.node.naturalWidth<32))return {v:1,s:"unavailable"};
+let proof;try{proof=parse(privacy());}catch(_){return {v:1,s:"unavailable"};}if(!proof.c)return {v:1,s:"unavailable"};
+return {v:1,s:"crop",p:proof,i:request.i,g:request.g,k:request.k,n:request.n,b:{x:box.x,y:box.y,w:box.width,h:box.height}};
+}
+function dimensions(bytes,type) {
+const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength),n=bytes.length;
+const u16=(at)=>at+2<=n?view.getUint16(at):0,u32=(at)=>at+4<=n?view.getUint32(at):0;
+const le24=(at)=>at+3<=n?bytes[at]|bytes[at+1]<<8|bytes[at+2]<<16:0;
+const word=(at,value)=>at+value.length<=n && [...value].every((c,i)=>bytes[at+i]===c.charCodeAt(0));
+let size=null;
+if(type==="image/png" && n>=33 && u32(0)===0x89504e47 && u32(4)===0x0d0a1a0a && word(12,"IHDR") && u32(8)===13) {
+for(let at=8;at+12<=n;){const length=u32(at);if(length>n-at-12 || word(at+4,"acTL"))return null;at+=length+12;}
+size=[u32(16),u32(20)];
+} else if(type==="image/jpeg" && n>=4 && u16(0)===0xffd8) {
+for(let at=2;at+4<=n;) {
+if(bytes[at++]!==255)return null;while(at<n && bytes[at]===255)at++;
+const marker=bytes[at++];if(marker===0xda || marker===0xd9)break;
+if(marker===0x01 || marker>=0xd0 && marker<=0xd7)continue;
+const length=u16(at);if(length<2 || at+length>n)return null;
+if([0xc0,0xc1,0xc2].includes(marker)) {if(length<8)return null;size=[u16(at+5),u16(at+3)];break;}
+at+=length;
+}
+} else if(type==="image/webp" && n>=30 && word(0,"RIFF") && word(8,"WEBP")) {
+if(word(12,"VP8X")) {if(bytes[20]&2)return null;size=[le24(24)+1,le24(27)+1];}
+else if(word(12,"VP8 ") && bytes[23]===0x9d && bytes[24]===1 && bytes[25]===0x2a)size=[view.getUint16(26,true)&16383,view.getUint16(28,true)&16383];
+else if(word(12,"VP8L") && bytes[20]===0x2f)size=[1+((bytes[22]&63)<<8|bytes[21]),1+((bytes[24]&15)<<10|bytes[23]<<2|bytes[22]>>6)];
+}
+return size && size.every(value=>value>0 && value<=2048)?size:null;
+}
+async function sanitize(parts,total,type,signal) {
+const bytes=new Uint8Array(total);let offset=0;for(const part of parts){bytes.set(part,offset);offset+=part.length;}
+const size=dimensions(bytes,type);if(!size || signal.aborted)throw new Error();
+const bitmap=await createImageBitmap(new Blob([bytes],{type}));
+try {
+if(signal.aborted || bitmap.width!==size[0] || bitmap.height!==size[1])throw new Error();
+const canvas=document.createElement("canvas"),context=canvas.getContext("2d",{alpha:false});if(!context)throw new Error();
+try {
+for(const [width,height] of [[320,240],[240,180],[160,120],[80,60]]) {
+if(signal.aborted)throw new Error();
+const scale=Math.min(1,width/size[0],height/size[1]);canvas.width=Math.max(1,Math.floor(size[0]*scale));canvas.height=Math.max(1,Math.floor(size[1]*scale));
+context.drawImage(bitmap,0,0,canvas.width,canvas.height);
+const blob=await new Promise(resolve=>canvas.toBlob(resolve,"image/png"));
+if(signal.aborted)throw new Error();
+if(blob && blob.size>0 && blob.size<=MAX_OUTPUT) {
+const output=new Uint8Array(await blob.arrayBuffer());if(signal.aborted || output.length>MAX_OUTPUT)throw new Error();return output;
+}
+}
+throw new Error();
+} finally {canvas.width=canvas.height=1;}
+} finally {bitmap.close();}
+}
+async function invoke(encoded,privacy) {
+if(pending || typeof encoded!=="string" || encoded.length>256)return stringify({v:1,s:"unavailable"});
+let request;
+try {request=parse(encoded.slice(3));}catch(_){return stringify({v:1,s:"unavailable"});}
+if(Object.keys(request).sort().join(",")!=="g,i,k,n" || !Object.values(request).every(value=>Number.isSafeInteger(value)&&value>0))return stringify({v:1,s:"unavailable"});
+const current=target(request);if(!current)return stringify({v:1,s:"unavailable"});
+if(encoded.startsWith("V1:"))return stringify(crop(request,privacy));
+const url=current.url;
+if(!url || url.length>4096)return stringify(crop(request,privacy));
+let parsed;try {parsed=new URL(url,document.baseURI);}catch(_){return stringify(crop(request,privacy));}
+if(!["https:","http:","blob:","data:"].includes(parsed.protocol))return stringify(crop(request,privacy));
+const abort=new AbortController();pending=abort;
+const timer=setTimeout(()=>abort.abort(),1500);
+try {
+const response=await fetchAsset(url,{signal:abort.signal,credentials:current.node.crossOrigin==="anonymous"?"same-origin":"include",mode:"cors",redirect:"error",cache:"force-cache"});
+const type=(response.headers.get("content-type")||"").split(";")[0].trim().toLowerCase();
+if(!response.ok || !["image/png","image/jpeg","image/webp"].includes(type) ||
+Number(response.headers.get("content-length")||0)>MAX_RAW || !response.body)throw new Error();
+const reader=response.body.getReader(),parts=[];let total=0;
+while(true){const item=await reader.read();if(item.done)break;total+=item.value.length;if(total>MAX_RAW){abort.abort();throw new Error();}parts.push(item.value);}
+if(!target(request) || abort.signal.aborted)throw new Error();
+const output=await sanitize(parts,total,type,abort.signal);
+if(!target(request) || abort.signal.aborted)throw new Error();
+let binary="";for(const value of output)binary+=String.fromCharCode(value);
+return stringify({v:1,s:"fetch",i:request.i,g:request.g,k:request.k,n:request.n,bytes:encode(binary)});
+} catch(_) {return stringify(crop(request,privacy));}
+finally {clearTimeout(timer);pending=null;}
+}
+Object.defineProperty(globalThis,NAME,{value:Object.freeze({evidence,invoke}),writable:false,configurable:false});
+})();
+(() => {
+"use strict";
+const NAME = "__zephiumPixelPrivacyV1";
+if (Object.hasOwn(globalThis, NAME)) return;
+const stringify = JSON.stringify, getStyle = getComputedStyle;
+const rect = Element.prototype.getBoundingClientRect;
+const rangeRect = Range.prototype.getBoundingClientRect;
+const rangeSelect = Range.prototype.selectNodeContents;
+const inputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").get;
+const areaValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").get;
+const values = new WeakMap(), roots = new WeakSet();
+let revision = 1, exhausted = false, rootCount = 0;
+function changed() {
+if (revision >= Number.MAX_SAFE_INTEGER) exhausted = true;
+else revision += 1;
+}
+const observer = new MutationObserver(changed);
+function watch(root) {
+if (roots.has(root)) return;
+if (++rootCount > 256) {exhausted=true;observer.disconnect();return;}
+roots.add(root);
+observer.observe(root, {subtree:true, childList:true, attributes:true, characterData:true});
+}
+watch(document);
+for (const type of ["input", "change", "scroll", "resize", "load", "transitionrun", "animationstart"])
+addEventListener(type, changed, true);
+function probe(secret) {
+let clear = !exhausted;
+const w=innerWidth, h=innerHeight, x=scrollX, y=scrollY;
+try {
+if (observer.takeRecords().length) changed();
+if (!Number.isFinite(w+h+x+y) || w<=0 || h<=0 || w>16384 || h>16384) clear=false;
+const animations=document.getAnimations();
+if (animations.length>128 || animations.some(item=>item.playState==="running" || item.pending)) clear=false;
+const stack=[document.documentElement];
+let visited=0, textBytes=0, tail="", spaced="", attributeTail="", attributeSpaced="";
+const range=document.createRange();
+const inspect=(text,attribute=false)=>{
+if(!text)return true;
+if(text.length>4096)return false;
+for(const character of text){const point=character.codePointAt(0);textBytes+=point<=127?1:point<=2047?2:point<=65535?3:4;}
+if(textBytes>65536 || secret(null,text,true))return false;
+if(attribute) {
+attributeTail=(attributeTail+text).slice(-4096);attributeSpaced=(attributeSpaced+" "+text).slice(-4096);
+return !secret(null,attributeTail) && !secret(null,attributeSpaced);
+}
+tail=(tail+text).slice(-4096);spaced=(spaced+" "+text).slice(-4096);
+return !secret(null,tail) && !secret(null,spaced);
+};
+while (stack.length && clear) {
+const node=stack.pop();
+if (!node || ++visited>20000) {clear=false; break;}
+if (node.nodeType===3) {
+const parent=node.parentElement || node.getRootNode()?.host;
+if (!parent) {clear=false;break;}
+rangeSelect.call(range,node);
+const b=rangeRect.call(range), s=getStyle(parent);
+if (b.bottom<=0 || b.right<=0 || b.top>=h || b.left>=w || s.visibility!=="visible" || s.display==="none") continue;
+if (!inspect(node.nodeValue)) clear=false;
+continue;
+}
+if (node.nodeType!==1) continue;
+const b=rect.call(node), s=getStyle(node);
+const visible=b.width>0 && b.height>0 && b.bottom>0 && b.right>0 && b.top<h && b.left<w && s.visibility==="visible" && s.display!=="none";
+const tag=node.localName;
+if(visible) for(const name of ["aria-label","title","alt","placeholder"]) {
+if(!inspect(node.getAttribute(name)||"",true)) {clear=false;break;}
+}
+if(!clear)break;
+if (visible && (["iframe","frame","object","embed"].includes(tag) || tag.includes("-") && !node.shadowRoot || secret(node,null))) {clear=false; break;}
+if (["input","textarea","select"].includes(tag) && secret(node,null)) {clear=false; break;}
+if (tag==="input" || tag==="textarea") {
+const value=(tag==="input" ? inputValue : areaValue).call(node);
+if (value.length>4096) {clear=false; break;}
+if (values.has(node) && values.get(node)!==value) changed();
+values.set(node,value);
+if (visible && !inspect(value)) {clear=false; break;}
+}
+if (node.shadowRoot) {
+watch(node.shadowRoot);
+for (let at=node.shadowRoot.childNodes.length-1;at>=0;at--) stack.push(node.shadowRoot.childNodes[at]);
+}
+for (let at=node.childNodes.length-1;at>=0;at--) stack.push(node.childNodes[at]);
+if (stack.length>20000) {clear=false; break;}
+}
+if (observer.takeRecords().length) {changed(); clear=false;}
+} catch (_) {clear=false;}
+return stringify({v:1,r:revision,c:clear && !exhausted,w,h,x,y});
+}
+Object.defineProperty(globalThis, NAME, {value:Object.freeze({probe}), writable:false, configurable:false});
+})();
 (() => {
 "use strict";
 const GLOBAL_NAME = "__zephiumSemanticRuntimeV1";
@@ -61,6 +411,8 @@ const stringSplit = String.prototype.split;
 const stringTrim = String.prototype.trim;
 const stringStartsWith = String.prototype.startsWith;
 const stringIncludes = String.prototype.includes;
+const stringIndexOf = String.prototype.indexOf;
+const regexpExec = RegExp.prototype.exec;
 if (objectHasOwn(globalThis, GLOBAL_NAME)) {
 return;
 }
@@ -162,6 +514,9 @@ const inputValueGetter =
 typeof HTMLInputElement === "function" ? getter(HTMLInputElement.prototype, "value") : null;
 const anchorHrefGetter =
 typeof HTMLAnchorElement === "function" ? getter(HTMLAnchorElement.prototype, "href") : null;
+const imageCompleteGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "complete") : null;
+const imageNaturalWidthGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "naturalWidth") : null;
+const videoPosterGetter = typeof HTMLVideoElement === "function" ? getter(HTMLVideoElement.prototype, "poster") : null;
 const imageCurrentSrcGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "currentSrc") : null;
 const imageSrcGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "src") : null;
 const titleTextGetter = typeof HTMLTitleElement === "function" ? getter(HTMLTitleElement.prototype, "text") : null;
@@ -586,7 +941,11 @@ const lower = apply(stringToLowerCase, trimmed, []);
 if (
 lower.includes("-----begin private key-----") ||
 lower.includes("-----begin rsa private key-----") ||
-lower.includes("-----begin ec private key-----")
+lower.includes("-----begin ec private key-----") ||
+lower.includes("-----begin openssh private key-----") ||
+lower.includes("-----begin dsa private key-----") ||
+lower.includes("-----begin encrypted private key-----") ||
+lower.includes("-----begin pgp private key block-----")
 ) {
 return true;
 }
@@ -888,10 +1247,16 @@ const plainTextEditable = editableSupport === 1;
 const richText = editable && editableSupport === 7 && richTextShape(node);
 const explicit = explicitRole(node);
 if (explicit !== null) {
-if (explicit.suppressed === true) return null;
+if (explicit.suppressed === true) return isRenderedPhoto(node, tag) ? { role: "image", tag, inputType } : null;
 return { role: explicit.role, landmark: explicit.landmark, tag, inputType, contentEditable: editable, plainTextEditable, richText, editableSupport, editableStructure, editableEmpty: editableWitness && editableWitness.empty, editingContext: editableWitness && editableWitness.context };
 }
 if (editable) return { role: "textbox", tag, inputType, contentEditable: true, plainTextEditable, richText, editableSupport, editableStructure, editableEmpty: editableWitness.empty, editingContext: editableWitness.context };
+if ((tag === "div" || tag === "span") && listLength(childNodes(node)) <= 1 && backgroundSource(node) !== null && isRenderedPhoto(node, tag)) {
+return { role: "image", tag, inputType, mediaKind: "background" };
+}
+if (["video", "canvas", "svg"].includes(tag) && isRenderedPhoto(node, tag)) {
+return { role: "image", tag, inputType, mediaKind: tag === "video" ? "poster" : tag };
+}
 if (tag === "html" || tag === "body" || tag === "div" || tag === "fieldset" || tag === "details") {
 return tag === "fieldset" || tag === "details"
 ? { role: "group", tag, inputType }
@@ -942,7 +1307,7 @@ if (tag === "table") return { role: "table", tag, inputType };
 if (tag === "tr") return { role: "row", tag, inputType };
 if (tag === "th") return { role: "cell_header", tag, inputType };
 if (tag === "td") return { role: "cell", tag, inputType };
-if (tag === "img" && attribute(node, "alt", 1) !== null) {
+if (tag === "img" && (attribute(node, "alt", 1) !== null || isRenderedPhoto(node, tag))) {
 return { role: "image", tag, inputType };
 }
 if (isPageImageMeta(node, tag)) return { role: "image", tag, inputType, pageImage: true, headMeta: true };
@@ -1100,9 +1465,18 @@ stack.push({ node: photos[index], parent: item.parent, sink: null, depth: item.d
 }
 }
 function isRenderedPhoto(element, tag) {
-if (tag !== "img") return false;
+if (!["img", "canvas", "svg"].includes(tag) &&
+!(tag === "video" && attribute(element, "poster", 1) !== null) &&
+!((tag === "div" || tag === "span") && listLength(childNodes(element)) <= 1 && backgroundSource(element) !== null)) return false;
 const rect = elementRect(element);
 return rect !== null && rect.width >= 64 && rect.height >= 64;
+}
+function backgroundSource(element) {
+try {
+const value = apply(getComputedStyleFixed, globalThis, [element]).backgroundImage;
+const match = /^url\(["']?([^"'\\]+)["']?\)$/.exec(value);
+return match && match[1].length <= 4096 ? match[1] : null;
+} catch (_) { return null; }
 }
 function ancestorLabel(element, state) {
 let current = element;
@@ -1909,7 +2283,8 @@ if (form !== null) wire.ff = form;
 if (states !== 0) wire.s = states;
 if (operations !== 0) wire.o = operations;
 if (rect !== null && state.request.b.geo) wire.b = wireRect(rect);
-const record = { wire, sink: null, sinkBytes: 0, sensitivity: "public", element };
+const record = { wire, sink: null, sinkBytes: 0, sensitivity: "public", element,
+media: descriptor.mediaKind || (descriptor.tag === "article" || descriptor.role === "list_item" ? "record" : null) || (descriptor.role !== "image" ? null : descriptor.pageImage ? "page_image" : descriptor.tag === "img" ? "image" : ["canvas","svg"].includes(descriptor.tag) ? descriptor.tag : descriptor.tag === "video" ? "poster" : "graphic") };
 if (!isDocument) {
 const sensitivity = sensitivityFor(element);
 if (sensitivity !== "public") setSensitivity(record, sensitivity);
@@ -1926,7 +2301,7 @@ record.sinkBytes = 0;
 appendSink(record, descriptor.pageTitle === true ? pageTitleText(element, descriptor.tag) || "" : descriptor.pageFacts, state);
 record.sink = null;
 }
-const imageSource = descriptor.role === "image" && (descriptor.tag === "img" || descriptor.pageImage === true);
+const imageSource = descriptor.role === "image" && (descriptor.tag === "img" || descriptor.pageImage === true || descriptor.mediaKind === "background" || descriptor.mediaKind === "poster");
 if (((descriptor.role === "link" && (descriptor.tag === "a" || descriptor.pageAddress === true)) || imageSource) &&
 record.sensitivity === "public") {
 let destination;
@@ -1934,6 +2309,8 @@ try {
 if (descriptor.headMeta === true) {
 destination = attribute(element, descriptor.tag === "link" ? "href" : "content", 2048) || undefined;
 }
+else if (descriptor.mediaKind === "background") destination = backgroundSource(element);
+else if (descriptor.mediaKind === "poster") destination = read(videoPosterGetter, element);
 else destination = read(imageSource ? imageCurrentSrcGetter : anchorHrefGetter, element);
 if (imageSource && !destination && descriptor.headMeta !== true) destination = read(imageSrcGetter, element);
 } catch (_) { destination = undefined; }
@@ -2442,6 +2819,32 @@ const role = described === null ? null : described.role;
 return (editable !== null && lower(editable) !== "false") || sensitivityFor(element) !== "public" ||
 ["textbox", "password", "searchbox", "spinbutton", "combobox", "listbox", "option", "frame_boundary"].includes(role);
 }
+function textSearchWindows(text, terms, literal) {
+const windows = [], words = /[\p{Alphabetic}\p{N}]+/gu;
+let covered = 0;
+while (true) {
+let at;
+if (literal !== null) {
+at = apply(stringIndexOf, text, [literal, covered]);
+if (at < 0) break;
+} else {
+const match = apply(regexpExec, words, [text]);
+if (match === null) break;
+if (match.index < covered || !apply(stringSplit, lower(match[0]), [/[^\p{Alphabetic}\p{N}]+/u]).some(word => terms.has(word))) continue;
+at = match.index;
+}
+let start = mathMax(0, at - 512);
+if (start > 0) {
+const space = apply(stringIndexOf, text, [" ", start]);
+start = space >= 0 && space < at ? space + 1 : at;
+}
+const value = normalizeText(apply(stringSlice, text, [start]), 4096).value;
+if (value === "" || start + value.length <= at) break;
+covered = start + value.length;
+windows.push(value);
+}
+return windows;
+}
 function searchTextRecords(anchor, descriptor, state) {
 let ancestor = anchor;
 while (ancestor !== document) {
@@ -2493,10 +2896,17 @@ if (!textNodeVisible(current)) { flush(); continue; }
 const raw = read(characterDataGetter, current);
 if (typeof raw !== "string") continue;
 const remaining = 131072 - scannedBytes;
-const normalized = normalizeText(raw, mathMin(4096, remaining), remaining);
+const normalized = normalizeText(raw, remaining, remaining);
 scannedBytes += normalized.scannedBytes;
 if (normalized.truncated) mark(state, "scope_boundary", false);
-if (normalized.value !== "") {
+if (normalized.bytes > 4096) {
+flush();
+mark(state, "scope_boundary", false);
+for (const text of textSearchWindows(normalized.value, terms, literal)) {
+pending = { element: item.source, text, bytes: utf8Length(text, 4097), ordinal: ordinal++ };
+flush();
+}
+} else if (normalized.value !== "") {
 if (pending !== null && pending.element !== item.source) flush();
 if (pending === null) pending = { element: item.source, text: "", bytes: 0, ordinal: ordinal++ };
 const part = normalizeText(normalized.value, mathMax(0, 4096 - pending.bytes - (pending.bytes === 0 ? 0 : 1)));
@@ -2554,6 +2964,9 @@ if (state.stopped) break;
 state.stopped = state.stopped || stopped;
 return records;
 }
+function mediaEvidence(records, request) {
+try { return globalThis.__zephiumRecordMediaV1.evidence(records, request.i, request.g, {apply,read,weakMapGet,weakMapSet,nodeContains,elementRect,tagName,nodeType,nodeParentGetter,imageCompleteGetter,imageNaturalWidthGetter,pageTitleText}); } catch (_) { return []; }
+}
 function encodeSnapshot(request, records, completeness) {
 let dialogSample = "";
 const pending = pendingDialogSample;
@@ -2602,7 +3015,13 @@ break;
 parts.push(encodedNode);
 bytes += separator + nodeBytes;
 }
-return { value: `${header}${parts.join(",")}]}`, truncated };
+let value = `${header}${parts.join(",")}]}`;
+const media = mediaEvidence(records.slice(0,parts.length),request);
+if (media.length) {
+const enriched = value.slice(0,-1) + ',"m":' + apply(jsonStringify,JSON,[media]) + '}';
+if (utf8Length(enriched,request.b.w+1) <= request.b.w) value = enriched;
+}
+return { value, truncated };
 };
 let encoded = compose(completeness);
 if (encoded.truncated) encoded = compose("wire_limit");
@@ -3765,8 +4184,17 @@ records = traverse(anchor, state, true);
 if (state.regionBoundary) mark(state, "scope_boundary", false);
 return encodeSnapshot(request, records, state.completeness);
 }
+function pixelPrivacy() {
+try {
+return globalThis.__zephiumPixelPrivacyV1.probe((element,value,field) => element === null
+? looksLikeSecret(value) || (field && classifyLiveValue(value) !== 2)
+: credentialField(element, classify(element) || {role:"group",tag:tagName(element)}, attribute(element,"aria-label",512)||"") !== 0);
+} catch (_) { return "E1:privacy"; }
+}
 function invoke(encoded) {
 if (busy) return fault("busy");
+if (typeof encoded === "string" && (encoded.startsWith("M1:") || encoded.startsWith("V1:"))) return globalThis.__zephiumRecordMediaV1.invoke(encoded, pixelPrivacy);
+if (encoded === "P1:privacy") return pixelPrivacy();
 const request = parseRequest(encoded);
 if (request === null) return fault("invalid_request");
 busy = true;

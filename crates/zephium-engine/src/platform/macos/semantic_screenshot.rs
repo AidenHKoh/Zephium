@@ -27,6 +27,7 @@ use objc2_core_foundation::CFString;
 use objc2_core_graphics::{CGDataConsumer, CGDataConsumerCallbacks, CGImage};
 use objc2_foundation::{MainThreadMarker, NSNumber};
 use objc2_web_kit::WKSnapshotConfiguration;
+
 use wry::WebViewExtMacOS as _;
 use zephium_agentic::{
     SemanticCaptureInstant, SemanticScreenshotBudget, SemanticScreenshotNativeCapture,
@@ -152,7 +153,7 @@ unsafe extern "C-unwind" {
 }
 
 pub(super) fn capture_viewport(
-    view: &wry::WebView,
+    webview: &objc2_web_kit::WKWebView,
     request: SemanticScreenshotNativeRequest,
     admitted_at: Instant,
     cancelled: Arc<AtomicBool>,
@@ -164,7 +165,6 @@ pub(super) fn capture_viewport(
         return Err(SemanticScreenshotNativeFailure::Cancelled);
     }
     let mtm = MainThreadMarker::new().ok_or(SemanticScreenshotNativeFailure::Transport)?;
-    let webview = view.webview();
     let bounds = webview.bounds();
     let window = webview
         .window()
@@ -422,23 +422,82 @@ pub(crate) fn capture_work_frame(
     view: &wry::WebView,
     completion: impl FnOnce(Option<(u32, u32, Vec<u8>)>) + 'static,
 ) -> bool {
+    capture_work_frame_native(&view.webview(), completion)
+}
+pub(crate) fn capture_work_frame_native(
+    webview: &objc2_web_kit::WKWebView,
+    completion: impl FnOnce(Option<(u32, u32, Vec<u8>)>) + 'static,
+) -> bool {
+    capture_person_frame_native(webview, None, completion)
+}
+/// A fresh admitted record region. The caller retains the whole-viewport
+/// before/after privacy fence and the original run's one-shot capture permit.
+pub(crate) fn capture_record_frame_native(
+    webview: &objc2_web_kit::WKWebView,
+    crop: crate::platform::record_media::Crop,
+    completion: crate::platform::record_media::FrameCompletion,
+) -> bool {
+    capture_person_frame_native(webview, Some(crop), move |image| {
+        completion(image.map(
+            |(width, height, png)| crate::platform::record_media::RecordFrame {
+                png,
+                geometry: zephium_agentic::WorkBrowserCropGeometry {
+                    captured: [width, height],
+                    viewport: [crop.proof.viewport().0, crop.proof.viewport().1],
+                    css_rect: crop.rect,
+                    raster_rect: [0, 0, width, height],
+                },
+            },
+        ));
+    })
+}
+fn capture_person_frame_native(
+    webview: &objc2_web_kit::WKWebView,
+    crop: Option<crate::platform::record_media::Crop>,
+    completion: impl FnOnce(Option<(u32, u32, Vec<u8>)>) + 'static,
+) -> bool {
     let Some(mtm) = MainThreadMarker::new() else {
         return false;
     };
-    let Some(budget) = work_frame_budget() else {
+    let Some(budget) = (if crop.is_some() {
+        SemanticScreenshotBudget::try_new(320, 240, 320 * 240, 1024 * 1024).ok()
+    } else {
+        work_frame_budget()
+    }) else {
         return false;
     };
-    let webview = view.webview();
     let bounds = webview.bounds();
     let Some(window) = webview.window() else {
         return false;
     };
     let scale = window.backingScaleFactor();
-    let Some(snapshot_width) =
-        fitted_snapshot_width(bounds.size.width, bounds.size.height, scale, budget)
+    let mut region = bounds;
+    if let Some(crop) = crop {
+        let (width, height) = crop.proof.viewport();
+        if !crop.proof.clear()
+            || !crop.rect.iter().all(|value| value.is_finite())
+            || crop.rect[0] < 0.0
+            || crop.rect[1] < 0.0
+            || crop.rect[2] <= 0.0
+            || crop.rect[3] <= 0.0
+            || crop.rect[0] + crop.rect[2] > width
+            || crop.rect[1] + crop.rect[3] > height
+        {
+            return false;
+        }
+        region.origin.x += crop.rect[0] * bounds.size.width / width;
+        region.origin.y += crop.rect[1] * bounds.size.height / height;
+        region.size.width = crop.rect[2] * bounds.size.width / width;
+        region.size.height = crop.rect[3] * bounds.size.height / height;
+    }
+    let Some(mut snapshot_width) =
+        fitted_snapshot_width(region.size.width, region.size.height, scale, budget)
     else {
         return false;
     };
+    if let Some(crop) = crop {
+        snapshot_width = snapshot_width.min(crop.rect[2] / scale);
+    }
     // SAFETY: `mtm` proves this WebKit object is created on the main thread;
     // objc2 retains the returned configuration for the enclosing scope.
     let configuration = unsafe { WKSnapshotConfiguration::new(mtm) };
@@ -447,7 +506,7 @@ pub(crate) fn capture_work_frame(
     // objects, `bounds` came from this live WKWebView, and all calls remain on
     // the main thread proven above.
     unsafe {
-        configuration.setRect(bounds);
+        configuration.setRect(region);
         configuration.setSnapshotWidth(Some(&width));
         configuration.setAfterScreenUpdates(false);
     }

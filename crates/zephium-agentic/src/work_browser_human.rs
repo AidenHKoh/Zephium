@@ -554,7 +554,8 @@ fn request(
     row.pending = Some(operation.clone());
     WorkBrowserResourceRequest {
         construction: None,
-        operation,
+        media: None,
+        operation: Box::new(operation),
         storage: row.storage,
         isolated_public: row.isolated_public,
         document: row.document.clone(),

@@ -49,6 +49,7 @@ fn project_work_deadline(origin: Instant, deadline: Instant) -> Option<AgentPoli
 enum Phase {
     Constructing,
     Retained,
+    ReadingMedia,
     Acquiring,
     Leased,
     Revoking,
@@ -67,6 +68,7 @@ struct State {
     // Keep that exact delivery reservation separate from the active lease.
     retirement_delivery: Option<WorkBrowserExecutionLease>,
     human_delivery: Option<Operation>,
+    media_delivery: bool,
     human_deadline: Option<AgentPolicyInstant>,
     reads: usize,
     navigation: Option<zephium_agentic::ContextOperationJoin>,
@@ -175,6 +177,7 @@ impl WorkResourceGuard {
                 lease: None,
                 retirement_delivery: None,
                 human_delivery: None,
+                media_delivery: false,
                 human_deadline: None,
                 reads: 0,
                 navigation: None,
@@ -439,6 +442,32 @@ impl WorkResourceGuard {
             state.action_drain_closed = true;
         }
         match request.operation() {
+            Operation::ReadMedia
+                if self.session_current()
+                    && self.health_current()
+                    && state.phase == Phase::Retained
+                    && !state.uncertain
+                    && state.lease.is_none()
+                    && state.retirement_delivery.is_none()
+                    && state.human_delivery.is_none()
+                    && !state.media_delivery
+                    && state.reads == 0
+                    && state.navigation.is_none()
+                    && state.action.is_none()
+                    && state.callbacks == 0 =>
+            {
+                if request
+                    .media_plans()
+                    .is_none_or(|plans| plans.is_empty() || plans.len() > 12)
+                    || request.media_deadline().is_none_or(|deadline| {
+                        deadline <= now || deadline.millis() - now.millis() > 8000
+                    })
+                {
+                    return Err(ContextPortFailure::Stale);
+                }
+                state.phase = Phase::ReadingMedia;
+                state.media_delivery = true;
+            }
             Operation::Acquire
                 if self.session_current()
                     && self.health_current()
@@ -447,6 +476,7 @@ impl WorkResourceGuard {
                     && state.lease.is_none()
                     && state.retirement_delivery.is_none()
                     && state.human_delivery.is_none()
+                    && !state.media_delivery
                     && state.reads == 0
                     && state.navigation.is_none()
                     && state.action.is_none()
@@ -467,6 +497,7 @@ impl WorkResourceGuard {
                     && state.lease.is_none()
                     && state.retirement_delivery.is_none()
                     && state.human_delivery.is_none()
+                    && !state.media_delivery
                     && state.reads == 0
                     && state.navigation.is_none()
                     && state.action.is_none()
@@ -494,6 +525,7 @@ impl WorkResourceGuard {
                     && state.phase == Phase::PresentedHuman
                     && !state.uncertain
                     && state.human_delivery.is_none()
+                    && !state.media_delivery
                     && state.human_deadline == request.human_deadline()
                     && state.human_deadline.is_some_and(|deadline| now < deadline) =>
             {
@@ -617,6 +649,7 @@ impl WorkResourceGuard {
             !state.construction_pending
                 && state.retirement_delivery.is_none()
                 && state.human_delivery.is_none()
+                && !state.media_delivery
                 && state.reads == 0
                 && state.navigation.is_none()
                 && state.action.is_none()
@@ -738,6 +771,13 @@ impl WorkResourceGuard {
             state.construction_pending = false;
         }
         match (request.operation(), outcome) {
+            (Operation::ReadMedia, Outcome::MediaRead)
+                if state.media_delivery && !state.uncertain =>
+            {
+                if state.phase == Phase::ReadingMedia {
+                    state.phase = Phase::Retained;
+                }
+            }
             (Operation::Construct, Outcome::Constructed)
                 if state.phase == Phase::Constructing && !state.uncertain =>
             {
@@ -778,6 +818,7 @@ impl WorkResourceGuard {
                 if !state.construction_pending
                     && state.retirement_delivery.is_none()
                     && state.human_delivery.is_none()
+                    && !state.media_delivery
                     && state.reads == 0
                     && state.navigation.is_none()
                     && state.action.is_none()
@@ -896,6 +937,12 @@ impl WorkResourceGuard {
                 state.phase = Phase::Retained;
             }
         } else {
+            if request.operation() == Operation::ReadMedia && state.media_delivery {
+                state.media_delivery = false;
+                if state.phase == Phase::ReadingMedia {
+                    state.phase = Phase::Retained;
+                }
+            }
             if state.human_delivery == Some(request.operation()) {
                 state.human_delivery = None;
             }
@@ -908,6 +955,28 @@ impl WorkResourceGuard {
             if state.phase != Phase::Destroyed {
                 state.phase = Phase::Quarantined;
             }
+        }
+        drop(state);
+        self.report_uncertainty();
+    }
+    pub(crate) fn media_current(&self) -> bool {
+        self.port_open()
+            && self.session_current()
+            && self.health_current()
+            && self.state.lock().is_ok_and(|state| {
+                !state.uncertain && state.phase == Phase::ReadingMedia && state.media_delivery
+            })
+    }
+    fn finish_media_delivery(&self, returned: bool, released: bool) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.media_delivery || !returned || !released {
+            state.uncertain = true;
+        }
+        if released {
+            state.media_delivery = false;
         }
         drop(state);
         self.report_uncertainty();
@@ -1082,6 +1151,7 @@ impl WorkLifecycleTask {
             return;
         };
         let construction = request.operation() == Operation::Construct;
+        let media = request.operation() == Operation::ReadMedia;
         let human = matches!(
             request.operation(),
             Operation::PresentHuman | Operation::ContinueAfterHuman
@@ -1142,6 +1212,12 @@ impl WorkLifecycleTask {
             }
         }
         self.permit.release();
+        if media {
+            self.guard.finish_media_delivery(
+                callback_returned,
+                self.permit.released && self.permit.admission.counts().is_some(),
+            );
+        }
         if let Some(operation) = human {
             self.guard.finish_human_delivery(
                 operation,
@@ -1157,7 +1233,7 @@ impl WorkLifecycleTask {
                 delivery,
             );
         }
-        if (construction || revocation.is_some() || human.is_some())
+        if (construction || revocation.is_some() || human.is_some() || media)
             && self.guard.destruction_started()
         {
             crate::host::notify_work_resource(self.guard.clone());

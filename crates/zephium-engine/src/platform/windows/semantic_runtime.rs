@@ -55,7 +55,54 @@ fn next_world_name() -> Result<SemanticWorldName, ()> {
     SemanticWorldName::from_nonce(epoch, unpredictable).map_err(|_| ())
 }
 
-type SemanticCompletion = Box<dyn FnOnce(Result<SemanticSnapshot, SemanticRuntimePortFailure>)>;
+use crate::platform::record_media::{MediaCompletion, MediaInvocation, NativeMediaResult};
+use crate::platform::semantic_pixel_privacy::{PixelPrivacyProof, PrivacyCompletion};
+enum ReadResult {
+    Observation(SemanticSnapshot),
+    Privacy(PixelPrivacyProof),
+    Media(NativeMediaResult),
+}
+enum ReadInvocation {
+    Observation(SemanticRuntimeInvocation),
+    Privacy,
+    Media(MediaInvocation),
+}
+impl ReadInvocation {
+    fn observation(&self) -> Option<&SemanticRuntimeInvocation> {
+        match self {
+            Self::Observation(value) => Some(value),
+            _ => None,
+        }
+    }
+    fn command(&self, context: &SemanticExecutionContext) -> Option<FixedSemanticCdpCommand> {
+        match self {
+            Self::Observation(value) => invoke_runtime_command(context, value).ok(),
+            Self::Privacy => {
+                crate::platform::agent_semantic_cdp_protocol::invoke_privacy_command(context).ok()
+            }
+            Self::Media(value) => {
+                crate::platform::agent_semantic_cdp_protocol::invoke_media_command(context, value)
+                    .ok()
+            }
+        }
+    }
+    fn decode(&self, response: &str) -> Result<ReadResult, SemanticCdpInvocationError> {
+        match self {
+            Self::Observation(value) => {
+                decode_invocation_response(value, response).map(ReadResult::Observation)
+            }
+            Self::Privacy => {
+                crate::platform::agent_semantic_cdp_protocol::decode_privacy_response(response)
+                    .map(ReadResult::Privacy)
+            }
+            Self::Media(value) => {
+                crate::platform::agent_semantic_cdp_protocol::decode_media_response(value, response)
+                    .map(ReadResult::Media)
+            }
+        }
+    }
+}
+type SemanticCompletion = Box<dyn FnOnce(Result<ReadResult, SemanticRuntimePortFailure>)>;
 type NativeCompletion = Box<dyn FnOnce(Result<String, NativeCdpFailure>)>;
 type ActionCompletion =
     Box<dyn FnOnce(Result<SemanticActionRuntimeEvidence, AgentSemanticActionRuntimeFailure>)>;
@@ -143,7 +190,7 @@ struct InFlightCommand {
 }
 
 struct PendingInvocation {
-    invocation: SemanticRuntimeInvocation,
+    invocation: ReadInvocation,
     completion: SemanticCompletion,
 }
 
@@ -377,7 +424,45 @@ impl AgentSemanticRuntimeController {
         invocation: SemanticRuntimeInvocation,
         completion: impl FnOnce(Result<SemanticSnapshot, SemanticRuntimePortFailure>) + 'static,
     ) -> Result<(), SemanticRuntimePortFailure> {
-        self.native.dispatch(invocation, Box::new(completion))
+        self.native.dispatch(
+            ReadInvocation::Observation(invocation),
+            Box::new(move |result| {
+                completion(result.and_then(|result| match result {
+                    ReadResult::Observation(snapshot) => Ok(snapshot),
+                    ReadResult::Privacy(_) | ReadResult::Media(_) => {
+                        Err(SemanticRuntimePortFailure::Transport)
+                    }
+                }))
+            }),
+        )
+    }
+
+    pub(crate) fn dispatch_media(
+        &self,
+        plan: &zephium_agentic::SemanticRecordMediaPlan,
+        validate: bool,
+        completion: MediaCompletion,
+    ) {
+        let _ = self.native.dispatch(
+            ReadInvocation::Media(MediaInvocation::new(plan, validate)),
+            Box::new(move |result| {
+                completion(match result {
+                    Ok(ReadResult::Media(value)) => Some(value),
+                    _ => None,
+                })
+            }),
+        );
+    }
+    pub(crate) fn dispatch_privacy(&self, completion: PrivacyCompletion) {
+        let _ = self.native.dispatch(
+            ReadInvocation::Privacy,
+            Box::new(move |result| {
+                completion(match result {
+                    Ok(ReadResult::Privacy(proof)) => Some(proof),
+                    _ => None,
+                })
+            }),
+        );
     }
 
     pub(crate) fn begin_document_load(&self) -> Result<(), ()> {
@@ -763,7 +848,7 @@ impl NativeRuntime {
 
     fn dispatch(
         self: &Rc<Self>,
-        invocation: SemanticRuntimeInvocation,
+        invocation: ReadInvocation,
         completion: SemanticCompletion,
     ) -> Result<(), SemanticRuntimePortFailure> {
         let refusal = {
@@ -818,9 +903,12 @@ impl NativeRuntime {
             (generation, state.installed_context.clone())
         };
         let command = match installed_context.as_ref() {
-            Some(context) => self.shared.state.try_borrow().ok().and_then(|state| {
-                invoke_runtime_command(context, &state.pending.as_ref()?.invocation).ok()
-            }),
+            Some(context) => self
+                .shared
+                .state
+                .try_borrow()
+                .ok()
+                .and_then(|state| state.pending.as_ref()?.invocation.command(context)),
             None => Some(get_frame_tree_command()),
         };
         let stage = if installed_context.is_some() {
@@ -906,11 +994,12 @@ impl NativeRuntime {
                 self.invariant_failed();
                 return false;
             };
-            if state
-                .pending
-                .as_ref()
-                .is_none_or(|pending| pending.invocation.invocation() != invocation)
-            {
+            if state.pending.as_ref().is_none_or(|pending| {
+                pending
+                    .invocation
+                    .observation()
+                    .is_none_or(|current| current.invocation() != invocation)
+            }) {
                 return false;
             }
             state.phase = DocumentPhase::Failed;
@@ -1264,7 +1353,7 @@ impl NativeRuntime {
                 }
                 let command = self.shared.state.try_borrow().ok().and_then(|state| {
                     let context = state.installed_context.as_ref()?;
-                    invoke_runtime_command(context, &state.pending.as_ref()?.invocation).ok()
+                    state.pending.as_ref()?.invocation.command(context)
                 });
                 let Some(command) = command else {
                     self.fail_current(SemanticRuntimePortFailure::Transport, true);
@@ -1415,7 +1504,7 @@ impl NativeRuntime {
                 self.invariant_failed();
                 return;
             };
-            let outcome = decode_invocation_response(&pending.invocation, &response);
+            let outcome = pending.invocation.decode(&response);
             let (outcome, recoverable) = match outcome {
                 Ok(snapshot) => (Ok(snapshot), true),
                 Err(SemanticCdpInvocationError::Result(error)) => {
@@ -1512,7 +1601,7 @@ impl NativeRuntime {
     fn invoke_completion(
         &self,
         completion: SemanticCompletion,
-        outcome: Result<SemanticSnapshot, SemanticRuntimePortFailure>,
+        outcome: Result<ReadResult, SemanticRuntimePortFailure>,
     ) {
         if std::panic::catch_unwind(AssertUnwindSafe(|| completion(outcome))).is_err() {
             self.callback_panicked();

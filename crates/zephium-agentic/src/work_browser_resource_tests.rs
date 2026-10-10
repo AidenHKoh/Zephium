@@ -785,7 +785,7 @@ fn wrong_phase_duplicate_and_old_incarnation_receipts_cannot_reopen_resources() 
         .unwrap();
     let duplicate = WorkBrowserResourceCompletion {
         effective_document: None,
-        operation: request.operation.clone(),
+        operation: (*request.operation).clone(),
         outcome: WorkBrowserResourceNativeOutcome::Acquired,
         delivery: None,
     };

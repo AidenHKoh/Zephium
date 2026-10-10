@@ -89,8 +89,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0x33, 0x76, 0xa8, 0xe4, 0xcf, 0x7b, 0x83, 0x80, 0xc4, 0xc0, 0x79, 0xda, 0x71, 0x85, 0xd3, 0x3d,
-    0x52, 0xcd, 0x9d, 0x84, 0xe9, 0xa5, 0xb5, 0x61, 0xa1, 0xe0, 0x07, 0xc3, 0xc1, 0xa0, 0xf1, 0x8b,
+    0x4f, 0x8c, 0xf4, 0x3f, 0x33, 0x7e, 0x44, 0x5d, 0x02, 0x15, 0x28, 0x29, 0x5b, 0x4e, 0xb4, 0x19,
+    0xbc, 0x34, 0xb8, 0xe2, 0xd9, 0x6b, 0xe1, 0x25, 0xae, 0x0c, 0x3c, 0x2e, 0x5c, 0x4c, 0xf9, 0xae,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -106,6 +106,15 @@ impl SemanticRuntimeProgram {
     /// the separately encoded closed request grammar.
     pub const fn source(self) -> &'static str {
         SEMANTIC_RUNTIME_SOURCE
+    }
+
+    /// Immutable installation containing the independently bounded pixel privacy helper.
+    pub fn installation_source(self) -> &'static str {
+        concat!(
+            include_str!("../assets/semantic-record-media-v1.js"),
+            include_str!("../assets/semantic-pixel-privacy-v1.js"),
+            include_str!("../assets/semantic-runtime-v1.js")
+        )
     }
 
     /// Precompacted identical program for the fixed Windows CDP wire ceiling.
@@ -1752,12 +1761,35 @@ mod tests {
     }
 
     #[test]
+    fn record_media_program_has_independent_pin_and_bound() {
+        let source = include_str!("../assets/semantic-record-media-v1.js");
+        assert!(source.len() <= 16 * 1024);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(source.as_bytes())),
+            "508ae873e09b109c3851f44b3ed5abf1b028c321df5089d6e849d144ab68a0bb"
+        );
+        assert!(source.contains("new AbortController()"));
+        assert!(source.contains("redirect:\"error\""));
+    }
+
+    #[test]
+    fn pixel_privacy_program_has_independent_pin_and_bound() {
+        let source = include_str!("../assets/semantic-pixel-privacy-v1.js");
+        assert!(source.len() <= 8 * 1024);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(source.as_bytes())),
+            "da40e060fdf9fadcdda3e5819aeb160608e7b6300d9d7e5ebe5885c70ae9f4de"
+        );
+        assert!(source.contains("observer.takeRecords()"));
+    }
+
+    #[test]
     fn compact_program_is_bound_to_the_reviewed_source_and_exact_output() {
         let manifest: serde_json::Value =
             serde_json::from_str(include_str!("../assets/semantic-runtime-cdp-v1.json"))
                 .expect("manifest");
         for (key, source) in [
-            ("source", SEMANTIC_RUNTIME_PROGRAM.source()),
+            ("source", SEMANTIC_RUNTIME_PROGRAM.installation_source()),
             ("compact", SEMANTIC_RUNTIME_PROGRAM.cdp_source()),
         ] {
             assert!(source.is_ascii());

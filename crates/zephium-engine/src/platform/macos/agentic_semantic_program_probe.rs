@@ -276,23 +276,23 @@ pub(super) fn source() -> std::borrow::Cow<'static, str> {
     {
         return std::borrow::Cow::Owned(format!(
             "{}\n{}",
-            SEMANTIC_RUNTIME_PROGRAM.source(),
+            SEMANTIC_RUNTIME_PROGRAM.installation_source(),
             include_str!("agentic_owned_display_command_probe.js")
         ));
     }
-    std::borrow::Cow::Borrowed(SEMANTIC_RUNTIME_PROGRAM.source())
+    std::borrow::Cow::Borrowed(SEMANTIC_RUNTIME_PROGRAM.installation_source())
 }
 
 #[allow(clippy::print_stderr)]
 pub(super) fn isolated_fill_candidate_source() -> String {
     // Two exact closed substitutions; one immutable, attested document-start
     // script. No invocation chooses a backend or supplies an editor program.
-    let source = SEMANTIC_RUNTIME_PROGRAM.source()
-        .replacen("  function runFixedFill(target, descriptor, request) {",
-            &format!("{}\n  function runSyntheticFill(target, descriptor, request) {{",
+    let source = SEMANTIC_RUNTIME_PROGRAM.installation_source()
+        .replacen("  function runFixedFill(target, descriptor, request, finish) {",
+            &format!("{}\n  function runSyntheticFill(target, descriptor, request, finish) {{",
                 include_str!("agentic_isolated_fill_candidate.js")), 1)
-        .replacen("const result = runFixedFill(target, descriptor, request);",
-            "const result = runFixedFill(target, descriptor, request);\n      if (typeof result !== \"string\") return apply(promiseThen, result, [finishFill, () => actionFault(\"applied_unverified_postcondition\")]);", 1);
+        .replacen("const result = runFixedFill(target, descriptor, request, finishFill);",
+            "const result = runFixedFill(target, descriptor, request, finishFill);\n      if (typeof result !== \"string\") return apply(promiseThen, result, [finishFill, () => actionFault(\"applied_unverified_postcondition\")]);", 1);
     let source = if preparation_only_selected() {
         eprintln!("isolated-fill-preparation-only: phase=source_selected command_entered=false content=redacted");
         source.replacen(
@@ -529,25 +529,27 @@ mod tests {
 
     #[test]
     fn isolated_fill_candidate_is_closed_and_absent_from_shipping_program() {
-        let shipping = SEMANTIC_RUNTIME_PROGRAM.source();
+        let shipping = SEMANTIC_RUNTIME_PROGRAM.installation_source();
         assert_eq!(
             shipping
-                .matches("  function runFixedFill(target, descriptor, request) {")
+                .matches("  function runFixedFill(target, descriptor, request, finish) {")
                 .count(),
             1
         );
         assert_eq!(
             shipping
-                .matches("const result = runFixedFill(target, descriptor, request);")
+                .matches("const result = runFixedFill(target, descriptor, request, finishFill);")
                 .count(),
             1
         );
-        assert!(!shipping.contains("execCommand"));
+        let insertion = include_str!("agentic_isolated_fill_candidate.js");
+        assert!(!shipping.contains("commandPreparationOnly"));
+        assert!(!shipping.contains("function runSyntheticFill("));
         let candidate = isolated_fill_candidate_source();
         assert!(candidate.len() < shipping.len() + 16 * 1024);
         assert_eq!(
             candidate.matches("Document.prototype.execCommand").count(),
-            1
+            shipping.matches("Document.prototype.execCommand").count() + 1
         );
         assert_eq!(
             candidate
@@ -571,7 +573,7 @@ mod tests {
             "deleteFromDocument",
         ] {
             assert!(
-                !candidate.contains(forbidden),
+                !insertion.contains(forbidden),
                 "unexpected candidate capability: {forbidden}"
             );
         }
