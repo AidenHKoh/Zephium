@@ -687,6 +687,7 @@ function leadView(
           ...(item.detail ? { detail: item.detail } : {}),
           ...(item.due ? { due: item.due } : {}),
           ...(item.priority ? { priority: item.priority } : {}),
+          ...(item.done ? { done: true } : {}),
           ...(item.from
             ? {
                 from: Object.fromEntries(

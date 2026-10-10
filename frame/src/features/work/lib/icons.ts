@@ -57,3 +57,5 @@ export { default as Upload01Icon } from "@hugeicons/core-free-icons/Upload01Icon
 export { default as UserIcon } from "@hugeicons/core-free-icons/UserIcon";
 export { default as WorkHistoryIcon } from "@hugeicons/core-free-icons/WorkHistoryIcon";
 export { default as Navigation03Icon } from "@hugeicons/core-free-icons/Navigation03Icon";
+export { default as Calendar03Icon } from "@hugeicons/core-free-icons/Calendar03Icon";
+export { default as ShapeCollectionIcon } from "@hugeicons/core-free-icons/ShapeCollectionIcon";

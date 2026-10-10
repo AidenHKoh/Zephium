@@ -46,7 +46,7 @@ export function firstWeekday(locale?: string): number {
  */
 export function planWeeks(
   plan: PlanView,
-  options: { today?: Date; firstDay?: number } = {},
+  options: { today?: Date; firstDay?: number; month?: Date } = {},
 ): CalendarDay[][] | null {
   const dated = plan.steps.flatMap((step, index) =>
     step.date ? [{ index, date: step.date }] : [],
@@ -54,8 +54,11 @@ export function planWeeks(
   const days = dated.map(({ date }) => parse(date).getTime());
   let first: Date;
   let last: Date;
-  if (plan.calendar) {
-    // A calendar the person keeps: whole months, from its first day's month (this one when empty).
+  if (plan.calendar && options.month) {
+    first = new Date(options.month.getFullYear(), options.month.getMonth(), 1);
+    last = new Date(options.month.getFullYear(), options.month.getMonth() + 1, 0);
+  } else if (plan.calendar) {
+    // A calendar the agent drew: whole months, from its first day's month (this one when empty).
     const now = options.today ?? new Date();
     const from = days.length ? new Date(Math.min(...days)) : now;
     const to = days.length ? new Date(Math.max(...days)) : now;
@@ -102,3 +105,10 @@ export const CALENDAR = { cell: 128, row: 100, head: 34 } as const;
 export const calendarWidth = () => 7 * CALENDAR.cell + 6 + 2;
 export const calendarHeight = (weeks: number) =>
   CALENDAR.head + 1 + weeks * CALENDAR.row + (weeks - 1) + 2;
+
+/** The month a calendar opens on: its first day's, or this one when it holds none. */
+export function openingMonth(plan: PlanView, today = new Date()): Date {
+  const days = plan.steps.flatMap((step) => (step.date ? [step.date] : [])).sort();
+  const first = days[0] ? parse(days[0]) : today;
+  return new Date(first.getFullYear(), first.getMonth(), 1);
+}

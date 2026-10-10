@@ -18,3 +18,7 @@ export { default as Message01Icon } from "@hugeicons/core-free-icons/Message01Ic
 export { default as Ticket01Icon } from "@hugeicons/core-free-icons/Ticket01Icon";
 export { default as Doc01Icon } from "@hugeicons/core-free-icons/Doc01Icon";
 export { default as PlayCircleIcon } from "@hugeicons/core-free-icons/PlayCircleIcon";
+export { default as ArrowLeft01Icon } from "@hugeicons/core-free-icons/ArrowLeft01Icon";
+export { default as ArrowRight01Icon } from "@hugeicons/core-free-icons/ArrowRight01Icon";
+export { default as Add01Icon } from "@hugeicons/core-free-icons/Add01Icon";
+export { default as Cancel01Icon } from "@hugeicons/core-free-icons/Cancel01Icon";

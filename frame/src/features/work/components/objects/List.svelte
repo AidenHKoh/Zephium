@@ -6,6 +6,7 @@
   import MakeTasks from "../board/MakeTasks.svelte";
   import Mark from "./Mark.svelte";
   import Title from "./Title.svelte";
+  import Checklist from "./Checklist.svelte";
   import { ArrowUpRight01Icon, Tick02Icon } from "./icons";
   /**
    * Things to do, answer or read, each with where it came from: the app's mark,
@@ -35,75 +36,79 @@
   };
 </script>
 
-<section class="list" class:deck aria-label={object.title}>
-  {#if object.title}<Title text={object.title} />{/if}
-  {#if deck}<ol class="cards">
-      {#each object.items as item, index (index)}<li>
-          <button
-            type="button"
-            class="card nodrag nopan"
-            class:turned={turned.has(index)}
-            aria-pressed={turned.has(index)}
-            onclick={() => turn(index)}
-          >
-            <span class="face obverse" aria-hidden={turned.has(index)}>
-              <span class="number">{index + 1}</span>
-              <span class="question">{item.title}</span>
-              {#if item.detail}<span class="hint">{m.work_list_show_answer()}</span>{/if}
-            </span>
-            <span class="face reverse" aria-hidden={!turned.has(index)}>
-              <span class="asked">{item.title}</span>
-              <span class="answer">{item.detail ?? ""}</span>
-            </span>
-          </button>
-        </li>{/each}
-    </ol>{:else}<ul class="items">
-      {#each object.items as item, index (index)}
-        <li class:done={item.done}>
-          {#if todo}
-            {#if actions.check}<button
-                type="button"
-                class="box nodrag nopan"
-                aria-pressed={!!item.done}
-                aria-label={item.title}
-                onclick={() => actions.check?.(object.id, index, !item.done)}
-                >{#if item.done}<Icon icon={Tick02Icon} size={12} />{/if}</button
-              >{:else}<span class="box" aria-hidden="true"
-                >{#if item.done}<Icon icon={Tick02Icon} size={12} />{/if}</span
-              >{/if}
-          {:else}<span class="lead" aria-hidden="true"></span>{/if}
-          <div class="body">
-            <div class="line">
-              <h4>{item.title}</h4>
-              {#if item.priority === "high" || item.due}<span class="when">
-                  {#if item.priority === "high"}<span class="priority">{m.work_list_high()}</span
-                    >{/if}{#if item.due}<span class="due">{item.due}</span>{/if}
-                </span>{/if}
-            </div>
-            {#if item.detail}<p class="detail">{item.detail}</p>{/if}
-            {#if item.from}
-              {@const from = item.from}
-              <div class="from">
-                {#if from.host}<Mark address={from.host} size={14} />{/if}
-                <span class="who"
-                  >{[from.who, from.app, from.when].filter(Boolean).join(" · ")}</span
-                >
-                {#if from.url}<a
-                    class="back nodrag"
-                    href={from.url}
-                    onclick={open(from.url)}
-                    title={from.app ? m.work_list_open_in({ app: from.app }) : m.work_env_open()}
-                    ><Icon icon={ArrowUpRight01Icon} size={13} /></a
-                  >{/if}
+{#if actions.edit && todo}<Checklist {object} {actions} />{:else}<section
+    class="list"
+    class:deck
+    aria-label={object.title}
+  >
+    {#if object.title}<Title text={object.title} />{/if}
+    {#if deck}<ol class="cards">
+        {#each object.items as item, index (index)}<li>
+            <button
+              type="button"
+              class="card nodrag nopan"
+              class:turned={turned.has(index)}
+              aria-pressed={turned.has(index)}
+              onclick={() => turn(index)}
+            >
+              <span class="face obverse" aria-hidden={turned.has(index)}>
+                <span class="number">{index + 1}</span>
+                <span class="question">{item.title}</span>
+                {#if item.detail}<span class="hint">{m.work_list_show_answer()}</span>{/if}
+              </span>
+              <span class="face reverse" aria-hidden={!turned.has(index)}>
+                <span class="asked">{item.title}</span>
+                <span class="answer">{item.detail ?? ""}</span>
+              </span>
+            </button>
+          </li>{/each}
+      </ol>{:else}<ul class="items">
+        {#each object.items as item, index (index)}
+          <li class:done={item.done}>
+            {#if todo}
+              {#if actions.check}<button
+                  type="button"
+                  class="box nodrag nopan"
+                  aria-pressed={!!item.done}
+                  aria-label={item.title}
+                  onclick={() => actions.check?.(object.id, index, !item.done)}
+                  >{#if item.done}<Icon icon={Tick02Icon} size={12} />{/if}</button
+                >{:else}<span class="box" aria-hidden="true"
+                  >{#if item.done}<Icon icon={Tick02Icon} size={12} />{/if}</span
+                >{/if}
+            {:else}<span class="lead" aria-hidden="true"></span>{/if}
+            <div class="body">
+              <div class="line">
+                <h4>{item.title}</h4>
+                {#if item.priority === "high" || item.due}<span class="when">
+                    {#if item.priority === "high"}<span class="priority">{m.work_list_high()}</span
+                      >{/if}{#if item.due}<span class="due">{item.due}</span>{/if}
+                  </span>{/if}
               </div>
-              {#if from.quote}<blockquote>{from.quote}</blockquote>{/if}
-            {/if}
-          </div>
-        </li>
-      {/each}
-    </ul>{/if}
-  {#if todo && !centre}<footer><MakeTasks id={object.id} /></footer>{/if}
-</section>
+              {#if item.detail}<p class="detail">{item.detail}</p>{/if}
+              {#if item.from}
+                {@const from = item.from}
+                <div class="from">
+                  {#if from.host}<Mark address={from.host} size={14} />{/if}
+                  <span class="who"
+                    >{[from.who, from.app, from.when].filter(Boolean).join(" · ")}</span
+                  >
+                  {#if from.url}<a
+                      class="back nodrag"
+                      href={from.url}
+                      onclick={open(from.url)}
+                      title={from.app ? m.work_list_open_in({ app: from.app }) : m.work_env_open()}
+                      ><Icon icon={ArrowUpRight01Icon} size={13} /></a
+                    >{/if}
+                </div>
+                {#if from.quote}<blockquote>{from.quote}</blockquote>{/if}
+              {/if}
+            </div>
+          </li>
+        {/each}
+      </ul>{/if}
+    {#if todo && !centre}<footer><MakeTasks id={object.id} /></footer>{/if}
+  </section>{/if}
 
 <style>
   .list {

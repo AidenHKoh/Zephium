@@ -14,6 +14,17 @@ const WRITE_AFTER_MS = 450;
 
 export type OwnedObject = { id: string; title: string; data: ObjectRead };
 
+/** What is kept of an edit: a row still being typed (no words yet) is shown, never written. */
+function kept(data: ObjectData): ObjectData {
+  if (data.kind === "list")
+    return { ...data, items: data.items.filter((item) => item.title.trim()) };
+  if (data.kind === "plan")
+    return { ...data, steps: data.steps.filter((step) => step.title.trim()) };
+  if (data.kind === "sheet")
+    return { ...data, rows: data.rows.filter((row) => row.cells.some((cell) => cell.trim())) };
+  return data;
+}
+
 /**
  * The person's own objects on a canvas — the tables, checklists and
  * calendars they made — read once and written as they change. What they
@@ -108,7 +119,8 @@ export class OwnedObjects {
   }
 
   async #write(id: string, retried = false): Promise<void> {
-    const data = this.#pending.get(id);
+    const shown = this.#pending.get(id);
+    const data = shown && kept(shown);
     const record = this.#records.get(id);
     if (!data || record?.draft.content.kind !== "object") return;
     const command: ResourceCommand = {
@@ -134,7 +146,7 @@ export class OwnedObjects {
       this.#ack(command.request_id);
       this.#records.set(id, response.record);
       // Only the edit this write carried is settled; a newer one stays pending.
-      if (this.#pending.get(id) === data) this.#pending.delete(id);
+      if (this.#pending.get(id) === shown) this.#pending.delete(id);
       return;
     }
     // Written elsewhere meanwhile: the person's latest edit still wins, once.

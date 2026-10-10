@@ -1,3 +1,4 @@
+import type { OwnedData } from "./board/types";
 import type { EvidenceReference } from "$shared/ui/data/Artifact";
 
 /** Instance-local UI callbacks; never part of a saved canvas node or runtime projection. */
@@ -58,6 +59,8 @@ export type BoardActions = {
   drafted?: (id: string) => DraftEdit | undefined;
   /** A GitHub draft's review: a comment, an approval or a request for changes. */
   review?: (id: string, review: DraftReview) => void;
+  /** The person's own object changed in place. */
+  edit?: (id: string, change: (data: OwnedData) => OwnedData) => void;
   /** Save as note until the note exists, then Open note; nothing for what has no text. */
   note: (id: string) => { label: string; disabled?: boolean; onclick?: () => void } | undefined;
 };

@@ -55,6 +55,8 @@ export class CanvasPlacing {
     reference: WorkEnvironmentReference,
     type: CanvasItem["type"],
     at: CanvasPosition | null,
+    /** Its own size when it knows it; else its kind's. */
+    sized?: { width: number; height: number },
   ): Promise<boolean> {
     const session = this.#deps.session();
     if (session.snapshot && elementFor(session.snapshot, reference)) return true;
@@ -64,7 +66,8 @@ export class CanvasPlacing {
     const element = current ? elementFor(current, reference) : undefined;
     const point = at ?? this.#deps.centre();
     if (!current || !element || !point) return true;
-    const size = defaultSize({ id: element.id, title: "", kind: "", detail: "", status: "", type });
+    const size =
+      sized ?? defaultSize({ id: element.id, title: "", kind: "", detail: "", status: "", type });
     session.checkpoint({
       ...current.view,
       placements: [

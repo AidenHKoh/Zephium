@@ -303,6 +303,8 @@ pub struct WorkListItemV1 {
     pub due: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<WorkListPriorityV1>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub done: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<WorkListFromV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

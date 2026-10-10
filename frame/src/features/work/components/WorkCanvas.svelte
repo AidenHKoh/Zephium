@@ -8,6 +8,7 @@
   import { fade } from "svelte/transition";
   import Icon from "$shared/ui/Icon";
   import { Navigation03Icon } from "../lib/icons";
+  import type { OwnedData } from "../lib/board/types";
   import {
     canvasInspection,
     canvasResize,
@@ -160,6 +161,7 @@
     write: (id: string, markdown: string) => board?.write?.(id, markdown),
     drafted: (id: string) => board?.drafted?.(id),
     review: (id: string, review: DraftReview) => board?.review?.(id, review),
+    edit: (id: string, change: (data: OwnedData) => OwnedData) => board?.edit?.(id, change),
   } satisfies BoardActions);
   /** Each origin is asked for once per canvas. */
   const probed: Record<string, true> = {};

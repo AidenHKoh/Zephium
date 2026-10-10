@@ -1,4 +1,4 @@
-import type { IconRef } from "$shared/ipc/bindings";
+import type { IconRef, WorkArtifactDataV1_Deserialize } from "$shared/ipc/bindings";
 import type {
   ArtifactContent,
   DocumentNodeView,
@@ -529,4 +529,7 @@ export type ObjectActions = {
   send?: (id: string) => void;
   /** A GitHub draft's review state. */
   review?: (id: string, review: "comment" | "approve" | "request_changes") => void;
+  /** The person's own object changed in place: present only on what they own. */
+  edit?: (id: string, change: (data: OwnedData) => OwnedData) => void;
 };
+export type OwnedData = WorkArtifactDataV1_Deserialize;

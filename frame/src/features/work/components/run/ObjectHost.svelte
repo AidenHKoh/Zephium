@@ -44,7 +44,7 @@
     return base;
   });
   const width = $derived(item.size?.width ?? 0);
-  const actions: ObjectActions = {
+  const shared: ObjectActions = {
     open: (target) => open?.(target),
     choose: (element, chosen) => board?.choose(element, chosen),
     ask: (subject) => board?.ask(subject),
@@ -60,6 +60,10 @@
       if (task) tasks?.open(task.id);
     },
   };
+  /** What the person owns is changed in place; what the agent made is not. */
+  const actions = $derived<ObjectActions>(
+    item.owned ? { ...shared, edit: (target, change) => board?.edit?.(target, change) } : shared,
+  );
 
   let body = $state<HTMLElement>();
   // The object's height at its width, so its run makes the room it takes.

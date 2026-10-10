@@ -5,7 +5,8 @@
   import Mark, { hasMark } from "./Mark.svelte";
   import Title from "./Title.svelte";
   import PlanCalendar from "./PlanCalendar.svelte";
-  import { planWeeks } from "../../lib/board/plan-calendar";
+  import { openingMonth, planWeeks } from "../../lib/board/plan-calendar";
+  import { ArrowLeft01Icon, ArrowRight01Icon } from "./icons";
   import { icsFileName, planIcs } from "../../lib/board/plan-ics";
   import { commands } from "$shared/ipc/bindings";
   import * as m from "$shared/i18n/messages";
@@ -38,8 +39,23 @@
     note: Note01Icon,
   } as const;
   const priced = $derived(object.steps.some((step) => step.cost));
+  /** The person's calendar turns a month at a time; one the agent drew shows all its months. */
+  const keeps = $derived(!!object.calendar && !!actions.edit);
+  let turned = $state(0);
+  const month = $derived.by(() => {
+    const opening = openingMonth(object);
+    return new Date(opening.getFullYear(), opening.getMonth() + turned, 1);
+  });
+  const monthName = $derived(
+    new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(month),
+  );
+  function showToday() {
+    const opening = openingMonth(object);
+    const now = new Date();
+    turned = (now.getFullYear() - opening.getFullYear()) * 12 + now.getMonth() - opening.getMonth();
+  }
   /** A long dated plan stands as its weeks; the centre keeps every step's words beneath. */
-  const weeks = $derived(planWeeks(object));
+  const weeks = $derived(planWeeks(object, keeps ? { month } : {}));
   const onDays = $derived(object.steps.some((step) => step.date));
   let saving = $state(false);
   async function addToCalendar() {
@@ -61,8 +77,26 @@
 </script>
 
 <section class="plan" class:priced class:calendar={!!weeks} aria-label={object.title}>
-  {#if object.title || onDays}<header>
+  {#if object.title || onDays || keeps}<header>
       {#if object.title}<Title text={object.title} />{/if}
+      {#if keeps}<div class="month nodrag nopan">
+          <span class="month-name">{monthName}</span>
+          <button
+            type="button"
+            class="turn"
+            aria-label={m.work_block_previous_month()}
+            onclick={() => (turned -= 1)}><Icon icon={ArrowLeft01Icon} size={14} /></button
+          >
+          <button type="button" class="turn today" onclick={showToday}
+            >{m.work_block_today()}</button
+          >
+          <button
+            type="button"
+            class="turn"
+            aria-label={m.work_block_next_month()}
+            onclick={() => (turned += 1)}><Icon icon={ArrowRight01Icon} size={14} /></button
+          >
+        </div>{/if}
       {#if onDays}<button
           type="button"
           class="calendar-add nodrag nopan"
@@ -150,6 +184,50 @@
     align-items: baseline;
     justify-content: space-between;
     gap: 16px;
+  }
+
+  .month {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-inline-start: auto;
+  }
+
+  .month-name {
+    margin-inline-end: 8px;
+    color: var(--color-label-secondary);
+    font-size: var(--text-body);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .turn {
+    display: grid;
+    place-items: center;
+    min-inline-size: 26px;
+    block-size: 26px;
+    padding: 0 6px;
+    border: 0;
+    border-radius: var(--radius-control-compact);
+    background: transparent;
+    color: var(--color-muted);
+    font: inherit;
+    font-size: var(--text-label);
+    font-weight: 500;
+    cursor: default;
+    transition:
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out);
+  }
+
+  .turn:hover {
+    background: var(--color-control-hover);
+    color: var(--color-text);
+  }
+
+  .turn:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 1px;
   }
 
   .calendar-add {

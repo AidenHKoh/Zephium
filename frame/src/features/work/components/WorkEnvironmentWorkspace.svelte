@@ -37,6 +37,7 @@
     Image01Icon,
     Pdf01Icon,
     PlusSignIcon,
+    ShapeCollectionIcon,
     StickyNote03Icon,
     Cursor01Icon,
     HandIcon,
@@ -49,6 +50,7 @@
   import BarTool from "./bar/BarTool.svelte";
   import NotePanel from "./bar/NotePanel.svelte";
   import TasksPanel from "./bar/TasksPanel.svelte";
+  import BlocksPanel, { type BlockKind } from "./bar/BlocksPanel.svelte";
   import AttachPanel, { type AttachKind } from "./bar/AttachPanel.svelte";
   import WorksMenu from "./top/WorksMenu.svelte";
   import ContextManifest from "./composer/ContextManifest.svelte";
@@ -70,7 +72,10 @@
     measurer,
   } from "../lib/project-environment-board";
   import type { BoardActions, DraftEdit } from "../lib/canvas-context";
-  import type { DraftView, ObjectActions, ObjectView } from "../lib/board/types";
+  import { OwnedObjects } from "$domain/resources";
+  import { ownedView } from "../lib/board/objects";
+  import { objectHeight, objectWidth } from "../lib/board/object-size";
+  import type { DraftView, ObjectActions, ObjectView, OwnedData } from "../lib/board/types";
   import { objectIcon, objectLabel } from "../lib/object-kind";
   import { clipText, defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
@@ -140,6 +145,8 @@
   });
   // The pages the runs on this canvas are holding open for a person.
   const human = untrack(() => new WorkHumanSession(session.profile));
+  /** The person's own tables, checklists and calendars on this canvas. */
+  const owned = untrack(() => new OwnedObjects(session.profile));
   onMount(() => {
     void human.start();
     return () => human.dispose();
@@ -699,7 +706,7 @@
     }
   }
   /** The bar's one open panel: a tool's, or the field's own attach. */
-  let panel = $state<"note" | "tabs" | "media" | "attach" | "tasks" | null>(null);
+  let panel = $state<"note" | "tabs" | "media" | "attach" | "tasks" | "blocks" | null>(null);
   setContext(canvasOpenTasks, () => openPanel("tasks", true));
   /** Work keeps its rail compact: a tool asked for from the app's menus opens here instead. */
   function toolAsked(event: Event) {
@@ -753,9 +760,24 @@
   }
   const snapshot = $derived(session.snapshot);
   provideLeadLook(() => session.snapshot?.id);
+  // A resource that is neither a note nor a file is one of the person's objects: read it.
+  $effect(() => {
+    const current = snapshot;
+    if (!current) return;
+    const notesHeld = new Set(context.notes.map((note) => note.id));
+    void owned.load(
+      current.elements.flatMap((element) =>
+        element.reference.kind === "resource" &&
+        !notesHeld.has(element.reference.resource) &&
+        !context.media.has(element.reference.resource)
+          ? [element.reference.resource]
+          : [],
+      ),
+    );
+  });
   const baseItems = $derived(
     snapshot
-      ? environmentItems(snapshot, tabs, context.notes, context.objectives, context.media)
+      ? environmentItems(snapshot, tabs, context.notes, context.objectives, context.media, owned)
       : [],
   );
   let planGeometry = $state.raw<CanvasView>({
@@ -1398,6 +1420,11 @@
     write: (id, text) => editDraft(id, { body: text }),
     review: (id, review) => editDraft(id, { review }),
     drafted: (id) => drafts.get(id),
+    edit(id, change) {
+      const resource = items.find((item) => item.id === id)?.owned;
+      const current = resource ? owned.get(resource) : undefined;
+      if (resource && current) owned.update(resource, change(current.data as OwnedData));
+    },
     measure: takeMeasure,
     toggle: toggleBlock,
     ask: (name) => askAbout(name),
@@ -1724,6 +1751,38 @@
     if (element) lift(element.id);
   }
   const NOTE_SIZE = { width: 360, height: 304 } as const;
+  /** A block the person puts down: an empty table, checklist or calendar of their own, ready to fill. */
+  async function createBlock(kind: BlockKind) {
+    panel = null;
+    if (kind === "note") return void createNote();
+    if (busy || !session.snapshot) return;
+    const environment = session.snapshot.id;
+    const [title, data]: [string, OwnedData] =
+      kind === "checklist"
+        ? [m.work_block_checklist(), { kind: "list", style: "todo", items: [] }]
+        : kind === "table"
+          ? [
+              m.work_block_table(),
+              {
+                kind: "sheet",
+                columns: [
+                  { label: m.work_block_name_column(), kind: "text" },
+                  { label: m.work_block_notes_column(), kind: "text" },
+                ],
+                rows: [],
+              },
+            ]
+          : [
+              m.work_block_calendar(),
+              { kind: "plan", steps: [], checkable: false, calendar: true },
+            ];
+    const id = await owned.create(title, data);
+    if (!id || environment !== session.snapshot?.id) return;
+    const view = ownedView(id, title, data);
+    const width = view ? objectWidth(view).ideal : 400;
+    const size = { width, height: view ? Math.round(objectHeight(view, width)) + 48 : 240 };
+    await placing.place({ kind: "resource", resource: id }, "object", clearSpot(null, size), size);
+  }
   /** What stands on the canvas now, one thing left out: the runs and every placed item. */
   function taken(except: string | null) {
     const view = canvasView;
@@ -1775,6 +1834,7 @@
     if (key === "v" || key === "h") setPointerTool(key === "v" ? "select" : "hand");
     else if (key === "n") openPanel("note", true);
     else if (key === "a") openPanel("media", true);
+    else if (key === "b") openPanel("blocks", true);
     else if (key === "t") openPanel("tasks", true);
     else if (key === "/" && aiEnabled)
       composerElement?.querySelector<HTMLElement>("textarea")?.focus();
@@ -2128,6 +2188,18 @@
           }}
           onpick={(id) => void placeNote(id)}
         />{/if}{/snippet}</BarTool
+  >
+  <BarTool
+    icon={ShapeCollectionIcon}
+    label={m.work_tool_blocks()}
+    keys={["B"]}
+    disabled={!snapshot}
+    open={panel === "blocks"}
+    onopenchange={(open) => openPanel("blocks", open)}
+    >{#snippet content()}<BlocksPanel
+        {busy}
+        onpick={(kind) => void createBlock(kind)}
+      />{/snippet}</BarTool
   >
   <BarTool
     icon={CheckListIcon}

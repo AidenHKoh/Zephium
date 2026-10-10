@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import Icon from "$shared/ui/Icon";
-  import type { ObjectActions, PlanView } from "../../lib/board/types";
+  import * as m from "$shared/i18n/messages";
+  import type { ObjectActions, OwnedData, PlanView } from "../../lib/board/types";
   import { CALENDAR, firstWeekday, type CalendarDay } from "../../lib/board/plan-calendar";
   import { Tick02Icon } from "./icons";
   /** A dated plan as its weeks: each day holds its steps, a fixed cell that never grows. */
@@ -29,6 +31,57 @@
     const [year, month, date] = day.date.split("-").map(Number);
     return monthDay.format(new Date(year!, month! - 1, date!));
   };
+  /** The person's own calendar: a day takes a new event where it is clicked, an event its new name. */
+  const editable = $derived(!!actions.edit);
+  let adding = $state<string | null>(null);
+  let renaming = $state<number | null>(null);
+  type Step = Extract<OwnedData, { kind: "plan" }>["steps"][number];
+  const change = (steps: (current: Step[]) => Step[]) =>
+    actions.edit?.(object.id, (data) =>
+      data.kind === "plan" ? { ...data, steps: steps([...data.steps]) } : data,
+    );
+  async function begin(date: string) {
+    if (!editable || renaming !== null) return;
+    adding = date;
+    await tick();
+    document.querySelector<HTMLInputElement>(`[data-adding="${date}"]`)?.focus();
+  }
+  function commitNew(field: HTMLInputElement, date: string) {
+    const title = field.value.trim();
+    adding = null;
+    if (!title) return;
+    change((steps) =>
+      [...steps, { title, date, kind: "event" } as Step].sort((a, b) =>
+        (a.date ?? "").localeCompare(b.date ?? ""),
+      ),
+    );
+  }
+  async function rename(index: number) {
+    if (!editable) return;
+    renaming = index;
+    await tick();
+    const field = document.querySelector<HTMLInputElement>(`[data-renaming="${index}"]`);
+    field?.focus();
+    field?.select();
+  }
+  function commitName(field: HTMLInputElement, index: number) {
+    const title = field.value.trim();
+    renaming = null;
+    if (title === object.steps[index]?.title) return;
+    change((steps) =>
+      title
+        ? steps.map((step, at) => (at === index ? { ...step, title } : step))
+        : steps.filter((_, at) => at !== index),
+    );
+  }
+  const keys =
+    (commit: (field: HTMLInputElement) => void, cancel: () => void) => (event: KeyboardEvent) => {
+      const field = event.currentTarget as HTMLInputElement;
+      if (event.key === "Enter") {
+        event.preventDefault();
+        commit(field);
+      } else if (event.key === "Escape") cancel();
+    };
   const longDate = new Intl.DateTimeFormat(undefined, { dateStyle: "full" });
   const spoken = (day: CalendarDay) => {
     const [year, month, date] = day.date.split("-").map(Number);
@@ -53,8 +106,17 @@
             class="day"
             class:outside={day.outside}
             class:today={day.today}
+            class:editable
             role="gridcell"
             aria-label={spoken(day)}
+            tabindex={editable ? -1 : undefined}
+            onclick={(event) => {
+              if (event.target === event.currentTarget) void begin(day.date);
+            }}
+            onkeydown={(event) => {
+              if (event.key === "Enter" && event.target === event.currentTarget)
+                void begin(day.date);
+            }}
           >
             <span class="number" class:opens={day.opens}>{label(day)}</span>
             {#if day.steps.length}<ul
@@ -67,7 +129,21 @@
                     class:done={step.done}
                     title={step.detail ? `${step.title} — ${step.detail}` : step.title}
                   >
-                    {#if object.checkable && actions.check}<button
+                    {#if renaming === index}<input
+                        class="field nodrag nopan"
+                        data-renaming={index}
+                        value={step.title}
+                        aria-label={step.title}
+                        onblur={(event) => commitName(event.currentTarget, index)}
+                        onkeydown={keys(
+                          (field) => commitName(field, index),
+                          () => (renaming = null),
+                        )}
+                      />{:else if editable}<button
+                        type="button"
+                        class="step nodrag nopan"
+                        onclick={() => void rename(index)}><span>{step.title}</span></button
+                      >{:else if object.checkable && actions.check}<button
                         type="button"
                         class="step nodrag nopan"
                         aria-pressed={!!step.done}
@@ -86,6 +162,17 @@
               {#if day.steps.length > SHOWN}<span class="more">+{day.steps.length - SHOWN}</span
                 >{/if}
             {/if}
+            {#if adding === day.date}<input
+                class="field nodrag nopan"
+                data-adding={day.date}
+                placeholder={m.work_block_new_event()}
+                aria-label={m.work_block_new_event()}
+                onblur={(event) => commitNew(event.currentTarget, day.date)}
+                onkeydown={keys(
+                  (field) => commitNew(field, day.date),
+                  () => (adding = null),
+                )}
+              />{/if}
           </div>{/each}
       </div>{/each}
   </div>
@@ -149,6 +236,33 @@
 
   .day:hover {
     background: var(--color-control-hover);
+  }
+
+  .day:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: -2px;
+  }
+
+  /* A new or renamed event, typed where it will stand. */
+  .field {
+    box-sizing: border-box;
+    inline-size: 100%;
+    min-inline-size: 0;
+    padding: 2px 6px;
+    border: 0;
+    border-radius: 5px;
+    background: var(--color-surface);
+    box-shadow: inset 0 0 0 1px var(--color-ring);
+    color: var(--color-text);
+    font: inherit;
+    font-size: var(--text-caption);
+    font-weight: 500;
+    line-height: 14px;
+    outline: none;
+  }
+
+  .field::placeholder {
+    color: var(--color-faint);
   }
 
   .number {

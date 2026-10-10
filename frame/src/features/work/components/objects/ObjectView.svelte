@@ -63,4 +63,8 @@
 </script>
 
 {#if object.kind === "reply"}<Reply {object} {centre} />
+{:else if object.kind === "sheet" && actions.edit}{#await import("./TableBlock.svelte") then block}<block.default
+      {object}
+      {actions}
+    />{/await}
 {:else if Drawn}<Drawn {object} {actions} {centre} />{/if}

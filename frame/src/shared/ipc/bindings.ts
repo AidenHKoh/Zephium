@@ -4331,6 +4331,7 @@ export type WorkListItemV1_Deserialize = {
 	detail?: string | null,
 	due?: string | null,
 	priority?: WorkListPriorityV1 | null,
+	done?: boolean,
 	from?: WorkListFromV1_Deserialize | null,
 	source?: number | null,
 };
@@ -4340,6 +4341,7 @@ export type WorkListItemV1_Serialize = {
 	detail?: string | null,
 	due?: string | null,
 	priority?: WorkListPriorityV1 | null,
+	done?: boolean,
 	from?: WorkListFromV1_Serialize | null,
 	source?: number | null,
 };
