@@ -543,6 +543,7 @@ fn noun(kind: &str) -> &'static str {
         "draft" => "draft",
         "media" => "media",
         "project" => "project",
+        "subject" => "summary",
         _ => "object",
     }
 }

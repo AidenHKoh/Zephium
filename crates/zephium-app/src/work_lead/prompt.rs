@@ -24,6 +24,7 @@ Each request stands on its own
 What you make
 - Make the one result the person came for (a plan, a diagram, picks, a sheet, a list, a draft, a diff, a project) and put a reply on top: a headline and one to three sentences that answer the request. The reply never restates an object beside it.
 - One object per purpose. Never a document restating a table, a sheet restating picks, or a second reply.
+- When the request is about one thing in a service (a pull request, an issue, a thread, an email, a ticket, a page), make a subject for it; findings, a draft or a plan about it stand beside it as their own objects. Picks are only for things to choose between, never for one thing or for facts about it.
 - When parts found the same thing on several sites, put the offers side by side in one picks object, one item per site with its price and link, cheapest first; the reply names where it is cheapest.
 - Things that have a look get a picture: stays, products, places, people, videos. Pictures, logos and links come from your sources; never invent a URL.
 - Keep text short and exact. Cells hold values, not sentences. When create or revise returns a fault, correct the named field and call it again.
@@ -85,13 +86,14 @@ fn object(properties: Value, required: &[&str]) -> Value {
 const OBJECTS: &str = "\
 Each kind's data follows the schema whose title is the kind; limits are characters and items, and nothing is ever cut to fit.
 - reply: the answer on top of the result, made last. text is one to three plain sentences with only **bold** and `code`; figures are key numbers shown large; points are short lines. One per request.
-- picks: things to choose between. The subtitle says what the item is (Entire loft in the Mission, Starfighter set) and never repeats its price or facts. An item without its own photo gets its maker's or seller's logo_host. price.was is the price before a reduction, only when the source shows one. route is for flights and trains. At most one item is recommended.
+- picks: things to choose between, never facts about one thing. The subtitle says what the item is (Entire loft in the Mission, Starfighter set) and never repeats its price or facts. An item without its own photo gets its maker's or seller's logo_host. price.was is the price before a reduction, only when the source shows one. route is for flights and trains. At most one item is recommended.
 - plan: time-ordered steps (an itinerary, a roadmap, weeks of study). Advice sits on the step it belongs to; pick points a step at an item of a picks object (0-based index).
 - list: items without time order; from says where an item came from (app, who, when, a quote, a link back).
 - sheet: real data in typed columns, one string per cell (numbers as plain decimals, yes_no one of yes, no, partial, unknown, rating like 4/5, empty when unknown); money columns name a currency. No sentences.
 - plot: a chart; basis says what the values are and where they come from, knowledge is true when they are your own knowledge. Never empty or all equal.
 - diagram: nodes with ids that edges name; vendor is a bare host only when the node is a real product.
-- code, diff: exact text in one of the code languages. document: only when the person asked for text. draft: a message shaped like its destination; subject is for email only. media: an image, a video or audio at its https url.
+- subject: the one thing the request is about, shaped like its service. noun is the service's word (Pull request, Issue, Thread, Email), reference its handle (crynta/terax#1337), state its status in the service's words with a tone (active: open, in progress; done: merged, resolved; waiting: draft, in review; blocked: failing, changes requested; closed), people the roles that matter (Author, Assignee, From), facts the few values that matter (Changed files, Checks, Comments), summary one to three plain sentences on what it is, url its own address.
+- code, diff: exact text in one of the code languages. document: only when the person asked for text. draft: a message shaped like its destination; its subject field is for email only. media: an image, a video or audio at its https url.
 sources lists the keys (s3, s7) of the sources the object rests on, and an item's source names one of those keys. Pictures and links must come from those sources. An object without sources is your own knowledge and holds no pictures or links.";
 
 const PART_OBJECTS: &str = "\

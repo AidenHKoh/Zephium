@@ -285,6 +285,15 @@ pub(crate) fn picks(
             }
         });
     }
+    // Records with nothing to choose by (no price, rating or picture) are
+    // facts about one thing, not picks: the lead shapes them.
+    if facet == Facet::Place
+        && !kept
+            .iter()
+            .any(|row| row.price.is_some() || row.rating.is_some() || !row.images.is_empty())
+    {
+        return None;
+    }
     kept.truncate(MAX_ITEMS);
     if kept.is_empty() {
         return None;
@@ -668,5 +677,25 @@ mod tests {
         assert!(wants_cheapest("Find the cheapest new LEGO set"));
         assert!(!wants_cheapest("Find a hotel in Lisbon"));
         assert_eq!(facet(None, "Find a hotel in Lisbon", &rows), Facet::Stay);
+    }
+
+    #[test]
+    fn facts_about_one_thing_are_not_picks() {
+        let facts = vec![
+            row(
+                "PR #1337",
+                None,
+                "https://github.com/crynta/terax/pull/1337",
+            ),
+            row(
+                "PR author and date",
+                None,
+                "https://github.com/crynta/terax/pull/1337",
+            ),
+        ];
+        assert!(picks(&facts, Facet::Place, None, false, |_, _| "s1".into()).is_none());
+        let mut pictured = facts.clone();
+        pictured[0].images = vec!["https://i.ytimg.com/vi/a/hqdefault.jpg".into()];
+        assert!(picks(&pictured, Facet::Place, None, false, |_, _| "s1".into()).is_some());
     }
 }

@@ -264,6 +264,30 @@ pub struct WorkLabelledV1 {
     pub value: String,
 }
 
+/// Where a subject stands, in its service's word, and the tone it reads in.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkSubjectStateV1 {
+    pub label: String,
+    pub tone: WorkSubjectToneV1,
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkSubjectToneV1 {
+    /// Open, in progress, unread.
+    Active,
+    /// Merged, resolved, done.
+    Done,
+    /// Waiting on review, on hold, draft.
+    Waiting,
+    /// Failing, blocked, changes requested.
+    Blocked,
+    /// Closed without being done, archived.
+    Closed,
+}
+
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -543,6 +567,17 @@ pub mod limit {
     pub const DRAFT_SUBJECT: usize = 120;
     pub const MEDIA_TITLE: usize = 80;
     pub const MEDIA_DURATION: usize = 16;
+    pub const SUBJECT_NOUN: usize = 24;
+    pub const SUBJECT_REFERENCE: usize = 48;
+    pub const SUBJECT_TITLE: usize = 160;
+    pub const SUBJECT_STATE: usize = 20;
+    pub const SUBJECT_PEOPLE: usize = 4;
+    pub const SUBJECT_ROLE: usize = 20;
+    pub const SUBJECT_NAME: usize = 40;
+    pub const SUBJECT_FACTS: usize = 6;
+    pub const SUBJECT_LABELS: usize = 6;
+    pub const SUBJECT_LABEL: usize = 24;
+    pub const SUBJECT_SUMMARY: usize = 400;
     pub const DIAGRAM_NAME: usize = 28;
     pub const DIAGRAM_NOTE: usize = 60;
     pub const DIAGRAM_EDGE_LABEL: usize = 24;
@@ -1889,6 +1924,139 @@ impl Media<'_> {
             return Err(place("start_secs", None).dropping(F::MediaDuration, Remove("start_secs")));
         }
         Ok(())
+    }
+}
+
+pub(super) struct Subject<'a> {
+    pub noun: &'a str,
+    pub reference: &'a Option<String>,
+    pub title: &'a str,
+    pub state: &'a Option<WorkSubjectStateV1>,
+    pub people: &'a [WorkLabelledV1],
+    pub facts: &'a [WorkLabelledV1],
+    pub labels: &'a [String],
+    pub summary: &'a Option<String>,
+    pub url: &'a str,
+}
+impl Subject<'_> {
+    pub(super) fn check(&self, budget: &mut Budget) -> Checked {
+        use WorkFaultDrop::Remove;
+        line(
+            budget,
+            self.noun,
+            L::SUBJECT_NOUN,
+            F::SubjectNoun,
+            place("noun", None),
+        )?;
+        optional(
+            budget,
+            self.reference,
+            L::SUBJECT_REFERENCE,
+            F::SubjectReference,
+            place("reference", None),
+        )?;
+        line(
+            budget,
+            self.title,
+            L::SUBJECT_TITLE,
+            F::SubjectTitle,
+            place("title", None),
+        )?;
+        if let Some(state) = self.state {
+            droppable(
+                budget,
+                &state.label,
+                L::SUBJECT_STATE,
+                F::SubjectState,
+                place("state", None),
+                Remove("state"),
+            )?;
+        }
+        extra(
+            self.people.len(),
+            L::SUBJECT_PEOPLE,
+            F::SubjectPeople,
+            place("people", None),
+        )?;
+        for (index, person) in self.people.iter().enumerate() {
+            let at = place("people[]", Some(index));
+            droppable(
+                budget,
+                &person.label,
+                L::SUBJECT_ROLE,
+                F::SubjectPeople,
+                at,
+                Remove(at.path),
+            )?;
+            droppable(
+                budget,
+                &person.value,
+                L::SUBJECT_NAME,
+                F::SubjectPeople,
+                at,
+                Remove(at.path),
+            )?;
+        }
+        extra(
+            self.facts.len(),
+            L::SUBJECT_FACTS,
+            F::SubjectFacts,
+            place("facts", None),
+        )?;
+        for (index, fact) in self.facts.iter().enumerate() {
+            let at = place("facts[]", Some(index));
+            droppable(
+                budget,
+                &fact.label,
+                L::FACT_LABEL,
+                F::SubjectFacts,
+                at,
+                Remove(at.path),
+            )?;
+            droppable(
+                budget,
+                &fact.value,
+                L::FACT_VALUE,
+                F::SubjectFacts,
+                at,
+                Remove(at.path),
+            )?;
+        }
+        extra(
+            self.labels.len(),
+            L::SUBJECT_LABELS,
+            F::SubjectLabels,
+            place("labels", None),
+        )?;
+        for (index, label) in self.labels.iter().enumerate() {
+            let at = place("labels[]", Some(index));
+            droppable(
+                budget,
+                label,
+                L::SUBJECT_LABEL,
+                F::SubjectLabels,
+                at,
+                Remove(at.path),
+            )?;
+        }
+        if let Some(summary) = self.summary {
+            if summary.trim().is_empty()
+                || summary.chars().count() > L::SUBJECT_SUMMARY
+                || summary.chars().any(char::is_control)
+                || !inline_only(summary)
+            {
+                return Err(WorkObjectFault {
+                    found: Some(measured(summary)),
+                    limit: limit(L::SUBJECT_SUMMARY),
+                    ..place("summary", None).dropping(F::SubjectSummary, Remove("summary"))
+                });
+            }
+            budget.add(summary)?;
+        }
+        if !https(self.url) {
+            return Err(place("url", None).fault(F::SubjectUrl));
+        }
+        budget.add(self.url)
     }
 }
 

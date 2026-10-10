@@ -445,6 +445,29 @@ pub enum WorkArtifactDataV1 {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         start_secs: Option<u32>,
     },
+    /// The one thing a request is about, in the shape of its service: a pull
+    /// request, an issue, a thread, an email, a ticket, a page.
+    Subject {
+        /// The service's own word for it: Pull request, Issue, Thread.
+        noun: String,
+        /// Its handle there: crynta/terax#1337, UBER-5671.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<WorkSubjectStateV1>,
+        /// Roles and names: Author, Assignee, From.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        people: Vec<WorkLabelledV1>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        facts: Vec<WorkLabelledV1>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        labels: Vec<String>,
+        /// Inline bold and code only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+        url: String,
+    },
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -786,6 +809,15 @@ pub enum WorkArtifactField {
     ProjectTree,
     ProjectScripts,
     ProjectGit,
+    SubjectNoun,
+    SubjectReference,
+    SubjectTitle,
+    SubjectState,
+    SubjectPeople,
+    SubjectFacts,
+    SubjectLabels,
+    SubjectSummary,
+    SubjectUrl,
     ItemSource,
     /// A kind kept so saved works open; the lead makes the current kinds.
     LegacyKind,
@@ -914,8 +946,17 @@ impl WorkArtifactField {
             Self::ProjectTree => "project tree has 1 to 80 entries, each a relative path at most three names deep whose parent folder comes before it, listed once; only folders have more",
             Self::ProjectScripts => "project has at most 16 scripts: name at most 32 characters, command at most 160, source at most 24",
             Self::ProjectGit => "project git branch is one line of at most 80 characters",
+            Self::SubjectNoun => "subject noun is the service's word for it, at most 24 characters",
+            Self::SubjectReference => "subject reference is one line of at most 48 characters",
+            Self::SubjectTitle => "subject title is one line of 1 to 160 characters",
+            Self::SubjectState => "subject state label is at most 20 characters",
+            Self::SubjectPeople => "subject has at most 4 people: role at most 20 characters, name at most 40",
+            Self::SubjectFacts => "subject has at most 6 facts: label at most 20 characters, value at most 40",
+            Self::SubjectLabels => "subject has at most 6 labels of at most 24 characters",
+            Self::SubjectSummary => "subject summary is at most 400 characters of plain text with only bold and code",
+            Self::SubjectUrl => "subject url is its public https address",
             Self::ItemSource => "an item's source must be the 0-based index of one of the object's sources",
-            Self::LegacyKind => "this kind is kept only so saved works open; make reply, picks, plan, list, sheet, plot, diagram, code, diff, document, draft, media or project",
+            Self::LegacyKind => "this kind is kept only so saved works open; make reply, picks, plan, list, sheet, plot, diagram, code, diff, document, draft, media, project or subject",
         }
     }
 }
@@ -1044,6 +1085,7 @@ impl WorkArtifactDataV1 {
             Self::Draft { .. } => "draft",
             Self::Media { .. } => "media",
             Self::Project { .. } => "project",
+            Self::Subject { .. } => "subject",
         }
     }
     /// `at` names the part under check when an error returns, `index` the
@@ -1174,6 +1216,30 @@ impl WorkArtifactDataV1 {
                     tree,
                     scripts,
                     git,
+                }
+                .check(&mut object),
+            )?,
+            Self::Subject {
+                noun,
+                reference,
+                title,
+                state,
+                people,
+                facts,
+                labels,
+                summary,
+                url,
+            } => objects(
+                Subject {
+                    noun,
+                    reference,
+                    title,
+                    state,
+                    people,
+                    facts,
+                    labels,
+                    summary,
+                    url,
                 }
                 .check(&mut object),
             )?,
@@ -1612,7 +1678,7 @@ impl WorkArtifactDataV1 {
             Self::Picks { items, .. } => return picks_link(items),
             Self::List { items, .. } => return list_links(items),
             Self::Sheet { columns, rows, .. } => return sheet_links(columns, rows),
-            Self::Media { .. } => return true,
+            Self::Media { .. } | Self::Subject { .. } => return true,
             _ => &[],
         };
         subjects
@@ -1790,6 +1856,25 @@ impl WorkArtifactDataV1 {
                 }
                 for script in scripts {
                     push(&format!("{}: {}", script.name, script.command));
+                }
+            }
+            Self::Subject {
+                noun,
+                reference,
+                title,
+                summary,
+                facts,
+                ..
+            } => {
+                push(
+                    &format!("{noun} {}", reference.as_deref().unwrap_or_default())
+                        .trim_end()
+                        .to_owned(),
+                );
+                push(title);
+                summary.as_deref().map(&mut push);
+                for fact in facts {
+                    push(&format!("{}: {}", fact.label, fact.value));
                 }
             }
         }

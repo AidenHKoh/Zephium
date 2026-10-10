@@ -61,6 +61,12 @@ fn every_kind_round_trips_its_wire_shape() {
             "git":{"branch":"main","changed":2,"ahead":1}}),
         json!({"kind":"media","medium":"video","url":"https://www.youtube.com/watch?v=abc","title":"Lecture 1",
             "provider":"youtube","poster":"https://i.ytimg.com/vi/abc/hqdefault.jpg","duration":"1:12:03","start_secs":30}),
+        json!({"kind":"subject","noun":"Pull request","reference":"crynta/terax#1337",
+            "title":"feat(explorer): support pasting files from OS clipboard",
+            "state":{"label":"Open","tone":"active"},"people":[{"label":"Author","value":"drunkardleo-10"}],
+            "facts":[{"label":"Changed files","value":"6"},{"label":"Checks","value":"Passing"}],
+            "labels":["enhancement"],"summary":"Adds pasting files from the **OS clipboard** with Cmd+V.",
+            "url":"https://github.com/crynta/terax/pull/1337"}),
     ];
     for shape in &shapes {
         let parsed = data(shape.clone());
@@ -757,4 +763,40 @@ fn a_first_run_names_its_work_from_its_finish() {
         .unwrap()
         .get("title")
         .is_none());
+}
+
+#[test]
+fn a_subject_needs_its_noun_title_and_address_and_sheds_what_overflows() {
+    let base = |extra: serde_json::Value| {
+        let mut value = json!({"kind":"subject","noun":"Issue","title":"Rerun workflows like Playwright",
+            "url":"https://github.com/zephium-browser/Zephium/issues/103"});
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        value
+    };
+    assert_eq!(field(base(json!({}))), None);
+    assert_eq!(
+        field(base(json!({"url":"http://localhost/x"}))),
+        Some(F::SubjectUrl)
+    );
+    assert_eq!(
+        field(base(json!({"title":"x".repeat(161)}))),
+        Some(F::SubjectTitle)
+    );
+    assert_eq!(
+        field(base(json!({"summary":"# Heading"}))),
+        Some(F::SubjectSummary)
+    );
+    let people = fault(
+        base(
+            json!({"people":[{"label":"Author","value":"a"},{"label":"B","value":"b"},
+        {"label":"C","value":"c"},{"label":"D","value":"d"},{"label":"E","value":"e"}]}),
+        ),
+        0,
+    )
+    .unwrap();
+    assert_eq!(people.field, F::SubjectPeople);
+    assert_eq!(people.drop, Some(WorkFaultDrop::Keep("people")));
 }

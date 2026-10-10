@@ -68,9 +68,9 @@ const NODE_KINDS: [&str; 12] = [
 ];
 
 /// The kinds the lead makes, in the order the tool lists them.
-pub(crate) const KINDS: [&str; 12] = [
+pub(crate) const KINDS: [&str; 13] = [
     "reply", "picks", "plan", "list", "sheet", "plot", "diagram", "code", "diff", "document",
-    "draft", "media",
+    "draft", "media", "subject",
 ];
 
 /// The schema of one kind's data; `None` for a kind the model never makes.
@@ -257,6 +257,38 @@ pub(crate) fn data(kind: &str) -> Option<Value> {
             }),
             &["medium", "url"],
         ),
+        "subject" => {
+            let labelled = |label: usize, value: usize, max: usize| {
+                list(
+                    object(
+                        json!({"label": text(label), "value": text(value)}),
+                        &["label", "value"],
+                    ),
+                    0,
+                    max,
+                )
+            };
+            object(
+                json!({
+                    "noun": text(L::SUBJECT_NOUN),
+                    "reference": text(L::SUBJECT_REFERENCE),
+                    "title": text(L::SUBJECT_TITLE),
+                    "state": object(
+                        json!({
+                            "label": text(L::SUBJECT_STATE),
+                            "tone": one_of(&["active", "done", "waiting", "blocked", "closed"])
+                        }),
+                        &["label", "tone"],
+                    ),
+                    "people": labelled(L::SUBJECT_ROLE, L::SUBJECT_NAME, L::SUBJECT_PEOPLE),
+                    "facts": labelled(L::FACT_LABEL, L::FACT_VALUE, L::SUBJECT_FACTS),
+                    "labels": list(text(L::SUBJECT_LABEL), 0, L::SUBJECT_LABELS),
+                    "summary": text(L::SUBJECT_SUMMARY),
+                    "url": string()
+                }),
+                &["noun", "title", "url"],
+            )
+        }
         _ => return None,
     })
 }
