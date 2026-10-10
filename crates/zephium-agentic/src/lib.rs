@@ -122,7 +122,7 @@ pub mod public_asset;
 mod semantic;
 mod semantic_media;
 pub use semantic_media::{
-    SemanticMediaEvidence, SemanticMediaKind, SemanticRecordMediaPlan, MAX_SEMANTIC_MEDIA,
+    SemanticMediaEvidence, SemanticMediaKind, SemanticRecordMediaDiagnostics, SemanticRecordMediaPlan, MAX_SEMANTIC_MEDIA,
     MAX_SEMANTIC_MEDIA_RELATIONS,
 };
 mod secret_shapes;

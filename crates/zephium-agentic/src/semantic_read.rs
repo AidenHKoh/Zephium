@@ -700,6 +700,8 @@ impl ReadMediaAssociation {
 
 /// Bounded borrowed readable projection of one exact semantic observation.
 pub struct SemanticReadResult<'a> {
+    observed_images: usize,
+    eligible_image_geometry: usize,
     media: Vec<ReadMediaAssociation>,
     page_title: Option<String>,
     focused: bool,
@@ -741,6 +743,37 @@ impl<'a> SemanticReadResult<'a> {
     }
     pub(crate) const fn includes_image_sources(&self) -> bool {
         self.url_sources & 2 != 0
+    }
+
+    pub(crate) fn media_diagnostics(&self) -> crate::SemanticRecordMediaDiagnostics {
+        crate::SemanticRecordMediaDiagnostics {
+            observed_images: self.observed_images,
+            eligible_image_geometry: self.eligible_image_geometry,
+            structural_candidates: self.media.len(),
+            ..Default::default()
+        }
+    }
+    pub(crate) fn count_media_relations(
+        &self,
+        identity: &[SemanticReadFragmentId],
+        counts: &mut crate::SemanticRecordMediaDiagnostics,
+    ) {
+        counts.records += 1;
+        counts.identity_sources += identity.len();
+        for association in &self.media {
+            for source in identity.iter().filter_map(|id| self.fragment(*id)) {
+                if association.same_capture(source.provenance()) {
+                    counts.same_capture_pairs += 1;
+                    if association
+                        .media
+                        .related()
+                        .contains(&source.provenance().reference())
+                    {
+                        counts.related_pairs += 1;
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) fn media_for_record(
@@ -1693,6 +1726,25 @@ impl<'a> SemanticReadBuilder<'a> {
             .take(crate::MAX_SEMANTIC_MEDIA)
             .collect();
         SemanticReadResult {
+            eligible_image_geometry: self
+                .observation
+                .frames()
+                .iter()
+                .flat_map(|frame| frame.nodes())
+                .filter(|node| {
+                    node.role() == SemanticRole::Image
+                        && node
+                            .geometry()
+                            .is_some_and(|rect| rect.width() >= 64 && rect.height() >= 48)
+                })
+                .count(),
+            observed_images: self
+                .observation
+                .frames()
+                .iter()
+                .flat_map(|frame| frame.nodes())
+                .filter(|node| node.role() == SemanticRole::Image)
+                .count(),
             media,
             page_title: self.observation.frames().first().and_then(|frame| {
                 frame

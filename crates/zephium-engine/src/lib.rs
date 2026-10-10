@@ -4524,3 +4524,11 @@ mod tests {
         );
     }
 }
+
+/// Enables only fixed, content-free media counters in a public development probe.
+/// Active account qualification always disables them, irrespective of environment.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn configure_macos_public_media_diagnostic(public: bool, account_active: bool) {
+    platform::macos::configure_media_diagnostic(public, account_active);
+}

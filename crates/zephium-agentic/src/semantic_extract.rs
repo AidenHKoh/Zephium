@@ -998,6 +998,7 @@ impl SemanticExtractionStats {
 
 /// Validated structured mapping over one exact committed semantic read.
 pub struct SemanticExtractionResult<'a> {
+    media_diagnostics: crate::SemanticRecordMediaDiagnostics,
     media: Vec<crate::SemanticRecordMediaPlan>,
     page_title: Option<String>,
     schema: SemanticExtractionSchemaId,
@@ -1098,6 +1099,7 @@ impl<'a> SemanticExtractionResult<'a> {
             edges.push(u16::try_from(index).map_err(|_| SemanticExtractionError::Invariant)?);
         }
         Ok(SemanticOwnedExtractionResult {
+            media_diagnostics: self.media_diagnostics,
             media: self.media,
             page_title: self.page_title,
             schema: self.schema,
@@ -1217,6 +1219,7 @@ pub struct SemanticOwnedExtractionSource {
 /// Its only constructor consumes the validated result. It is not policy,
 /// task-completion, persistence or independent factual-verification proof.
 pub struct SemanticOwnedExtractionResult {
+    media_diagnostics: crate::SemanticRecordMediaDiagnostics,
     media: Vec<crate::SemanticRecordMediaPlan>,
     page_title: Option<String>,
     schema: SemanticExtractionSchemaId,
@@ -1296,8 +1299,11 @@ impl SemanticOwnedExtractionResult {
         }
         self.media.iter().any(|plan| plan.crop.is_some())
     }
-    /// Native-only bounded record candidates. Their live document and privacy
-    /// remain unverified until the retained owner completes media capture.
+    /// Closed source-stage counters; never model input or archived result data.
+    pub fn media_diagnostics(&self) -> crate::SemanticRecordMediaDiagnostics {
+        self.media_diagnostics
+    }
+    /// Exact original native plans; no inferred image locations.
     pub fn media(&self) -> &[crate::SemanticRecordMediaPlan] {
         &self.media
     }
@@ -1607,6 +1613,7 @@ pub(crate) fn extract_semantic_read_inner<'a>(
     )?;
 
     let mut media = Vec::new();
+    let mut media_diagnostics = read.media_diagnostics();
     let mut record = 0u16;
     for field in &fields {
         if let SemanticExtractedValue::Rows(rows) = field.value() {
@@ -1621,6 +1628,7 @@ pub(crate) fn extract_semantic_read_inner<'a>(
                             .iter()
                             .map(|source| source.fragment().id())
                             .collect::<Vec<_>>();
+                        read.count_media_relations(&identity, &mut media_diagnostics);
                         if let Some(plan) = read.media_for_record(record, &identity, result_guard) {
                             media.push(plan);
                         }
@@ -1642,6 +1650,7 @@ pub(crate) fn extract_semantic_read_inner<'a>(
         dropped: u16::try_from(counters.dropped).unwrap_or(u16::MAX),
     };
     Ok(SemanticExtractionResult {
+        media_diagnostics,
         media,
         page_title: read.page_title().map(str::to_owned),
         schema: schema.id(),
@@ -3487,6 +3496,21 @@ mod tests {
                     .unwrap()
                     .id()
             };
+            let mut counts = read.media_diagnostics();
+            read.count_media_relations(&[source("Amber record")], &mut counts);
+            read.count_media_relations(&[source("Blue record")], &mut counts);
+            assert_eq!(
+                counts,
+                crate::SemanticRecordMediaDiagnostics {
+                    observed_images: 1,
+                    eligible_image_geometry: 1,
+                    structural_candidates: 3,
+                    records: 2,
+                    identity_sources: 2,
+                    same_capture_pairs: 6,
+                    related_pairs: 3,
+                }
+            );
             let amber = read
                 .media_for_record(0, &[source("Amber record")], [7; 32])
                 .unwrap();

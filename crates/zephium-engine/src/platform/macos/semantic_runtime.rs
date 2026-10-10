@@ -24,6 +24,10 @@ use block2::RcBlock;
 #[cfg(feature = "native-agentic-semantic-probe")]
 #[path = "agentic_semantic_program_probe.rs"]
 mod program_probe;
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub(super) fn configure_media_diagnostic(public: bool, account: bool) {
+    program_probe::configure_media_diagnostic(public, account);
+}
 use objc2::{define_class, msg_send, rc::Retained, runtime::AnyObject, runtime::NSObject};
 use objc2::{DefinedClass as _, MainThreadOnly, Message as _};
 use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSString, NSUTF8StringEncoding};
@@ -809,6 +813,8 @@ impl SemanticRuntimeChannelState {
                 invocation,
                 completion,
             } => {
+                #[cfg(feature = "native-agentic-semantic-probe")]
+                let bytes = program_probe::normalize_media_diagnostic(bytes);
                 let outcome = invocation
                     .decode_result(bytes)
                     .map(Box::new)

@@ -519,6 +519,11 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             let _ = writeln!(std::io::stdout().lock(), "record-media: {event:?}");
         }
     }));
+    zephium_engine::configure_macos_public_media_diagnostic(
+        std::env::var("ZEPHIUM_PROBE_MEDIA_DIAGNOSTIC").as_deref() == Ok("1")
+            && std::env::var_os("ZEPHIUM_EVAL_PUBLIC_EXPORT").is_some(),
+        super::work_account::active().is_some(),
+    );
     let coordinated = !matches!(mode, Mode::Public | Mode::MoneyNode);
     let data = tempfile::Builder::new()
         .prefix("zephium-durable-work-")

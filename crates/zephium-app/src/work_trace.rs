@@ -21,6 +21,16 @@ pub fn record(arguments: std::fmt::Arguments<'_>) {
 /// account identity, source references, or pixel bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecordMediaTrace {
+    /// Exact native source-stage counts before any retrieval attempt.
+    Source {
+        observed_images: usize,
+        eligible_image_geometry: usize,
+        structural_candidates: usize,
+        records: usize,
+        identity_sources: usize,
+        same_capture_pairs: usize,
+        related_pairs: usize,
+    },
     /// Native source association and retained-owner admission.
     Admitted {
         plans: usize,

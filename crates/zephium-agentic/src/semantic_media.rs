@@ -285,3 +285,23 @@ impl SemanticRecordMediaPlan {
                 .is_some_and(|permit| permit.spent.load(std::sync::atomic::Ordering::Acquire))
     }
 }
+
+/// Closed source-stage counts, never source text, identity, URLs or pixel bytes.
+/// These values diagnose optional image absence and confer no capture authority.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SemanticRecordMediaDiagnostics {
+    /// Explicit image nodes in the current semantic observation.
+    pub observed_images: usize,
+    /// Image nodes with native geometry meeting the unchanged minimum dimensions.
+    pub eligible_image_geometry: usize,
+    /// Structural candidates retained across admitted source observations.
+    pub structural_candidates: usize,
+    /// Admitted source rows considered for optional enrichment.
+    pub records: usize,
+    /// Name provenance fragments considered across those rows.
+    pub identity_sources: usize,
+    /// Candidate/source pairs from the exact same capture.
+    pub same_capture_pairs: usize,
+    /// Exact native structural relations to those name sources.
+    pub related_pairs: usize,
+}

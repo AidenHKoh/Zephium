@@ -1,6 +1,14 @@
 //! Release-excluded, fixed source variants for local owned-view qualifications.
 
 use zephium_agentic::{SemanticActionRuntimeFault, SEMANTIC_RUNTIME_PROGRAM};
+#[path = "agentic_media_diagnostic_probe.rs"]
+mod media_diagnostic;
+pub(super) fn configure_media_diagnostic(public: bool, account: bool) {
+    media_diagnostic::configure(public, account);
+}
+pub(super) fn normalize_media_diagnostic(bytes: &[u8]) -> &[u8] {
+    media_diagnostic::normalize(bytes)
+}
 
 pub(super) const PREPARE_MESSAGE: &str = "ZEPHIUM_PREPARED_FILL_WAIT_V1";
 const PREPARE_CONTINUE: &str = "ZEPHIUM_PREPARED_FILL_CONTINUE_V1";
@@ -269,6 +277,13 @@ pub(super) fn normalize_diagnostic(bytes: &[u8]) -> &[u8] {
 }
 
 pub(super) fn source() -> std::borrow::Cow<'static, str> {
+    if media_diagnostic::enabled() {
+        if let Some(source) = media_diagnostic::source(SEMANTIC_RUNTIME_PROGRAM.installation_source()) {
+            return std::borrow::Cow::Owned(source);
+        }
+        // Changed source anchors disable diagnostics, never alter shipping behavior.
+        return std::borrow::Cow::Borrowed(SEMANTIC_RUNTIME_PROGRAM.installation_source());
+    }
     if isolated_fill_selected() {
         return std::borrow::Cow::Owned(isolated_fill_candidate_source());
     }

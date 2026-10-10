@@ -1707,7 +1707,21 @@ impl NativeWorkComposition {
                         media_plans = guard
                             .0
                             .take_extraction()
-                            .map(|extraction| extraction.media().to_vec())
+                            .map(|extraction| {
+                                let counts = extraction.media_diagnostics();
+                                zephium_app::work_trace::record_media(
+                                    zephium_app::work_trace::RecordMediaTrace::Source {
+                                        observed_images: counts.observed_images,
+                                        eligible_image_geometry: counts.eligible_image_geometry,
+                                        structural_candidates: counts.structural_candidates,
+                                        records: counts.records,
+                                        identity_sources: counts.identity_sources,
+                                        same_capture_pairs: counts.same_capture_pairs,
+                                        related_pairs: counts.related_pairs,
+                                    },
+                                );
+                                extraction.media().to_vec()
+                            })
                             .unwrap_or_default();
                         let crop_permits = media_plans
                             .iter()

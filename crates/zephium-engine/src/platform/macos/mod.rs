@@ -774,3 +774,8 @@ mod tests {
         assert!(failed.load(Ordering::Acquire));
     }
 }
+
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub(crate) fn configure_media_diagnostic(public: bool, account: bool) {
+    semantic_runtime::configure_media_diagnostic(public, account);
+}
