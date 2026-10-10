@@ -671,7 +671,11 @@ pub(crate) fn protected_path(path: &Path) -> bool {
         // Case-insensitive filesystems also equate characters whose uppercase
         // expands to ASCII (for example long-s ſ with s). Lowercase alone misses
         // these aliases, and macOS realpath preserves the caller's spelling.
-        let name = name.to_uppercase().to_lowercase();
+        let folded = name.to_uppercase();
+        if zephium_agentic::contains_recognized_secret(folded.trim_start_matches('.')) {
+            return true;
+        }
+        let name = folded.to_lowercase();
         name.starts_with(".env")
             || matches!(name.as_str(),
                 ".zephium-work-recovery" | ".ssh" | ".gnupg" | ".aws" | ".azure" | ".kube" | ".config"
@@ -1728,7 +1732,11 @@ mod tests {
             grant.prepare(&kind, None),
             Err(WorkFileError::Sensitive)
         ));
-        for name in ["ghp_inertFixtureToken.txt", ".ghp_inertFixtureToken"] {
+        for name in [
+            "ghp_inertFixtureToken.txt",
+            ".ghp_inertFixtureToken",
+            "ſk-inertFixtureToken.txt",
+        ] {
             std::fs::write(project.join(name), "ordinary").unwrap();
             assert!(protected_path(&project.join(name)));
         }
