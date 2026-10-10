@@ -4,6 +4,8 @@
   import MakeTasks from "../board/MakeTasks.svelte";
   import Mark, { hasMark } from "./Mark.svelte";
   import Title from "./Title.svelte";
+  import PlanCalendar from "./PlanCalendar.svelte";
+  import { planWeeks } from "../../lib/board/plan-calendar";
   import {
     AirplaneTakeOff01Icon,
     BedDoubleIcon,
@@ -33,6 +35,8 @@
     note: Note01Icon,
   } as const;
   const priced = $derived(object.steps.some((step) => step.cost));
+  /** A long dated plan stands as its weeks; the centre keeps every step's words beneath. */
+  const weeks = $derived(planWeeks(object));
   /** A step names its day only where the day changes. */
   const dated = $derived(
     object.steps.map((step, index) =>
@@ -41,64 +45,66 @@
   );
 </script>
 
-<section class="plan" class:priced aria-label={object.title}>
+<section class="plan" class:priced class:calendar={!!weeks} aria-label={object.title}>
   {#if object.title}<Title text={object.title} />{/if}
-  <div class="grid">
-    <ol class="steps">
-      {#each object.steps as step, index (index)}
-        <li class="step {step.kind}" class:done={step.done} class:first={!!dated[index]}>
-          <span class="when">{dated[index]}</span>
-          <span class="node">
-            {#if object.checkable && actions.check}<button
-                type="button"
-                class="glyph check nodrag nopan"
-                aria-pressed={!!step.done}
-                aria-label={step.title}
-                onclick={() => actions.check?.(object.id, index, !step.done)}
-                ><Icon icon={step.done ? Tick02Icon : GLYPH[step.kind]} size={14} /></button
-              >{:else}<span class="glyph"
-                ><Icon icon={step.done ? Tick02Icon : GLYPH[step.kind]} size={14} /></span
-              >{/if}
-          </span>
-          <div class="what">
-            <div class="head">
-              <h4>{step.title}</h4>
-              {#if step.pick}
-                {#if step.pick.picture}<img
-                    class="thumb"
-                    src={step.pick.picture.src}
-                    alt={step.pick.name}
-                    title={step.pick.name}
-                    decoding="async"
-                    loading="lazy"
-                    width="40"
-                    height="30"
-                  />{:else if step.pick.logo && hasMark(step.pick.logo)}<span
-                    class="logo"
-                    title={step.pick.name}><Mark address={step.pick.logo} size={16} /></span
-                  >{/if}
+  {#if weeks}<PlanCalendar {object} {weeks} glyphs={GLYPH} {actions} />{/if}
+  {#if !weeks || centre}<div class="grid">
+      <ol class="steps">
+        {#each object.steps as step, index (index)}
+          <li class="step {step.kind}" class:done={step.done} class:first={!!dated[index]}>
+            <span class="when">{dated[index]}</span>
+            <span class="node">
+              {#if object.checkable && actions.check}<button
+                  type="button"
+                  class="glyph check nodrag nopan"
+                  aria-pressed={!!step.done}
+                  aria-label={step.title}
+                  onclick={() => actions.check?.(object.id, index, !step.done)}
+                  ><Icon icon={step.done ? Tick02Icon : GLYPH[step.kind]} size={14} /></button
+                >{:else}<span class="glyph"
+                  ><Icon icon={step.done ? Tick02Icon : GLYPH[step.kind]} size={14} /></span
+                >{/if}
+            </span>
+            <div class="what">
+              <div class="head">
+                <h4>{step.title}</h4>
+                {#if step.pick}
+                  {#if step.pick.picture}<img
+                      class="thumb"
+                      src={step.pick.picture.src}
+                      alt={step.pick.name}
+                      title={step.pick.name}
+                      decoding="async"
+                      loading="lazy"
+                      width="40"
+                      height="30"
+                    />{:else if step.pick.logo && hasMark(step.pick.logo)}<span
+                      class="logo"
+                      title={step.pick.name}><Mark address={step.pick.logo} size={16} /></span
+                    >{/if}
+                {/if}
+              </div>
+              {#if step.detail || step.place}
+                <p class="detail">
+                  {#if step.place}<span class="place">{step.place}{step.detail ? " · " : ""}</span
+                    >{/if}{#if step.detail}{step.detail}{/if}
+                </p>
               {/if}
             </div>
-            {#if step.detail || step.place}
-              <p class="detail">
-                {#if step.place}<span class="place">{step.place}{step.detail ? " · " : ""}</span
-                  >{/if}{#if step.detail}{step.detail}{/if}
-              </p>
-            {/if}
-          </div>
-          {#if priced}<span class="cost">{step.cost ?? ""}</span>{/if}
-        </li>
-      {/each}
-    </ol>
-    {#if object.total?.value.trim()}
-      <p class="total" class:loose={!priced}>
-        <span class="label">{object.total.label}</span><span class="value"
-          >{object.total.value}</span
-        >
-      </p>
-    {/if}
-    {#if object.checkable && !centre}<footer><MakeTasks id={object.id} /></footer>{/if}
-  </div>
+            {#if priced}<span class="cost">{step.cost ?? ""}</span>{/if}
+          </li>
+        {/each}
+      </ol>
+      {#if object.total?.value.trim()}
+        <p class="total" class:loose={!priced}>
+          <span class="label">{object.total.label}</span><span class="value"
+            >{object.total.value}</span
+          >
+        </p>
+      {/if}
+      {#if object.checkable && !centre && !weeks}<footer><MakeTasks id={object.id} /></footer>{/if}
+    </div>{/if}
+  {#if weeks && object.checkable && !centre}<footer><MakeTasks id={object.id} /></footer>{/if}
 </section>
 
 <style>
@@ -110,6 +116,10 @@
     gap: 16px;
     max-inline-size: 760px;
     color: var(--color-text);
+  }
+
+  .plan.calendar {
+    max-inline-size: none;
   }
 
   /* One grid for every step: the date column is as wide as its longest label. */

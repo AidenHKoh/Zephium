@@ -2,6 +2,7 @@ import { diagramLayout, diagramWidth } from "../diagram";
 import { BOARD } from "./layout";
 import type { ObjectView, SheetColumn } from "./types";
 import { versus } from "./versus";
+import { calendarHeight, calendarWidth, planWeeks } from "./plan-calendar";
 
 type Range = { min: number; ideal: number; max: number };
 
@@ -53,8 +54,11 @@ export function objectWidth(view: ObjectView): Range {
       const width = (cards: number) => cards * card + (cards - 1) * CARD.gap;
       return { min: width(Math.min(2, across)), ideal: width(across), max: width(across) + 160 };
     }
-    case "plan":
-      return { min: 440, ideal: 640, max: 760 };
+    case "plan": {
+      if (!planWeeks(view)) return { min: 440, ideal: 640, max: 760 };
+      const width = calendarWidth();
+      return { min: width, ideal: width, max: width };
+    }
     case "list":
       return { min: 400, ideal: 560, max: 640 };
     case "sheet": {
@@ -130,8 +134,11 @@ export function objectHeight(view: ObjectView, width: number): number {
       const height = (pictured ? Math.round(card * 0.75) + 132 : 148) + from;
       return (view.title ? 34 : 0) + rows * height + (rows - 1) * CARD.gap;
     }
-    case "plan":
-      return (view.title ? 40 : 0) + view.steps.length * 56 + (view.total ? 48 : 0) + 16;
+    case "plan": {
+      const weeks = planWeeks(view);
+      const body = weeks ? calendarHeight(weeks.length) : view.steps.length * 56;
+      return (view.title ? 40 : 0) + body + (view.total ? 48 : 0) + 16;
+    }
     case "list":
       return (
         (view.title ? 40 : 0) +

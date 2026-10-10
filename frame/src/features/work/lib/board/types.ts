@@ -260,6 +260,8 @@ type StepKind = "travel" | "stay" | "event" | "task" | "milestone" | "note";
 type PickLink = Likeness & { name: string; element?: string };
 export type PlanStepView = {
   when?: string;
+  /** `YYYY-MM-DD`, when it falls on a day. */
+  date?: string;
   title: string;
   detail?: string;
   kind: StepKind;

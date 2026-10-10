@@ -667,6 +667,7 @@ function leadView(
         ...(data.total ? { total: { label: data.total.label, value: data.total.value } } : {}),
         steps: data.steps.map((step) => ({
           ...(step.when ? { when: step.when } : {}),
+          ...(step.date ? { date: step.date } : {}),
           title: step.title,
           ...(step.detail ? { detail: step.detail } : {}),
           kind: step.kind,
