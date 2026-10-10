@@ -16,7 +16,7 @@ import type {
 import { events } from "$shared/ipc/native-events";
 import { observe } from "$shared/lib/observe";
 import { registerCloseTask } from "$shared/lib/close";
-import { SvelteMap } from "svelte/reactivity";
+import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import {
   admitProjection,
   commandId,
@@ -26,7 +26,7 @@ import {
   AGENT_LIMITS,
 } from "./work-model";
 import { currentActivity } from "./work-activity";
-import { WorkOperations } from "./work-operations.svelte";
+import { WorkOperations, type OperationObservation } from "./work-operations.svelte";
 
 export type WorkDelivery =
   "ready" | "pending" | "rejected" | "conflict" | "unknown" | "resynchronizing";
@@ -37,6 +37,31 @@ type ArtifactDraft = {
   data: WorkArtifactDataV1;
   evidence: WorkEvidenceLink[];
 };
+
+type ContinuationScope = { work: string; selection: number; generation: number };
+type ContinuationResult = {
+  accepted: boolean;
+  operation: OperationObservation | null;
+  failure: string | null;
+};
+type QueuedRequest = { text: string; operation?: string };
+type RequestQueue = { items: QueuedRequest[]; failure: string | null };
+
+function runAccepted(operation: OperationObservation | undefined | null): boolean {
+  const state = operation?.state;
+  return (
+    state?.kind === "pending" ||
+    (state?.kind === "settled" && state.response.reply.kind === "projection")
+  );
+}
+function runFailure(operation: OperationObservation | null): string {
+  const state = operation?.state;
+  if (state?.kind === "unknown") return "outcome_unknown";
+  if (state?.kind === "refused") return state.error;
+  if (state?.kind === "settled" && state.response.reply.kind === "error")
+    return state.response.reply.error;
+  return "unavailable";
+}
 
 /** Profile-scoped Rust projections. Pending operands survive view unmount. */
 export class WorkSession {
@@ -56,8 +81,15 @@ export class WorkSession {
   pages = $state.raw<WorkPageV1[]>([]);
   /** Folders the canvas grants to the runs it starts; empty until a person grants one. */
   folders = $state.raw<string[]>([]);
-  /** Messages typed while a run was live; each is sent on as the run before it ends. */
-  queue = $state.raw<string[]>([]);
+  /** Queued requests keep their originating Work when the selected canvas changes. */
+  private readonly queues = new SvelteMap<string, RequestQueue>();
+  private readonly sendingQueued = new SvelteSet<string>();
+  private selection = 0;
+  get queue(): readonly string[] {
+    return this.selected
+      ? (this.queues.get(this.selected)?.items.map((item) => item.text) ?? [])
+      : [];
+  }
   /** Requests waiting on an origin grant, by work: the context rides with the run once allowed. */
   private activityRefresh: ReturnType<typeof setTimeout> | undefined;
   private readonly artifacts = new SvelteMap<string, ArtifactDraft>();
@@ -167,6 +199,7 @@ export class WorkSession {
     const generation = ++this.reads;
     clearTimeout(this.activityRefresh);
     if (work !== this.selected) {
+      ++this.selection;
       this.selected = work;
       this.projection = null;
       this.pages = [];
@@ -204,7 +237,11 @@ export class WorkSession {
         )
           this.followActivity(work, generation, 0);
       }
-      if (this.delivery === "ready") this.failure = null;
+      if (this.delivery === "ready") {
+        const failure = this.queues.get(work)?.failure;
+        if (failure) this.refused(failure);
+        else this.failure = null;
+      }
       return true;
     }
     if (result.kind === "error") this.failure = result.error;
@@ -255,18 +292,43 @@ export class WorkSession {
     }
   }
   back() {
+    ++this.selection;
     ++this.reads;
     this.selected = null;
     this.projection = null;
     this.loading = false;
   }
   async reconcile() {
+    const scope = this.continuationScope();
     await this.operations.reconcile();
+    if (scope && !this.sameContinuation(scope)) return false;
     this.delivery = "resynchronizing";
-    if (this.pending) return this.retry();
-    await this.reload();
-    const okay = this.selected ? await this.open(this.selected) : true;
-    this.delivery = okay ? "ready" : "unknown";
+    let okay: boolean;
+    if (this.pending) okay = await this.retry();
+    else {
+      await this.reload();
+      if (scope && !this.sameContinuation(scope)) return false;
+      okay = this.selected ? await this.open(this.selected) : true;
+    }
+    if (scope && !this.sameContinuation(scope)) return false;
+    const queued = scope ? this.queues.get(scope.work) : undefined;
+    const head = queued?.items[0];
+    if (okay && scope && queued && head) {
+      const operation = head.operation ? this.operations.jobs.get(head.operation) : undefined;
+      if (head.operation && (!operation || runFailure(operation) === "outcome_unknown")) {
+        this.refused("outcome_unknown");
+        return false;
+      }
+      if (runAccepted(operation)) this.removeQueued(scope.work, head);
+      else {
+        // Only a definite refusal permits a fresh admission after explicit recovery.
+        delete head.operation;
+        this.queues.set(scope.work, { items: queued.items, failure: null });
+      }
+    }
+    if (okay) this.delivery = "ready";
+    else if (this.delivery === "resynchronizing") this.delivery = "unknown";
+    if (okay) this.failure = null;
     return okay;
   }
   create(objective: string, command = commandId()) {
@@ -276,7 +338,13 @@ export class WorkSession {
     });
   }
   get canRelease() {
-    return !this.pending && !this.composer && !this.selected && this.artifacts.size === 0;
+    return (
+      !this.pending &&
+      !this.composer &&
+      !this.selected &&
+      this.artifacts.size === 0 &&
+      this.queues.size === 0
+    );
   }
   artifactDraft(artifact: string) {
     return this.artifacts.get(`${this.selected}:${artifact}`);
@@ -330,18 +398,52 @@ export class WorkSession {
    * The routine loop: sending the objective runs the agent in the person's
    * own sessions; a site it has not worked on yet asks first, on the canvas.
    */
+  private continuationScope(): ContinuationScope | null {
+    const work = this.projection?.work.id;
+    return work && this.selected === work
+      ? { work, selection: this.selection, generation: this.generation }
+      : null;
+  }
+  private sameContinuation(scope: ContinuationScope): boolean {
+    return (
+      this.selected === scope.work &&
+      this.projection?.work.id === scope.work &&
+      this.selection === scope.selection &&
+      this.generation === scope.generation
+    );
+  }
+  private refused(failure: string) {
+    this.failure = failure;
+    this.delivery =
+      failure === "conflict" ? "conflict" : failure === "outcome_unknown" ? "unknown" : "rejected";
+  }
   async run(
     context: WorkContextSelectionV1 | null = null,
     options: { private?: boolean; skill?: string | null } = {},
-  ) {
-    if (!this.projection || this.pending || this.operations.busy(this.projection.work.id)) return;
-    // What an earlier launch left running is acknowledged first: sending the
-    // next request moves on from it, and the work cannot run while it stands.
-    for (const execution of [...this.projection.interrupted])
-      if (!(await this.execute({ kind: "acknowledge_interruption", execution }))) return;
-    const work = this.projection?.work;
-    if (!work || this.pending || this.operations.busy(work.id)) return;
-    await this.operations.begin({
+  ): Promise<boolean> {
+    const scope = this.continuationScope();
+    return scope ? (await this.beginRun(scope, context, options)).accepted : false;
+  }
+  private async beginRun(
+    scope: ContinuationScope,
+    context: WorkContextSelectionV1 | null,
+    options: { private?: boolean; skill?: string | null },
+  ): Promise<ContinuationResult> {
+    const notStarted = { accepted: false, operation: null, failure: "unavailable" };
+    if (!this.sameContinuation(scope) || this.pending || this.operations.busy(scope.work))
+      return notStarted;
+    // Acknowledgements are also bound to the canvas selected before the first await.
+    for (const execution of [...(this.projection?.interrupted ?? [])]) {
+      if (
+        !this.sameContinuation(scope) ||
+        !(await this.execute({ kind: "acknowledge_interruption", execution }))
+      )
+        return notStarted;
+    }
+    if (!this.sameContinuation(scope) || this.pending || this.operations.busy(scope.work))
+      return notStarted;
+    const work = this.projection!.work;
+    const operation = await this.operations.begin({
       kind: "run",
       ...(context ? { context } : {}),
       command: {
@@ -361,21 +463,36 @@ export class WorkSession {
         },
       },
     });
+    const accepted = runAccepted(operation);
+    const failure = accepted ? null : runFailure(operation);
+    if (failure && this.sameContinuation(scope)) this.refused(failure);
+    return { accepted, operation, failure };
   }
-  /**
-   * The person's next message on the same work: it becomes the live request and
-   * starts a fresh run over everything the work already established.
-   */
+  /** The next message starts a fresh run only on the Work selected when submitted. */
   async continueWith(
     text: string,
     context: WorkContextSelectionV1 | null = null,
     options: { private?: boolean } = {},
   ): Promise<boolean> {
+    const scope = this.continuationScope();
+    return scope ? (await this.continueRequest(scope, text, context, options)).accepted : false;
+  }
+  private async continueRequest(
+    scope: ContinuationScope,
+    text: string,
+    context: WorkContextSelectionV1 | null = null,
+    options: { private?: boolean } = {},
+  ): Promise<ContinuationResult> {
     const message = text.trim();
-    if (!message || !this.projection?.work) return false;
-    if (!(await this.edit({ kind: "set_objective", objective: message }))) return false;
-    await this.run(context, options);
-    return true;
+    const notStarted = () => ({
+      accepted: false,
+      operation: null,
+      failure: this.sameContinuation(scope) ? (this.failure ?? "unavailable") : "unavailable",
+    });
+    if (!message || !this.sameContinuation(scope)) return notStarted();
+    if (!(await this.edit({ kind: "set_objective", objective: message }))) return notStarted();
+    if (!this.sameContinuation(scope)) return notStarted();
+    return this.beginRun(scope, context, options);
   }
   /** Up to three next requests the finished run offers; empty while it works. */
   get followups(): readonly string[] {
@@ -401,17 +518,67 @@ export class WorkSession {
     if (!message || !execution) return false;
     return this.execute({ kind: "steer", execution: execution.id, text: message });
   }
-  /** Holds a message until the run in flight finishes. */
-  enqueue(text: string) {
+  /** Holds a request for this Work; false is surfaced as a capacity/admission failure. */
+  enqueue(text: string): boolean {
     const message = text.trim();
-    if (message && this.queue.length < 16) this.queue = [...this.queue, message];
+    const work = this.selected;
+    if (!message || !work || this.projection?.work.id !== work) {
+      this.refused("unavailable");
+      return false;
+    }
+    const queued = this.queues.get(work);
+    if (queued?.failure && queued.items[0]?.text === message) {
+      // A repeat click retries the retained head, never duplicates it. Unknown
+      // admissions are reconciled by original operation id before any new run.
+      void this.reconcile();
+      return true;
+    }
+    if ([...this.queues.values()].reduce((count, queue) => count + queue.items.length, 0) >= 16) {
+      this.refused("capacity");
+      return false;
+    }
+    this.queues.set(work, {
+      items: [...(queued?.items ?? []), { text: message }],
+      failure: queued?.failure ?? null,
+    });
+    return true;
   }
-  /** Sends the oldest queued message on as a continuation; the rest wait their turn. */
+  private removeQueued(work: string, head: QueuedRequest) {
+    const queued = this.queues.get(work);
+    if (queued?.items[0] !== head) return;
+    const rest = queued.items.slice(1);
+    if (rest.length) this.queues.set(work, { items: rest, failure: null });
+    else this.queues.delete(work);
+  }
+  /** Refused/unknown sends keep the head paused until an explicit retry/reconcile. */
   async sendQueued(): Promise<boolean> {
-    const [next, ...rest] = this.queue;
-    if (!next) return false;
-    this.queue = rest;
-    return this.continueWith(next);
+    const scope = this.continuationScope();
+    if (!scope || this.sendingQueued.has(scope.work)) return false;
+    const queued = this.queues.get(scope.work);
+    const head = queued?.items[0];
+    if (!head || queued.failure || this.running || this.operations.busy(scope.work)) return false;
+    this.sendingQueued.add(scope.work);
+    try {
+      const result = await this.continueRequest(scope, head.text);
+      // Only uncertain admission ownership must outlive the disposable job cache.
+      // A known refusal remains retryable even after its finished job is evicted.
+      if (result.operation && result.failure === "outcome_unknown")
+        head.operation = result.operation.id;
+      else delete head.operation;
+      if (result.accepted) {
+        this.removeQueued(scope.work, head);
+        return true;
+      }
+      const current = this.queues.get(scope.work);
+      if (current?.items[0] === head)
+        this.queues.set(scope.work, {
+          items: current.items,
+          failure: result.failure ?? "unavailable",
+        });
+      return false;
+    } finally {
+      this.sendingQueued.delete(scope.work);
+    }
   }
   /** Accepts or refuses one proposed file change the running agent is waiting on. */
   approveStep(step: string, approve: boolean): Promise<boolean> {

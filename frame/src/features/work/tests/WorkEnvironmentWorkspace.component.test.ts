@@ -224,7 +224,11 @@ test("prompt submission keeps work on canvas and clarification choices above the
     };
     return true;
   });
-  const planning = vi.spyOn(objective.operations, "begin").mockResolvedValue();
+  const planning = vi.spyOn(objective.operations, "begin").mockImplementation(async (input) => ({
+    id: "operation",
+    input,
+    state: { kind: "pending", work: "objective" },
+  }));
   vi.spyOn(environment, "edit").mockImplementation(async (edit) => {
     expect(edit).toMatchObject({
       kind: "add",

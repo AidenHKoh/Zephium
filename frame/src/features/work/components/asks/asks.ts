@@ -115,13 +115,13 @@ export type AddressAsk = Base & {
 };
 
 export type SignInAsk = {
-  kind: "sign_in";
+  kind: "sign_in" | "check";
   step: string;
   part: string | null;
   host: string;
-  /** The held page, for Open and "I've signed in". */
-  page: WorkHumanPageV1;
-  state: "open" | "working";
+  /** The same live page, absent on a durable resolution receipt. */
+  page: WorkHumanPageV1 | null;
+  state: "open" | "working" | "done" | "failed";
 };
 
 export type Ask =
@@ -408,19 +408,41 @@ export function asksOf(
     if (ask) asks.push(ask);
   }
   for (const page of held) {
-    if (page.reason !== "sign_in" || page.phase === "reading" || page.phase === "released")
+    if (
+      (page.reason !== "sign_in" && page.reason !== "challenge") ||
+      page.phase === "reading" ||
+      page.phase === "released"
+    )
       continue;
     const step = steps.find((entry) => entry.id === page.id.step);
     const url = step?.kind.kind === "read" ? step.kind.url : null;
     const host = url ? hostOf(url) : null;
     if (!host) continue;
     asks.push({
-      kind: "sign_in",
+      kind: page.reason === "sign_in" ? "sign_in" : "check",
       step: page.id.step,
       part: step?.part ?? null,
       host,
       page,
       state: page.phase === "continuing" ? "working" : "open",
+    });
+  }
+  for (const step of steps) {
+    if (step.kind.kind !== "read" || asks.some((ask) => ask.step === step.id)) continue;
+    const host = hostOf(step.kind.url);
+    const outcome = step.measurements?.outcome?.kind;
+    const unresolved =
+      outcome === "needs_sign_in" ? "sign_in" : outcome === "needs_check" ? "check" : null;
+    const resolved = step.measurements?.resolved_handoff;
+    const kind = unresolved ?? (resolved === "sign_in_and_check" ? "sign_in" : resolved);
+    if (!host || !kind) continue;
+    asks.push({
+      kind,
+      step: step.id,
+      part: step.part ?? null,
+      host,
+      page: null,
+      state: unresolved ? "failed" : "done",
     });
   }
   return asks;
@@ -434,7 +456,7 @@ export const openAsks = (asks: readonly Ask[]) =>
 export function askPart(ask: Ask): string | null {
   if (ask.part) return ask.part;
   if (ask.kind === "confirm") return registrableSite(ask.site);
-  if (ask.kind === "sign_in") return registrableSite(ask.host);
+  if (ask.kind === "sign_in" || ask.kind === "check") return registrableSite(ask.host);
   if (ask.kind === "entry" && ask.host) return registrableSite(ask.host);
   if (ask.kind === "connection" && ask.host) return registrableSite(ask.host);
   return null;

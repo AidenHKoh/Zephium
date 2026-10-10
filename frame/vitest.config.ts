@@ -56,6 +56,10 @@ export default defineConfig({
         test: {
           name: "component",
           provide: {
+            humanWallSurvey: readFileSync(
+              new URL("../crates/zephium-engine/src/host/work_human_wall.js", import.meta.url),
+              "utf8",
+            ),
             contentStyleSource: readFileSync(
               new URL("../crates/zephium-engine/src/host/content_style.js", import.meta.url),
               "utf8",

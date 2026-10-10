@@ -1,6 +1,13 @@
 import { expect, test } from "vitest";
 import { needWords } from "../lib/run/need";
 
+test("a typed human check offers the page where the person can resolve it", () => {
+  expect(needWords({ kind: "check", target: "Allegro" }, "Prices", "row")).toEqual({
+    text: "Allegro asked for a human check",
+    action: "Open page",
+  });
+});
+
 test("a service the person has not connected asks once to be connected, with one action", () => {
   const need = { kind: "connect" as const, target: "Linear" };
   expect(needWords(need, "Issues", "row")).toEqual({

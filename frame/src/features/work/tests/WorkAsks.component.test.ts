@@ -160,7 +160,7 @@ test("entry, context and connection questions answer with Rust's own option word
   }
 });
 
-test("a sign-in wall opens the held page, and 'I've signed in' carries it on", async () => {
+test("a sign-in wall opens the held page without a second confirmation action", async () => {
   const { session, execution } = sessionWith(f.notionTask);
   const human = new WorkHumanSession("profile");
   native.human.mockResolvedValue({
@@ -182,13 +182,8 @@ test("a sign-in wall opens the held page, and 'I've signed in' carries it on", a
     .toBeVisible();
   await screen.getByRole("button", { name: "Sign in", exact: true }).click();
   expect(open).toHaveBeenCalledExactlyOnceWith("read-notion");
-  await screen.getByRole("button", { name: "I've signed in", exact: true }).click();
-  expect(native.human).toHaveBeenCalledExactlyOnceWith(
-    "profile",
-    "objective",
-    f.notionWall.id,
-    "anonymous",
-  );
+  expect(screen.container.querySelectorAll("button")).toHaveLength(1);
+  expect(native.human).not.toHaveBeenCalled();
   await screen.unmount();
   session.dispose();
 });

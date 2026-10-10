@@ -81,15 +81,14 @@
     />
   {:else if ask.kind === "address"}
     <AddressCard {ask} {placement} {busy} onanswer={answer} />
-  {:else if ask.kind === "sign_in"}
+  {:else if ask.kind === "sign_in" || ask.kind === "check"}
     <SignInCard
       {ask}
       {placement}
       {busy}
       onopen={actions.openPage ? () => actions.openPage?.(ask.step) : undefined}
-      onsignedin={actions.signedIn ? () => void send(() => actions.signedIn!(ask.page)) : undefined}
     />
-  {:else}
+  {:else if ask.kind === "question"}
     <QuestionCard {ask} {placement} {busy} {seed} onanswer={answer} />
   {/if}
   {#if refused === ask.step && ask.state === "open"}<p class="refused" role="alert">

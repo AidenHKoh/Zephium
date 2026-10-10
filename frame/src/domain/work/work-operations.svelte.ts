@@ -52,8 +52,8 @@ export class WorkOperations {
         operationBasis(job.input).work === work && ["pending", "unknown"].includes(job.state.kind),
     );
   }
-  async begin(input: WorkOperationV1): Promise<void> {
-    if (this.busy(operationBasis(input).work)) return;
+  async begin(input: WorkOperationV1): Promise<OperationObservation | null> {
+    if (this.busy(operationBasis(input).work)) return null;
     // Completed UI observations are disposable; native acknowledgement retains
     // a tombstone so reordered admission cannot restart a finished provider call.
     if (this.jobs.size >= 16) {
@@ -61,7 +61,7 @@ export class WorkOperations {
         ([, job]) => job.state.kind !== "pending" && job.state.kind !== "unknown",
       );
       if (finished) this.jobs.delete(finished[0]);
-      else return;
+      else return null;
     }
     const id = commandId();
     const job: OperationObservation = {
@@ -72,9 +72,10 @@ export class WorkOperations {
     this.jobs.set(id, job);
     this.submitting.add(id);
     const result = await this.received(() => commands.workOperation(this.profile, id, input), id);
-    await this.accept(job, result);
+    const observation = await this.accept(job, result);
     this.submitting.delete(id);
     if (this.live) void this.poll();
+    return this.jobs.get(id) ?? observation;
   }
   private async received(
     call: () => Promise<WorkOperationResponseV1>,
@@ -94,8 +95,11 @@ export class WorkOperations {
     }
     return { kind: "unknown" };
   }
-  private async accept(job: OperationObservation, state: WorkOperationStateV1) {
-    if (this.jobs.get(job.id) !== job) return;
+  private async accept(
+    job: OperationObservation,
+    state: WorkOperationStateV1,
+  ): Promise<OperationObservation | null> {
+    if (this.jobs.get(job.id) !== job) return null;
     const work = operationBasis(job.input).work;
     // Only an agent run is ever begun; a reply shaped for any other operation is not ours.
     const run = job.input.kind === "run";
@@ -117,7 +121,8 @@ export class WorkOperations {
                   state.response.reply.projection.work.profile === this.profile))
             : true;
     const admitted = matching ? state : { kind: "unknown" as const };
-    this.jobs.set(job.id, { ...job, state: admitted });
+    const observation = { ...job, state: admitted };
+    this.jobs.set(job.id, observation);
     if (admitted.kind !== "pending") {
       await this.changed(work);
       if (admitted.kind !== "unknown") {
@@ -128,6 +133,7 @@ export class WorkOperations {
         );
       }
     }
+    return observation;
   }
   private poll(): Promise<void> {
     clearTimeout(this.timer);
@@ -163,6 +169,10 @@ export class WorkOperations {
     }
   }
   async reconcile() {
-    if (this.live) await this.poll();
+    const generation = this.generation;
+    // Explicit recovery must observe after a status read already in flight,
+    // rather than returning that older response as a fresh reconciliation.
+    if (this.polling) await this.polling;
+    if (this.live && generation === this.generation) await this.poll();
   }
 }

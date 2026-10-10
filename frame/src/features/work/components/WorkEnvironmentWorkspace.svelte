@@ -281,7 +281,11 @@
   function openBranchPage(page: string) {
     const entry = pageEntries.get(page);
     if (!entry) return;
-    if (entry.page.human?.phase === "waiting_for_human") {
+    if (
+      entry.page.human &&
+      entry.page.human.phase !== "reading" &&
+      entry.page.human.phase !== "released"
+    ) {
       openTakeover(page);
       return;
     }
@@ -294,7 +298,12 @@
   function openStep(step: string) {
     for (const [id, entry] of pageEntries)
       if (id.endsWith(`:${step}`)) {
-        if (entry.page.human?.phase === "waiting_for_human") openTakeover(id);
+        if (
+          entry.page.human &&
+          entry.page.human.phase !== "reading" &&
+          entry.page.human.phase !== "released"
+        )
+          openTakeover(id);
         else openPane({ kind: "url", url: entry.page.url }, entry.part, entry.page.account);
         return;
       }
@@ -465,21 +474,40 @@
     const current = objectiveSession;
     if (!part || !need || !current || current.projection?.work.id !== part.objective) return;
     // After a check nobody solved in time, the next try names the site the person will solve it on.
-    const checked = need.kind === "retry" && need.reason === "blocked_by_check" && !!need.target;
+    const checked =
+      need.kind === "check" ||
+      need.kind === "sign_in" ||
+      (need.kind === "retry" && need.reason === "blocked_by_check" && !!need.target);
     const again = (
       text = checked
         ? m.work_need_again_site_request({ part: part.title, site: need.target })
         : m.work_need_again_request({ part: part.title }),
     ) => {
-      // While the run goes on, the lead takes the retry now, or next if it cannot mid-step.
-      if (activeExecution) void current.steer(text).then((taken) => taken || current.enqueue(text));
+      // A closed wall requires a fresh execution; steering the blocked one
+      // cannot recreate the retained page or grant a retry.
+      if (activeExecution && (need.kind === "sign_in" || need.kind === "check"))
+        void current.enqueue(text);
+      else if (activeExecution)
+        void current.steer(text).then((taken) => taken || current.enqueue(text));
       else void current.continueWith(text);
     };
     if (how === "again") return again();
     switch (need.kind) {
       case "sign_in":
-        if (need.address) openCitation(need.address);
+      case "check": {
+        const site = need.address ? registrableSite(host(need.address)) : null;
+        const waiting = part.pages?.find(
+          (page) =>
+            (!site || registrableSite(host(page.url)) === site) &&
+            page.human &&
+            page.human.phase !== "reading" &&
+            page.human.phase !== "released" &&
+            page.human.reason === (need.kind === "sign_in" ? "sign_in" : "challenge"),
+        );
+        if (waiting) openTakeover(waiting.id);
+        else again();
         return;
+      }
       case "allow_site":
         if (need.address) preallowed.add(registrableSite(new URL(need.address).hostname));
         return again();
@@ -602,6 +630,13 @@
     // The well stands over the part the page is in.
     const card = entry?.part ?? page;
     const url = entry?.page.url ?? item?.page?.url ?? "";
+    if (
+      state &&
+      takeover?.page.attempt === state.attempt &&
+      takeover.page.step === state.step &&
+      takeover.page.generation === state.generation
+    )
+      return;
     if (!state || state.phase !== "waiting_for_human") return;
     const work = heldWork(state);
     if (!work) return;

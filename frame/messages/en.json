@@ -2183,6 +2183,7 @@
   "work_ask_entry_receipt": "Your {name}",
   "work_ask_sign_in_title": "Sign in to {host} to continue",
   "work_ask_sign_in_how": "Sign in here or in any tab. The agent carries on by itself once you're in.",
+  "work_ask_handoff_how": "Complete this on the live page. Work continues automatically when the page is ready.",
   "work_ask_signed_in": "I've signed in",
   "work_ask_sign_in": "Sign in",
   "work_ask_signed_in_short": "Signed in",

@@ -643,6 +643,7 @@ const TOOLS: Record<string, string> = { gh: "GitHub", glab: "GitLab" };
 function needView(need: NonNullable<RunPart["need"]>, host?: string): PartNeed {
   switch (need.kind) {
     case "sign_in":
+    case "check":
     case "allow_site":
       return { kind: need.kind, target: siteName(need.host), address: `https://${need.host}` };
     case "allow_folder":

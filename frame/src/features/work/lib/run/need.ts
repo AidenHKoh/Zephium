@@ -63,6 +63,11 @@ export function needWords(
             : partReason(part, "signed_out"),
         action: m.work_ask_sign_in(),
       };
+    case "check":
+      return {
+        text: said(need.target, "blocked_by_check"),
+        action: m.work_human_open(),
+      };
     case "allow_site":
       return { text: m.work_need_allow_site({ site: need.target }), action: m.work_ask_allow() };
     case "allow_folder":

@@ -288,7 +288,12 @@ test("a refused steer queues the draft and the queue rides on when the run close
   session.selected = "objective";
   const execution = agentRun("running");
   session.projection = { ...structuredClone(projection), executions: [execution] };
-  const continueWith = vi.spyOn(session, "continueWith").mockResolvedValue(true);
+  const edit = vi.spyOn(session, "edit").mockResolvedValue(true);
+  const begin = vi.spyOn(session.operations, "begin").mockImplementation(async (input) => ({
+    id: "queued-operation",
+    input,
+    state: { kind: "pending", work: "objective" },
+  }));
   // A refused steer must not drop the message: it waits for the run instead.
   const steer = vi.spyOn(session, "steer").mockResolvedValue(false);
   const onsteered = vi.fn();
@@ -304,12 +309,15 @@ test("a refused steer queues the draft and the queue rides on when the run close
   expect(steer).toHaveBeenCalledExactlyOnceWith("Also compare the wireless ones");
   await expect.poll(() => session.queue).toEqual(["Also compare the wireless ones"]);
   expect(onsteered).toHaveBeenCalledOnce();
-  expect(continueWith).not.toHaveBeenCalled();
+  expect(begin).not.toHaveBeenCalled();
   session.projection = {
     ...session.projection,
     executions: [{ ...execution, status: "completed" }],
   };
-  await expect.poll(() => continueWith.mock.calls).toEqual([["Also compare the wireless ones"]]);
+  await expect
+    .poll(() => edit.mock.calls)
+    .toEqual([[{ kind: "set_objective", objective: "Also compare the wireless ones" }]]);
+  await expect.poll(() => begin.mock.calls.length).toBe(1);
   expect(session.queue).toEqual([]);
   await screen.unmount();
   session.dispose();

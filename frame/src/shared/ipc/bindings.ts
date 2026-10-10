@@ -4783,6 +4783,8 @@ export type WorkPageFrameV1 = {
 	height: number,
 };
 
+export type WorkPageHandoffKindV1 = "sign_in" | "check" | "sign_in_and_check";
+
 export type WorkPageOutcomeV1 = { kind: "completed" } | { kind: "incomplete" } | { kind: "needs_sign_in" } | { kind: "needs_check" } | { kind: "needs_approval" } | { kind: "needs_interaction" } | { kind: "too_many_steps" } | { kind: "redirected" } | { kind: "refused"; stage: WorkPageFailureStageV1 } | { kind: "site_error" } | { kind: "cancelled" } | { kind: "outcome_unknown" };
 
 /**
@@ -4882,8 +4884,10 @@ export type WorkPartNeedV1 = WorkPartNeedV1_Serialize | WorkPartNeedV1_Deseriali
  *  thing it concerns. The fix sits on the part's row.
  */
 export type WorkPartNeedV1_Deserialize = 
-/**  Sign in on the site, then the part can run again. */
+/**  Sign in on the retained page so the part can continue. */
 ({ kind: "sign_in"; host: string }) & { connection?: never; path?: never; reason?: never } | 
+/**  Pass the site's human check on the retained page. */
+({ kind: "check"; host: string }) & { connection?: never; path?: never; reason?: never } | 
 /**  Let the agent work on the site as the person. */
 ({ kind: "allow_site"; host: string }) & { connection?: never; path?: never; reason?: never } | 
 /**  Let the agent read a folder on this Mac. */
@@ -4906,8 +4910,10 @@ export type WorkPartNeedV1_Deserialize =
  *  thing it concerns. The fix sits on the part's row.
  */
 export type WorkPartNeedV1_Serialize = 
-/**  Sign in on the site, then the part can run again. */
+/**  Sign in on the retained page so the part can continue. */
 ({ kind: "sign_in"; host: string }) & { connection?: never; path?: never; reason?: never } | 
+/**  Pass the site's human check on the retained page. */
+({ kind: "check"; host: string }) & { connection?: never; path?: never; reason?: never } | 
 /**  Let the agent work on the site as the person. */
 ({ kind: "allow_site"; host: string }) & { connection?: never; path?: never; reason?: never } | 
 /**  Let the agent read a folder on this Mac. */
@@ -6139,8 +6145,15 @@ export type WorkStepMeasurementsV1 = WorkStepMeasurementsV1_Serialize | WorkStep
  *  or provider text.
  */
 export type WorkStepMeasurementsV1_Deserialize = {
+	/**
+	 *  Work revision assigned by Store when this page step settled. Never an
+	 *  adapter clock or claim; absent on older or unfinished records.
+	 */
+	settled_revision?: WorkRevision | null,
 	/**  Closed page outcome, independent of explanatory text. Absent on older steps. */
 	outcome?: WorkPageOutcomeV1 | null,
+	/**  A wall verified clear before the same retained task resumed. */
+	resolved_handoff?: WorkPageHandoffKindV1 | null,
 	/**  Wall time from the step's resource launch to its settled outcome. */
 	wall_millis: number,
 	/**  Typed decision calls answered by the recommended backend. */
@@ -6165,8 +6178,15 @@ export type WorkStepMeasurementsV1_Deserialize = {
  *  or provider text.
  */
 export type WorkStepMeasurementsV1_Serialize = {
+	/**
+	 *  Work revision assigned by Store when this page step settled. Never an
+	 *  adapter clock or claim; absent on older or unfinished records.
+	 */
+	settled_revision?: WorkRevision | null,
 	/**  Closed page outcome, independent of explanatory text. Absent on older steps. */
 	outcome?: WorkPageOutcomeV1 | null,
+	/**  A wall verified clear before the same retained task resumed. */
+	resolved_handoff?: WorkPageHandoffKindV1 | null,
 	/**  Wall time from the step's resource launch to its settled outcome. */
 	wall_millis: number,
 	/**  Typed decision calls answered by the recommended backend. */

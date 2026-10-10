@@ -191,7 +191,8 @@ export type PartView = {
 };
 /** A part's need as its row says it: a sentence and the action that meets it. */
 export type PartNeed = {
-  kind: "sign_in" | "allow_site" | "allow_folder" | "use_connection" | "connect" | "retry";
+  kind:
+    "sign_in" | "check" | "allow_site" | "allow_folder" | "use_connection" | "connect" | "retry";
   /** The site, folder or connection it concerns, as a person names it. */
   target: string;
   /** The page to open for a sign-in, the folder to allow. */
