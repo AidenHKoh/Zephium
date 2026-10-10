@@ -380,6 +380,8 @@ export type DraftView = ObjectBase & {
   author?: Likeness & { name: string; handle?: string };
   /** Where Send stands: until Confirm is wired, a draft is only ever a draft. */
   send?: "draft" | "confirming" | "sent";
+  /** A GitHub draft's review state. */
+  review?: "comment" | "approve" | "request_changes";
 };
 
 export type MediaView = ObjectBase & {
@@ -519,8 +521,10 @@ export type ObjectActions = {
   link?: (url: string) => void;
   /** A checkable step or item ticked or unticked. */
   check?: (id: string, index: number, done: boolean) => void;
-  /** A note's new Markdown, written through the notes store. */
+  /** A note's new Markdown, written through the notes store; a draft's new words. */
   write?: (id: string, markdown: string) => void;
   /** A draft's Send: always through Confirm. */
   send?: (id: string) => void;
+  /** A GitHub draft's review state. */
+  review?: (id: string, review: "comment" | "approve" | "request_changes") => void;
 };

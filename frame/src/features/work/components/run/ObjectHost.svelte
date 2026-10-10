@@ -18,6 +18,17 @@
   const made = $derived(tasks ? tasks.tasks(id) : []);
   const view = $derived.by((): View => {
     const base = item.object!.view;
+    if (base.kind === "draft") {
+      const edit = board?.drafted?.(id);
+      return edit
+        ? {
+            ...base,
+            ...(edit.body !== undefined ? { body: edit.body } : {}),
+            ...(edit.review ? { review: edit.review } : {}),
+            ...(edit.sent ? { send: "confirming" as const } : {}),
+          }
+        : base;
+    }
     if (!made.some(Boolean)) return base;
     const done = (index: number) => !!made[index]?.completedAt;
     if (base.kind === "plan")
@@ -42,6 +53,7 @@
     compare: (target) => board?.compare?.(target),
     send: (target) => board?.send?.(target),
     write: (target, markdown) => board?.write?.(target, markdown),
+    review: (target, review) => board?.review?.(target, review),
     // A step made into a task opens it in Tasks; its tick lives there.
     check: (_object, index) => {
       const task = made[index];

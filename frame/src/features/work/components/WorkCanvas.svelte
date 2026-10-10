@@ -24,6 +24,7 @@
     canvasFar,
     canvasWork,
     type BoardActions,
+    type DraftReview,
   } from "../lib/canvas-context";
   import CanvasNode from "./CanvasNode.svelte";
   import AreaNode from "./AreaNode.svelte";
@@ -155,6 +156,8 @@
     compare: (id: string) => board?.compare?.(id),
     send: (id: string) => board?.send?.(id),
     write: (id: string, markdown: string) => board?.write?.(id, markdown),
+    drafted: (id: string) => board?.drafted?.(id),
+    review: (id: string, review: DraftReview) => board?.review?.(id, review),
   } satisfies BoardActions);
   /** Each origin is asked for once per canvas. */
   const probed: Record<string, true> = {};

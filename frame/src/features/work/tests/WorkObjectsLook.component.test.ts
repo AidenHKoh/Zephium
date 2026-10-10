@@ -94,6 +94,7 @@ test.each(Object.keys(scenes))(
         check: noop,
         send: noop,
         write: noop,
+        review: noop,
       },
     });
     const sheet = screen.container.querySelector<HTMLElement>(".sheet")!;

@@ -52,8 +52,15 @@ export type BoardActions = {
   compare?: (id: string) => void;
   /** A draft's Send: always through Confirm. */
   send?: (id: string) => void;
-  /** A note's new Markdown, written through the notes store. */
+  /** A note's new Markdown, written through the notes store; a draft's new words. */
   write?: (id: string, markdown: string) => void;
+  /** What the person made of a draft: their words, its review and whether it went. */
+  drafted?: (id: string) => DraftEdit | undefined;
+  /** A GitHub draft's review: a comment, an approval or a request for changes. */
+  review?: (id: string, review: DraftReview) => void;
   /** Save as note until the note exists, then Open note; nothing for what has no text. */
   note: (id: string) => { label: string; disabled?: boolean; onclick?: () => void } | undefined;
 };
+
+export type DraftReview = "comment" | "approve" | "request_changes";
+export type DraftEdit = { body?: string; review?: DraftReview; sent?: boolean };

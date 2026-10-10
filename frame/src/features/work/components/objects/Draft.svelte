@@ -23,6 +23,34 @@
   } = $props();
   // What the person is writing, reset whenever the draft itself changes.
   let text = $derived(object.body);
+  /** On the canvas, the words turn editable where the person clicks them. */
+  let editing = $state(false);
+  const editable = $derived(!!actions.write && (object.send ?? "draft") === "draft");
+  const REVIEWS = ["comment", "approve", "request_changes"] as const;
+  const reviewLabel = (review: (typeof REVIEWS)[number]) =>
+    review === "approve"
+      ? m.work_draft_approve()
+      : review === "request_changes"
+        ? m.work_draft_request_changes()
+        : m.work_draft_comment();
+  /** A textarea as tall as what it holds: the draft grows only as the person writes. */
+  function fit(field: HTMLTextAreaElement, focus: boolean) {
+    const size = () => {
+      field.style.blockSize = "auto";
+      field.style.blockSize = `${field.scrollHeight}px`;
+    };
+    size();
+    if (focus) {
+      field.focus({ preventScroll: true });
+      field.setSelectionRange(field.value.length, field.value.length);
+    }
+    field.addEventListener("input", size);
+    return { destroy: () => field.removeEventListener("input", size) };
+  }
+  const keep = () => {
+    if (text !== object.body) actions.write?.(object.id, text);
+    if (!centre) editing = false;
+  };
   const HOST = {
     slack: "slack.com",
     email: "mail.google.com",
@@ -37,7 +65,7 @@
     object.destination === "linkedin" || object.destination === "x"
       ? m.work_draft_post()
       : object.destination === "github"
-        ? m.work_draft_comment()
+        ? reviewLabel(object.review ?? "comment")
         : m.work_draft_send(),
   );
   const where = $derived(
@@ -59,23 +87,41 @@
 </script>
 
 {#snippet body()}
-  {#if centre && actions.write}<textarea
+  {#if editable && (centre || editing)}<textarea
       class="body edit nodrag nopan nowheel"
+      class:inline={!centre}
       aria-label={where}
       bind:value={text}
-      onblur={() => text !== object.body && actions.write?.(object.id, text)}></textarea>{:else}
-    <div class="body">
-      {#each parts as part, index (index)}
-        {#if part.kind === "list"}<ul>
-            {#each part.items as item, at (at)}<li><Inline text={item} plain /></li>{/each}
-          </ul>{:else}<p>
-            {#each part.lines as line, at (at)}{#if at}<br />{/if}<Inline
-                text={line}
-                plain
-              />{/each}
-          </p>{/if}
-      {/each}
-    </div>{/if}
+      use:fit={!centre}
+      onblur={keep}
+      onkeydown={(event) => {
+        if (event.key === "Escape") (event.currentTarget as HTMLTextAreaElement).blur();
+      }}></textarea>{:else}
+    {#if editable}<div
+        class="body editable"
+        role="button"
+        tabindex="0"
+        aria-label={m.work_draft_edit()}
+        onclick={() => (editing = true)}
+        onkeydown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            editing = true;
+          }
+        }}
+      >
+        {@render words()}
+      </div>{:else}<div class="body">{@render words()}</div>{/if}{/if}
+{/snippet}
+
+{#snippet words()}
+  {#each parts as part, index (index)}
+    {#if part.kind === "list"}<ul>
+        {#each part.items as item, at (at)}<li><Inline text={item} plain /></li>{/each}
+      </ul>{:else}<p>
+        {#each part.lines as line, at (at)}{#if at}<br />{/if}<Inline text={line} plain />{/each}
+      </p>{/if}
+  {/each}
 {/snippet}
 
 {#snippet author(size: number)}
@@ -134,6 +180,18 @@
     </div>
   {/if}
   <footer>
+    {#if object.destination === "github" && actions.review && (object.send ?? "draft") === "draft"}<div
+        class="reviews nodrag nopan"
+        role="radiogroup"
+        aria-label={m.work_draft_review()}
+      >
+        {#each REVIEWS as review (review)}<button
+            type="button"
+            role="radio"
+            aria-checked={(object.review ?? "comment") === review}
+            onclick={() => actions.review?.(object.id, review)}>{reviewLabel(review)}</button
+          >{/each}
+      </div>{/if}
     {#if left !== null}<span class="count" class:over={left < 0}>{left}</span>{/if}
     <button
       type="button"
@@ -253,6 +311,74 @@
     line-height: 1.5;
     resize: vertical;
     outline: none;
+  }
+
+  /* On the canvas: the same words, now a field, with a quiet edge while it has the caret. */
+  .edit.inline {
+    min-block-size: 0;
+    margin: -6px -8px;
+    padding: 6px 8px;
+    overflow: hidden;
+    border-radius: var(--radius-inset);
+    box-shadow: inset 0 0 0 1px var(--color-border-strong);
+    resize: none;
+  }
+
+  .body.editable {
+    margin: -6px -8px;
+    padding: 6px 8px;
+    border-radius: var(--radius-inset);
+    cursor: text;
+    transition: background-color var(--motion-fast) var(--ease-out);
+  }
+
+  .body.editable:hover {
+    background: var(--color-control-hover);
+  }
+
+  .body.editable:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  .reviews {
+    display: inline-flex;
+    gap: 2px;
+    margin-inline-end: auto;
+    padding: 2px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-fill);
+  }
+
+  .reviews button {
+    block-size: 24px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: var(--radius-capsule);
+    background: transparent;
+    color: var(--color-muted);
+    font: inherit;
+    font-size: var(--text-label);
+    font-weight: 500;
+    cursor: default;
+    transition:
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out);
+  }
+
+  .reviews button:hover {
+    color: var(--color-text);
+  }
+
+  .reviews button[aria-checked="true"] {
+    background: var(--color-surface);
+    box-shadow: var(--shadow-raised);
+    color: var(--color-text);
+  }
+
+  .reviews button:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 1px;
   }
 
   .body p,

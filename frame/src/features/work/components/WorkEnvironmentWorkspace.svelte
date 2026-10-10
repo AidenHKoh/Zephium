@@ -69,8 +69,8 @@
     laneElement,
     measurer,
   } from "../lib/project-environment-board";
-  import type { BoardActions } from "../lib/canvas-context";
-  import type { ObjectActions, ObjectView } from "../lib/board/types";
+  import type { BoardActions, DraftEdit } from "../lib/canvas-context";
+  import type { DraftView, ObjectActions, ObjectView } from "../lib/board/types";
   import { objectIcon, objectLabel } from "../lib/object-kind";
   import { clipText, defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
@@ -1361,7 +1361,43 @@
     const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
     return execution && artifact ? artifactView(artifact, execution) : undefined;
   }
+  /** What the person made of each draft before it went: kept while the work is open. */
+  const drafts = new SvelteMap<string, DraftEdit>();
+  const editDraft = (id: string, edit: DraftEdit) => drafts.set(id, { ...drafts.get(id), ...edit });
+  /** The words a draft goes out with, asked of the run so the app's Confirm stands before it. */
+  function draftRequest(view: DraftView, body: string): string {
+    const target = view.targetUrl ?? view.to ?? "";
+    const review = drafts.get(view.id)?.review ?? view.review ?? "comment";
+    const lead =
+      view.destination === "github"
+        ? review === "approve"
+          ? m.work_draft_ask_approve({ target })
+          : review === "request_changes"
+            ? m.work_draft_ask_changes({ target })
+            : m.work_draft_ask_comment({ target })
+        : view.destination === "email"
+          ? view.subject
+            ? m.work_draft_ask_email_subject({ target, subject: view.subject })
+            : m.work_draft_ask_email({ target })
+          : view.destination === "linkedin" || view.destination === "x"
+            ? m.work_draft_ask_post({ target: view.destination === "x" ? "X" : "LinkedIn" })
+            : m.work_draft_ask_message({ target });
+    return `${lead}\n\n${body}`;
+  }
+  async function sendDraft(id: string) {
+    const view = items.find((item) => item.id === id)?.object?.view;
+    if (view?.kind !== "draft" || drafts.get(id)?.sent || busy) return;
+    const body = (drafts.get(id)?.body ?? view.body).trim();
+    if (!body) return;
+    session.composer = draftRequest(view, body);
+    editDraft(id, { sent: true });
+    await send();
+  }
   const boardActions: BoardActions = {
+    send: (id) => void sendDraft(id),
+    write: (id, text) => editDraft(id, { body: text }),
+    review: (id, review) => editDraft(id, { review }),
+    drafted: (id) => drafts.get(id),
     measure: takeMeasure,
     toggle: toggleBlock,
     ask: (name) => askAbout(name),
@@ -1397,6 +1433,9 @@
   };
   /** What an object opened in the centre asks of the canvas. */
   const centreActions: ObjectActions = {
+    send: (id) => void sendDraft(id),
+    write: (id, text) => editDraft(id, { body: text }),
+    review: (id, review) => editDraft(id, { review }),
     choose: (element, chosen) => boardActions.choose(element, chosen),
     compare: (id) => boardActions.compare?.(id),
     ask: (subject) => askAbout(subject),
@@ -1411,6 +1450,17 @@
   const liftedObject = $derived.by((): ObjectView | undefined => {
     const view = liftedItem?.object?.view;
     if (!view) return undefined;
+    if (view.kind === "draft") {
+      const edit = drafts.get(view.id);
+      return edit
+        ? {
+            ...view,
+            ...(edit.body !== undefined ? { body: edit.body } : {}),
+            ...(edit.review ? { review: edit.review } : {}),
+            ...(edit.sent ? { send: "confirming" as const } : {}),
+          }
+        : view;
+    }
     return lifted?.compare && view.kind === "picks" ? picksSheet(view) : view;
   });
   const liftedElement = $derived(snapshot?.elements.find((element) => element.id === lifted?.id));
