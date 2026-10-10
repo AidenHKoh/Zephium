@@ -654,7 +654,10 @@ pub(crate) fn protected_path(path: &Path) -> bool {
         let Some(name) = name.to_str() else {
             return true;
         };
-        let name = name.to_lowercase();
+        // Case-insensitive filesystems also equate characters whose uppercase
+        // expands to ASCII (for example long-s ſ with s). Lowercase alone misses
+        // these aliases, and macOS realpath preserves the caller's spelling.
+        let name = name.to_uppercase().to_lowercase();
         name.starts_with(".env")
             || matches!(name.as_str(),
                 ".ssh" | ".gnupg" | ".aws" | ".azure" | ".kube" | ".config"
@@ -1746,9 +1749,39 @@ mod tests {
             ".SSH",
             "AppData",
             "token.PFX",
+            ".ſſh",
+            "ſecrets",
+            "credentialſ.json",
+            "id_rſa",
+            ".ßh",
+            ".confıg",
         ] {
             assert!(protected_path(Path::new(name)), "{name}");
         }
+    }
+
+    #[test]
+    fn unicode_case_aliases_never_open_protected_files() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().canonicalize().unwrap();
+        for (original, alias) in [
+            ("secrets", "ſecrets"),
+            ("credentials.json", "credentialſ.json"),
+            ("id_rsa", "id_rſa"),
+        ] {
+            std::fs::write(root.join(original), "inert protected fixture").unwrap();
+            // APFS resolves each alias to the existing protected file; on a
+            // case-sensitive volume the same policy still refuses the spelling.
+            assert_eq!(read_text(&root.join(alias)), Err(WorkFileError::Denied));
+            assert!(!file_available(&root.join(alias)));
+        }
+        std::fs::create_dir(root.join(".ssh")).unwrap();
+        std::fs::write(root.join(".ssh/note"), "inert protected fixture").unwrap();
+        assert!(!directory_available(&root.join(".ſſh")));
+        assert_eq!(
+            read_text(&root.join(".ſſh/note")),
+            Err(WorkFileError::Denied)
+        );
     }
 
     #[cfg(unix)]

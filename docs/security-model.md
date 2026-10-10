@@ -1859,8 +1859,8 @@ updates mitigate some of these risks but do not remove them.
 Computer inspects granted folders and proposes file writes and edits that the
 person approves one diff at a time. A shared
 path policy excludes `.env*`, named credential stores, private-key extensions and
-browser credential files from reads, listings and searches, including case variants
-and alternate-stream/trailing-dot spellings. Regular files with multiple hard links
+browser credential files from reads, listings and searches, including Unicode case aliases
+(such as long-s ſ) and alternate-stream/trailing-dot spellings. Regular files with multiple hard links
 are refused. Unix inspection opens components relative to held directory descriptors
 with `O_NOFOLLOW`; Windows inspection retains its directory/reparse checks and adds
 handle-based hard-link checks. Search loads local ignore files through the same
