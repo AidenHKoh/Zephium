@@ -1,11 +1,20 @@
 //! Bounded file steps inside folders the person granted for one run.
 //! Paths resolve through granted roots and protected names are excluded.
-//! Read handles refuse symlinks and hard links. Mutations remain unavailable
-//! until every supported platform has a confined writer and recoverable deletion.
+//! Read handles refuse symlinks and hard links. Approved writes and edits are
+//! atomic; moving and deleting remain gated on recoverable deletion.
 use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
-use zephium_core::work::{runtime::*, WorkArtifactId};
+use zephium_core::work::runtime::*;
+#[cfg(not(unix))]
+use zephium_core::work::WorkArtifactId;
+
+#[cfg(unix)]
+mod unix_write;
+#[cfg(windows)]
+mod windows_marker;
+#[cfg(unix)]
+use unix_write::write_atomic;
 
 const MAX_READ_BYTES: u64 = 1024 * 1024;
 const MAX_LIST_ENTRIES: usize = 200;
@@ -532,8 +541,15 @@ impl WorkFileGrant {
         }
         let (path, kind, after, bytes) = if let Some(next) = change.next {
             write_atomic(&file, next.as_bytes(), change.before.as_deref())?;
-            let (bytes, digest, _) = read_text(&file)?;
-            (file, WorkFileKindV1::Written, Some(digest), bytes)
+            // Publication attests the bytes from our owned output handle. A
+            // later pathname read could observe a different, concurrently edited file.
+            let digest = format!("{:x}", Sha256::digest(next.as_bytes()));
+            (
+                file,
+                WorkFileKindV1::Written,
+                Some(digest),
+                next.len() as u32,
+            )
         } else if let Some(to) = change.destination {
             let _destination_directories =
                 pin_mutation_directory(to.parent().ok_or(WorkFileError::Denied)?)?;
@@ -1112,7 +1128,8 @@ fn pin_mutation_directory(path: &Path) -> Result<Vec<std::fs::File>, WorkFileErr
     #[cfg(windows)]
     {
         let mut pinned = pin_directories_with_write(path, true)?;
-        pinned.push(mutation_marker(path)?);
+        let parent = pinned.last().ok_or(WorkFileError::Denied)?;
+        pinned.push(mutation_marker(parent, path)?);
         Ok(pinned)
     }
     #[cfg(not(windows))]
@@ -1120,22 +1137,16 @@ fn pin_mutation_directory(path: &Path) -> Result<Vec<std::fs::File>, WorkFileErr
 }
 
 #[cfg(windows)]
-fn mutation_marker(path: &Path) -> Result<std::fs::File, WorkFileError> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows::Win32::Storage::FileSystem::{
-        FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
-    };
+fn mutation_marker(parent: &std::fs::File, path: &Path) -> Result<std::fs::File, WorkFileError> {
     // A held child keeps the parent nonempty, so its reparse tag cannot change.
-    let marker = path.join(format!(".zephium-pin-{}", WorkArtifactId::generate()));
-    let marker_file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .share_mode(FILE_SHARE_READ.0)
-        .custom_flags((FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT).0)
-        .open(&marker)
-        .map_err(|_| WorkFileError::Denied)?;
-    if !opened_at(&marker_file, &marker) {
+    // Create relative to the held parent: an in-place junction raced before the
+    // marker must never cause even a temporary write through its target path.
+    if !safe_reparse(parent) || !opened_at(parent, path) {
+        return Err(WorkFileError::Denied);
+    }
+    let name = format!(".zephium-pin-{}", WorkArtifactId::generate());
+    let marker_file = windows_marker::create(parent, &name)?;
+    if !safe_reparse(parent) || !opened_at(&marker_file, &path.join(name)) {
         return Err(WorkFileError::Denied);
     }
     Ok(marker_file)
@@ -1273,8 +1284,26 @@ fn open_checked_file(file: &Path, payload: bool) -> Result<CheckedFile, WorkFile
 
 /// Bytes, digest and, for UTF-8 text without NUL, the content.
 pub(crate) fn read_text(file: &Path) -> Result<(u32, String, Option<String>), WorkFileError> {
+    read_text_limited(file, MAX_READ_BYTES)
+}
+
+pub(crate) fn file_available(file: &Path) -> bool {
+    open_checked_file(file, false).is_ok()
+}
+
+pub(crate) fn directory_available(path: &Path) -> bool {
+    !protected_path(path) && pin_directories(path).is_ok()
+}
+
+pub(crate) fn read_text_limited(
+    file: &Path,
+    limit: u64,
+) -> Result<(u32, String, Option<String>), WorkFileError> {
+    if limit == 0 || limit > MAX_READ_BYTES {
+        return Err(WorkFileError::Denied);
+    }
     let mut checked = open_checked_file(file, true)?;
-    if checked.metadata.len() > MAX_READ_BYTES {
+    if checked.metadata.len() > limit {
         return Err(WorkFileError::TooLarge);
     }
     use std::io::Read;
@@ -1282,10 +1311,10 @@ pub(crate) fn read_text(file: &Path) -> Result<(u32, String, Option<String>), Wo
     checked
         .input
         .by_ref()
-        .take(MAX_READ_BYTES + 1)
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| WorkFileError::Io)?;
-    if bytes.len() as u64 > MAX_READ_BYTES {
+    if bytes.len() as u64 > limit {
         return Err(WorkFileError::TooLarge);
     }
     let byte_count = bytes.len() as u32;
@@ -1296,6 +1325,7 @@ pub(crate) fn read_text(file: &Path) -> Result<(u32, String, Option<String>), Wo
     };
     Ok((byte_count, digest, text))
 }
+#[cfg(not(unix))]
 fn write_atomic(file: &Path, bytes: &[u8], expected: Option<&str>) -> Result<(), WorkFileError> {
     use std::io::Write;
     let parent = file.parent().ok_or(WorkFileError::Denied)?;
@@ -1986,7 +2016,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn approved_mutation_guard_blocks_in_place_junctions_and_cleans_redirected_creation() {
+    fn approved_mutation_guard_refuses_in_place_junctions_before_marker_creation() {
         let root = tempfile::tempdir().unwrap();
         let folder = root.path().join("files");
         let outside = root.path().join("outside");
@@ -2004,7 +2034,7 @@ mod tests {
         let pins = pin_directories_with_write(&folder, true).unwrap();
         set_junction(&folder, &outside).unwrap();
         assert!(matches!(
-            mutation_marker(&folder),
+            mutation_marker(pins.last().unwrap(), &folder),
             Err(WorkFileError::Denied)
         ));
         assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
@@ -2025,7 +2055,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Native confined mutation and Trash gate is closed; retained for writer qualification"]
     fn writes_are_proposed_as_diffs_and_applied_atomically() {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
@@ -2123,7 +2152,6 @@ mod tests {
             .contains("src/main.rs"));
     }
     #[test]
-    #[ignore = "Native confined mutation and Trash gate is closed; retained for writer qualification"]
     fn work_multi_edit_is_atomic_and_detects_changed_digests() {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()

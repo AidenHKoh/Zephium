@@ -1,10 +1,9 @@
 //! `describe_project`: a granted folder read exactly into a `project`
 //! object. The stack comes from manifests, the structure from a bounded
-//! walk, the scripts from the files that define them and the state from git;
-//! nothing is the model's guess. A second reading of the same folder revises
-//! the first.
+//! walk and the scripts from the files that define them. Git state remains
+//! unavailable until a confined runner is qualified; no raw process is launched.
+//! A second reading of the same folder revises the first.
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde_json::{json, Value};
 use zephium_core::work::{
@@ -25,7 +24,6 @@ const ROOT_LISTED: usize = 24;
 const CHILDREN_LISTED: usize = 8;
 const GRANDCHILDREN_LISTED: usize = 6;
 const DIR_READ: usize = 2_000;
-const GIT_TIMEOUT: Duration = Duration::from_secs(3);
 /// What project templates write as a description: it says nothing.
 const TEMPLATE_DESCRIPTIONS: [&str; 4] = [
     "A Tauri App",
@@ -53,7 +51,7 @@ const SKIPPED: [&str; 16] = [
     "gen",
 ];
 /// Hidden entries still worth showing.
-const HIDDEN_SHOWN: [&str; 3] = [".github", ".env.example", ".gitlab-ci.yml"];
+const HIDDEN_SHOWN: [&str; 2] = [".github", ".gitlab-ci.yml"];
 /// Folders whose own folders are opened one level further.
 const DEEP: [&str; 9] = [
     "src",
@@ -80,7 +78,7 @@ impl LeadToolSet for ProjectTools {
         }
         vec![WorkModelTool {
             name: "describe_project".into(),
-            description: "Reads a granted folder exactly and places it as a project object: what it is, its stack from the manifests, its structure, its scripts and its git state. Use it for what a folder or project is or holds; it is the result for such a request. Reading the same folder again updates the object in place. Returns a short digest with the source key.".into(),
+            description: "Reads a granted folder exactly and places it as a project object: what it is, its stack from the manifests, its structure and its scripts. Git state is currently unavailable while a confined runner is being qualified. Use it for what a folder or project is or holds; it is the result for such a request. Reading the same folder again updates the object in place. Returns a short digest with the source key.".into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -120,7 +118,7 @@ async fn describe(context: LeadToolContext<'_>, args: &Value) -> Result<String, 
     let root = files
         .resolve(&asked, false)
         .map_err(|error| format!("{asked}: {}", error.note()))?;
-    if !root.is_dir() {
+    if !crate::work_files::directory_available(&root) {
         return Err(format!("{asked} is not a folder"));
     }
     let root_text = root.to_string_lossy().into_owned();
@@ -178,7 +176,7 @@ async fn describe(context: LeadToolContext<'_>, args: &Value) -> Result<String, 
             .map_err(|_| "The folder could not be read".to_owned())?
     };
     if scanned.tree.is_empty() {
-        return Err(format!("{asked} is empty"));
+        return Err(format!("{asked} has no readable project entries"));
     }
     let git = git_state(&root).await;
     let data = scanned.into_data(&root_text, git);
@@ -285,7 +283,7 @@ fn digest(data: &WorkArtifactDataV1, key: &str) -> String {
                 (None, None) => String::new(),
             }
         )),
-        None => out.push_str("Not a git repository\n"),
+        None => out.push_str("Git state unavailable\n"),
     }
     out.push_str("The object shows all of this; the reply says what the project is and its state in one to three sentences, without restating the object.");
     out
@@ -404,11 +402,9 @@ fn sentence(text: &str, max: usize) -> Option<String> {
 }
 
 fn read(path: &Path) -> Option<String> {
-    let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > MANIFEST_BYTES {
-        return None;
-    }
-    std::fs::read_to_string(path).ok()
+    crate::work_files::read_text_limited(path, MANIFEST_BYTES)
+        .ok()?
+        .2
 }
 
 /// Reads the folder: manifests at the root and one level down, the tree and
@@ -429,7 +425,7 @@ fn scan(root: &Path) -> Scanned {
             ]
             .iter()
             .map(|dir| root.join(dir))
-            .filter(|dir| dir.is_dir()),
+            .filter(|dir| crate::work_files::directory_available(dir)),
         )
         .collect();
     for dir in &manifests {
@@ -449,7 +445,7 @@ fn scan(root: &Path) -> Scanned {
                 ("bun.lock", "Bun", "bun.sh"),
                 ("package-lock.json", "npm", "npmjs.com"),
             ] {
-                if dir.join(lock).exists() {
+                if crate::work_files::file_available(&dir.join(lock)) {
                     stack.add(name, None, "Package manager", Some(host), &relative(lock));
                     break;
                 }
@@ -495,7 +491,7 @@ fn scan(root: &Path) -> Scanned {
                 scanned.name = Some(product.to_owned());
             }
         }
-        if dir.join("Gemfile").exists() {
+        if crate::work_files::file_available(&dir.join("Gemfile")) {
             stack.add(
                 "Ruby",
                 None,
@@ -515,7 +511,9 @@ fn scan(root: &Path) -> Scanned {
                 );
             }
         }
-        if dir.join("deno.json").exists() || dir.join("deno.jsonc").exists() {
+        if crate::work_files::file_available(&dir.join("deno.json"))
+            || crate::work_files::file_available(&dir.join("deno.jsonc"))
+        {
             stack.add(
                 "Deno",
                 None,
@@ -525,7 +523,7 @@ fn scan(root: &Path) -> Scanned {
             );
         }
     }
-    if root.join("Dockerfile").exists() {
+    if crate::work_files::file_available(&root.join("Dockerfile")) {
         stack.add(
             "Docker",
             None,
@@ -534,7 +532,7 @@ fn scan(root: &Path) -> Scanned {
             "Dockerfile",
         );
     }
-    if root.join(".github/workflows").is_dir() {
+    if crate::work_files::directory_available(&root.join(".github/workflows")) {
         stack.add(
             "GitHub Actions",
             None,
@@ -1107,7 +1105,7 @@ fn scripts(root: &Path, scanned: &mut Scanned) {
         }
     }
     if scanned.scripts.is_empty() {
-        if root.join("Cargo.toml").exists() {
+        if crate::work_files::file_available(&root.join("Cargo.toml")) {
             for (name, command) in [
                 ("build", "cargo build"),
                 ("test", "cargo test"),
@@ -1115,7 +1113,7 @@ fn scripts(root: &Path, scanned: &mut Scanned) {
             ] {
                 push_script(scanned, name, command, "Cargo");
             }
-        } else if root.join("go.mod").exists() {
+        } else if crate::work_files::file_available(&root.join("go.mod")) {
             for (name, command) in [("build", "go build ./..."), ("test", "go test ./...")] {
                 push_script(scanned, name, command, "Go");
             }
@@ -1131,7 +1129,7 @@ struct Entry {
 /// A folder's shown entries: folders first, then files, by name; hidden
 /// and generated ones left out. The count is of everything shown.
 fn entries(dir: &Path) -> Vec<Entry> {
-    let Ok(read) = std::fs::read_dir(dir) else {
+    let Ok(read) = crate::work_files::read_directory(dir) else {
         return Vec::new();
     };
     let mut out: Vec<Entry> = read
@@ -1242,55 +1240,14 @@ fn set_more(tree: &mut [WorkProjectEntryV1], path: &str, rest: usize) {
     }
 }
 
-/// A real git binary; macOS's `/usr/bin/git` stub offers to install the
-/// developer tools, so it is used only when they are there.
-fn git_binary() -> Option<PathBuf> {
-    [
-        "/opt/homebrew/bin/git",
-        "/usr/local/bin/git",
-        "/Library/Developer/CommandLineTools/usr/bin/git",
-        "/Applications/Xcode.app/Contents/Developer/usr/bin/git",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .find(|path| path.is_file())
+/// This field must come from a qualified typed runner. Git status can execute
+/// checkout filters and read included configuration; a read-looking argv and
+/// the generic command approval gate do not confine this independent caller.
+async fn git_state(_root: &Path) -> Option<WorkProjectGitV1> {
+    None
 }
 
-/// Branch, changed files and distance from upstream, from `git status`.
-async fn git_state(root: &Path) -> Option<WorkProjectGitV1> {
-    if !root.join(".git").exists() {
-        return None;
-    }
-    let git = git_binary()?;
-    let output = tokio::time::timeout(
-        GIT_TIMEOUT,
-        tokio::process::Command::new(git)
-            .arg("-c")
-            .arg("core.fsmonitor=false")
-            .arg("-C")
-            .arg(root)
-            .args([
-                "status",
-                "--porcelain=v1",
-                "--branch",
-                "--untracked-files=normal",
-            ])
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("LC_ALL", "C")
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    parse_status(&String::from_utf8_lossy(&output.stdout))
-}
-
+#[cfg(test)]
 fn parse_status(text: &str) -> Option<WorkProjectGitV1> {
     let mut lines = text.lines();
     let head = lines.next()?.strip_prefix("## ")?;
@@ -1365,7 +1322,7 @@ mod tests {
         ] {
             std::fs::write(root.join(file), "").unwrap();
         }
-        root
+        root.canonicalize().unwrap()
     }
 
     #[test]
@@ -1414,6 +1371,75 @@ mod tests {
         assert_eq!(scripts.len(), 2);
         assert_eq!(scripts[0].source.as_deref(), Some("package.json"));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_scan_refuses_linked_manifests_and_protected_names() {
+        use std::os::unix::fs::symlink;
+        let scratch = tempfile::tempdir().unwrap();
+        let base = scratch.path().canonicalize().unwrap();
+        let root = base.join("project");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join(".github")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(
+            outside.join("package.json"),
+            r#"{"name":"outside-fixture-marker","description":"outside credential fixture"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            outside.join("Cargo.toml"),
+            "[package]\nname = \"outside-fixture-marker\"\n",
+        )
+        .unwrap();
+        std::fs::write(outside.join("private.txt"), "outside-fixture-marker").unwrap();
+        symlink(outside.join("package.json"), root.join("package.json")).unwrap();
+        std::fs::hard_link(outside.join("private.txt"), root.join("README.md")).unwrap();
+        symlink(&outside, root.join("backend")).unwrap();
+        symlink(&outside, root.join(".github/workflows")).unwrap();
+        for name in [
+            ".env.example",
+            ".ENV.PRODUCTION",
+            "credentials.json",
+            "private.pem",
+        ] {
+            std::fs::write(root.join(name), "protected-fixture-marker").unwrap();
+        }
+        std::fs::write(root.join("notes.txt"), "ordinary project fixture").unwrap();
+        let data = scan(&root).into_data(&root.to_string_lossy(), None);
+        let encoded = serde_json::to_string(&data).unwrap();
+        assert!(!encoded.contains("outside-fixture-marker"));
+        assert!(!encoded.contains("protected-fixture-marker"));
+        assert!(
+            !encoded.contains(".env.example")
+                && !encoded.contains("credentials.json")
+                && !encoded.contains("private.pem")
+        );
+        assert!(!encoded.contains("GitHub Actions"));
+        assert!(encoded.contains("notes.txt"));
+        // A parent replaced after grant validation cannot redirect the scan.
+        std::fs::rename(&root, base.join("original")).unwrap();
+        symlink(&outside, &root).unwrap();
+        let scanned = scan(&root);
+        assert!(scanned.tree.is_empty() && scanned.readme.is_none() && scanned.stack.is_empty());
+    }
+
+    #[tokio::test]
+    async fn project_git_is_unavailable_without_claiming_no_repository() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::write(
+            root.join("README.md"),
+            "# Project\nOrdinary project fixture.\n",
+        )
+        .unwrap();
+        assert!(git_state(&root).await.is_none());
+        let data = scan(&root).into_data(&root.to_string_lossy(), None);
+        let text = digest(&data, "s1");
+        assert!(text.contains("Git state unavailable"));
+        assert!(!text.contains("Not a git repository"));
     }
 
     #[test]

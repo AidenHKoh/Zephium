@@ -1864,14 +1864,19 @@ and alternate-stream/trailing-dot spellings. Regular files with multiple hard li
 are refused. Unix inspection opens components relative to held directory descriptors
 with `O_NOFOLLOW`; Windows inspection retains its directory/reparse checks and adds
 handle-based hard-link checks. Search loads local ignore files through the same
-bounded reader and does not load parent or global ignore configuration.
+bounded reader and does not load parent or global ignore configuration. Project
+descriptions use those same guarded readers/listings; their Git state is explicitly
+unavailable and does not launch an independent Git process.
 
 Commands and coding-agent hand-offs fail before spawning, regardless of prior
 approval. An approved write or edit resolves through the same path policy, writes
-atomically and only if the file still matches what was read. Moving and deleting
-files fail while recoverable deletion is unavailable; no permanent deletion is
-offered. Process
-groups, Windows JobObjects and command classification are lifecycle/approval
+atomically after checking the prior digest. Unix creation, publication and cleanup
+are relative to held directory descriptors; Windows guard markers are created
+relative to the held parent before pathname-based publication. These checks reject
+observed changes; they are not a compare-and-swap against hostile same-user writers.
+Moving and deleting files fail while recoverable deletion is unavailable; no
+permanent deletion is offered. Process groups, Windows JobObjects and command
+classification are lifecycle/approval
 mechanisms, not a sandbox. The retained runner uses a fixed environment and no Unix
 login shell. Native Windows runtime qualification remains outstanding. This policy
 cannot identify secrets stored in arbitrary ordinary file contents and is not a
