@@ -50,6 +50,28 @@ int main(int argc, char **argv) {
         if (child == 0) _exit(0);
         if (child > 0) { waitpid(child, NULL, 0); puts("opened"); }
         else result(-1);
+    } else if (!strcmp(argv[1], "double-fork")) {
+        pid_t first = fork();
+        if (first == 0) {
+            setsid();
+            pid_t second = fork();
+            if (second == 0) { sleep(2); _exit(0); }
+            if (second > 0) waitpid(second, NULL, 0);
+            _exit(0);
+        }
+        if (first > 0) { waitpid(first, NULL, 0); puts("opened"); }
+        else result(-1);
+    } else if (!strcmp(argv[1], "group-hold") && argc == 4) {
+        /* A group leader cannot setsid directly; changing its group first is
+           allowed on the qualified host. Leave the final group changed so the
+           Stop fixture actually requires the owned positive PID. */
+        setsid();
+        int changed = setpgid(0, (pid_t)atoi(argv[3])) == 0 && getpgrp() != getpid();
+        int fd = open(argv[2], O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (fd < 0) return 3;
+        const char *state = changed ? "moved" : "denied";
+        if (write(fd, state, strlen(state)) < 0) { close(fd); return 4; }
+        close(fd); sleep(3);
     } else if (!strcmp(argv[1], "environment")) {
         puts(getenv("SSH_AUTH_SOCK") || getenv("GITHUB_TOKEN") || getenv("ZEPHIUM_RUNNER_PARENT_SENTINEL") ? "present" : "absent");
     } else if (!strcmp(argv[1], "hold") && argc == 3) {

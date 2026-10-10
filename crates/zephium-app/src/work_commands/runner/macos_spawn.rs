@@ -111,6 +111,7 @@ impl Drop for Child {
         // process. There is never a persisted PID or model-selected target.
         unsafe {
             libc::kill(-pid, libc::SIGKILL);
+            libc::kill(pid, libc::SIGKILL);
         }
         let mut status = 0;
         let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };

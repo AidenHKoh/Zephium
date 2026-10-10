@@ -122,7 +122,7 @@ mod groups {
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
     };
-    type Row = (i32, Arc<AtomicBool>);
+    type Row = (i32, Arc<AtomicBool>, bool);
     static CLOSING: AtomicBool = AtomicBool::new(false);
     fn registry() -> &'static Mutex<Vec<Row>> {
         static GROUPS: OnceLock<Mutex<Vec<Row>>> = OnceLock::new();
@@ -132,10 +132,13 @@ mod groups {
         pub pid: i32,
         pub shutdown: Arc<AtomicBool>,
         armed: bool,
+        owned_single: bool,
     }
     impl Group {
         /// Spawn and registration share shutdown's lock. Typed confined work
         /// cannot start after the terminal process boundary or evade its drain.
+        /// The caller must own every reap through poll_single_process; this is
+        /// not suitable for independently reaped Tokio or multi-process children.
         pub fn launch<T, E>(
             spawn: impl FnOnce() -> Result<(T, u32), E>,
             stopped: E,
@@ -146,26 +149,29 @@ mod groups {
             }
             let (child, pid) = spawn()?;
             let shutdown = Arc::new(AtomicBool::new(false));
-            rows.push((pid as i32, shutdown.clone()));
+            rows.push((pid as i32, shutdown.clone(), true));
             Ok((
                 child,
                 Self {
                     pid: pid as i32,
                     shutdown,
                     armed: true,
+                    owned_single: true,
                 },
             ))
         }
         pub fn new(pid: u32) -> Self {
             let shutdown = Arc::new(AtomicBool::new(false));
-            registry()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push((pid as i32, shutdown.clone()));
+            registry().lock().unwrap_or_else(|e| e.into_inner()).push((
+                pid as i32,
+                shutdown.clone(),
+                false,
+            ));
             Self {
                 pid: pid as i32,
                 shutdown,
                 armed: true,
+                owned_single: false,
             }
         }
         /// Reap only a qualified single-process group while shutdown is excluded.
@@ -184,31 +190,37 @@ mod groups {
                     .is_some_and(|error| error.raw_os_error() == Some(libc::ECHILD))
             {
                 self.armed = false;
-                rows.retain(|(pid, _)| *pid != self.pid);
+                rows.retain(|(pid, _, _)| *pid != self.pid);
             }
             result
         }
         pub fn signal(&self, signal: i32) {
             if self.armed {
-                signal_group(self.pid, signal);
+                signal_group(self.pid, signal, self.owned_single);
             }
         }
         pub fn quitting(&self) -> bool {
             self.shutdown.load(Ordering::Acquire)
         }
     }
-    fn signal_group(pid: i32, signal: i32) {
+    fn signal_group(pid: i32, signal: i32, owned_single: bool) {
         // Only a live child group created by this runner is registered. A negative
         // PID addresses that group; no shell parsing or user-selected PID occurs.
         unsafe {
             libc::kill(-pid, signal);
+            // Native single-process owners serialize every reap with registry
+            // removal. This exact unreaped PID remains ours even if code changes
+            // its process group/session. Legacy Tokio children do not qualify.
+            if owned_single {
+                libc::kill(pid, signal);
+            }
         }
     }
     impl Drop for Group {
         fn drop(&mut self) {
             let mut rows = registry().lock().unwrap_or_else(|e| e.into_inner());
             self.signal(libc::SIGKILL);
-            rows.retain(|(pid, _)| *pid != self.pid);
+            rows.retain(|(pid, _, _)| *pid != self.pid);
         }
     }
     pub fn shutdown() {
@@ -219,9 +231,9 @@ mod groups {
             if rows.is_empty() {
                 return;
             }
-            for (pid, flag) in rows.iter() {
+            for (pid, flag, single) in rows.iter() {
                 flag.store(true, Ordering::Release);
-                signal_group(*pid, libc::SIGTERM);
+                signal_group(*pid, libc::SIGTERM, *single);
             }
         }
         // The app must not exit with surviving children, even if its async
@@ -233,8 +245,8 @@ mod groups {
                     return;
                 }
                 if started.elapsed() >= std::time::Duration::from_secs(2) {
-                    for (pid, _) in rows.iter() {
-                        signal_group(*pid, libc::SIGKILL);
+                    for (pid, _, single) in rows.iter() {
+                        signal_group(*pid, libc::SIGKILL, *single);
                     }
                     return;
                 }

@@ -505,6 +505,7 @@ mod tests {
             (vec!["network".into(), port.into()], "denied\n"),
             (vec!["fork".into()], "denied\n"),
             (vec!["spawn".into()], "denied\n"),
+            (vec!["double-fork".into()], "denied\n"),
             (vec!["environment".into()], "absent\n"),
         ] {
             let result = run(&snapshot, &helper, &args, &cancelled).await.unwrap();
@@ -561,6 +562,80 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "Native same-owner group-change/Stop fixture, only inert scratch"]
+    async fn native_stop_does_not_depend_on_group_membership() {
+        let snapshot = Snapshot::fixture(&[]);
+        let helper = helper(&snapshot);
+        let ready = snapshot.work.join(".git/session-ready");
+        let requested = std::sync::Mutex::new(None::<std::time::Instant>);
+        let cancel = || async {
+            if std::fs::read_to_string(&ready)
+                .is_ok_and(|value| matches!(value.as_str(), "moved" | "denied"))
+            {
+                requested
+                    .lock()
+                    .unwrap()
+                    .get_or_insert_with(std::time::Instant::now);
+                true
+            } else {
+                false
+            }
+        };
+        let original_group = unsafe { libc::getpgrp() }.to_string();
+        let result = run(
+            &snapshot,
+            &helper,
+            &[
+                "group-hold".into(),
+                ready.as_os_str().to_owned(),
+                original_group.into(),
+            ],
+            &cancel,
+        )
+        .await;
+        assert!(matches!(result, Err(Failure::Stopped)));
+        let state = std::fs::read_to_string(&ready).unwrap();
+        assert_eq!(
+            state, "moved",
+            "the fixture must leave its initial process group"
+        );
+        eprintln!("final_group_change={state}");
+        assert!(requested.lock().unwrap().unwrap().elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    #[ignore = "Native owned-child drop proof, only inert scratch"]
+    async fn native_dropped_child_settles_after_group_change() {
+        let snapshot = Snapshot::fixture(&[]);
+        let helper = helper(&snapshot);
+        let ready = snapshot.work.join(".git/drop-ready");
+        let args = [
+            "group-hold".into(),
+            ready.as_os_str().to_owned(),
+            unsafe { libc::getpgrp() }.to_string().into(),
+        ];
+        let mut child = process(&snapshot, &helper, &args).unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read_to_string(&ready)
+                .is_ok_and(|value| matches!(value.as_str(), "moved" | "denied"))
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fixture reached running state");
+        drop(child);
+        // The fixture keeps stdout open while alive and cannot create children.
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), stdout.read_to_end(&mut bytes))
+            .await
+            .expect("drop ended the exact child")
+            .unwrap();
+        assert!(bytes.is_empty());
+    }
+
+    #[tokio::test]
     #[ignore = "Native descriptor inheritance proof uses only an inert outside file"]
     async fn native_child_cannot_inherit_unlisted_handles() {
         use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -591,11 +666,17 @@ mod tests {
         let snapshot = Snapshot::fixture(&[]);
         let helper = helper(&snapshot);
         let ready = snapshot.work.join(".git/ready");
-        let args = ["hold".into(), ready.as_os_str().to_owned()];
+        let args = [
+            "group-hold".into(),
+            ready.as_os_str().to_owned(),
+            unsafe { libc::getpgrp() }.to_string().into(),
+        ];
         let operation = run(&snapshot, &helper, &args, &|| async { false });
         let shutdown = async {
             tokio::time::timeout(Duration::from_secs(5), async {
-                while !ready.exists() {
+                while !std::fs::read_to_string(&ready)
+                    .is_ok_and(|value| matches!(value.as_str(), "moved" | "denied"))
+                {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             })

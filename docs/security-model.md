@@ -1882,7 +1882,7 @@ open-only helpers that never consume secret bytes or directory names; absent
 real targets are reported separately from denial evidence. Windows LPAC token,
 ACL and job adapters remain gated pending physical Windows qualification. Darwin
 spawn closes all non-stdio descriptors atomically; child reap and shutdown share
-the process registry lock. Stop is reported as confirmed only after exit is observed.
+the process registry lock. Qualified single-process cleanup signals both the initial group and its exact unreaped child, so a group change does not evade Stop; independently reaped legacy children remain group-only. Stop is reported as confirmed only after exit is observed.
 
 `git_changes` compares 1–64 selected ordinary text paths with their current SHA-1 Git index content. A typed no-follow broker reads only index v2/v3 and selected loose or pack-v2/idx-v2 objects; it never reads source configuration, hooks, alternates or HEAD. Protected-path object IDs (including aliased IDs and delta bases) are refused. Checksums, CRCs, offsets, delta cycles/depth, input/output budgets and source identities are checked, and the index plus selected working files are revalidated before disclosure. Only validated text copies enter the qualified runner. This is a content comparison, excluding staged-versus-HEAD, untracked files, modes and filter transformations; unsupported layouts fail closed. The broker has a cooperative 5-second processing budget and an independent 10-second worker-await deadline. Windows implementation is source-checked but runtime-gated pending native qualification.
 
