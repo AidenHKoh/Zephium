@@ -9,3 +9,5 @@ export type {
 } from "$shared/ipc/bindings";
 export { mediaUrl, mediaSize, pageFrameUrl } from "./media";
 export type { MediaAssetV1 } from "./media";
+export { OwnedObjects } from "./owned-objects";
+export type { OwnedObject } from "./owned-objects";

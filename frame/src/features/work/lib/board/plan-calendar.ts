@@ -51,18 +51,29 @@ export function planWeeks(
   const dated = plan.steps.flatMap((step, index) =>
     step.date ? [{ index, date: step.date }] : [],
   );
-  if (dated.length < LEAST_STEPS || dated.length < plan.steps.length * 0.8) return null;
   const days = dated.map(({ date }) => parse(date).getTime());
-  const first = new Date(Math.min(...days));
-  const last = new Date(Math.max(...days));
-  if (Math.round((last.getTime() - first.getTime()) / DAY_MS) + 1 < LEAST_DAYS) return null;
+  let first: Date;
+  let last: Date;
+  if (plan.calendar) {
+    // A calendar the person keeps: whole months, from its first day's month (this one when empty).
+    const now = options.today ?? new Date();
+    const from = days.length ? new Date(Math.min(...days)) : now;
+    const to = days.length ? new Date(Math.max(...days)) : now;
+    first = new Date(from.getFullYear(), from.getMonth(), 1);
+    last = new Date(to.getFullYear(), to.getMonth() + 1, 0);
+  } else {
+    if (dated.length < LEAST_STEPS || dated.length < plan.steps.length * 0.8) return null;
+    first = new Date(Math.min(...days));
+    last = new Date(Math.max(...days));
+    if (Math.round((last.getTime() - first.getTime()) / DAY_MS) + 1 < LEAST_DAYS) return null;
+  }
   const weekStart = (options.firstDay ?? firstWeekday()) % 7;
   const start = new Date(first);
   start.setDate(start.getDate() - ((start.getDay() - weekStart + 7) % 7));
   const end = new Date(last);
   end.setDate(end.getDate() + ((weekStart + 6 - end.getDay() + 7) % 7));
   const span = Math.round((end.getTime() - start.getTime()) / DAY_MS) + 1;
-  if (span / 7 > MOST_WEEKS) return null;
+  if (span / 7 > MOST_WEEKS && !plan.calendar) return null;
   const byDay = new Map<string, number[]>();
   for (const { index, date } of dated) byDay.set(date, [...(byDay.get(date) ?? []), index]);
   const today = iso(options.today ?? new Date());

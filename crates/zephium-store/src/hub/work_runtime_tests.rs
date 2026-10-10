@@ -1792,6 +1792,7 @@ fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
         }],
         total: None,
         checkable: false,
+        calendar: false,
     };
     assert!(matches!(
         revise(&mut hub, 3, 20, plan, 10),

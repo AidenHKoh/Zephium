@@ -365,6 +365,9 @@ pub enum WorkArtifactDataV1 {
         total: Option<WorkLabelledV1>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         checkable: bool,
+        /// Drawn as a calendar of its days whatever it holds.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        calendar: bool,
     },
     /// Items without time order.
     List {

@@ -66,6 +66,8 @@ export type CanvasItem = {
   trail?: readonly TrailLine[];
   /** A lane card's size, set by its lane rather than saved. */
   size?: CanvasSize;
+  /** The person's own object this card draws: its resource, which edits write to. */
+  owned?: string;
   /** Transient agent presence: its orb's seed, what it does, where it stands, what it says. */
   agent?: {
     seed: number;

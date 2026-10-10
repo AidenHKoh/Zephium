@@ -275,6 +275,8 @@ export type PlanView = ObjectBase & {
   steps: readonly PlanStepView[];
   total?: { label: string; value: string };
   checkable: boolean;
+  /** Drawn as a calendar whatever it holds: the person's calendar block. */
+  calendar?: boolean;
 };
 
 type ListStyle = "todo" | "messages" | "reading" | "requirements" | "questions";

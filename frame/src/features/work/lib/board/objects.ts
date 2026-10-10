@@ -567,11 +567,11 @@ function pictured(
 
 function leadView(
   id: string,
-  artifact: WorkArtifactV1,
-  execution: WorkExecutionFact,
+  artifact: Pick<WorkArtifactV1, "title" | "data"> & Partial<WorkArtifactV1>,
+  execution: WorkExecutionFact | null,
   fetched: ReadonlyMap<string, Picture> = new Map(),
 ): ObjectView | null {
-  const evidence = artifactView(artifact, execution).evidence;
+  const evidence = execution ? artifactView(artifact as WorkArtifactV1, execution).evidence : [];
   const sources: Record<string, EvidenceReference> = Object.fromEntries(
     evidence.map((reference) => [reference.key, reference]),
   );
@@ -664,6 +664,7 @@ function leadView(
         ...base,
         kind: "plan",
         checkable: !!data.checkable,
+        ...(data.calendar ? { calendar: true } : {}),
         ...(data.total ? { total: { label: data.total.label, value: data.total.value } } : {}),
         steps: data.steps.map((step) => ({
           ...(step.when ? { when: step.when } : {}),
@@ -673,7 +674,7 @@ function leadView(
           kind: step.kind,
           ...(step.cost ? { cost: step.cost } : {}),
           ...(step.place ? { place: step.place } : {}),
-          ...pickLink(step.pick, execution),
+          ...(execution ? pickLink(step.pick, execution) : {}),
         })),
       };
     case "list":
@@ -699,7 +700,7 @@ function leadView(
       };
     case "sheet":
       return (
-        pictured(base, data, namedPictures(execution, fetched)) ?? {
+        pictured(base, data, execution ? namedPictures(execution, fetched) : new Map()) ?? {
           ...base,
           kind: "sheet",
           columns: data.columns.map((column) => ({
@@ -889,6 +890,15 @@ const HERO = new Set(["diagram", "picks", "sheet", "plan", "project"]);
  * A run's objects: the reply that heads its result, then everything else it
  * made, legacy blocks turned into the objects they are now.
  */
+/** The person's own object, drawn by the renderer the agent's objects use; it cites nothing. */
+export function ownedView(
+  id: string,
+  title: string,
+  data: WorkArtifactV1["data"],
+): ObjectView | null {
+  return leadView(id, { title, data }, null);
+}
+
 export function runObjects(input: ObjectsInput): { reply?: RunObject; objects: RunObject[] } {
   const objects: RunObject[] = [];
   let reply: RunObject | undefined;

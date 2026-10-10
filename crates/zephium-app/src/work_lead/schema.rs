@@ -133,7 +133,8 @@ pub(crate) fn data(kind: &str) -> Option<Value> {
                     "source": string()
                 }), &["title", "kind"]), 1, MAX_PLAN_STEPS),
                 "total": object(json!({"label": text(L::PLAN_TOTAL), "value": text(L::PLAN_TOTAL)}), &["label", "value"]),
-                "checkable": {"type": "boolean"}
+                "checkable": {"type": "boolean"},
+                "calendar": {"type": "boolean"}
             }),
             &["steps"],
         ),

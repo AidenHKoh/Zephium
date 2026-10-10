@@ -1,4 +1,5 @@
 import type {
+  WorkArtifactV1,
   WorkElementPlacement,
   WorkExecutionFact,
   WorkFileEvidenceV1,
@@ -23,6 +24,7 @@ import { pageName } from "./run/sources";
 import { PART } from "./run/part-size";
 import { fileName } from "./work-files";
 import { linkVideo } from "./link-media";
+import { ownedView } from "./board/objects";
 import { heldPage, humanPage, phaseLabel } from "./work-human";
 import { mediaUrl, pageFrameUrl } from "$domain/resources";
 import {
@@ -102,12 +104,19 @@ export function environmentPictures(
   return pictures;
 }
 
+/** The person's own objects a canvas holds, as far as they have been read. */
+export type OwnedLookup = {
+  get(id: string): { title: string; data: WorkArtifactV1["data"] } | undefined;
+  read(id: string): boolean;
+};
+
 export function environmentItems(
   snapshot: WorkEnvironmentSnapshot,
   tabs: readonly TabView[],
   notes: readonly NoteSummary[],
   objectives: ReadonlyMap<string, WorkRuntimeProjection> = new Map(),
   media: ReadonlyMap<string, MediaAssetV1> = new Map(),
+  owned?: OwnedLookup,
 ): CanvasItem[] {
   const decisions = new Map((snapshot.decisions ?? []).map((d) => [d.element, d.choice]));
   const resources = new Map(
@@ -124,7 +133,7 @@ export function environmentItems(
     if (asset?.kind === "image")
       pictures.set(relation.from, { profile: snapshot.profile, digest: asset.digest });
   }
-  return elementItems(snapshot, tabs, notes, objectives, media).map((item) => {
+  return elementItems(snapshot, tabs, notes, objectives, media, owned).map((item) => {
     const decision = decisions.get(item.id);
     const image = pictures.get(item.id);
     // A video's admitted thumbnail is its poster, read from the profile rather than the web.
@@ -149,6 +158,7 @@ function elementItems(
   notes: readonly NoteSummary[],
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
   media: ReadonlyMap<string, MediaAssetV1>,
+  owned?: OwnedLookup,
 ): CanvasItem[] {
   const pictures = subjectPictures(snapshot);
   return snapshot.elements.flatMap((element) => {
@@ -201,7 +211,23 @@ function elementItems(
           media: { profile: snapshot.profile, asset },
         };
       }
+      const own = owned?.get(resourceId);
+      const view = own ? ownedView(element.id, own.title, own.data) : null;
+      if (own && view)
+        return {
+          id: element.id,
+          type: "object" as const,
+          area: element.area,
+          kind: view.kind,
+          title: own.title,
+          detail: "",
+          status: area,
+          owned: resourceId,
+          object: { view, live: false },
+        };
       const note = notes.find((note) => note.id === resourceId);
+      // Not a note: the person's own object, drawn once it has been read.
+      if (!note && owned && !owned.read(resourceId)) return [];
       return {
         id: element.id,
         type: "note",
