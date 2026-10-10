@@ -85,7 +85,7 @@ pub fn definitions() -> Vec<WorkModelTool> {
         ),
         tool(
             "edit",
-            "Currently unavailable until confined native writes are supported. Replace an exact passage in a file you have read. `old` must match the file exactly, whitespace included, without the line-number prefix, and occur once; include surrounding lines to make it unique, or set replace_all to change every occurrence. Keep edits minimal. The person approves each change before it is written.",
+            "Replace an exact passage in a file you have read. `old` must match the file exactly, whitespace included, without the line-number prefix, and occur once; include surrounding lines to make it unique, or set replace_all to change every occurrence. Keep edits minimal. The person approves each change before it is written.",
             json!({"type": "object", "properties": {
                 "path": path,
                 "old": {"type": "string"},
@@ -95,7 +95,7 @@ pub fn definitions() -> Vec<WorkModelTool> {
         ),
         tool(
             "write",
-            "Currently unavailable until confined native writes are supported. Create a file, or replace a file you have read, with its complete text. Use edit to change part of an existing file. The person approves it before it is written.",
+            "Create a file, or replace a file you have read, with its complete text. Use edit to change part of an existing file. The person approves it before it is written.",
             json!({"type": "object", "properties": {
                 "path": path,
                 "text": {"type": "string"}
@@ -303,11 +303,6 @@ impl ComputerTools {
         if matches!(name, "bash" | "delegate") {
             if let Err(reason) = crate::work_commands::ensure_available() {
                 return ToolReply::fault(reason);
-            }
-        }
-        if matches!(name, "write" | "edit") {
-            if let Err(reason) = crate::work_files::ensure_mutations_available() {
-                return ToolReply::fault(reason.note());
             }
         }
         let reply = match name {

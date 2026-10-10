@@ -1891,11 +1891,7 @@ impl WorkArtifactDataV1 {
                 facts,
                 ..
             } => {
-                push(
-                    &format!("{noun} {}", reference.as_deref().unwrap_or_default())
-                        .trim_end()
-                        .to_owned(),
-                );
+                push(format!("{noun} {}", reference.as_deref().unwrap_or_default()).trim_end());
                 push(title);
                 summary.as_deref().map(&mut push);
                 for fact in facts {

@@ -502,16 +502,6 @@ fn work_local_inspection_survives_while_unsafe_capabilities_fail_without_approva
                         glob: None,
                         regex: None,
                     },
-                    WorkAgentFetch::WriteFile {
-                        path: file.clone(),
-                        content: "overwritten".into(),
-                    },
-                    WorkAgentFetch::EditFile {
-                        path: file.clone(),
-                        old: "version=1".into(),
-                        new: "version=2".into(),
-                        replacements: vec![],
-                    },
                     WorkAgentFetch::MoveFile {
                         from: file.clone(),
                         to: moved.clone(),
@@ -556,7 +546,7 @@ fn work_local_inspection_survives_while_unsafe_capabilities_fail_without_approva
                 .collect();
             assert_eq!(
                 rejected.len(),
-                5,
+                3,
                 "steps: {:?}; notices: {:?}",
                 execution
                     .steps

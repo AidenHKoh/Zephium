@@ -110,7 +110,6 @@ fn serially(body: impl std::future::Future<Output = ()>) {
 }
 
 #[test]
-#[ignore = "Requires the currently unavailable confined Computer writer or runner; retained for qualification"]
 fn edits_need_a_read_a_unique_match_and_an_approval() {
     serially(async {
         let (_home, tools, root) = project();
@@ -182,7 +181,6 @@ fn edits_need_a_read_a_unique_match_and_an_approval() {
 }
 
 #[test]
-#[ignore = "Requires the currently unavailable confined Computer writer or runner; retained for qualification"]
 fn a_file_changed_since_it_was_read_is_read_again() {
     serially(async {
         let (_home, tools, root) = project();
@@ -212,7 +210,6 @@ fn a_file_changed_since_it_was_read_is_read_again() {
 }
 
 #[test]
-#[ignore = "Requires the currently unavailable confined Computer writer or runner; retained for qualification"]
 fn writes_create_freely_but_replace_only_what_was_read() {
     serially(async {
         let (_home, tools, root) = project();
@@ -244,7 +241,7 @@ fn writes_create_freely_but_replace_only_what_was_read() {
         let outside = tools
             .call(&host, "write", &json!({"path": "/etc/hosts", "text": "x"}))
             .await;
-        assert!(outside.is_error && outside.content.contains("outside the granted folders"));
+        assert!(outside.is_error && outside.content.contains("not available to Work"));
         let escape = tools
             .call(&host, "read", &json!({"path": "../secret"}))
             .await;
@@ -363,11 +360,7 @@ fn unavailable_capabilities_refuse_before_approval_and_keep_reads_useful() {
         let host = Recorder::deciding(&[Decision::Approved]);
         for (name, args) in [
             ("bash", json!({"command": "touch escaped"})),
-            (
-                "edit",
-                json!({"path": "src/lib.rs", "old": "a + 2", "new": "a + 1"}),
-            ),
-            ("write", json!({"path": "escaped", "text": "changed"})),
+            ("delegate", json!({"goal": "touch escaped"})),
         ] {
             let result = tools.call(&host, name, &args).await;
             assert!(

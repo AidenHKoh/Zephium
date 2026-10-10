@@ -404,7 +404,12 @@ impl WorkFileGrant {
         kind: &WorkStepKindV1,
         known: Option<&str>,
     ) -> Result<PreparedChange, WorkFileError> {
-        ensure_mutations_available()?;
+        if matches!(
+            kind,
+            WorkStepKindV1::DeleteFile { .. } | WorkStepKindV1::MoveFile { .. }
+        ) {
+            ensure_removals_available()?;
+        }
         let (path, create) = match kind {
             WorkStepKindV1::WriteFile { path, .. } => (path, true),
             WorkStepKindV1::EditFile { path, .. } | WorkStepKindV1::DeleteFile { path, .. } => {
@@ -509,7 +514,9 @@ impl WorkFileGrant {
         })
     }
     pub fn apply(&self, change: PreparedChange) -> Result<WorkFileEvidenceV1, WorkFileError> {
-        ensure_mutations_available()?;
+        if change.next.is_none() {
+            ensure_removals_available()?;
+        }
         let file = self.resolve(&change.original, change.before.is_none())?;
         if file != change.file {
             return Err(WorkFileError::Changed);
@@ -614,9 +621,10 @@ impl WorkFileGrant {
     }
 }
 
-/// A capability gate, independent of approval. Keep review/apply code behind
-/// this seam until native handle-relative writes and Trash are qualified.
-pub(crate) fn ensure_mutations_available() -> Result<(), WorkFileError> {
+/// A capability gate, independent of approval: a file written or edited in a
+/// granted folder is the person's to approve, diff by diff; deleting or moving
+/// one waits until it goes to the Trash instead of away for good.
+pub(crate) fn ensure_removals_available() -> Result<(), WorkFileError> {
     Err(WorkFileError::Unavailable)
 }
 
@@ -1666,19 +1674,8 @@ mod tests {
             0
         );
         let path = project.join("README.md").to_string_lossy().into_owned();
+        // Writes and edits are the person's to approve; moving and deleting wait for the Trash.
         for step in [
-            WorkStepKindV1::WriteFile {
-                path: path.clone(),
-                content: marker.into(),
-                decision: None,
-            },
-            WorkStepKindV1::EditFile {
-                path: path.clone(),
-                old: "hello".into(),
-                new: "bye".into(),
-                replacements: vec![],
-                decision: None,
-            },
             WorkStepKindV1::MoveFile {
                 from: path.clone(),
                 to: project.join("moved").to_string_lossy().into_owned(),

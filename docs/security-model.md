@@ -1856,7 +1856,8 @@ updates mitigate some of these risks but do not remove them.
 
 ### Work Computer capability gate
 
-Computer currently supports bounded inspection of granted folders only. A shared
+Computer inspects granted folders and proposes file writes and edits that the
+person approves one diff at a time. A shared
 path policy excludes `.env*`, named credential stores, private-key extensions and
 browser credential files from reads, listings and searches, including case variants
 and alternate-stream/trailing-dot spellings. Regular files with multiple hard links
@@ -1866,8 +1867,10 @@ handle-based hard-link checks. Search loads local ignore files through the same
 bounded reader and does not load parent or global ignore configuration.
 
 Commands and coding-agent hand-offs fail before spawning, regardless of prior
-approval. File preparation and application fail while confined native writes and
-recoverable deletion are unavailable; no permanent deletion is offered. Process
+approval. An approved write or edit resolves through the same path policy, writes
+atomically and only if the file still matches what was read. Moving and deleting
+files fail while recoverable deletion is unavailable; no permanent deletion is
+offered. Process
 groups, Windows JobObjects and command classification are lifecycle/approval
 mechanisms, not a sandbox. The retained runner uses a fixed environment and no Unix
 login shell. Native Windows runtime qualification remains outstanding. This policy
