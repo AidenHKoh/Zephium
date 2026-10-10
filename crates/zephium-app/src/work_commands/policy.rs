@@ -1,6 +1,6 @@
-//! Approval policy, not a sandbox: commands can reach anything the account can.
-//! Shell startup files, project configuration and the person's CLI authentication
-//! are trusted. Inspection through `gh` is an explicit authenticated-network exception.
+//! Approval classification retained for a future confined runner. This parser
+//! cannot enforce filesystem or network boundaries and does not authorize
+//! execution; the runtime capability gate applies independently.
 use std::path::{Component, Path, PathBuf};
 use zephium_core::work::runtime::{WorkCommandClassV1 as Class, WorkCommandReasonV1 as Reason};
 

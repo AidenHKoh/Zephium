@@ -366,7 +366,13 @@ fn assemble_with_actions(
     let mut classes = vec![SemanticEffectClass::Read];
     if let Some(actions) = actions.as_ref().filter(|actions| !actions.read_only) {
         classes.push(SemanticEffectClass::LocalWrite);
-        classes.extend(actions.commits.iter().copied());
+        // Baseline drafting and a typing approval can grant the same effect.
+        // Normalize only these host-owned grants; external manifests stay strict.
+        for effect in &actions.commits {
+            if !classes.contains(effect) {
+                classes.push(*effect);
+            }
+        }
     }
     let effects = AgentEffectScope::try_new(&classes).map_err(fail)?;
     let mut origins = objective.navigation.origins().cloned().collect::<Vec<_>>();

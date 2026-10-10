@@ -1853,3 +1853,23 @@ updates mitigate some of these risks but do not remove them.
       gates; exact advisory exceptions stay justified, reviewed, and tied to removal work.
 - [ ] This document is updated when a guarantee or accepted platform limitation
       changes.
+
+### Work Computer capability gate
+
+Computer currently supports bounded inspection of granted folders only. A shared
+path policy excludes `.env*`, named credential stores, private-key extensions and
+browser credential files from reads, listings and searches, including case variants
+and alternate-stream/trailing-dot spellings. Regular files with multiple hard links
+are refused. Unix inspection opens components relative to held directory descriptors
+with `O_NOFOLLOW`; Windows inspection retains its directory/reparse checks and adds
+handle-based hard-link checks. Search loads local ignore files through the same
+bounded reader and does not load parent or global ignore configuration.
+
+Commands and coding-agent hand-offs fail before spawning, regardless of prior
+approval. File preparation and application fail while confined native writes and
+recoverable deletion are unavailable; no permanent deletion is offered. Process
+groups, Windows JobObjects and command classification are lifecycle/approval
+mechanisms, not a sandbox. The retained runner uses a fixed environment and no Unix
+login shell. Native Windows runtime qualification remains outstanding. This policy
+cannot identify secrets stored in arbitrary ordinary file contents and is not a
+claim of complete secret detection or same-user process isolation.

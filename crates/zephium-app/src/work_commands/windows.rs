@@ -22,6 +22,7 @@ use ::windows::{
 };
 use base64::Engine;
 use std::{
+    ffi::OsStr,
     fs::File,
     io::Read,
     mem::{size_of, size_of_val},
@@ -170,8 +171,8 @@ fn spawn(cwd: &Path, command: &str) -> Result<Process, &'static str> {
         return Err("The command shell is unavailable");
     }
     use std::os::windows::ffi::OsStringExt;
-    let shell = std::path::PathBuf::from(OsString::from_wide(&system[..length]))
-        .join("WindowsPowerShell/v1.0/powershell.exe");
+    let system_directory = std::path::PathBuf::from(OsString::from_wide(&system[..length]));
+    let shell = system_directory.join("WindowsPowerShell/v1.0/powershell.exe");
     let application = wide(shell.as_os_str())?;
     let script = format!("$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $OutputEncoding=[Console]::OutputEncoding; & {{\n{command}\n}}; if ($null -ne $LASTEXITCODE) {{ exit $LASTEXITCODE }}");
     let script: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
@@ -183,6 +184,10 @@ fn spawn(cwd: &Path, command: &str) -> Result<Process, &'static str> {
     }
     let cwd = wide(cwd.as_os_str())?;
     let mut env = environment();
+    env.push(("PATH".into(), system_directory.as_os_str().to_owned()));
+    if let Some(root) = system_directory.parent() {
+        env.push(("SystemRoot".into(), root.as_os_str().to_owned()));
+    }
     env.retain(|(key, _)| {
         !["NO_COLOR", "CI", "GIT_TERMINAL_PROMPT", "GIT_PAGER"]
             .iter()
@@ -331,6 +336,23 @@ where
     P: Fn(WorkCommandOutputV1) -> PF,
     PF: Future<Output = ()>,
 {
+    super::ensure_available()?;
+    run_unconfined(cwd, command, timeout_secs, cancelled, progress).await
+}
+
+async fn run_unconfined<C, CF, P, PF>(
+    cwd: &Path,
+    command: &str,
+    timeout_secs: u32,
+    cancelled: C,
+    progress: P,
+) -> Result<CommandResult, &'static str>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+    P: Fn(WorkCommandOutputV1) -> PF,
+    PF: Future<Output = ()>,
+{
     let started = Instant::now();
     let mut process = spawn(cwd, command)?;
     let mut output = Output::new();
@@ -405,7 +427,7 @@ mod tests {
     #[tokio::test]
     async fn windows_command_preserves_unicode_output_and_exit_status() {
         let dir = tempfile::tempdir().unwrap();
-        let result = run(
+        let result = run_unconfined(
             dir.path(),
             "[Console]::Write('hello żółć'); [Console]::Error.Write('error'); exit 7",
             10,
@@ -423,7 +445,7 @@ mod tests {
     #[tokio::test]
     async fn windows_command_timeout_and_stop_end_the_owned_tree() {
         let dir = tempfile::tempdir().unwrap();
-        let result = run(
+        let result = run_unconfined(
             dir.path(),
             "Write-Output started; Start-Sleep -Seconds 30",
             1,
@@ -435,7 +457,7 @@ mod tests {
         assert_eq!(result.note, "Stopped after 1 s");
         assert!(result.evidence.elapsed_ms < 5000);
         let pid = AtomicU32::new(0);
-        let result = run(dir.path(), "$p=Start-Process -FilePath ($PSHOME+'\\powershell.exe') -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30' -WindowStyle Hidden -PassThru; [Console]::WriteLine($p.Id); Start-Sleep -Seconds 30", 10,
+        let result = run_unconfined(dir.path(), "$p=Start-Process -FilePath ($PSHOME+'\\powershell.exe') -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30' -WindowStyle Hidden -PassThru; [Console]::WriteLine($p.Id); Start-Sleep -Seconds 30", 10,
             || async { pid.load(Ordering::Acquire) != 0 },
             |view| { if let Some(value) = view.text.lines().find_map(|line| line.trim().parse::<u32>().ok()) { pid.store(value, Ordering::Release); } async {} }
         ).await.unwrap();

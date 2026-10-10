@@ -3714,6 +3714,7 @@ export type WorkElementPlacement_Deserialize = {
 	/**
 	 *  0: an absolute position from before lanes, which the canvas re-derives;
 	 *  2: `x, y` are the card's offset from its lane-derived position.
+	 *  3: the person pinned the block relative to its result's corner.
 	 */
 	revision?: number,
 };
@@ -3731,6 +3732,7 @@ export type WorkElementPlacement_Serialize = {
 	/**
 	 *  0: an absolute position from before lanes, which the canvas re-derives;
 	 *  2: `x, y` are the card's offset from its lane-derived position.
+	 *  3: the person pinned the block relative to its result's corner.
 	 */
 	revision?: number,
 };
@@ -4773,11 +4775,15 @@ export type WorkPageAccountV1 = {
 	badge: boolean,
 };
 
+export type WorkPageFailureStageV1 = "admission" | "observation" | "action" | "navigation" | "extraction" | "provider" | "storage" | "runtime";
+
 export type WorkPageFrameV1 = {
 	generation: number,
 	width: number,
 	height: number,
 };
+
+export type WorkPageOutcomeV1 = { kind: "completed" } | { kind: "incomplete" } | { kind: "needs_sign_in" } | { kind: "needs_check" } | { kind: "needs_approval" } | { kind: "needs_interaction" } | { kind: "too_many_steps" } | { kind: "redirected" } | { kind: "refused"; stage: WorkPageFailureStageV1 } | { kind: "site_error" } | { kind: "cancelled" } | { kind: "outcome_unknown" };
 
 /**
  *  A page one browser step opened, with its newest bounded frame for the
@@ -6010,7 +6016,7 @@ export type WorkStepFact_Deserialize = {
 	/**  A short line for people: what the agent said or what this step found. */
 	note?: string | null,
 	/**  Closed measurements of a settled browser step; absent for other kinds. */
-	measurements?: WorkStepMeasurementsV1 | null,
+	measurements?: WorkStepMeasurementsV1_Deserialize | null,
 	local?: WorkLocalStepV1_Deserialize | null,
 	/**  A page opened in the person's own session on its site. */
 	account?: WorkPageAccountV1 | null,
@@ -6033,7 +6039,7 @@ export type WorkStepFact_Serialize = {
 	/**  A short line for people: what the agent said or what this step found. */
 	note?: string | null,
 	/**  Closed measurements of a settled browser step; absent for other kinds. */
-	measurements?: WorkStepMeasurementsV1 | null,
+	measurements?: WorkStepMeasurementsV1_Serialize | null,
 	local?: WorkLocalStepV1_Serialize | null,
 	/**  A page opened in the person's own session on its site. */
 	account?: WorkPageAccountV1 | null,
@@ -6125,7 +6131,42 @@ title?: string | null }) & { answer?: never; call?: never; collection?: never; c
  *  accounting beside the conservative ceiling in `usage`. Never page, model
  *  or provider text.
  */
-export type WorkStepMeasurementsV1 = {
+export type WorkStepMeasurementsV1 = WorkStepMeasurementsV1_Serialize | WorkStepMeasurementsV1_Deserialize;
+
+/**
+ *  Closed counts for one browser step: durations, call counts and exact
+ *  accounting beside the conservative ceiling in `usage`. Never page, model
+ *  or provider text.
+ */
+export type WorkStepMeasurementsV1_Deserialize = {
+	/**  Closed page outcome, independent of explanatory text. Absent on older steps. */
+	outcome?: WorkPageOutcomeV1 | null,
+	/**  Wall time from the step's resource launch to its settled outcome. */
+	wall_millis: number,
+	/**  Typed decision calls answered by the recommended backend. */
+	decision_calls: number,
+	/**  Typed decision calls answered by the LLM emulation. */
+	emulation_calls: number,
+	/**  Page-model calls, including focused generation and extraction. */
+	planner_calls: number,
+	/**  Native actions the page agent started. */
+	native_actions: number,
+	/**  Tokens charged by settled provider calls. */
+	model_tokens: number,
+	/**  Micro-USD charged by settled provider calls. */
+	cost_micro_usd: number,
+	/**  How exactly `cost_micro_usd` is known. */
+	cost_basis: WorkCostBasis,
+};
+
+/**
+ *  Closed counts for one browser step: durations, call counts and exact
+ *  accounting beside the conservative ceiling in `usage`. Never page, model
+ *  or provider text.
+ */
+export type WorkStepMeasurementsV1_Serialize = {
+	/**  Closed page outcome, independent of explanatory text. Absent on older steps. */
+	outcome?: WorkPageOutcomeV1 | null,
 	/**  Wall time from the step's resource launch to its settled outcome. */
 	wall_millis: number,
 	/**  Typed decision calls answered by the recommended backend. */

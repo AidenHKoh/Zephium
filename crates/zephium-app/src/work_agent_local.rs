@@ -6,6 +6,9 @@ impl Driver {
         mut kind: WorkStepKindV1,
         files: &WorkFileGrant,
     ) -> Result<Option<WorkAttemptStatus>, WorkError> {
+        if !matches!(kind, WorkStepKindV1::RunCommand { .. }) {
+            return Err(WorkError::Invalid);
+        }
         let WorkStepKindV1::RunCommand {
             cwd,
             command,
@@ -58,6 +61,13 @@ impl Driver {
             }),
             ..Default::default()
         }));
+        if let Err(note) = crate::work_commands::ensure_available() {
+            step.status = WorkStepStatus::Failed;
+            step.note = Some(note.into());
+            self.begin(step, vec![], None).await?;
+            self.notice(note);
+            return Ok(None);
+        }
         let id = self.begin(step, vec![], None).await?;
         if scope != WorkCommandApprovalScopeV1::None {
             self.probe.record_activity(WorkActivityV1::WaitingForHuman);

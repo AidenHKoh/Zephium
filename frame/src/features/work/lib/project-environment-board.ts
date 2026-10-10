@@ -1,4 +1,5 @@
 import { measure } from "./diagram-text";
+import { WORK_PLACEMENT_PIN } from "$shared/ipc/work-constants";
 import type {
   WorkEnvironmentElement,
   WorkEnvironmentSnapshot,
@@ -33,7 +34,7 @@ import { provenance } from "./run/provenance";
 import * as m from "$shared/i18n/messages";
 
 /** A placement written in board terms: the person moved the block; `x, y` are from the result's corner. */
-export const BOARD_PIN = 3;
+export const BOARD_PIN = WORK_PLACEMENT_PIN;
 const REQUEST_TEXT = 512;
 
 /**

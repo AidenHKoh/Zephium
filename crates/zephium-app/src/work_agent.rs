@@ -699,6 +699,9 @@ impl Driver {
             .await
         {
             self.report(WorkAgentDiagnostic::CommitRefused { kind, error });
+            crate::work_trace::record(format_args!(
+                "work: phase=step stage=begin kind={kind} error={error:?} content=redacted"
+            ));
             return Err(error);
         }
         self.steps += 1;
@@ -1531,6 +1534,13 @@ impl Driver {
         if let Some(Ok(change)) = &prepared {
             step.local = Some(Box::new(change.fact()));
         }
+        if let Some(Err(error)) = &prepared {
+            step.status = WorkStepStatus::Failed;
+            step.note = Some(error.note().into());
+            self.begin(step, vec![], None).await?;
+            self.notice(error.note());
+            return Ok(None);
+        }
         let id = self.begin(step, vec![], None).await?;
         let outcome = match (&kind, prepared) {
             (_, Some(Ok(change))) => return self.await_decision(id, &files, change).await,
@@ -1870,9 +1880,9 @@ impl Driver {
                         if let Some(destination) = outcome.redirect.clone() {
                             self.redirects.push((id, destination, None));
                         } else if status == WorkStepStatus::Failed {
-                            self.notice(&format!(
-                                "A page read failed: {}. Use another listed source or finish with what the canvas has; do not reopen that page.",
-                                outcome.note.as_deref().unwrap_or("the page gave nothing")
+                            self.notice(&page_failure_notice(
+                                outcome.note.as_deref().unwrap_or("the page gave nothing"),
+                                measurements.and_then(|m| m.outcome),
                             ));
                         }
                         // Facts from the person's own pages never ride a search query.
@@ -1939,9 +1949,14 @@ impl Driver {
                             error,
                         });
                         let note = browse_error_note(error);
-                        self.notice(&format!(
-                            "A page read failed: {note}. Use another listed source or finish with what the canvas has."
-                        ));
+                        let stage = match error {
+                            WorkError::Invalid | WorkError::Capacity => {
+                                WorkPageFailureStageV1::Admission
+                            }
+                            _ => WorkPageFailureStageV1::Runtime,
+                        };
+                        let outcome = WorkPageOutcomeV1::Refused { stage };
+                        self.notice(&page_failure_notice(note, Some(outcome)));
                         self.settle(
                             id,
                             WorkStepStatus::Failed,
@@ -1949,7 +1964,10 @@ impl Driver {
                             vec![],
                             None,
                             Some(note.into()),
-                            None,
+                            Some(WorkStepMeasurementsV1 {
+                                outcome: Some(outcome),
+                                ..Default::default()
+                            }),
                         )
                         .await?;
                     }
@@ -2741,11 +2759,22 @@ fn step_kind_label(kind: &WorkStepKindV1) -> &'static str {
 /// Why a page could not be opened at all, in the person's words.
 fn browse_error_note(error: WorkError) -> &'static str {
     match error {
-        WorkError::Capacity => "Too many pages were already open",
+        WorkError::Capacity => "The page task exceeded an input or resource limit",
+        WorkError::Invalid => "Work could not validate the page request",
         WorkError::Unavailable | WorkError::Shutdown => "The browser was not available",
         WorkError::ProfileUnavailable => "The browsing profile was not available",
         _ => "The page could not be opened",
     }
+}
+
+fn page_failure_notice(note: &str, outcome: Option<WorkPageOutcomeV1>) -> String {
+    let recovery = match outcome {
+        Some(WorkPageOutcomeV1::NeedsSignIn) => "The person needs to sign in on the requested site. Keep the sign-in need visible and wait for that handoff; do not retry blindly.",
+        Some(WorkPageOutcomeV1::NeedsCheck) => "The person needs to pass the check on the requested site. Keep that need visible and wait for the handoff; do not try other URLs on the site.",
+        Some(WorkPageOutcomeV1::Refused { .. }) => "Work could not execute this page step. Report the recorded failure accurately; do not blame the site or claim the task completed.",
+        _ => "Keep the unfinished assignment explicit. Continue independent work where possible, without claiming this task completed.",
+    };
+    format!("{recovery} Never substitute help-center or documentation pages for the person's account content. Page result: {note}")
 }
 
 fn step_status(status: WorkAttemptStatus) -> WorkStepStatus {

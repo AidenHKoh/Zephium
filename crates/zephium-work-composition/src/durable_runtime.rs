@@ -268,6 +268,7 @@ impl ReadMeasure {
 
     fn settle(self, started: Instant, in_flight: bool) -> WorkStepMeasurementsV1 {
         WorkStepMeasurementsV1 {
+            outcome: None,
             wall_millis: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
             decision_calls: self.decision_calls,
             emulation_calls: self.emulation_calls,
@@ -766,6 +767,9 @@ impl NativeWorkComposition {
                 gate,
             )
             .await?;
+        if run.measurements.outcome.is_none() {
+            run.measurements.outcome = Some(page_outcome(run.status, run.intervention.as_ref()));
+        }
         if let Some(destination) = redirect
             .and_then(|redirect| redirect.destination())
             .filter(|_| run.status != WorkAttemptStatus::Succeeded)
@@ -773,6 +777,7 @@ impl NativeWorkComposition {
             run.status = WorkAttemptStatus::Failed;
             run.artifacts.clear();
             run.note = Some(redirect_note(&destination));
+            run.measurements.outcome = Some(WorkPageOutcomeV1::Redirected);
             run.redirect = Some(destination);
         }
         Ok(run)
@@ -1493,7 +1498,16 @@ impl NativeWorkComposition {
                                 .unwrap_or("The browser was not ready for this page")
                                 .into(),
                         ),
-                        measurements: measure.settle(started, model_in_flight),
+                        measurements: WorkStepMeasurementsV1 {
+                            outcome: Some(WorkPageOutcomeV1::Refused {
+                                stage: if storage_note(&snapshot).is_some() {
+                                    WorkPageFailureStageV1::Storage
+                                } else {
+                                    WorkPageFailureStageV1::Admission
+                                },
+                            }),
+                            ..measure.settle(started, model_in_flight)
+                        },
                         helped,
                         redirect: None,
                     });
@@ -1810,22 +1824,6 @@ impl NativeWorkComposition {
                         intervention_note(intervention.as_ref())
                             .unwrap_or("The page needs a person"),
                     ),
-                    // The person's own app that never finished loading for a
-                    // first look is, in practice, a redirect to its sign-in.
-                    _ if signed_in.is_some()
-                        && matches!(
-                            snapshot.failure,
-                            Some(AgentWorkFailure::Observation(
-                                zephium_agentic::SemanticRuntimePortFailure::Result(
-                                    zephium_agentic::SemanticRuntimeResultError::Runtime(
-                                        zephium_agentic::SemanticRuntimeFault::DocumentLoading,
-                                    ),
-                                ),
-                            ))
-                        ) =>
-                    {
-                        Some("The page asked to sign in")
-                    }
                     _ => Some(
                         snapshot
                             .failure
@@ -1839,7 +1837,8 @@ impl NativeWorkComposition {
                     note.map(str::to_owned),
                     measure.settle(started, model_in_flight),
                     helped,
-                ));
+                )
+                .with_failure(snapshot.failure));
             }
             tokio::time::sleep(if paused || (human_wait.is_some() && !requested_close) {
                 HELD_PAGE_POLL
@@ -2067,11 +2066,12 @@ fn failure_note(failure: AgentWorkFailure) -> &'static str {
             "The page led somewhere the read may not follow"
         }
         AgentWorkFailure::Browser(Browser::Action(_)) => "An action on the page did not work",
-        AgentWorkFailure::Browser(Browser::Authority) => "The read ran out of page operations",
-        AgentWorkFailure::Browser(_) => "The page could not be read",
-        AgentWorkFailure::TaskPhase { .. } | AgentWorkFailure::Contract => {
-            "The page agent broke the reading rules"
+        AgentWorkFailure::Browser(Browser::Authority) => {
+            "Work could not validate the page operation's authority"
         }
+        AgentWorkFailure::Browser(_) => "The page could not be read",
+        AgentWorkFailure::TaskPhase { .. } => "Work refused the action in this task phase",
+        AgentWorkFailure::Contract => "Work could not validate its internal page-task contract",
         _ => "The page could not be read",
     }
 }
@@ -2117,19 +2117,38 @@ impl Drop for PageSettle {
 }
 
 impl BrowserRun {
+    fn with_failure(mut self, failure: Option<AgentWorkFailure>) -> Self {
+        if self.measurements.outcome == Some(WorkPageOutcomeV1::Incomplete) {
+            self.measurements.outcome = failure
+                .map(page_failure_outcome)
+                .or(self.measurements.outcome);
+        }
+        self
+    }
+
     fn closed(
         result: Result<(WorkAttemptStatus, Vec<WorkArtifactDraft>), WorkError>,
         usage: Option<WorkUsage>,
         intervention: Option<WorkInterventionV1>,
         note: Option<String>,
-        measurements: WorkStepMeasurementsV1,
+        mut measurements: WorkStepMeasurementsV1,
         helped: bool,
     ) -> Self {
+        let conversion_failed = result.is_err();
         let (status, artifacts) = match result {
             Ok(result) => result,
             Err(WorkError::OutcomeUnknown) => (WorkAttemptStatus::OutcomeUnknown, vec![]),
             Err(_) => (WorkAttemptStatus::Failed, vec![]),
         };
+        measurements.outcome = Some(
+            if conversion_failed && status != WorkAttemptStatus::OutcomeUnknown {
+                WorkPageOutcomeV1::Refused {
+                    stage: WorkPageFailureStageV1::Extraction,
+                }
+            } else {
+                page_outcome(status, intervention.as_ref())
+            },
+        );
         Self {
             status,
             usage,
@@ -2143,9 +2162,140 @@ impl BrowserRun {
     }
 }
 
+fn page_outcome(
+    status: WorkAttemptStatus,
+    intervention: Option<&WorkInterventionV1>,
+) -> WorkPageOutcomeV1 {
+    use WorkInterventionKindV1 as Kind;
+    use WorkPageOutcomeV1 as Outcome;
+    match status {
+        WorkAttemptStatus::Succeeded => Outcome::Completed,
+        WorkAttemptStatus::Cancelled => Outcome::Cancelled,
+        WorkAttemptStatus::OutcomeUnknown => Outcome::OutcomeUnknown,
+        _ => match intervention.map(|held| held.kind) {
+            Some(Kind::SignIn) => Outcome::NeedsSignIn,
+            Some(Kind::Challenge) => Outcome::NeedsCheck,
+            Some(Kind::Permission | Kind::Review) => Outcome::NeedsApproval,
+            Some(Kind::UnsupportedInteraction | Kind::HumanTakeover) => Outcome::NeedsInteraction,
+            None => Outcome::Incomplete,
+        },
+    }
+}
+
+fn page_failure_outcome(failure: AgentWorkFailure) -> WorkPageOutcomeV1 {
+    use zephium_agent_controller::AgentBrowserProviderError as Browser;
+    use WorkPageFailureStageV1 as Stage;
+    use WorkPageOutcomeV1 as Outcome;
+    let stage = match failure {
+        AgentWorkFailure::Redirected => return Outcome::Redirected,
+        AgentWorkFailure::Cancelled => return Outcome::Cancelled,
+        AgentWorkFailure::Browser(Browser::TurnLimit | Browser::ActionLimit) => {
+            return Outcome::TooManySteps
+        }
+        AgentWorkFailure::Contract | AgentWorkFailure::TaskPhase { .. } => Stage::Admission,
+        AgentWorkFailure::Observation(_) | AgentWorkFailure::Screenshot(_) => Stage::Observation,
+        AgentWorkFailure::Browser(Browser::Extraction(_) | Browser::NoExtractionEvidence) => {
+            Stage::Extraction
+        }
+        AgentWorkFailure::Browser(
+            Browser::Action(_)
+            | Browser::ActionRejected(_)
+            | Browser::ActionPending
+            | Browser::ActionUnverified,
+        ) => Stage::Action,
+        AgentWorkFailure::Browser(Browser::Navigation(_)) => Stage::Navigation,
+        AgentWorkFailure::Browser(
+            Browser::RequestPolicy(_)
+            | Browser::RequestContract(_)
+            | Browser::Account(_)
+            | Browser::Authority,
+        ) => Stage::Admission,
+        AgentWorkFailure::Browser(
+            Browser::Read(_)
+            | Browser::ReadEncoding(_)
+            | Browser::InitialEncoding(_)
+            | Browser::DiffEncoding(_)
+            | Browser::LocateEncoding(_)
+            | Browser::Locate
+            | Browser::LocateTool,
+        ) => Stage::Observation,
+        AgentWorkFailure::Browser(Browser::Journal) => Stage::Storage,
+        AgentWorkFailure::Browser(Browser::Cancelled) => return Outcome::Cancelled,
+        AgentWorkFailure::Browser(Browser::UnsupportedTool(_)) => return Outcome::NeedsInteraction,
+        AgentWorkFailure::Browser(Browser::Catalog | Browser::Clock) => Stage::Admission,
+        AgentWorkFailure::Browser(
+            Browser::NoProgress | Browser::ActionProposalLoop | Browser::Deadline,
+        ) => return Outcome::Incomplete,
+        AgentWorkFailure::Browser(
+            Browser::Transport
+            | Browser::PreDispatchTerminal(_)
+            | Browser::CountTerminal(_)
+            | Browser::ModelTerminal(_)
+            | Browser::ModelProtocol(_, _)
+            | Browser::Proposal,
+        ) => Stage::Provider,
+        AgentWorkFailure::Browser(_) => Stage::Runtime,
+        AgentWorkFailure::Audit => Stage::Storage,
+        AgentWorkFailure::Deadline | AgentWorkFailure::ContextLost => return Outcome::Incomplete,
+        _ => Stage::Runtime,
+    };
+    Outcome::Refused { stage }
+}
+
 #[cfg(test)]
 mod closed_result_tests {
     use super::*;
+
+    #[test]
+    fn page_outcomes_preserve_walls_uncertainty_and_internal_failure_stages() {
+        use WorkPageOutcomeV1 as Outcome;
+        for (kind, expected) in [
+            (WorkInterventionKindV1::SignIn, Outcome::NeedsSignIn),
+            (WorkInterventionKindV1::Challenge, Outcome::NeedsCheck),
+            (WorkInterventionKindV1::Permission, Outcome::NeedsApproval),
+        ] {
+            let held = WorkInterventionV1 { kind, origin: None };
+            assert_eq!(
+                page_outcome(WorkAttemptStatus::Failed, Some(&held)),
+                expected
+            );
+            assert_eq!(
+                page_outcome(WorkAttemptStatus::Succeeded, Some(&held)),
+                Outcome::Completed
+            );
+            assert_eq!(
+                page_outcome(WorkAttemptStatus::OutcomeUnknown, Some(&held)),
+                Outcome::OutcomeUnknown
+            );
+        }
+        use zephium_agent_controller::AgentBrowserProviderError as Browser;
+        for (failure, expected) in [
+            (
+                AgentWorkFailure::Contract,
+                Outcome::Refused {
+                    stage: WorkPageFailureStageV1::Admission,
+                },
+            ),
+            (
+                AgentWorkFailure::Browser(Browser::Journal),
+                Outcome::Refused {
+                    stage: WorkPageFailureStageV1::Storage,
+                },
+            ),
+            (
+                AgentWorkFailure::Browser(Browser::Authority),
+                Outcome::Refused {
+                    stage: WorkPageFailureStageV1::Admission,
+                },
+            ),
+            (
+                AgentWorkFailure::Browser(Browser::TurnLimit),
+                Outcome::TooManySteps,
+            ),
+        ] {
+            assert_eq!(page_failure_outcome(failure), expected);
+        }
+    }
 
     #[test]
     fn final_events_clear_model_reservation_and_are_accounted_once() {
@@ -3156,7 +3306,10 @@ fn compile_page_step(
             refusals.report(&format!(
                 "compile:admission:{failure:?} remaining_ms={remaining} objective_bytes={objective_bytes}"
             ));
-            WorkError::Unavailable
+            match failure {
+                AgentWorkFailure::Contract => WorkError::Invalid,
+                _ => WorkError::Unavailable,
+            }
         })?;
     let request = request
         .with_construction_attempt(construction_attempt)
@@ -3223,12 +3376,13 @@ fn fit_objective(overall: &str, step: &str, note: Option<&str>) -> Option<String
         objective.push_str(overall);
     } else {
         const MORE: &str = "…";
-        let mut end = left.saturating_sub(MORE.len());
+        let marker = if left >= MORE.len() { MORE } else { "" };
+        let mut end = left.saturating_sub(marker.len());
         while !overall.is_char_boundary(end) {
             end -= 1;
         }
         objective.push_str(overall[..end].trim_end());
-        objective.push_str(MORE);
+        objective.push_str(marker);
     }
     objective.push_str(step);
     objective.push_str(note);
@@ -3495,6 +3649,17 @@ fn map_archive(
 #[cfg(test)]
 mod page_objective_tests {
     use super::*;
+
+    #[test]
+    fn a_multibyte_truncation_marker_never_exceeds_the_last_few_bytes() {
+        for remaining in 0..=6 {
+            let step = "s".repeat(MAX_PAGE_OBJECTIVE_BYTES - OVERALL_OBJECTIVE.len() - remaining);
+            let fitted = fit_objective("旅行🚀旅行🚀", &step, None).unwrap();
+            assert!(fitted.len() <= MAX_PAGE_OBJECTIVE_BYTES);
+            assert!(fitted.ends_with(&step));
+            assert!(admitted(&fitted));
+        }
+    }
 
     fn admitted(objective: &str) -> bool {
         let revision = zephium_agentic::SemanticTokenizerRevision::try_new("o200k_base".into())

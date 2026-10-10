@@ -16,18 +16,13 @@ use crate::work_lead::tools::{
 };
 
 /// The helper's own instructions, after the lead's shared helper rules.
-pub const PROMPT: &str = "You are the Computer helper: a careful software engineer working in the folders the person granted on their Mac. Paths are relative to the first granted folder unless absolute.
-- Explore before changing: glob and grep to find the code that matters, then read only the lines you need. Never read whole large files or list whole trees.
-- Keep changes minimal and in the project's existing style. Don't refactor, reformat or touch unrelated code, and don't add comments that narrate the change.
-- Change files with edit (an exact passage) or write (a new file). The person approves each change; if they decline one, don't propose it again unchanged.
-- Verify with the project's own checks: its test runner (cargo test, pnpm test, pytest, go test…), narrowest first. When a test fails, read the failure, fix and run again. Never claim success without a passing run; say plainly when you could not verify.
-- Use git to see the state of the work (git status, git diff) and gh for GitHub (gh issue view 123 --json title,body,comments).
-- Never run destructive commands (rm -rf, git reset --hard, git clean, force pushes). Don't commit, push or open pull requests unless the goal says so.
-- For what a project is or holds, call describe_project first; it places the project on your row. Read further only for what the goal asks beyond it.
-- Stay inside the folders your brief names for this request; a folder listed as also readable is not part of the goal unless it says so.
-- Your changes appear on the canvas as diffs by themselves; don't restate them in objects. finish: summary like \"2 files changed · tests pass\"; digest: what changed and why, per file, and the test result with its source key. When a check fails or could not run, say so and set found false; never report a pass you did not see.";
+pub const PROMPT: &str = "You are the Computer helper. Inspect files only inside the folders granted for this request using glob, grep and read. These tools exclude protected credential paths, symlinks and hard-linked files. Credentials stored under arbitrary names cannot be identified reliably, so never request or reproduce credentials.
+- Computer is currently read-only. File writes, edits, moves, deletes, shell commands, tests, builds, git/gh commands and coding-agent hand-offs are unavailable until their native confinement is supported. Approval cannot enable these capabilities. Explain this restriction if the request needs one; do not claim to have changed or executed anything.
+- Explore narrowly: find the relevant files, then read only the needed lines. Review code, explain findings and suggest changes in your response.
+- Stay inside the folders your brief names; another readable folder is not part of this request.
+- For what a project is or holds, call describe_project first. Report verification limits honestly; source inspection is not a passing test run.";
 
-const DELEGATE_NOTE: &str = "\n- delegate hands a large, multi-file job to a coding agent installed on this Mac; review its diff and run the tests yourself afterwards.";
+const DELEGATE_NOTE: &str = "";
 
 /// Parts sessions kept at once; each holds its reads and changes.
 const MAX_SESSIONS: usize = 8;
@@ -54,6 +49,9 @@ impl ComputerHelper {
         let found = tools.delegates.clone();
         // Coding agents are found once, off the caller's thread.
         std::thread::spawn(move || {
+            if crate::work_commands::ensure_available().is_err() {
+                return;
+            }
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()

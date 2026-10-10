@@ -1,6 +1,60 @@
 use super::*;
 
 #[test]
+fn empty_local_evidence_does_not_prevent_the_next_agent_turn() {
+    use super::{agent::*, artifact::*, runtime::*};
+    let mut preview = WorkEvidencePreviewV1 {
+        version: 1,
+        link: WorkEvidenceLink {
+            extraction_id: 40.into(),
+            source_id: 1,
+        },
+        origin: "file:///Users/person/project".into(),
+        role: "file".into(),
+        text: String::new(),
+        truncated: false,
+        source_bytes: "0".into(),
+        link_destination: None,
+        source: WorkEvidenceSourceV1::File {
+            path: "/Users/person/project".into(),
+            name: "No search matches".into(),
+            file_kind: WorkFileKindV1::Search,
+        },
+    };
+    let disclose = |preview: &WorkEvidencePreviewV1| {
+        WorkAgentTurnDisclosure::try_new(
+            "Inspect this folder",
+            vec![],
+            vec![],
+            &[],
+            std::slice::from_ref(preview),
+            &[],
+            WorkAgentBudget {
+                turns_left: 3,
+                steps_left: 8,
+                browse_available: true,
+            },
+            WorkExecutionLimits {
+                model_tokens: 8000,
+                cost_micro_usd: 10000,
+                operations: 8,
+                timeout_seconds: 60,
+                max_workers: 1,
+            },
+            vec![],
+        )
+    };
+    assert!(disclose(&preview).is_ok());
+    preview.text = "\0".into();
+    assert!(disclose(&preview).is_err());
+    preview.text = "x".repeat(MAX_WORK_FILE_TEXT_BYTES + 1);
+    assert!(disclose(&preview).is_err());
+    preview.text.clear();
+    preview.source = WorkEvidenceSourceV1::NativeExtraction;
+    assert!(disclose(&preview).is_err());
+}
+
+#[test]
 fn native_link_handoff_admits_exact_observed_targets_without_promoting_prose() {
     use super::{agent::*, artifact::*, runtime::*};
     let target = "https://shop.example.test/products/42?variant=blue";
@@ -1466,6 +1520,17 @@ fn step_measurements_name_their_cost_basis_and_read_older_records() {
     );
     let priced = read(r#","cost_basis":"priced""#);
     assert_eq!(priced.cost_basis, WorkCostBasis::Priced);
+    assert_eq!(priced.outcome, None);
+    let checked = read(",\"outcome\":{\"kind\":\"needs_check\"}");
+    assert_eq!(
+        checked.outcome,
+        Some(runtime::WorkPageOutcomeV1::NeedsCheck)
+    );
+    assert_eq!(
+        serde_json::from_str::<WorkStepMeasurementsV1>(&serde_json::to_string(&checked).unwrap())
+            .unwrap(),
+        checked
+    );
     let written = serde_json::to_string(&priced).unwrap();
     assert!(written.contains(r#""cost_basis":"priced""#) && !written.contains("cost_exact"));
     assert_eq!(

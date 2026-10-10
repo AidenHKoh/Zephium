@@ -1308,7 +1308,7 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
     }
 
     fn sign_in_optional(&self, observation: &SemanticObservation) -> bool {
-        !sign_in_wall(observation) && secret_entry(observation).is_none()
+        !self.gate.state().view && !sign_in_wall(observation) && secret_entry(observation).is_none()
     }
 
     fn patient_checks(&self) -> bool {
@@ -1575,6 +1575,26 @@ mod tests {
 
     fn page(nodes: Vec<serde_json::Value>) -> SemanticObservation {
         super::super::tests::reading_observation(json!(nodes), "complete")
+    }
+
+    #[test]
+    fn an_account_view_can_request_sign_in_without_a_password_form() {
+        let picker = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"heading","n":"Find your workspace","l":1}),
+            json!({"k":3,"p":0,"r":"textbox","n":"Workspace URL","o":2}),
+        ]);
+        let gate = Arc::new(
+            SiteGate::new("slack.com".into(), false, false)
+                .reading_view("https://slack.com", "Read my messages"),
+        );
+        let policy = SiteWorkPolicy { gate, asks: true };
+        assert!(!policy.sign_in_optional(&picker));
+        let public = SiteWorkPolicy {
+            gate: Arc::new(SiteGate::default()),
+            asks: true,
+        };
+        assert!(public.sign_in_optional(&picker));
     }
 
     fn effect(observation: &SemanticObservation, key: u64, kind: SemanticActionKind) -> SiteEffect {
