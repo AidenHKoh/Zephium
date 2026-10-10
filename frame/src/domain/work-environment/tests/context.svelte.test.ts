@@ -49,6 +49,100 @@ const snapshot: WorkEnvironmentSnapshot = {
   view: { revision: "1", x: 0, y: 0, zoom_milli: 1000, placements: [] },
 };
 
+test("slow page frames cannot delay Stop or undo same-revision interruption", async () => {
+  const { WorkEnvironmentContext } = await import("../context.svelte");
+  const projection = {
+    version: 1,
+    interrupted: [] as string[],
+    executions: [
+      {
+        id: "execution",
+        approved_revision: "1",
+        status: "running",
+        attempts: [],
+        spec: { plan_revision: "1", limits, nodes: [] },
+        artifacts: [],
+        user_artifacts: [],
+      },
+    ],
+    work: {
+      schema_version: 2,
+      profile,
+      id: "objective",
+      revision: "1",
+      lifecycle: "active",
+      objective: "Study plan",
+      objective_revision: "1",
+      context_revision: "1",
+      objective_author: "user",
+      questions: [],
+      status: "plan_ready",
+      plan: null,
+    },
+  };
+  native.call.mockReset();
+  native.activity.mockReset();
+  native.call.mockImplementation(async () => ({
+    version: 1,
+    profile,
+    reply: { kind: "projection", projection: structuredClone(projection) },
+  }));
+  let release!: () => void;
+  native.activity.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        release = () =>
+          resolve({ version: 1, profile, work: "objective", signals: [], pages: [], error: null });
+      }),
+  );
+  const context = new WorkEnvironmentContext(profile);
+  context.update({
+    ...snapshot,
+    elements: [
+      { id: "element", area: null, reference: { kind: "objective", objective: "objective" } },
+    ],
+  });
+  await context.start();
+  await vi.waitFor(() => expect(context.objectives.get("objective")?.interrupted).toEqual([]));
+  expect(native.activity).toHaveBeenCalledTimes(1);
+  projection.interrupted = ["execution"];
+  native.changed!({ payload: { profile, work: "objective" } });
+  await vi.waitFor(() =>
+    expect(context.objectives.get("objective")?.interrupted).toEqual(["execution"]),
+  );
+  expect(native.activity).toHaveBeenCalledTimes(1);
+  release();
+  await vi.waitFor(() => expect(native.activity).toHaveBeenCalledTimes(2));
+  expect(context.objectives.get("objective")?.interrupted).toEqual(["execution"]);
+  context.dispose();
+});
+
+test("projection refreshes for one work coalesce without overlapping reads", async () => {
+  const { WorkEnvironmentContext } = await import("../context.svelte");
+  native.call.mockReset();
+  let release!: (response: WorkResponseV1) => void;
+  native.call.mockImplementation(
+    () =>
+      new Promise<WorkResponseV1>((resolve) => {
+        release = resolve;
+      }),
+  );
+  const context = new WorkEnvironmentContext(profile);
+  context.update({
+    ...snapshot,
+    elements: [
+      { id: "element", area: null, reference: { kind: "objective", objective: "objective" } },
+    ],
+  });
+  await context.start();
+  await vi.waitFor(() => expect(native.call).toHaveBeenCalledTimes(1));
+  for (let i = 0; i < 5; i++) native.changed!({ payload: { profile, work: "objective" } });
+  expect(native.call).toHaveBeenCalledTimes(1);
+  release({ version: 1, profile, reply: { kind: "error", error: "not_found" } });
+  await vi.waitFor(() => expect(native.call).toHaveBeenCalledTimes(2));
+  context.dispose();
+});
+
 test("attached context reads are bounded to two, use queries only, and discard late results after hide", async () => {
   const { WorkEnvironmentContext } = await import("../context.svelte");
   const resolvers: ((value: WorkResponseV1) => void)[] = [];

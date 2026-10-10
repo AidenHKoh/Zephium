@@ -39,6 +39,9 @@ export class WorkEnvironmentContext {
   private workers = 0;
   private failures = new SvelteMap<string, number>();
   private inFlight = new SvelteSet<string>();
+  private pendingPages = new SvelteSet<string>();
+  private pageInFlight = new SvelteSet<string>();
+  private pageWorkers = 0;
   private notesTask: Promise<void> | null = null;
   private notesAgain = false;
   private active = false;
@@ -47,7 +50,7 @@ export class WorkEnvironmentContext {
   private stop: (() => void) | null = null;
   private lifetime = new AbortController();
   /** Reads that finished while others are still out: published together, so a work opens in one pass. */
-  private arrived: Record<string, { projection: WorkRuntimeProjection; pages?: WorkPageV1[] }> = {};
+  private arrived: Record<string, { projection: WorkRuntimeProjection }> = {};
   private publishing: ReturnType<typeof setTimeout> | undefined;
   private since = 0;
   constructor(readonly profile: string) {}
@@ -118,7 +121,7 @@ export class WorkEnvironmentContext {
   private pump() {
     if (!this.active) return;
     while (this.workers < 2 && this.pending.size) {
-      const id = this.pending.values().next().value;
+      const id = [...this.pending].find((id) => !this.inFlight.has(id));
       if (!id) break;
       this.pending.delete(id);
       this.workers++;
@@ -159,13 +162,12 @@ export class WorkEnvironmentContext {
         next.executions.length <= 16 &&
         (!current || BigInt(next.work.revision) >= BigInt(current.work.revision))
       ) {
-        const pages = next.executions.length ? await this.readPages(id, generation) : undefined;
-        if (!this.active || generation !== this.generation || !this.wanted.includes(id)) return;
         this.failures.delete(id);
-        this.arrive(id, {
-          projection: next,
-          ...(pages ? { pages } : {}),
-        });
+        this.arrive(id, { projection: next });
+        if (next.executions.length) {
+          this.pendingPages.add(id);
+          this.pumpPages();
+        }
         return;
       }
     }
@@ -187,7 +189,7 @@ export class WorkEnvironmentContext {
    * most a moment, then everything that arrived is published at once: the
    * canvas lays out once for all of them instead of once for each.
    */
-  private arrive(id: string, read: { projection: WorkRuntimeProjection; pages?: WorkPageV1[] }) {
+  private arrive(id: string, read: { projection: WorkRuntimeProjection }) {
     if (!Object.keys(this.arrived).length) this.since = Date.now();
     this.arrived[id] = read;
     clearTimeout(this.publishing);
@@ -207,10 +209,39 @@ export class WorkEnvironmentContext {
       if (!sameProjection(this.objectives.get(id) ?? null, read.projection))
         this.objectives.set(id, read.projection);
       this.unavailable.delete(id);
-      if (read.pages && !samePages(this.pages.get(id), read.pages)) this.pages.set(id, read.pages);
     }
   }
   /** The frames one work recorded, so its page cards are pictures on arrival. */
+  private pumpPages() {
+    if (!this.active) return;
+    while (this.pageWorkers < 2) {
+      const id = [...this.pendingPages].find((id) => !this.pageInFlight.has(id));
+      if (!id) break;
+      this.pendingPages.delete(id);
+      if (!this.wanted.includes(id)) continue;
+      this.pageWorkers++;
+      this.pageInFlight.add(id);
+      const generation = this.generation;
+      // Optional frames cannot delay a terminal or interrupted projection.
+      void this.readPages(id, generation)
+        .then((pages) => {
+          if (
+            pages &&
+            this.active &&
+            generation === this.generation &&
+            this.wanted.includes(id) &&
+            !samePages(this.pages.get(id), pages)
+          )
+            this.pages.set(id, pages);
+        })
+        .finally(() => {
+          this.pageWorkers--;
+          this.pageInFlight.delete(id);
+          this.pumpPages();
+        });
+    }
+  }
+
   private async readPages(id: string, generation: number): Promise<WorkPageV1[] | undefined> {
     const response = await observe(
       Promise.resolve().then(() => commands.workActivity(this.profile, id)),
@@ -303,6 +334,7 @@ export class WorkEnvironmentContext {
     clearTimeout(this.publishing);
     this.arrived = {};
     this.pending.clear();
+    this.pendingPages.clear();
     this.objectives.clear();
     this.media.clear();
     this.mediaRevisions.clear();
