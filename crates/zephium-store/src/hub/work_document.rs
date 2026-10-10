@@ -179,6 +179,53 @@ impl Hub {
             tick_ms: i64::try_from(self.work_runtime_epoch.elapsed().as_millis())
                 .map_err(|_| WorkError::Unavailable)?,
         };
+        if let WorkRequest::PutRecordMedia { media, .. } | WorkRequest::ReadRecordMedia { media } =
+            &request
+        {
+            #[cfg(not(feature = "work-execution"))]
+            return Err(WorkError::Unavailable);
+            #[cfg(feature = "work-execution")]
+            {
+                let conn = self
+                    .profile_conn(profile)
+                    .map_err(|_| WorkError::Unavailable)?;
+                let projection =
+                    runtime_store::projection(conn, profile, media.work, runtime_session)?;
+                let execution = projection
+                    .executions
+                    .iter()
+                    .find(|e| e.id == media.execution)
+                    .ok_or(WorkError::NotFound)?;
+                let attempt = execution
+                    .attempts
+                    .iter()
+                    .find(|a| a.id == media.attempt)
+                    .ok_or(WorkError::NotFound)?;
+                let step = execution
+                    .steps
+                    .iter()
+                    .find(|s| s.id == media.step)
+                    .ok_or(WorkError::NotFound)?;
+                if !matches!(step.kind, runtime::WorkStepKindV1::Read { .. }) {
+                    return Err(WorkError::Invalid);
+                }
+                if let WorkRequest::PutRecordMedia { png, .. } = &request {
+                    if execution.status != runtime::WorkExecutionStatus::Running
+                        || attempt.status != runtime::WorkAttemptStatus::Running
+                        || step.status != runtime::WorkStepStatus::Running
+                        || projection.interrupted.contains(&execution.id)
+                    {
+                        return Err(WorkError::Conflict);
+                    }
+                    self.record_media(profile, media, Some(png))?;
+                    return Ok(WorkReply::RecordMediaStored(media.clone()));
+                }
+                return self
+                    .record_media(profile, media, None)?
+                    .map(WorkReply::RecordMedia)
+                    .ok_or(WorkError::NotFound);
+            }
+        }
         if let WorkRequest::ReadEvidence { id, link } = &request {
             // Both databases are owned by this actor. Validate the selected
             // Work/profile first; no mutation can interleave the archive read.
@@ -318,6 +365,10 @@ impl Hub {
                 WorkError::Unavailable
             }
         })?;
+        #[cfg(feature = "work-execution")]
+        if let WorkReply::Deleted { id } = &reply {
+            self.remove_record_media(profile, *id);
+        }
         #[cfg(test)]
         if write && tests::LOSE_COMMIT_ACK.with(|fault| fault.replace(false)) {
             return Err(WorkError::OutcomeUnknown);
@@ -352,6 +403,8 @@ fn apply(
             authoring_store::command(tx, profile, runtime_session, command, intent)?
         }
         WorkRequest::ReadEvidence { .. }
+        | WorkRequest::PutRecordMedia { .. }
+        | WorkRequest::ReadRecordMedia { .. }
         | WorkRequest::ReadMediaContext { .. }
         | WorkRequest::SiteAccess { .. }
         | WorkRequest::Personal(_) => return Err(WorkError::Invalid),

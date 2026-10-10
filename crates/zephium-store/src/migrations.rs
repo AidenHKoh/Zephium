@@ -296,6 +296,10 @@ pub(crate) static WORK: &[Migration] = &[
         version: 2,
         up: retain_clean_work_runs,
     },
+    Migration {
+        version: 3,
+        up: record_media,
+    },
 ];
 
 fn schema_manifest(conn: &Connection) -> rusqlite::Result<Vec<SchemaObject>> {
@@ -1785,7 +1789,37 @@ pub static META: &[Migration] = &[
         version: 25,
         up: retain_clean_work_runs,
     },
+    Migration {
+        version: 26,
+        up: record_media,
+    },
 ];
+
+fn record_media(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE work_record_media (
+            profile_id TEXT NOT NULL CHECK (length(profile_id) = 26),
+            work_id TEXT NOT NULL CHECK (length(work_id) = 26),
+            execution_id TEXT NOT NULL CHECK (length(execution_id) = 26),
+            attempt_id TEXT NOT NULL CHECK (length(attempt_id) = 26),
+            step_id TEXT NOT NULL CHECK (length(step_id) = 26),
+            record_index INTEGER NOT NULL CHECK (record_index BETWEEN 0 AND 65535),
+            extraction_id BLOB NOT NULL REFERENCES agent_work_artifacts(artifact_id) ON DELETE CASCADE,
+            metadata BLOB NOT NULL CHECK (length(metadata) BETWEEN 1 AND 2048),
+            png BLOB NOT NULL CHECK (length(png) BETWEEN 1 AND 65536),
+            PRIMARY KEY (profile_id, attempt_id, step_id, record_index)
+         ) STRICT, WITHOUT ROWID;
+         CREATE INDEX work_record_media_work ON work_record_media(profile_id, work_id);
+         CREATE TRIGGER work_record_media_immutable BEFORE UPDATE ON work_record_media
+         BEGIN SELECT RAISE(ABORT, 'record media is immutable'); END;
+         CREATE TRIGGER work_record_media_capacity BEFORE INSERT ON work_record_media
+         WHEN (SELECT count(*) FROM work_record_media WHERE profile_id = NEW.profile_id
+                 AND attempt_id = NEW.attempt_id AND step_id = NEW.step_id) >= 12
+           OR (SELECT count(*) FROM work_record_media WHERE profile_id = NEW.profile_id) >= 256
+           OR (SELECT coalesce(sum(length(png)),0) FROM work_record_media) + length(NEW.png) > 67108864
+         BEGIN SELECT RAISE(ABORT, 'record media capacity exceeded'); END;",
+    )
+}
 
 /// Clean terminal runs become history the Store may prune; anything live or
 /// carrying debt stays recovery history that no statement can delete. Only
@@ -2672,6 +2706,7 @@ mod tests {
         (23, 0x6a156db401738842),
         (24, 0xb38257a2cbe5bad8),
         (25, 0xdd0b59247509897e),
+        (26, 0x8cf0e4639f17eb73),
     ];
     const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
         (1, 0x10b8_b7a3_094f_23d7),
@@ -3229,7 +3264,7 @@ mod tests {
                 [run(key, 0, 0).0.as_slice()],
             )
         };
-        for (migrations, shipped, current) in [(META, 24, 25), (WORK, 1, 2)] {
+        for (migrations, shipped) in [(META, 24), (WORK, 1)] {
             let mut conn = Connection::open_in_memory().unwrap();
             apply(&mut conn, &migrations[..shipped]).unwrap();
             insert(&conn, 1, 10, 0).unwrap();
@@ -3240,7 +3275,7 @@ mod tests {
             assert_eq!(
                 conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                current
+                migrations.last().unwrap().version
             );
             for (key, disposition, debt) in [(1, 10, 0), (2, 9, 63), (3, 1, 63)] {
                 let (stored, settled): (Vec<u8>, Option<i64>) = conn

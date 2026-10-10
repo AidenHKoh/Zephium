@@ -519,7 +519,9 @@ impl WorkResponseV1 {
                 | port::WorkReply::Deleted { .. }
                 | port::WorkReply::SiteAccess(_)
                 | port::WorkReply::Personal(_)
-                | port::WorkReply::MediaContext(_),
+                | port::WorkReply::MediaContext(_)
+                | port::WorkReply::RecordMedia(_)
+                | port::WorkReply::RecordMediaStored(_),
             ) => WorkReplyV1::Error {
                 error: WorkFailureV1::Invalid,
             },

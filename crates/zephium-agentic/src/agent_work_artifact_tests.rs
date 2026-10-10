@@ -106,6 +106,44 @@ fn encode(document: &ArchivedDocument) -> (AgentWorkArtifactDescriptor, Vec<u8>)
 }
 
 #[test]
+fn media_source_binds_exact_archive_and_schema_ordered_row() {
+    let mut original = document();
+    original.version = 3;
+    for source in &mut original.sources {
+        source.observation = Some(4);
+        source.observation_generation = Some(1);
+        source.captured_millis = Some(5);
+    }
+    original.fields.push(ArchivedField {
+        name: "records".into(),
+        value: ArchivedValue::Rows {
+            items: (0..2)
+                .map(|_| {
+                    vec![ArchivedField {
+                        name: "name".into(),
+                        value: ArchivedValue::Text {
+                            value: "Fixture label".into(),
+                            sources: vec![1],
+                        },
+                    }]
+                })
+                .collect(),
+        },
+    });
+    let (descriptor, bytes) = encode(&original);
+    let archive = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();
+    let first = archive.record_media_source(0).unwrap();
+    assert_ne!(Some(first), archive.record_media_source(1));
+    assert_eq!(None, archive.record_media_source(2));
+    let reopened = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();
+    assert_eq!(Some(first), reopened.record_media_source(0));
+    original.id = [9; 16];
+    let (descriptor, bytes) = encode(&original);
+    let other = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();
+    assert_ne!(Some(first), other.record_media_source(0));
+}
+
+#[test]
 fn archived_roundtrip_keeps_closed_values_quotes_and_redacted_debug() {
     let (descriptor, bytes) = encode(&document());
     let result = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();

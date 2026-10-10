@@ -197,6 +197,9 @@ impl WorkDocumentSubmission {
     ) -> Result<(Self, WorkDocumentRequest), WorkError> {
         request.validate()?;
         let work_id = match &request {
+            WorkRequest::PutRecordMedia { media, .. } | WorkRequest::ReadRecordMedia { media } => {
+                Some(media.work)
+            }
             WorkRequest::AuthoringCommand { intent, .. } => intent.work(),
             WorkRequest::Create { id, .. }
             | WorkRequest::ReadEvidence { id, .. }

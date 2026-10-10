@@ -5,6 +5,15 @@ use super::*;
 
 #[derive(Clone)]
 pub enum WorkRequest {
+    /// Native-only immutable enrichment after source extraction succeeded.
+    PutRecordMedia {
+        media: media::WorkRecordMediaRefV1,
+        png: Vec<u8>,
+    },
+    /// Native-only read; never decoded from the model tool vocabulary.
+    ReadRecordMedia {
+        media: media::WorkRecordMediaRefV1,
+    },
     /// The person's memory, a work's consent to their history, notes and
     /// tabs, and history search for the agent's context tools.
     Personal(super::personal::WorkPersonalRequest),
@@ -119,6 +128,14 @@ impl WorkRequest {
             evidence.evidence.validate()?;
         }
         match self {
+            Self::PutRecordMedia { media, png } => {
+                media.validate()?;
+                if png.is_empty() || png.len() > media::MAX_RECORD_MEDIA_BYTES {
+                    return Err(WorkError::Capacity);
+                }
+                Ok(())
+            }
+            Self::ReadRecordMedia { media } => media.validate(),
             Self::RuntimeUpdate {
                 update: runtime::WorkRuntimeUpdate::PageTitle { title, .. },
                 ..
@@ -313,6 +330,8 @@ impl std::fmt::Debug for WorkSummary {
 }
 #[derive(Clone, Debug)]
 pub enum WorkReply {
+    RecordMediaStored(media::WorkRecordMediaRefV1),
+    RecordMedia(WorkMediaContext),
     Personal(super::personal::WorkPersonalReply),
     SiteAccess(Vec<super::sites::WorkSiteEntryV1>),
     MediaContext(WorkMediaContext),

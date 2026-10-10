@@ -100,7 +100,7 @@ pub(crate) use tests::work_test_guard;
 pub(crate) use tests::work_test_storage;
 
 impl Hub {
-    fn with_work_connection<T>(
+    pub(super) fn with_work_connection<T>(
         &mut self,
         operation: impl FnOnce(&mut Connection) -> Result<T, Error>,
     ) -> Result<T, Error> {
@@ -115,7 +115,7 @@ impl Hub {
         operation(&mut self.meta)
     }
 
-    fn work_profile_retired(&mut self, profile: ProfileId) -> Result<bool, Error> {
+    pub(super) fn work_profile_retired(&mut self, profile: ProfileId) -> Result<bool, Error> {
         #[cfg(windows)]
         if self.windows_work_storage.is_some() {
             return self.with_work_connection(|connection| {
@@ -722,7 +722,7 @@ fn result_profile(connection: &Connection, key: [u8; 32]) -> Result<Option<Profi
     }
 }
 
-fn read_artifact(
+pub(super) fn read_artifact(
     connection: &Connection,
     key: [u8; 32],
     profile: ProfileId,

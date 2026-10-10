@@ -555,6 +555,27 @@ impl AgentWorkArchivedExtraction {
     pub fn fields(&self) -> &[ArchivedField] {
         &self.document.fields
     }
+    /// Fingerprint of one flattened, schema-ordered archived row and this exact
+    /// extraction. Used only to associate optional native media after success.
+    pub fn record_media_source(&self, index: u16) -> Option<[u8; 32]> {
+        let row = self
+            .document
+            .fields
+            .iter()
+            .filter_map(|field| match &field.value {
+                ArchivedValue::Rows { items } => Some(items.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .nth(usize::from(index))?;
+        let mut hash = Sha256::new();
+        hash.update(b"zephium-record-media-source-v1\0");
+        hash.update(self.descriptor.id());
+        hash.update(self.descriptor.digest());
+        hash.update(index.to_le_bytes());
+        hash.update(serde_json::to_vec(row).ok()?);
+        Some(hash.finalize().into())
+    }
     /// Resolves one historical citation within this exact archive.
     pub fn source(&self, id: u16) -> Option<&ArchivedSource> {
         self.document.sources.iter().find(|source| source.id == id)
