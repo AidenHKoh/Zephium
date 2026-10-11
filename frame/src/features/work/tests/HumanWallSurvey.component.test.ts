@@ -65,8 +65,29 @@ test("an accessible inbox can resume without paragraphs or native anchor links",
   </div></section>`;
   expect(await survey(inbox)).toBe(true);
   expect(
+    await survey(`${inbox}<aside><div role="progressbar">Loading a preview</div></aside>`),
+  ).toBe(true);
+  expect(
     await survey(
       '<main><div role="grid"><div role="row"></div><div role="row"></div></div></main>',
     ),
   ).toBe(false);
+});
+
+test("email and MFA transitions remain walls before or without editable controls", async () => {
+  for (const html of [
+    "<main><h1>Check your email</h1><p>We sent a sign-in link. Open your email to continue.</p></main>",
+    "<main><h1>Enter your confirmation code</h1><p>Use the six-digit code from your email.</p><input inputmode='numeric' name='confirmation_code'><button>Continue</button></main>",
+    "<main><h1>Approve sign-in on your phone</h1><p>Open your authenticator to continue.</p><a href='/help'>Help</a><a href='/terms'>Terms</a><a href='/privacy'>Privacy</a></main>",
+    "<main><h1>Sign in</h1><p>Your sign-in form is loading.</p></main><footer><a href='/help'>Help</a><a href='/terms'>Terms</a><a href='/privacy'>Privacy</a></footer>",
+    "<main><div role='progressbar'>Loading</div></main><footer><a href='/help'>Help</a><a href='/terms'>Terms</a><a href='/privacy'>Privacy</a></footer>",
+  ])
+    expect(await survey(html), html).toBe(false);
+});
+
+test("a verification screen clears only after it is replaced by account content", async () => {
+  const waiting =
+    "<main><h1>Enter the code from your email</h1><p>Use the message we sent to finish signing in.</p><div role='textbox' aria-label='Confirmation code' contenteditable='true'></div></main>";
+  expect(await survey(waiting)).toBe(false);
+  expect(await survey(content)).toBe(true);
 });
