@@ -1,8 +1,9 @@
 // A fixed, read-only, content-free survey while the person owns this page.
 // Never read input values, follow frames, click, fill, or return page text.
+// Closed result: 0 is clear; 1..18 name only a structural reason to keep holding.
 (() => {
   try {
-    if (!document.body || !["interactive", "complete"].includes(document.readyState)) return false;
+    if (!document.body || !["interactive", "complete"].includes(document.readyState)) return 1;
     const visible = (node) => {
       if (!node || node.closest('[hidden],[inert],[aria-hidden="true"]')) return false;
       const box = node.getBoundingClientRect();
@@ -13,10 +14,10 @@
     const active = document.activeElement;
     if (visible(active) && active.matches("input,textarea")) {
       const hint = ["type", "autocomplete", "name", "id", "aria-label", "placeholder"].map((name) => active.getAttribute(name) || "").join(" ");
-      if (/(?:password|one-time-code|totp|otp|authentication.?code|verification.?code|confirmation.?code|email|user.?name|workspace)/i.test(hint)) return false;
+      if (/(?:password|one-time-code|totp|otp|authentication.?code|verification.?code|confirmation.?code|email|user.?name|workspace)/i.test(hint)) return 2;
     }
-    const nodes = document.querySelectorAll("input,textarea,select,iframe,h1,h2,h3,h4,h5,h6,p,button,a,main,article,[role='heading'],[role='alert'],[role='main'],[role='dialog'],[role='row'],[role='listitem'],[role='option'],[role='link'],[role='button'],[role='grid'],[role='status'],[role='progressbar'],[role='textbox'],[contenteditable='true'],[aria-busy='true']");
-    if (nodes.length > 4096) return false;
+    const nodes = document.querySelectorAll("input,textarea,select,iframe,h1,h2,h3,h4,h5,h6,p,button,a,main,article,li,tr,[role='heading'],[role='alert'],[role='main'],[role='dialog'],[role='row'],[role='listitem'],[role='option'],[role='link'],[role='button'],[role='grid'],[role='status'],[role='progressbar'],[role='textbox'],[contenteditable='true'],[aria-busy='true']");
+    if (nodes.length > 4096) return 3;
     const challenge = /^(?:just a moment|checking (?:your browser|if the site connection)|verifying you are human|verify you are human|please verify|confirm you are human|are you (?:a human|a robot)|prove you are human|press (?:&|and) hold|human verification|security (?:check|verification)|complete the security check|pardon our interruption|access denied|unusual traffic|something went wrong|please wait)/i;
     const signIn = /(?:sign[ -]?in|log[ -]?in|zaloguj|two[ -]?factor|verification code|confirmation code|authentication code|one[ -]?time code|choose (?:an? |your )?(?:account|workspace|organization)|select (?:an? |your )?(?:account|workspace|organization)|find your workspace|workspace url|enter your workspace|continue (?:with|to) (?:google|microsoft|apple|slack|sso)|single sign[ -]?on)/i;
     const authStatus = /^(?:(?:please\s+)?(?:check|open)\s+(?:your\s+)?(?:e[ -]?mail|inbox)|(?:enter|type|provide)\s+(?:(?:the|your|a)\s+)?(?:(?:six|6)[ -]digit\s+)?(?:(?:confirmation|verification|authentication|security|one[ -]?time)\s+)?code|(?:approve|confirm|complete)\s+(?:the\s+|your\s+)?(?:sign[ -]?in|log[ -]?in|authentication)|(?:we(?:'ve| have)?\s+)?sent\s+(?:you\s+)?(?:an?\s+|the\s+)?(?:e[ -]?mail|sign[ -]?in link|verification|confirmation)|waiting\s+for\s+(?:approval|verification|authentication))/i;
@@ -53,16 +54,19 @@
       if (["input", "textarea", "select"].includes(tag) || role === "textbox" || node.isContentEditable) {
         const type = (node.getAttribute("type") || "").toLowerCase();
         const hints = ["autocomplete", "name", "id", "aria-label", "placeholder"].map((name) => node.getAttribute(name) || "");
-        if (hints.some((hint) => hint.length > 256)) return false;
+        if (hints.some((hint) => hint.length > 256)) return 4;
         const hint = hints.join(" ");
-        if (type === "password" || /(?:password|one-time-code|totp|otp|authentication.?code|verification.?code|confirmation.?code)/i.test(hint)) return false;
+        if (type === "password" || /(?:password|one-time-code|totp|otp|authentication.?code|verification.?code|confirmation.?code)/i.test(hint)) return 5;
         // Segmented OTP widgets often expose only ordinary one-character
         // text inputs, without an accessible code label or autocomplete hint.
-        if (node.getAttribute("maxlength") === "1" && /^(?:text|tel|number|)$/.test(type)) return false;
+        if (node.getAttribute("maxlength") === "1" && /^(?:text|tel|number|)$/.test(type)) return 6;
         if (node.disabled || node.readOnly) continue;
         editable++;
-        if (!publicEntry(node) && type !== "search") unknownEntry++;
-        if ((/(?:email|user.?name|workspace|organization|tenant)/i.test(hint) || type === "email") && !publicEntry(node)) return false;
+        if (!publicEntry(node) && type !== "search") {
+          unknownEntry++;
+          if (node.closest("dialog,[role='dialog'],[aria-modal='true']")) return 14;
+        }
+        if ((/(?:email|user.?name|workspace|organization|tenant)/i.test(hint) || type === "email") && !publicEntry(node)) return 7;
         continue;
       }
       if (tag === "iframe") {
@@ -71,21 +75,21 @@
         const width = node.getBoundingClientRect().width;
         if (/(?:hcaptcha|captcha challenge|recaptcha challenge|security challenge|verify you are human|arkose)/.test(title) ||
           (title === "recaptcha" && width >= 290) ||
-          (/(?:captcha-delivery\.com|challenges\.cloudflare\.com|hcaptcha\.com)/.test(src) && width >= 290)) return false;
+          (/(?:captcha-delivery\.com|challenges\.cloudflare\.com|hcaptcha\.com)/.test(src) && width >= 290)) return 8;
         continue;
       }
       if (["main", "article"].includes(tag) || role === "main" || role === "grid") {
         main = true;
-        if (signIn.test((node.getAttribute("aria-label") || "").slice(0, 160))) return false;
+        if (signIn.test((node.getAttribute("aria-label") || "").slice(0, 160))) return 9;
         continue;
       }
       // Bounded labels only; structural containers never expand their text.
       const short = label(node);
       const isHeading = /^h[1-6]$/.test(tag) || role === "heading";
-      if ((isHeading || role === "alert" || tag === "p") && challenge.test(short)) return false;
-      if ((isHeading || role === "alert" || role === "status" || role === "dialog") && authStatus.test(short)) return false;
+      if ((isHeading || role === "alert" || tag === "p") && challenge.test(short)) return 10;
+      if ((isHeading || role === "alert" || role === "status" || role === "dialog") && authStatus.test(short)) return 11;
       if (role === "status" && /^(?:loading|please wait|just a moment)\b/i.test(short)) busy = true;
-      if ((isHeading || role === "dialog") && /(?:choose|select|find|enter) (?:an? |your )?(?:account|workspace|organization)|workspace url/i.test(short)) return false;
+      if ((isHeading || role === "dialog") && /(?:choose|select|find|enter) (?:an? |your )?(?:account|workspace|organization)|workspace url/i.test(short)) return 12;
       if (isHeading || role === "dialog") authHeading ||= signIn.test(short);
       if ((tag === "button" || tag === "a" || role === "button" || role === "link") && signIn.test(short)) authControls++;
       // Legal/help chrome is not evidence that the requested app loaded.
@@ -93,20 +97,20 @@
       heading ||= isHeading && short.length > 2 && !signIn.test(short);
       paragraph ||= tag === "p" && short.length >= 24;
       links += Number(((tag === "a" && !!node.getAttribute("href")) || role === "link") && short.length > 1 && !!node.closest("main,article,[role='main'],[role='grid']"));
-      rows += Number(["row", "listitem", "option"].includes(role) && short.length >= 8 && !!node.closest("main,[role='main'],[role='grid'],[role='list']"));
+      rows += Number((["li", "tr"].includes(tag) || ["row", "listitem", "option"].includes(role)) && short.length >= 8 && !!node.closest("main,[role='main'],[role='grid'],[role='list']"));
     }
     // Authentication forms may arrive after their heading, and email/MFA
     // waiting screens may have no editable controls at all.
-    if (authHeading) return false;
+    if (authHeading) return 13;
     // A heading and explanatory paragraph also describe most code-entry
     // screens. Unclassified editable controls require actual app structure.
-    if (unknownEntry > 0 && !(main && rows >= 3)) return false;
-    if (busy && !(main && (links >= 3 || rows >= 3))) return false;
-    if (authControls > 0 && editable > 0 && !(heading && paragraph) && rows < 3) return false;
+    if (unknownEntry > 0 && !(main && rows >= 3)) return 14;
+    if (busy && !(main && (links >= 3 || rows >= 3))) return 15;
+    if (authControls > 0 && editable > 0 && !(heading && paragraph) && rows < 3) return 16;
     // A settled URL and the absence of a field are insufficient: require
     // visible page content, so an empty SPA shell/spinner cannot resume it.
-    return (heading && paragraph) || (main && (links >= 3 || rows >= 3));
+    return ((heading && paragraph) || (main && (links >= 3 || rows >= 3))) ? 0 : 17;
   } catch {
-    return false;
+    return 18;
   }
 })();

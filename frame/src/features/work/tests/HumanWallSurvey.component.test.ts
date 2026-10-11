@@ -23,8 +23,8 @@ async function survey(html: string): Promise<boolean> {
   try {
     await loaded;
     const result = frame.contentDocument?.documentElement.dataset.wallClear;
-    expect(["true", "false"]).toContain(result);
-    return result === "true";
+    expect(Array.from({ length: 19 }, (_, code) => String(code))).toContain(result);
+    return result === "0";
   } finally {
     frame.remove();
   }
@@ -99,4 +99,23 @@ test("unlabelled segmented verification controls and lower-level headings remain
     `<main><h5>Check your inbox</h5><p>Follow the link to continue to your workspace.</p></main>`,
   ])
     expect(await survey(html), html).toBe(false);
+});
+
+test("native HTML inbox items are account content without ARIA row attributes", async () => {
+  const items =
+    "<main><h1>Inbox</h1><ul><li>Prepare the release checklist</li><li>Review the project proposal</li><li>Read the integration notes</li></ul></main>";
+  expect(await survey(items)).toBe(true);
+  expect(
+    await survey(
+      `${items}<div role='dialog'><h2>Continue</h2><input name='code'><button>Continue</button></div>`,
+    ),
+  ).toBe(false);
+});
+
+test("native table rows can establish loaded inbox content", async () => {
+  expect(
+    await survey(
+      "<main><h1>Inbox</h1><table><tbody><tr><td>Review the project proposal</td></tr><tr><td>Confirm the planning meeting</td></tr><tr><td>Read the engineering report</td></tr></tbody></table></main>",
+    ),
+  ).toBe(true);
 });

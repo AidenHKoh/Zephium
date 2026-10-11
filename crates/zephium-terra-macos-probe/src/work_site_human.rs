@@ -195,6 +195,11 @@ pub(super) fn response(path: &str) -> String {
             "<h1>Sign in to the fixture dashboard</h1><p>Local qualification only. Do not enter real credentials.</p><form onsubmit=\"return false\"><label>Fixture password <input type=\"password\" autocomplete=\"off\"></label><button type=\"button\" disabled>Fixture human sign-in</button></form>",
         )
     };
+    let content = if *scenario == "email-code" {
+        format!("<main><h1>Inbox</h1><ul><li>{FACT}.</li><li>Review the synthetic project checklist.</li><li>Read the synthetic integration notes.</li></ul></main>")
+    } else {
+        format!("<main><h1>Fixture dashboard</h1><p>{FACT}.</p><p>This dashboard is public synthetic test data. The retained page now exposes its balance and reference without a reload, route change, cookie signal or manual continue command.</p></main>")
+    };
     // This polling simulation is present only in a synthetic loopback document.
     // Its controller never publishes a clear before observing native Presented.
     format!(
@@ -215,7 +220,7 @@ pub(super) fn response(path: &str) -> String {
    }}
    if(action==='clear'){{
     finished=true;document.title='Fixture dashboard';
-    document.body.innerHTML='<main><h1>Fixture dashboard</h1><p>{FACT}.</p><p>This dashboard is public synthetic test data. The retained page now exposes its balance and reference without a reload, route change, cookie signal or manual continue command.</p></main>';
+    document.body.innerHTML='{content}';
     await fetch('/human-fixture/ack/'+documentNumber,{{cache:'no-store'}});return;
    }}
   }}catch(_){{}}

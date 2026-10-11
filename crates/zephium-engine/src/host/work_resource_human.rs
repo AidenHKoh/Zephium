@@ -3,6 +3,37 @@ use super::*;
 const HUMAN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const HUMAN_WALL_SURVEY: &str = include_str!("work_human_wall.js");
 
+fn wall_survey_outcome(wire: &str) -> Option<u8> {
+    let code = wire.parse::<u8>().ok()?;
+    (code <= 18 && wire == code.to_string()).then_some(code)
+}
+
+#[cfg(test)]
+mod wall_survey_wire_tests {
+    use super::wall_survey_outcome;
+    #[test]
+    fn only_closed_structural_codes_are_admitted() {
+        for code in 0..=18 {
+            assert_eq!(wall_survey_outcome(&code.to_string()), Some(code));
+        }
+        for wire in [
+            "true",
+            "false",
+            "0.0",
+            "00",
+            " 0",
+            "19",
+            "255",
+            "-1",
+            "null",
+            "{}",
+            "private detail",
+        ] {
+            assert_eq!(wall_survey_outcome(wire), None);
+        }
+    }
+}
+
 #[cfg(all(
     target_os = "macos",
     feature = "agentic-browser-qa",
@@ -279,18 +310,28 @@ impl WorkNativeResource {
                     return;
                 }
                 let fresh = sampled.elapsed() <= Duration::from_secs(1);
+                let outcome = wall_survey_outcome(&result);
+                #[cfg(feature = "agentic-browser-qa")]
+                if check.is_some() {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "agent_view human_survey_code={} fresh={fresh}; content=redacted",
+                        outcome.unwrap_or(255)
+                    );
+                }
                 let valid = fresh
-                    && matches!(result.as_str(), "true" | "false")
+                    && outcome.is_some()
                     && work_browser_monotonic_now()
                         .is_some_and(|now| guard.human_current(Operation::PresentHuman, now))
-                    && admitted.record_human_wall_clear(stamp, result == "true");
+                    && admitted.record_human_wall_clear(stamp, outcome == Some(0));
                 if !valid {
                     admitted.record_human_wall_clear(stamp, false);
                 }
                 if let Some(check) = check.as_ref() {
                     if !valid {
                         check.finish(None);
-                    } else if result == "false" {
+                    } else if outcome != Some(0) {
                         check.finish(Some(false));
                     } else if admitted.human_verified_wall_clear() {
                         check.finish(Some(true));
