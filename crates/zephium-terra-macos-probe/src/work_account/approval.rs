@@ -1,6 +1,6 @@
 //! One explicit approval of the fixed disposable-account fixture. The offer is
 //! process-local and never a model tool, durable grant, or run-wide permission.
-use zephium_core::work::{WorkExecutionId, WorkStepId, runtime::*};
+use zephium_core::work::{runtime::*, WorkExecutionId, WorkStepId};
 
 pub(super) const MESSAGE: &str = "Zephium Work qualification: approved send and extraction test.";
 
@@ -335,8 +335,8 @@ mod tests {
     #[tokio::test]
     async fn leaving_the_account_flow_cancels_a_pending_review() {
         use std::sync::{
-            Arc,
             atomic::{AtomicBool, Ordering},
+            Arc,
         };
         struct Finished(Arc<AtomicBool>);
         impl Drop for Finished {

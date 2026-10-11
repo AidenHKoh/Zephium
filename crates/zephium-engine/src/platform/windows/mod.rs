@@ -249,7 +249,13 @@ pub fn configure(
     expected_in_private: bool,
     expected_user_data_folder: &Path,
 ) -> windows_core::Result<SecurityPolicy> {
-    configure_with_credential_denied(webview, _radius, expected_in_private, expected_user_data_folder, None)
+    configure_with_credential_denied(
+        webview,
+        _radius,
+        expected_in_private,
+        expected_user_data_folder,
+        None,
+    )
 }
 
 /// Owned Work views can remove public lineage when credential UI is cancelled.
@@ -317,18 +323,19 @@ fn configure_with_credential_denied(
     unsafe { core10.add_BasicAuthenticationRequested(&basic_auth, &mut basic_auth_token)? };
     policy.basic_auth_token = Some(basic_auth_token);
 
-    let client_certificate = ClientCertificateRequestedEventHandler::create(Box::new(move |_, args| {
-        if let Some(notify) = credential_denied.as_ref() {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify()));
-        }
-        if let Some(args) = args {
-            unsafe {
-                args.SetCancel(true)?;
-                args.SetHandled(true)?;
+    let client_certificate =
+        ClientCertificateRequestedEventHandler::create(Box::new(move |_, args| {
+            if let Some(notify) = credential_denied.as_ref() {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify()));
             }
-        }
-        Ok(())
-    }));
+            if let Some(args) = args {
+                unsafe {
+                    args.SetCancel(true)?;
+                    args.SetHandled(true)?;
+                }
+            }
+            Ok(())
+        }));
     let mut client_certificate_token = 0_i64;
     unsafe {
         core5.add_ClientCertificateRequested(&client_certificate, &mut client_certificate_token)

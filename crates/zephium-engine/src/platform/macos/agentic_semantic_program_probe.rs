@@ -308,7 +308,9 @@ pub(super) fn source() -> std::borrow::Cow<'static, str> {
         return std::borrow::Cow::Borrowed(SEMANTIC_RUNTIME_PROGRAM.installation_source());
     }
     if media_diagnostic::enabled() {
-        if let Some(source) = media_diagnostic::source(SEMANTIC_RUNTIME_PROGRAM.installation_source()) {
+        if let Some(source) =
+            media_diagnostic::source(SEMANTIC_RUNTIME_PROGRAM.installation_source())
+        {
             return std::borrow::Cow::Owned(source);
         }
         // Changed source anchors disable diagnostics, never alter shipping behavior.

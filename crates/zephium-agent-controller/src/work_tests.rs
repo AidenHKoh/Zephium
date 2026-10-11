@@ -3868,31 +3868,91 @@ fn a_chosen_model_drives_the_same_turns_to_the_exact_ceiling() {
 
 #[test]
 fn original_anonymous_read_proof_is_minted_once_before_construction_and_shared_across_specs() {
-    use zephium_agentic::{WorkBrowserAnonymousReadStatus as Status, WorkBrowserResources, WorkBrowserResourceId, WorkId};
-    let mut original=input().with_isolated_website_data();
+    use zephium_agentic::{
+        WorkBrowserAnonymousReadStatus as Status, WorkBrowserResourceId, WorkBrowserResources,
+        WorkId,
+    };
+    let mut original = input().with_isolated_website_data();
     original.mark_original_anonymous_read();
-    let first=original.retained_resource_spec().unwrap();
-    let proof=first.anonymous_read_authority.clone().unwrap();
-    let now=first.clock.now().unwrap();
-    let mut rows=WorkBrowserResources::new(WorkId::generate(),first.identity.profile());
-    let _request=rows.construct_document_with_original_read(WorkBrowserResourceId::generate(),first.identity.id(),first.storage,first.target,first.document_policy,first.isolated_public,proof.clone(),now).unwrap();
-    assert_eq!(original.retained_resource_spec().unwrap().anonymous_read_authority.unwrap().status(now),Status::Current);
+    let first = original.retained_resource_spec().unwrap();
+    let proof = first.anonymous_read_authority.clone().unwrap();
+    let now = first.clock.now().unwrap();
+    let mut rows = WorkBrowserResources::new(WorkId::generate(), first.identity.profile());
+    let _request = rows
+        .construct_document_with_original_read(
+            WorkBrowserResourceId::generate(),
+            first.identity.id(),
+            first.storage,
+            first.target,
+            first.document_policy,
+            first.isolated_public,
+            proof.clone(),
+            now,
+        )
+        .unwrap();
+    assert_eq!(
+        original
+            .retained_resource_spec()
+            .unwrap()
+            .anonymous_read_authority
+            .unwrap()
+            .status(now),
+        Status::Current
+    );
     rows.seal();
     original.mark_original_anonymous_read();
-    assert_eq!(original.retained_resource_spec().unwrap().anonymous_read_authority.unwrap().status(now),Status::Closed);
+    assert_eq!(
+        original
+            .retained_resource_spec()
+            .unwrap()
+            .anonymous_read_authority
+            .unwrap()
+            .status(now),
+        Status::Closed
+    );
 }
 #[test]
 fn original_anonymous_read_requires_explicit_intent_and_original_account_scope_not_storage_label() {
-    assert!(input().with_isolated_website_data().retained_resource_spec().unwrap().anonymous_read_authority.is_none());
-    let mut normal=input();normal.mark_original_anonymous_read();
-    assert!(normal.retained_resource_spec().unwrap().anonymous_read_authority.is_none());
-    let mut identified=input_with_navigation_account(&[SemanticEffectClass::Read],None,None,24,AgentAccountScope::Authenticated(zephium_agentic::AgentAccountId::generate())).with_isolated_website_data();
+    assert!(input()
+        .with_isolated_website_data()
+        .retained_resource_spec()
+        .unwrap()
+        .anonymous_read_authority
+        .is_none());
+    let mut normal = input();
+    normal.mark_original_anonymous_read();
+    assert!(normal
+        .retained_resource_spec()
+        .unwrap()
+        .anonymous_read_authority
+        .is_none());
+    let mut identified = input_with_navigation_account(
+        &[SemanticEffectClass::Read],
+        None,
+        None,
+        24,
+        AgentAccountScope::Authenticated(zephium_agentic::AgentAccountId::generate()),
+    )
+    .with_isolated_website_data();
     identified.mark_original_anonymous_read();
-    assert!(identified.retained_resource_spec().unwrap().anonymous_read_authority.is_none());
-    for storage in [ContextProfileStorageClass::Durable,ContextProfileStorageClass::Ephemeral] {
-        let mut original=input();original.context.storage=storage;
-        let mut original=original.with_work_website_data();original.mark_original_anonymous_read();
-        assert!(original.retained_resource_spec().unwrap().anonymous_read_authority.is_some());
+    assert!(identified
+        .retained_resource_spec()
+        .unwrap()
+        .anonymous_read_authority
+        .is_none());
+    for storage in [
+        ContextProfileStorageClass::Durable,
+        ContextProfileStorageClass::Ephemeral,
+    ] {
+        let mut original = input();
+        original.context.storage = storage;
+        let mut original = original.with_work_website_data();
+        original.mark_original_anonymous_read();
+        assert!(original
+            .retained_resource_spec()
+            .unwrap()
+            .anonymous_read_authority
+            .is_some());
         // An original anonymous task may use Work-memory cookies; this result
         // proves neither cookie absence nor signed-out screenshot permission.
     }

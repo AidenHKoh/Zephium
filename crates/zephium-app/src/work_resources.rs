@@ -378,9 +378,28 @@ impl WorkResourceOwner {
             return Err(Refusal::Uncertain);
         }
         let request = if let Some(proof) = anonymous_read_authority {
-            self.shared.lock_rows()?.construct_document_with_original_read(id,context,storage,target,policy,isolated_public,proof,now)?
+            self.shared
+                .lock_rows()?
+                .construct_document_with_original_read(
+                    id,
+                    context,
+                    storage,
+                    target,
+                    policy,
+                    isolated_public,
+                    proof,
+                    now,
+                )?
         } else {
-            self.shared.lock_rows()?.construct_document_with_isolation(id,context,storage,target,policy,isolated_public,now)?
+            self.shared.lock_rows()?.construct_document_with_isolation(
+                id,
+                context,
+                storage,
+                target,
+                policy,
+                isolated_public,
+                now,
+            )?
         };
         let request = if work_website_data {
             request

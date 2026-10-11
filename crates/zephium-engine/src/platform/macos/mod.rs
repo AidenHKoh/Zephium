@@ -776,7 +776,9 @@ mod tests {
 }
 
 #[cfg(feature = "native-agentic-semantic-probe")]
-pub(crate) fn media_diagnostics_enabled() -> bool { semantic_runtime::media_diagnostics_enabled() }
+pub(crate) fn media_diagnostics_enabled() -> bool {
+    semantic_runtime::media_diagnostics_enabled()
+}
 #[cfg(feature = "native-agentic-semantic-probe")]
 pub(crate) fn configure_media_diagnostic(public: bool, account: bool) {
     semantic_runtime::configure_media_diagnostic(public, account);

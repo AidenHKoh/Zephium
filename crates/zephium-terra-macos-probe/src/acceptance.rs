@@ -548,9 +548,16 @@ mod visual_diagnostic_tests {
                 cache_key: None,
             };
             let rejecting = EvalModelClient {
-                inner: Arc::new(Echo), role: "page", diagnostics: Arc::new(Mutex::new(EvalDiagnostics::default())), visual_diagnostics: false, reject_images: true,
+                inner: Arc::new(Echo),
+                role: "page",
+                diagnostics: Arc::new(Mutex::new(EvalDiagnostics::default())),
+                visual_diagnostics: false,
+                reject_images: true,
             };
-            assert!(matches!(rejecting.call(request.clone(), &|_| {}).await, Err(WorkModelError::BadRequest)));
+            assert!(matches!(
+                rejecting.call(request.clone(), &|_| {}).await,
+                Err(WorkModelError::BadRequest)
+            ));
             assert!(rejecting.diagnostics.lock().unwrap().calls.is_empty());
             let outcome = client.call(request, &|_| {}).await.unwrap();
             assert_eq!(outcome.assistant.len(), 1);

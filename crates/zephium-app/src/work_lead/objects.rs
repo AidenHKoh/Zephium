@@ -1314,7 +1314,9 @@ mod list_record_media_tests {
             "output":"result","title":"Native rows","review":"source_mapped_needs_review","presentation":"automatic","general_knowledge":false,
             "evidence":[source],"data":{"kind":"comparison_matrix","subjects":[{"name":"Native row","media_attempted":true,"record_media":media}],"criteria":[{"name":"Title","kind":{"kind":"text"}}],"cells":[[{"value":{"kind":"text","text":"Native row"},"evidence":[0]}]]}
         })).unwrap());
-        fact.artifacts[0].validate().expect("valid synthetic source artifact");
+        fact.artifacts[0]
+            .validate()
+            .expect("valid synthetic source artifact");
         (profile, work, fact, source, media)
     }
     fn proposed(source: WorkEvidenceLink, record: Option<u16>) -> Proposed {

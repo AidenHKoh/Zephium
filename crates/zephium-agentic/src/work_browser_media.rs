@@ -208,7 +208,11 @@ pub(super) struct MediaRead {
 impl WorkBrowserResourceRequest {
     /// Host-admitted original task class, independent of cookie-jar contents.
     pub fn media_fetch_mode(&self) -> WorkBrowserMediaFetchMode {
-        self.media.as_ref().map_or(WorkBrowserMediaFetchMode::SessionOnly, |media| media.fetch_mode)
+        self.media
+            .as_ref()
+            .map_or(WorkBrowserMediaFetchMode::SessionOnly, |media| {
+                media.fetch_mode
+            })
     }
 
     /// Rechecks the request's original opaque retry proof at native admission
@@ -219,20 +223,34 @@ impl WorkBrowserResourceRequest {
         resource: &WorkBrowserResourceJoin,
         now: AgentPolicyInstant,
     ) -> bool {
-        let Some(media) = self.media.as_ref() else { return false; };
+        let Some(media) = self.media.as_ref() else {
+            return false;
+        };
         if self.operation() != WorkBrowserResourceOperation::ReadMedia
-            || self.resource() != resource || now >= media.deadline
-            || !media.progress.current() || media.plans.is_empty() || media.plans.len() > 12
-        { return false; }
-        if media.fetch_mode == WorkBrowserMediaFetchMode::SessionOnly { return true; }
-        let Some(authority) = &media.retry_authority else { return false; };
-        self.isolated_public && authority.resource == *resource
+            || self.resource() != resource
+            || now >= media.deadline
+            || !media.progress.current()
+            || media.plans.is_empty()
+            || media.plans.len() > 12
+        {
+            return false;
+        }
+        if media.fetch_mode == WorkBrowserMediaFetchMode::SessionOnly {
+            return true;
+        }
+        let Some(authority) = &media.retry_authority else {
+            return false;
+        };
+        self.isolated_public
+            && authority.resource == *resource
             && authority.deadline == media.deadline
             && media.plans.iter().all(|plan| {
                 plan.frame().frame() == crate::FrameId::MAIN
                     && plan.frame().context().identity().id() == resource.identity().context()
                     && plan.frame().context().context_generation().get() == authority.generation
-                    && authority.original.matches(plan.frame().context().identity(), now)
+                    && authority
+                        .original
+                        .matches(plan.frame().context().identity(), now)
             })
     }
 
@@ -286,22 +304,40 @@ impl WorkBrowserResources {
             return Err(WorkBrowserResourceError::Phase);
         }
         let deadline = if fetch_mode == WorkBrowserMediaFetchMode::PublicAssetRetry {
-            let proof=row.anonymous_read_authority.as_ref().ok_or(WorkBrowserResourceError::Source)?;
-            if !row.isolated_public || !plans.iter().all(|plan|
-                proof.matches(plan.frame().context().identity(),now)
-                    && row.anonymous_read_generation==Some(plan.frame().context().context_generation().get())) {
+            let proof = row
+                .anonymous_read_authority
+                .as_ref()
+                .ok_or(WorkBrowserResourceError::Source)?;
+            if !row.isolated_public
+                || !plans.iter().all(|plan| {
+                    proof.matches(plan.frame().context().identity(), now)
+                        && row.anonymous_read_generation
+                            == Some(plan.frame().context().context_generation().get())
+                })
+            {
                 return Err(WorkBrowserResourceError::Source);
             }
-            proof.bound_deadline(now,deadline).ok_or(WorkBrowserResourceError::Expired)?
-        } else { deadline };
+            proof
+                .bound_deadline(now, deadline)
+                .ok_or(WorkBrowserResourceError::Expired)?
+        } else {
+            deadline
+        };
         let retry_authority = if fetch_mode == WorkBrowserMediaFetchMode::PublicAssetRetry {
             Some(MediaRetryAuthority {
-                original: row.anonymous_read_authority.clone().ok_or(WorkBrowserResourceError::Source)?,
+                original: row
+                    .anonymous_read_authority
+                    .clone()
+                    .ok_or(WorkBrowserResourceError::Source)?,
                 resource: resource.clone(),
-                generation: row.anonymous_read_generation.ok_or(WorkBrowserResourceError::Source)?,
+                generation: row
+                    .anonymous_read_generation
+                    .ok_or(WorkBrowserResourceError::Source)?,
                 deadline,
             })
-        } else { None };
+        } else {
+            None
+        };
         row.tick(now)?;
         let operation = OperationJoin {
             resource: resource.clone(),

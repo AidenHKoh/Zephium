@@ -411,7 +411,7 @@ impl WorkDocumentNavigation {
 
 #[cfg(all(test, target_os = "windows"))]
 mod windows_tests {
-    use super::super::tests::{URL, event, ready_gate};
+    use super::super::tests::{event, ready_gate, URL};
     use super::*;
     use wry::NavigationEventPhase as E;
 
@@ -530,7 +530,7 @@ mod windows_tests {
 
 #[cfg(all(test, any(target_os = "macos", target_os = "ios")))]
 mod tests {
-    use super::super::tests::{URL, apple_action, event, ready_gate};
+    use super::super::tests::{apple_action, event, ready_gate, URL};
     use super::*;
     use wry::{AppleNavigationType as T, NavigationEventPhase as E};
 
@@ -666,7 +666,7 @@ mod tests {
 
 #[cfg(test)]
 mod wall_proof_tests {
-    use super::super::tests::{URL, ready_gate};
+    use super::super::tests::{ready_gate, URL};
     use super::*;
 
     fn human() -> (

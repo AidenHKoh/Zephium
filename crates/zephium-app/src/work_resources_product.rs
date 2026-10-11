@@ -364,7 +364,10 @@ pub struct RetainedWorkSnapshot {
     pub refusal: Option<(RetainedRefusal, RetainedLaneFacts)>,
 }
 struct Projection {
-    media_command: Option<(Vec<zephium_agentic::SemanticRecordMediaPlan>, zephium_agentic::WorkBrowserMediaFetchMode)>,
+    media_command: Option<(
+        Vec<zephium_agentic::SemanticRecordMediaPlan>,
+        zephium_agentic::WorkBrowserMediaFetchMode,
+    )>,
     media_result: Option<Vec<zephium_agentic::WorkBrowserRecordImage>>,
     media_requested: bool,
 
@@ -592,7 +595,11 @@ impl RetainedWorkHandle {
     /// requires atomic artifact publication; the archived result remains in Store.
     /// One optional same-page media batch after durable text success. Numeric
     /// native source plans cannot add account, navigation, or action authority.
-    pub fn read_record_media(&self, plans: Vec<zephium_agentic::SemanticRecordMediaPlan>, fetch_mode: zephium_agentic::WorkBrowserMediaFetchMode) -> bool {
+    pub fn read_record_media(
+        &self,
+        plans: Vec<zephium_agentic::SemanticRecordMediaPlan>,
+        fetch_mode: zephium_agentic::WorkBrowserMediaFetchMode,
+    ) -> bool {
         if self.signal.close.load(Ordering::Acquire)
             || self.signal.stop.load(Ordering::Acquire)
             || plans.is_empty()

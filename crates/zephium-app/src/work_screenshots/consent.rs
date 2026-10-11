@@ -187,7 +187,9 @@ impl QuestionTicket {
         &self.0.origin
     }
     #[cfg(test)]
-    pub(crate) fn page(&self) -> WorkStepId { self.0.page }
+    pub(crate) fn page(&self) -> WorkStepId {
+        self.0.page
+    }
     pub(crate) fn step(&self) -> Option<WorkStepId> {
         self.0.state.lock().ok()?.question
     }

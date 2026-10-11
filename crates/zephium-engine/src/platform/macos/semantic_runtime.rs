@@ -1127,7 +1127,9 @@ impl AgentSemanticRuntimeController {
         completion: MediaCompletion,
     ) {
         let dispatched = match self.state.try_borrow_mut() {
-            Ok(mut state) => state.dispatch_media(MediaInvocation::new(plan, validate, fetch), completion),
+            Ok(mut state) => {
+                state.dispatch_media(MediaInvocation::new(plan, validate, fetch), completion)
+            }
             Err(_) => Err(completion),
         };
         match dispatched {

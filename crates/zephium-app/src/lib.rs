@@ -110,14 +110,14 @@ pub mod work_files;
 pub mod work_lead;
 #[cfg(feature = "work-planning")]
 pub mod work_models;
-#[cfg(feature = "work-planning")]
-pub mod work_screenshots;
 #[cfg(feature = "work-runtime")]
 pub mod work_personal;
 #[cfg(feature = "work-planning")]
 pub mod work_planning;
 #[cfg(feature = "work-runtime")]
 pub mod work_runtime;
+#[cfg(feature = "work-planning")]
+pub mod work_screenshots;
 #[cfg(feature = "work-runtime")]
 mod work_search;
 #[cfg(feature = "work-runtime")]

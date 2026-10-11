@@ -638,8 +638,16 @@ impl AgentWorkRunInput {
     /// this flag is neither cookie absence nor screenshot permission.
     pub fn mark_original_anonymous_read(&mut self) {
         if self.original_anonymous_read.is_none() && self.isolated_store {
-            self.original_anonymous_read=self.settings.clock.now().ok().and_then(|now|
-                zephium_agentic::WorkBrowserAnonymousReadAuthority::from_original_read(&self.manifest,self.lease,self.context.identity,&self.context.target,now,self.settings.deadline));
+            self.original_anonymous_read = self.settings.clock.now().ok().and_then(|now| {
+                zephium_agentic::WorkBrowserAnonymousReadAuthority::from_original_read(
+                    &self.manifest,
+                    self.lease,
+                    self.context.identity,
+                    &self.context.target,
+                    now,
+                    self.settings.deadline,
+                )
+            });
         }
     }
     /// Descriptive original resource construction operands for the trusted

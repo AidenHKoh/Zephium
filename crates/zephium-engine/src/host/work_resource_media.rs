@@ -44,10 +44,14 @@ impl Batch {
             && self.progress.current()
             && self.presentation.borrow().human_current()
             && work_browser_monotonic_now().is_some_and(|now| {
-                now < self.deadline && self.task.try_borrow().ok().is_some_and(|task| {
-                    task.as_ref().and_then(WorkLifecycleTask::request)
-                        .is_some_and(|request| request.media_fetch_authority_current(self.guard.resource(), now))
-                })
+                now < self.deadline
+                    && self.task.try_borrow().ok().is_some_and(|task| {
+                        task.as_ref()
+                            .and_then(WorkLifecycleTask::request)
+                            .is_some_and(|request| {
+                                request.media_fetch_authority_current(self.guard.resource(), now)
+                            })
+                    })
             })
             && self
                 .gate
@@ -75,7 +79,10 @@ impl Batch {
             return;
         }
         self.cursor.set(self.cursor.get() + 1);
-        let Some(now) = work_browser_monotonic_now() else { self.finish(false); return; };
+        let Some(now) = work_browser_monotonic_now() else {
+            self.finish(false);
+            return;
+        };
         let started = Instant::now();
         let window = Rc::new(RefCell::new(record_media::MediaRetryWindow::new(
             started,
@@ -83,11 +90,22 @@ impl Batch {
             self.fetch_mode == zephium_agentic::WorkBrowserMediaFetchMode::PublicAssetRetry,
         )));
         let initial = window.borrow_mut().initial(started);
-        let Some(fetch) = initial else { self.next(); return; };
+        let Some(fetch) = initial else {
+            self.next();
+            return;
+        };
         self.fetch(plan, fetch, window);
     }
-    fn fetch(self: Rc<Self>, plan: SemanticRecordMediaPlan, fetch: record_media::MediaFetchAttempt, window: Rc<RefCell<record_media::MediaRetryWindow>>) {
-        if !self.current(&plan) { self.finish(true); return; }
+    fn fetch(
+        self: Rc<Self>,
+        plan: SemanticRecordMediaPlan,
+        fetch: record_media::MediaFetchAttempt,
+        window: Rc<RefCell<record_media::MediaRetryWindow>>,
+    ) {
+        if !self.current(&plan) {
+            self.finish(true);
+            return;
+        }
         media_stage!(Dispatched);
         let batch = self.clone();
         (self.semantic)(
@@ -103,14 +121,21 @@ impl Batch {
                 // Renderer dispatch/callback delay never extends the original
                 // public-asset window. Its callback still drains before discard.
                 if batch.fetch_mode == zephium_agentic::WorkBrowserMediaFetchMode::PublicAssetRetry
-                    && !window.borrow().active(Instant::now()) {
+                    && !window.borrow().active(Instant::now())
+                {
                     batch.next();
                     return;
                 }
                 match outcome {
                     Some(NativeMediaResult::RetryableNetwork) => {
-                        let retry = window.borrow_mut().retry(Instant::now(), batch.current(&plan));
-                        if let Some(retry) = retry { batch.fetch(plan, retry, window); } else { batch.next(); }
+                        let retry = window
+                            .borrow_mut()
+                            .retry(Instant::now(), batch.current(&plan));
+                        if let Some(retry) = retry {
+                            batch.fetch(plan, retry, window);
+                        } else {
+                            batch.next();
+                        }
                     }
                     Some(NativeMediaResult::Fetched(bytes)) => {
                         media_stage!(Fetched);
@@ -301,7 +326,9 @@ impl WorkNativeResource {
             }
             let plans = request.media_plans()?.to_vec();
             let now = work_browser_monotonic_now()?;
-            if !request.media_fetch_authority_current(self.guard.resource(), now) { return None; }
+            if !request.media_fetch_authority_current(self.guard.resource(), now) {
+                return None;
+            }
             let progress = request.media_progress()?;
             let deadline = request.media_deadline()?;
             if plans.is_empty() || plans.len() > 12 {

@@ -789,10 +789,14 @@ impl NativeWorkComposition {
         resume_plan: Option<ResumePlan>,
         gate: Option<std::sync::Arc<crate::open_objective::site_work::SiteGate>>,
     ) -> Result<BrowserRun, WorkError> {
-        let request=resume_plan.as_ref().map(|plan|&plan.request);
-        let entry=request.filter(|request|request.entry).and_then(|request|request.confirm.clone());
-        let blocked=request.is_none_or(|request|request.image_entry_blocked || (request.entry && request.confirm.is_none()));
-        let visual=invocation.model_images_for(attempt,blocked,entry)?;
+        let request = resume_plan.as_ref().map(|plan| &plan.request);
+        let entry = request
+            .filter(|request| request.entry)
+            .and_then(|request| request.confirm.clone());
+        let blocked = request.is_none_or(|request| {
+            request.image_entry_blocked || (request.entry && request.confirm.is_none())
+        });
+        let visual = invocation.model_images_for(attempt, blocked, entry)?;
         let redirect = invocation.redirect.clone();
         let mut run = self
             .run_retained_page(
@@ -811,8 +815,11 @@ impl NativeWorkComposition {
                 visual.clone(),
             )
             .await?;
-        if let Some(disclosure)=visual.as_ref().and_then(|visual|visual.possible_disclosure()) {
-            run.measurements.image_disclosure=Some(disclosure);
+        if let Some(disclosure) = visual
+            .as_ref()
+            .and_then(|visual| visual.possible_disclosure())
+        {
+            run.measurements.image_disclosure = Some(disclosure);
         }
         if run.measurements.outcome.is_none() {
             run.measurements.outcome = Some(page_outcome(run.status, run.intervention.as_ref()));
@@ -848,7 +855,7 @@ impl NativeWorkComposition {
         gate: Option<std::sync::Arc<crate::open_objective::site_work::SiteGate>>,
         visual: Option<std::sync::Arc<zephium_app::work_screenshots::WorkScreenshotAccess>>,
     ) -> Result<BrowserRun, WorkError> {
-        use zephium_agentic::{SemanticModelImageHost as _,SemanticModelImagePlan};
+        use zephium_agentic::{SemanticModelImageHost as _, SemanticModelImagePlan};
         #[cfg(feature = "public-qualification")]
         let diagnostic = diagnostics.diagnostic;
         #[cfg(feature = "public-qualification")]
@@ -860,7 +867,10 @@ impl NativeWorkComposition {
         let refusals = diagnostics.refusals;
         let started = Instant::now();
         let mut measure = ReadMeasure::default();
-        if original_anonymous_read_intent(resume_plan.as_ref().map(|plan| &plan.request), intervention_origin.is_some()) {
+        if original_anonymous_read_intent(
+            resume_plan.as_ref().map(|plan| &plan.request),
+            intervention_origin.is_some(),
+        ) {
             invocation.input.mark_original_anonymous_read();
         }
         let original_spec = invocation
@@ -1238,126 +1248,137 @@ impl NativeWorkComposition {
                 }
                 // Screenshot choices are a separate durable Ask, never site
                 // entry or an effect confirmation. The native page stays hidden.
-                let image_handoff=visual.as_ref().and_then(|visual|visual.handoff());
-                if let Some(human)=guard.0.human_snapshot().filter(|human|human.reason==AgentBrowserHumanReason::UserDecision && image_handoff.is_some() && !requested_close) {
-                    if human.phase==Phase::WaitingForHuman && handing!=Some(human.generation)
-                        && image_handoff!=Some(SemanticModelImagePlan::Waiting) {
+                let image_handoff = visual.as_ref().and_then(|visual| visual.handoff());
+                if let Some(human) = guard.0.human_snapshot().filter(|human| {
+                    human.reason == AgentBrowserHumanReason::UserDecision
+                        && image_handoff.is_some()
+                        && !requested_close
+                }) {
+                    if human.phase == Phase::WaitingForHuman
+                        && handing != Some(human.generation)
+                        && image_handoff != Some(SemanticModelImagePlan::Waiting)
+                    {
                         successor_notice=Some(if image_handoff==Some(SemanticModelImagePlan::Consented) {
                             "The person allowed page pictures for this origin. Continue the existing task; a fresh native privacy check is still required."
                         } else {"Page pictures are unavailable. Continue using text only; if the necessary fact is visual, report that it could not be verified."}.into());
-                        handing=Some(human.generation);
-                        if !guard.0.hand_over(human.generation) {requested_close=true;}
-                    }
-                    if human.phase==Phase::Presented && handing==Some(human.generation) {guard.0.continue_human(human.generation);}
-                }
-                if image_handoff.is_none() {
-                if let (Some(gate), Some(port)) = (&gate, &confirm) {
-                    // How the approved step ended, before any next question.
-                    if let Some((ask, true)) = gate.ask() {
-                        if let Some(receipt) = gate.take_receipt() {
-                            port.settle(ask, site_receipt(receipt));
-                            gate.set_ask(None);
-                        }
-                    }
-                    use crate::open_objective::site_work::EntryCheck;
-                    if !entry_asked && !entry_told && gate.entry() == EntryCheck::Settled {
-                        entry_told = true;
-                        if resume_plan.as_ref().is_some_and(|plan| plan.request.entry) {
-                            port.signed_out();
-                        }
-                    }
-                    if let Some(human) = guard.0.human_snapshot() {
-                        // A load in another tab is not evidence that this
-                        // retained page's wall cleared. Keep this exact page.
-                        if human.reason == AgentBrowserHumanReason::UserDecision
-                            && gate.entry() == EntryCheck::Asking
-                            && human.phase == Phase::WaitingForHuman
-                            && !requested_close
-                        {
-                            use zephium_app::work_agent::WorkSiteEntry;
-                            if !entry_asked {
-                                entry_asked = true;
-                                entry_told = true;
-                                port.ask_entry();
-                                trace("entry:asked");
-                            } else {
-                                match port.entry() {
-                                    Some(WorkSiteEntry::Allow | WorkSiteEntry::Always) => {
-                                        gate.entered();
-                                        handing = Some(human.generation);
-                                        trace("entry:allowed");
-                                        if !guard.0.hand_over(human.generation) {
-                                            requested_close = true;
-                                        }
-                                    }
-                                    Some(WorkSiteEntry::NotNow) => {
-                                        trace("close:entry_declined");
-                                        requested_close = true;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        if human.phase == Phase::Presented && handing == Some(human.generation) {
-                            guard.0.continue_human(human.generation);
-                        }
-                        if human.reason == AgentBrowserHumanReason::Verification
-                            && gate.unconfirmed().is_some()
-                            && !requested_close
-                        {
-                            trace("close:unconfirmed_commit");
+                        handing = Some(human.generation);
+                        if !guard.0.hand_over(human.generation) {
                             requested_close = true;
                         }
-                        if human.reason == AgentBrowserHumanReason::UserDecision
-                            && gate.entry() == EntryCheck::Settled
-                            && handing != Some(human.generation)
-                            && !requested_close
-                        {
-                            match (human.phase, gate.ask()) {
-                                (Phase::WaitingForHuman, None) => match gate.pending() {
-                                    Some(pending) => {
-                                        let ask = port.ask(confirmation(&pending));
-                                        gate.set_ask(Some((ask, false)));
-                                        trace("confirm:asked");
+                    }
+                    if human.phase == Phase::Presented && handing == Some(human.generation) {
+                        guard.0.continue_human(human.generation);
+                    }
+                }
+                if image_handoff.is_none() {
+                    if let (Some(gate), Some(port)) = (&gate, &confirm) {
+                        // How the approved step ended, before any next question.
+                        if let Some((ask, true)) = gate.ask() {
+                            if let Some(receipt) = gate.take_receipt() {
+                                port.settle(ask, site_receipt(receipt));
+                                gate.set_ask(None);
+                            }
+                        }
+                        use crate::open_objective::site_work::EntryCheck;
+                        if !entry_asked && !entry_told && gate.entry() == EntryCheck::Settled {
+                            entry_told = true;
+                            if resume_plan.as_ref().is_some_and(|plan| plan.request.entry) {
+                                port.signed_out();
+                            }
+                        }
+                        if let Some(human) = guard.0.human_snapshot() {
+                            // A load in another tab is not evidence that this
+                            // retained page's wall cleared. Keep this exact page.
+                            if human.reason == AgentBrowserHumanReason::UserDecision
+                                && gate.entry() == EntryCheck::Asking
+                                && human.phase == Phase::WaitingForHuman
+                                && !requested_close
+                            {
+                                use zephium_app::work_agent::WorkSiteEntry;
+                                if !entry_asked {
+                                    entry_asked = true;
+                                    entry_told = true;
+                                    port.ask_entry();
+                                    trace("entry:asked");
+                                } else {
+                                    match port.entry() {
+                                        Some(WorkSiteEntry::Allow | WorkSiteEntry::Always) => {
+                                            gate.entered();
+                                            handing = Some(human.generation);
+                                            trace("entry:allowed");
+                                            if !guard.0.hand_over(human.generation) {
+                                                requested_close = true;
+                                            }
+                                        }
+                                        Some(WorkSiteEntry::NotNow) => {
+                                            trace("close:entry_declined");
+                                            requested_close = true;
+                                        }
+                                        _ => {}
                                     }
-                                    None => requested_close = true,
-                                },
-                                (Phase::WaitingForHuman, Some((ask, false))) => {
-                                    if let Some(decision) = port.decision(ask) {
-                                        let heard = match decision {
-                                            WorkSiteDecision::Decline => {
-                                                port.settle(ask, WorkSiteReceipt::Declined);
-                                                gate.set_ask(None);
-                                                gate.decline().map(|preview| format!(
+                                }
+                            }
+                            if human.phase == Phase::Presented && handing == Some(human.generation)
+                            {
+                                guard.0.continue_human(human.generation);
+                            }
+                            if human.reason == AgentBrowserHumanReason::Verification
+                                && gate.unconfirmed().is_some()
+                                && !requested_close
+                            {
+                                trace("close:unconfirmed_commit");
+                                requested_close = true;
+                            }
+                            if human.reason == AgentBrowserHumanReason::UserDecision
+                                && gate.entry() == EntryCheck::Settled
+                                && handing != Some(human.generation)
+                                && !requested_close
+                            {
+                                match (human.phase, gate.ask()) {
+                                    (Phase::WaitingForHuman, None) => match gate.pending() {
+                                        Some(pending) => {
+                                            let ask = port.ask(confirmation(&pending));
+                                            gate.set_ask(Some((ask, false)));
+                                            trace("confirm:asked");
+                                        }
+                                        None => requested_close = true,
+                                    },
+                                    (Phase::WaitingForHuman, Some((ask, false))) => {
+                                        if let Some(decision) = port.decision(ask) {
+                                            let heard = match decision {
+                                                WorkSiteDecision::Decline => {
+                                                    port.settle(ask, WorkSiteReceipt::Declined);
+                                                    gate.set_ask(None);
+                                                    gate.decline().map(|preview| format!(
                                                     "The person declined: {} ({}). Do not take that step or try it another way. Clear any text you typed for it, then report what is ready.",
                                                     preview.headline, preview.action
                                                 ))
-                                            }
-                                            WorkSiteDecision::Approve
-                                            | WorkSiteDecision::AllowForRun => {
-                                                gate.set_ask(Some((ask, true)));
-                                                gate.approve(decision == WorkSiteDecision::AllowForRun).map(|preview| format!(
+                                                }
+                                                WorkSiteDecision::Approve
+                                                | WorkSiteDecision::AllowForRun => {
+                                                    gate.set_ask(Some((ask, true)));
+                                                    gate.approve(decision == WorkSiteDecision::AllowForRun).map(|preview| format!(
                                                     "The person confirmed: {} ({}). Take exactly that step now, alone, with effect={}, then report what the page shows.",
                                                     preview.headline,
                                                     preview.action,
                                                     effect_word(preview.consequence.class())
                                                 ))
+                                                }
+                                            };
+                                            successor_notice = heard;
+                                            handing = Some(human.generation);
+                                            trace("confirm:decided");
+                                            if !guard.0.hand_over(human.generation) {
+                                                requested_close = true;
                                             }
-                                        };
-                                        successor_notice = heard;
-                                        handing = Some(human.generation);
-                                        trace("confirm:decided");
-                                        if !guard.0.hand_over(human.generation) {
-                                            requested_close = true;
                                         }
                                     }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                         }
                     }
                 }
-            }
             }
             if !requested_close {
                 if let Some(resume) = guard
@@ -1455,9 +1476,12 @@ impl NativeWorkComposition {
                             gate.clone(),
                             plan.results.clone(),
                         )?;
-                        if let Some(visual)=&visual {
+                        if let Some(visual) = &visual {
                             visual.finish_handoff();
-                            invocation.input.bind_model_image_host(visual.clone()).map_err(|_|WorkError::Invalid)?;
+                            invocation
+                                .input
+                                .bind_model_image_host(visual.clone())
+                                .map_err(|_| WorkError::Invalid)?;
                         }
                         resume_stage = "decisions";
                         configure_decisions(&mut invocation, plan.decisions, resume_deadline)
@@ -1714,9 +1738,15 @@ impl NativeWorkComposition {
                                 .as_ref()
                                 .is_some_and(|registration| !registration.claim_site_check())
                         });
-                        let cap = if visual.as_ref().and_then(|visual|visual.handoff()).is_some() {
+                        let cap = if visual
+                            .as_ref()
+                            .and_then(|visual| visual.handoff())
+                            .is_some()
+                        {
                             HUMAN_CHECK_WAIT_MILLIS
-                        } else {human_wait_cap(intervention.as_ref(), task, anonymous, elsewhere)};
+                        } else {
+                            human_wait_cap(intervention.as_ref(), task, anonymous, elsewhere)
+                        };
                         skipped = cap == 0;
                         let wait = if skipped {
                             None
@@ -1801,10 +1831,22 @@ impl NativeWorkComposition {
                                 }),
                             },
                         );
-                        let original_status = anonymous_read_authority.as_ref().and_then(|proof| original_spec.clock.now().ok().map(|now|proof.status(now)))
+                        let original_status = anonymous_read_authority
+                            .as_ref()
+                            .and_then(|proof| {
+                                original_spec.clock.now().ok().map(|now| proof.status(now))
+                            })
                             .unwrap_or(zephium_agentic::WorkBrowserAnonymousReadStatus::Absent);
-                        zephium_app::work_trace::record_media(zephium_app::work_trace::RecordMediaTrace::OriginalRead { status: original_status });
-                        let fetch_mode = public_asset_fetch_mode(original_status==zephium_agentic::WorkBrowserAnonymousReadStatus::Current, measure.resolved_handoff);
+                        zephium_app::work_trace::record_media(
+                            zephium_app::work_trace::RecordMediaTrace::OriginalRead {
+                                status: original_status,
+                            },
+                        );
+                        let fetch_mode = public_asset_fetch_mode(
+                            original_status
+                                == zephium_agentic::WorkBrowserAnonymousReadStatus::Current,
+                            measure.resolved_handoff,
+                        );
                         let native_started = !media_plans.is_empty()
                             && guard.0.read_record_media(media_plans.clone(), fetch_mode);
                         media_complete = !native_started;
@@ -4377,19 +4419,27 @@ fn public_asset_task_facts(
         hold_typing: request.is_some_and(|request| request.hold_typing),
     }
 }
-fn original_anonymous_read_intent(request: Option<&WorkAgentBrowseRequest>, identified_account: bool) -> bool {
-    !identified_account && request.is_some_and(|request| {
-        matches!(request.session, zephium_app::work_sites::SiteSession::Private)
-            && matches!(request.step,WorkStepKindV1::Read { .. })
-            && !request.entry && !request.view && !request.allow_edits && !request.hold_typing
-    })
+fn original_anonymous_read_intent(
+    request: Option<&WorkAgentBrowseRequest>,
+    identified_account: bool,
+) -> bool {
+    !identified_account
+        && request.is_some_and(|request| {
+            matches!(
+                request.session,
+                zephium_app::work_sites::SiteSession::Private
+            ) && matches!(request.step, WorkStepKindV1::Read { .. })
+                && !request.entry
+                && !request.view
+                && !request.allow_edits
+                && !request.hold_typing
+        })
 }
 fn public_asset_fetch_mode(
     original_public: bool,
     resolved: Option<zephium_core::work::runtime::WorkPageHandoffKindV1>,
 ) -> zephium_agentic::WorkBrowserMediaFetchMode {
-    if original_public && resolved.is_none()
-    {
+    if original_public && resolved.is_none() {
         zephium_agentic::WorkBrowserMediaFetchMode::PublicAssetRetry
     } else {
         zephium_agentic::WorkBrowserMediaFetchMode::SessionOnly
@@ -4432,21 +4482,42 @@ mod public_asset_retry_tests {
     }
     #[test]
     fn original_read_intent_includes_goal_reads_but_excludes_account_or_interactive_intent() {
-        assert!(!original_anonymous_read_intent(None,false));
-        for private_storage in [false,true] { for goal in [None,Some("Compare records".to_owned())] {
-            let mut r=request();r.private_run=private_storage;
-            r.step=WorkStepKindV1::Read {url:"https://example.test/".into(),collection:None,goal};
-            assert!(original_anonymous_read_intent(Some(&r),false));
-            assert!(!original_anonymous_read_intent(Some(&r),true));
-            for changed in 0..6 {
-                let mut r=r.clone();match changed {
-                    0=>r.session=zephium_app::work_sites::SiteSession::Yours {site:"example.test".into(),account:"fixture".into()},
-                    1=>r.entry=true,2=>r.view=true,3=>r.allow_edits=true,4=>r.hold_typing=true,
-                    _=>r.step=WorkStepKindV1::Discover {query:"records".into(),collection:None},
+        assert!(!original_anonymous_read_intent(None, false));
+        for private_storage in [false, true] {
+            for goal in [None, Some("Compare records".to_owned())] {
+                let mut r = request();
+                r.private_run = private_storage;
+                r.step = WorkStepKindV1::Read {
+                    url: "https://example.test/".into(),
+                    collection: None,
+                    goal,
+                };
+                assert!(original_anonymous_read_intent(Some(&r), false));
+                assert!(!original_anonymous_read_intent(Some(&r), true));
+                for changed in 0..6 {
+                    let mut r = r.clone();
+                    match changed {
+                        0 => {
+                            r.session = zephium_app::work_sites::SiteSession::Yours {
+                                site: "example.test".into(),
+                                account: "fixture".into(),
+                            }
+                        }
+                        1 => r.entry = true,
+                        2 => r.view = true,
+                        3 => r.allow_edits = true,
+                        4 => r.hold_typing = true,
+                        _ => {
+                            r.step = WorkStepKindV1::Discover {
+                                query: "records".into(),
+                                collection: None,
+                            }
+                        }
+                    }
+                    assert!(!original_anonymous_read_intent(Some(&r), false));
                 }
-                assert!(!original_anonymous_read_intent(Some(&r),false));
             }
-        }}
+        }
     }
     #[test]
     fn retry_diagnostic_carries_only_closed_original_facts() {
@@ -4506,7 +4577,7 @@ mod public_asset_retry_tests {
                 ..
             }
         ));
-        assert!(!original_anonymous_read_intent(Some(&original),false));
+        assert!(!original_anonymous_read_intent(Some(&original), false));
     }
     #[test]
     fn any_resolved_handoff_cannot_keep_a_public_asset_retry_grant() {

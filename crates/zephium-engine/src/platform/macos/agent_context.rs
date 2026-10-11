@@ -246,7 +246,9 @@ impl AgentOwnedView {
     }
 
     #[cfg(feature = "native-agentic-semantic-probe")]
-    pub(crate) fn form_observer_world(&self) -> Option<objc2::rc::Retained<objc2_web_kit::WKContentWorld>> {
+    pub(crate) fn form_observer_world(
+        &self,
+    ) -> Option<objc2::rc::Retained<objc2_web_kit::WKContentWorld>> {
         self.semantic.as_ref()?.form_observer_world()
     }
 

@@ -3,7 +3,7 @@ use super::*;
 use zephium_core::work::{
     artifact::WorkArtifactDataV1,
     collection::{WorkBrowseCollection, WorkBrowseColumn, WorkBrowseExtraction, WorkBrowseValue},
-    media::{MAX_RECORD_MEDIA_BYTES, WorkRecordMediaOriginV1, WorkRecordMediaRefV1},
+    media::{WorkRecordMediaOriginV1, WorkRecordMediaRefV1, MAX_RECORD_MEDIA_BYTES},
     port::WorkReply,
 };
 

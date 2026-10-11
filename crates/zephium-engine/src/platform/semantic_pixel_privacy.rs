@@ -238,8 +238,12 @@ mod tests {
         for response in [
             None,
             PixelPrivacyProof::decode(br#"{"v":1,"r":1,"c":false,"w":1280,"h":800,"x":0,"y":0}"#),
-            PixelPrivacyProof::decode(br#"{"v":1,"r":9007199254740991,"c":false,"w":1280,"h":800,"x":0,"y":0}"#),
-            PixelPrivacyProof::decode(br#"{"v":1,"r":9007199254740992,"c":true,"w":1280,"h":800,"x":0,"y":0}"#),
+            PixelPrivacyProof::decode(
+                br#"{"v":1,"r":9007199254740991,"c":false,"w":1280,"h":800,"x":0,"y":0}"#,
+            ),
+            PixelPrivacyProof::decode(
+                br#"{"v":1,"r":9007199254740992,"c":true,"w":1280,"h":800,"x":0,"y":0}"#,
+            ),
         ] {
             let completed = Rc::new(RefCell::new(false));
             let result = completed.clone();

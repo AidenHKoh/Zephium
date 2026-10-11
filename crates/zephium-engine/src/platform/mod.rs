@@ -1,11 +1,3 @@
-#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
-pub(crate) mod form_qualification;
-#[cfg(all(feature="agentic-browser",any(target_os="macos",target_os="windows",test)))]
-pub(crate) mod record_media;
-#[cfg(all(feature = "agentic-browser", any(target_os = "macos", target_os = "windows", test)))]
-pub(crate) mod semantic_pixel_privacy;
-#[cfg(all(feature = "agentic-browser", any(target_os = "macos", target_os = "windows", test)))]
-pub(crate) mod work_human_survey;
 #[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
 #[cfg_attr(all(target_os = "windows", not(test)), allow(dead_code))]
 mod agent_cookie_preflight;
@@ -16,6 +8,23 @@ mod agent_cookie_preflight;
 mod agent_navigation;
 #[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
 mod agent_screenshot_buffer;
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+pub(crate) mod form_qualification;
+#[cfg(all(
+    feature = "agentic-browser",
+    any(target_os = "macos", target_os = "windows", test)
+))]
+pub(crate) mod record_media;
+#[cfg(all(
+    feature = "agentic-browser",
+    any(target_os = "macos", target_os = "windows", test)
+))]
+pub(crate) mod semantic_pixel_privacy;
+#[cfg(all(
+    feature = "agentic-browser",
+    any(target_os = "macos", target_os = "windows", test)
+))]
+pub(crate) mod work_human_survey;
 // Only the Windows runtime calls the action helpers; Windows tests keep them honest.
 #[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]

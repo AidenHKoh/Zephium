@@ -209,7 +209,9 @@ fn local_step_is_disclosable(kind: &WorkStepKindV1) -> bool {
     if !kind.files() && !matches!(kind, WorkStepKindV1::RunCommand { .. }) {
         return true;
     }
-    serde_json::to_string(kind).ok().is_some_and(|wire| !zephium_agentic::contains_recognized_secret(&wire))
+    serde_json::to_string(kind)
+        .ok()
+        .is_some_and(|wire| !zephium_agentic::contains_recognized_secret(&wire))
 }
 
 /// Tokens a turn must still be able to spend before the loop stops itself.
