@@ -1,13 +1,14 @@
 //! The worker owns the entire copied workspace, including acknowledged cleanup.
 //! Granted folders are read-only inputs. Cancellation is checked before each
 //! child admission; no worker publishes changes back to a granted folder.
+use super::worker_slots::{Permit, Slots};
 use super::{ApprovedChange, Failure, GitOperation, Output, ReadOperation, Snapshot};
 use crate::work_files::WorkFileGrant;
 use std::{
     future::Future,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, OnceLock,
     },
     time::{Duration, Instant},
@@ -15,58 +16,19 @@ use std::{
 const FILESYSTEM_LIMIT: Duration = Duration::from_secs(10);
 const REVIEW_LIMIT: Duration = Duration::from_secs(90);
 const CLEANUP_GRACE: Duration = Duration::from_millis(300);
-// A timed-out caller never releases its worker's capacity. Unconfirmed cleanup
-// or a panic retains the slot; only the worker's acknowledged closure releases it.
-struct Slots {
-    used: AtomicUsize,
-    maximum: usize,
-}
-impl Slots {
-    fn new(maximum: usize) -> Self {
-        Self {
-            used: AtomicUsize::new(0),
-            maximum,
-        }
-    }
-    fn reserve(self: &Arc<Self>) -> Result<Permit, Failure> {
-        self.used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                (used < self.maximum).then_some(used + 1)
-            })
-            .map_err(|_| Failure::ReviewBusy)?;
-        Ok(Permit {
-            slots: self.clone(),
-            acknowledged: false,
-        })
-    }
-}
-struct Permit {
-    slots: Arc<Slots>,
-    acknowledged: bool,
-}
-impl Drop for Permit {
-    fn drop(&mut self) {
-        if self.acknowledged {
-            self.slots.used.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
-}
 fn slots() -> &'static Arc<Slots> {
     static SLOTS: OnceLock<Arc<Slots>> = OnceLock::new();
     SLOTS.get_or_init(|| Arc::new(Slots::new(4)))
 }
 fn launch_owned(
-    mut permit: Permit,
+    permit: Permit,
     work: impl FnOnce() -> Result<Output, Failure> + Send + 'static,
 ) -> tokio::task::JoinHandle<Result<Output, Failure>> {
-    tokio::task::spawn_blocking(move || {
-        let result = work();
-        permit.acknowledged = !matches!(
+    super::worker_slots::launch(permit, work, |result| {
+        !matches!(
             result,
             Err(Failure::CleanupPending | Failure::StopUnconfirmed)
-        );
-        drop(permit);
-        result
+        )
     })
 }
 
@@ -130,7 +92,7 @@ where
     if super::cancellation_requested(&cancelled).await {
         return Err(Failure::Stopped);
     }
-    let permit = slots().reserve()?;
+    let permit = slots().reserve().map_err(|_| Failure::ReviewBusy)?;
     let control = Arc::new(Control::new(FILESYSTEM_LIMIT));
     let _cancel = CancelOnDrop(control.clone());
     let (grant, root, changes) = (grant.clone(), root.to_owned(), changes.to_vec());
@@ -256,6 +218,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
     fn output() -> Output {
         Output {
             text: String::new(),
@@ -322,9 +285,9 @@ mod tests {
         assert!(matches!(result, Err(Failure::CleanupPending)));
         assert!(began.elapsed() < Duration::from_millis(150));
         assert!(!cleaned.load(Ordering::Acquire));
-        assert!(matches!(slots.reserve(), Err(Failure::ReviewBusy)));
+        assert!(slots.reserve().is_err());
         tokio::time::timeout(Duration::from_secs(2), async {
-            while !cleaned.load(Ordering::Acquire) || slots.used.load(Ordering::Acquire) != 0 {
+            while !cleaned.load(Ordering::Acquire) || slots.outstanding() != 0 {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
@@ -365,7 +328,7 @@ mod tests {
             worker.await.unwrap(),
             Err(Failure::CleanupPending)
         ));
-        assert!(matches!(slots.reserve(), Err(Failure::ReviewBusy)));
+        assert!(slots.reserve().is_err());
     }
     #[tokio::test]
     async fn failed_cleanup_acknowledgement_is_never_reported_as_stopped() {

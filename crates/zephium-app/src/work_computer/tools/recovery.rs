@@ -1,16 +1,7 @@
 //! Recovery is explicit and approved. Journal discovery never reads OS Trash.
 use super::*;
 use crate::work_files::trash::{self, PreparedMove, PreparedTrash};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-struct CancelOnDrop(Arc<AtomicBool>);
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
+use std::sync::{atomic::AtomicBool, Arc};
 
 fn profile(host: &dyn ComputerHost) -> Result<String, ToolReply> {
     host.recovery_profile()
@@ -53,21 +44,16 @@ impl ComputerTools {
         }
         let step_key = step.to_string();
         let cancelled = Arc::new(AtomicBool::new(false));
-        let _cancel_on_drop = CancelOnDrop(cancelled.clone());
         let worker_cancel = cancelled.clone();
-        let mut worker = tokio::task::spawn_blocking(move || {
-            prepared.apply(&profile, &step_key, &worker_cancel)
-        });
-        let mut tick = tokio::time::interval(Duration::from_millis(25));
-        let outcome = loop {
-            tokio::select! {
-                outcome = &mut worker => break outcome,
-                _ = tick.tick() => if crate::work_commands::runner::cancellation_requested(&|| host.cancelled()).await { cancelled.store(true, Ordering::Release); }
-            }
+        let worker =
+            trash::launch_worker(move || prepared.apply(&profile, &step_key, &worker_cancel));
+        let outcome = match worker {
+            Ok(worker) => trash::await_worker(worker, cancelled, || host.cancelled()).await,
+            Err(error) => Err(error),
         };
         match outcome {
-            Ok(Err(trash::Failure::Stopped)) => self.recovery_stopped(host, step).await,
-            Ok(Ok(())) => {
+            Err(trash::Failure::Stopped) => self.recovery_stopped(host, step).await,
+            Ok(()) => {
                 if let Ok(mut reads) = self.reads.lock() {
                     reads.remove(&file);
                 }
@@ -96,15 +82,16 @@ impl ComputerTools {
                     self.shown(&file)
                 )))
             }
-            failure => {
-                let note = match failure {
-                    Ok(Err(error)) => error.note(),
-                    _ => "The Trash result is unknown; check private recovery before retrying",
+            Err(failure) => {
+                let note = failure.note();
+                let note = if failure == trash::Failure::RecoveryPending {
+                    format!("{note}. Do not replay this operation; check recoveries for reference {id}.")
+                } else {
+                    note.to_owned()
                 };
-                let note = format!("{note}. Check recoveries for reference {id} before retrying.");
                 host.settle(
                     step,
-                    WorkStepStatus::Failed,
+                    failure.step_status(),
                     Settled::Nothing,
                     Some(note.clone()),
                 )
@@ -153,21 +140,16 @@ impl ComputerTools {
         }
         let step_key = step.to_string();
         let cancelled = Arc::new(AtomicBool::new(false));
-        let _cancel_on_drop = CancelOnDrop(cancelled.clone());
         let worker_cancel = cancelled.clone();
-        let mut worker = tokio::task::spawn_blocking(move || {
-            prepared.apply(&profile, &step_key, &worker_cancel)
-        });
-        let mut tick = tokio::time::interval(Duration::from_millis(25));
-        let outcome = loop {
-            tokio::select! {
-                outcome = &mut worker => break outcome,
-                _ = tick.tick() => if crate::work_commands::runner::cancellation_requested(&|| host.cancelled()).await { cancelled.store(true, Ordering::Release); }
-            }
+        let worker =
+            trash::launch_worker(move || prepared.apply(&profile, &step_key, &worker_cancel));
+        let outcome = match worker {
+            Ok(worker) => trash::await_worker(worker, cancelled, || host.cancelled()).await,
+            Err(error) => Err(error),
         };
         match outcome {
-            Ok(Err(trash::Failure::Stopped)) => self.recovery_stopped(host, step).await,
-            Ok(Ok(())) => {
+            Err(trash::Failure::Stopped) => self.recovery_stopped(host, step).await,
+            Ok(()) => {
                 if let Ok(mut reads) = self.reads.lock() {
                     reads.remove(&file);
                     reads.insert(destination.clone(), digest.clone());
@@ -198,15 +180,16 @@ impl ComputerTools {
                     self.shown(&destination)
                 )))
             }
-            failure => {
-                let note = match failure {
-                    Ok(Err(error)) => error.note(),
-                    _ => "The move result is unknown; check private recovery before retrying",
+            Err(failure) => {
+                let note = failure.note();
+                let note = if failure == trash::Failure::RecoveryPending {
+                    format!("{note}. Do not replay this operation; check recoveries for reference {id}.")
+                } else {
+                    note.to_owned()
                 };
-                let note = format!("{note}. Check recoveries for reference {id} before retrying.");
                 host.settle(
                     step,
-                    WorkStepStatus::Failed,
+                    failure.step_status(),
                     Settled::Nothing,
                     Some(note.clone()),
                 )

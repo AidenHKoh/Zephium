@@ -323,6 +323,126 @@ mod tests {
             );
         }
     }
+    #[tokio::test]
+    async fn held_move_backup_ack_never_publishes_after_pending_stop() {
+        use std::{
+            sync::Arc,
+            time::{Duration, Instant},
+        };
+        let f = Fixture::new();
+        let id = recovery_id();
+        let flag = Arc::new(AtomicBool::new(false));
+        let worker_flag = flag.clone();
+        let active = Arc::new(AtomicBool::new(false));
+        let entered = active.clone();
+        let release = Arc::new(AtomicBool::new(false));
+        let proceed = release.clone();
+        let finished = Arc::new(AtomicBool::new(false));
+        let done = finished.clone();
+        let root = f.root.clone();
+        let source = f.source.clone();
+        let target = f.target.clone();
+        let worker_id = id.clone();
+        let worker = super::super::super::wait::launch(move || {
+            let prepared = Prepared::new(source.clone(), &digest(b"inert move fixture"))?;
+            let destination = Destination::new(target.clone())?;
+            let journal =
+                journal::Journal::open(&root, "move-held", true)?.ok_or(Failure::Storage)?;
+            let record = journal.prepare(
+                journal::Receipt {
+                    version: 1,
+                    id: worker_id,
+                    path: source,
+                    destination: Some(target),
+                    digest: prepared.digest.clone(),
+                    bytes: prepared.text.len(),
+                    step: "exact-move-step".into(),
+                },
+                prepared.text.as_bytes(),
+            )?;
+            let stage = record.stage()?;
+            let result = prepared
+                .move_to_with(
+                    &stage,
+                    &record,
+                    &destination,
+                    &worker_flag,
+                    |path, expected| {
+                        entered.store(true, Ordering::Release);
+                        let deadline = Instant::now() + Duration::from_secs(3);
+                        while !proceed.load(Ordering::Acquire) && Instant::now() < deadline {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        if !proceed.load(Ordering::Acquire) {
+                            return Err(Failure::RecoveryPending);
+                        }
+                        let acknowledged = root.join("inert-backup-ack");
+                        fs::rename(path, &acknowledged).map_err(|_| Failure::RecoveryPending)?;
+                        assert_eq!(
+                            identity(&open_unix(&acknowledged, false).unwrap()).unwrap(),
+                            expected
+                        );
+                        Ok(acknowledged)
+                    },
+                )
+                .map(|_| ());
+            if result.is_ok() {
+                record.mark("moved")?;
+            }
+            drop(stage);
+            drop(record);
+            drop(journal);
+            done.store(true, Ordering::Release);
+            result
+        })
+        .unwrap();
+        let result = super::super::super::wait::observe_with_limits(
+            worker,
+            flag,
+            || async { active.load(Ordering::Acquire) },
+            Duration::from_secs(2),
+            Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(result, Err(Failure::RecoveryPending));
+        assert_eq!(
+            result.unwrap_err().step_status(),
+            zephium_core::work::runtime::WorkStepStatus::OutcomeUnknown
+        );
+        assert!(!f.source.exists());
+        assert!(!f.target.exists());
+        let record_root = f
+            .root
+            .join(".zephium-work-recovery")
+            .join(digest(b"move-held"))
+            .join(&id);
+        assert_eq!(
+            fs::read(record_root.join("stage/note.txt")).unwrap(),
+            b"inert move fixture"
+        );
+        release.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !finished.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let journal = journal::Journal::open(&f.root, "move-held", false)
+            .unwrap()
+            .unwrap();
+        let rows = journal.records().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].receipt.id, id);
+        assert_eq!(rows[0].receipt.step, "exact-move-step");
+        assert!(rows[0].marked("move_backup_trashed").unwrap());
+        assert!(!rows[0].marked("moved").unwrap());
+        assert!(!f.target.exists());
+        assert_eq!(
+            fs::read(record_root.join("stage/note.txt")).unwrap(),
+            b"inert move fixture"
+        );
+    }
     #[test]
     fn uncertain_backup_result_retains_original_without_publishing_destination() {
         let f = Fixture::new();

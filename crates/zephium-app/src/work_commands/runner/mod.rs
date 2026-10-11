@@ -16,6 +16,7 @@ mod snapshot;
 mod windows;
 #[cfg(windows)]
 mod windows_github;
+pub(crate) mod worker_slots;
 use crate::work_files::WorkFileGrant;
 use snapshot::Snapshot;
 use std::{future::Future, path::Path};

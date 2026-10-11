@@ -1,7 +1,9 @@
 //! Approved, recoverable removal. Generic file deletion remains unavailable.
 mod journal;
 mod move_file;
+mod wait;
 pub(crate) use move_file::PreparedMove;
+pub(crate) use wait::{launch as launch_worker, observe as await_worker};
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(windows)]
@@ -43,11 +45,23 @@ pub(crate) enum Failure {
     RecoveryPending,
     Destination,
     Stopped,
+    Busy,
+    Deadline,
     File(WorkFileError),
 }
 impl Failure {
+    pub fn step_status(self) -> zephium_core::work::runtime::WorkStepStatus {
+        use zephium_core::work::runtime::WorkStepStatus;
+        match self {
+            Self::Stopped => WorkStepStatus::Cancelled,
+            Self::RecoveryPending => WorkStepStatus::OutcomeUnknown,
+            _ => WorkStepStatus::Failed,
+        }
+    }
     pub fn note(self) -> &'static str {
         match self {
+            Self::Busy => "A recoverable file operation still owns native worker capacity; wait for its receipt before retrying",
+            Self::Deadline => "The file operation exceeded its time limit and stopped before changing the file",
             Self::Destination => "The destination must be absent in the approved granted directory",
             Self::Unavailable => "Recoverable file changes are not available on this system",
             Self::Stopped => "Stopped before moving the file",
@@ -57,7 +71,7 @@ impl Failure {
             Self::Changed => "The file changed since it was read; no new change was admitted",
             Self::CrossVolume => "Trash across volumes is not supported; no file was removed",
             Self::RecoveryPending => {
-                "The file change is not confirmed; a private recovery copy was retained"
+                "The file change is not confirmed; its native worker or recovery state is still unresolved"
             }
             Self::File(error) => error.note(),
         }

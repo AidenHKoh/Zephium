@@ -274,3 +274,152 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod held_ack_tests {
+    use super::*;
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+    #[tokio::test]
+    async fn pending_ack_retains_exact_stage_and_late_ack_marks_original_receipt() {
+        let scratch = tempfile::Builder::new()
+            .prefix("work-trash-held-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let root = scratch.path().canonicalize().unwrap();
+        let source = root.join("note.txt");
+        std::fs::write(&source, "inert held native file").unwrap();
+        let id = super::super::recovery_id();
+        let flag = Arc::new(AtomicBool::new(false));
+        let worker_flag = flag.clone();
+        let active = Arc::new(AtomicBool::new(false));
+        let entered = active.clone();
+        let release = Arc::new(AtomicBool::new(false));
+        let proceed = release.clone();
+        let finished = Arc::new(AtomicBool::new(false));
+        let done = finished.clone();
+        let worker_root = root.clone();
+        let worker_id = id.clone();
+        let worker_source = source.clone();
+        let worker = super::super::wait::launch(move || {
+            let prepared =
+                Prepared::new(worker_source.clone(), &digest(b"inert held native file"))?;
+            let journal = super::super::journal::Journal::open(&worker_root, "held-native", true)?
+                .ok_or(Failure::Storage)?;
+            let record = journal.prepare(
+                super::super::journal::Receipt {
+                    version: 1,
+                    id: worker_id,
+                    path: worker_source,
+                    digest: prepared.digest.clone(),
+                    bytes: prepared.text.len(),
+                    step: "exact-original-step".into(),
+                    destination: None,
+                },
+                prepared.text.as_bytes(),
+            )?;
+            let stage = record.stage()?;
+            stage
+                .with_verified_path(|directory| {
+                    prepared.apply_at_with(directory, &worker_flag, |path, expected| {
+                        entered.store(true, Ordering::Release);
+                        let until = std::time::Instant::now() + Duration::from_secs(3);
+                        while !proceed.load(Ordering::Acquire) && std::time::Instant::now() < until
+                        {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        if !proceed.load(Ordering::Acquire) {
+                            return Err(Failure::RecoveryPending);
+                        }
+                        let target = worker_root.join("inert-native-ack");
+                        std::fs::rename(path, &target).map_err(|_| Failure::RecoveryPending)?;
+                        assert_eq!(
+                            identity(&open_unix(&target, false).unwrap()).unwrap(),
+                            expected
+                        );
+                        Ok(target)
+                    })
+                })
+                .map_err(|_| Failure::RecoveryPending)??;
+            record.mark("trashed")?;
+            drop(stage);
+            drop(record);
+            drop(journal);
+            done.store(true, Ordering::Release);
+            Ok(())
+        })
+        .unwrap();
+        let result = super::super::wait::observe_with_limits(
+            worker,
+            flag,
+            || async { active.load(Ordering::Acquire) },
+            Duration::from_secs(2),
+            Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(result, Err(Failure::RecoveryPending));
+        assert_eq!(
+            result.unwrap_err().step_status(),
+            zephium_core::work::runtime::WorkStepStatus::OutcomeUnknown
+        );
+        assert!(!source.exists());
+        let record_root = root
+            .join(".zephium-work-recovery")
+            .join(digest(b"held-native"))
+            .join(&id);
+        assert_eq!(
+            std::fs::read(record_root.join("stage/note.txt")).unwrap(),
+            b"inert held native file"
+        );
+        assert_eq!(
+            std::fs::read(record_root.join("saved")).unwrap(),
+            b"inert held native file"
+        );
+        assert!(!record_root.join("trashed").exists());
+        release.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !finished.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let journal = super::super::journal::Journal::open(&root, "held-native", false)
+            .unwrap()
+            .unwrap();
+        let rows = journal.records().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].receipt.id, id);
+        assert_eq!(rows[0].receipt.step, "exact-original-step");
+        assert!(rows[0].marked("trashed").unwrap());
+        assert_eq!(rows[0].saved().unwrap(), "inert held native file");
+        assert!(
+            !source.exists(),
+            "late acknowledgement must not reopen or replay the original source"
+        );
+    }
+    #[test]
+    fn prestage_stop_never_dispatches_or_moves_original() {
+        let scratch = tempfile::Builder::new()
+            .prefix("work-trash-prestop-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let root = scratch.path().canonicalize().unwrap();
+        let source = root.join("note.txt");
+        std::fs::write(&source, "inert prestage").unwrap();
+        let prepared = Prepared::new(source.clone(), &digest(b"inert prestage")).unwrap();
+        let stage = root.join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        let result = prepared.apply_at_with(&stage, &AtomicBool::new(true), |_, _| {
+            panic!("native call must not start")
+        });
+        assert_eq!(result, Err(Failure::Stopped));
+        assert_eq!(std::fs::read(&source).unwrap(), b"inert prestage");
+        assert!(!stage.join("note.txt").exists());
+    }
+}
