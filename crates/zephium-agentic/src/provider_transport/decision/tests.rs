@@ -2889,6 +2889,55 @@ async fn changed_numeric_search_constraints_never_dispatch_a_reuse_decision() {
     assert!(transport.snapshot().unwrap().is_idle());
 }
 
+#[tokio::test]
+async fn completion_decisions_refuse_truncated_evidence_without_dispatch() {
+    use zephium_core::work::{search::WorkPublicSearchError, WorkError};
+    let (scope, mut evidence) = search_ranking_fixture(2);
+    evidence.answer = "é".repeat(1600);
+    let request =
+        super::search::search_reuse_projection(&scope, "public source", &evidence).unwrap();
+    assert_eq!(request.state()["earlier_answer"]["text"], evidence.answer);
+    let found = "é".repeat(8000);
+    let request = super::search::search_enough_projection(&scope, &found).unwrap();
+    assert_eq!(request.state()["found"]["text"], found);
+    evidence
+        .answer
+        .push_str(" but the requested facts could not be verified");
+    let found = format!("{found} but the requested facts could not be verified");
+    let transport = AgentProviderTransport::try_new_loopback(
+        AgentProviderTransportConfig::STANDARD,
+        "http://127.0.0.1:9/v1/responses",
+        "http://127.0.0.1:9/v1/messages",
+    )
+    .unwrap();
+    let credential =
+        AgentProviderCredential::try_new(AgentProviderKind::OpenAiResponses, "fixture-key".into())
+            .unwrap();
+    let ranking = super::search::SearchDecisionRanking::new(None, emulation_config(), None);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    assert!(matches!(
+        ranking
+            .reuse(
+                &transport,
+                &credential,
+                &scope,
+                "public source",
+                &evidence,
+                limits(),
+                deadline
+            )
+            .await,
+        Err(WorkPublicSearchError::NotDispatched(WorkError::Capacity))
+    ));
+    assert!(matches!(
+        ranking
+            .enough(&transport, &credential, &scope, &found, limits(), deadline)
+            .await,
+        Err(WorkPublicSearchError::NotDispatched(WorkError::Capacity))
+    ));
+    assert!(transport.snapshot().unwrap().is_idle());
+}
+
 #[test]
 fn recorded_search_reuse_eval_requests_match_the_shipping_projection() {
     use sha2::Digest as _;

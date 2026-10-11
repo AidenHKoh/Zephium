@@ -354,9 +354,12 @@ pub fn search_enough_projection(
     if found.trim().is_empty() {
         return Err(WorkError::Invalid);
     }
+    if found.chars().take(FOUND_CHARS + 1).count() > FOUND_CHARS {
+        return Err(WorkError::Capacity);
+    }
     let state = serde_json::json!({
         "goal": scope.query,
-        "found": {"trust": "untrusted_provider_search", "text": clipped(found, FOUND_CHARS)},
+        "found": {"trust": "untrusted_provider_search", "text": found},
     });
     if contains_secret(&state) {
         return Err(WorkError::Invalid);
@@ -389,6 +392,10 @@ pub fn search_reuse_projection(
     if evidence.provider != scope.provider || evidence.model != scope.model {
         return Err(WorkError::Invalid);
     }
+    // Completion cannot be inferred from a prefix that may omit a qualification.
+    if evidence.answer.chars().take(REUSE_ANSWER_CHARS + 1).count() > REUSE_ANSWER_CHARS {
+        return Err(WorkError::Capacity);
+    }
     let mut seen = std::collections::BTreeSet::new();
     let sources: Vec<_> = evidence
         .citations
@@ -408,7 +415,7 @@ pub fn search_reuse_projection(
         "earlier_query": earlier,
         "earlier_answer": {
             "trust": "untrusted_provider_search",
-            "text": clipped(&evidence.answer, REUSE_ANSWER_CHARS),
+            "text": evidence.answer,
             "sources": sources,
         },
     });
