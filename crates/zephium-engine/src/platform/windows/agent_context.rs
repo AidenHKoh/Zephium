@@ -791,6 +791,18 @@ impl AgentOwnedView {
         self.work_navigation.as_ref()
     }
 
+    pub(crate) fn sample_work_human_wall(
+        &self,
+        completion: impl FnOnce(String) + 'static,
+    ) -> Result<(), ()> {
+        // Only the original, live human-owned navigation phase may evaluate
+        // this fixed survey. It is never an automated or hidden-decision tool.
+        self.work_navigation()
+            .and_then(|gate| gate.human_wall_probe())
+            .ok_or(())?;
+        self.semantic().ok_or(())?.sample_human_wall(completion);
+        Ok(())
+    }
     pub(crate) fn semantic(
         &self,
     ) -> Option<&super::semantic_runtime::AgentSemanticRuntimeController> {
@@ -933,7 +945,11 @@ impl AgentOwnedView {
     }
 
     pub(crate) fn semantic_pending_for_audit(&self) -> Option<bool> {
-        self.semantic()?.pending_for_audit()
+        // Logical cancellation cannot erase an original CDP callback or its
+        // context-reporting cleanup obligation before physical return.
+        self.semantic()?
+            .work_drained_for_audit()
+            .map(|drained| !drained)
     }
 
     #[cfg(feature = "native-agentic-semantic-probe")]

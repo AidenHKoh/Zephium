@@ -58,11 +58,13 @@ fn next_world_name() -> Result<SemanticWorldName, ()> {
 use crate::platform::record_media::{MediaCompletion, MediaInvocation, NativeMediaResult};
 use crate::platform::semantic_pixel_privacy::{PixelPrivacyProof, PrivacyCompletion};
 enum ReadResult {
+    HumanWall(String),
     Observation(SemanticSnapshot),
     Privacy(PixelPrivacyProof),
     Media(NativeMediaResult),
 }
 enum ReadInvocation {
+    HumanWall,
     Observation(SemanticRuntimeInvocation),
     Privacy,
     Media(MediaInvocation),
@@ -76,6 +78,10 @@ impl ReadInvocation {
     }
     fn command(&self, context: &SemanticExecutionContext) -> Option<FixedSemanticCdpCommand> {
         match self {
+            Self::HumanWall => {
+                crate::platform::agent_semantic_cdp_protocol::invoke_human_wall_command(context)
+                    .ok()
+            }
             Self::Observation(value) => invoke_runtime_command(context, value).ok(),
             Self::Privacy => {
                 crate::platform::agent_semantic_cdp_protocol::invoke_privacy_command(context).ok()
@@ -88,6 +94,10 @@ impl ReadInvocation {
     }
     fn decode(&self, response: &str) -> Result<ReadResult, SemanticCdpInvocationError> {
         match self {
+            Self::HumanWall => {
+                crate::platform::agent_semantic_cdp_protocol::decode_human_wall_response(response)
+                    .map(ReadResult::HumanWall)
+            }
             Self::Observation(value) => {
                 decode_invocation_response(value, response).map(ReadResult::Observation)
             }
@@ -429,7 +439,7 @@ impl AgentSemanticRuntimeController {
             Box::new(move |result| {
                 completion(result.and_then(|result| match result {
                     ReadResult::Observation(snapshot) => Ok(snapshot),
-                    ReadResult::Privacy(_) | ReadResult::Media(_) => {
+                    ReadResult::Privacy(_) | ReadResult::Media(_) | ReadResult::HumanWall(_) => {
                         Err(SemanticRuntimePortFailure::Transport)
                     }
                 }))
@@ -450,6 +460,17 @@ impl AgentSemanticRuntimeController {
                 completion(match result {
                     Ok(ReadResult::Media(value)) => Some(value),
                     _ => None,
+                })
+            }),
+        );
+    }
+    pub(crate) fn sample_human_wall(&self, completion: impl FnOnce(String) + 'static) {
+        let _ = self.native.dispatch(
+            ReadInvocation::HumanWall,
+            Box::new(move |result| {
+                completion(match result {
+                    Ok(ReadResult::HumanWall(code)) => code,
+                    _ => String::new(),
                 })
             }),
         );
@@ -874,7 +895,9 @@ impl NativeRuntime {
                 || state.in_flight.is_some()
             {
                 Some(SemanticRuntimePortFailure::ResourceExhausted)
-            } else if state.completed_invocations >= MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS {
+            } else if !matches!(invocation, ReadInvocation::HumanWall)
+                && state.completed_invocations >= MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS
+            {
                 Some(SemanticRuntimePortFailure::InvocationLimit)
             } else {
                 None
@@ -1516,7 +1539,10 @@ impl NativeRuntime {
                     (Err(SemanticRuntimePortFailure::Transport), false)
                 }
             };
-            let completed = state.completed_invocations.checked_add(1);
+            let completed = state.completed_invocations.checked_add(u16::from(!matches!(
+                pending.invocation,
+                ReadInvocation::HumanWall
+            )));
             let count_valid =
                 completed.filter(|count| *count <= MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS);
             if let Some(completed) = count_valid {

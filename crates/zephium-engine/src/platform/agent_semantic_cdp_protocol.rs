@@ -526,6 +526,39 @@ pub(crate) fn decode_media_response(
     ))
 }
 
+pub(crate) fn invoke_human_wall_command(
+    context: &SemanticExecutionContext,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    command(
+        FixedSemanticCdpMethod::CallFunctionOn,
+        json!({
+            "functionDeclaration":format!("function() {{ return {}; }}",crate::platform::work_human_survey::program()),
+            "arguments":[],"silent":true,"returnByValue":true,"generatePreview":false,"userGesture":false,"awaitPromise":false,
+            "uniqueContextId":context.unique_id(),
+        }),
+        32 * 1024,
+        256,
+    )
+}
+pub(crate) fn decode_human_wall_response(
+    response: &str,
+) -> Result<String, SemanticCdpInvocationError> {
+    let object =
+        parse_success_object(response, 256).map_err(SemanticCdpInvocationError::Protocol)?;
+    object
+        .get("result")
+        .and_then(Value::as_object)
+        .filter(|result| {
+            result.len() == 2 && result.get("type").and_then(Value::as_str) == Some("string")
+        })
+        .and_then(|result| result.get("value"))
+        .and_then(Value::as_str)
+        .and_then(crate::platform::work_human_survey::decode)
+        .ok_or(SemanticCdpInvocationError::Protocol(
+            SemanticCdpProtocolError::InvalidResponse,
+        ))
+}
+
 pub(crate) fn invoke_privacy_command(
     context: &SemanticExecutionContext,
 ) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
@@ -855,6 +888,42 @@ fn validate_browser_identifier(value: &str) -> Result<(), SemanticCdpProtocolErr
 mod tests {
     use super::*;
 
+    #[test]
+    fn human_survey_uses_only_the_original_isolated_context_and_closed_codes() {
+        let context = SemanticExecutionContext::new(19, "original-private-world").unwrap();
+        let command = invoke_human_wall_command(&context).unwrap();
+        assert_eq!(command.method(), FixedSemanticCdpMethod::CallFunctionOn);
+        assert_eq!(command.response_limit(), 256);
+        let body: Value = serde_json::from_str(command.parameters()).unwrap();
+        assert_eq!(body["uniqueContextId"], "original-private-world");
+        assert_eq!(body["userGesture"], false);
+        assert_eq!(body["awaitPromise"], false);
+        assert!(body.get("executionContextId").is_none());
+        assert_eq!(body["arguments"], json!([]));
+        assert_eq!(
+            body["functionDeclaration"],
+            format!(
+                "function() {{ return {}; }}",
+                crate::platform::work_human_survey::program()
+            )
+        );
+        for code in 0..=23 {
+            let response = json!({"result":{"type":"string","value":code.to_string()}}).to_string();
+            assert_eq!(
+                decode_human_wall_response(&response).unwrap(),
+                code.to_string()
+            );
+        }
+        for response in [
+            r#"{"result":{"type":"boolean","value":false}}"#,
+            r#"{"result":{"type":"number","value":0}}"#,
+            r#"{"result":{"type":"string","value":"24"}}"#,
+            r#"{"result":{"type":"string","value":"0","objectId":"foreign"}}"#,
+            r#"{"result":{"type":"string","value":"0"},"exceptionDetails":{}}"#,
+        ] {
+            assert!(decode_human_wall_response(response).is_err());
+        }
+    }
     #[test]
     fn action_step_correlation_and_closed_authority_reject_replays_and_extra_fields() {
         let plan = json!({"a":17,"i":1,"k":"text","p":{"text":"Exact text"}});

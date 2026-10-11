@@ -1,7 +1,6 @@
 use super::*;
 
 const HUMAN_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const HUMAN_WALL_SURVEY: &str = include_str!("work_human_wall.js");
 
 fn wall_survey_outcome(wire: &str) -> Option<u8> {
     let code = wire.parse::<u8>().ok()?;
@@ -304,8 +303,7 @@ impl WorkNativeResource {
         let answered = std::sync::atomic::AtomicBool::new(false);
         let sampled = Instant::now();
         if view
-            .view()
-            .evaluate_script_with_callback(HUMAN_WALL_SURVEY, move |result| {
+            .sample_work_human_wall(move |result| {
                 if answered.swap(true, Ordering::AcqRel) {
                     return;
                 }
@@ -339,6 +337,9 @@ impl WorkNativeResource {
                     // One positive sample alone leaves the request pending.
                 }
                 completed.finish_wall_probe();
+                // Run cleanup only after the private-world callback returns.
+                let wake = guard.clone();
+                guard.dispatch_notification(move || notify_work_resource(wake));
             })
             .is_err()
         {

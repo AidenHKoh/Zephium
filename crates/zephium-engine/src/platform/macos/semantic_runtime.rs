@@ -9,11 +9,11 @@
 //! Private production semantic runtime registration for owned agent contexts.
 //!
 //! WebKit's public evaluation APIs confer user activation, so this adapter
-//! never evaluates JavaScript. The immutable document-start program instead
+//! never evaluates JavaScript for automated invocations. The immutable document-start program instead
 //! holds one Promise on a content-world-scoped reply handler. Native code may
 //! answer that pull only with [`SemanticRuntimeInvocation`]'s closed grammar.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::panic::AssertUnwindSafe;
 use std::ptr::null_mut;
 use std::rc::Rc;
@@ -34,7 +34,9 @@ pub(super) fn configure_media_diagnostic(public: bool, account: bool) {
 }
 use objc2::{define_class, msg_send, rc::Retained, runtime::AnyObject, runtime::NSObject};
 use objc2::{DefinedClass as _, MainThreadOnly, Message as _};
-use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSString, NSUTF8StringEncoding};
+use objc2_foundation::{
+    MainThreadMarker, NSError, NSObjectProtocol, NSString, NSUTF8StringEncoding,
+};
 use objc2_web_kit::{
     WKContentWorld, WKScriptMessage, WKScriptMessageHandlerWithReply, WKUserContentController,
     WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration,
@@ -978,6 +980,7 @@ impl SemanticRuntimeChannelState {
 
 #[derive(Clone)]
 pub(crate) struct AgentSemanticRuntimeController {
+    human_probe: Rc<Cell<bool>>,
     state: Rc<RefCell<SemanticRuntimeChannelState>>,
     on_invariant_failure: Rc<dyn Fn()>,
     on_callback_panic: Rc<dyn Fn()>,
@@ -1041,6 +1044,7 @@ impl AgentSemanticRuntimeController {
     }
     fn new(on_invariant_failure: Rc<dyn Fn()>, on_callback_panic: Rc<dyn Fn()>) -> Self {
         Self {
+            human_probe: Rc::new(Cell::new(false)),
             state: Rc::new(RefCell::new(SemanticRuntimeChannelState::default())),
             on_invariant_failure,
             on_callback_panic,
@@ -1218,7 +1222,14 @@ impl AgentSemanticRuntimeController {
         matched
     }
 
+    pub(crate) fn human_survey_pending(&self) -> bool {
+        self.human_probe.get()
+    }
     pub(crate) fn pending_for_audit(&self) -> Option<bool> {
+        self.pending_semantic_for_audit()
+            .map(|pending| pending || self.human_probe.get())
+    }
+    fn pending_semantic_for_audit(&self) -> Option<bool> {
         let state = self.state.try_borrow().ok()?;
         let pending = state.pending.is_some();
         let world_valid = if state.phase == DocumentPhase::Retired {
@@ -1293,6 +1304,9 @@ impl AgentSemanticRuntimeController {
     }
 
     fn retire(&self) -> bool {
+        if self.human_probe.get() {
+            return false;
+        }
         let (actions, clean) = match self.state.try_borrow_mut() {
             Ok(mut state) => (state.retire(), true),
             Err(_) => {
@@ -1801,6 +1815,95 @@ impl AgentSemanticRuntimeRegistration {
         Ok(registration)
     }
 
+    /// The fixed read-only survey is evaluated only for an already-presented
+    /// human page, in this view's attested original private world. Automated
+    /// semantic invocations still use the no-evaluation pull channel.
+    pub(crate) fn sample_human_wall(
+        &self,
+        view: &WKWebView,
+        completion: impl FnOnce(String) + 'static,
+    ) -> Result<(), ()> {
+        if self.retired || self.channel.pending_for_audit() != Some(false) {
+            return Err(());
+        }
+        self.installation.attest_controller()?;
+        let world = self
+            .installation
+            .epochs
+            .try_borrow()
+            .map_err(|_| ())?
+            .active
+            .as_ref()
+            .ok_or(())?
+            .world
+            .clone();
+        {
+            let state = self.channel.state.try_borrow().map_err(|_| ())?;
+            if state.expected_view != Some(std::ptr::from_ref(view).addr())
+                || state.active_world != Some(Retained::as_ptr(&world).addr())
+            {
+                return Err(());
+            }
+        }
+        if self.channel.human_probe.replace(true) {
+            return Err(());
+        }
+        let returned = Rc::new(RefCell::new(Some(completion)));
+        let result = returned.clone();
+        let channel = self.channel.clone();
+        let source_world = world.clone();
+        let callback: RcBlock<dyn Fn(*mut AnyObject, *mut NSError)> =
+            RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+                let Some(completion) = result.borrow_mut().take() else {
+                    return;
+                };
+                let current = channel.state.try_borrow().is_ok_and(|state| {
+                    state.active_world == Some(Retained::as_ptr(&source_world).addr())
+                        && state.phase != DocumentPhase::Retired
+                });
+                // SAFETY: WebKit provides live callback objects on this original main-thread view.
+                let wire = if current && error.is_null() {
+                    unsafe { value.as_ref() }
+                        .and_then(AnyObject::downcast_ref::<NSString>)
+                        .filter(|value| value.length() <= 2)
+                        .and_then(|value| {
+                            crate::platform::work_human_survey::decode(&value.to_string())
+                        })
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                // Keep physical callback debt visible through the recipient callback.
+                let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| completion(wire)));
+                channel.human_probe.set(false);
+                if outcome.is_err() {
+                    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        (channel.on_callback_panic)()
+                    }));
+                }
+            });
+        let source = NSString::from_str(&crate::platform::work_human_survey::program());
+        // SAFETY: fixed source, attested private world, exact bound owned view,
+        // and one original native callback owner. No main-world fallback exists.
+        let dispatched = objc2::exception::catch(AssertUnwindSafe(|| unsafe {
+            view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+                &source,
+                None,
+                &world,
+                Some(&callback),
+            );
+        }))
+        .is_ok();
+        if !dispatched {
+            // An exceptional dispatch cannot prove callback absence. Preserve
+            // native debt until an actual callback, and keep readiness false.
+            let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                (self.channel.on_invariant_failure)()
+            }));
+        }
+        Ok(())
+    }
+
     pub(crate) fn bind_view(&self, view: &WKWebView) -> Result<(), ()> {
         self.channel.bind_view(view)
     }
@@ -1956,7 +2059,7 @@ impl AgentSemanticRuntimeRegistration {
         let installation = self.installation.clone();
         Rc::new(move || {
             if !installation.channel.ready_for_history()
-                || installation.channel.pending_for_audit() != Some(false)
+                || installation.channel.pending_semantic_for_audit() != Some(false)
             {
                 return false;
             }
@@ -2167,6 +2270,25 @@ mod tests {
         SemanticOrigin, SemanticRuntimeBudget, SemanticRuntimeFault, SemanticSnapshotGeneration,
     };
 
+    #[test]
+    fn human_survey_callback_debt_blocks_retirement_without_blocking_user_navigation() {
+        let controller = AgentSemanticRuntimeController::new(Rc::new(|| {}), Rc::new(|| {}));
+        *controller.state.borrow_mut() = SemanticRuntimeChannelState {
+            expected_view: Some(17),
+            active_world: Some(18),
+            phase: DocumentPhase::Ready,
+            ..Default::default()
+        };
+        assert_eq!(controller.pending_for_audit(), Some(false));
+        controller.human_probe.set(true);
+        assert_eq!(controller.pending_for_audit(), Some(true));
+        assert_eq!(controller.pending_semantic_for_audit(), Some(false));
+        assert!(!controller.retire());
+        assert_eq!(controller.state.borrow().phase, DocumentPhase::Ready);
+        controller.human_probe.set(false);
+        assert_eq!(controller.pending_for_audit(), Some(false));
+        assert_eq!(controller.state.borrow().completed_invocations, 0);
+    }
     #[test]
     fn handed_off_privacy_probe_drains_after_stop_without_authorizing_capture() {
         let mut state = SemanticRuntimeChannelState {
@@ -2851,6 +2973,7 @@ mod tests {
             ..SemanticRuntimeChannelState::default()
         };
         let controller = AgentSemanticRuntimeController {
+            human_probe: Rc::new(Cell::new(false)),
             state: Rc::new(RefCell::new(invalid)),
             on_invariant_failure: Rc::new(|| {}),
             on_callback_panic: Rc::new(|| {}),
