@@ -379,6 +379,8 @@ struct EvalDiagnostics {
     images: Vec<EvalInputImage>,
     image_bytes: usize,
     images_limited: bool,
+    page_traces: Vec<serde_json::Value>,
+    page_traces_limited: bool,
     truncated: bool,
 }
 struct EvalInputImage {
@@ -492,11 +494,79 @@ fn export_eval_images(
     )
 }
 
+const EVAL_PAGE_TRACE_BYTES: usize = 96 * 1024;
+const EVAL_PAGE_TRACE_CALLS: usize = 12;
+
+fn eval_trace_parts(
+    parts: &[zephium_core::work::model::WorkModelPart],
+    text: bool,
+) -> serde_json::Value {
+    use zephium_core::work::model::WorkModelPart as P;
+    serde_json::Value::Array(
+        parts
+            .iter()
+            .filter_map(|part| match part {
+                P::Text(value) if text => Some(serde_json::json!({"text": value})),
+                P::ToolCall(call) => {
+                    Some(serde_json::json!({"tool": call.name, "arguments": call.arguments}))
+                }
+                // Images and provider replay items never enter this text trace.
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+fn eval_trace_messages(
+    messages: &[zephium_core::work::model::WorkModelMessage],
+) -> serde_json::Value {
+    use zephium_core::work::model::WorkModelMessage as M;
+    serde_json::Value::Array(
+        messages
+            .iter()
+            .map(|message| match message {
+                M::User(parts) => {
+                    serde_json::json!({"role":"user", "parts":eval_trace_parts(parts, true)})
+                }
+                M::Assistant(parts) => {
+                    serde_json::json!({"role":"assistant", "parts":eval_trace_parts(parts, false)})
+                }
+                M::ToolResults(results) => {
+                    serde_json::json!({"role":"tool_results", "results":results.iter().map(|result|
+            serde_json::json!({"is_error":result.is_error,"content":result.content})
+        ).collect::<Vec<_>>()})
+                }
+            })
+            .collect(),
+    )
+}
+
+fn remember_eval_page_trace(local: &mut EvalDiagnostics, trace: serde_json::Value) {
+    if trace.to_string().len() > EVAL_PAGE_TRACE_BYTES {
+        local.page_traces_limited = true;
+        return;
+    }
+    if local.page_traces.len() == EVAL_PAGE_TRACE_CALLS {
+        local.page_traces.remove(0);
+        local.page_traces_limited = true;
+    }
+    local.page_traces.push(trace);
+}
+
+fn export_eval_page_traces(public: bool, local: &EvalDiagnostics) -> serde_json::Value {
+    if !public {
+        return serde_json::json!({"state":"withheld_private_provenance","turns":[]});
+    }
+    serde_json::json!({"state":if local.page_traces.is_empty() && !local.page_traces_limited { "not_recorded" } else { "exported" },"turns":local.page_traces,"limited":local.page_traces_limited,
+        "scope":"Opt-in bounded local public page-model text and tool arguments. No system blocks, assistant prose, images, provider replay items or transport credentials; not a native action receipt."})
+}
+
 struct EvalModelClient {
     inner: Arc<dyn zephium_core::work::model::WorkModelClient>,
     role: &'static str,
     diagnostics: Arc<Mutex<EvalDiagnostics>>,
     visual_diagnostics: bool,
+    trace_pages: bool,
     reject_images: bool,
 }
 fn eval_image_inputs(messages: &[zephium_core::work::model::WorkModelMessage]) -> (usize, usize) {
@@ -548,6 +618,8 @@ impl zephium_core::work::model::WorkModelClient for EvalModelClient {
                     Some(index)
                 }
             };
+            let trace = (self.trace_pages && self.visual_diagnostics && self.role == "page")
+                .then(|| eval_trace_messages(&request.messages));
             let result = self.inner.call(request, events).await;
             if let Some(index) = index {
                 let mut local = self.diagnostics.lock().unwrap_or_else(|e| e.into_inner());
@@ -590,9 +662,83 @@ impl zephium_core::work::model::WorkModelClient for EvalModelClient {
                         row["failure"] = serde_json::json!(format!("{error:?}"));
                     }
                 }
+                if let Some(messages) = trace {
+                    let output = match &result {
+                        Ok(outcome) => eval_trace_parts(&outcome.assistant, false),
+                        Err(_) => serde_json::Value::Null,
+                    };
+                    remember_eval_page_trace(
+                        &mut local,
+                        serde_json::json!({
+                            "call_index":index,"messages":messages,"output_tools":output,
+                            "settled":result.is_ok(),
+                        }),
+                    );
+                }
             }
             result
         })
+    }
+}
+
+#[cfg(test)]
+mod page_trace_tests {
+    use super::*;
+    use zephium_core::work::model::*;
+
+    #[test]
+    fn trace_omits_images_replay_and_assistant_prose_and_withholds_private_runs() {
+        let messages = vec![
+            WorkModelMessage::User(vec![
+                WorkModelPart::Text("public synthetic date picker".into()),
+                WorkModelPart::Image {
+                    media_type: "image/png".into(),
+                    bytes: b"omitted-pixels".to_vec(),
+                },
+                WorkModelPart::Replay(serde_json::json!({"internal":"omitted-replay"})),
+            ]),
+            WorkModelMessage::Assistant(vec![
+                WorkModelPart::Text("omitted-assistant-prose".into()),
+                WorkModelPart::ToolCall(WorkModelToolCall {
+                    id: "not-exported-id".into(),
+                    name: "act".into(),
+                    arguments: serde_json::json!({"value":"synthetic-date"}),
+                }),
+            ]),
+        ];
+        let mut local = EvalDiagnostics::default();
+        remember_eval_page_trace(&mut local, eval_trace_messages(&messages));
+        let text = export_eval_page_traces(true, &local).to_string();
+        assert!(text.contains("public synthetic date picker"));
+        assert!(text.contains("synthetic-date"));
+        for withheld in [
+            "omitted-pixels",
+            "omitted-replay",
+            "omitted-assistant-prose",
+            "not-exported-id",
+        ] {
+            assert!(!text.contains(withheld));
+        }
+        let withheld = export_eval_page_traces(false, &local).to_string();
+        assert!(!withheld.contains("synthetic-date"));
+        assert!(!withheld.contains("public synthetic"));
+    }
+
+    #[test]
+    fn trace_retains_only_bounded_recent_turns_without_clipping_quotes() {
+        let mut local = EvalDiagnostics::default();
+        for index in 0..20 {
+            remember_eval_page_trace(&mut local, serde_json::json!({"call_index":index}));
+        }
+        assert_eq!(local.page_traces.len(), EVAL_PAGE_TRACE_CALLS);
+        assert_eq!(local.page_traces[0]["call_index"], 8);
+        remember_eval_page_trace(
+            &mut local,
+            serde_json::json!({"text":"x".repeat(EVAL_PAGE_TRACE_BYTES)}),
+        );
+        assert_eq!(local.page_traces.len(), EVAL_PAGE_TRACE_CALLS);
+        assert_eq!(local.page_traces.last().unwrap()["call_index"], 19);
+        assert!(local.page_traces_limited);
     }
 }
 
@@ -632,6 +778,7 @@ mod visual_diagnostic_tests {
                 role: "page",
                 diagnostics: diagnostics.clone(),
                 visual_diagnostics: public,
+                trace_pages: !public,
                 reject_images: false,
             };
             let request = WorkModelRequest {
@@ -674,6 +821,7 @@ mod visual_diagnostic_tests {
                 role: "page",
                 diagnostics: Arc::new(Mutex::new(EvalDiagnostics::default())),
                 visual_diagnostics: false,
+                trace_pages: false,
                 reject_images: true,
             };
             assert!(matches!(
@@ -684,6 +832,10 @@ mod visual_diagnostic_tests {
             let outcome = client.call(request, &|_| {}).await.unwrap();
             assert_eq!(outcome.assistant.len(), 1);
             let local = diagnostics.lock().unwrap();
+            assert!(
+                local.page_traces.is_empty(),
+                "private mode cannot enable the text trace"
+            );
             assert_eq!(local.calls[0]["stop"], "tool_use");
             let row = &local.calls[0];
             if public {
@@ -883,6 +1035,7 @@ fn export_eval(
             "page_intervals": local.pages,
             "source_evidence": source_evidence,
             "model_input_images": model_input_images,
+            "public_page_turns": export_eval_page_traces(public, &local),
             "page_diagnostics_version": if public { Some(1) } else { None },
             "timeline": {"started_ms": finished_ms.saturating_sub(wall_ms), "finished_ms": finished_ms},
             "model_call_scope": "selected Work model clients; direct public-search transport is not included; do not add page diagnostics to this count",
@@ -1666,6 +1819,8 @@ pub(super) async fn lead_workflow(
                 role,
                 diagnostics: local_diagnostics.clone(),
                 visual_diagnostics: public_eval,
+                trace_pages: public_eval
+                    && std::env::var("ZEPHIUM_EVAL_PUBLIC_PAGE_TRACE").as_deref() == Ok("1"),
                 reject_images: account_probe,
             });
         }
@@ -1930,6 +2085,16 @@ pub(super) async fn lead_workflow(
                         settings.model_diagnostic = None;
                         settings.resource_diagnostic = None;
                         settings.diagnostic = None;
+                    }
+                    if public_eval {
+                        settings.resource_diagnostic = Some(|cause| {
+                            if let Some(cause) = cause {
+                                let _ = writeln!(
+                                    std::io::stdout().lock(),
+                                    "page-resource: cause={cause:?}; content=redacted"
+                                );
+                            }
+                        });
                     }
                     if account_probe {
                         settings.stage_diagnostic = Some(super::work_account::stage);
