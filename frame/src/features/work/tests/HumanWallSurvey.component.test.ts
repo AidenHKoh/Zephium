@@ -256,3 +256,68 @@ test("nested conversation logs and feeds supply visible content without shallow 
     expect(await survey(page + "<input autocomplete='one-time-code'>"), role).toBe(false);
   }
 });
+
+test("visible external ARIA-owned conversation content needs unique bounded acyclic references", async () => {
+  const controls =
+    "<h1>Project channel</h1><div><button>Review channel details</button><button>Browse conversation history</button><button>Open message settings</button></div><div role='textbox' aria-multiline='true' contenteditable='true'><p><br></p></div>";
+  const owner =
+    "<div id='history' role='list' aria-label='Project' aria-owns='message' style='min-height:20px'></div>";
+  const message =
+    "<div id='message'><p>A visible source-backed conversation message is here.</p></div>";
+  expect(await survey(controls + owner + message)).toBe(true);
+  expect(
+    await survey(
+      controls +
+        owner.replace("'message'", "'group'") +
+        "<div id='group' aria-owns='message' style='min-height:20px'></div>" +
+        message,
+    ),
+  ).toBe(true);
+  for (const changed of [
+    owner,
+    owner + message + "<div id='message'></div>",
+    owner + message.replace("id='message'", "id='message' hidden"),
+    owner + `<div style='opacity:0'>${message}</div>`,
+    owner.replace("aria-owns='message'", "aria-owns='history'") + message,
+    owner + "<div id='message' aria-owns='history' style='min-height:20px'></div>",
+    owner +
+      "<div id='message' aria-owns='history' style='min-height:20px'><p>Visible content cannot validate a cyclic owner.</p></div>",
+    owner + "<iframe srcdoc=\"<p id='message'>Content in another document</p>\"></iframe>",
+    "<div id='message'>" + owner + "<p>Visible text cannot break an ownership cycle.</p></div>",
+    owner + message + "<input autocomplete='one-time-code'>",
+    owner + message + "<input type='password'>",
+  ])
+    expect(await survey(controls + changed)).toBe(false);
+  expect(
+    await survey(
+      controls +
+        owner.replace(
+          "aria-owns='message'",
+          `aria-owns='${Array.from({ length: 33 }, (_, i) => "id" + i).join(" ")}'`,
+        ) +
+        message,
+    ),
+  ).toBe(false);
+  expect(
+    await survey(
+      controls +
+        owner +
+        message +
+        Array.from({ length: 8193 }, (_, i) => `<div id='extra${i}'></div>`).join(""),
+    ),
+  ).toBe(false);
+  const deep = Array.from(
+    { length: 18 },
+    (_, i) =>
+      `<div id='chain${i}' aria-owns='${i === 17 ? "message" : "chain" + (i + 1)}' style='min-height:20px'></div>`,
+  ).join("");
+  expect(await survey(controls + owner.replace("'message'", "'chain0'") + deep + message)).toBe(
+    false,
+  );
+});
+
+test("an exhausted visibility ancestry check cannot clear a wall", async () => {
+  expect(
+    await survey(content + "<div>".repeat(66) + "<input type='password'>" + "</div>".repeat(66)),
+  ).toBe(false);
+});

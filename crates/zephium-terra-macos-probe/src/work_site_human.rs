@@ -196,9 +196,14 @@ pub(super) fn response(path: &str) -> String {
         )
     };
     let content = if *scenario == "email-code" {
-        format!("<div aria-label=\"Main Content\"><h1>Inbox</h1><input type=\"range\" aria-label=\"Sidebar width\"><input type=\"search\" aria-label=\"Channel or user name\"><div role=\"log\" aria-label=\"Project channel\"><div><div><p>{FACT}.</p></div></div><button>Task: {FACT}.</button><button>Task: Review the synthetic project checklist.</button><button>Task: Read the synthetic integration notes.</button></div><div role=\"textbox\" aria-multiline=\"true\" contenteditable=\"true\" aria-label=\"Message to project channel\"><p><br></p></div></div>")
+        format!("<div aria-label=\"Main Content\"><h1>Inbox</h1><input type=\"range\" aria-label=\"Sidebar width\"><input type=\"search\" aria-label=\"Channel or user name\"><div role=\"list\" aria-label=\"Project channel\" aria-owns=\"fixture-message\" style=\"min-height:20px\"></div><div id=\"fixture-message\"><p>{FACT}.</p></div><div><button>Task: {FACT}.</button><button>Task: Review the synthetic project checklist.</button><button>Task: Read the synthetic integration notes.</button></div><div role=\"textbox\" aria-multiline=\"true\" contenteditable=\"true\" aria-label=\"Message to project channel\"><p><br></p></div></div>")
     } else {
         format!("<main><h1>Fixture dashboard</h1><p>{FACT}.</p><p>This dashboard is public synthetic test data. The retained page now exposes its balance and reference without a reload, route change, cookie signal or manual continue command.</p></main>")
+    };
+    let tamper = if *scenario == "email-code" {
+        "Object.defineProperty(window,'getComputedStyle',{value(){throw new Error('fixture_page_world_tampered');},configurable:true});"
+    } else {
+        ""
     };
     // This polling simulation is present only in a synthetic loopback document.
     // Its controller never publishes a clear before observing native Presented.
@@ -207,6 +212,7 @@ pub(super) fn response(path: &str) -> String {
 <main id="wall">{wall}</main><script>
 (function(){{
  const documentNumber={document}; let finished=false, emailShown=false;
+ {tamper}
  async function poll(){{
   if(finished)return;
   try{{
