@@ -943,7 +943,7 @@ async fn stand_in(
         let WorkReplyV1::Projection { projection } = request.response(profile).await.reply else {
             continue;
         };
-        if !public_eval {
+        if !public_eval && super::work_local_fixture::active().is_none() {
             // Kept as it goes, so a run the host stops can still be read.
             let _ = std::fs::create_dir_all("target/work-runtime-proof/lead");
             let _ = std::fs::write(
@@ -966,84 +966,92 @@ async fn stand_in(
         else {
             continue;
         };
-        let intent = match &step.kind {
-            WorkStepKindV1::Ask { options, .. } => {
-                let reply = if public_eval {
-                    match &step.kind {
-                        WorkStepKindV1::Ask {
-                            purpose: Some(WorkAskPurposeV1::Question),
-                            ..
-                        } => answer.to_owned(),
-                        _ => options
-                            .iter()
-                            .find(|option| {
-                                matches!(option.as_str(), "Not now" | "Decline" | "Stop" | "No")
-                            })
-                            .cloned()
-                            .unwrap_or_else(|| "Not now".into()),
-                    }
-                } else if options.iter().any(|o| o == "Keep going") {
-                    kept_going += 1;
-                    if kept_going <= 2 {
-                        "Keep going"
+        let intent = if let Some(fixture) = super::work_local_fixture::active() {
+            match &step.kind {
+                WorkStepKindV1::Ask{purpose:Some(WorkAskPurposeV1::Question),..}=>WorkRuntimeIntent::AnswerStep{execution:execution.id,step:step.id,answer:"Follow TASK.md in the granted synthetic folder; unavailable capabilities must be reported, never replaced with a shell.".into()},
+                WorkStepKindV1::Ask{options,..}=>WorkRuntimeIntent::AnswerStep{execution:execution.id,step:step.id,answer:options.iter().find(|o|matches!(o.as_str(),"Not now"|"Decline"|"Stop"|"No")).cloned().unwrap_or_else(||"Not now".into())},
+                _=>{let approve=fixture.approval(step);fixture.record_approval(step,approve);WorkRuntimeIntent::ApproveStep{execution:execution.id,step:step.id,approve,for_run:false}}
+            }
+        } else {
+            match &step.kind {
+                WorkStepKindV1::Ask { options, .. } => {
+                    let reply = if public_eval {
+                        match &step.kind {
+                            WorkStepKindV1::Ask {
+                                purpose: Some(WorkAskPurposeV1::Question),
+                                ..
+                            } => answer.to_owned(),
+                            _ => options
+                                .iter()
+                                .find(|option| {
+                                    matches!(option.as_str(), "Not now" | "Decline" | "Stop" | "No")
+                                })
+                                .cloned()
+                                .unwrap_or_else(|| "Not now".into()),
+                        }
+                    } else if options.iter().any(|o| o == "Keep going") {
+                        kept_going += 1;
+                        if kept_going <= 2 {
+                            "Keep going"
+                        } else {
+                            "Stop"
+                        }
+                        .to_owned()
+                    } else if let Some(pick) = pick
+                        .as_ref()
+                        .filter(|_| options.first().map(String::as_str) == Some("Choose folder…"))
+                    {
+                        // The folder panel's choice goes back as its path.
+                        pick.to_string_lossy().into_owned()
+                    } else if let Some(allow) = options.iter().find(|o| o.starts_with("Allow")) {
+                        allow.clone()
+                    } else if !answer.is_empty() && answer != "Allow" {
+                        answer.to_owned()
                     } else {
-                        "Stop"
+                        options
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| "Go ahead".into())
+                    };
+                    say(format_args!(
+                        "lead-person: answered question options={}",
+                        options.len()
+                    ));
+                    WorkRuntimeIntent::AnswerStep {
+                        execution: execution.id,
+                        step: step.id,
+                        answer: reply,
                     }
-                    .to_owned()
-                } else if let Some(pick) = pick
-                    .as_ref()
-                    .filter(|_| options.first().map(String::as_str) == Some("Choose folder…"))
-                {
-                    // The folder panel's choice goes back as its path.
-                    pick.to_string_lossy().into_owned()
-                } else if let Some(allow) = options.iter().find(|o| o.starts_with("Allow")) {
-                    allow.clone()
-                } else if !answer.is_empty() && answer != "Allow" {
-                    answer.to_owned()
-                } else {
-                    options
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "Go ahead".into())
-                };
-                say(format_args!(
-                    "lead-person: answered question options={}",
-                    options.len()
-                ));
-                WorkRuntimeIntent::AnswerStep {
-                    execution: execution.id,
-                    step: step.id,
-                    answer: reply,
                 }
-            }
-            WorkStepKindV1::Confirm { confirm } => {
-                // A cookie banner is never a held step; one showing up here
-                // is a classifier miss, reported and declined like any other.
-                let action = confirm.action.to_lowercase();
-                let consent = ["reject", "accept", "cookie", "odrzuć", "necessary"]
-                    .iter()
-                    .any(|word| action.contains(word));
-                say(format_args!(
-                    "lead-person: declined held step category={:?} consent_miss={consent}",
-                    confirm.category
-                ));
-                WorkRuntimeIntent::ApproveStep {
-                    execution: execution.id,
-                    step: step.id,
-                    approve: false,
-                    for_run: false,
+                WorkStepKindV1::Confirm { confirm } => {
+                    // A cookie banner is never a held step; one showing up here
+                    // is a classifier miss, reported and declined like any other.
+                    let action = confirm.action.to_lowercase();
+                    let consent = ["reject", "accept", "cookie", "odrzuć", "necessary"]
+                        .iter()
+                        .any(|word| action.contains(word));
+                    say(format_args!(
+                        "lead-person: declined held step category={:?} consent_miss={consent}",
+                        confirm.category
+                    ));
+                    WorkRuntimeIntent::ApproveStep {
+                        execution: execution.id,
+                        step: step.id,
+                        approve: false,
+                        for_run: false,
+                    }
                 }
-            }
-            _ => {
-                say(format_args!(
-                    "lead-person: proposed change approved={}",
-                    !public_eval
-                ));
-                WorkRuntimeIntent::ApproveStep {
-                    execution: execution.id,
-                    step: step.id,
-                    approve: !public_eval,
-                    for_run: false,
+                _ => {
+                    say(format_args!(
+                        "lead-person: proposed change approved={}",
+                        !public_eval
+                    ));
+                    WorkRuntimeIntent::ApproveStep {
+                        execution: execution.id,
+                        step: step.id,
+                        approve: !public_eval,
+                        for_run: false,
+                    }
                 }
             }
         };
@@ -1177,6 +1185,16 @@ pub(super) async fn media_row(execution: &zephium_core::work::runtime::WorkExecu
     ));
 }
 
+async fn enrich_media_for_mode<F, Fut>(account: bool, local: bool, enrich: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    if !account && !local {
+        enrich().await;
+    }
+}
+
 fn needs_person(kind: &zephium_core::work::runtime::WorkStepKindV1) -> bool {
     use zephium_core::work::runtime::WorkStepKindV1 as K;
     match kind {
@@ -1207,6 +1225,14 @@ pub(super) async fn lead_workflow(
     let export = public_eval_path(scenario)?;
     let public_eval = export.is_some();
     let account_probe = super::work_account::active().is_some();
+    let local_fixture = super::work_local_fixture::active();
+    let heldout_blocks = super::work_heldout_blocks::active();
+    let local_probe = local_fixture.is_some() || heldout_blocks.is_some();
+    if local_probe
+        && (account_probe || public_eval || scenario.folder || scenario.name != "request")
+    {
+        return Err("local_scope");
+    }
     if account_probe && (public_eval || scenario.folder || scenario.name != "request") {
         return Err("account_scope");
     }
@@ -1224,7 +1250,7 @@ pub(super) async fn lead_workflow(
     let block_probe = scenario.name.starts_with("blocks-");
     let eval_started = Instant::now();
     let local_diagnostics = Arc::new(Mutex::new(EvalDiagnostics::default()));
-    if public_eval || block_probe || account_probe {
+    if public_eval || block_probe || account_probe || local_probe {
         let _ = zephium_app::work_models::view(profile).await;
         for role in [
             WorkModelRole::Lead,
@@ -1243,7 +1269,7 @@ pub(super) async fn lead_workflow(
     };
     // A named page model, as a person picks one in Settings → AI.
     if let Ok(id) = std::env::var("ZEPHIUM_PROBE_PAGE_MODEL").and_then(|id| {
-        if public_eval || block_probe || account_probe {
+        if public_eval || block_probe || account_probe || local_probe {
             Err(std::env::VarError::NotPresent)
         } else {
             Ok(id)
@@ -1261,7 +1287,7 @@ pub(super) async fn lead_workflow(
         .await
         .unwrap_or_else(|| page.clone());
     let model_setup = serde_json::json!({ "lead": lead.entry, "page": page.entry, "light": light.entry, "public_search_model": PUBLIC_SEARCH_MODEL, "read_triage": read_decision_name });
-    if public_eval || block_probe || account_probe {
+    if public_eval || block_probe || account_probe || local_probe {
         for (role, model) in [
             ("lead", &mut lead),
             ("page", &mut page),
@@ -1328,8 +1354,12 @@ pub(super) async fn lead_workflow(
             super::work_site::stores_hold(profile, host)
         ));
     }
-    super::work_site::seed_profile(profile).await?;
-    let folder = if scenario.folder {
+    if !local_probe {
+        super::work_site::seed_profile(profile).await?;
+    }
+    let folder = if let Some(fixture) = local_fixture {
+        Some(fixture.root.clone())
+    } else if scenario.folder {
         Some(bug_folder()?)
     } else {
         None
@@ -1398,6 +1428,9 @@ pub(super) async fn lead_workflow(
         seed_tasks(handle, profile).await?;
     }
     let block_fixture = super::work_blocks::seed(handle, profile, space, scenario.name).await?;
+    if let Some(fixture) = heldout_blocks {
+        fixture.seed(handle, profile).await?;
+    }
     let pick = if scenario.name == "save" {
         Some(save_folder()?)
     } else {
@@ -1410,7 +1443,7 @@ pub(super) async fn lead_workflow(
             work,
             scenario.answer,
             pick.clone(),
-            public_eval || block_probe,
+            public_eval || block_probe || local_probe,
         ))
     });
     let keys = Arc::new(Mutex::new(keys));
@@ -1419,8 +1452,11 @@ pub(super) async fn lead_workflow(
         say(format_args!("lead-run: event={event:?}"));
     });
     let no_search = super::work_account::NoSearch;
-    let active_search: &dyn WorkPublicSearchProvider =
-        if account_probe { &no_search } else { &search };
+    let active_search: &dyn WorkPublicSearchProvider = if account_probe || local_probe {
+        &no_search
+    } else {
+        &search
+    };
     let mut expected = created.applied_revision;
     let mut state = None;
     let mut failure = None;
@@ -1472,7 +1508,7 @@ pub(super) async fn lead_workflow(
                             .map(|f| f.to_string_lossy().into_owned())
                             .collect(),
                         accounts: vec![],
-                        private: public_eval || block_probe || account_probe,
+                        private: public_eval || block_probe || account_probe || local_probe,
                         lead: None,
                         skill: None,
                         search_fallback: None,
@@ -1497,6 +1533,9 @@ pub(super) async fn lead_workflow(
                 let chosen_page = chosen_page.clone();
                 let chosen_light = chosen_light.clone();
                 async move {
+                    if local_probe {
+                        return Err(WorkError::Unavailable);
+                    }
                     if super::work_account::active()
                         .is_some_and(|account| !account.permits(&request))
                     {
@@ -1521,7 +1560,7 @@ pub(super) async fn lead_workflow(
                     if public_eval {
                         settings.decisions = read_decisions;
                     }
-                    if public_eval || block_probe || account_probe {
+                    if public_eval || block_probe || account_probe || local_probe {
                         settings.stage_diagnostic = None;
                         settings.model_diagnostic = None;
                         settings.resource_diagnostic = None;
@@ -1571,13 +1610,11 @@ pub(super) async fn lead_workflow(
             execution,
             started.elapsed().as_millis(),
         );
-        if !public_eval && !block_probe && !account_probe {
+        if !public_eval && !block_probe && !account_probe && !local_probe {
             page_rows(execution);
             part_rows(execution);
         }
-        if !account_probe {
-            media_row(execution).await;
-        }
+        enrich_media_for_mode(account_probe, local_probe, || media_row(execution)).await;
         if !matches!(
             execution.status,
             WorkExecutionStatus::Completed | WorkExecutionStatus::NeedsReview
@@ -1606,7 +1643,7 @@ pub(super) async fn lead_workflow(
             failure = failure.or(Some("save_nothing_written"));
         }
     }
-    if let Some(folder) = folder {
+    if let Some(folder) = folder.filter(|_| !local_probe) {
         let fixed = std::fs::read_to_string(folder.join("pricing.py")).unwrap_or_default();
         say(format_args!(
             "lead-run: scenario=bug fixed={}",
@@ -1633,7 +1670,40 @@ pub(super) async fn lead_workflow(
             failure = failure.or(Some(error));
         }
     }
-    if let Some(path) = export {
+    let fixture_diagnostics = || {
+        let diagnostics = local_diagnostics.lock().unwrap_or_else(|e| e.into_inner());
+        serde_json::json!({
+            "selected_client_calls": diagnostics.calls,
+            "truncated": diagnostics.truncated,
+            "scope": "selected Work model clients; no browser/search dispatch permitted",
+            "attempt_usage": state.executions.last().map(|e| e.attempts.iter().map(|a| a.usage).collect::<Vec<_>>()),
+            "step_usage": state.executions.last().map(|e| e.steps.iter().map(|s| s.usage).collect::<Vec<_>>()),
+        })
+    };
+    if let Some(fixture) = local_fixture {
+        if !fixture.export(
+            &state,
+            &model_setup,
+            fixture_diagnostics(),
+            eval_started.elapsed().as_millis(),
+        )? {
+            failure = failure.or(Some("local_outcome"));
+        }
+    } else if let Some(fixture) = heldout_blocks {
+        if !fixture
+            .export(
+                handle,
+                profile,
+                &state,
+                &model_setup,
+                fixture_diagnostics(),
+                eval_started.elapsed().as_millis(),
+            )
+            .await?
+        {
+            failure = failure.or(Some("heldout_blocks_outcome"));
+        }
+    } else if let Some(path) = export {
         export_eval(
             &path,
             &state,
@@ -1655,6 +1725,20 @@ pub(super) async fn lead_workflow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_and_account_modes_never_invoke_media_candidate_fetch() {
+        let candidate = "https://example.com/inert-candidate.png";
+        for (account, local) in [(false, true), (true, false), (true, true)] {
+            let invoked = std::sync::atomic::AtomicBool::new(false);
+            enrich_media_for_mode(account, local, || async {
+                assert!(!candidate.is_empty());
+                invoked.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await;
+            assert!(!invoked.load(std::sync::atomic::Ordering::SeqCst));
+        }
+    }
 
     #[test]
     fn public_page_diagnostic_is_explicit_and_never_for_accounts() {

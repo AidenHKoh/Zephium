@@ -205,6 +205,33 @@ pub(super) fn run_lead_request(
     run_mode(Mode::Lead)
 }
 
+pub(super) fn run_local_fixture(
+    case: &std::ffi::OsStr,
+    export: &std::ffi::OsStr,
+) -> Result<(), super::ProbeFailure> {
+    let case = case.to_str().ok_or(super::ProbeFailure::Authority)?;
+    let objective = if case.starts_with("blocks-") {
+        super::work_heldout_blocks::configure(case, std::path::Path::new(export))
+    } else {
+        super::work_local_fixture::configure(case, std::path::Path::new(export))
+    }
+    .map_err(|_| super::ProbeFailure::Authority)?;
+    LEAD_SCENARIO
+        .set(super::acceptance::request_scenario(
+            &objective,
+            "Follow the frozen fixture request; report unavailable capabilities honestly.",
+        ))
+        .map_err(|_| super::ProbeFailure::Authority)?;
+    let result = run_mode(Mode::Lead);
+    if let Some(fixture) = super::work_local_fixture::active() {
+        fixture.cleanup();
+    }
+    if let Some(fixture) = super::work_heldout_blocks::active() {
+        fixture.cleanup();
+    }
+    result
+}
+
 pub(super) fn run_account_read(start: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
     let request =
         super::work_account::configure(start.to_str().ok_or(super::ProbeFailure::Authority)?)

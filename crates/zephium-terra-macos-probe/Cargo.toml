@@ -34,6 +34,7 @@ required-features = ["durable-runtime"]
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
 zephium-agent-model-catalog = { workspace = true, optional = true }
 serde_json.workspace = true
+sha2 = "=0.10.9"
 zephium-ipc.workspace = true
 zephium-agent-controller.workspace = true
 zephium-agent-provider-transport.workspace = true

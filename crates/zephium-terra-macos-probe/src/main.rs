@@ -35,6 +35,10 @@ mod work_blocks;
 mod work_commerce;
 #[cfg(all(target_os = "macos", feature = "durable-runtime"))]
 mod work_durable;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod work_heldout_blocks;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod work_local_fixture;
 #[cfg(any(target_os = "macos", test))]
 mod work_navigation;
 #[cfg(any(target_os = "macos", test))]
@@ -215,6 +219,10 @@ fn main() {
         [argument] if argument == "--live-agent-trip-work" => work_durable::run_agent_trip(),
         #[cfg(feature = "durable-runtime")]
         [argument, scenario] if argument == "--live-lead" => work_durable::run_lead(scenario),
+        #[cfg(feature = "durable-runtime")]
+        [argument, case, export] if argument == "--live-local-fixture" => {
+            work_durable::run_local_fixture(case, export)
+        }
         [argument, request, answer] if argument == "--live-lead-request" => {
             work_durable::run_lead_request(request, answer)
         }
