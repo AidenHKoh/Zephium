@@ -603,5 +603,37 @@ class CanonicalMetadataSourceTests(unittest.TestCase):
         self.assertEqual(eval.grade(task,evidence,reference,manifest)['task_outcome'],'failed', 'historical grading remains immutable')
 
 
+class SourceAuditBindingTests(unittest.TestCase):
+    def test_audit_cannot_be_transferred_between_repetitions(self):
+        row = {"evidence_sha256": "a" * 64, "log_sha256": "b" * 64}
+        entry = dict(row, root_cause="missing_record_values")
+        eval.validate_source_audit_binding(entry, row)
+        for key in row:
+            other = dict(row, **{key: "c" * 64})
+            with self.assertRaises(ValueError):
+                eval.validate_source_audit_binding(entry, other)
+        with self.assertRaises(ValueError):
+            eval.validate_source_audit_binding(dict(entry, evidence_sha256=None), dict(row, evidence_sha256=None))
+
+    def test_audit_preserves_a_bounded_cause_and_quality_notes(self):
+        row = {"evidence_sha256": "a" * 64, "log_sha256": "b" * 64}
+        for cause in (None, "", "none\n", "a" * 81, "https://example.test/private"):
+            with self.assertRaises(ValueError):
+                eval.validate_source_audit_binding(dict(row, root_cause=cause), row)
+        with self.assertRaises(ValueError):
+            eval.validate_source_audit_binding(dict(row, root_cause="none", quality_notes="not a list"), row)
+        eval.validate_source_audit_binding(dict(row, root_cause="none", quality_notes=["Answer is correct; native shutdown remains unproven."]), row)
+
+    def test_answer_grade_does_not_hide_native_process_failure(self):
+        _, evidence, _, _ = fixture()
+        row = {"id": "fixture", "eligibility": "eligible_public", "exit": 1, "process_completed": False,
+               "process_ms": 10, "task_outcome": "passed", "metrics": eval.metrics(evidence, ""),
+               "root_cause": "cleanup_unproven", "review": {"type": "agent_source_audit"}}
+        summary = eval.summarize([row])
+        self.assertEqual(summary["verified_passes_of_attempted"], "1/1")
+        self.assertEqual(summary["process_completions"], 0)
+        self.assertEqual(summary["source_audit_root_causes"], {"cleanup_unproven": 1})
+
+
 if __name__ == '__main__':
     unittest.main()

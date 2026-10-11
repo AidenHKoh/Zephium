@@ -1036,6 +1036,7 @@ def summarize(rows):
     return {"tasks": len(rows), "eligible_public": eligible, "attempted": len(attempted), "task_outcomes": dict(outcomes),
             "verified_passes_of_attempted": f"{outcomes['passed']}/{len(attempted)}",
             "process_completions": sum(row["process_completed"] for row in attempted),
+            "source_audit_root_causes": dict(collections.Counter(row["root_cause"] for row in attempted if row.get("review") and row.get("root_cause") not in (None, "none"))),
             "reported_cost_micro_usd_known": sum(cost for cost in costs if cost is not None), "unknown_cost_runs": sum(cost is None for cost in costs),
             "latency_median_ms": distributions["process_latency_ms"]["median"],
             "distributions": distributions,
@@ -1157,6 +1158,21 @@ def predicate_outcome(checks):
     return "passed"
 
 
+def validate_source_audit_binding(entry, row):
+    # Bind judgments to the captured evidence, not merely a task name reused
+    # in another repetition. Missing exports cannot substantiate an audit.
+    for key in ("evidence_sha256", "log_sha256"):
+        expected = row.get(key)
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected) or entry.get(key) != expected:
+            raise ValueError("source audit does not match this repetition's evidence and log")
+    cause = entry.get("root_cause")
+    if not isinstance(cause, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", cause):
+        raise ValueError("source audit requires a bounded root-cause category")
+    notes = entry.get("quality_notes", [])
+    if not isinstance(notes, list) or len(notes) > 16 or any(not isinstance(note, str) or len(note) > 2048 for note in notes):
+        raise ValueError("source audit quality notes exceed their limits")
+
+
 def review(args):
     run = read_json(args.run)
     audit = read_json(args.audit)
@@ -1171,15 +1187,21 @@ def review(args):
         task, row = tasks[entry["id"]], rows[entry["id"]]
         if task["grading"] != "source_audit" or "exit" not in row or row.get("reason") != "source_audit_required":
             raise ValueError("only attempted, uncontaminated source-audit tasks can be reviewed")
+        if manifest["suite"] != "work-heldout-v1":
+            validate_source_audit_binding(entry, row)
         checks = entry["predicates"]
         if {check["id"] for check in checks} != {check["id"] for check in task["predicates"]} or len(checks) != len(task["predicates"]):
             raise ValueError("audit must address every declared predicate exactly once")
         allowed_states = ("passed", "failed", "unknown") if manifest["suite"] == "work-heldout-v1" else ("passed", "partial", "failed", "unknown")
         if any(check["state"] not in allowed_states or not check.get("evidence") or not check.get("reason") for check in checks):
             raise ValueError("each audit result needs concrete evidence references and reasoning")
+        if "root_cause" in entry:
+            row["root_cause"] = entry["root_cause"]
+        if "quality_notes" in entry:
+            row["quality_notes"] = entry["quality_notes"]
         row["task_outcome"] = predicate_outcome(checks)
         row["predicates"] = checks
-        row["review"] = {"reviewer": audit["reviewer"], "type": audit["reviewer_type"], "audit_sha256": digest(args.audit)}
+        row["review"] = {"reviewer": audit["reviewer"], "type": audit["reviewer_type"], "audit_sha256": digest(args.audit), "processor_sha256": digest(__file__)}
         row["reason"] = "recorded_source_audit"
     run["parent_run_sha256"] = digest(args.run)
     run["summary"] = summarize(run["rows"])
