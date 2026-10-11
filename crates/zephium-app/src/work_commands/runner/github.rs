@@ -16,7 +16,7 @@ const BODY_LIMIT: usize = 60 * 1024;
 const HEADER_LIMIT: usize = 8192;
 
 pub(crate) fn available() -> bool {
-    const QUALIFIED: bool = true; // Exact AF_UNIX/denial/Stop matrix on macOS 25G83.
+    const QUALIFIED: bool = false; // Host-independent custody must qualify before re-enabling.
     #[cfg(target_os = "macos")]
     {
         QUALIFIED && super::macos_github::present()

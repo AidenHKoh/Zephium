@@ -29,9 +29,10 @@ const PROFILE: &str = r#"(version 1)
 
 pub(super) fn qualified() -> bool {
     // Populated only after the actual native denial matrix is reviewed. A new
-    // macOS build must not inherit a prior private Seatbelt-policy qualification.
+    // macOS build or CPU architecture must not inherit another native qualification.
     const BUILDS: &[&str] = &["25G83"];
-    os_build().is_some_and(|build| BUILDS.contains(&build.as_str()))
+    cfg!(target_arch = "aarch64")
+        && os_build().is_some_and(|build| BUILDS.contains(&build.as_str()))
 }
 fn os_build() -> Option<String> {
     let key = CString::new("kern.osversion").ok()?;
@@ -164,9 +165,51 @@ where
     C: Fn() -> CF,
     CF: Future<Output = bool>,
 {
+    monitor_mode(cancelled, include_errors, false, None::<fn(u32)>, spawn).await
+}
+pub(super) const PYTHON_READY: &[u8] = b"\0ZEPHIUM-PYTHON-SEALED-V1\0";
+pub(super) async fn monitor_custodied<C, CF, S>(
+    cancelled: &C,
+    spawn: impl FnOnce() -> Result<super::macos_spawn::Child, Failure>,
+    sealed: S,
+) -> Result<Output, Failure>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+    S: FnOnce(u32),
+{
+    monitor_mode(cancelled, true, true, Some(sealed), spawn).await
+}
+fn ready_prefix(output: &mut Vec<u8>, eof: bool) -> Result<bool, Failure> {
+    if output.len() < PYTHON_READY.len() {
+        return if !eof && PYTHON_READY.starts_with(output) {
+            Ok(false)
+        } else {
+            Err(Failure::Failed)
+        };
+    }
+    if !output.starts_with(PYTHON_READY) {
+        return Err(Failure::Failed);
+    }
+    output.drain(..PYTHON_READY.len());
+    Ok(true)
+}
+async fn monitor_mode<C, CF, S>(
+    cancelled: &C,
+    include_errors: bool,
+    retain_custody: bool,
+    mut sealed: Option<S>,
+    spawn: impl FnOnce() -> Result<super::macos_spawn::Child, Failure>,
+) -> Result<Output, Failure>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+    S: FnOnce(u32),
+{
     if super::cancellation_requested(cancelled).await {
         return Err(Failure::Stopped);
     }
+    let expires = tokio::time::Instant::now() + DEADLINE;
     let (mut child, mut group) = crate::work_commands::groups::Group::launch(
         || {
             let child = spawn()?;
@@ -175,6 +218,7 @@ where
         },
         Failure::Stopped,
     )?;
+    let child_id = child.id();
     let mut stdout = child.stdout.take().ok_or(Failure::Launch)?;
     let mut stderr = child.stderr.take().ok_or(Failure::Launch)?;
     let mut output = Vec::new();
@@ -184,7 +228,7 @@ where
     let mut out_open = true;
     let mut err_open = true;
     let mut status = None;
-    let deadline = tokio::time::sleep(DEADLINE);
+    let deadline = tokio::time::sleep_until(expires);
     tokio::pin!(deadline);
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     let failure = loop {
@@ -198,8 +242,37 @@ where
             _ = &mut deadline => break Some(Failure::Stopped),
             _ = tick.tick() => {
                 if group.quitting() || super::cancellation_requested(cancelled).await { break Some(Failure::Stopped); }
-                if status.is_none() { status = group.poll_single_process(|| child.poll()).map_err(|_| Failure::Failed)?; }
+                if status.is_none() {
+                    match group.poll_single_process(|| child.poll()) {
+                        Ok(value) => status = value,
+                        Err(_) => break Some(Failure::StopUnconfirmed),
+                    }
+                }
             }
+        }
+        if sealed.is_some() {
+            match ready_prefix(&mut output, !out_open) {
+                Ok(true) => {
+                    let report = sealed.take().expect("one fixed ready prefix");
+                    if status.is_none() {
+                        report(child_id);
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => break Some(error),
+            }
+        }
+        // No later project output can attest readiness or expose the private
+        // bootstrap marker as model evidence. All output remains held.
+        if retain_custody
+            && sealed.is_none()
+            && [output.as_slice(), errors.as_slice()].iter().any(|stream| {
+                stream
+                    .windows(PYTHON_READY.len())
+                    .any(|bytes| bytes == PYTHON_READY)
+            })
+        {
+            break Some(Failure::Failed);
         }
         if output.len() + errors.len() > OUTPUT_LIMIT {
             break Some(Failure::Limit);
@@ -213,7 +286,7 @@ where
     let failure = failure.or_else(|| group.quitting().then_some(Failure::Stopped));
     if let Some(failure) = failure {
         group.signal(libc::SIGKILL);
-        let settled = tokio::time::timeout(Duration::from_millis(300), async {
+        let settling = async {
             loop {
                 if group
                     .poll_single_process(|| child.poll())
@@ -225,8 +298,15 @@ where
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        })
-        .await;
+        };
+        if retain_custody {
+            // This standalone guard is the final native owner. Its host may
+            // stop waiting, but no cleanup acknowledgement or process exit can
+            // abandon an unsettled child. ECHILD stays unknown, never PID-killed.
+            settling.await;
+            return Err(failure);
+        }
+        let settled = tokio::time::timeout(Duration::from_millis(300), settling).await;
         return Err(if settled.is_ok() {
             failure
         } else {
@@ -259,6 +339,20 @@ where
 mod tests {
     use super::*;
     use std::process::Stdio;
+    #[test]
+    fn guard_readiness_requires_one_exact_bounded_first_prefix() {
+        let mut partial = PYTHON_READY[..5].to_vec();
+        assert_eq!(ready_prefix(&mut partial, false), Ok(false));
+        assert_eq!(ready_prefix(&mut partial, true), Err(Failure::Failed));
+        assert_eq!(
+            ready_prefix(&mut b"project text".to_vec(), false),
+            Err(Failure::Failed)
+        );
+        let mut bytes = PYTHON_READY.to_vec();
+        bytes.extend_from_slice(b"project output");
+        assert_eq!(ready_prefix(&mut bytes, false), Ok(true));
+        assert_eq!(bytes, b"project output");
+    }
 
     #[tokio::test]
     #[ignore = "Native cancellation qualification with an intentionally pending host query"]

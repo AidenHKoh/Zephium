@@ -90,10 +90,11 @@ fn available() -> Result<(), Failure> {
     // The macOS slice passed exact-ack, interrupted-recovery and queued-cancel
     // fixtures on the same build admitted by the qualified runner. Windows
     // requires its separate native private-fs and Recycle Bin qualification.
-    if !cfg!(target_os = "macos") {
-        return Err(Failure::Unavailable);
+    if crate::work_commands::runner::native_recovery_qualified() {
+        Ok(())
+    } else {
+        Err(Failure::Unavailable)
     }
-    crate::work_commands::runner::ensure_available().map_err(|_| Failure::Unavailable)
 }
 fn root() -> Result<&'static Path, Failure> {
     ROOT.get().map(PathBuf::as_path).ok_or(Failure::Unavailable)

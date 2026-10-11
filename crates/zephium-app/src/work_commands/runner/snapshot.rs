@@ -42,10 +42,12 @@ impl Snapshot {
         Self::prepare_checked(files, true, check)
     }
 
+    #[cfg(test)]
     pub(super) fn from_files(files: BTreeMap<PathBuf, Vec<u8>>) -> Result<Self, Failure> {
         Self::prepare(files, true)
     }
 
+    #[cfg(test)]
     pub(super) fn read_only(files: BTreeMap<PathBuf, Vec<u8>>) -> Result<Self, Failure> {
         Self::prepare(files, false)
     }
@@ -63,6 +65,7 @@ impl Snapshot {
         Self::prepare_checked(files, false, check)
     }
 
+    #[cfg(test)]
     fn prepare(files: BTreeMap<PathBuf, Vec<u8>>, git_metadata: bool) -> Result<Self, Failure> {
         Self::prepare_checked(files, git_metadata, &|| Ok(()))
     }

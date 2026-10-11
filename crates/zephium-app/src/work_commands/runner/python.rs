@@ -1,6 +1,8 @@
 //! Selected stdlib unittest modules in a read-only text snapshot. No shell,
 //! dependency installation, arbitrary interpreter options or project startup hook.
-use super::{Failure, Output, Snapshot};
+#[cfg(any(windows, test))]
+use super::Snapshot;
+use super::{Failure, Output};
 use crate::work_files::{protected_path, read_text_limited, WorkFileGrant};
 use std::{
     collections::BTreeSet,
@@ -76,7 +78,7 @@ fn relative(value: &str) -> Result<PathBuf, Failure> {
 }
 pub(crate) fn ensure_available() -> Result<(), Failure> {
     #[cfg(target_os = "macos")]
-    if super::macos::qualified() {
+    if super::macos::qualified() && super::guard::installed() {
         return Ok(());
     }
     // Windows requires packaged runtime hashes and native LPAC/Job qualification.
@@ -103,8 +105,6 @@ where
         &cancelled,
         super::worker::Limits::standard(Duration::from_secs(40)),
         move |control| async move {
-            #[cfg(target_os = "macos")]
-            let runtime = super::macos_python::Runtime::qualified_checked(&|| control.check())?;
             control.check()?;
             if grant
                 .resolve(root.to_str().ok_or(Failure::Input)?, false)
@@ -132,40 +132,38 @@ where
                 }
                 files.insert(path.clone(), text.into_bytes());
             }
-            let snapshot = Snapshot::read_only_checked(files, &|| control.check())?;
-            let result = async {
-                control.check()?;
+            control.check()?;
+            control.native();
+            let cancelled = || async { control.cancelled.load(Ordering::Acquire) };
+            #[cfg(target_os = "macos")]
+            let output = super::guard::run(&files, &request.modules, &cancelled).await?;
+            #[cfg(windows)]
+            let output = {
+                control.filesystem();
+                let snapshot = Snapshot::read_only_checked(files.clone(), &|| control.check())?;
                 control.native();
-                let cancelled = || async { control.cancelled.load(Ordering::Acquire) };
-                #[cfg(target_os = "macos")]
-                let output =
-                    super::macos_python::run(&snapshot, &runtime, &request.modules, &cancelled)
-                        .await?;
-                #[cfg(windows)]
-                let output =
-                    super::windows::python(&snapshot, &request.modules, &cancelled).await?;
-                #[cfg(not(any(target_os = "macos", windows)))]
-                return Err(Failure::PythonUnavailable);
-                #[cfg(any(target_os = "macos", windows))]
-                {
-                    control.filesystem();
-                    for (path, bytes) in &snapshot.files {
-                        control.check()?;
-                        if crate::work_files::snapshot_bytes(&root.join(path), 1024 * 1024)
-                            .ok()
-                            .as_ref()
-                            != Some(bytes)
-                        {
-                            return Err(Failure::Changed);
-                        }
-                    }
+                let result = super::windows::python(&snapshot, &request.modules, &cancelled).await;
+                control.filesystem();
+                super::worker::closed(result, snapshot.close())?
+            };
+            #[cfg(not(any(target_os = "macos", windows)))]
+            return Err(Failure::PythonUnavailable);
+            #[cfg(any(target_os = "macos", windows))]
+            {
+                control.filesystem();
+                for (path, bytes) in &files {
                     control.check()?;
-                    Ok(output)
+                    if crate::work_files::snapshot_bytes(&root.join(path), 1024 * 1024)
+                        .ok()
+                        .as_ref()
+                        != Some(bytes)
+                    {
+                        return Err(Failure::Changed);
+                    }
                 }
+                control.check()?;
+                Ok(output)
             }
-            .await;
-            control.filesystem();
-            super::worker::closed(result, snapshot.close())
         },
     )
     .await

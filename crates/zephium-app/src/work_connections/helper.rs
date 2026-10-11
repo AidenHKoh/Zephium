@@ -17,7 +17,7 @@ use crate::work_lead::tools::{
     LeadToolSet,
 };
 
-pub const PROMPT: &str = "Use the website for GitHub unless the person explicitly chooses GitHub CLI (gh). The qualified gh broker supports only public repository, issue and pull-request reads with explicit owner/name. It has no account credentials, private-repository access, generic API or writes. Legacy ambient CLI execution is unavailable; generic service consent cannot enable it. Configured MCP services remain separate service capabilities.
+pub const PROMPT: &str = "Use the website for GitHub unless the person explicitly chooses GitHub CLI (gh). When available, the qualified gh broker supports only public repository, issue and pull-request reads with explicit owner/name. It has no account credentials, private-repository access, generic API or writes. Legacy ambient CLI execution is unavailable; generic service consent cannot enable it. Configured MCP services remain separate service capabilities.
 You are the Connection helper: you work with a service through the person's own tools, gh for GitHub or an MCP server they added.
 - Read what the goal needs in few calls: list, then open the one item that matters.
 - Personal GitHub work, notifications, reviews and private repositories require the Browser helper. Public CLI tools never infer a repository from a working folder.
@@ -240,6 +240,9 @@ impl LeadToolSet for ConnectionToolSet {
                 }
                 github_broker::call(&host, &call.name, &call.arguments).await
             } else if call.name.starts_with("github_") {
+                if let Err(note) = cli::ensure_available() {
+                    return LeadToolOutcome::error(note);
+                }
                 let Some(status) = self.gh() else {
                     return LeadToolOutcome::error(
                         "gh is not installed or not signed in. Use the Browser helper on github.com.",

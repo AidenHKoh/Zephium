@@ -498,3 +498,13 @@ fn native_move_journals_confirmation_and_explicit_saved_text_restore() {
     // Exact fixture backup only, never a Trash inventory.
     fs::remove_file(acknowledged).unwrap();
 }
+
+#[test]
+fn native_recovery_does_not_inherit_the_command_host_custody_gate() {
+    if crate::work_commands::runner::native_recovery_qualified() {
+        assert!(crate::work_commands::runner::ensure_available().is_err());
+        assert!(available().is_ok());
+    } else {
+        assert!(matches!(available(), Err(Failure::Unavailable)));
+    }
+}

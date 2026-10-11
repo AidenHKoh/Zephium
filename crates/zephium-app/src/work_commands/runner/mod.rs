@@ -2,6 +2,8 @@
 pub(crate) mod git_index;
 pub(crate) mod github;
 #[cfg(target_os = "macos")]
+pub(crate) mod guard;
+#[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
 mod macos_github;
@@ -37,6 +39,7 @@ pub(crate) enum Failure {
     Sensitive,
     PythonUnavailable,
     GitHubUnavailable,
+    CustodyUnavailable,
     CleanupPending,
     WorkerBusy,
 }
@@ -46,6 +49,7 @@ impl Failure {
             Self::Unavailable => {
                 "Confined Git inspection is not supported on this operating-system build"
             }
+            Self::CustodyUnavailable => "Git review and diff execution await independent process and copied-workspace cleanup qualification; guarded file tools remain available",
             Self::ToolUnavailable => {
                 "Confined Git inspection needs a supported local Git installation"
             }
@@ -58,8 +62,8 @@ impl Failure {
             Self::CleanupPending => "The runner operation or copied-workspace cleanup is not yet confirmed; do not automatically retry",
             Self::StopUnconfirmed => "Stop was requested, but process exit has not been confirmed",
             Self::Failed => "The operation in the copied workspace failed",
-            Self::GitHubUnavailable => "Public GitHub CLI reads require the qualified macOS build 25G83 and the pinned Homebrew gh 2.96.0 image; Windows awaits packaged runtime and AF_UNIX/LPAC qualification",
-            Self::PythonUnavailable => "Python tests require qualified macOS build 25G83 and the pinned Apple Command Line Tools Python 3.9 runtime; Windows awaits runtime packaging and native qualification",
+            Self::GitHubUnavailable => "GitHub CLI reads await independent process and copied-workspace cleanup qualification; browser reads remain available",
+            Self::PythonUnavailable => "Python tests require the qualified private runner guard on Apple silicon macOS build 25G83 and the pinned Apple Command Line Tools Python 3.9 runtime; Windows awaits runtime packaging and native qualification",
             Self::Sensitive => "Recognizable credential content was withheld from the review",
             Self::Changed => "An approved file changed again; read it before reviewing these edits",
         }
@@ -146,10 +150,25 @@ fn prepare_baseline_checked(
     Ok(())
 }
 
+/// Native recovery was qualified independently of command-child custody.
+/// Sharing the measured OS/architecture check must not share command authority.
+pub(crate) fn native_recovery_qualified() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::qualified()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 pub(crate) fn ensure_available() -> Result<(), Failure> {
     #[cfg(target_os = "macos")]
     if macos::qualified() {
-        return Ok(());
+        // Preserve the typed implementation, but do not advertise a host-owned
+        // timer as surviving host death. Reopen only after guard qualification.
+        return Err(Failure::CustodyUnavailable);
     }
     // Native Windows token/ACL/network/alias qualification is a separate gate.
     Err(Failure::Unavailable)

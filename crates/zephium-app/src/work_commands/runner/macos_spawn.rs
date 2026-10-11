@@ -110,7 +110,6 @@ impl Drop for Child {
         // This PID has not been reaped, so it cannot identify an unrelated
         // process. There is never a persisted PID or model-selected target.
         unsafe {
-            libc::kill(-pid, libc::SIGKILL);
             libc::kill(pid, libc::SIGKILL);
         }
         let mut status = 0;
@@ -145,6 +144,7 @@ pub(super) fn spawn(
         arguments,
         environment,
         false,
+        None,
     )
 }
 
@@ -154,7 +154,76 @@ pub(super) fn spawn_direct_read_only(
     arguments: &[OsString],
     environment: &[(OsString, OsString)],
 ) -> Result<Child, Failure> {
-    spawn_program(cwd, program, arguments, environment, true)
+    spawn_program(cwd, program, arguments, environment, true, None)
+}
+
+/// The private guard receives one control pipe as stdin, and no ambient FDs.
+pub(super) fn spawn_guard(
+    program: &Path,
+    arguments: &[OsString],
+) -> Result<
+    (
+        Child,
+        std::sync::Arc<crate::work_commands::groups::GuardControl>,
+    ),
+    Failure,
+> {
+    use crate::work_commands::groups::{self, GuardControl};
+    let (read, write) = io::pipe().map_err(|_| Failure::Launch)?;
+    let read = above_stdio(read)?;
+    let write = above_stdio(write)?;
+    let flags = unsafe { libc::fcntl(write.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(write.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+        || unsafe {
+            libc::fcntl(
+                write.as_raw_fd(),
+                73, /* Darwin F_SETNOSIGPIPE from sys/fcntl.h */
+                1,
+            )
+        } < 0
+    {
+        return Err(Failure::Launch);
+    }
+    let input = std::sync::Arc::new(GuardControl::new(write));
+    let child = groups::launch_guard(
+        &input,
+        || {
+            spawn_program(
+                Path::new("/private/tmp"),
+                program,
+                arguments,
+                &[("LC_ALL".into(), "C".into()), ("TZ".into(), "UTC".into())],
+                false,
+                Some(read),
+            )
+        },
+        Failure::Stopped,
+    )?;
+    Ok((child, input))
+}
+
+impl Child {
+    /// A guard may itself own a confined child. Close its control pipe and reap
+    /// it without killing it; killing the guard would abandon that custody.
+    pub(super) fn reap_without_signal(mut self) {
+        let Some(pid) = self.pid.take() else {
+            return;
+        };
+        let _ = std::thread::Builder::new()
+            .name("work-guard-reap".into())
+            .spawn(move || {
+                let mut status = 0;
+                loop {
+                    let result = unsafe { libc::waitpid(pid, &mut status, 0) };
+                    if result == pid
+                        || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                    {
+                        break;
+                    }
+                }
+            });
+    }
 }
 
 fn spawn_program(
@@ -163,6 +232,7 @@ fn spawn_program(
     arguments: &[OsString],
     environment: &[(OsString, OsString)],
     fatal_footprint: bool,
+    input: Option<OwnedFd>,
 ) -> Result<Child, Failure> {
     let executable = string(program.as_os_str())?;
     let cwd = string(cwd.as_os_str())?;
@@ -187,7 +257,10 @@ fn spawn_program(
     envp.push(std::ptr::null_mut());
     let (stdout, out) = pipe()?;
     let (stderr, err) = pipe()?;
-    let input = above_stdio(File::open("/dev/null").map_err(|_| Failure::Launch)?)?;
+    let input = match input {
+        Some(input) => input,
+        None => above_stdio(File::open("/dev/null").map_err(|_| Failure::Launch)?)?,
+    };
     let mut raw = std::ptr::null_mut();
     checked(unsafe { libc::posix_spawnattr_init(&mut raw) })?;
     let mut attributes = Attributes(raw);

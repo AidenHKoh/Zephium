@@ -153,6 +153,8 @@ async fn native_python_stop_survives_group_change() {
 #[tokio::test]
 #[ignore = "Qualified Python class admission under pending worker debt; no interpreter starts"]
 async fn native_python_pending_workers_hold_capacity_before_preparation() {
+    // This admission-only fixture never launches the test executable as a guard.
+    super::super::guard::entry();
     ensure_available().unwrap();
     super::super::worker::pending_capacity_fixture(slots().clone(), || async {
         let request = UnittestRequest::new(&["test_inert.py".into()], &[]).unwrap();

@@ -55,6 +55,8 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn main() {
+    #[cfg(feature = "durable-runtime")]
+    zephium_app::work_commands::private_guard_main();
     use std::io::Write as _;
 
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();

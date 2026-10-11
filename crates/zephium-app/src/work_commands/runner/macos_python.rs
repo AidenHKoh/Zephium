@@ -228,6 +228,7 @@ fn verify_stdlib(root: &Path, check: &dyn Fn() -> Result<(), Failure>) -> Result
     }
     Ok(())
 }
+#[cfg(test)]
 pub(super) async fn run<C, CF>(
     snapshot: &Snapshot,
     runtime: &Runtime,
@@ -238,7 +239,34 @@ where
     C: Fn() -> CF,
     CF: Future<Output = bool>,
 {
-    let request = serde_json::json!({"platform":"macos","profile":runtime.profile(snapshot)?,"root":snapshot.work,"home":snapshot.home,"temporary":snapshot.temporary,"stdlib":[runtime.stdlib,runtime.dynamic],"modules":modules});
+    run_mode(snapshot, runtime, modules, cancelled, false, |_| {}).await
+}
+pub(super) async fn run_custodied<C, CF>(
+    snapshot: &Snapshot,
+    runtime: &Runtime,
+    modules: &[String],
+    cancelled: &C,
+    started: impl FnOnce(u32),
+) -> Result<Output, Failure>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+{
+    run_mode(snapshot, runtime, modules, cancelled, true, started).await
+}
+async fn run_mode<C, CF>(
+    snapshot: &Snapshot,
+    runtime: &Runtime,
+    modules: &[String],
+    cancelled: &C,
+    retain_custody: bool,
+    started: impl FnOnce(u32),
+) -> Result<Output, Failure>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+{
+    let request = serde_json::json!({"platform":"macos","guard_ready":retain_custody,"profile":runtime.profile(snapshot)?,"root":snapshot.work,"home":snapshot.home,"temporary":snapshot.temporary,"stdlib":[runtime.stdlib,runtime.dynamic],"modules":modules});
     let args: Vec<OsString> = vec![
         "-I".into(),
         "-S".into(),
@@ -252,13 +280,18 @@ where
         ("LC_ALL".into(), "C".into()),
         ("TZ".into(), "UTC".into()),
     ];
-    super::macos::monitor(cancelled, true, || {
-        super::macos_spawn::spawn_direct_read_only(
+    let spawn = || {
+        let child = super::macos_spawn::spawn_direct_read_only(
             &snapshot.work,
             &runtime.executable,
             &args,
             &environment,
-        )
-    })
-    .await
+        )?;
+        Ok(child)
+    };
+    if retain_custody {
+        super::macos::monitor_custodied(cancelled, spawn, started).await
+    } else {
+        super::macos::monitor(cancelled, true, spawn).await
+    }
 }

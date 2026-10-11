@@ -41,6 +41,11 @@ try:
 except BaseException:
     refuse()
 
+# A fixed content-free prefix is consumed privately by the guard. No project
+# import or callable runs before native sealing and this optional attestation.
+if request.get("guard_ready") is True:
+    os.write(1, b"\x00ZEPHIUM-PYTHON-SEALED-V1\x00")
+
 suite = unittest.TestLoader().loadTestsFromNames(request["modules"])
 if suite.countTestCases() == 0:
     print("No tests discovered", file=sys.stderr)

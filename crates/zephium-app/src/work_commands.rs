@@ -1,5 +1,10 @@
 //! Command lifecycle plumbing, gated until an OS-enforced runner is available.
 //! Approval and working-directory selection are not filesystem confinement.
+/// Handle the private confined-test guard before normal application initialization.
+#[cfg(target_os = "macos")]
+pub fn private_guard_main() {
+    runner::guard::entry();
+}
 pub mod policy;
 pub(crate) mod runner;
 #[cfg(target_os = "windows")]
@@ -128,6 +133,52 @@ mod groups {
         static GROUPS: OnceLock<Mutex<Vec<Row>>> = OnceLock::new();
         GROUPS.get_or_init(Default::default)
     }
+    #[cfg(target_os = "macos")]
+    pub struct GuardControl(Mutex<Option<std::os::fd::OwnedFd>>);
+    #[cfg(target_os = "macos")]
+    impl GuardControl {
+        pub fn new(fd: std::os::fd::OwnedFd) -> Self {
+            Self(Mutex::new(Some(fd)))
+        }
+        pub fn close(&self) {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+        }
+        pub fn write(&self, bytes: &[u8]) -> std::io::Result<usize> {
+            use std::os::fd::AsRawFd;
+            let owned = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            let fd = owned
+                .as_ref()
+                .ok_or(std::io::ErrorKind::BrokenPipe)?
+                .as_raw_fd();
+            let count = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len().min(65536)) };
+            if count < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(count as usize)
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    fn guards() -> &'static Mutex<Vec<std::sync::Weak<GuardControl>>> {
+        static GUARDS: OnceLock<Mutex<Vec<std::sync::Weak<GuardControl>>>> = OnceLock::new();
+        GUARDS.get_or_init(Default::default)
+    }
+    #[cfg(target_os = "macos")]
+    pub fn launch_guard<T, E>(
+        control: &Arc<GuardControl>,
+        spawn: impl FnOnce() -> Result<T, E>,
+        stopped: E,
+    ) -> Result<T, E> {
+        let _rows = registry().lock().unwrap_or_else(|e| e.into_inner());
+        if CLOSING.load(Ordering::Acquire) {
+            return Err(stopped);
+        }
+        let result = spawn()?;
+        let mut controls = guards().lock().unwrap_or_else(|e| e.into_inner());
+        controls.retain(|entry| entry.strong_count() != 0);
+        controls.push(Arc::downgrade(control));
+        Ok(result)
+    }
     pub struct Group {
         pub pid: i32,
         pub shutdown: Arc<AtomicBool>,
@@ -204,18 +255,20 @@ mod groups {
         }
     }
     fn signal_group(pid: i32, signal: i32, owned_single: bool) {
-        // Only a live child group created by this runner is registered. A negative
-        // PID addresses that group; no shell parsing or user-selected PID occurs.
         unsafe {
-            libc::kill(-pid, signal);
-            // Native single-process owners serialize every reap with registry
-            // removal. This exact unreaped PID remains ours even if code changes
-            // its process group/session. Legacy Tokio children do not qualify.
             if owned_single {
+                // Qualified targets deny fork. Only this exact unreaped child
+                // belongs to the operation; an unrelated same-session process
+                // joining its process group must not receive our signal.
                 libc::kill(pid, signal);
+            } else {
+                // Legacy Tokio owns reaping: retain its group-only protocol,
+                // never promote a possibly recycled PID to an owned child.
+                libc::kill(-pid, signal);
             }
         }
     }
+
     impl Drop for Group {
         fn drop(&mut self) {
             let mut rows = registry().lock().unwrap_or_else(|e| e.into_inner());
@@ -228,6 +281,15 @@ mod groups {
         {
             let rows = registry().lock().unwrap_or_else(|e| e.into_inner());
             CLOSING.store(true, Ordering::Release);
+            #[cfg(target_os = "macos")]
+            for control in guards()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+            {
+                control.close();
+            }
             if rows.is_empty() {
                 return;
             }
@@ -252,6 +314,73 @@ mod groups {
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    #[cfg(all(test, target_os = "macos"))]
+    mod tests {
+        use super::*;
+        #[test]
+        #[ignore = "Only the isolated fixture process closes the one-way shutdown gate"]
+        fn guard_shutdown_fixture_child() {
+            use std::{
+                io::Read,
+                os::fd::{FromRawFd, IntoRawFd, OwnedFd},
+            };
+            assert_eq!(
+                std::env::var("ZEPHIUM_GUARD_SHUTDOWN_FIXTURE").as_deref(),
+                Ok("1")
+            );
+            let (mut read, write) = std::io::pipe().unwrap();
+            let write = unsafe { OwnedFd::from_raw_fd(write.into_raw_fd()) };
+            let control = Arc::new(GuardControl::new(write));
+            launch_guard(&control, || Ok::<_, ()>(()), ()).unwrap();
+            assert_eq!(control.write(b"x").unwrap(), 1);
+            shutdown();
+            assert_eq!(
+                control.write(b"y").unwrap_err().kind(),
+                std::io::ErrorKind::BrokenPipe
+            );
+            let mut bytes = Vec::new();
+            read.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, b"x");
+            let attempted = AtomicBool::new(false);
+            assert!(launch_guard(
+                &control,
+                || {
+                    attempted.store(true, Ordering::Release);
+                    Ok::<_, ()>(())
+                },
+                ()
+            )
+            .is_err());
+            assert!(!attempted.load(Ordering::Acquire));
+        }
+        #[test]
+        fn guard_shutdown_closes_control_without_async_polling_or_late_spawn() {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "work_commands::groups::tests::guard_shutdown_fixture_child",
+                    "--ignored",
+                ])
+                .env("ZEPHIUM_GUARD_SHUTDOWN_FIXTURE", "1")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success());
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("isolated shutdown fixture did not settle");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
         }
     }
 }
