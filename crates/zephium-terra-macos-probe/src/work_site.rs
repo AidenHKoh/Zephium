@@ -5,8 +5,8 @@ use std::{
     io::{Read as _, Write as _},
     net::{TcpListener, TcpStream},
     sync::{
-        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock,
     },
     time::Duration,
 };
@@ -23,7 +23,7 @@ use zephium_core::{
 use zephium_ipc::work::*;
 use zephium_work_composition::NativeWorkComposition;
 
-use super::work_durable::{WorkflowResult, browser_settings};
+use super::work_durable::{browser_settings, WorkflowResult};
 
 #[path = "work_site_human.rs"]
 mod human_fixture;
@@ -122,6 +122,8 @@ enum Check {
     /// A message typed into a rich composer and sent with Enter, after the
     /// person approves it: the channel receives exactly that text.
     SlackWrite,
+    /// The complete natural-language approved-send request through real small models.
+    SlackRequest,
     /// The same message sent with Enter from the composer, not its button.
     SlackEnter,
     /// Declining the rich composer's send must leave the channel unchanged.
@@ -327,6 +329,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("views") => vec![Check::Views],
         Some("memory") => vec![Check::Memory],
         Some("slackwrite") => vec![Check::SlackWrite],
+        Some("slack-request") => vec![Check::SlackRequest],
         Some("slackenter") => vec![Check::SlackEnter],
         Some("slackdecline") => vec![Check::SlackDecline],
         Some("slack-actions") => vec![Check::SlackWrite, Check::SlackEnter, Check::SlackDecline],
@@ -1415,7 +1418,7 @@ impl Context<'_> {
         starts: &'static str,
         answer: &str,
     ) -> Result<Run, &'static str> {
-        use zephium_app::work_lead::{LeadModel, WorkLeadModels, WorkLeadService};
+        use zephium_app::work_lead::{LeadModel, WorkLeadModels};
         let entry = zephium_app::work_models::resolve_entry(
             self.profile,
             zephium_core::work::model::WorkModelRole::Lead,
@@ -1432,11 +1435,50 @@ impl Context<'_> {
             page: scripted.clone(),
             light: scripted,
         };
+        self.lead_run_with_models(objective, answer, models, Vec::new())
+            .await
+    }
+
+    async fn live_send_run(&self, objective: &str) -> Result<Run, &'static str> {
+        use zephium_app::work_lead::{LeadModel, WorkLeadModels};
+        use zephium_core::work::model::WorkModelRole;
+        let _ = zephium_app::work_models::view(self.profile).await;
+        for role in [
+            WorkModelRole::Lead,
+            WorkModelRole::Page,
+            WorkModelRole::Light,
+        ] {
+            zephium_app::work_models::choose(self.profile, role, Some("openai/gpt-6-luna"))
+                .map_err(|_| "fixture_model")?;
+        }
+        let resolve = |role| async move {
+            zephium_app::work_models::resolve_entry(self.profile, role)
+                .await
+                .map(|(entry, client)| LeadModel { entry, client })
+                .map_err(|_| "fixture_model")
+        };
+        let models = WorkLeadModels {
+            lead: resolve(WorkModelRole::Lead).await?,
+            page: resolve(WorkModelRole::Page).await?,
+            light: resolve(WorkModelRole::Light).await?,
+        };
+        self.lead_run_with_models(objective, "Allow", models, vec![(true, false)])
+            .await
+    }
+
+    async fn lead_run_with_models(
+        &self,
+        objective: &str,
+        answer: &str,
+        models: zephium_app::work_lead::WorkLeadModels,
+        decisions: Vec<(bool, bool)>,
+    ) -> Result<Run, &'static str> {
+        use zephium_app::work_lead::WorkLeadService;
         let work = self.create(objective).await?;
         let started = std::time::Instant::now();
         let opened = Mutex::new(Vec::<Opened>::new());
         let asked = Mutex::new(Vec::new());
-        let decisions = Mutex::new(Vec::new());
+        let decisions = Mutex::new(decisions);
         let confirmed = Mutex::new(Vec::new());
         let done = AtomicBool::new(false);
         let callback = self.handle.callback_handle();
@@ -1484,6 +1526,28 @@ impl Context<'_> {
                         let opened = &opened;
                         async move {
                             let (request, yours) = self.local(request)?;
+                            let WorkStepKindV1::Read { url, goal, .. } = &request.step else {
+                                return Err(WorkError::Invalid);
+                            };
+                            let local = [
+                                self.sites.account,
+                                self.sites.other,
+                                self.sites.third,
+                                self.sites.board,
+                            ]
+                            .iter()
+                            .any(|port| {
+                                ["127.0.0.1", "localhost"]
+                                    .iter()
+                                    .any(|host| url.starts_with(&format!("http://{host}:{port}/")))
+                            });
+                            if !local {
+                                return Err(WorkError::Invalid);
+                            }
+                            let _ = writeln!(
+                                std::io::stdout().lock(),
+                                "loopback-site: synthetic_assignment={goal:?}"
+                            );
                             let key = match key {
                                 Some(key) => key,
                                 None => tokio::task::spawn_blocking(
@@ -2021,6 +2085,38 @@ pub(super) async fn workflow(
                             WorkStepStatus::Succeeded,
                         )
                     && run.confirmed.first().is_some_and(|h| h.contains("#design"))
+            }
+            Check::SlackRequest => {
+                let expected = "Zephium Work qualification: approved send and extraction test.";
+                let before = context.sites.written("/edit/slack/send").len();
+                let request =
+                    super::work_account::slack_send_request(&format!("{ACCOUNT}/edit/slack"));
+                let objective = request.lines().next().ok_or("fixture_request")?;
+                let run = context.live_send_run(objective).await?;
+                let sent = context.sites.written("/edit/slack/send");
+                let sent = &sent[before.min(sent.len())..];
+                let held = confirms(&run);
+                let extracted = run
+                    .opened
+                    .iter()
+                    .any(|page| page.status == Some(WorkStepStatus::Succeeded))
+                    && run.state.executions.iter().any(|execution| {
+                        execution
+                            .artifacts
+                            .iter()
+                            .any(|artifact| !artifact.evidence.is_empty())
+                    });
+                let passed = sent.len() == 1
+                    && sent[0] == expected
+                    && extracted
+                    && held
+                        == vec![(
+                            Some(WorkConfirmDecisionV1::Approved),
+                            WorkStepStatus::Succeeded,
+                        )];
+                line(format!("check=slack_request sent={} exact={} extracted={extracted} confirms={held:?} pages=[{}] passed={passed}", sent.len(), sent.first().is_some_and(|text| text == expected), pages_of(&run)));
+                last = run.state;
+                passed
             }
             Check::SlackWrite | Check::SlackEnter | Check::SlackDecline => {
                 let before = context.sites.written("/edit/slack/send").len();

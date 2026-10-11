@@ -256,7 +256,7 @@ fn configure_mode(url: &str, send: bool) -> Result<String, &'static str> {
         "Open my test account at {url} with the Browser helper and read only the currently visible channel, inbox or issue list. If sign-in or MFA is needed, hand the live page to me and resume after native verification. Summarize at most three visible items with sources, or report honestly what blocks access. Do not search, substitute documentation, use Computer, type into account content, send, create, edit or delete anything.\nExplain the previous result from recorded state and evidence. If access was blocked, say exactly what is needed; do not retry or open a new page just to explain."
     ))
 }
-fn slack_send_request(url: &str) -> String {
+pub(super) fn slack_send_request(url: &str) -> String {
     format!(
         "Open my disposable Slack test channel at {url} with the Browser helper. If sign-in or MFA is needed, hand the live page to me and resume after native verification. Stay in the browser through any app-launch page. Send exactly this message once: {} Prepare it and wait for the normal explicit confirmation before sending. Then read the channel to verify it appears and report the result honestly. Never resend after uncertain verification or extraction failure. Do not search, substitute help pages, use Computer, edit, delete, invite, or change other account data.\nExplain from recorded state whether the approved message was sent and what verification was obtained. Do not send or retry any action to explain the previous result.",
         approval::MESSAGE
@@ -289,6 +289,25 @@ impl Account {
                 .filter(|c| c.decision == Some(WorkConfirmDecisionV1::AllowedForRun))
                 .count()
         );
+        for part in &execution.parts {
+            use zephium_core::work::parts::WorkPartNeedV1;
+            let need = match &part.need {
+                None => "none",
+                Some(WorkPartNeedV1::SignIn { .. }) => "sign_in",
+                Some(WorkPartNeedV1::Check { .. }) => "check",
+                Some(WorkPartNeedV1::AllowSite { .. }) => "allow_site",
+                Some(WorkPartNeedV1::ChooseFolder) => "choose_folder",
+                Some(WorkPartNeedV1::AllowFolder { .. }) => "allow_folder",
+                Some(WorkPartNeedV1::UseConnection { .. }) => "use_connection",
+                Some(WorkPartNeedV1::Connect { .. }) => "connect",
+                Some(WorkPartNeedV1::Retry { .. }) => "retry",
+            };
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                "account-probe: part_state={:?} need={need}; content=redacted",
+                part.state
+            );
+        }
         for (index, step) in execution
             .steps
             .iter()
@@ -304,6 +323,14 @@ impl Account {
                 step.measurements.as_ref().map(|m| m.native_actions),
                 step.measurements.as_ref().map(|m| m.planner_calls)
             );
+            if let WorkStepKindV1::Read { goal, .. } = &step.kind {
+                let text = goal.as_deref().unwrap_or_default().to_ascii_lowercase();
+                let words: Vec<_> = text.split(|c: char| !c.is_ascii_alphabetic()).collect();
+                let _ = writeln!(std::io::stdout().lock(), "account-probe: page={} task_goal={} send_word={} prepare_word={} approval_word={} exact_fixture={}; content=redacted",
+                    index + 1, goal.is_some(), words.contains(&"send"), words.contains(&"prepare"),
+                    words.iter().any(|word| matches!(*word, "approve" | "approval" | "confirmation")),
+                    text.contains(&approval::MESSAGE.to_ascii_lowercase()));
+            }
         }
     }
     pub(super) fn stopped(&self) -> bool {
