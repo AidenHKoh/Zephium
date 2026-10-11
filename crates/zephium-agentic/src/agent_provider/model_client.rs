@@ -47,6 +47,7 @@ pub struct AgentProviderModelReplyFacts {
     dropped_tool_calls: u16,
     dropped_text_bytes: u32,
     asked_again: u8,
+    action_rejections: [Option<super::AgentBrowserToolContractError>; 2],
 }
 
 impl AgentProviderModelReplyFacts {
@@ -63,6 +64,19 @@ impl AgentProviderModelReplyFacts {
     /// Times the model was told why its reply was unusable and asked again.
     pub const fn asked_again(self) -> u8 {
         self.asked_again
+    }
+
+    /// Invalid action replies observed inside this logical provider call.
+    pub const fn action_rejections(self) -> [Option<super::AgentBrowserToolContractError>; 2] {
+        self.action_rejections
+    }
+
+    pub(crate) const fn with_action_rejections(
+        mut self,
+        errors: [Option<super::AgentBrowserToolContractError>; 2],
+    ) -> Self {
+        self.action_rejections = errors;
+        self
     }
 
     pub(crate) const fn with_asked_again(mut self, times: u8) -> Self {
@@ -373,6 +387,30 @@ fn input_image(
 }
 
 impl ModelClientReplyContract {
+    pub(crate) fn action_error(
+        &self,
+        outcome: &WorkModelOutcome,
+    ) -> Option<super::AgentBrowserToolContractError> {
+        if self.structured
+            || !self.offered.contains(&AgentBrowserToolKind::Act)
+            || !matches!(
+                outcome.stop,
+                WorkModelStop::ToolUse | WorkModelStop::EndTurn
+            )
+        {
+            return None;
+        }
+        let call = outcome.assistant.iter().find_map(|part| match part {
+            WorkModelPart::ToolCall(call) => Some(call),
+            _ => None,
+        })?;
+        if call.name != "act" {
+            return None;
+        }
+        super::tool::decode_proposal(&call.name, &serde_json::to_string(&call.arguments).ok()?)
+            .err()
+    }
+
     /// When a reply cannot become a browser turn but the model could correct
     /// it (no tool call, a tool not offered, arguments that do not decode),
     /// the messages that hand it back with the exact reason, to append to
@@ -528,6 +566,7 @@ impl ModelClientReplyContract {
             dropped_tool_calls: u16::try_from(calls.len().saturating_sub(1)).unwrap_or(u16::MAX),
             dropped_text_bytes: 0,
             asked_again: 0,
+            action_rejections: [None; 2],
         };
         let first = calls.into_iter().next();
         let bounded = |bytes: usize, limit: u32| {

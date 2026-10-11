@@ -415,6 +415,8 @@ impl AgentProviderAttempt {
         let mut ran_away = false;
         let mut spent = WorkModelUsage::default();
         let mut reasks = 0_u8;
+        let mut action_repair_used = false;
+        let mut action_rejections = [None; 2];
         let outcome = loop {
             let outcome = tokio::select! {
                 biased;
@@ -445,10 +447,22 @@ impl AgentProviderAttempt {
                 ));
             }
             outcome.usage = spent;
+            let action_error = contract.action_error(&outcome);
+            if let Some(error) = action_error {
+                if let Some(slot) = action_rejections.iter_mut().find(|slot| slot.is_none()) {
+                    *slot = Some(error);
+                }
+            }
+            self.model_reply = Some(
+                crate::AgentProviderModelReplyFacts::default()
+                    .with_asked_again(reasks)
+                    .with_action_rejections(action_rejections),
+            );
             // DeepSeek can think past the whole allowance and say nothing.
             // That reply is asked once more, told to be brief, with thinking
             // off and only the kept-back output; it is charged as reported.
             if !ran_away
+                && !action_repair_used
                 && runaway_reserve > 0
                 && max_output - spent.output_tokens >= runaway_reserve
                 && spent
@@ -479,6 +493,7 @@ impl AgentProviderAttempt {
                 .saturating_add(last.output_tokens)
                 .saturating_add(REASK_INPUT_ALLOWANCE);
             let Some(messages) = (reasks < MAX_REASKS
+                && !action_repair_used
                 && next_input <= reserved
                 && left_output >= last.output_tokens.max(1))
             .then(|| contract.reask(&outcome, &request.tools))
@@ -486,6 +501,7 @@ impl AgentProviderAttempt {
                 break outcome;
             };
             reasks += 1;
+            action_repair_used |= action_error.is_some();
             request.messages.extend(messages);
             request.volatile_tail = 0;
             request.max_output_tokens = u32::try_from(left_output).unwrap_or(u32::MAX);
@@ -494,7 +510,12 @@ impl AgentProviderAttempt {
             Ok(reply) => reply,
             Err(error) => return self.finish_terminal(protocol_decoder_failure(error, None)),
         };
-        self.model_reply = Some(reply.facts.with_asked_again(reasks));
+        self.model_reply = Some(
+            reply
+                .facts
+                .with_asked_again(reasks)
+                .with_action_rejections(action_rejections),
+        );
         if let Some(text) = reply.text {
             let batch = AgentProviderStreamBatch::new(call, vec![text]);
             let disposition =

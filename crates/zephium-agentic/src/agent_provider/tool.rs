@@ -979,7 +979,7 @@ pub enum AgentBrowserToolContractError {
     ExtractionSchema,
 }
 
-fn decode_proposal(
+pub(super) fn decode_proposal(
     name: &str,
     arguments: &str,
 ) -> Result<AgentBrowserToolProposal, AgentBrowserToolContractError> {

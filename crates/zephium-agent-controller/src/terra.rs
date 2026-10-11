@@ -3325,6 +3325,15 @@ impl AgentBrowserSession {
                     .map_err(|_| AgentBrowserProviderError::Journal)?;
             }
         }
+        if let Some(facts) = result.model_reply() {
+            if let Some(journal) = &self.journal {
+                for error in facts.action_rejections().into_iter().flatten() {
+                    journal
+                        .emit(work::AgentWorkEventKind::ModelActionRejected(error))
+                        .map_err(|_| AgentBrowserProviderError::Journal)?;
+                }
+            }
+        }
         let input = result.input_metric_receipt();
         let disclosure = result.disclosure_stage();
         let terminal = settle_browser_terminal(

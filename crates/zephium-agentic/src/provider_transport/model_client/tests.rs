@@ -579,3 +579,39 @@ async fn a_runaway_reply_is_asked_once_more_briefly_inside_its_kept_back_output(
     assert_eq!(terminal.receipt().input_tokens(), 1_800);
     assert!(terminal.has_tool_turn());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_actions_have_one_repair_and_keep_failure_counts_when_terminal() {
+    let bad = || {
+        outcome(
+            WorkModelStop::ToolUse,
+            vec![tool(
+                "act",
+                json!({"actions":[{"kind":"scroll","target":"@a1","direction":"down","amount":"page","effect":"read","wait":{"kind":"immediate"},"verification":{"kind":"scroll_position_changed"},"settle_millis":0}]}),
+            )],
+        )
+    };
+    let client = Scripted::answering_each(vec![
+        Ok(bad()),
+        Ok(bad()),
+        Ok(outcome(WorkModelStop::ToolUse, vec![locate()])),
+    ]);
+    let (mut policy, _, result) = run(client.clone()).await;
+    assert_eq!(
+        client.calls().len(),
+        2,
+        "third answer must never be requested"
+    );
+    let facts = result.model_reply().unwrap();
+    assert_eq!(facts.asked_again(), 1);
+    assert_eq!(
+        facts.action_rejections(),
+        [Some(crate::AgentBrowserToolContractError::Action); 2]
+    );
+    let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+    else {
+        panic!("invalid call grants no tool");
+    };
+    settlement.settle(&mut policy).unwrap();
+    assert_eq!(policy.pending_model_calls(), 0);
+}
