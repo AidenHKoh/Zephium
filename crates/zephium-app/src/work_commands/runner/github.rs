@@ -7,8 +7,6 @@ use std::{
     time::Duration,
 };
 pub(super) mod socket;
-#[cfg(target_os = "macos")]
-use super::macos_github::Runtime;
 #[cfg(windows)]
 use super::windows_github::Runtime;
 use socket::Listener;
@@ -16,14 +14,12 @@ const BODY_LIMIT: usize = 60 * 1024;
 const HEADER_LIMIT: usize = 8192;
 
 pub(crate) fn available() -> bool {
-    const QUALIFIED: bool = false; // Host-independent custody must qualify before re-enabling.
     #[cfg(target_os = "macos")]
     {
-        QUALIFIED && super::macos_github::present()
+        super::guard::github_installed() && super::macos_github::present()
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = QUALIFIED;
         false
     }
 }
@@ -53,14 +49,26 @@ where
             cancelled,
             super::worker::Limits::standard(Duration::from_secs(30)),
             move |control| async move {
-                let mut runtime = Runtime::prepare_checked(&|| control.check())?;
-                let outcome = exchange(&mut runtime, &control, || async {
-                    asked.send(()).map_err(|_| Failure::Stopped)?;
-                    response.await.map_err(|_| Failure::Stopped)?
-                })
-                .await;
-                control.filesystem();
-                super::worker::closed(outcome, runtime.close())
+                #[cfg(target_os = "macos")]
+                {
+                    control.native();
+                    super::guard::github(&|| async { control.check().is_err() }, || async {
+                        asked.send(()).map_err(|_| Failure::Stopped)?;
+                        response.await.map_err(|_| Failure::Stopped)?
+                    })
+                    .await
+                }
+                #[cfg(windows)]
+                {
+                    let mut runtime = Runtime::prepare_checked(&|| control.check())?;
+                    let outcome = exchange(&mut runtime, &control, || async {
+                        asked.send(()).map_err(|_| Failure::Stopped)?;
+                        response.await.map_err(|_| Failure::Stopped)?
+                    })
+                    .await;
+                    control.filesystem();
+                    super::worker::closed(outcome, runtime.close())
+                }
             },
         );
         tokio::pin!(observing);
@@ -80,7 +88,7 @@ where
         Err(Failure::GitHubUnavailable)
     }
 }
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(windows)]
 async fn exchange<F, FF>(
     runtime: &mut Runtime,
     control: &super::worker::Control,

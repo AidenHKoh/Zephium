@@ -1,4 +1,4 @@
-//! Private current-executable custody for selected Python tests. The guard owns
+//! Private current-executable custody for closed local operations. The guard owns
 //! its copy from creation to verified removal and never receives a source grant.
 use super::{Failure, Output, Snapshot};
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,8 @@ const REQUEST_LIMIT: usize = 64 * 1024 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const DEADLINE: Duration = Duration::from_secs(35);
 const GIT_DEADLINE: Duration = Duration::from_secs(90);
+const GITHUB_QUALIFIED: bool = true; // Native8 and connected broker6 groups on25G83.
+const GITHUB_DEADLINE: Duration = Duration::from_secs(30);
 const GIT_QUALIFIED: bool = true; // Native7 and connected tool9 checks on25G83.
 const QUALIFIED: bool = true; // Copied v19: attested child/host-death/Stop/cleanup matrix on25G83.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -34,6 +36,7 @@ struct Request {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 enum Operation {
+    PublicGitHub {},
     SelectedUnittest {
         #[serde(deserialize_with = "bounded_modules")]
         modules: Vec<String>,
@@ -57,6 +60,7 @@ struct RequestRef<'a> {
 #[derive(Serialize)]
 #[serde(tag = "kind")]
 enum OperationRef<'a> {
+    PublicGitHub {},
     SelectedUnittest {
         modules: &'a [String],
         files: BTreeMap<&'a str, &'a str>,
@@ -71,6 +75,15 @@ enum OperationRef<'a> {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 enum Reply {
+    GitHubChildSpawned {
+        id: [u8; 16],
+        pid: u32,
+        instance: Option<u64>,
+    },
+    FetchRequested {
+        id: [u8; 16],
+        challenge: [u8; 16],
+    },
     Prepared {
         id: [u8; 16],
         root: String,
@@ -106,6 +119,7 @@ enum Error {
     Input,
     Unavailable,
     ToolUnavailable,
+    GitHubUnavailable,
     CustodyUnavailable,
     Limit,
     Stopped,
@@ -120,6 +134,7 @@ impl From<Failure> for Error {
             Failure::Input => Self::Input,
             Failure::PythonUnavailable | Failure::Unavailable => Self::Unavailable,
             Failure::ToolUnavailable => Self::ToolUnavailable,
+            Failure::GitHubUnavailable => Self::GitHubUnavailable,
             Failure::CustodyUnavailable => Self::CustodyUnavailable,
             Failure::Limit => Self::Limit,
             Failure::Stopped => Self::Stopped,
@@ -136,6 +151,7 @@ impl From<Error> for Failure {
             Error::Input => Self::Input,
             Error::Unavailable => Self::PythonUnavailable,
             Error::ToolUnavailable => Self::ToolUnavailable,
+            Error::GitHubUnavailable => Self::GitHubUnavailable,
             Error::CustodyUnavailable => Self::CustodyUnavailable,
             Error::Limit => Self::Limit,
             Error::Stopped => Self::Stopped,
@@ -148,6 +164,9 @@ impl From<Error> for Failure {
 }
 pub(super) fn installed() -> bool {
     QUALIFIED && INSTALLED.load(Ordering::Acquire)
+}
+pub(super) fn github_installed() -> bool {
+    GITHUB_QUALIFIED && INSTALLED.load(Ordering::Acquire)
 }
 pub(super) fn git_installed() -> bool {
     GIT_QUALIFIED && INSTALLED.load(Ordering::Acquire)
@@ -228,7 +247,8 @@ fn bounded_files<'de, D: serde::Deserializer<'de>>(
     deserializer.deserialize_map(Visitor)
 }
 
-struct Control {
+pub(super) struct Control {
+    pub(super) broker: super::guard_github::Broker,
     stopped: AtomicBool,
     go: AtomicBool,
     challenge: std::sync::Mutex<Option<[u8; 16]>>,
@@ -239,7 +259,7 @@ impl Control {
     fn expires(&self) -> Instant {
         self.started + Duration::from_secs(self.budget_secs.load(Ordering::Acquire))
     }
-    fn check(&self) -> Result<(), Failure> {
+    pub(super) fn check(&self) -> Result<(), Failure> {
         if self.stopped.load(Ordering::Acquire) {
             return Err(Failure::Stopped);
         }
@@ -305,6 +325,7 @@ fn file_map(files: BTreeMap<String, String>) -> Result<BTreeMap<PathBuf, Vec<u8>
 }
 
 enum Prepared {
+    GitHub(super::macos_github::Runtime),
     Python {
         snapshot: Snapshot,
         runtime: super::macos_python::Runtime,
@@ -314,6 +335,13 @@ enum Prepared {
 }
 impl Prepared {
     fn new(operation: Operation, check: &dyn Fn() -> Result<(), Failure>) -> Result<Self, Failure> {
+        if matches!(&operation, Operation::PublicGitHub { .. }) {
+            if !GITHUB_QUALIFIED && !cfg!(debug_assertions) {
+                return Err(Failure::GitHubUnavailable);
+            }
+            return super::macos_github::Runtime::prepare_checked(check).map(Self::GitHub);
+        }
+
         if let Operation::GitComparison {
             before,
             after,
@@ -347,11 +375,13 @@ impl Prepared {
         match self {
             Self::Python { snapshot, .. } => snapshot,
             Self::Git(git) => &git.snapshot,
+            Self::GitHub(runtime) => &runtime.snapshot,
         }
     }
     async fn run(&self, control: &Control, id: [u8; 16]) -> Result<Output, Failure> {
         let cancelled = || async { control.check().is_err() };
         match self {
+            Self::GitHub(runtime) => super::guard_github::run(runtime, control, id).await,
             Self::Python {
                 snapshot,
                 runtime,
@@ -388,8 +418,24 @@ impl Prepared {
         match self {
             Self::Python { snapshot, .. } => snapshot.close(),
             Self::Git(git) => git.snapshot.close(),
+            Self::GitHub(runtime) => runtime.close(),
         }
     }
+}
+pub(super) fn github_child(
+    control: &Control,
+    id: [u8; 16],
+    pid: u32,
+    instance: Option<u64>,
+) -> Result<(), Failure> {
+    send(&Reply::GitHubChildSpawned { id, pid, instance }, control)
+}
+pub(super) fn github_fetch(
+    control: &Control,
+    id: [u8; 16],
+    challenge: [u8; 16],
+) -> Result<(), Failure> {
+    send(&Reply::FetchRequested { id, challenge }, control)
 }
 fn send(reply: &Reply, control: &Control) -> Result<(), Failure> {
     let bytes = serde_json::to_vec(reply).map_err(|_| Failure::Failed)?;
@@ -439,6 +485,7 @@ fn serve(started: Instant) -> Result<(), Failure> {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
     let control = Arc::new(Control {
+        broker: Default::default(),
         stopped: AtomicBool::new(false),
         go: AtomicBool::new(false),
         challenge: std::sync::Mutex::new(None),
@@ -452,6 +499,9 @@ fn serve(started: Instant) -> Result<(), Failure> {
         .spawn(move || {
             let mut input = std::io::stdin().lock();
             let parsed = request(&mut input);
+            let public_github = parsed
+                .as_ref()
+                .is_ok_and(|request| matches!(&request.operation, Operation::PublicGitHub { .. }));
             if sender.send(parsed).is_err() {
                 return;
             }
@@ -466,6 +516,10 @@ fn serve(started: Instant) -> Result<(), Failure> {
                     .is_some_and(|challenge| go[1..] == challenge[..])
             {
                 input_control.go.store(true, Ordering::Release);
+                if public_github && input_control.broker.receive(&mut input).is_err() {
+                    input_control.stopped.store(true, Ordering::Release);
+                    return;
+                }
                 // No second request or trailing payload is admitted. EOF is Stop.
                 let _ = input.read(&mut [0]);
             }
@@ -476,6 +530,11 @@ fn serve(started: Instant) -> Result<(), Failure> {
         .recv_timeout(Duration::from_secs(10))
         .map_err(|_| Failure::Limit)??;
     let id = request.id;
+    if matches!(&request.operation, Operation::PublicGitHub { .. }) {
+        control
+            .budget_secs
+            .store(GITHUB_DEADLINE.as_secs(), Ordering::Release);
+    }
     if matches!(&request.operation, Operation::GitComparison { .. }) {
         control
             .budget_secs
@@ -633,6 +692,7 @@ where
             files: borrowed_files(files)?,
         },
         cancelled,
+        || async { Err(Failure::Input) },
     )
     .await
 }
@@ -656,8 +716,21 @@ where
             operation: operation.try_into()?,
         },
         cancelled,
+        || async { Err(Failure::Input) },
     )
     .await
+}
+pub(super) async fn github<C, CF, F, FF>(cancelled: &C, fetch: F) -> Result<Output, Failure>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+    F: FnOnce() -> FF,
+    FF: Future<Output = Result<Vec<u8>, Failure>>,
+{
+    if !github_installed() {
+        return Err(Failure::GitHubUnavailable);
+    }
+    transact(OperationRef::PublicGitHub {}, cancelled, fetch).await
 }
 fn borrowed_files(files: &BTreeMap<PathBuf, Vec<u8>>) -> Result<BTreeMap<&str, &str>, Failure> {
     files
@@ -670,12 +743,22 @@ fn borrowed_files(files: &BTreeMap<PathBuf, Vec<u8>>) -> Result<BTreeMap<&str, &
         })
         .collect()
 }
-async fn transact<C, CF>(operation: OperationRef<'_>, cancelled: &C) -> Result<Output, Failure>
+async fn transact<C, CF, F, FF>(
+    operation: OperationRef<'_>,
+    cancelled: &C,
+    fetch: F,
+) -> Result<Output, Failure>
 where
     C: Fn() -> CF,
     CF: Future<Output = bool>,
+    F: FnOnce() -> FF,
+    FF: Future<Output = Result<Vec<u8>, Failure>>,
 {
     let is_git = matches!(&operation, OperationRef::GitComparison { .. });
+    let is_github = matches!(&operation, OperationRef::PublicGitHub { .. });
+    let mut fetch = Some(fetch);
+    let mut fetch_completed = false;
+    let mut host_failure = None;
     let id = zephium_core::work::WorkArtifactId::generate().bytes();
     let mut encoded = BoundedRequest(Vec::new());
     serde_json::to_writer(
@@ -691,7 +774,15 @@ where
     if super::cancellation_requested(cancelled).await {
         return Err(Failure::Stopped);
     }
-    let program = std::env::current_exe().map_err(|_| Failure::PythonUnavailable)?;
+    let program = std::env::current_exe().map_err(|_| {
+        if is_github {
+            Failure::GitHubUnavailable
+        } else if is_git {
+            Failure::CustodyUnavailable
+        } else {
+            Failure::PythonUnavailable
+        }
+    })?;
     let (mut child, input) = super::macos_spawn::spawn_guard(&program, &[ARGUMENT.into()])?;
     let mut status = child.stdout.take().ok_or(Failure::Launch)?;
     let mut errors = child.stderr.take().ok_or(Failure::Launch)?;
@@ -739,10 +830,24 @@ where
                             if let Some(input)=owner.input.as_mut() { let mut go=vec![1];go.extend_from_slice(&challenge);if write_control(input,&go).await.is_err() { owner.input.take(); } }
                         } else { owner.input.take(); }
                     },
-                    Ok(Reply::Started { id: seen, pid }) if seen == id && prepared && !is_git && !started_child && pid > 0 => { started_child = true; },
+                    Ok(Reply::Started { id: seen, pid }) if seen == id && prepared && !is_git && !is_github && !started_child && pid > 0 => { started_child = true; },
                     Ok(Reply::GitChildSpawned { id: seen, ordinal, pid, .. }) if seen == id && prepared && is_git && ordinal == git_ordinal && ordinal < 5 && pid > 0 => { started_child = true; git_ordinal += 1; },
+                    Ok(Reply::GitHubChildSpawned { id:seen, pid, .. }) if seen == id && prepared && is_github && !started_child && pid > 0 => { started_child=true; },
+                    Ok(Reply::FetchRequested { id:seen, challenge }) if seen == id && prepared && started_child && is_github && !fetch_completed => {
+                        fetch_completed=true;
+                        let response=super::guard_github::fetch_response(challenge,fetch.take().expect("one closed broker fetch")(),cancelled).await;
+                        let sent=match (response,owner.input.as_ref()) {
+                            (Ok(bytes),Some(input))=>match tokio::time::timeout(Duration::from_secs(1),write_control(input,&bytes)).await {
+                                Ok(Ok(()))=>true,
+                                _=>{host_failure=Some(Failure::Failed);false},
+                            },
+                            (Err(error),_)=>{host_failure=Some(error);false},
+                            _=>false,
+                        };
+                        if !sent {owner.input.take();}
+                    },
                     Ok(Reply::Completed { id: seen, result, cleanup }) if seen == id => {
-                        let phase_valid = result.is_err() || completion_phase(is_git, prepared, started_child, git_ordinal);
+                        let phase_valid = result.is_err() || if is_github {prepared && started_child && fetch_completed && git_ordinal==0} else {completion_phase(is_git, prepared, started_child, git_ordinal)};
                         completion = Some(if !phase_valid { Err(Failure::StopUnconfirmed) } else if cleanup { result.map(|value| Output { text: value.text, success: value.success, exit: value.exit }).map_err(|error| if is_git && matches!(error, Error::Unavailable) { Failure::Unavailable } else { error.into() }) } else { Err(Failure::CleanupPending) });
                         owner.input.take(); protocol = false;
                     },
@@ -766,12 +871,28 @@ where
                 return Err(Failure::StopUnconfirmed);
             }
             if let Some(result) = completion.take() {
-                return result;
+                return settled_host_failure(result, host_failure);
             }
             if !protocol {
                 return Err(Failure::StopUnconfirmed);
             }
         }
+    }
+}
+
+fn settled_host_failure(
+    result: Result<Output, Failure>,
+    host_failure: Option<Failure>,
+) -> Result<Output, Failure> {
+    if matches!(
+        &result,
+        Err(Failure::CleanupPending | Failure::StopUnconfirmed)
+    ) {
+        return result;
+    }
+    match host_failure {
+        Some(error) => Err(error),
+        None => result,
     }
 }
 
@@ -847,6 +968,7 @@ mod tests {
     #[test]
     fn absolute_clock_and_control_eof_are_independent_of_native_timer() {
         let control = Control {
+            broker: Default::default(),
             stopped: AtomicBool::new(false),
             go: AtomicBool::new(false),
             challenge: std::sync::Mutex::new(None),
@@ -884,5 +1006,47 @@ mod tests {
         assert!(!completion_phase(true, false, true, 5));
         assert!(!completion_phase(false, true, false, 0));
         assert!(!completion_phase(false, true, true, 1));
+    }
+}
+
+#[cfg(test)]
+mod github_protocol_tests {
+    use super::*;
+    #[test]
+    fn public_broker_request_has_no_resource_credential_or_program_fields() {
+        let request_value = serde_json::json!({"version":1,"id":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"operation":{"kind":"PublicGitHub"}});
+        let framed = |value: &serde_json::Value| {
+            let bytes = serde_json::to_vec(value).unwrap();
+            let mut frame = (bytes.len() as u32).to_be_bytes().to_vec();
+            frame.extend(bytes);
+            frame
+        };
+        assert!(request(&mut framed(&request_value).as_slice()).is_ok());
+        for name in ["url", "token", "path", "program", "arguments"] {
+            let mut bad = request_value.clone();
+            bad["operation"][name] = serde_json::json!("inert");
+            assert!(request(&mut framed(&bad).as_slice()).is_err(), "{name}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod github_host_failure_tests {
+    use super::*;
+    #[test]
+    fn confirmed_eof_does_not_turn_a_privacy_or_limit_refusal_into_user_stop() {
+        for cause in [Failure::Sensitive, Failure::Limit, Failure::Failed] {
+            assert!(
+                matches!(settled_host_failure(Err(Failure::Stopped),Some(cause)),Err(error) if error==cause)
+            );
+            assert!(matches!(
+                settled_host_failure(Err(Failure::CleanupPending), Some(cause)),
+                Err(Failure::CleanupPending)
+            ));
+            assert!(matches!(
+                settled_host_failure(Err(Failure::StopUnconfirmed), Some(cause)),
+                Err(Failure::StopUnconfirmed)
+            ));
+        }
     }
 }

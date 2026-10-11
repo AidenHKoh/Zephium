@@ -1,8 +1,13 @@
 //! Fixed-origin public GETs. The checked DNS addresses reach the connector;
 //! ambient proxies, redirects, cookies and provider credentials are not admitted.
 use super::{Failure, Request};
+use crate::work_commands::runner::worker_slots::{self, Slots};
 use reqwest::{redirect::Policy, Client};
-use std::{sync::Arc, time::Duration};
+use std::{
+    net::ToSocketAddrs,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 const HOST: &str = "api.github.com";
 const LIMIT: usize = 60 * 1024;
 struct Resolver;
@@ -17,9 +22,33 @@ impl reqwest::dns::Resolve for Resolver {
                 )
                 .into());
             }
-            checked_addresses(tokio::net::lookup_host((host, 0)).await?).map_err(Into::into)
+            resolve_with(resolver_slots(), move || {
+                checked_addresses((host.as_str(), 0).to_socket_addrs()?)
+            })
+            .await
+            .map_err(Into::into)
         })
     }
+}
+fn resolver_slots() -> &'static Arc<Slots> {
+    static SLOTS: OnceLock<Arc<Slots>> = OnceLock::new();
+    SLOTS.get_or_init(|| Arc::new(Slots::new(4)))
+}
+async fn resolve_with(
+    slots: &Arc<Slots>,
+    resolve: impl FnOnce() -> Result<reqwest::dns::Addrs, std::io::Error> + Send + 'static,
+) -> Result<reqwest::dns::Addrs, std::io::Error> {
+    // Dropping a DNS future cannot cancel getaddrinfo. Its physical worker owns
+    // capacity until return, including after the request or Work is cancelled.
+    let permit = slots.reserve().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "broker resolution capacity occupied",
+        )
+    })?;
+    worker_slots::launch(permit, resolve, |_| true)
+        .await
+        .map_err(|_| std::io::Error::other("broker resolution did not settle"))?
 }
 fn checked_addresses(
     addresses: impl Iterator<Item = std::net::SocketAddr>,
@@ -105,6 +134,43 @@ async fn receive(mut response: reqwest::Response) -> Result<Vec<u8>, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn cancelled_resolution_holds_capacity_until_physical_return() {
+        let slots = Arc::new(Slots::new(1));
+        let owned = slots.clone();
+        let (started, observed) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let caller = tokio::spawn(async move {
+            resolve_with(&owned, move || {
+                let _ = started.send(());
+                let _ = held.recv();
+                Err(std::io::Error::other("inert resolved failure"))
+            })
+            .await
+        });
+        observed.await.unwrap();
+        caller.abort();
+        assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+        assert_eq!(slots.outstanding(), 1);
+        let refused = resolve_with(&slots, || {
+            panic!("capacity refusal must not start another resolver")
+        })
+        .await;
+        assert!(matches!(refused,Err(ref error) if error.kind()==std::io::ErrorKind::WouldBlock));
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while slots.outstanding() != 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            slots.reserve().is_ok(),
+            "capacity returns only after resolver acknowledgment"
+        );
+    }
+
     use std::net::{IpAddr, SocketAddr};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},

@@ -98,15 +98,23 @@ impl Runtime {
     pub fn close(self) -> Result<(), Failure> {
         self.snapshot.close()
     }
-    pub fn grant_socket(&mut self) -> Result<(), Failure> {
-        Ok(())
-    }
-    pub async fn run<C, CF>(&self, nonce: &str, cancelled: &C) -> Result<Output, Failure>
+    pub async fn run_custodied<C, CF, S>(
+        &self,
+        nonce: &str,
+        cancelled: &C,
+        spawned: S,
+    ) -> Result<Output, Failure>
     where
         C: Fn() -> CF,
         CF: Future<Output = bool>,
+        S: FnOnce(u32, Option<u64>),
     {
-        super::macos::monitor(cancelled, false, || self.process(nonce)).await
+        super::macos::monitor_single_custodied(cancelled, || {
+            let child = self.process(nonce)?;
+            spawned(child.id(), child.instance());
+            Ok(child)
+        })
+        .await
     }
     fn process(&self, nonce: &str) -> Result<super::macos_spawn::Child, Failure> {
         self.process_arguments(&[
