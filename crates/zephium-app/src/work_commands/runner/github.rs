@@ -1,4 +1,4 @@
-//! The child can request one opaque loopback route; only the captured broker
+//! The child can request one opaque local-socket route; only the captured broker
 //! closure can decide the remote resource. No provider credential enters gh.
 use super::{Failure, Output};
 use std::{
@@ -6,15 +6,17 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-};
+pub(super) mod socket;
+#[cfg(target_os = "macos")]
+use super::macos_github::Runtime;
+#[cfg(windows)]
+use super::windows_github::Runtime;
+use socket::Listener;
 const BODY_LIMIT: usize = 60 * 1024;
 const HEADER_LIMIT: usize = 8192;
 
 pub(crate) fn available() -> bool {
-    const QUALIFIED: bool = true; // Qualified native denial, broker and Stop matrix on 25G83.
+    const QUALIFIED: bool = true; // Exact AF_UNIX/denial/Stop matrix on macOS 25G83.
     #[cfg(target_os = "macos")]
     {
         QUALIFIED && super::macos_github::present()
@@ -35,26 +37,25 @@ where
     if !available() && !cfg!(test) {
         return Err(Failure::GitHubUnavailable);
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     {
         if super::cancellation_requested(cancelled).await {
             return Err(Failure::Stopped);
         }
-        let mut worker = tokio::task::spawn_blocking(super::macos_github::Runtime::prepare);
+        let mut worker = tokio::task::spawn_blocking(Runtime::prepare);
         let deadline = tokio::time::sleep(Duration::from_secs(10));
         tokio::pin!(deadline);
         let mut tick = tokio::time::interval(Duration::from_millis(25));
-        let runtime = loop {
+        let mut runtime = loop {
             tokio::select! {
                 ready = &mut worker => break ready.map_err(|_| Failure::GitHubUnavailable)??,
                 _ = &mut deadline => return Err(Failure::Limit),
                 _ = tick.tick() => if super::cancellation_requested(cancelled).await { return Err(Failure::Stopped); }
             }
         };
-        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .map_err(|_| Failure::Launch)?;
-        let port = listener.local_addr().map_err(|_| Failure::Launch)?.port();
+        let listener = Listener::bind(&runtime.socket)?;
+        runtime.grant_socket()?;
+        let port = 1;
         let nonce = format!(
             "{:032x}",
             u128::from_be_bytes(zephium_core::work::WorkArtifactId::generate().bytes())
@@ -69,7 +70,7 @@ where
             stopped || halt.load(Ordering::Acquire)
         };
         let child = async {
-            let result = runtime.run(port, &nonce, &cancellation).await;
+            let result = runtime.run(&nonce, &cancellation).await;
             if result.is_err() || result.as_ref().is_ok_and(|out| !out.success) {
                 halt.store(true, Ordering::Release);
             }
@@ -98,18 +99,14 @@ where
         }
         Ok(output)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
-        // Windows LPAC without networking cannot reach a loopback broker. Do not
-        // grant internetClient or a machine-wide loopback exemption as a fallback.
-        // A pinned packaged gh plus a qualified per-endpoint network policy and
-        // the existing Job/LPAC filesystem confinement are required before admission.
         let _ = (cancelled, fetch);
         Err(Failure::GitHubUnavailable)
     }
 }
-async fn serve<F, FF>(
-    listener: TcpListener,
+pub(super) async fn serve<F, FF>(
+    listener: Listener,
     port: u16,
     nonce: &str,
     halted: &AtomicBool,
@@ -120,10 +117,7 @@ where
     FF: Future<Output = Result<Vec<u8>, Failure>>,
 {
     let exchange = async {
-        let (mut stream, peer) = listener.accept().await.map_err(|_| Failure::Failed)?;
-        if !peer.ip().is_loopback() {
-            return Err(Failure::Failed);
-        }
+        let mut stream = listener.accept().await?;
         let mut header = Vec::new();
         let mut chunk = [0u8; 1024];
         loop {
@@ -218,6 +212,18 @@ fn exact_request(bytes: &[u8], port: u16, nonce: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixture_listener() -> (tempfile::TempDir, Listener, std::path::PathBuf) {
+        #[cfg(unix)]
+        let directory = tempfile::Builder::new()
+            .prefix("zgh-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        #[cfg(not(unix))]
+        let directory = tempfile::Builder::new().prefix("zgh-").tempdir().unwrap();
+        let path = directory.path().canonicalize().unwrap().join("broker.sock");
+        let listener = Listener::bind(&path).unwrap();
+        (directory, listener, path)
+    }
     #[test]
     fn broker_accepts_only_one_exact_bodyless_get() {
         let good = b"GET /nonce HTTP/1.1\r\nHost: 127.0.0.1:1234\r\nUser-Agent: fixture\r\n\r\n";
@@ -236,8 +242,8 @@ mod tests {
     }
     #[tokio::test]
     async fn malformed_request_never_starts_remote_fetch() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let (_directory, listener, endpoint) = fixture_listener();
+        let port = 1;
         let called = AtomicBool::new(false);
         let halt = AtomicBool::new(false);
         let broker = serve(listener, port, "nonce", &halt, || async {
@@ -245,9 +251,7 @@ mod tests {
             Ok(b"{}".to_vec())
         });
         let client = async {
-            let mut socket = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
-                .await
-                .unwrap();
+            let mut socket = socket::Stream::connect(&endpoint);
             socket
                 .write_all(
                     format!("POST /nonce HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes(),
@@ -270,15 +274,12 @@ mod tests {
             br#"{"text":"\u0067hp_inertFixtureToken"}"#.to_vec(),
             vec![b'x'; BODY_LIMIT + 1],
         ] {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let port = listener.local_addr().unwrap().port();
+            let (_directory, listener, endpoint) = fixture_listener();
+            let port = 1;
             let halt = AtomicBool::new(false);
             let broker = serve(listener, port, "nonce", &halt, || async { Ok(content) });
             let client = async {
-                let mut socket =
-                    tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
-                        .await
-                        .unwrap();
+                let mut socket = socket::Stream::connect(&endpoint);
                 socket
                     .write_all(
                         format!("GET /nonce HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes(),
@@ -296,7 +297,7 @@ mod tests {
     }
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    #[ignore = "Native pinned-gh qualification; inert loopback broker only"]
+    #[ignore = "Native pinned-gh qualification; inert local-socket broker only"]
     async fn native_github_fixed_get_returns_only_captured_public_fixture() {
         let output = run(&|| async { false }, || async {
             Ok(br#"{"number":3,"title":"Inert public fixture"}"#.to_vec())
@@ -337,5 +338,87 @@ mod tests {
         .await;
         assert!(matches!(outcome, Err(Failure::Stopped)));
         assert!(requested.lock().unwrap().unwrap().elapsed() < Duration::from_secs(1));
+    }
+}
+
+pub(super) fn environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    // Markers satisfy gh's CLI/auth preflight; neither is a provider credential.
+    let result: Vec<_> = [
+        ("GH_TOKEN", "work-local-broker-placeholder"),
+        ("GH_ENTERPRISE_TOKEN", "work-local-broker-placeholder"),
+        ("GH_PROMPT_DISABLED", "1"),
+        ("GH_NO_UPDATE_NOTIFIER", "1"),
+        ("GH_NO_EXTENSION_UPDATE_NOTIFIER", "1"),
+        ("GH_TELEMETRY", "false"),
+        ("DO_NOT_TRACK", "1"),
+        ("NO_COLOR", "1"),
+        ("LC_ALL", "C"),
+        ("TZ", "UTC"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.into(), value.into()))
+    .collect();
+    #[cfg(unix)]
+    let result = {
+        let mut result = result;
+        result.push(("PATH".into(), "/usr/bin:/bin".into()));
+        result
+    };
+    result
+}
+pub(super) fn write_config(
+    home: &std::path::Path,
+    endpoint: &std::path::Path,
+) -> Result<(), Failure> {
+    use std::io::Write;
+    let name = socket::endpoint_name(endpoint)?;
+    let content = format!(
+        "version: 1\nhttp_unix_socket: {}\n",
+        serde_json::to_string(&name).map_err(|_| Failure::Input)?
+    );
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(home.join("config.yml"))
+        .map_err(|_| Failure::Storage)?;
+    file.write_all(content.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|_| Failure::Storage)
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    #[test]
+    fn generated_config_is_exact_private_and_never_overwrites() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("broker.sock");
+        write_config(root.path(), &socket).unwrap();
+        let content = std::fs::read_to_string(root.path().join("config.yml")).unwrap();
+        assert_eq!(
+            content,
+            format!(
+                "version: 1\nhttp_unix_socket: {}\n",
+                serde_json::to_string(&socket::endpoint_name(&socket).unwrap()).unwrap()
+            )
+        );
+        assert!(write_config(root.path(), &socket).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(root.path().join("config.yml"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
     }
 }

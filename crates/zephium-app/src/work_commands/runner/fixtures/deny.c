@@ -8,6 +8,7 @@ extern char **environ;
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -27,6 +28,15 @@ int main(int argc, char **argv) {
         result(open(argv[2], O_RDONLY | O_DIRECTORY | O_NONBLOCK));
     } else if (!strcmp(argv[1], "create") && argc == 3) {
         result(open(argv[2], O_WRONLY | O_CREAT | O_EXCL, 0600));
+    } else if (!strcmp(argv[1], "unix") && argc == 3) {
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) { result(fd); return 0; }
+        struct sockaddr_un address = {0}; address.sun_family = AF_UNIX;
+        if (strlen(argv[2]) >= sizeof(address.sun_path)) { close(fd); return 2; }
+        strcpy(address.sun_path, argv[2]);
+        int status = connect(fd, (struct sockaddr *)&address, sizeof(address));
+        int error = errno; close(fd); errno = error;
+        if (status == 0) puts("opened"); else result(-1);
     } else if (!strcmp(argv[1], "network-external")) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) { result(fd); return 0; }

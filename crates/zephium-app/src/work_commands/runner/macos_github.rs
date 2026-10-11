@@ -1,4 +1,4 @@
-//! A checked private copy of one qualified gh image, with only a broker port.
+//! A checked private copy of one gh image, with only an exact local socket.
 use super::{Failure, Output, Snapshot};
 use sha2::{Digest, Sha256};
 use std::{
@@ -14,6 +14,7 @@ const IMAGE_DIGEST: &str = "02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b30
 pub(super) struct Runtime {
     pub snapshot: Snapshot,
     executable: PathBuf,
+    pub socket: PathBuf,
 }
 pub(super) fn present() -> bool {
     super::macos::qualified() && Path::new(IMAGE).is_file()
@@ -73,38 +74,41 @@ impl Runtime {
             return Err(Failure::GitHubUnavailable);
         }
         output.sync_all().map_err(|_| Failure::Storage)?;
+        let socket = snapshot.root.join("broker.sock");
+        super::github::write_config(&snapshot.home, &socket)?;
         Ok(Self {
             snapshot,
             executable,
+            socket,
         })
     }
-    pub async fn run<C, CF>(&self, port: u16, nonce: &str, cancelled: &C) -> Result<Output, Failure>
+    pub fn grant_socket(&mut self) -> Result<(), Failure> {
+        Ok(())
+    }
+    pub async fn run<C, CF>(&self, nonce: &str, cancelled: &C) -> Result<Output, Failure>
     where
         C: Fn() -> CF,
         CF: Future<Output = bool>,
     {
-        super::macos::monitor(cancelled, false, || self.process(port, nonce)).await
+        super::macos::monitor(cancelled, false, || self.process(nonce)).await
     }
-    fn process(&self, port: u16, nonce: &str) -> Result<super::macos_spawn::Child, Failure> {
-        self.process_arguments(
-            port,
-            &[
-                "api".into(),
-                "--method".into(),
-                "GET".into(),
-                format!("http://127.0.0.1:{port}/{nonce}").into(),
-            ],
-        )
+    fn process(&self, nonce: &str) -> Result<super::macos_spawn::Child, Failure> {
+        self.process_arguments(&[
+            "api".into(),
+            "--method".into(),
+            "GET".into(),
+            format!("http://127.0.0.1:1/{nonce}").into(),
+        ])
     }
     fn process_arguments(
         &self,
-        port: u16,
         command: &[OsString],
     ) -> Result<super::macos_spawn::Child, Failure> {
         let mut arguments = Vec::<OsString>::new();
         for (key, value) in [
             ("TOOL", self.executable.as_os_str()),
             ("WORK", self.snapshot.root.as_os_str()),
+            ("BROKER", self.socket.as_os_str()),
         ] {
             let mut parameter = OsString::from(key);
             parameter.push("=");
@@ -112,28 +116,13 @@ impl Runtime {
             arguments.extend(["-D".into(), parameter]);
         }
         arguments.extend([
-            "-D".into(),
-            format!("BROKER=localhost:{port}").into(),
             "-p".into(),
             PROFILE.into(),
             "--".into(),
             self.executable.as_os_str().to_owned(),
         ]);
         arguments.extend_from_slice(command);
-        let mut environment: Vec<(OsString, OsString)> = [
-            ("GH_TOKEN", "work-local-broker-placeholder"), // Not a provider credential.
-            ("GH_PROMPT_DISABLED", "1"),
-            ("GH_NO_UPDATE_NOTIFIER", "1"),
-            ("GH_NO_EXTENSION_UPDATE_NOTIFIER", "1"),
-            ("GH_TELEMETRY", "false"),
-            ("DO_NOT_TRACK", "1"),
-            ("NO_COLOR", "1"),
-            ("LC_ALL", "C"),
-            ("PATH", "/usr/bin:/bin"),
-        ]
-        .into_iter()
-        .map(|(key, value)| (key.into(), value.into()))
-        .collect();
+        let mut environment = super::github::environment();
         for (key, path) in [
             ("HOME", &self.snapshot.home),
             ("GH_CONFIG_DIR", &self.snapshot.home),
@@ -155,7 +144,7 @@ pub(super) const PROFILE: &str = r#"(version 1)
 (allow file-read-data (literal "/"))
 (allow file-read-data file-write-data (literal "/dev/null"))
 (allow file-read-data (literal "/dev/urandom") (literal "/dev/random"))
-(allow network-outbound (remote tcp (param "BROKER")))
+(allow network-outbound (literal (param "BROKER")))
 "#;
 
 #[cfg(test)]
@@ -185,14 +174,15 @@ mod tests {
             .unwrap()
             .success());
         Runtime {
+            socket: snapshot.root.join("broker.sock"),
             snapshot,
             executable,
         }
     }
-    async fn check(runtime: &Runtime, port: u16, operation: &str, argument: &Path) -> String {
+    async fn check(runtime: &Runtime, _port: u16, operation: &str, argument: &Path) -> String {
         let arguments = [operation.into(), argument.as_os_str().to_owned()];
         let output = super::super::macos::monitor(&|| async { false }, false, || {
-            runtime.process_arguments(port, &arguments)
+            runtime.process_arguments(&arguments)
         })
         .await
         .unwrap();
@@ -291,11 +281,17 @@ mod tests {
         );
         assert_eq!(
             check(&runtime, port, "network", Path::new(&port.to_string())).await,
+            "denied"
+        );
+        let local = super::super::github::socket::Listener::bind(&runtime.socket).unwrap();
+        assert_eq!(
+            check(&runtime, port, "unix", &runtime.socket).await,
             "opened"
         );
-        // A positive kernel-connect proof is not authorization to fetch a
-        // resource: the broker separately requires its exact opaque GET route.
-        let _ = allowed.accept().await.unwrap();
+        let _ = local.accept().await.unwrap();
+        let adjacent = runtime.snapshot.root.join("other.sock");
+        let _other_socket = super::super::github::socket::Listener::bind(&adjacent).unwrap();
+        assert_eq!(check(&runtime, port, "unix", &adjacent).await, "denied");
         use std::os::fd::AsRawFd;
         let inherited_path = outside.join("descriptor.txt");
         fs::write(&inherited_path, b"inert descriptor").unwrap();

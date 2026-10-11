@@ -13,6 +13,8 @@ pub(crate) mod python;
 mod snapshot;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+mod windows_github;
 use crate::work_files::WorkFileGrant;
 use snapshot::Snapshot;
 use std::{future::Future, path::Path};
@@ -49,7 +51,7 @@ impl Failure {
             Self::Stopped => "The confined process stopped",
             Self::StopUnconfirmed => "Stop was requested, but process exit has not been confirmed",
             Self::Failed => "The operation in the copied workspace failed",
-            Self::GitHubUnavailable => "Public GitHub CLI reads require the qualified macOS build 25G83 and the pinned Homebrew gh 2.96.0 image; Windows awaits packaged runtime and per-endpoint network qualification",
+            Self::GitHubUnavailable => "Public GitHub CLI reads require the qualified macOS build 25G83 and the pinned Homebrew gh 2.96.0 image; Windows awaits packaged runtime and AF_UNIX/LPAC qualification",
             Self::PythonUnavailable => "Python tests require qualified macOS build 25G83 and the pinned Apple Command Line Tools Python 3.9 runtime; Windows awaits runtime packaging and native qualification",
             Self::Sensitive => "Recognizable credential content was withheld from the review",
             Self::Changed => "An approved file changed again; read it before reviewing these edits",

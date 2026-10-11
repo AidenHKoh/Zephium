@@ -1140,7 +1140,7 @@ fn pin_directories(_path: &Path) -> Result<Vec<std::fs::File>, WorkFileError> {
 }
 
 #[cfg(windows)]
-fn pin_directories(path: &Path) -> Result<Vec<std::fs::File>, WorkFileError> {
+pub(crate) fn pin_directories(path: &Path) -> Result<Vec<std::fs::File>, WorkFileError> {
     pin_directories_with_write(path, false)
 }
 
