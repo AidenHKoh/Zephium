@@ -122,7 +122,9 @@ pub(super) fn split(bytes: &[u8]) -> Option<(NameRows, &[u8])> {
     body.starts_with(b"MD1:").then_some((NameRows(rows), body))
 }
 fn valid_flags(value: u32) -> bool {
-    value < (1 << 20)
+    value < (1 << 29)
+        && ((value >> 20) & 31) <= 26
+        && (((value >> 25) & 15) <= 8 || ((value >> 25) & 15) == 15)
         && value & 15 <= 8
         && ((value >> 8) & 15) <= 10
         && ((value >> 16) & 15) <= 13
@@ -221,6 +223,8 @@ fn report(sources: &[SemanticMediaNameProbe], incomplete: bool) {
                 "ExpectedMissing",
                 "WorkLimit",
             ][((row.flags >> 16) & 15) as usize];
+            let aria = aria_reason((row.flags >> 20) & 31);
+            let aria_depth = (row.flags >> 25) & 15;
             let ancestors: Vec<_> = row
                 .ancestors
                 .iter()
@@ -238,10 +242,42 @@ fn report(sources: &[SemanticMediaNameProbe], incomplete: bool) {
                     )
                 })
                 .collect();
-            let _ = writeln!(std::io::stderr().lock(),"record-media-name: record={} reused={} first={first} first_depth={} inheritance={inherit} inheritance_depth={} link={link} ancestors={ancestors:?} incomplete={incomplete} content=redacted",source.record(),reused,(row.flags>>4)&15,(row.flags>>12)&15);
+            let _ = writeln!(std::io::stderr().lock(),"record-media-name: record={} reused={} first={first} first_depth={} inheritance={inherit} inheritance_depth={} link={link} aria={aria} aria_depth={aria_depth} ancestors={ancestors:?} incomplete={incomplete} content=redacted",source.record(),reused,(row.flags>>4)&15,(row.flags>>12)&15);
         } else {
             let _ = writeln!(std::io::stderr().lock(),"record-media-name: record={} reused={} unavailable=true incomplete={incomplete} content=redacted",source.record(),reused);
         }
+    }
+}
+fn aria_reason(value: u32) -> &'static str {
+    match value {
+        0 => "NotTried",
+        1 => "NativeNameIdentity",
+        2 => "InlineName",
+        3 => "UniqueDocumentId",
+        4 => "RootBoundary",
+        5 => "LocalSubtree",
+        6 => "UniqueVisualAndLink",
+        7 => "ExactLabelAndCover",
+        8 => "CapturedVisualAndLink",
+        9 => "StackedGeometry",
+        10 => "ContentAncestry",
+        11 => "PhotoBranch",
+        12 => "FirstTextName",
+        13 => "PeerBound",
+        14 => "RepeatedPeer",
+        15 => "Proved",
+        16 => "AncestorWork",
+        17 => "Exception",
+        18 => "DepthOrMissing",
+        19 => "TotalWorkBound",
+        20 => "NodeOrStackBound",
+        21 => "InteractiveDescendant",
+        22 => "OpaqueOrForeignDescendant",
+        23 => "NestedRecord",
+        24 => "PseudoVisual",
+        25 => "TextNodeBound",
+        26 => "EditableDescendant",
+        _ => "Unknown",
     }
 }
 fn label_reason(value: u32) -> &'static str {
@@ -313,7 +349,7 @@ mod tests {
             SemanticRuntimeBudget, MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES,
             SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX,
         };
-        let flags = 8 | (15 << 4) | (10 << 8) | (15 << 12) | (13 << 16);
+        let flags = 8 | (15 << 4) | (10 << 8) | (15 << 12) | (13 << 16) | (26 << 20) | (15 << 25);
         let ancestor =
             7 | (48 << 3) | (3 << 9) | (2 << 11) | (63 << 13) | (2 << 19) | (26 << 21) | (15 << 26);
         let rows: Vec<_> = (0..32u64)
@@ -353,7 +389,9 @@ mod tests {
         ));
         for bad in [
             "MN1:[[0,0,[]]]\nMD1:",
-            "MN1:[[1,1048576,[]]]\nMD1:",
+            "MN1:[[1,536870912,[]]]\nMD1:",
+            "MN1:[[1,28311552,[]]]\nMD1:",
+            "MN1:[[1,301989888,[]]]\nMD1:",
             "MN1:[[1,0,[1073741824]]]\nMD1:",
             "MN1:[[1,0,[65011712]]]\nMD1:",
             "MN1:[[1,0,[603979776]]]\nMD1:",
@@ -369,11 +407,11 @@ pub(super) fn instrument(source: &str) -> Option<String> {
     let replacements = [
         (
             r###"let md=[0,0,0,0],mr=[0,0,0,0];"###,
-            r###"let mn=[],md=[0,0,0,0],mr=[0,0,0,0];"###,
+            r###"let ma=new WeakMap(),mn=[],md=[0,0,0,0],mr=[0,0,0,0];"###,
         ),
         (
             r###"function evidence(records, invocation, generation, helpers) {md=[0,0,0,0];"###,
-            r###"function evidence(records, invocation, generation, helpers) {md=[0,0,0,0];mn=[];"###,
+            r###"function evidence(records, invocation, generation, helpers) {md=[0,0,0,0];mn=[];ma=new WeakMap();"###,
         ),
         (
             r###"    const linkProofs=new WeakMap(),provenNames=new Set();"###,
@@ -527,7 +565,7 @@ pub(super) fn instrument(source: &str) -> Option<String> {
         const relation=labelRelation(r,n);a.push(kind|(owned<<3)|((lcComplete?(lc.get(n)||0):3)<<9)|((counts.get(n)||0)<<11)|(geo<<13)|((pb.has(n)?pb.get(n)?2:1:0)<<19)|(relation[0]<<21)|(relation[1]<<26));
       }
       if(work>16384){if(d[0]===6)d[0]=7;if(d[2]===9)d[2]=10;}
-      mn.push([r.wire.k,d[0]|d[1]<<4|d[2]<<8|d[3]<<12|d[4]<<16,a]);
+      mn.push([r.wire.k,d[0]|d[1]<<4|d[2]<<8|d[3]<<12|d[4]<<16|((ma.get(r.element)||0)<<20),a]);
     }
     md[2]=Math.min(work,16385);md[3]=rows.length;remember(invocation,generation,records,rows);"###,
         ),
@@ -552,7 +590,111 @@ pub(super) fn instrument(source: &str) -> Option<String> {
             r###"return 'MN1:'+JSON.stringify(mediaNameDiagnostic)+'\nMD1:'+mediaDiagnostic.join(',')+'\n'+encoded.value;"###,
         ),
     ];
+    let start = source.find("function ariaRecordProof(")?;
+    let end = source[start..].find("\n  function evidence(")? + start;
+    let body = &source[start..end];
+    let aria_replacements = [
+        (
+            r###"  const name = nameRecord.element;"###,
+            r###"  const name = nameRecord.element;let ar=1,ad=15;try{"###,
+        ),
+        (
+            r###"      if (++seen > limit || !charge()) return false;"###,
+            r###"      if (++seen > limit){ar=20;return false;}if(!charge()){ar=19;return false;}"###,
+        ),
+        (
+            r###"        if (stack.length >= limit) return false;"###,
+            r###"        if (stack.length >= limit){ar=20;return false;}"###,
+        ),
+        (
+            r###"  if (!walk(name,32,node=>{"###,
+            r###"  ar=2;if (!walk(name,32,node=>{"###,
+        ),
+        (
+            r###"  if (!cache.ids) {"###,
+            r###"  ar=3;if (!cache.ids) {"###,
+        ),
+        (
+            r###"    if (!charge() || ['html','body','main','nav','header','footer','aside','article','li'].includes(root.localName)"###,
+            r###"    ar=4;ad=depth;if (!charge() || ['html','body','main','nav','header','footer','aside','article','li'].includes(root.localName)"###,
+        ),
+        (
+            r###"    if (!walk(root,64,node => {"###,
+            r###"    ar=5;if (!walk(root,64,node => {"###,
+        ),
+        (
+            r###"    if (visuals.length!==1 || links.length!==1) return null;"###,
+            r###"    ar=6;if (visuals.length!==1 || links.length!==1) return null;"###,
+        ),
+        (
+            r###"    if (labelled.length!==1"###,
+            r###"    ar=7;if (labelled.length!==1"###,
+        ),
+        (
+            r###"    if (!imageRecord || !linkRecord"###,
+            r###"    ar=8;if (!imageRecord || !linkRecord"###,
+        ),
+        (
+            r###"    if (image.width<64"###,
+            r###"    ar=9;if (image.width<64"###,
+        ),
+        (
+            r###"    let content=visual.parentElement;"###,
+            r###"    ar=10;let content=visual.parentElement;"###,
+        ),
+        (
+            r###"    let branch=visual;"###,
+            r###"    ar=11;let branch=visual;"###,
+        ),
+        (
+            r###"    if (texts.some("###,
+            r###"    ar=12;if (texts.some("###,
+        ),
+        (
+            r###"    if (!peers || peers.length"###,
+            r###"    ar=13;if (!peers || peers.length"###,
+        ),
+        (
+            r###"    let repeated=false;"###,
+            r###"    ar=14;let repeated=false;"###,
+        ),
+        (
+            r###"    return {name,link,root,visual,imageRecord,linkRecord,id:name.id,href:link.href};"###,
+            r###"    ar=15;return {name,link,root,visual,imageRecord,linkRecord,id:name.id,href:link.href};"###,
+        ),
+        (
+            r###"  return null;
+}"###,
+            r###"  ar=18;return null;
+}catch(error){ar=17;throw error;}finally{ma.set(name,ar|(ad<<5));}
+}"###,
+        ),
+        (
+            r###"if (node.nodeValue.length>2048) return false;"###,
+            r###"if (node.nodeValue.length>2048){ar=25;return false;}"###,
+        ),
+        (
+            r###"if (node.shadowRoot || tag.includes('-') || ['iframe','frame','object','embed','input','textarea','select','button'].includes(tag) || node.isContentEditable) return false;"###,
+            r###"if(node.shadowRoot || tag.includes('-') || ['iframe','frame','object','embed'].includes(tag)){ar=22;return false;}if(['input','textarea','select','button'].includes(tag)){ar=21;return false;}if(node.isContentEditable){ar=26;return false;}"###,
+        ),
+        (
+            r###"if (node!==root && (['article','li'].includes(tag) || node.getAttribute('role')==='listitem')) return false;"###,
+            r###"if (node!==root && (['article','li'].includes(tag) || node.getAttribute('role')==='listitem')){ar=23;return false;}"###,
+        ),
+        (
+            r###"if (p.backgroundImage!=='none' || p.content.includes('url(')) return false;"###,
+            r###"if (p.backgroundImage!=='none' || p.content.includes('url(')){ar=24;return false;}"###,
+        ),
+    ];
+    let mut body = body.to_owned();
+    for (from, to) in aria_replacements {
+        if body.matches(from).count() != 1 {
+            return None;
+        }
+        body = body.replacen(from, to, 1);
+    }
     let mut result = source.to_owned();
+    result.replace_range(start..end, &body);
     for (from, to) in replacements {
         if result.matches(from).count() != 1 {
             return None;
