@@ -46,6 +46,8 @@
     };
     let heading = false, paragraph = false, links = 0, main = false, rows = 0;
     let authHeading = false, authControls = 0, editable = 0, unknownEntry = 0, busy = false;
+    const cardGroups = new Map();
+    let cards = 0;
     for (const node of nodes) {
       if (!visible(node)) continue;
       const tag = node.tagName.toLowerCase();
@@ -94,6 +96,22 @@
       if ((tag === "button" || tag === "a" || role === "button" || role === "link") && signIn.test(short)) authControls++;
       // Legal/help chrome is not evidence that the requested app loaded.
       if (node.closest("nav,footer,aside,[role='navigation'],[role='contentinfo'],[role='complementary']")) continue;
+      // Custom app lists often expose each item as a button rather than li/row.
+      // Require repeated local siblings; never count global or auth chrome.
+      if ((tag === "button" || role === "button") && short.length >= 12 && !signIn.test(short) &&
+          !/^(?:continue|sign|log|authenticate|connect)\b/i.test(short) &&
+          !node.closest("form,dialog,[role='dialog'],[role='alert']") &&
+          !node.parentElement?.closest("button,[role='button']")) {
+        let parent = node.parentElement;
+        for (let depth = 0; parent && depth < 6; depth++, parent = parent.parentElement) {
+          if (parent === document.body || parent === document.documentElement ||
+              parent.matches("nav,footer,aside,form,dialog,[role='navigation'],[role='dialog']")) break;
+          if (!cardGroups.has(parent) && cardGroups.size >= 512) return 3;
+          const count = (cardGroups.get(parent) || 0) + 1;
+          cardGroups.set(parent, count);
+          cards = Math.max(cards, count);
+        }
+      }
       heading ||= isHeading && short.length > 2 && !signIn.test(short);
       paragraph ||= tag === "p" && short.length >= 24;
       links += Number(((tag === "a" && !!node.getAttribute("href")) || role === "link") && short.length > 1 && !!node.closest("main,article,[role='main'],[role='grid']"));
@@ -109,7 +127,7 @@
     if (authControls > 0 && editable > 0 && !(heading && paragraph) && rows < 3) return 16;
     // A settled URL and the absence of a field are insufficient: require
     // visible page content, so an empty SPA shell/spinner cannot resume it.
-    return ((heading && paragraph) || (main && (links >= 3 || rows >= 3))) ? 0 : 17;
+    return ((heading && (paragraph || cards >= 3)) || (main && (links >= 3 || rows >= 3))) ? 0 : 17;
   } catch {
     return 18;
   }

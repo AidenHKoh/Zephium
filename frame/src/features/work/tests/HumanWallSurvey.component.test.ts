@@ -119,3 +119,31 @@ test("native table rows can establish loaded inbox content", async () => {
     ),
   ).toBe(true);
 });
+
+test("an inbox of sibling card buttons clears without main or list landmarks", async () => {
+  const cards =
+    "<div aria-label='Main Content'><h1>Inbox</h1><div><button>Task: Prepare the project checklist</button><button>Task: Review the integration notes</button><button>Task: Read the planning report</button></div></div>";
+  expect(await survey(cards)).toBe(true);
+  const wrapped =
+    "<div><h1>Inbox</h1><section>" +
+    ["Prepare the project checklist", "Review the integration notes", "Read the planning report"]
+      .map((label) => `<div><div><div><button>Task: ${label}</button></div></div></div>`)
+      .join("") +
+    "</section></div>";
+  expect(await survey(wrapped)).toBe(true);
+  expect(
+    await survey(
+      `${cards}<div role='dialog'><h2>Continue</h2><input name='code'><button>Continue</button></div>`,
+    ),
+  ).toBe(false);
+  expect(
+    await survey(
+      "<h1>Welcome</h1><div><button>Continue with Google</button><button>Continue with Microsoft</button><button>Continue with Apple</button></div>",
+    ),
+  ).toBe(false);
+  expect(
+    await survey(
+      "<h1>Welcome</h1><footer><button>Accessibility settings</button><button>Privacy preferences</button><button>Support information</button></footer>",
+    ),
+  ).toBe(false);
+});

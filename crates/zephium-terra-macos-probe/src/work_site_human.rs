@@ -196,7 +196,7 @@ pub(super) fn response(path: &str) -> String {
         )
     };
     let content = if *scenario == "email-code" {
-        format!("<main><h1>Inbox</h1><ul><li>{FACT}.</li><li>Review the synthetic project checklist.</li><li>Read the synthetic integration notes.</li></ul></main>")
+        format!("<div aria-label=\"Main Content\"><h1>Inbox</h1><div><button>Task: {FACT}.</button><button>Task: Review the synthetic project checklist.</button><button>Task: Read the synthetic integration notes.</button></div></div>")
     } else {
         format!("<main><h1>Fixture dashboard</h1><p>{FACT}.</p><p>This dashboard is public synthetic test data. The retained page now exposes its balance and reference without a reload, route change, cookie signal or manual continue command.</p></main>")
     };
