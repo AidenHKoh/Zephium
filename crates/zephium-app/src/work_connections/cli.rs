@@ -521,7 +521,10 @@ mod tests {
         std::env::set_var("SHELL", &program);
         assert!(login_shell("ignored").is_none());
         let _ = login_path();
-        assert!(!super::super::helper::ConnectionHelper::new().gh_ready());
+        assert_eq!(
+            super::super::helper::ConnectionHelper::new().gh_ready(),
+            super::super::github_broker::available()
+        );
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

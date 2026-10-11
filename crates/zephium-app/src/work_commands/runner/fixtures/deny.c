@@ -27,6 +27,15 @@ int main(int argc, char **argv) {
         result(open(argv[2], O_RDONLY | O_DIRECTORY | O_NONBLOCK));
     } else if (!strcmp(argv[1], "create") && argc == 3) {
         result(open(argv[2], O_WRONLY | O_CREAT | O_EXCL, 0600));
+    } else if (!strcmp(argv[1], "network-external")) {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) { result(fd); return 0; }
+        struct sockaddr_in address = {0};
+        address.sin_family = AF_INET; address.sin_port = htons(443);
+        inet_pton(AF_INET, "203.0.113.1", &address.sin_addr);
+        int status = connect(fd, (struct sockaddr *)&address, sizeof(address));
+        int error = errno; close(fd); errno = error;
+        if (status == 0) puts("opened"); else result(-1);
     } else if (!strcmp(argv[1], "network") && argc == 3) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) { result(fd); return 0; }

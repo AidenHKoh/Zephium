@@ -204,7 +204,7 @@ mod tests {
         );
         assert_eq!(slack.yes, "Use Slack");
         assert_eq!(offer("notion", false, &servers), None);
-        assert_eq!(offer("github", true, &servers).unwrap().yes, "Use GitHub");
+        assert_eq!(offer("github", true, &servers).unwrap().yes, "Use GitHub CLI (gh)");
         assert_eq!(offer("github", false, &servers), None);
         assert_eq!(offer("sla", false, &servers), None);
         assert!(reaches_own_app("notion", Some("app.notion.com")));

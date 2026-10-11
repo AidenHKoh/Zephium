@@ -14,8 +14,8 @@ use crate::work_computer::ToolReply;
 pub const SERVICE: &str = "github";
 /// The question the first use in a work asks, with GitHub's mark; the ask
 /// card reads the service and tool from it.
-pub const ASK: &str = "Use GitHub (gh)?";
-pub const USE: &str = "Use GitHub";
+pub const ASK: &str = "Use GitHub CLI (gh) for public reads?";
+pub const USE: &str = "Use GitHub CLI (gh)";
 pub const DECLINE: &str = "Use the website instead";
 
 /// Why the first call wants gh, in a sentence the ask card shows.

@@ -697,7 +697,7 @@ pub(crate) fn protected_path(path: &Path) -> bool {
 }
 
 #[cfg(unix)]
-fn open_unix(path: &Path, directory: bool) -> Result<std::fs::File, WorkFileError> {
+pub(crate) fn open_unix(path: &Path, directory: bool) -> Result<std::fs::File, WorkFileError> {
     use std::os::{
         fd::{AsRawFd, FromRawFd},
         unix::ffi::OsStrExt,

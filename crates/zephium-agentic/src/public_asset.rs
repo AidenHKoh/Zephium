@@ -53,7 +53,10 @@ pub fn public_https(url: &url::Url) -> bool {
     }
 }
 
-fn public_address(address: IpAddr) -> bool {
+/// Conservatively admits public unicast addresses, excluding private, loopback,
+/// link-local, documentation, transition/tunnel and reserved special-purpose blocks.
+/// Callers must apply this to the exact addresses used by their connector.
+pub fn public_address(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(ip) => {
             let [a, b, c, _] = ip.octets();

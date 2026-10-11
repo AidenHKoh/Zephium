@@ -1,7 +1,10 @@
 //! Typed operations over a brokered copy. The ordinary shell gate is independent.
 pub(crate) mod git_index;
+pub(crate) mod github;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod macos_github;
 #[cfg(target_os = "macos")]
 mod macos_python;
 #[cfg(target_os = "macos")]
@@ -28,6 +31,7 @@ pub(crate) enum Failure {
     Changed,
     Sensitive,
     PythonUnavailable,
+    GitHubUnavailable,
 }
 impl Failure {
     pub fn note(self) -> &'static str {
@@ -45,6 +49,7 @@ impl Failure {
             Self::Stopped => "The confined process stopped",
             Self::StopUnconfirmed => "Stop was requested, but process exit has not been confirmed",
             Self::Failed => "The operation in the copied workspace failed",
+            Self::GitHubUnavailable => "Public GitHub CLI reads require the qualified macOS build 25G83 and the pinned Homebrew gh 2.96.0 image; Windows awaits packaged runtime and per-endpoint network qualification",
             Self::PythonUnavailable => "Python tests require qualified macOS build 25G83 and the pinned Apple Command Line Tools Python 3.9 runtime; Windows awaits runtime packaging and native qualification",
             Self::Sensitive => "Recognizable credential content was withheld from the review",
             Self::Changed => "An approved file changed again; read it before reviewing these edits",
