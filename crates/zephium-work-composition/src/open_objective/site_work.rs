@@ -395,6 +395,75 @@ fn composer_has_send(snapshot: &SemanticSnapshot) -> bool {
     })
 }
 
+/// The same page context governs typing and keyboard value edits.
+fn typing_effect(node: &SemanticNode, snapshot: &SemanticSnapshot) -> SiteEffect {
+    if in_search(node, snapshot) {
+        SiteEffect::Read
+    } else if node.editable_structure().is_some()
+        && !ancestors(node, snapshot)
+            .any(|(_, a)| a.landmark_kind() == Some(SemanticLandmarkKind::Form))
+        && !composer_has_send(snapshot)
+        && !composer(node)
+        && draft_dialog(node, snapshot).is_none()
+    {
+        // A document that saves as it is typed commits on the first key.
+        SiteEffect::Commit(Consequence::Edit)
+    } else {
+        SiteEffect::Draft
+    }
+}
+
+fn key_activates(key: Option<SemanticPressKey>, node: &SemanticNode) -> bool {
+    match key {
+        Some(SemanticPressKey::Enter) => matches!(
+            node.role(),
+            SemanticRole::Button | SemanticRole::Link | SemanticRole::MenuItem | SemanticRole::Tab
+        ),
+        Some(SemanticPressKey::Space) => matches!(
+            node.role(),
+            SemanticRole::Button
+                | SemanticRole::Link
+                | SemanticRole::Checkbox
+                | SemanticRole::Radio
+        ),
+        _ => false,
+    }
+}
+
+/// Only keys with a known value-editing meaning for this observed control.
+/// Caret movement and unknown navigation controls keep their existing policy.
+fn key_changes_value(key: Option<SemanticPressKey>, node: &SemanticNode) -> bool {
+    let text = node.editable_structure().is_some()
+        || matches!(
+            node.role(),
+            SemanticRole::Textbox | SemanticRole::Searchbox | SemanticRole::Combobox
+        );
+    match key {
+        Some(SemanticPressKey::Backspace | SemanticPressKey::Delete) => text,
+        Some(SemanticPressKey::Space) => {
+            text || matches!(node.role(), SemanticRole::Checkbox | SemanticRole::Radio)
+        }
+        Some(SemanticPressKey::Enter) => node.editable_structure().is_some(),
+        Some(SemanticPressKey::ArrowUp | SemanticPressKey::ArrowDown) => matches!(
+            node.role(),
+            SemanticRole::Spinbutton
+                | SemanticRole::Slider
+                | SemanticRole::Combobox
+                | SemanticRole::Listbox
+                | SemanticRole::Option
+        ),
+        Some(
+            SemanticPressKey::ArrowLeft
+            | SemanticPressKey::ArrowRight
+            | SemanticPressKey::Home
+            | SemanticPressKey::End
+            | SemanticPressKey::PageUp
+            | SemanticPressKey::PageDown,
+        ) => node.role() == SemanticRole::Slider,
+        _ => false,
+    }
+}
+
 /// Reads what a step would do from the observed target and its surroundings.
 pub(crate) fn classify(
     kind: SemanticActionKind,
@@ -438,34 +507,21 @@ pub(crate) fn classify(
                 SiteEffect::Draft
             }
         }
-        SemanticActionKind::Fill | SemanticActionKind::Select => {
-            if in_search(node, snapshot) {
-                SiteEffect::Read
-            } else if node.editable_structure().is_some()
-                && !ancestors(node, snapshot)
-                    .any(|(_, a)| a.landmark_kind() == Some(SemanticLandmarkKind::Form))
-                && !composer_has_send(snapshot)
-                && !composer(node)
-                && draft_dialog(node, snapshot).is_none()
-            {
-                // A document that saves as it is typed commits on the first key.
-                SiteEffect::Commit(Consequence::Edit)
-            } else {
-                SiteEffect::Draft
-            }
+        SemanticActionKind::Fill | SemanticActionKind::Select => typing_effect(node, snapshot),
+        SemanticActionKind::Press if key_activates(key, node) => {
+            classify(SemanticActionKind::Click, None, node, snapshot)
+        }
+        SemanticActionKind::Press
+            if key_changes_value(key, node) && key != Some(SemanticPressKey::Enter) =>
+        {
+            typing_effect(node, snapshot)
         }
         SemanticActionKind::Press => match key {
-            // Enter on a button, link or menu item activates it like a click.
             Some(SemanticPressKey::Enter)
-                if matches!(
-                    node.role(),
-                    SemanticRole::Button
-                        | SemanticRole::Link
-                        | SemanticRole::MenuItem
-                        | SemanticRole::Tab
-                ) =>
+                if node.editable_structure().is_some()
+                    && typing_effect(node, snapshot) == SiteEffect::Commit(Consequence::Edit) =>
             {
-                classify(SemanticActionKind::Click, None, node, snapshot)
+                SiteEffect::Commit(Consequence::Edit)
             }
             Some(SemanticPressKey::Enter) => {
                 if in_search(node, snapshot)
@@ -870,7 +926,10 @@ pub(crate) fn preview(
             "type into {}",
             if name.is_empty() { "the page" } else { &name }
         ),
-        SemanticActionKind::Press => format!("press Enter in {name}"),
+        SemanticActionKind::Press => match action.bound_action().press_key() {
+            Some(key) => format!("press {key:?} in {name}"),
+            None => format!("press a key in {name}"),
+        },
         _ => format!(
             "press {}",
             if name.is_empty() {
@@ -1466,7 +1525,10 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
         // A banner choice is a read: refused optional cookies, a notice
         // closed or its settings opened. Accepting is refused while the same
         // banner offers a refusal.
-        if action.kind() == SemanticActionKind::Click {
+        if action.kind() == SemanticActionKind::Click
+            || (action.kind() == SemanticActionKind::Press
+                && key_activates(action.bound_action().press_key(), node))
+        {
             if let Some(choice) = super::consent::banner_choice(node, snapshot) {
                 if choice == super::consent::Choice::Accept
                     && super::consent::offers_refusal(node, snapshot)
@@ -1496,6 +1558,24 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             node,
             snapshot,
         );
+        let keyboard_mutation = action.kind() == SemanticActionKind::Press
+            && key_changes_value(action.bound_action().press_key(), node);
+        if keyboard_mutation {
+            let mut state = self.gate.state();
+            // A key's affected selection/caret is not captured in the preview.
+            // Never spend an exact one-step approval on that unknown edit.
+            if (observed == SiteEffect::Commit(Consequence::Edit) && !state.allow_edits)
+                || (state.hold_typing && !state.allow_typing)
+            {
+                state.held = true;
+                return Err(AgentWorkFailure::ActionDenied);
+            }
+            if observed == SiteEffect::Draft && declared == SemanticEffectClass::Read {
+                return Err(AgentWorkFailure::EffectRequired(
+                    SemanticEffectClass::LocalWrite,
+                ));
+            }
+        }
         let held_typing = matches!(
             action.kind(),
             SemanticActionKind::Fill | SemanticActionKind::Select
@@ -2559,5 +2639,362 @@ mod tests {
         };
         assert!(!sign_in_wall(&offer("Zamknij okno dialogowe")));
         assert!(sign_in_wall(&offer("Dalej")));
+    }
+
+    fn keyboard_audit_action(
+        observation: &SemanticObservation,
+        key: SemanticPressKey,
+        declared: SemanticEffectClass,
+    ) -> SemanticPreparedAction {
+        let snapshot = &observation.frames()[0];
+        let proposal = SemanticActionProposal::try_new(
+            SemanticActionIntent::Press {
+                target: snapshot.nodes()[1].reference(),
+                key,
+            },
+            declared,
+            SemanticWaitCondition::Immediate,
+            if snapshot.nodes()[1].value().is_some() {
+                SemanticVerification::TargetValueChanged
+            } else {
+                SemanticVerification::PageChanged
+            },
+            SemanticSettleBudget::try_new(2000).unwrap(),
+        )
+        .unwrap();
+        SemanticActionBatch::bind(
+            SemanticActionBatchId::new(1).unwrap(),
+            observation,
+            &[snapshot.frame().clone()],
+            vec![proposal],
+        )
+        .unwrap()
+        .actions()[0]
+            .prepare(snapshot)
+            .unwrap()
+    }
+
+    #[test]
+    fn keyboard_document_mutation_requires_the_same_edit_approval_as_fill() {
+        let look = page(vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"textbox","n":"Document body","o":11,"fs":1,"es":[1,2,false],"fc":true,
+                "v":{"k":"text","value":"Draft"},"b":{"x":1,"y":1,"w":400,"h":60}}),
+        ]);
+        assert_eq!(
+            effect(&look, 2, SemanticActionKind::Fill),
+            SiteEffect::Commit(Consequence::Edit)
+        );
+        for key in [
+            SemanticPressKey::Backspace,
+            SemanticPressKey::Delete,
+            SemanticPressKey::Space,
+        ] {
+            assert_eq!(
+                effect_key(&look, 2, SemanticActionKind::Press, Some(key)),
+                SiteEffect::Commit(Consequence::Edit),
+                "{key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keyboard_document_mutation_cannot_declare_read_or_local_write_to_avoid_approval() {
+        let look = page(vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"textbox","n":"Document body","o":11,"fs":1,"es":[1,2,false],"fc":true,
+                "v":{"k":"text","value":"Draft"},"b":{"x":1,"y":1,"w":400,"h":60}}),
+        ]);
+        for key in [
+            SemanticPressKey::Backspace,
+            SemanticPressKey::Delete,
+            SemanticPressKey::Space,
+        ] {
+            for declared in [SemanticEffectClass::Read, SemanticEffectClass::LocalWrite] {
+                let gate = Arc::new(SiteGate::new("example.test".into(), false, false));
+                let policy = SiteWorkPolicy {
+                    gate: gate.clone(),
+                    asks: true,
+                };
+                assert!(
+                    matches!(
+                        policy.assess(&keyboard_audit_action(&look, key, declared), &look),
+                        Err(AgentWorkFailure::ActionDenied)
+                    ),
+                    "{key:?} {declared:?}"
+                );
+                assert!(
+                    gate.pending().is_none(),
+                    "unknown caret cannot offer a one-step edit"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn keyboard_numeric_mutation_cannot_be_admitted_as_read() {
+        let look = page(vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"spinbutton","n":"Quantity","o":10,"fc":true,
+                "v":{"k":"text","value":"17"},"b":{"x":1,"y":1,"w":200,"h":30}}),
+        ]);
+        let policy = SiteWorkPolicy {
+            gate: Arc::new(SiteGate::default()),
+            asks: true,
+        };
+        assert!(matches!(
+            policy.assess(
+                &keyboard_audit_action(&look, SemanticPressKey::ArrowUp, SemanticEffectClass::Read),
+                &look
+            ),
+            Err(AgentWorkFailure::EffectRequired(
+                SemanticEffectClass::LocalWrite
+            ))
+        ));
+        assert!(policy
+            .assess(
+                &keyboard_audit_action(
+                    &look,
+                    SemanticPressKey::ArrowUp,
+                    SemanticEffectClass::LocalWrite
+                ),
+                &look
+            )
+            .is_ok());
+    }
+
+    fn keyboard_editor_look() -> SemanticObservation {
+        page(vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"textbox","n":"Document body","o":11,"fs":1,"es":[1,2,false],"fc":true,
+                "v":{"k":"text","value":"Draft"},"b":{"x":1,"y":1,"w":400,"h":60}}),
+        ])
+    }
+
+    #[test]
+    fn keyboard_preview_names_the_actual_key_but_cannot_bind_unknown_selection() {
+        let look = keyboard_editor_look();
+        let snapshot = &look.frames()[0];
+        let action = keyboard_audit_action(
+            &look,
+            SemanticPressKey::Backspace,
+            SemanticEffectClass::ExternalWrite,
+        );
+        let node = &snapshot.nodes()[1];
+        let shown = preview(Consequence::Edit, &action, node, snapshot, "example.test");
+        assert_eq!(shown.action, "press Backspace in Document body");
+        let gate = Arc::new(SiteGate::default());
+        gate.state().pending = Some(Pending {
+            fingerprint: fingerprint(&action, node, snapshot),
+            digest: shown.digest(),
+            preview: shown,
+        });
+        gate.approve(false).unwrap();
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        assert!(matches!(
+            policy.assess(&action, &look),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        assert!(
+            gate.state().confirmed.is_some(),
+            "unbound selection must not consume one-step approval"
+        );
+        assert!(!gate.allow_edits());
+        let allowed = SiteWorkPolicy {
+            gate: Arc::new(SiteGate::new("example.test".into(), true, false)),
+            asks: true,
+        };
+        assert!(allowed.assess(&action, &look).is_ok());
+        assert!(matches!(
+            allowed.assess(
+                &keyboard_audit_action(
+                    &look,
+                    SemanticPressKey::Backspace,
+                    SemanticEffectClass::LocalWrite
+                ),
+                &look
+            ),
+            Err(AgentWorkFailure::EffectRequired(
+                SemanticEffectClass::ExternalWrite
+            ))
+        ));
+    }
+
+    #[test]
+    fn keyboard_space_activation_keeps_checkbox_and_radio_consequences() {
+        for role in ["checkbox", "radio"] {
+            let look = page(vec![
+                json!({"k":1,"r":"document","o":16,"fc":true}),
+                json!({"k":2,"p":0,"r":role,"n":"Delete saved items","o":9,"fc":true,
+                    "v":{"k":"boolean","value":false},"b":{"x":1,"y":1,"w":200,"h":30}}),
+            ]);
+            assert_eq!(
+                effect_key(
+                    &look,
+                    2,
+                    SemanticActionKind::Press,
+                    Some(SemanticPressKey::Space)
+                ),
+                effect(&look, 2, SemanticActionKind::Click)
+            );
+            assert_eq!(
+                effect(&look, 2, SemanticActionKind::Click),
+                SiteEffect::Commit(Consequence::Destructive)
+            );
+        }
+    }
+
+    #[test]
+    fn keyboard_consent_activation_cannot_accept_while_refusal_is_offered() {
+        let look = page(vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"button","n":"Accept all","o":9,"fc":true,"ak":1,"b":{"x":1,"y":1,"w":200,"h":30}}),
+            json!({"k":3,"p":0,"r":"heading","n":"Cookies","l":1,"fc":true}),
+            json!({"k":4,"p":0,"r":"paragraph","t":"We use cookies and other technologies.","fc":true}),
+            json!({"k":5,"p":0,"r":"button","n":"Reject all","o":9,"fc":true,"ak":1,"b":{"x":1,"y":40,"w":200,"h":30}}),
+        ]);
+        let snapshot = &look.frames()[0];
+        assert!(super::super::consent::offers_refusal(
+            &snapshot.nodes()[1],
+            snapshot
+        ));
+        let policy = SiteWorkPolicy {
+            gate: Arc::new(SiteGate::default()),
+            asks: true,
+        };
+        for key in [SemanticPressKey::Enter, SemanticPressKey::Space] {
+            assert!(
+                matches!(
+                    policy.assess(
+                        &keyboard_audit_action(&look, key, SemanticEffectClass::Read),
+                        &look
+                    ),
+                    Err(AgentWorkFailure::ActionDenied)
+                ),
+                "{key:?}"
+            );
+        }
+        assert!(
+            policy
+                .assess(
+                    &keyboard_audit_action(
+                        &look,
+                        SemanticPressKey::ArrowDown,
+                        SemanticEffectClass::Read
+                    ),
+                    &look
+                )
+                .is_ok(),
+            "caret/navigation key is not consent activation"
+        );
+    }
+
+    #[test]
+    fn keyboard_search_draft_and_navigation_keep_their_context() {
+        for (role, name, expected) in [
+            ("searchbox", "Search", SiteEffect::Read),
+            ("textbox", "Message to design", SiteEffect::Draft),
+        ] {
+            let look = page(vec![
+                json!({"k":1,"r":"document","o":16,"fc":true}),
+                json!({"k":2,"p":0,"r":role,"n":name,"o":10,"fc":true,"v":{"k":"text","value":"Draft"},"b":{"x":1,"y":1,"w":200,"h":30}}),
+            ]);
+            assert_eq!(
+                effect_key(
+                    &look,
+                    2,
+                    SemanticActionKind::Press,
+                    Some(SemanticPressKey::Backspace)
+                ),
+                expected
+            );
+            let gate = Arc::new(SiteGate::default());
+            let policy = SiteWorkPolicy {
+                gate: gate.clone(),
+                asks: true,
+            };
+            assert!(policy
+                .assess(
+                    &keyboard_audit_action(
+                        &look,
+                        SemanticPressKey::Backspace,
+                        SemanticEffectClass::LocalWrite
+                    ),
+                    &look
+                )
+                .is_ok());
+            assert!(gate.pending().is_none());
+            if role == "searchbox" {
+                assert!(
+                    policy
+                        .assess(
+                            &keyboard_audit_action(
+                                &look,
+                                SemanticPressKey::Backspace,
+                                SemanticEffectClass::Read
+                            ),
+                            &look
+                        )
+                        .is_ok(),
+                    "search editing remains an intentional read"
+                );
+            }
+
+            assert_eq!(
+                effect_key(
+                    &look,
+                    2,
+                    SemanticActionKind::Press,
+                    Some(SemanticPressKey::ArrowLeft)
+                ),
+                SiteEffect::Read
+            );
+            let held = Arc::new(SiteGate::default().holding_typing(true));
+            let policy = SiteWorkPolicy {
+                gate: held.clone(),
+                asks: true,
+            };
+            assert!(matches!(
+                policy.assess(
+                    &keyboard_audit_action(
+                        &look,
+                        SemanticPressKey::Backspace,
+                        SemanticEffectClass::LocalWrite
+                    ),
+                    &look
+                ),
+                Err(AgentWorkFailure::ActionDenied)
+            ));
+            assert!(held.pending().is_none());
+            held.state().allow_typing = true;
+            assert!(policy
+                .assess(
+                    &keyboard_audit_action(
+                        &look,
+                        SemanticPressKey::Backspace,
+                        SemanticEffectClass::LocalWrite
+                    ),
+                    &look
+                )
+                .is_ok());
+        }
+        let look = page(vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"button","n":"Open details","o":9,"fc":true,"b":{"x":1,"y":1,"w":200,"h":30}}),
+        ]);
+        assert_eq!(
+            effect(&look, 2, SemanticActionKind::Click),
+            SiteEffect::Draft
+        );
+        let policy = SiteWorkPolicy {
+            gate: Arc::new(SiteGate::default()),
+            asks: true,
+        };
+        assert!(policy
+            .assess(&click(&look, 2, SemanticEffectClass::Read), &look)
+            .is_ok());
     }
 }
