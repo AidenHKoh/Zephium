@@ -20,12 +20,19 @@
     onanswer: (answer: string) => void;
   } = $props();
 
+  const title = $derived(
+    ask.screenshotOrigin
+      ? m.work_ask_screenshot_title({ origin: ask.screenshotOrigin })
+      : m.work_ask_entry_title({ name: ask.name }),
+  );
   const answered = $derived(
-    ask.answer === ASK_WORDS.allow
-      ? m.work_ask_allowed()
-      : ask.answer === ask.always
-        ? m.work_ask_always_short()
-        : m.work_ask_not_now(),
+    ask.screenshotOrigin && ask.answer !== ASK_WORDS.notNow
+      ? m.work_ask_screenshot_choice_received()
+      : ask.answer === ASK_WORDS.allow
+        ? m.work_ask_allowed()
+        : ask.answer === ask.always
+          ? m.work_ask_always_short()
+          : m.work_ask_not_now(),
   );
 </script>
 
@@ -33,10 +40,10 @@
   <AskShell
     {placement}
     {busy}
-    label={m.work_ask_entry_title({ name: ask.name })}
-    note={m.work_ask_entry_note()}
-    where={ask.host ? registrableSite(ask.host) : ask.name}
-    title={m.work_ask_entry_title({ name: ask.name })}
+    label={title}
+    note={ask.screenshotOrigin ? m.work_ask_screenshot_note() : m.work_ask_entry_note()}
+    where={ask.screenshotOrigin ?? (ask.host ? registrableSite(ask.host) : ask.name)}
+    {title}
   >
     {#snippet mark()}
       {#if ask.hosts.length > 1}<span class="marks"
@@ -62,7 +69,9 @@
   <AskReceipt
     tone={ask.answer === ASK_WORDS.notNow ? "declined" : "done"}
     status={answered}
-    text={m.work_ask_entry_receipt({ name: ask.name })}
+    text={ask.screenshotOrigin
+      ? m.work_ask_screenshot_receipt({ origin: ask.screenshotOrigin })
+      : m.work_ask_entry_receipt({ name: ask.name })}
   />
 {/if}
 

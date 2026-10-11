@@ -45,6 +45,8 @@ export type ConfirmAsk = Base & {
 
 export type EntryAsk = Base & {
   kind: "entry";
+  /** Exact origin for independent screenshot consent, never account entry. */
+  screenshotOrigin?: string;
   /** What people call the site: "Slack". */
   name: string;
   host: string | null;
@@ -240,6 +242,35 @@ function entryOf(
   };
 }
 
+/** Rust uses the exact canonical origin as this typed question's operand. */
+function screenshotOf(base: AskBase, { prompt, options, answer }: Words): EntryAsk | null {
+  try {
+    const url = new URL(prompt);
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      url.origin !== prompt ||
+      options.length !== 3 ||
+      options[0] !== ASK_WORDS.allow ||
+      options[1] !== "Always allow" ||
+      options[2] !== ASK_WORDS.notNow
+    )
+      return null;
+    return {
+      ...base,
+      kind: "entry",
+      screenshotOrigin: prompt,
+      name: url.hostname,
+      host: url.hostname,
+      hosts: [url.hostname],
+      plan: "",
+      always: options[1],
+      answer,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** "Use your history?": which of the person's things, by its fixed words or, failing them, its noun. */
 function contextOf(base: AskBase, { prompt, answer }: Words, loose: boolean): ContextAsk | null {
   for (const source of Object.keys(CONTEXT_PROMPTS) as ContextSource[]) {
@@ -337,6 +368,8 @@ function fromAsk(
   switch (purpose) {
     case "entry":
       return entryOf(base, words, steps) ?? question;
+    case "screenshot":
+      return screenshotOf(base, words) ?? question;
     case "context":
       return contextOf(base, words, true) ?? question;
     case "connection":

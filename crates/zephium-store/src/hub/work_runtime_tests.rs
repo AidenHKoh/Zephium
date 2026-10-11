@@ -1445,6 +1445,82 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
 }
 
 #[test]
+fn screenshot_records_never_inherit_or_modify_account_access_and_bind_exact_origins() {
+    use zephium_core::work::sites::WorkSiteAccessV1;
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&session()).unwrap();
+    let initial = create(&mut hub);
+    hub.work_document(
+        initial.profile,
+        WorkRequest::SiteAccess {
+            set: Some(("slack.com".into(), Some(WorkSiteAccessV1::Always))),
+        },
+    )
+    .unwrap();
+    let WorkReply::ScreenshotAccess(empty) = hub
+        .work_document(initial.profile, WorkRequest::ScreenshotAccess { set: None })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(
+        empty.is_empty(),
+        "legacy Always never becomes screenshot consent"
+    );
+    for origin in ["https://app.slack.com", "https://slack.com"] {
+        hub.work_document(
+            initial.profile,
+            WorkRequest::ScreenshotAccess {
+                set: Some((origin.into(), true)),
+            },
+        )
+        .unwrap();
+    }
+    let WorkReply::SiteAccess(entries) = hub
+        .work_document(initial.profile, WorkRequest::SiteAccess { set: None })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].access, WorkSiteAccessV1::Always);
+    hub.work_document(
+        initial.profile,
+        WorkRequest::SiteAccess {
+            set: Some(("slack.com".into(), None)),
+        },
+    )
+    .unwrap();
+    let WorkReply::ScreenshotAccess(entries) = hub
+        .work_document(
+            initial.profile,
+            WorkRequest::ScreenshotAccess {
+                set: Some(("https://app.slack.com".into(), false)),
+            },
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].origin, "https://slack.com");
+    assert!(hub
+        .work_document(
+            initial.profile,
+            WorkRequest::ScreenshotAccess {
+                set: Some(("https://slack.com/client?token=x".into(), true))
+            }
+        )
+        .is_err());
+    assert!(hub
+        .work_document(
+            ProfileId::from(999_u128),
+            WorkRequest::ScreenshotAccess { set: None }
+        )
+        .is_err());
+}
+
+#[test]
 fn site_access_is_a_bounded_sorted_profile_list() {
     use zephium_core::work::sites::*;
     let mut hub = Hub::in_memory().unwrap();
@@ -2380,4 +2456,167 @@ fn an_interrupted_block_edit_remains_unknown_effect_debt() {
         .unwrap();
     assert_eq!(step.status, WorkStepStatus::OutcomeUnknown);
     assert!(step.has_unconfirmed_effect());
+}
+
+fn image_disclosure_read(f: &mut AgentSettlementFixture) {
+    f.step(
+        1,
+        WorkStepKindV1::Read {
+            url: "https://example.test/view".into(),
+            goal: None,
+            collection: None,
+        },
+        WorkStepStatus::Running,
+        vec![],
+    )
+    .unwrap();
+}
+fn stop_image_fixture(f: &mut AgentSettlementFixture) {
+    let current = read_runtime(&mut f.hub, &f.work);
+    f.hub
+        .work_document(
+            f.work.profile,
+            WorkRequest::RuntimeCommand {
+                id: f.work.id,
+                expected: current.work.revision,
+                command: WorkCommandId::generate(),
+                intent: WorkRuntimeIntent::Cancel {
+                    execution: f.execution,
+                    intervention: None,
+                },
+            },
+        )
+        .unwrap();
+}
+#[test]
+fn image_disclosure_mark_is_durable_before_dispatch_and_survives_stop() {
+    for mark_first in [false, true] {
+        let mut f = AgentSettlementFixture::new();
+        image_disclosure_read(&mut f);
+        let mark = WorkRuntimeUpdate::MarkImageDisclosure {
+            execution: f.execution,
+            attempt: f.attempt,
+            step: 1.into(),
+            disclosure: WorkPageImageDisclosureV1::SiteConsent,
+        };
+        if mark_first {
+            f.update(mark.clone()).unwrap();
+        }
+        stop_image_fixture(&mut f);
+        assert!(matches!(f.update(mark), Err(WorkError::Conflict)));
+        let fact = f.fact();
+        let read = &fact.steps[0];
+        assert_ne!(read.status, WorkStepStatus::Running);
+        assert_eq!(
+            read.measurements.and_then(|m| m.image_disclosure),
+            mark_first.then_some(WorkPageImageDisclosureV1::SiteConsent)
+        );
+        assert!(
+            read.measurements
+                .is_none_or(|m| m.settled_revision.is_none()),
+            "privacy marking is not a settlement receipt"
+        );
+    }
+}
+#[test]
+fn image_disclosure_private_provenance_cannot_be_downgraded_by_public_or_missing_settlement() {
+    for measurement in [
+        None,
+        Some(WorkStepMeasurementsV1 {
+            image_disclosure: Some(WorkPageImageDisclosureV1::PublicIsolated),
+            model_tokens: 123,
+            ..Default::default()
+        }),
+    ] {
+        let mut f = AgentSettlementFixture::new();
+        image_disclosure_read(&mut f);
+        for disclosure in [
+            WorkPageImageDisclosureV1::SiteConsent,
+            WorkPageImageDisclosureV1::PublicIsolated,
+        ] {
+            f.update(WorkRuntimeUpdate::MarkImageDisclosure {
+                execution: f.execution,
+                attempt: f.attempt,
+                step: 1.into(),
+                disclosure,
+            })
+            .unwrap();
+        }
+        f.update(WorkRuntimeUpdate::SettleStep {
+            execution: f.execution,
+            attempt: f.attempt,
+            step: 1.into(),
+            status: WorkStepStatus::Succeeded,
+            usage: Some(WorkUsage::default()),
+            artifacts: vec![],
+            evidence: None,
+            file: None,
+            note: None,
+            measurements: measurement,
+        })
+        .unwrap();
+        let fact = f.fact();
+        let measured = fact.steps[0].measurements.unwrap();
+        assert_eq!(
+            measured.image_disclosure,
+            Some(WorkPageImageDisclosureV1::SiteConsent)
+        );
+        assert_eq!(
+            measured.model_tokens,
+            measurement.map_or(0, |m| m.model_tokens)
+        );
+        assert!(measured.settled_revision.is_some());
+        assert!(matches!(
+            f.update(WorkRuntimeUpdate::MarkImageDisclosure {
+                execution: f.execution,
+                attempt: f.attempt,
+                step: 1.into(),
+                disclosure: WorkPageImageDisclosureV1::PublicIsolated
+            }),
+            Err(WorkError::Conflict)
+        ));
+    }
+}
+#[test]
+fn image_disclosure_mark_refuses_wrong_attempt_execution_profile_and_non_read() {
+    let mut f = AgentSettlementFixture::new();
+    image_disclosure_read(&mut f);
+    let mark = |execution, attempt, step| WorkRuntimeUpdate::MarkImageDisclosure {
+        execution,
+        attempt,
+        step,
+        disclosure: WorkPageImageDisclosureV1::SiteConsent,
+    };
+    assert!(f.update(mark(f.execution, 999.into(), 1.into())).is_err());
+    assert!(f.update(mark(999.into(), f.attempt, 1.into())).is_err());
+    let current = read_runtime(&mut f.hub, &f.work);
+    assert!(f
+        .hub
+        .work_document(
+            999.into(),
+            WorkRequest::RuntimeUpdate {
+                id: f.work.id,
+                expected: current.work.revision,
+                update: mark(f.execution, f.attempt, 1.into())
+            }
+        )
+        .is_err());
+    f.step(
+        2,
+        WorkStepKindV1::Search {
+            query: "public fact".into(),
+        },
+        WorkStepStatus::Running,
+        vec![],
+    )
+    .unwrap();
+    assert!(matches!(
+        f.update(mark(f.execution, f.attempt, 2.into())),
+        Err(WorkError::Invalid)
+    ));
+    assert!(f
+        .fact()
+        .steps
+        .iter()
+        .all(|step| step.measurements.is_none()));
 }

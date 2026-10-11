@@ -65,6 +65,31 @@ impl TrustedWorkRequest {
         self.page = Some(page);
         self
     }
+    #[cfg(feature = "durable-runtime")]
+    pub(crate) fn model_images_for(
+        &mut self,
+        probe: &zephium_app::work_runtime::WorkAttemptProbe,
+        blocked: bool,
+        entry: Option<zephium_app::work_agent::WorkConfirmPort>,
+    ) -> Result<
+        Option<Arc<zephium_app::work_screenshots::WorkScreenshotAccess>>,
+        zephium_core::work::WorkError,
+    > {
+        let Some(page) = self.page.as_ref() else {
+            return Ok(None);
+        };
+        let identity = self
+            .input
+            .retained_resource_spec()
+            .map_err(|_| zephium_core::work::WorkError::Invalid)?
+            .identity;
+        let host = zephium_app::work_screenshots::for_page(probe, page, identity, blocked, entry)
+            .ok_or(zephium_core::work::WorkError::Invalid)?;
+        self.input
+            .bind_model_image_host(host.clone())
+            .map_err(|_| zephium_core::work::WorkError::Invalid)?;
+        Ok(Some(host))
+    }
     pub(crate) fn with_anonymous_session(
         mut self,
         session: zephium_agentic::WorkBrowserSession,

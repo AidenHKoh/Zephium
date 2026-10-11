@@ -518,6 +518,7 @@ impl WorkResponseV1 {
                 port::WorkReply::RuntimeStarted { .. }
                 | port::WorkReply::Deleted { .. }
                 | port::WorkReply::SiteAccess(_)
+                | port::WorkReply::ScreenshotAccess(_)
                 | port::WorkReply::Personal(_)
                 | port::WorkReply::MediaContext(_)
                 | port::WorkReply::RecordMedia(_)

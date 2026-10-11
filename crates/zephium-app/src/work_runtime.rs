@@ -264,6 +264,7 @@ pub(crate) fn revoke_published(profile: ProfileId, projection: &WorkRuntimeProje
 /// selected textual fields through their own provider policy boundary.
 #[must_use]
 pub struct WorkNodeAttempt {
+    screenshots: Arc<crate::work_screenshots::consent::RunScreenshots>,
     lifetime: Lifetime,
     basis_revision: Arc<Mutex<WorkRevision>>,
     owner: WorkRuntimeSessionId,
@@ -352,6 +353,7 @@ impl WorkNodeAttempt {
     /// restart the attempt.
     pub fn probe(&self) -> WorkAttemptProbe {
         WorkAttemptProbe {
+            screenshots: self.screenshots.clone(),
             lifetime: self.lifetime.clone(),
             basis_revision: self.basis_revision.clone(),
             owner: self.owner,
@@ -1148,6 +1150,7 @@ impl Drop for WorkPersonHold {
 }
 #[derive(Clone)]
 pub struct WorkAttemptProbe {
+    screenshots: Arc<crate::work_screenshots::consent::RunScreenshots>,
     lifetime: Lifetime,
     basis_revision: Arc<Mutex<WorkRevision>>,
     owner: WorkRuntimeSessionId,
@@ -1162,6 +1165,24 @@ pub struct WorkAttemptProbe {
     node: WorkPlanNodeId,
 }
 impl WorkAttemptProbe {
+    pub(crate) async fn wait_image_cancelled(&self) {
+        let mut receiver = self.lifetime.state().cancellation.subscribe();
+        loop {
+            if receiver.borrow_and_update().is_some() {
+                return;
+            }
+            if receiver.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    pub(crate) fn screenshot_choices(
+        &self,
+    ) -> &Arc<crate::work_screenshots::consent::RunScreenshots> {
+        &self.screenshots
+    }
+
     #[cfg(feature = "work-execution")]
     pub async fn admit_read_page(
         &self,
@@ -1263,6 +1284,50 @@ impl WorkAttemptProbe {
             WorkReply::RecordMediaStored(media) => Ok(media),
             _ => Err(WorkError::Invalid),
         }
+    }
+    /// Durably records conservative possible image disclosure before any
+    /// image request may dispatch. Permission/source checks remain independent.
+    /// A missing, late, stopped or wrong-owner acknowledgement refuses the send.
+    pub async fn record_image_disclosure(
+        &self,
+        step: WorkStepId,
+        disclosure: WorkPageImageDisclosureV1,
+    ) -> Result<(), WorkError> {
+        if self.cached_cancellation().is_some() {
+            return Err(WorkError::Conflict);
+        }
+        let projection = self
+            .commit_step(WorkRuntimeUpdate::MarkImageDisclosure {
+                execution: self.execution,
+                attempt: self.attempt,
+                step,
+                disclosure,
+            })
+            .await?;
+        let recorded = projection
+            .executions
+            .iter()
+            .find(|execution| execution.id == self.execution)
+            .filter(|execution| execution.status == WorkExecutionStatus::Running)
+            .filter(|execution| {
+                execution.attempts.iter().any(|attempt| {
+                    attempt.id == self.attempt && attempt.status == WorkAttemptStatus::Running
+                })
+            })
+            .and_then(|execution| {
+                execution.steps.iter().find(|read| {
+                    read.id == step
+                        && read.status == WorkStepStatus::Running
+                        && matches!(read.kind, WorkStepKindV1::Read { .. })
+                })
+            })
+            .and_then(|read| read.measurements)
+            .and_then(|measurement| measurement.image_disclosure)
+            .is_some_and(|recorded| recorded.merge(disclosure) == recorded);
+        if !recorded || self.cancellation_requested().await? {
+            return Err(WorkError::Conflict);
+        }
+        Ok(())
     }
     /// Persists the observed public title of a running page-read step.
     pub async fn record_page_title(&self, step: WorkStepId, title: &str) -> Result<(), WorkError> {
@@ -1746,6 +1811,9 @@ impl WorkRuntimeService {
             deadline.min(parent_deadline)
         });
         let owned = WorkNodeAttempt {
+            screenshots: Arc::new(crate::work_screenshots::consent::RunScreenshots::new(
+                profile,
+            )),
             lifetime: Lifetime::new(profile, work, execution, attempt, deadline),
             basis_revision: Arc::new(Mutex::new(projection.work.revision)),
             owner: projection

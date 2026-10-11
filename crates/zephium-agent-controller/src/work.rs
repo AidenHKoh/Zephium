@@ -573,6 +573,7 @@ impl AgentWorkRunSettings {
 /// Approved product input, admitted before native or provider work begins.
 #[must_use]
 pub struct AgentWorkRunInput {
+    model_image_host: Option<Arc<dyn zephium_agentic::SemanticModelImageHost>>,
     decision_provider: Option<super::AgentBrowserDecisionProvider>,
     decision_model: Option<zephium_agentic::AgentProviderModelClient>,
     manifest: AgentRunManifest,
@@ -587,6 +588,18 @@ pub struct AgentWorkRunInput {
 }
 
 impl AgentWorkRunInput {
+    /// Joins the host coordinator before admission. Native source ownership is
+    /// obtained separately from the original retained adapter, never supplied here.
+    pub fn bind_model_image_host(
+        &mut self,
+        host: Arc<dyn zephium_agentic::SemanticModelImageHost>,
+    ) -> Result<(), AgentWorkFailure> {
+        if self.model_image_host.is_some() {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.model_image_host = Some(host);
+        Ok(())
+    }
     /// Enables typed decisions with a trusted provider configuration. Existing
     /// OpenAI ownership supplies the per-question fallback; no scope is added.
     pub fn with_decision_provider(mut self, provider: super::AgentBrowserDecisionProvider) -> Self {
@@ -736,6 +749,7 @@ impl AgentWorkRunInput {
             AgentProviderObjective::try_admit_conservative_utf8(objective, config.tokenizer())
                 .map_err(|_| AgentWorkFailure::Contract)?;
         Ok(Self {
+            model_image_host: None,
             decision_provider: None,
             decision_model: None,
             manifest,
@@ -2333,6 +2347,23 @@ impl AgentWorkController {
             state.retention,
         )
         .map_err(AgentWorkFailure::Browser)?;
+        if let Some(host) = input.model_image_host.take() {
+            let source = state
+                .native
+                .retained
+                .as_ref()
+                .and_then(|retained| retained.screenshot_source_port())
+                .ok_or(AgentWorkFailure::Contract)?;
+            session
+                .policy
+                .bind_model_image_owners(
+                    session.lease.lease(),
+                    source,
+                    host,
+                    input.original_anonymous_read.clone(),
+                )
+                .map_err(|_| AgentWorkFailure::Contract)?;
+        }
         if let Some(provider) = input.decision_provider.take() {
             if let Err(error) = session.configure_decisions(provider, input.decision_model.take()) {
                 session.journal = state.journal.take();
@@ -3406,8 +3437,15 @@ impl AgentWorkController {
             }
             if turn.turn.proposal().kind() == AgentBrowserToolKind::Screenshot {
                 if Self::screenshot_possible(state, &turn, &observation)? {
-                    turn = Self::screenshot_current(state, worker, browser, turn, &observation)
-                        .await?;
+                    match Self::screenshot_current(state, worker, browser, turn, &observation)
+                        .await?
+                    {
+                        Some(next) => turn = next,
+                        None => {
+                            state.observation = Some(observation);
+                            return Ok(());
+                        }
+                    }
                     continue;
                 }
                 // A picture refused for this look goes back as a fresh text
@@ -4898,7 +4936,7 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
         turn: AgentBrowserProviderTurn,
         observation: &SemanticObservation,
-    ) -> Result<AgentBrowserProviderTurn, AgentWorkFailure> {
+    ) -> Result<Option<AgentBrowserProviderTurn>, AgentWorkFailure> {
         state.check_task_contract()?;
         if !state.viewport_screenshot
             || state.native.screenshot_pending.is_some()
@@ -4912,7 +4950,7 @@ impl AgentWorkController {
                 AgentBrowserProviderError::UnsupportedTool(AgentBrowserToolKind::Screenshot),
             ));
         }
-        let screenshot = Self::capture_screenshot(
+        let Some(screenshot) = Self::capture_screenshot(
             state,
             worker,
             browser,
@@ -4920,10 +4958,19 @@ impl AgentWorkController {
             observation,
             SemanticScreenshotBudget::STANDARD,
         )
-        .await?;
+        .await?
+        else {
+            return Ok(None);
+        };
         state.native.check_control(worker, browser)?;
         state.refresh_account(worker, browser)?;
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
+        session
+            .policy
+            .admit_model_image(&screenshot, observation, session.account, now)
+            .await
+            .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?;
         Self::provider(
             &mut state.native,
             worker,
@@ -4932,6 +4979,7 @@ impl AgentWorkController {
             session.continue_after_screenshot(turn.into_tool_turn(), screenshot, observation),
         )
         .await
+        .map(Some)
     }
 
     /// One bounded viewport screenshot of `observation`'s page, bound to the
@@ -4943,7 +4991,7 @@ impl AgentWorkController {
         baseline: &SemanticObservationAcknowledgement,
         observation: &SemanticObservation,
         budget: SemanticScreenshotBudget,
-    ) -> Result<SemanticScreenshot, AgentWorkFailure> {
+    ) -> Result<Option<SemanticScreenshot>, AgentWorkFailure> {
         let now = state
             .session
             .as_mut()
@@ -4966,16 +5014,44 @@ impl AgentWorkController {
                 .checked_add(window_millis)
                 .ok_or(AgentWorkFailure::Contract)?,
         );
-        let request = prepare_semantic_screenshot(
-            SemanticScreenshotRequestId::new(state.native.id()?)
-                .ok_or(AgentWorkFailure::Contract)?,
-            observation,
-            baseline,
-            requested_at,
-            deadline,
-            budget,
-        )
-        .map_err(AgentWorkFailure::ScreenshotRequest)?;
+        let id = SemanticScreenshotRequestId::new(state.native.id()?)
+            .ok_or(AgentWorkFailure::Contract)?;
+        let origin = observation
+            .frames()
+            .first()
+            .ok_or(AgentWorkFailure::Contract)?
+            .frame()
+            .origin()
+            .as_url()
+            .origin()
+            .ascii_serialization();
+        let plan = state
+            .session
+            .as_ref()
+            .ok_or(AgentWorkFailure::Contract)?
+            .policy
+            .model_image_plan(id, observation.request().context(), &origin, now);
+        use zephium_agentic::SemanticModelImagePlan;
+        match plan {
+            SemanticModelImagePlan::Waiting => {
+                Self::raise_image_question(state, observation)?;
+                return Ok(None);
+            }
+            SemanticModelImagePlan::Unavailable => {
+                return Err(AgentWorkFailure::Browser(
+                    AgentBrowserProviderError::Authority,
+                ))
+            }
+            _ => {}
+        }
+        let request =
+            prepare_semantic_screenshot(id, observation, baseline, requested_at, deadline, budget)
+                .map_err(AgentWorkFailure::ScreenshotRequest)?;
+        let request = if plan == SemanticModelImagePlan::Public {
+            request.require_public_page()
+        } else {
+            request
+        };
         let (pending, native) = state
             .native
             .screenshots
@@ -5005,7 +5081,40 @@ impl AgentWorkController {
                 if let Some(retained) = &mut state.native.retained {
                     retained.account_screenshot_terminal(now)?;
                 }
-                capture.map_err(AgentWorkFailure::Screenshot)?
+                match capture {
+                    Ok(capture) => capture,
+                    Err(error) => {
+                        let pending = state
+                            .native
+                            .screenshot_pending
+                            .take()
+                            .ok_or(AgentWorkFailure::Contract)?;
+                        state
+                            .native
+                            .screenshots
+                            .cancel(pending)
+                            .map_err(|_| AgentWorkFailure::Contract)?;
+                        if error
+                            == zephium_agentic::SemanticScreenshotNativeFailure::ConsentRequired
+                            && plan == SemanticModelImagePlan::Public
+                        {
+                            let next = state
+                                .session
+                                .as_ref()
+                                .ok_or(AgentWorkFailure::Contract)?
+                                .policy
+                                .model_image_consent_required(
+                                    observation.request().context(),
+                                    &origin,
+                                );
+                            if next == SemanticModelImagePlan::Waiting {
+                                Self::raise_image_question(state, observation)?;
+                                return Ok(None);
+                            }
+                        }
+                        return Err(AgentWorkFailure::Screenshot(error));
+                    }
+                }
             }
             event => {
                 state.native.retain(event)?;
@@ -5022,7 +5131,30 @@ impl AgentWorkController {
             .native
             .screenshots
             .admit(pending, context, capture)
+            .map(Some)
             .map_err(|_| AgentWorkFailure::ContextLost)
+    }
+
+    fn raise_image_question(
+        state: &mut WorkState,
+        observation: &SemanticObservation,
+    ) -> Result<(), AgentWorkFailure> {
+        let reason = AgentBrowserHumanReason::UserDecision;
+        state
+            .journal_mut()?
+            .emit(AgentWorkEventKind::ModelRequestedHuman(reason))?;
+        state.model_human_request = Some(AgentWorkHumanRequest {
+            context: observation.request().context(),
+            observation: observation.request().id(),
+            generation: observation.request().generation(),
+            reason,
+            retained_resource: state
+                .native
+                .retained
+                .as_ref()
+                .map(|browser| browser.binding().lease().resource().identity()),
+        });
+        Ok(())
     }
 
     async fn wait_current(
@@ -5146,7 +5278,13 @@ impl AgentWorkController {
         // Original delivered baseline and original admitted account; neither
         // can be minted or refreshed later by the local media owner.
         let record_crop_baseline = turn.turn.continuation().baseline().clone();
-        let record_crop_config = session.config.clone();
+        // Model-picture preference is independent of the existing local crop
+        // authority. Preserve only the original Sensitive+model capability gate.
+        let record_crop_config = if state.viewport_screenshot && session.supports_record_crops() {
+            session.config.clone().with_viewport_screenshot()
+        } else {
+            session.config.clone()
+        };
         if session.turns >= session.max_model_calls {
             // Do not capture data when no mapping call can be admitted.
             return Err(AgentWorkFailure::Browser(
@@ -5223,7 +5361,7 @@ impl AgentWorkController {
         // canvas, a gallery, prices drawn as images) is mapped with one
         // viewport screenshot beside its text, when the model can see. The
         // image is best effort: without it the mapping runs as before.
-        let viewport = if expanded.is_none()
+        let mut viewport = if expanded.is_none()
             && state.viewport_screenshot
             && state.native.screenshot_pending.is_none()
             && state
@@ -5248,7 +5386,8 @@ impl AgentWorkController {
             )
             .await
             {
-                Ok(screenshot) => Some(screenshot),
+                Ok(Some(screenshot)) => Some(screenshot),
+                Ok(None) => return Ok(()),
                 Err(
                     AgentWorkFailure::Screenshot(_)
                     | AgentWorkFailure::ScreenshotRequest(_)
@@ -5275,6 +5414,17 @@ impl AgentWorkController {
             .as_ref()
             .ok_or(AgentWorkFailure::Contract)?;
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        if let Some(image) = viewport.as_ref() {
+            let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
+            if session
+                .policy
+                .admit_model_image(image, observation, session.account, now)
+                .await
+                .is_err()
+            {
+                viewport = None;
+            }
+        }
         let result = Self::provider(
             &mut state.native,
             worker,

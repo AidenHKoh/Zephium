@@ -1797,6 +1797,29 @@ fn favicon_raster_batch_is_single_request_bounded_and_exact() {
 }
 
 #[test]
+fn permission_setting_readback_distinguishes_missing_value_and_unavailable() {
+    use zephium_core::ports::store::AppSettingReadback as Readback;
+    let store = SqliteStore::in_memory().unwrap();
+    assert!(matches!(
+        store.app_setting_readback("work.screenshots"),
+        Readback::Missing
+    ));
+    assert!(store.set_app_setting("work.screenshots".into(), "false".into()));
+    assert!(store.flush());
+    assert!(
+        matches!(store.app_setting_readback("work.screenshots"), Readback::Value(value) if value == "false")
+    );
+    assert!(matches!(
+        store.app_setting_readback(""),
+        Readback::Unavailable
+    ));
+    assert!(matches!(
+        store.app_setting_readback(&"x".repeat(MAX_SETTING_KEY_BYTES + 1)),
+        Readback::Unavailable
+    ));
+}
+
+#[test]
 fn app_settings_roundtrip() {
     let store = SqliteStore::in_memory().unwrap();
     assert_eq!(store.app_setting("keymap"), None);

@@ -274,6 +274,15 @@ pub enum StoreShutdownOutcome {
 
 pub type LegacyNotesDone = Box<dyn FnOnce(Option<Vec<crate::resources::ResourceRecord>>) + Send>;
 
+/// Exact application-setting readback. Missing is distinct from an unavailable
+/// database/actor so permission defaults never turn read failures into consent.
+#[derive(Clone, Eq, PartialEq)]
+pub enum AppSettingReadback {
+    Value(String),
+    Missing,
+    Unavailable,
+}
+
 pub trait Store {
     /// Dormant product Work authoring lane. The application selects the profile;
     /// Store independently rejects unregistered/private/deleting profiles.
@@ -466,6 +475,12 @@ pub trait Store {
     fn record_visit(&self, profile: ProfileId, url: String, title: String);
     /// App-level settings (keymap, launcher prefs) live outside profiles.
     fn app_setting(&self, key: &str) -> Option<String>;
+    /// Reads an authoritative value, including a confirmed absent setting.
+    /// Adapters without this proof fail closed for permission consumers.
+    fn app_setting_readback(&self, _key: &str) -> AppSettingReadback {
+        AppSettingReadback::Unavailable
+    }
+
     /// Enqueues an ordered application-setting mutation. `true` means the
     /// bounded adapter accepted the command; durability is established by a
     /// later `flush`/`flush_until` barrier. `false` is a definite rejection.

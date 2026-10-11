@@ -2054,6 +2054,8 @@
   "settings_work_enabled_desc": "Show the Browse and Work switch at the top of the sidebar.",
   "settings_work_failed": "The setting could not be saved. It may be unavailable while work is running.",
   "settings_work_privacy": "Privacy",
+  "settings_work_screenshots": "Let Work look at pages",
+  "settings_work_screenshots_desc": "Use page pictures when text is not enough. Work asks before looking at a signed-in site.",
   "settings_work_website_data": "Work's website data",
   "settings_work_website_data_desc": "Sites Work visited remember things like solved checks and cookie choices. Your own browsing data is separate.",
   "settings_work_website_data_open": "Clear…",
@@ -2881,5 +2883,15 @@
   "download_resume_file_busy": "Close other applications using this file or folder, then use Retry Download. The interrupted transfer expires after five minutes or when its tab closes.",
   "update_status_manual": "Version {version} needs to be installed manually from its release page.",
   "update_install_manual": "Download and install manually",
-  "update_download_latest": "Download latest version"
+  "update_download_latest": "Download latest version",
+  "settings_work_screenshot_sites": "Sites Work may look at",
+  "settings_work_screenshot_sites_desc": "These exact website addresses can share page pictures with the model. This does not allow Work to enter an account or make changes.",
+  "settings_work_screenshot_unconfirmed": "The change could not be confirmed. Page pictures remain blocked.",
+  "settings_work_screenshot_allowed": "Always allow page pictures when needed.",
+  "settings_work_screenshot_forget": "Ask next time",
+  "settings_work_screenshot_none": "No remembered screenshot permissions.",
+  "work_ask_screenshot_title": "Let Work look at pages on {origin}?",
+  "work_ask_screenshot_note": "Send screenshots to your model when page text is not enough.",
+  "work_ask_screenshot_receipt": "Screenshots on {origin}",
+  "work_ask_screenshot_choice_received": "Choice received"
 }

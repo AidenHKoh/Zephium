@@ -437,6 +437,12 @@ impl RunSites {
             self.edits.push(site.to_owned());
         }
     }
+    /// Entry refusal also prevents screenshot permission from being used as
+    /// an alternative way to disclose this site's account page.
+    pub fn image_entry_blocked(&self, site: &str) -> bool {
+        self.standing(site) == Some(WorkSiteAccessV1::Never)
+            || matches!(self.decided.get(site), Some(None))
+    }
     pub fn edits_allowed(&self, site: &str) -> bool {
         self.edits.iter().any(|edit| edit == site)
     }
@@ -592,6 +598,29 @@ async fn call(
 mod tests {
     use super::*;
 
+    #[test]
+    fn screenshot_entry_constraint_only_removes_authority() {
+        let mut sites = RunSites::new(
+            false,
+            vec![WorkSiteEntryV1 {
+                site: "example.com".into(),
+                access: WorkSiteAccessV1::Never,
+            }],
+        );
+        assert!(sites.image_entry_blocked("example.com"));
+        assert!(!sites.image_entry_blocked("other.example"));
+        sites.answer("other.example", EntryAnswer::NotNow);
+        assert!(sites.image_entry_blocked("other.example"));
+        let allowed = RunSites::new(
+            false,
+            vec![WorkSiteEntryV1 {
+                site: "example.com".into(),
+                access: WorkSiteAccessV1::Always,
+            }],
+        );
+        assert!(!allowed.image_entry_blocked("example.com"));
+        // False is only absence of this refusal; it creates no screenshot choice.
+    }
     #[test]
     fn work_site_entries_ask_once_and_respect_standing_answers() {
         let mut run = RunSites::new(

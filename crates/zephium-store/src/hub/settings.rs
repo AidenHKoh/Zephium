@@ -8,20 +8,29 @@ pub(crate) const MAX_APP_SETTINGS: i64 = 128;
 
 impl Hub {
     pub(crate) fn app_setting(&mut self, key: &str) -> Option<String> {
-        if key.is_empty() || key.len() > MAX_SETTING_KEY_BYTES {
-            return None;
+        match self.app_setting_readback(key) {
+            zephium_core::ports::store::AppSettingReadback::Value(value) => Some(value),
+            _ => None,
         }
-        self.meta
-            .query_row(
-                "SELECT CASE WHEN length(CAST(value AS BLOB)) <= ?2 THEN value END
-                 FROM settings WHERE key = ?1",
-                params![key, MAX_SETTING_VALUE_BYTES as i64],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .optional()
-            .ok()
-            .flatten()
-            .flatten()
+    }
+
+    pub(crate) fn app_setting_readback(
+        &mut self,
+        key: &str,
+    ) -> zephium_core::ports::store::AppSettingReadback {
+        use zephium_core::ports::store::AppSettingReadback as Readback;
+        if key.is_empty() || key.len() > MAX_SETTING_KEY_BYTES {
+            return Readback::Unavailable;
+        }
+        match self.meta.query_row(
+            "SELECT CASE WHEN length(CAST(value AS BLOB)) <= ?2 THEN value END FROM settings WHERE key = ?1",
+            params![key, MAX_SETTING_VALUE_BYTES as i64],
+            |r| r.get::<_, Option<String>>(0),
+        ).optional() {
+            Ok(Some(Some(value))) => Readback::Value(value),
+            Ok(None) => Readback::Missing,
+            _ => Readback::Unavailable,
+        }
     }
 
     /// Loads the exact durable key cohort before the actor starts. The shared

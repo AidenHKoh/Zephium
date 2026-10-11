@@ -21,6 +21,11 @@ pub enum WorkRequest {
     SiteAccess {
         set: Option<(String, Option<super::sites::WorkSiteAccessV1>)>,
     },
+    /// Screenshot-only standing consent at canonical origins, independently
+    /// persisted from account/session access. False removes an existing record.
+    ScreenshotAccess {
+        set: Option<(String, bool)>,
+    },
     /// Host-only context read, bound to an existing resource revision and profile.
     ReadMediaContext {
         resource: String,
@@ -160,6 +165,9 @@ impl WorkRequest {
             Self::SiteAccess { set } => set
                 .as_ref()
                 .map_or(Ok(()), |(site, _)| super::sites::validate_site(site)),
+            Self::ScreenshotAccess { set } => set.as_ref().map_or(Ok(()), |(origin, _)| {
+                super::screenshots::validate_origin(origin)
+            }),
             Self::Environment { call, .. } => call.validate(),
             Self::AuthoringCommand { intent, .. } => intent.validate(),
             Self::RuntimeCommand {
@@ -334,6 +342,7 @@ pub enum WorkReply {
     RecordMedia(WorkMediaContext),
     Personal(super::personal::WorkPersonalReply),
     SiteAccess(Vec<super::sites::WorkSiteEntryV1>),
+    ScreenshotAccess(Vec<super::screenshots::WorkScreenshotSiteV1>),
     MediaContext(WorkMediaContext),
     Environment(environment::WorkEnvironmentReply),
     AuthoringCommand(authoring::WorkAuthoringReceipt),

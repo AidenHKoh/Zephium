@@ -282,6 +282,7 @@ impl ReadMeasure {
             settled_revision: None,
             outcome: None,
             resolved_handoff: self.resolved_handoff,
+            image_disclosure: None,
             wall_millis: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
             decision_calls: self.decision_calls,
             emulation_calls: self.emulation_calls,
@@ -777,7 +778,7 @@ impl NativeWorkComposition {
         &self,
         shell: &CallbackHandle,
         attempt: &WorkAttemptProbe,
-        invocation: crate::TrustedWorkRequest,
+        mut invocation: crate::TrustedWorkRequest,
         intervention_origin: Option<String>,
         limits: WorkExecutionLimits,
         outputs: &[String],
@@ -788,6 +789,10 @@ impl NativeWorkComposition {
         resume_plan: Option<ResumePlan>,
         gate: Option<std::sync::Arc<crate::open_objective::site_work::SiteGate>>,
     ) -> Result<BrowserRun, WorkError> {
+        let request=resume_plan.as_ref().map(|plan|&plan.request);
+        let entry=request.filter(|request|request.entry).and_then(|request|request.confirm.clone());
+        let blocked=request.is_none_or(|request|request.image_entry_blocked || (request.entry && request.confirm.is_none()));
+        let visual=invocation.model_images_for(attempt,blocked,entry)?;
         let redirect = invocation.redirect.clone();
         let mut run = self
             .run_retained_page(
@@ -803,8 +808,12 @@ impl NativeWorkComposition {
                 decisions,
                 resume_plan,
                 gate,
+                visual.clone(),
             )
             .await?;
+        if let Some(disclosure)=visual.as_ref().and_then(|visual|visual.possible_disclosure()) {
+            run.measurements.image_disclosure=Some(disclosure);
+        }
         if run.measurements.outcome.is_none() {
             run.measurements.outcome = Some(page_outcome(run.status, run.intervention.as_ref()));
         }
@@ -837,7 +846,9 @@ impl NativeWorkComposition {
         resume_plan: Option<ResumePlan>,
         // Set for an agent page: the site policy holds committing steps here.
         gate: Option<std::sync::Arc<crate::open_objective::site_work::SiteGate>>,
+        visual: Option<std::sync::Arc<zephium_app::work_screenshots::WorkScreenshotAccess>>,
     ) -> Result<BrowserRun, WorkError> {
+        use zephium_agentic::{SemanticModelImageHost as _,SemanticModelImagePlan};
         #[cfg(feature = "public-qualification")]
         let diagnostic = diagnostics.diagnostic;
         #[cfg(feature = "public-qualification")]
@@ -1225,6 +1236,21 @@ impl NativeWorkComposition {
                 } else {
                     clear_since = None;
                 }
+                // Screenshot choices are a separate durable Ask, never site
+                // entry or an effect confirmation. The native page stays hidden.
+                let image_handoff=visual.as_ref().and_then(|visual|visual.handoff());
+                if let Some(human)=guard.0.human_snapshot().filter(|human|human.reason==AgentBrowserHumanReason::UserDecision && image_handoff.is_some() && !requested_close) {
+                    if human.phase==Phase::WaitingForHuman && handing!=Some(human.generation)
+                        && image_handoff!=Some(SemanticModelImagePlan::Waiting) {
+                        successor_notice=Some(if image_handoff==Some(SemanticModelImagePlan::Consented) {
+                            "The person allowed page pictures for this origin. Continue the existing task; a fresh native privacy check is still required."
+                        } else {"Page pictures are unavailable. Continue using text only; if the necessary fact is visual, report that it could not be verified."}.into());
+                        handing=Some(human.generation);
+                        if !guard.0.hand_over(human.generation) {requested_close=true;}
+                    }
+                    if human.phase==Phase::Presented && handing==Some(human.generation) {guard.0.continue_human(human.generation);}
+                }
+                if image_handoff.is_none() {
                 if let (Some(gate), Some(port)) = (&gate, &confirm) {
                     // How the approved step ended, before any next question.
                     if let Some((ask, true)) = gate.ask() {
@@ -1332,6 +1358,7 @@ impl NativeWorkComposition {
                     }
                 }
             }
+            }
             if !requested_close {
                 if let Some(resume) = guard
                     .0
@@ -1428,6 +1455,10 @@ impl NativeWorkComposition {
                             gate.clone(),
                             plan.results.clone(),
                         )?;
+                        if let Some(visual)=&visual {
+                            visual.finish_handoff();
+                            invocation.input.bind_model_image_host(visual.clone()).map_err(|_|WorkError::Invalid)?;
+                        }
                         resume_stage = "decisions";
                         configure_decisions(&mut invocation, plan.decisions, resume_deadline)
                             .await?;
@@ -1683,7 +1714,9 @@ impl NativeWorkComposition {
                                 .as_ref()
                                 .is_some_and(|registration| !registration.claim_site_check())
                         });
-                        let cap = human_wait_cap(intervention.as_ref(), task, anonymous, elsewhere);
+                        let cap = if visual.as_ref().and_then(|visual|visual.handoff()).is_some() {
+                            HUMAN_CHECK_WAIT_MILLIS
+                        } else {human_wait_cap(intervention.as_ref(), task, anonymous, elsewhere)};
                         skipped = cap == 0;
                         let wait = if skipped {
                             None
@@ -3687,7 +3720,9 @@ fn compile_page_step(
         return Ok(request);
     }
     let mut request = request;
-    request.input = if loopback || private_run {
+    // Original anonymous read-only public views use an attempt-owned native
+    // store; Work-memory cookies are never treated as signed-out proof.
+    request.input = if loopback || private_run || (public && !task && !reads_results) {
         request.input.with_isolated_website_data()
     } else {
         request.input.with_work_website_data()
@@ -4366,6 +4401,7 @@ mod public_asset_retry_tests {
     use super::*;
     fn request() -> WorkAgentBrowseRequest {
         WorkAgentBrowseRequest {
+            image_entry_blocked: false,
             construction_attempt: WorkBrowserConstructionAttempt::default(),
             id: WorkStepId::from(1),
             step: WorkStepKindV1::Read {

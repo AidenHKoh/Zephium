@@ -15,6 +15,7 @@ use thiserror::Error;
 use zephium_core::ids::ProfileId;
 
 mod effect;
+mod images;
 mod navigation;
 use effect::AgentEffectRow;
 pub use effect::{
@@ -664,6 +665,7 @@ impl AgentModelCallExpectation {
 
 /// Exact purpose-bound extraction evidence awaiting policy reservation.
 pub(crate) struct AgentProviderExtractionInput<'a, 'read> {
+    viewport_image_guard: Option<[u8; 32]>,
     baseline: &'a SemanticObservationAcknowledgement,
     subtree_target: Option<SemanticReferenceId>,
     schema: &'a SemanticExtractionSchema,
@@ -673,6 +675,10 @@ pub(crate) struct AgentProviderExtractionInput<'a, 'read> {
 }
 
 impl<'a, 'read> AgentProviderExtractionInput<'a, 'read> {
+    pub(crate) fn with_viewport_image_guard(mut self, guard: Option<[u8; 32]>) -> Self {
+        self.viewport_image_guard = guard;
+        self
+    }
     pub(crate) const fn new(
         baseline: &'a SemanticObservationAcknowledgement,
         subtree_target: Option<SemanticReferenceId>,
@@ -682,6 +688,7 @@ impl<'a, 'read> AgentProviderExtractionInput<'a, 'read> {
         structured_input_tokens: u64,
     ) -> Self {
         Self {
+            viewport_image_guard: None,
             baseline,
             subtree_target,
             schema,
@@ -1102,6 +1109,7 @@ impl fmt::Debug for AgentModelCallReceipt {
 /// Mutable single-owner policy state for one exact manifest revision.
 #[must_use]
 pub struct AgentRunPolicy {
+    image_owners: Option<images::ImageOwners>,
     manifest: AgentRunManifest,
     leases: Vec<PlanLeaseState>,
     consumed: ConsumedUsage,
@@ -1157,6 +1165,7 @@ impl AgentRunPolicy {
             return Err(AgentPolicyError::LeaseSet);
         }
         Ok(Self {
+            image_owners: None,
             manifest,
             leases: bindings
                 .into_iter()
@@ -1743,7 +1752,7 @@ impl AgentRunPolicy {
         if !input.delivery.matches(input.schema, input.read) {
             return Err(AgentPolicyError::PayloadMismatch);
         }
-        let candidates = match input.subtree_target {
+        let mut candidates = match input.subtree_target {
             None => provider_extraction_read_taints(
                 input.read,
                 input.baseline,
@@ -1758,6 +1767,25 @@ impl AgentRunPolicy {
                 &self.taints,
             )?,
         };
+        let viewport = input
+            .read
+            .fragments()
+            .iter()
+            .any(|fragment| fragment.field() == crate::SemanticReadField::ViewportImage);
+        if viewport != input.viewport_image_guard.is_some() {
+            return Err(AgentPolicyError::Authority);
+        }
+        if let Some(guard) = input.viewport_image_guard {
+            for candidate in &mut candidates {
+                if candidate.source_guard == input.read.guard()
+                    && candidate.sensitivity == SemanticSensitivity::Sensitive
+                    && candidate.references.is_empty()
+                {
+                    candidate.source_guard = guard;
+                    candidate.attested_at = request.account().observed_at();
+                }
+            }
+        }
         self.prepare_model_input(
             request,
             input.delivery.context(),
@@ -2150,12 +2178,21 @@ impl AgentRunPolicy {
         } else {
             Vec::new()
         };
+        // Only exact native-image cohorts with a current joined disclosure
+        // grant receive this scope exception. Actual retained taint stays
+        // Sensitive; text, arbitrary zero-reference cohorts, and crops do not.
+        let mut scope_candidates = candidates.clone();
+        for candidate in &mut scope_candidates {
+            if self.permits_exact_image_cohort(candidate) {
+                candidate.sensitivity = SemanticSensitivity::Public;
+            }
+        }
         validate_context_scope_with_history(
             &self.manifest,
             node,
             context,
             account,
-            &candidates,
+            &scope_candidates,
             &historical_contexts,
         )?;
 
@@ -3342,6 +3379,8 @@ fn hash_context(hasher: &mut Sha256, context: ContextJoin) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "provider-transport")]
+    mod image_tests;
     mod navigation_tests;
     use super::*;
     use crate::semantic_screenshot::admitted_test_screenshot;

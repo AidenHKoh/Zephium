@@ -22,6 +22,8 @@ mod reads;
 /// it in the session the run decided for its site.
 #[derive(Clone)]
 pub struct WorkAgentBrowseRequest {
+    /// Removal-only entry refusal. It never grants screenshot permission.
+    pub image_entry_blocked: bool,
     pub construction_attempt: zephium_agentic::WorkBrowserConstructionAttempt,
     pub id: WorkStepId,
     pub step: WorkStepKindV1,
@@ -1517,6 +1519,7 @@ impl Driver {
             reads.push(Box::pin(browser(
                 self.probe.clone(),
                 WorkAgentBrowseRequest {
+                    image_entry_blocked: false,
                     construction_attempt: Default::default(),
                     id: *id,
                     step: WorkStepKindV1::Search {
@@ -1909,7 +1912,7 @@ impl Driver {
                             self.charge(usage);
                         }
                         let signed_in = self.session_steps.contains(&id)
-                            || measurements_resolved_sign_in(outcome.measurements);
+                            || measurements_private_page(outcome.measurements);
                         if signed_in && !self.session_steps.contains(&id) {
                             // Privacy provenance only; do not mint an account grant/badge.
                             self.session_steps.push(id);
@@ -3006,9 +3009,15 @@ pub(crate) fn measurements_resolved_sign_in(measurements: Option<WorkStepMeasure
         .is_some_and(|kind| kind.includes(WorkPageHandoffKindV1::SignIn))
 }
 
+pub(crate) fn measurements_private_page(measurements: Option<WorkStepMeasurementsV1>) -> bool {
+    measurements_resolved_sign_in(measurements)
+        || measurements
+            .is_some_and(|m| m.image_disclosure == Some(WorkPageImageDisclosureV1::SiteConsent))
+}
+
 pub(crate) fn private_page_step(step: &WorkStepFact) -> bool {
     matches!(step.kind, WorkStepKindV1::Read { .. })
-        && (step.account.is_some() || measurements_resolved_sign_in(step.measurements))
+        && (step.account.is_some() || measurements_private_page(step.measurements))
 }
 
 /// Retained summaries may include personal source facts too. Conservatively

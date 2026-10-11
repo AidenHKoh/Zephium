@@ -4,6 +4,37 @@ import { askPart, asksOf, confirmVerb, openAsks } from "../components/asks/asks"
 import * as f from "./ask-fixtures";
 
 describe("asks", () => {
+  test("screenshot consent reuses site ask visuals but preserves the exact origin and separate scope", () => {
+    const screenshot = {
+      ...f.addressAsk,
+      kind: {
+        kind: "ask" as const,
+        purpose: "screenshot" as const,
+        prompt: "https://app.example.test:8443",
+        options: ["Allow", "Always allow", "Not now"],
+        answer: null,
+      },
+    };
+    expect(asksOf(f.runWith([screenshot]))[0]).toMatchObject({
+      kind: "entry",
+      screenshotOrigin: "https://app.example.test:8443",
+      host: "app.example.test",
+      always: "Always allow",
+      plan: "",
+    });
+    for (const prompt of [
+      "https://app.example.test/path",
+      "https://app.example.test/",
+      "Work in your Example?",
+    ]) {
+      expect(
+        asksOf(f.runWith([{ ...screenshot, kind: { ...screenshot.kind, prompt } }]))[0]?.kind,
+      ).toBe("question");
+    }
+    const entry = { ...screenshot, kind: { ...screenshot.kind, purpose: "entry" as const } };
+    expect(asksOf(f.runWith([entry]))[0]).not.toHaveProperty("screenshotOrigin");
+  });
+
   test("a folder the run needs is chosen in the panel, with the agent's reason", () => {
     const [ask] = asksOf(f.runWith([f.documentsAsk]));
     expect(ask).toMatchObject({

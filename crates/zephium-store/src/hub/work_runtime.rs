@@ -969,6 +969,7 @@ pub(super) fn update(
         | WorkRuntimeUpdate::SettleStep { execution, .. }
         | WorkRuntimeUpdate::CommandProgress { execution, .. }
         | WorkRuntimeUpdate::PageTitle { execution, .. }
+        | WorkRuntimeUpdate::MarkImageDisclosure { execution, .. }
         | WorkRuntimeUpdate::ExtendLimits { execution, .. }
         | WorkRuntimeUpdate::SettleCommand { execution, .. }
         | WorkRuntimeUpdate::Part { execution, .. }
@@ -1017,6 +1018,36 @@ pub(super) fn update(
                     ..limits
                 };
             }
+        }
+        WorkRuntimeUpdate::MarkImageDisclosure {
+            attempt,
+            step,
+            disclosure,
+            ..
+        } => {
+            // Agent executions have exactly one plan node/attempt; do not let
+            // another child, stopped owner or stale execution mark this read.
+            if !row.fact.is_agent()
+                || row.fact.status != WorkExecutionStatus::Running
+                || !matches!(row.fact.attempts.as_slice(), [owner] if owner.id == attempt && owner.status == WorkAttemptStatus::Running)
+            {
+                return Err(WorkError::Conflict);
+            }
+            let step = row
+                .fact
+                .steps
+                .iter_mut()
+                .find(|s| s.id == step && s.status == WorkStepStatus::Running)
+                .ok_or(WorkError::Conflict)?;
+            if !matches!(step.kind, WorkStepKindV1::Read { .. }) {
+                return Err(WorkError::Invalid);
+            }
+            let measurements = step.measurements.get_or_insert_with(Default::default);
+            measurements.image_disclosure = Some(
+                measurements
+                    .image_disclosure
+                    .map_or(disclosure, |prior| prior.merge(disclosure)),
+            );
         }
         WorkRuntimeUpdate::PageTitle {
             attempt,
@@ -1488,6 +1519,17 @@ pub(super) fn update(
             settled.evidence = record;
             if note.is_some() {
                 settled.note = note;
+            }
+            // A late settlement cannot downgrade pre-dispatch private provenance,
+            // even after a later public view or a missing measurement reply.
+            if let Some(prior) = settled.measurements.and_then(|m| m.image_disclosure) {
+                let measured =
+                    measurements.get_or_insert_with(|| settled.measurements.unwrap_or_default());
+                measured.image_disclosure = Some(
+                    measured
+                        .image_disclosure
+                        .map_or(prior, |next| prior.merge(next)),
+                );
             }
             if let Some(measured) = &mut measurements {
                 // Ignore any revision supplied by an adapter; this exact durable

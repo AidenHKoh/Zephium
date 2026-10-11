@@ -6,6 +6,7 @@
   import SettingsRow from "$shared/ui/SettingsRow";
   import Switch from "$shared/ui/Switch";
   import WorkWebsiteData from "../WorkWebsiteData.svelte";
+  import WorkScreenshotSites from "../WorkScreenshotSites.svelte";
   let profile = $derived(tabs.profile());
 </script>
 
@@ -34,9 +35,22 @@
       onchange={(on) => void preferences.set("ai.enabled", String(on))}
     /></SettingsRow
   >
+  <SettingsRow
+    settingId="work.screenshots"
+    title={m.settings_work_screenshots()}
+    description={m.settings_work_screenshots_desc()}
+    ><Switch
+      label={m.settings_work_screenshots()}
+      labelHidden
+      checked={preferences.value("work.screenshots") !== "false"}
+      disabled={preferences.saving()}
+      onchange={(on) => void preferences.set("work.screenshots", String(on))}
+    /></SettingsRow
+  >
 </SettingsGroup>
 {#if profile && profile.kind !== "incognito"}
   <SettingsGroup title={m.settings_work_privacy()}>
+    <WorkScreenshotSites profile={profile.id} />
     <WorkWebsiteData profile={profile.id} />
   </SettingsGroup>
 {/if}

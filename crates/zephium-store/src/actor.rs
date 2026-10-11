@@ -365,6 +365,10 @@ enum Cmd {
         Box<dyn FnOnce(DownloadStoreReply) + Send>,
     ),
     GetSetting(String, Sender<Option<String>>),
+    ReadSetting(
+        String,
+        Sender<zephium_core::ports::store::AppSettingReadback>,
+    ),
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
     RecordSearch(ProfileId, String, String),
     // Two adjacent Option<i64> bounds mean different things; name them.
@@ -1088,6 +1092,19 @@ impl Store for SqliteStore {
         rx.recv_timeout(STORE_RPC_TIMEOUT).ok().flatten()
     }
 
+    fn app_setting_readback(&self, key: &str) -> zephium_core::ports::store::AppSettingReadback {
+        use zephium_core::ports::store::AppSettingReadback as Readback;
+        if key.is_empty() || key.len() > MAX_SETTING_KEY_BYTES {
+            return Readback::Unavailable;
+        }
+        let (tx, rx) = mpsc::channel();
+        if self.tx.try_send(Cmd::ReadSetting(key.into(), tx)).is_err() {
+            return Readback::Unavailable;
+        }
+        rx.recv_timeout(STORE_RPC_TIMEOUT)
+            .unwrap_or(Readback::Unavailable)
+    }
+
     fn set_app_setting(&self, key: String, value: String) -> bool {
         if key.is_empty()
             || key.len() > MAX_SETTING_KEY_BYTES
@@ -1738,6 +1755,9 @@ fn actor(
             }
             Some(Cmd::GetSetting(key, reply)) => {
                 let _ = reply.send(hub.app_setting(&key));
+            }
+            Some(Cmd::ReadSetting(key, reply)) => {
+                let _ = reply.send(hub.app_setting_readback(&key));
             }
             Some(Cmd::ResourceCall(profile, call, done, admission)) => {
                 let response = if !hub.knows(profile) && !flush(&mut hub, &mut pending) {

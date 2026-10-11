@@ -237,6 +237,8 @@ impl Driver {
                 self.probe.record_activity(WorkActivityV1::Reading);
                 let board = matches!(kind, WorkStepKindV1::Read { ref url, .. } if job_board(url));
                 let request = WorkAgentBrowseRequest {
+                    image_entry_blocked: crate::work_sites::site_of(url)
+                        .is_some_and(|site| self.sites.image_entry_blocked(&site)),
                     // A board's listings render late: its page gets the longer
                     // loading window from the start, inside the read's budget.
                     construction_attempt: if board {
@@ -473,6 +475,8 @@ impl Driver {
         }
         self.probe.record_activity(WorkActivityV1::Reading);
         Ok(Some(WorkAgentBrowseRequest {
+            image_entry_blocked: crate::work_sites::site_of(destination)
+                .is_some_and(|site| self.sites.image_entry_blocked(&site)),
             construction_attempt: Default::default(),
             id,
             step: kind,
@@ -1000,6 +1004,52 @@ impl Driver {
                     }
                 }
             }
+            // These tickets originate only from the native screenshot fallback,
+            // not from a helper-authored Ask or the site's account-entry choice.
+            let screenshot_pages: Vec<_> = pending.iter().map(|read| read.request.id).collect();
+            while let Some(ticket) = self
+                .probe
+                .screenshot_choices()
+                .take_check(&screenshot_pages)
+            {
+                ticket.check(&self.handle).await;
+            }
+            while let Some(ticket) = self
+                .probe
+                .screenshot_choices()
+                .take_question(&screenshot_pages)
+            {
+                self.probe.record_activity(WorkActivityV1::WaitingForHuman);
+                let fact = self.step(
+                    WorkStepKindV1::Ask {
+                        prompt: ticket.origin().to_owned(),
+                        options: vec!["Allow".into(), "Always allow".into(), "Not now".into()],
+                        answer: None,
+                        purpose: Some(WorkAskPurposeV1::Screenshot),
+                    },
+                    WorkStepStatus::Running,
+                );
+                let step = match self.begin(fact, vec![], None).await {
+                    Ok(step) => step,
+                    Err(error) => {
+                        ticket.deny();
+                        return Err(error);
+                    }
+                };
+                if !ticket.bind(step) {
+                    ticket.deny();
+                    self.settle(
+                        step,
+                        WorkStepStatus::Cancelled,
+                        None,
+                        vec![],
+                        None,
+                        Some("The page closed before you decided".into()),
+                        None,
+                    )
+                    .await?;
+                }
+            }
             let look = changes.take() || looked.elapsed() >= crate::work_changes::FALLBACK;
             if look {
                 looked = Instant::now();
@@ -1029,6 +1079,62 @@ impl Driver {
                         crate::work_sites::EntryAnswer::Always => WorkSiteEntry::Always,
                         crate::work_sites::EntryAnswer::NotNow => WorkSiteEntry::NotNow,
                     });
+                }
+            }
+            if look {
+                let questions = self.probe.screenshot_choices().questions(&screenshot_pages);
+                if !questions.is_empty() {
+                    let projection = self.probe.runtime_projection().await?;
+                    let steps = projection
+                        .executions
+                        .iter()
+                        .find(|execution| execution.id == self.probe.execution())
+                        .map(|execution| execution.steps.as_slice())
+                        .unwrap_or_default();
+                    for ticket in questions {
+                        let Some(step) = ticket.step() else {
+                            continue;
+                        };
+                        let Some(fact) = steps.iter().find(|fact| fact.id == step) else {
+                            ticket.deny();
+                            continue;
+                        };
+                        let answer = match &fact.kind {
+                            WorkStepKindV1::Ask {
+                                prompt,
+                                options,
+                                answer: Some(answer),
+                                purpose: Some(WorkAskPurposeV1::Screenshot),
+                            } if fact.status == WorkStepStatus::Succeeded
+                                && prompt == ticket.origin()
+                                && options
+                                    == &[
+                                        "Allow".to_owned(),
+                                        "Always allow".to_owned(),
+                                        "Not now".to_owned(),
+                                    ] =>
+                            {
+                                use crate::work_screenshots::consent::ScreenshotAnswer;
+                                Some(match answer.as_str() {
+                                    "Allow" => ScreenshotAnswer::Allow,
+                                    "Always allow" => ScreenshotAnswer::Always,
+                                    _ => ScreenshotAnswer::NotNow,
+                                })
+                            }
+                            _ => None,
+                        };
+                        if let Some(answer) = answer {
+                            ticket.answer(&self.handle, step, answer).await;
+                            ticket.question_closed();
+                        } else if fact.status != WorkStepStatus::Running {
+                            ticket.deny();
+                            ticket.question_closed();
+                        } else if ticket.current()
+                            == crate::work_screenshots::consent::ScreenshotChoice::Denied
+                        {
+                            self.cancel_screenshot_question(&ticket).await?;
+                        }
+                    }
                 }
             }
             if look && open.iter().any(|confirm| !confirm.decided) {
@@ -1069,6 +1175,11 @@ impl Driver {
                 }
             }
             if let Some(read) = settled {
+                let screenshot_questions = self.probe.screenshot_choices().questions(&[read.0.id]);
+                self.probe.screenshot_choices().cancel_page(read.0.id);
+                for ticket in screenshot_questions {
+                    self.cancel_screenshot_question(&ticket).await?;
+                }
                 if let Some((port, step, site, _)) = entry.take() {
                     if port.entry().is_none() {
                         self.settle(
@@ -1111,6 +1222,49 @@ impl Driver {
                 return Ok(read);
             }
         }
+    }
+
+    async fn cancel_screenshot_question(
+        &mut self,
+        ticket: &crate::work_screenshots::consent::QuestionTicket,
+    ) -> Result<(), WorkError> {
+        ticket.deny();
+        let Some(step) = ticket.step() else {
+            return Ok(());
+        };
+        let result = self
+            .probe
+            .commit_step(WorkRuntimeUpdate::SettleStep {
+                execution: self.probe.execution(),
+                attempt: self.probe.attempt(),
+                step,
+                status: WorkStepStatus::Cancelled,
+                usage: None,
+                artifacts: vec![],
+                evidence: None,
+                file: None,
+                note: Some("The screenshot question is no longer current".into()),
+                measurements: None,
+            })
+            .await;
+        if let Err(error) = result {
+            // Answer/Stop can close the question concurrently. Its terminal
+            // stays authoritative; never overwrite it or leave a waiting Ask.
+            let closed = self
+                .probe
+                .runtime_projection()
+                .await?
+                .executions
+                .iter()
+                .find(|execution| execution.id == self.probe.execution())
+                .and_then(|execution| execution.steps.iter().find(|fact| fact.id == step))
+                .is_some_and(|fact| fact.status != WorkStepStatus::Running);
+            if !closed {
+                return Err(error);
+            }
+        }
+        ticket.question_closed();
+        Ok(())
     }
 
     /// Records a held step for the person; the text's provenance is the
@@ -2113,6 +2267,27 @@ mod tests {
             &private
         ));
         assert!(!query_discloses("weather in Warsaw", &private));
+        // Screenshot consent is independent of sign-in/account-entry authority.
+        read.measurements.as_mut().unwrap().resolved_handoff = None;
+        read.measurements.as_mut().unwrap().image_disclosure =
+            Some(WorkPageImageDisclosureV1::PublicIsolated);
+        assert!(!private_page_step(&read));
+        read.measurements.as_mut().unwrap().image_disclosure =
+            Some(WorkPageImageDisclosureV1::SiteConsent);
+        assert!(private_page_step(&read));
+        assert!(measurements_private_page(read.measurements));
+        assert!(!measurements_resolved_sign_in(read.measurements));
+        let private =
+            private_artifact_texts([(&[read.clone()][..], &source[..]), (&[][..], &summary[..])]);
+        assert_eq!(private.len(), 2);
+        assert!(query_discloses(
+            "My private account renewal budget is 99317 euros",
+            &private
+        ));
+        assert_eq!(
+            WorkPageImageDisclosureV1::SiteConsent.merge(WorkPageImageDisclosureV1::PublicIsolated),
+            WorkPageImageDisclosureV1::SiteConsent
+        );
         assert!(
             read.account.is_none(),
             "privacy classification must not invent account permission"

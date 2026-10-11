@@ -2540,6 +2540,14 @@ impl AgentBrowserSession {
 
     /// Whether the page model accepts screenshots.
     pub(crate) fn supports_vision(&self) -> bool {
+        self.policy.model_images_available(self.lease.lease())
+            && self
+                .chosen
+                .as_ref()
+                .is_none_or(zephium_agentic::AgentProviderModelClient::supports_vision)
+    }
+    /// Existing local crop capability, independent of model-image preference.
+    pub(crate) fn supports_record_crops(&self) -> bool {
         self.policy
             .permits_screenshot_sensitivity(self.lease.lease())
             && self
@@ -4888,8 +4896,12 @@ mod tests {
             AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
         );
         assert!(
-            exact.supports_vision(),
-            "the separately supported explicit Screenshot tool remains available"
+            !exact.supports_vision(),
+            "model pictures require original native and host owners"
+        );
+        assert!(
+            exact.supports_record_crops(),
+            "local Sensitive crop capability is unchanged"
         );
         assert!(
             !exact.supports_viewport_mapping(),
@@ -4928,8 +4940,9 @@ mod tests {
                 session.config.input_accounting_mode(),
                 AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation
             );
-            assert_eq!(session.supports_vision(), vision);
-            assert_eq!(session.supports_viewport_mapping(), vision);
+            assert_eq!(session.supports_record_crops(), vision);
+            assert!(!session.supports_vision());
+            assert!(!session.supports_viewport_mapping());
         }
     }
 

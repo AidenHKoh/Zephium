@@ -1081,6 +1081,28 @@ pub enum WorkCostBasis {
     Reserved,
 }
 
+/// Conservative provenance after model-image dispatch, including unknown
+/// transmission. It never grants account entry, effects or later disclosure.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkPageImageDisclosureV1 {
+    /// Native fresh-isolated public proof authorized the exact image.
+    PublicIsolated,
+    /// An exact site screenshot consent authorized the exact image.
+    SiteConsent,
+}
+impl WorkPageImageDisclosureV1 {
+    /// Privacy provenance is sticky; a later public view cannot downgrade it.
+    pub fn merge(self, next: Self) -> Self {
+        if self == Self::SiteConsent || next == Self::SiteConsent {
+            Self::SiteConsent
+        } else {
+            Self::PublicIsolated
+        }
+    }
+}
+
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Copy, Debug, Default, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -1098,6 +1120,9 @@ pub struct WorkStepMeasurementsV1 {
     /// A wall verified clear before the same retained task resumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_handoff: Option<WorkPageHandoffKindV1>,
+    /// Sticky model-image disclosure provenance, absent on older/text-only steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_disclosure: Option<WorkPageImageDisclosureV1>,
     /// Wall time from the step's resource launch to its settled outcome.
     pub wall_millis: u32,
     /// Typed decision calls answered by the recommended backend.
@@ -1128,6 +1153,8 @@ impl<'de> Deserialize<'de> for WorkStepMeasurementsV1 {
             outcome: Option<WorkPageOutcomeV1>,
             #[serde(default)]
             resolved_handoff: Option<WorkPageHandoffKindV1>,
+            #[serde(default)]
+            image_disclosure: Option<WorkPageImageDisclosureV1>,
             wall_millis: u32,
             decision_calls: u16,
             emulation_calls: u16,
@@ -1145,6 +1172,7 @@ impl<'de> Deserialize<'de> for WorkStepMeasurementsV1 {
             settled_revision: wire.settled_revision,
             outcome: wire.outcome,
             resolved_handoff: wire.resolved_handoff,
+            image_disclosure: wire.image_disclosure,
             wall_millis: wire.wall_millis,
             decision_calls: wire.decision_calls,
             emulation_calls: wire.emulation_calls,
@@ -1461,6 +1489,8 @@ pub enum WorkAskPurposeV1 {
     Question,
     /// Whether the agent may work in the person's session on a site.
     Entry,
+    /// Screenshot consent for one origin. This grants no account entry or action.
+    Screenshot,
     /// The run spent its budget: keep going or stop.
     Budget,
     /// Whether the agent may read the person's history, notes or tabs.
@@ -1609,7 +1639,8 @@ pub struct WorkStepFact {
     /// A short line for people: what the agent said or what this step found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    /// Closed measurements of a settled browser step; absent for other kinds.
+    /// Browser measurements; a running read may carry conservative image
+    /// disclosure provenance before its final measurements settle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measurements: Option<WorkStepMeasurementsV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2882,6 +2913,14 @@ pub enum WorkRuntimeIntent {
 
 #[derive(Clone, Debug)]
 pub enum WorkRuntimeUpdate {
+    /// Host-only conservative privacy provenance, committed before image input
+    /// may leave. This is not permission, billing, or proof bytes were sent.
+    MarkImageDisclosure {
+        execution: WorkExecutionId,
+        attempt: WorkAttemptId,
+        step: WorkStepId,
+        disclosure: WorkPageImageDisclosureV1,
+    },
     PageTitle {
         execution: WorkExecutionId,
         attempt: WorkAttemptId,

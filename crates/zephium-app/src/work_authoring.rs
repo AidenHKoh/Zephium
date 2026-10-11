@@ -222,6 +222,7 @@ impl WorkDocumentSubmission {
             | WorkRequest::Environment { .. }
             | WorkRequest::ReadMediaContext { .. }
             | WorkRequest::SiteAccess { .. }
+            | WorkRequest::ScreenshotAccess { .. }
             | WorkRequest::Personal(_) => None,
         };
         pending

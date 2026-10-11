@@ -47,6 +47,8 @@ impl Shell {
             } => self.operation_invoke_extension_action(runtime, revision, anchor),
             Command::OpenUrl { input, new_tab } => self.operation_open_url(input, new_tab),
             Command::SetAppSetting { key, value } => self.operation_set_app_setting(key, value),
+            #[cfg(feature = "work-planning")]
+            Command::SetWorkScreenshots(change) => self.operation_set_work_screenshots(change),
             Command::Focus(control) => self.operation_focus(control),
             Command::RetryContentPolicy {
                 profile,
@@ -775,6 +777,16 @@ impl Shell {
         if !zephium_core::preferences::value_allowed(&key, &value) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         }
+        #[cfg(feature = "work-planning")]
+        if key == "work.screenshots" {
+            let Some(change) = crate::work_screenshots::begin_preference(value == "true") else {
+                return operation_result(
+                    OperationOutcome::Rejected,
+                    OperationReason::StoreConflict,
+                );
+            };
+            return self.operation_set_work_screenshots(change);
+        }
         if !self.store.set_app_setting(key.clone(), value.clone()) {
             return operation_result(
                 OperationOutcome::Rejected,
@@ -807,6 +819,26 @@ impl Shell {
             OperationOutcome::Deferred,
             OperationReason::StoreWorkPending,
         )
+    }
+
+    #[cfg(feature = "work-planning")]
+    pub(super) fn operation_set_work_screenshots(
+        &mut self,
+        change: crate::work_screenshots::PreferenceChange,
+    ) -> OperationDisposition {
+        let confirmed = change.persist(self.store.as_ref());
+        (self.emit)(Projection::UiCommand(format!(
+            "preference.work.screenshots={}",
+            change.effective()
+        )));
+        if confirmed {
+            operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
+        } else {
+            operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::StoreOutcomeUnknown,
+            )
+        }
     }
 
     pub(super) fn operation_run_command(&mut self, id: &str) -> OperationDisposition {

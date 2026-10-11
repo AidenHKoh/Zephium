@@ -19,6 +19,7 @@ const defaults = {
   "ui.tab-layout": "vertical",
   "ai.enabled": "true",
   "work.enabled": "true",
+  "work.screenshots": "true",
   "ui.language": "system",
   "ui.density": "comfortable",
   "ui.text-size": "default",

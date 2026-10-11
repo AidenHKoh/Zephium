@@ -1084,6 +1084,10 @@ impl Shell {
             Command::SetAppSetting { key, value } => {
                 let _ = self.operation_set_app_setting(key, value);
             }
+            #[cfg(feature = "work-planning")]
+            Command::SetWorkScreenshots(change) => {
+                let _ = self.operation_set_work_screenshots(change);
+            }
             // These mutations are accepted only through `Command::Operation`
             // so every foreground request has one truthful terminal identity.
             Command::DeleteProfile(_)

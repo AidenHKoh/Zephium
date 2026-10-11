@@ -74,6 +74,52 @@ fn site_access(
     Ok(entries)
 }
 
+const SCREENSHOT_ACCESS_KEY: &str = "work.screenshot_access";
+fn screenshot_access(
+    conn: &mut Connection,
+    set: Option<(String, bool)>,
+) -> Result<Vec<screenshots::WorkScreenshotSiteV1>, WorkError> {
+    let tx = conn.transaction().map_err(|_| WorkError::Unavailable)?;
+    let stored: Option<String> = tx.query_row(
+        "SELECT CASE WHEN length(CAST(value AS BLOB)) <= 262144 THEN value END FROM settings WHERE key = ?1",
+        [SCREENSHOT_ACCESS_KEY], |row| row.get(0),
+    ).optional().map_err(|_| WorkError::Unavailable)?;
+    let mut entries: Vec<screenshots::WorkScreenshotSiteV1> = match stored {
+        Some(value) => serde_json::from_str(&value).map_err(|_| WorkError::Invalid)?,
+        None => Vec::new(),
+    };
+    if entries.len() > screenshots::MAX_SCREENSHOT_SITES
+        || entries
+            .iter()
+            .any(|entry| screenshots::validate_origin(&entry.origin).is_err())
+        || entries
+            .windows(2)
+            .any(|pair| pair[0].origin >= pair[1].origin)
+    {
+        return Err(WorkError::Invalid);
+    }
+    let Some((origin, allow)) = set else {
+        return Ok(entries);
+    };
+    screenshots::validate_origin(&origin)?;
+    entries.retain(|entry| entry.origin != origin);
+    if allow {
+        if entries.len() >= screenshots::MAX_SCREENSHOT_SITES {
+            return Err(WorkError::Capacity);
+        }
+        entries.push(screenshots::WorkScreenshotSiteV1 { origin });
+        entries.sort_by(|a, b| a.origin.cmp(&b.origin));
+    }
+    let value = serde_json::to_string(&entries).map_err(|_| WorkError::Invalid)?;
+    tx.execute(
+        "INSERT INTO settings(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=?2",
+        params![SCREENSHOT_ACCESS_KEY, value],
+    )
+    .map_err(|_| WorkError::Unavailable)?;
+    tx.commit().map_err(|_| WorkError::Unavailable)?;
+    Ok(entries)
+}
+
 impl Hub {
     pub(crate) fn work_document(
         &mut self,
@@ -139,6 +185,12 @@ impl Hub {
                 .profile_conn(profile)
                 .map_err(|_| WorkError::Unavailable)?;
             return site_access(conn, set).map(WorkReply::SiteAccess);
+        }
+        if let WorkRequest::ScreenshotAccess { set } = request {
+            let conn = self
+                .profile_conn(profile)
+                .map_err(|_| WorkError::Unavailable)?;
+            return screenshot_access(conn, set).map(WorkReply::ScreenshotAccess);
         }
         if let WorkRequest::ReadMediaContext { resource, revision } = &request {
             use sha2::{Digest, Sha256};
@@ -407,6 +459,7 @@ fn apply(
         | WorkRequest::ReadRecordMedia { .. }
         | WorkRequest::ReadMediaContext { .. }
         | WorkRequest::SiteAccess { .. }
+        | WorkRequest::ScreenshotAccess { .. }
         | WorkRequest::Personal(_) => return Err(WorkError::Invalid),
         WorkRequest::AcknowledgeOrphan {
             id,

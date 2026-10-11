@@ -1461,12 +1461,17 @@ pub struct AgentProviderTransportInput {
 impl AgentProviderTransportInput {
     /// Adds only a live revocation fence; existing native image/source and
     /// policy admission remain mandatory. Never serialized to the provider.
-    pub fn with_image_fence(mut self, fence: std::sync::Arc<dyn zephium_core::work::model::WorkModelImageFence>) -> Self {
+    pub fn with_image_fence(
+        mut self,
+        fence: std::sync::Arc<dyn zephium_core::work::model::WorkModelImageFence>,
+    ) -> Self {
         self.image_fence = Some(fence);
         self
     }
     #[cfg(feature = "provider-transport")]
-    pub(crate) fn image_fence(&self) -> Option<std::sync::Arc<dyn zephium_core::work::model::WorkModelImageFence>> {
+    pub(crate) fn image_fence(
+        &self,
+    ) -> Option<std::sync::Arc<dyn zephium_core::work::model::WorkModelImageFence>> {
         self.image_fence.clone()
     }
     /// Exact immutable request available for bounded transport admission.
@@ -3044,6 +3049,7 @@ impl fmt::Debug for AgentPreparedReadContinuationRequest {
 /// Rust after streaming completes.
 #[must_use]
 pub struct AgentProviderExtractionRequestDraft {
+    viewport_image_guard: Option<[u8; 32]>,
     request: AgentProviderRequest,
     baseline: SemanticObservationAcknowledgement,
     delivery: SemanticExtractionDeliveryAuthority,
@@ -3088,6 +3094,7 @@ impl AgentProviderExtractionRequestDraft {
                     {"type": "input_image", "image_url": image_url, "detail": "high"},
                 ],
             }));
+        self.viewport_image_guard = Some(screenshot.delivery_guard());
         self.request.body = encode_bounded_provider_body(&wire)?;
         Ok(self)
     }
@@ -3125,6 +3132,7 @@ impl AgentProviderExtractionRequestDraft {
             AgentProviderTranscript::try_initial(Arc::from(objective.as_str()), text)
                 .ok_or(AgentProviderRequestError::Encoding)?;
         Ok(Self {
+            viewport_image_guard: None,
             request: AgentProviderRequest {
                 call: AgentProviderCallIdentity {
                     manifest: prior.manifest,
@@ -3226,6 +3234,7 @@ impl AgentProviderExtractionRequestDraft {
             AgentProviderTranscript::try_initial(Arc::from(objective.as_str()), text)
                 .ok_or(AgentProviderRequestError::Encoding)?;
         Ok(Self {
+            viewport_image_guard: None,
             request: AgentProviderRequest {
                 call: AgentProviderCallIdentity {
                     manifest: prior.manifest,
@@ -3272,6 +3281,7 @@ impl AgentProviderExtractionRequestDraft {
         let (call, config, baseline, continuation_transcript, semantic_stats, delivery) =
             continuation.into_request_parts();
         Ok(Self {
+            viewport_image_guard: None,
             request: AgentProviderRequest {
                 call,
                 config,
@@ -3354,7 +3364,8 @@ impl AgentProviderExtractionRequestDraft {
                 read,
                 &self.delivery,
                 u64::from(structured_input.tokens()),
-            ),
+            )
+            .with_viewport_image_guard(self.viewport_image_guard),
         )?;
         debug_assert_eq!(call, AgentProviderCallIdentity::from_admission(&admission));
         let output =
@@ -3398,7 +3409,8 @@ impl AgentProviderExtractionRequestDraft {
                 read,
                 &self.delivery,
                 u64::from(structured_input.tokens()),
-            ),
+            )
+            .with_viewport_image_guard(self.viewport_image_guard),
         )?;
         debug_assert_eq!(call, AgentProviderCallIdentity::from_admission(&admission));
         let output =

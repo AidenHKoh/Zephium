@@ -1611,6 +1611,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             account::account_receipt,
             work_sites::work_sites,
             work_sites::work_set_site,
+            work_sites::work_screenshot_sites,
+            work_sites::work_set_screenshot_site,
             work_website_data::work_clear_website_data,
             work_connections::work_connections,
             work_connections::work_save_connection,
@@ -4182,6 +4184,10 @@ async fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
     if !SETTING_KEYS.contains(&key.as_str()) {
         return None;
     }
+    #[cfg(feature = "work-product")]
+    if key == "work.screenshots" {
+        return Some(zephium_app::work_screenshots::enabled().to_string());
+    }
     // A synchronous command runs on the main thread, and the store may be
     // busy for seconds (an import, a deletion); the read waits off it.
     tauri::async_runtime::spawn_blocking(move || {
@@ -4213,6 +4219,14 @@ fn setting_set(
         return rejected_operation();
     }
     if SETTING_KEYS.contains(&key.as_str()) && setting_value_allowed(&key, &value) {
+        #[cfg(feature = "work-product")]
+        if key == "work.screenshots" {
+            let Some(change) = zephium_app::work_screenshots::begin_preference(value == "true")
+            else {
+                return rejected_operation();
+            };
+            return dispatch_operation(&app, &shell, Command::SetWorkScreenshots(change));
+        }
         #[cfg(feature = "work-product")]
         if matches!(key.as_str(), "ai.enabled" | "work.enabled") {
             let Some(owner) = app.try_state::<work_product::WorkProductState>() else {
@@ -6683,6 +6697,17 @@ mod tests {
                 "../frame/src/shared/ipc/bindings.ts",
             )
             .expect("export bindings");
+        // Specta emits trailing spaces for documented union variants. Keep
+        // generated output deterministic and clean without hand-edited types.
+        let path = "../frame/src/shared/ipc/bindings.ts";
+        let generated = std::fs::read_to_string(path).expect("read generated bindings");
+        let normalized = generated
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(path, normalized).expect("normalize generated bindings");
         std::fs::write(
             "../frame/src/shared/ipc/work-constants.ts",
             format!(

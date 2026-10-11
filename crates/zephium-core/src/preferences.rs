@@ -16,6 +16,7 @@ pub const KEYS: &[&str] = &[
     "onboarding",
     "ai.enabled",
     "work.enabled",
+    "work.screenshots",
     "ui.language",
     "ui.density",
     "ui.text-size",
@@ -107,6 +108,7 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         | "ui.newtab-tasks"
         | "ai.enabled"
         | "work.enabled"
+        | "work.screenshots"
         | "ui.contrast"
         | "search.history"
         | "tabs.switch-to-open"
@@ -210,7 +212,7 @@ mod tests {
         assert!(value_allowed("ui.text-size", "large"));
         assert!(value_allowed("ui.tab-layout", "horizontal"));
         assert!(value_allowed("onboarding", "done"));
-        for key in ["ai.enabled", "work.enabled"] {
+        for key in ["ai.enabled", "work.enabled", "work.screenshots"] {
             assert!(KEYS.contains(&key));
             assert!(value_allowed(key, "true"));
             assert!(value_allowed(key, "false"));

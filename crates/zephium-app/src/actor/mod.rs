@@ -1170,6 +1170,10 @@ fn finish_unprocessed_command(command: Command, outcome: ShutdownOutcome) {
 }
 
 fn tracked_operation_command(command: &Command) -> bool {
+    #[cfg(feature = "work-planning")]
+    if matches!(command, Command::SetWorkScreenshots(_)) {
+        return true;
+    }
     matches!(
         command,
         Command::Open

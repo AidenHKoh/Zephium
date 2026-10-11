@@ -22,6 +22,7 @@ pub mod proposal;
 pub mod runtime;
 pub mod search;
 pub mod sites;
+pub mod screenshots;
 pub mod synthesis;
 #[cfg(test)]
 mod tests;

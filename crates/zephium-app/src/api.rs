@@ -502,6 +502,9 @@ pub enum Command {
         key: String,
         value: String,
     },
+    /// Already-revoked global image preference waiting for exact persistence.
+    #[cfg(feature = "work-planning")]
+    SetWorkScreenshots(crate::work_screenshots::PreferenceChange),
     /// Permanently removes one inactive named profile through the durable
     /// cross-store deletion coordinator. The profile id comes only from
     /// privileged chrome and is revalidated against authoritative state.
