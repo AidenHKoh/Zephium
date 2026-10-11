@@ -19,6 +19,7 @@ import re
 import shutil
 import signal
 import statistics
+import stat
 import subprocess
 import sys
 import tempfile
@@ -53,6 +54,14 @@ FORM_INSTRUMENTATION = {
     "crates/zephium-engine/src/platform/macos/agentic_form_diagnostic_probe.rs",
     "crates/zephium-engine/src/platform/macos/agentic_form_diagnostic_probe.js",
 }
+LOCAL_INSTRUMENTATION = {
+    "crates/zephium-terra-macos-probe/src/main.rs",
+    "crates/zephium-terra-macos-probe/src/work_local_fixture.rs",
+    "crates/zephium-terra-macos-probe/src/work_heldout_blocks.rs",
+    "crates/zephium-terra-macos-probe/Cargo.toml", "Cargo.lock", "eval/work-heldout-v1.json",
+}
+LOCAL_ELIGIBILITY = {"pending_confined_fixture", "pending_blocks_state_oracle"}
+
 FORM_CHECK_COUNTS = {
     "form-httpbin-draft": 11, "form-selenium-controls": 3, "form-selenium-date": 2,
     "form-expand-inputs": 3, "form-heroku-numeric": 2, "form-heroku-dropdown": 1,
@@ -218,7 +227,8 @@ def freeze(args):
     patch = git(source, "diff", "--binary", args.base_ref)
     changed = set(git(source, "diff", "--name-only", args.base_ref).decode().splitlines())
     forms = getattr(args, "form_oracle", False)
-    allowed = INSTRUMENTATION | (FORM_INSTRUMENTATION if forms else set())
+    locals_enabled = getattr(args, "local_fixtures", False)
+    allowed = INSTRUMENTATION | (FORM_INSTRUMENTATION if forms else set()) | (LOCAL_INSTRUMENTATION if locals_enabled else set())
     if args.label == "baseline" and not changed <= allowed:
         raise ValueError("baseline source includes production changes after base revision")
     if forms:
@@ -260,6 +270,19 @@ def freeze(args):
             record["form_oracle"]["files"][copied] = digest(out / copied)
             if Path(name).name in ("work_resource_form_oracle.rs", "work_form_oracle.js", "form_qualification.rs", "form_submit_observer.js", "agentic_form_diagnostic_probe.rs", "agentic_form_diagnostic_probe.js"):
                 record["form_oracle"]["predicate_files"][copied] = digest(out / copied)
+    if locals_enabled:
+        directory = out / "local-fixtures"
+        directory.mkdir(mode=0o700)
+        record["local_fixtures"] = {"version": 1, "files": {}, "predicate_files": {},
+            "authority": "Only exact predeclared synthetic scratch changes or new synthetic Work artifacts; concrete frozen prompts override generic read-only boilerplate. Existing approval and confinement gates remain mandatory.",
+            "calendar": "No typed timestamp/timezone in v1 product plan; full predicate remains unsupported/unknown."}
+        for name in sorted(LOCAL_INSTRUMENTATION):
+            git(source, "ls-files", "--error-unmatch", name)
+            copied = "local-fixtures/" + Path(name).name
+            write_private(out / copied, (source / name).read_bytes())
+            record["local_fixtures"]["files"][copied] = digest(out / copied)
+            if Path(name).name in ("work_local_fixture.rs", "work_heldout_blocks.rs", "work-heldout-v1.json"):
+                record["local_fixtures"]["predicate_files"][copied] = digest(out / copied)
     write_private(out / "freeze.json", record)
     print(out / "freeze.json")
 
@@ -274,6 +297,9 @@ def verify_freeze(path):
     for name, expected in record.get("form_oracle", {}).get("files", {}).items():
         if not name.startswith("form-observer/") or Path(name).name != name.split("/", 1)[1] or digest(root / name) != expected:
             raise ValueError("frozen form observer changed")
+    for name, expected in record.get("local_fixtures", {}).get("files", {}).items():
+        if not name.startswith("local-fixtures/") or Path(name).name != name.split("/", 1)[1] or digest(root / name) != expected:
+            raise ValueError("frozen local fixture changed")
     if digest(__file__) != record["runner_sha256"]:
         raise ValueError("invoke the frozen work-eval.py to preserve grading behavior")
     return root, record
@@ -434,6 +460,7 @@ def stop_child(child):
     try:
         os.killpg(child.pid, signal.SIGTERM)
     except ProcessLookupError:
+        child.wait()
         return
     try:
         child.wait(timeout=3)
@@ -536,6 +563,259 @@ def grade_form(task, evidence, log):
             "grading_evidence": "native_fixed_form_predicates_and_bounded_effect_ledger"}
 
 
+def grade_local(task, evidence, setup, manifest_sha):
+    unknown = {"task_outcome": "unknown", "reason": "local_fixture_evidence_unavailable", "predicates": []}
+    if any(not isinstance(row, dict) or row.get("schema_version") != 1 or row.get("case_id") != task["id"] or row.get("manifest_sha256") != manifest_sha or row.get("frozen_case") != task for row in (evidence, setup)):
+        return unknown
+    for role in ("lead", "page", "light"):
+        model = evidence.get("models", {}).get(role, {}).get("model", {})
+        if model.get("provider") != "open_ai" or model.get("model") != MODEL:
+            return dict(unknown, reason="local_model_setup_mismatch")
+    checks = evidence.get("predicates")
+    if not isinstance(checks, dict) or set(checks) != {check["id"] for check in task["predicates"]} or any(value is not None and type(value) is not bool for value in checks.values()):
+        return unknown
+    if task["category"] == "local-fixture":
+        if not setup.get("input_hashes") or evidence.get("input_hashes") != setup.get("input_hashes") or evidence.get("expected_changes") != setup.get("expected_changes"):
+            return dict(unknown, reason="local_fixture_input_or_authority_mismatch")
+    else:
+        sentinel = evidence.get("sentinel", {})
+        if setup.get("target_seeded") is not False or not setup.get("fixture_appendix_sha256") or evidence.get("fixture_appendix_sha256") != setup.get("fixture_appendix_sha256") or sentinel.get("id") != setup.get("sentinel_id") or sentinel.get("before_sha256") != setup.get("sentinel_sha256"):
+            return dict(unknown, reason="blocks_fixture_input_or_identity_mismatch")
+        if task["id"] == "blocks-calendar" and checks.get("p2") is not None:
+            return dict(unknown, reason="unsupported_typed_timezone_cannot_pass")
+    predicates = [{"id": key, "state": "passed" if value is True else "failed" if value is False else "unknown"} for key, value in checks.items()]
+    state = "failed" if any(value is False for value in checks.values()) else "passed" if all(value is True for value in checks.values()) else "unknown"
+    if state == "passed" and evidence.get("status") not in ("completed", "needs_review"):
+        state = "unknown"
+    return {"task_outcome": state, "reason": "typed_synthetic_fixture_predicates", "predicates": predicates,
+            "grading_evidence": "independent typed state or fixed parser plus actual command/approval receipts, never model-reported success",
+            "fixture_limitation": evidence.get("unsupported") or evidence.get("failure"), "runtime_status": evidence.get("status")}
+
+
+def local_metrics(evidence, log):
+    diagnostics = evidence.get("diagnostics") or {}
+    usage = diagnostics.get("attempt_usage")
+    converted = {"wall_ms": evidence.get("wall_ms"), "model_call_scope": diagnostics.get("scope", "unavailable")}
+    calls = diagnostics.get("selected_client_calls")
+    if isinstance(calls, list) and diagnostics.get("truncated") is False:
+        converted["model_calls"] = calls
+    if isinstance(usage, list):
+        converted["executions"] = [{"attempts": [{"usage": item} for item in usage], "steps": []}]
+    result = metrics(converted, log)
+    result.update(observed_selected_client_calls=len(calls) if isinstance(calls, list) else None,
+                  selected_client_calls_truncated=diagnostics.get("truncated"),
+                  primary_decision_calls=diagnostics.get("primary_decision_calls"),
+                  emulation_calls_overlapping_selected_client=diagnostics.get("emulation_calls"),
+                  call_scope_qualification="No browser/search dispatch allowed in fixed local mode; selected-client observations only. Missing/truncated totals and unexported primary counters stay unknown.")
+    if evidence.get("failure"):
+        result["failure_taxonomy"] = {evidence["failure"]: 1}
+    if evidence.get("unsupported"):
+        result["failure_taxonomy"] = {"unsupported_typed_state": 1}
+    return result
+
+
+def cleanup_local_fixture(task, setup, manifest_sha, *, reaped, home=None):
+    """Remove only the recorded owned child, using pinned nofollow directory FDs.
+
+    No discovery by prefix is permitted. Unexpected content or identity leaves
+    cleanup unresolved; the original evidence is never rewritten or removed.
+    This is post-reap cleanup of a probe-owned0700tree, not an atomic unlink
+    guarantee against arbitrary concurrent same-UID writers.
+    """
+    if task.get("category") != "local-fixture":
+        return "not_applicable"
+    if not reaped:
+        return "refused_not_reaped"
+    if not isinstance(setup, dict) or setup.get("schema_version") != 1 or setup.get("case_id") != task.get("id") or setup.get("manifest_sha256") != manifest_sha or setup.get("frozen_case") != task:
+        return "refused_setup"
+    locator = setup.get("cleanup")
+    if not isinstance(locator, dict) or locator.get("kind") != "owned_home_child_v1" or locator.get("mode") != 0o700:
+        return "refused_locator"
+    name = locator.get("home_basename")
+    if not isinstance(name, str) or not re.fullmatch(r"zephium-work-fixture-[A-Za-z0-9_-]{6,64}", name):
+        return "refused_locator"
+    def matches(info, identity):
+        return isinstance(identity, dict) and all(type(identity.get(key)) is int for key in ("device", "inode", "uid")) and (info.st_dev, info.st_ino, info.st_uid) == (identity["device"], identity["inode"], identity["uid"]) and info.st_uid == os.getuid() == os.geteuid()
+    def same(a, b):
+        return (a.st_dev, a.st_ino, a.st_uid, stat.S_IFMT(a.st_mode)) == (b.st_dev, b.st_ino, b.st_uid, stat.S_IFMT(b.st_mode))
+    def unchanged_file(a, b):
+        return same(a,b) and (a.st_size,a.st_mtime_ns,a.st_ctime_ns,a.st_nlink,stat.S_IMODE(a.st_mode)) == (b.st_size,b.st_mtime_ns,b.st_ctime_ns,b.st_nlink,stat.S_IMODE(b.st_mode))
+    def known_file(fd, info, hashes):
+        if not unchanged_file(info,os.fstat(fd)):
+            return False
+        os.lseek(fd,0,os.SEEK_SET)
+        body=bytearray()
+        while len(body)<=128*1024:
+            block=os.read(fd,16*1024)
+            if not block:
+                break
+            body.extend(block)
+        return len(body)<=128*1024 and digest_bytes(body) in hashes and unchanged_file(info,os.fstat(fd))
+    inputs, changes = setup.get("input_hashes"), setup.get("expected_changes")
+    if not isinstance(inputs, dict) or not isinstance(changes, list) or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in inputs.values()):
+        return "refused_locator"
+    if any(not isinstance(locator.get(key), dict) or set(locator[key]) != {"device", "inode", "uid"} or any(type(value) is not int or value < 0 for value in locator[key].values()) for key in ("root_identity", "parent_identity")):
+        return "refused_locator"
+    allowed = {}
+    for path, expected in inputs.items():
+        allowed.setdefault(path, set()).add(expected)
+    for change in changes:
+        if not isinstance(change, dict) or not isinstance(change.get("path"), str) or not isinstance(change.get("after_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", change["after_sha256"]):
+            return "refused_locator"
+        allowed.setdefault(change.get("path"), set()).add(change.get("after_sha256"))
+    if not allowed or len(allowed) > 32 or any(not isinstance(path, str) or path.startswith("/") or any(part in ("", ".", "..") for part in path.split("/")) or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in hashes) for path, hashes in allowed.items()):
+        return "refused_locator"
+    directories = {"/".join(path.split("/")[:index]) for path in allowed for index in range(1, len(path.split("/")))}
+    if len(directories) > 16 or any(len(path.split("/")) > 4 for path in allowed):
+        return "refused_locator"
+    if not all(hasattr(os, name) for name in ("O_NOFOLLOW", "O_DIRECTORY", "getuid", "geteuid")):
+        return "refused_platform"
+    fds, files, dirs = [], [], []
+    try:
+        home_path = Path(home if home is not None else os.environ["HOME"]).resolve(strict=True)
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        parent = os.open(home_path, flags)
+        fds.append(parent)
+        if not matches(os.fstat(parent), locator.get("parent_identity")):
+            return "refused_parent_identity"
+        try:
+            root = os.open(name, flags, dir_fd=parent)
+        except FileNotFoundError:
+            return "already_missing"
+        fds.append(root)
+        root_info = os.fstat(root)
+        if not matches(root_info, locator.get("root_identity")) or stat.S_IMODE(root_info.st_mode) != 0o700:
+            return "refused_root_identity"
+        pending = [(root, "")]
+        seen = 0
+        # Preflight the entire bounded synthetic tree before deleting any entry.
+        while pending:
+            directory, prefix = pending.pop()
+            names = os.listdir(directory)
+            seen += len(names)
+            if seen > 64:
+                return "refused_tree"
+            for child in names:
+                relative = f"{prefix}/{child}" if prefix else child
+                info = os.stat(child, dir_fd=directory, follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode) and relative in directories:
+                    nested = os.open(child, flags, dir_fd=directory)
+                    fds.append(nested)
+                    if not same(info, os.fstat(nested)) or info.st_uid != root_info.st_uid or info.st_dev != root_info.st_dev:
+                        return "refused_tree"
+                    dirs.append((directory, child, info, relative, nested))
+                    pending.append((nested, relative))
+                elif stat.S_ISREG(info.st_mode) and relative in allowed and info.st_nlink == 1 and info.st_size <= 128 * 1024:
+                    fd = os.open(child, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+                    fds.append(fd)
+                    if not same(info, os.fstat(fd)) or info.st_uid != root_info.st_uid or info.st_dev != root_info.st_dev or not known_file(fd,info,allowed[relative]):
+                        return "refused_tree"
+                    files.append((directory, child, info, fd, relative))
+                else:
+                    return "refused_tree"
+        def root_bound():
+            return same(os.fstat(parent),os.stat(home_path,follow_symlinks=False)) and matches(os.fstat(parent),locator["parent_identity"]) and same(root_info,os.stat(name,dir_fd=parent,follow_symlinks=False)) and stat.S_IMODE(os.fstat(root).st_mode)==0o700
+        def tree_current():
+            if not root_bound():
+                return False
+            active_dirs={root}|{entry[4] for entry in dirs}
+            for directory in active_dirs:
+                expected={entry[1] for entry in files if entry[0]==directory}|{entry[1] for entry in dirs if entry[0]==directory}
+                if set(os.listdir(directory))!=expected:
+                    return False
+            for directory,child,info,_,nested in dirs:
+                observed=os.stat(child,dir_fd=directory,follow_symlinks=False)
+                if not same(info,observed) or not same(info,os.fstat(nested)) or stat.S_IMODE(info.st_mode)!=stat.S_IMODE(observed.st_mode):
+                    return False
+            for directory,child,info,fd,relative in files:
+                if not unchanged_file(info,os.stat(child,dir_fd=directory,follow_symlinks=False)) or not known_file(fd,info,allowed[relative]):
+                    return False
+            return True
+        # Revalidate parent/root placement, every ancestor and retained file's
+        # content before the destructive phase and before each bounded mutation.
+        while files:
+            if not root_bound():
+                return "refused_root_changed"
+            if not tree_current():
+                return "refused_tree_changed"
+            directory,child,_,_,_=files.pop(0)
+            os.unlink(child,dir_fd=directory)
+        for entry in sorted(list(dirs),key=lambda item:item[3].count("/"),reverse=True):
+            if not root_bound():
+                return "refused_root_changed"
+            if not tree_current():
+                return "refused_tree_changed"
+            directory,child,_,_,_=entry
+            os.rmdir(child,dir_fd=directory)
+            dirs.remove(entry)
+        if not root_bound():
+            return "refused_root_changed"
+        if not tree_current():
+            return "refused_tree_changed"
+        os.rmdir(name,dir_fd=parent)
+        return "removed"
+    except (OSError, KeyError, TypeError, ValueError):
+        return "refused_or_failed"
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
+
+
+def run_local_case(root, frozen, task, out):
+    directory = out / task["id"]
+    directory.mkdir(mode=0o700)
+    export = directory / "evidence.json"
+    setup_path = export.with_suffix(".freeze.json")
+    env = {key: value for key, value in os.environ.items() if not key.startswith("ZEPHIUM_") and key not in ("RUST_LOG", "RUST_BACKTRACE")}
+    if digest(root / "probe") != frozen["probe_sha256"]:
+        raise ValueError("frozen probe changed before launch")
+    started = time.monotonic()
+    timed_out = False
+    child = None
+    cleanup = "refused_setup"
+    log_path = directory / "run.log"
+    def optional(path):
+        try:
+            return read_json(path) if path.exists() else {}
+        except (OSError,ValueError):
+            return {}
+    try:
+        with open(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as log:
+            child = subprocess.Popen([str(root / "probe"), "--live-local-fixture", task["id"], str(export)], cwd=directory, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            write_private(directory / "child.json", {"pid":child.pid,"process_group":child.pid,"probe_sha256":frozen["probe_sha256"]})
+            try:
+                code = child.wait(timeout=frozen["timeout_seconds"])
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                stop_child(child)
+                code = child.returncode
+        wall = int((time.monotonic() - started) * 1000)
+        if digest(root / "probe") != frozen["probe_sha256"]:
+            raise ValueError("frozen probe changed during launch")
+        evidence, setup = optional(export), optional(setup_path)
+        log = log_path.read_text(errors="replace")
+    finally:
+        if child is not None:
+            original_error = sys.exc_info()[0] is not None
+            try:
+                if child.poll() is None:
+                    stop_child(child)
+                child.wait()
+                cleanup = cleanup_local_fixture(task,optional(setup_path),frozen["manifest_sha256"],reaped=child.poll() is not None)
+                write_private(directory / "cleanup.json", {"schema_version":1,"child_reaped":child.poll() is not None,"result":cleanup,
+                    "scope":"Stopped probe-owned0700fixture; bindings/content revalidated, no atomic guarantee against arbitrary concurrent same-UID writers."})
+            except BaseException:
+                if not original_error:
+                    raise
+    row = {"id":task["id"], "eligibility":"eligible_synthetic_fixture", "exit":code, "timed_out":timed_out,
+           "process_ms":wall, "process_completed":code==0, "evidence_sha256":digest(export) if export.exists() else None,
+           "fixture_freeze_sha256":digest(setup_path) if setup_path.exists() else None,
+           "log_sha256":digest(log_path), "metrics":local_metrics(evidence,log), "fixture_cleanup":cleanup,
+           **grade_local(task,evidence,setup,frozen["manifest_sha256"])}
+    write_private(directory / "result.json", row)
+    return row
+
+
 def run_case(root, frozen, task, reference, manifest, out):
     directory = out / task["id"]
     directory.mkdir(mode=0o700)
@@ -585,12 +865,32 @@ def run_case(root, frozen, task, reference, manifest, out):
     return row
 
 
+def distribution(values, excluded_runs=0):
+    known = sorted(value for value in values if isinstance(value, (int, float)) and not isinstance(value, bool))
+    return {"known_runs": len(known), "unknown_runs": len(values) - len(known),
+            "excluded_unattempted_runs": excluded_runs,
+            "median": statistics.median(known) if known else None,
+            "p90": known[(9 * len(known) + 9) // 10 - 1] if known else None,
+            "quantile_method": "nearest rank: sorted[ceil(0.90*n)-1]; median averages the two middle values"}
+
+
 def summarize(rows):
     attempted = [row for row in rows if "exit" in row]
     outcomes = collections.Counter(row.get("task_outcome", "pending") for row in rows)
     eligible = sum(row["eligibility"] == "eligible_public" for row in rows)
     costs = [row["metrics"]["reported_cost_micro_usd"] for row in attempted]
-    times = sorted(row["process_ms"] for row in attempted)
+    times = [row.get("process_ms") for row in attempted]
+    excluded_runs = len(rows) - len(attempted)
+    distributions = {
+        "reported_cost_micro_usd": distribution(costs, excluded_runs),
+        "selected_client_calls": distribution([row["metrics"].get("selected_model_call_attempts") for row in attempted], excluded_runs),
+        "process_latency_ms": distribution(times, excluded_runs),
+        "work_wall_latency_ms": distribution([row["metrics"].get("wall_ms") for row in attempted], excluded_runs),
+    }
+    cost_groups = collections.defaultdict(list)
+    for row in attempted:
+        basis = "+".join(sorted(set(row["metrics"].get("accounting_bases") or ["unknown"])))
+        cost_groups[basis].append(row["metrics"].get("reported_cost_micro_usd"))
     internal, taxonomy, handoffs = collections.Counter(), collections.Counter(), collections.Counter()
     for row in attempted:
         internal.update(row["metrics"]["internal_failures"])
@@ -600,10 +900,16 @@ def summarize(rows):
             "verified_passes_of_attempted": f"{outcomes['passed']}/{len(attempted)}",
             "process_completions": sum(row["process_completed"] for row in attempted),
             "reported_cost_micro_usd_known": sum(cost for cost in costs if cost is not None), "unknown_cost_runs": sum(cost is None for cost in costs),
-            "latency_median_ms": statistics.median(times) if times else None,
+            "latency_median_ms": distributions["process_latency_ms"]["median"],
+            "distributions": distributions,
+            "reported_cost_by_accounting_basis": {basis: distribution(values) for basis, values in sorted(cost_groups.items())},
+            "latency_qualification": {"timed_out_runs": sum(bool(row.get("timed_out")) for row in attempted),
+                                      "timeout_policy": "Include observed time to timeout; censored observations are not completed-task latency."},
             "selected_model_call_attempts": sum(row["metrics"]["selected_model_call_attempts"] or 0 for row in attempted),
             "unknown_selected_model_call_runs": sum(row["metrics"]["selected_model_call_attempts"] is None for row in attempted),
             "primary_decision_calls_known": sum(row["metrics"].get("primary_decision_calls") or 0 for row in attempted),
+            "unknown_primary_decision_call_runs": sum(row["metrics"].get("primary_decision_calls") is None for row in attempted),
+            "unknown_emulation_call_runs": sum(row["metrics"].get("emulation_calls_overlapping_selected_client") is None for row in attempted),
             "emulation_calls_overlapping_selected_client_known": sum(row["metrics"].get("emulation_calls_overlapping_selected_client") or 0 for row in attempted),
             "internal_failures": dict(internal), "failure_taxonomy": dict(taxonomy), "resolved_handoffs": dict(handoffs),
             "qualification": "Constrained deterministic predicates or recorded source audits only; operational completion and historical tuned-site passes are not task correctness."}
@@ -626,13 +932,13 @@ def run(args):
             reason = task["eligibility"]
             if not selected:
                 row = {"id": task["id"], "eligibility": reason, "task_outcome": "pending", "reason": "not_selected"}
-            elif reason != "eligible_public" and not (reason == "pending_form_state_oracle" and frozen.get("form_oracle", {}).get("version") == 2):
+            elif reason != "eligible_public" and not (reason == "pending_form_state_oracle" and frozen.get("form_oracle", {}).get("version") == 2) and not (reason in LOCAL_ELIGIBILITY and frozen.get("local_fixtures", {}).get("version") == 1):
                 row = {"id": task["id"], "eligibility": reason, "task_outcome": "pending", "reason": reason}
             elif task.get("oracle") and references.get(task["id"], {}).get("state") != "ready":
                 row = {"id": task["id"], "eligibility": "blocked_reference", "task_outcome": "pending", "reason": "reference_unavailable"}
             else:
                 print(f"{task['id']}: running", flush=True)
-                row = run_case(root, frozen, task, references.get(task["id"]), manifest, out)
+                row = run_local_case(root, frozen, task, out) if reason in LOCAL_ELIGIBILITY else run_case(root, frozen, task, references.get(task["id"]), manifest, out)
                 print(f"{task['id']}: task={row['task_outcome']} process={row['exit']} {row['process_ms']}ms", flush=True)
             row.update(category=task["category"], grading=task["grading"])
             rows.append(row)
@@ -683,6 +989,9 @@ def compare(args):
     form_versions = [record.get("form_oracle", {}).get("version") for record in freezes]
     if any(form_versions):
         matching = matching and form_versions == [2, 2] and bool(freezes[0]["form_oracle"].get("predicate_files")) and freezes[0]["form_oracle"].get("predicate_files") == freezes[1]["form_oracle"].get("predicate_files")
+    local_versions = [record.get("local_fixtures", {}).get("version") for record in freezes]
+    if any(local_versions):
+        matching = matching and local_versions == [1, 1] and bool(freezes[0]["local_fixtures"].get("predicate_files")) and freezes[0]["local_fixtures"].get("predicate_files") == freezes[1]["local_fixtures"].get("predicate_files")
     if not matching:
         raise ValueError("unmatched manifest/reference/grader/model/platform/setup; no comparative success claim")
     old = {row["id"]: row for row in a["rows"]}
@@ -709,6 +1018,7 @@ def main():
     freezing.add_argument("--base-ref", default="3fcd07c5")
     freezing.add_argument("--label", choices=["baseline", "candidate"], required=True)
     freezing.add_argument("--form-oracle", action="store_true", help="freeze exact probe-only final-form, action, navigation and submit-event observers")
+    freezing.add_argument("--local-fixtures", action="store_true", help="freeze exact synthetic files/Blocks fixtures and independent predicates")
     freezing.add_argument("--timeout", type=int, default=300)
     freezing.add_argument("--out", required=True)
     running = commands.add_parser("run")

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 loader = importlib.machinery.SourceFileLoader('work_eval', str(Path(__file__).with_name('work-eval')))
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -166,6 +167,34 @@ class ReferenceAndFreezeTests(unittest.TestCase):
         self.assertEqual(summary['process_completions'], 1)
 
 
+    def test_summary_distributions_keep_unknowns_basis_and_censored_time_explicit(self):
+        _, evidence, _, _ = fixture()
+        rows = []
+        for index in range(10):
+            measured = eval.metrics(evidence, '')
+            measured.update(reported_cost_micro_usd=index if index < 8 else None,
+                            selected_model_call_attempts=index if index < 9 else None,
+                            wall_ms=index * 2 if index < 7 else None,
+                            accounting_bases=['exact' if index < 5 else 'conservative_reservation'])
+            rows.append(dict(id=str(index), eligibility='eligible_public', exit=0,
+                             process_completed=True, process_ms=index + 1,
+                             timed_out=index == 9, task_outcome='unknown', metrics=measured))
+        rows.append(dict(id='pending', eligibility='pending_user_session', task_outcome='pending'))
+        summary = eval.summarize(rows)
+        reports = summary['distributions']
+        self.assertEqual(reports['reported_cost_micro_usd']['median'], 3.5)
+        self.assertEqual(reports['reported_cost_micro_usd']['unknown_runs'], 2)
+        self.assertEqual(reports['selected_client_calls']['median'], 4)
+        self.assertEqual(reports['process_latency_ms']['p90'], 9)
+        self.assertEqual(reports['work_wall_latency_ms']['p90'], 12)
+        self.assertEqual(reports['work_wall_latency_ms']['unknown_runs'], 3)
+        self.assertTrue(all(report['excluded_unattempted_runs'] == 1 for report in reports.values()))
+        self.assertEqual(summary['latency_qualification']['timed_out_runs'], 1)
+        self.assertEqual(summary['reported_cost_by_accounting_basis']['exact']['median'], 2)
+        self.assertEqual(summary['reported_cost_by_accounting_basis']['conservative_reservation']['unknown_runs'], 2)
+        self.assertIsNone(eval.distribution([])['p90'])
+
+
 class FormOracleTests(unittest.TestCase):
     def receipt(self, checks, **changes):
         row = {"version": 1, "case": "form-selenium-controls", "reason": "observed", "checks": checks, "content_exported": False}
@@ -249,6 +278,188 @@ class FormOracleTests(unittest.TestCase):
         for checks in ([True], [True, 'true', True], [True, 1, True]):
             self.assertEqual(self.grade(self.receipt(checks))['task_outcome'], 'unknown')
         self.assertEqual(self.grade(self.receipt([True, True, True], content_exported=True))['task_outcome'], 'unknown')
+
+
+class LocalFixtureTests(unittest.TestCase):
+    def fixture(self, blocks=False):
+        task={"id":"blocks-checklist" if blocks else "local-json-edit", "category":"blocks-fixture" if blocks else "local-fixture",
+              "predicates":[{"id":key} for key in ("p1","p2","p3")]}
+        base={"schema_version":1,"case_id":task["id"],"manifest_sha256":"frozen","frozen_case":task}
+        setup=dict(base)
+        evidence=dict(base, models={role:{"model":{"provider":"open_ai","model":"gpt-6-luna"}} for role in ("lead","page","light")},
+                      status="completed", predicates={key:True for key in ("p1","p2","p3")})
+        if blocks:
+            setup.update(target_seeded=False,fixture_appendix_sha256="appendix",sentinel_id="owned",sentinel_sha256="before")
+            evidence.update(fixture_appendix_sha256="appendix",sentinel={"id":"owned","before_sha256":"before","after_sha256":"before"})
+        else:
+            setup.update(input_hashes={"TASK.md":"input"},expected_changes=[{"path":"settings.json","after_sha256":"after"}])
+            evidence.update(input_hashes=setup['input_hashes'],expected_changes=setup['expected_changes'])
+        return task,evidence,setup
+
+    def test_exact_setup_and_typed_predicates_are_required(self):
+        task,evidence,setup=self.fixture()
+        self.assertEqual(eval.grade_local(task,evidence,setup,'frozen')['task_outcome'],'passed')
+        for patch in ({"status":"running"},{"case_id":"other"},{"expected_changes":[]},{"predicates":{"p1":True,"p2":"true","p3":True}}):
+            changed=dict(evidence,**patch)
+            self.assertEqual(eval.grade_local(task,changed,setup,'frozen')['task_outcome'],'unknown')
+        evidence['predicates']['p2']=None
+        self.assertEqual(eval.grade_local(task,evidence,setup,'frozen')['task_outcome'],'unknown')
+        evidence['predicates']['p3']=False
+        self.assertEqual(eval.grade_local(task,evidence,setup,'frozen')['task_outcome'],'failed')
+
+    def test_blocks_never_substitute_seeded_targets_or_freeform_time_for_typed_zone(self):
+        task,evidence,setup=self.fixture(True)
+        self.assertEqual(eval.grade_local(task,evidence,setup,'frozen')['task_outcome'],'passed')
+        setup['target_seeded']=True
+        self.assertEqual(eval.grade_local(task,evidence,setup,'frozen')['task_outcome'],'unknown')
+        setup['target_seeded']=False
+        task['id']='blocks-calendar'
+        evidence['case_id']=setup['case_id']=task['id']
+        self.assertEqual(eval.grade_local(task,evidence,setup,'frozen')['reason'],'unsupported_typed_timezone_cannot_pass')
+        evidence['predicates']['p2']=None
+        self.assertEqual(eval.grade_local(task,evidence,setup,'frozen')['task_outcome'],'unknown')
+
+    def test_missing_or_truncated_local_calls_and_unexported_primary_counts_are_unknown(self):
+        self.assertIsNone(eval.local_metrics({},'')['selected_model_call_attempts'])
+        evidence={"diagnostics":{"selected_client_calls":[{"state":"settled"}],"truncated":True,"attempt_usage":[None]}}
+        row=eval.local_metrics(evidence,'')
+        self.assertIsNone(row['selected_model_call_attempts'])
+        self.assertEqual(row['observed_selected_client_calls'],1)
+        self.assertIsNone(row['primary_decision_calls'])
+        self.assertIsNone(row['reported_cost_micro_usd'])
+
+
+class FixtureCleanupTests(unittest.TestCase):
+    def setup_fixture(self, home):
+        task={"id":"local-json-edit","category":"local-fixture"}
+        root=home/'zephium-work-fixture-Abc123'
+        root.mkdir(mode=0o700)
+        (root/'docs').mkdir()
+        (root/'TASK.md').write_text('synthetic task\n')
+        (root/'docs'/'source.txt').write_text('synthetic source\n')
+        identity=lambda path:{"device":path.stat().st_dev,"inode":path.stat().st_ino,"uid":path.stat().st_uid}
+        setup={"schema_version":1,"case_id":task['id'],"manifest_sha256":"frozen","frozen_case":task,
+               "input_hashes":{path:eval.digest(root/path) for path in ('TASK.md','docs/source.txt')},"expected_changes":[],
+               "cleanup":{"kind":"owned_home_child_v1","home_basename":root.name,"mode":0o700,
+                          "root_identity":identity(root),"parent_identity":identity(home)}}
+        return task,setup,root
+
+    def clean(self, task, setup, home, reaped=True):
+        return eval.cleanup_local_fixture(task,setup,'frozen',reaped=reaped,home=home)
+
+    def test_reap_required_then_only_exact_owned_tree_is_removed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home=Path(temp);task,setup,root=self.setup_fixture(home)
+            sentinel=home/'unrelated.txt';sentinel.write_text('keep')
+            self.assertEqual(self.clean(task,setup,home,False),'refused_not_reaped')
+            self.assertTrue(root.exists())
+            self.assertEqual(self.clean(task,setup,home),'removed')
+            self.assertFalse(root.exists())
+            self.assertEqual(sentinel.read_text(),'keep')
+            self.assertEqual(self.clean(task,setup,home),'already_missing')
+
+    def test_replaced_root_or_parent_never_falls_back_to_discovery(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home=Path(temp);task,setup,root=self.setup_fixture(home)
+            root.rename(home/'retained-original')
+            root.mkdir(mode=0o700);(root/'personal.txt').write_text('must remain')
+            self.assertEqual(self.clean(task,setup,home),'refused_root_identity')
+            self.assertEqual((root/'personal.txt').read_text(),'must remain')
+            setup['cleanup']['parent_identity']['inode']+=1
+            self.assertEqual(self.clean(task,setup,home),'refused_parent_identity')
+
+    def test_child_symlink_or_unexpected_content_is_refused_before_any_delete(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home=Path(temp);task,setup,root=self.setup_fixture(home)
+            outside=home/'outside.txt';outside.write_text('private')
+            (root/'link').symlink_to(outside)
+            self.assertEqual(self.clean(task,setup,home),'refused_tree')
+            self.assertTrue((root/'TASK.md').exists());self.assertEqual(outside.read_text(),'private')
+            (root/'link').unlink();(root/'TASK.md').write_text('unexpected new data')
+            self.assertEqual(self.clean(task,setup,home),'refused_tree')
+            self.assertTrue((root/'docs'/'source.txt').exists())
+
+    def test_case_escape_and_root_symlink_are_refused_without_touching_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home=Path(temp);task,setup,root=self.setup_fixture(home)
+            bad=copy.deepcopy(setup);bad['case_id']='another'
+            self.assertEqual(self.clean(task,bad,home),'refused_setup')
+            bad=copy.deepcopy(setup);bad['cleanup']['home_basename']='../elsewhere'
+            self.assertEqual(self.clean(task,bad,home),'refused_locator')
+            saved=home/'retained';root.rename(saved);root.symlink_to(saved,target_is_directory=True)
+            self.assertEqual(self.clean(task,setup,home),'refused_or_failed')
+            self.assertTrue((saved/'TASK.md').exists())
+
+    def test_in_place_change_after_preflight_is_not_deleted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home=Path(temp);task,setup,root=self.setup_fixture(home)
+            original_stat=os.stat;changed=False;canonical_home=home.resolve()
+            def mutate(path,*args,**kwargs):
+                nonlocal changed
+                if Path(path)==canonical_home and not changed:
+                    changed=True
+                    previous=original_stat(root/'TASK.md')
+                    (root/'TASK.md').write_text('unknown changed content')
+                    os.utime(root/'TASK.md',ns=(previous.st_atime_ns,previous.st_mtime_ns))
+                return original_stat(path,*args,**kwargs)
+            with mock.patch.object(os,'stat',side_effect=mutate):
+                self.assertEqual(self.clean(task,setup,home),'refused_tree_changed')
+            self.assertEqual((root/'TASK.md').read_text(),'unknown changed content')
+            self.assertTrue((root/'docs'/'source.txt').exists())
+
+    def test_root_replacement_after_preflight_preserves_both_trees(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home=Path(temp);task,setup,root=self.setup_fixture(home)
+            original_stat=os.stat;changed=False;retained=home/'retained-owned';canonical_home=home.resolve()
+            def replace(path,*args,**kwargs):
+                nonlocal changed
+                if Path(path)==canonical_home and not changed:
+                    changed=True;root.rename(retained);root.mkdir(mode=0o700)
+                    (root/'personal.txt').write_text('keep')
+                return original_stat(path,*args,**kwargs)
+            with mock.patch.object(os,'stat',side_effect=replace):
+                self.assertEqual(self.clean(task,setup,home),'refused_root_changed')
+            self.assertEqual((retained/'TASK.md').read_text(),'synthetic task\n')
+            self.assertEqual((root/'personal.txt').read_text(),'keep')
+
+    def test_owned_run_finally_cleans_after_interrupt_and_integrity_failure(self):
+        for interrupt in (True,False):
+            with self.subTest(interrupt=interrupt), tempfile.TemporaryDirectory() as temp:
+                home=Path(temp)/'home';home.mkdir();task,setup,fixture_root=self.setup_fixture(home)
+                binary_root=Path(temp)/'binary';binary_root.mkdir();(binary_root/'probe').write_bytes(b'synthetic probe bytes')
+                out=Path(temp)/'out';out.mkdir()
+                frozen={'probe_sha256':eval.digest(binary_root/'probe'),'manifest_sha256':'frozen','timeout_seconds':1}
+                class Child:
+                    pid=12345
+                    returncode=None
+                    first=True
+                    def poll(self):return self.returncode
+                    def wait(self,timeout=None):
+                        if self.first:
+                            self.first=False
+                            if interrupt:raise KeyboardInterrupt()
+                            (binary_root/'probe').write_bytes(b'changed fake bytes')
+                            self.returncode=0
+                        return self.returncode
+                child=Child()
+                def spawn(command,**kwargs):
+                    eval.write_private(Path(command[-1]).with_suffix('.freeze.json'),setup)
+                    return child
+                original_cleanup=eval.cleanup_local_fixture
+                def cleanup(*args,**kwargs):return original_cleanup(*args,**kwargs,home=home)
+                def stop(target):target.returncode=-15
+                with mock.patch.object(eval.subprocess,'Popen',side_effect=spawn), mock.patch.object(eval,'stop_child',side_effect=stop), mock.patch.object(eval,'cleanup_local_fixture',side_effect=cleanup):
+                    with self.assertRaises(KeyboardInterrupt if interrupt else ValueError):
+                        eval.run_local_case(binary_root,frozen,task,out)
+                receipt=json.loads((out/task['id']/'cleanup.json').read_text())
+                self.assertTrue(receipt['child_reaped']);self.assertEqual(receipt['result'],'removed')
+                self.assertFalse(fixture_root.exists())
+
+    def test_already_exited_child_is_still_reaped(self):
+        child=mock.Mock(pid=12345)
+        with mock.patch.object(os,'killpg',side_effect=ProcessLookupError):
+            eval.stop_child(child)
+        child.wait.assert_called_once_with()
 
 
 if __name__ == '__main__':
