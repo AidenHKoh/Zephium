@@ -1351,3 +1351,152 @@ fn original_read_mode_selection_racing_revocation_or_expiry_creates_no_native_re
         assert!(rows.read_record_media(&resource,vec![plan],Mode::SessionOnly,tick(at),tick(at+8)).is_ok());
     }
 }
+
+#[test]
+fn native_media_retry_accepts_original_read_proof_on_goal_policy() {
+    use crate::WorkBrowserMediaFetchMode as Mode;
+    let (mut rows, resource, _, plan) = original_read_fixture();
+    let (request, _) = rows
+        .read_record_media(
+            &resource,
+            vec![plan],
+            Mode::PublicAssetRetry,
+            tick(5),
+            tick(80),
+        )
+        .unwrap();
+    assert!(
+        !request.document_policy().is_public(),
+        "regression: goal navigation policy is not a retry grant"
+    );
+    assert!(request.media_fetch_authority_current(&resource, tick(6)));
+    assert!(
+        !request.media_fetch_authority_current(&resource, tick(80)),
+        "original media deadline remains fixed"
+    );
+}
+
+#[test]
+fn native_media_retry_rejects_wrong_resource_source_generation_and_raised_deadline() {
+    use crate::WorkBrowserMediaFetchMode as Mode;
+    for change in 0..5 {
+        let (mut rows, resource, _, plan) = original_read_fixture();
+        let (mut request, _) = rows
+            .read_record_media(
+                &resource,
+                vec![plan],
+                Mode::PublicAssetRetry,
+                tick(5),
+                tick(80),
+            )
+            .unwrap();
+        let (_, other, _, _) = original_read_fixture();
+        assert!(!request.media_fetch_authority_current(&other, tick(6)));
+        match change {
+            0 => request.media.as_mut().unwrap().retry_authority = None,
+            1 => {
+                request
+                    .media
+                    .as_mut()
+                    .unwrap()
+                    .retry_authority
+                    .as_mut()
+                    .unwrap()
+                    .resource = other
+            }
+            2 => {
+                request
+                    .media
+                    .as_mut()
+                    .unwrap()
+                    .retry_authority
+                    .as_mut()
+                    .unwrap()
+                    .generation += 1
+            }
+            3 => request.media.as_mut().unwrap().deadline = tick(81),
+            _ => {
+                let media = request.media.as_mut().unwrap();
+                let old = media.plans[0].frame.clone();
+                let original = old.context();
+                let identity = crate::ContextIdentity::new(
+                    ContextId::from_raw(9),
+                    original.identity().owner(),
+                    ProfileId::from(1),
+                    crate::ContextKind::Owned,
+                );
+                let foreign = crate::ContextJoin::work_execution(
+                    identity,
+                    original.context_generation(),
+                    original.navigation_epoch(),
+                    original.frame_generation(),
+                );
+                media.plans[0].frame = crate::SemanticFrameJoin::try_new(
+                    foreign,
+                    crate::FrameId::MAIN,
+                    crate::FrameGeneration::INITIAL,
+                    crate::SemanticOrigin::parse("https://example.test").unwrap(),
+                    crate::SemanticFrameTrust::SameOrigin,
+                )
+                .unwrap();
+            }
+        }
+        assert!(
+            !request.media_fetch_authority_current(&resource, tick(6)),
+            "mutation {change}"
+        );
+    }
+}
+
+#[test]
+fn native_media_retry_rechecks_loss_between_native_admission_and_callback() {
+    use crate::WorkBrowserMediaFetchMode as Mode;
+    for reason in [
+        WorkBrowserAnonymousReadStatus::HumanHandoff,
+        WorkBrowserAnonymousReadStatus::SuccessorRun,
+        WorkBrowserAnonymousReadStatus::Closed,
+        WorkBrowserAnonymousReadStatus::PrivateDisclosure,
+    ] {
+        let (mut rows, resource, proof, plan) = original_read_fixture();
+        let (request, _) = rows
+            .read_record_media(
+                &resource,
+                vec![plan],
+                Mode::PublicAssetRetry,
+                tick(5),
+                tick(80),
+            )
+            .unwrap();
+        assert!(request.media_fetch_authority_current(&resource, tick(6)));
+        proof.revoke(reason);
+        assert!(
+            !request.media_fetch_authority_current(&resource, tick(7)),
+            "loss {reason:?}"
+        );
+    }
+    let (mut rows, resource, _, plan) = original_read_fixture();
+    let (request, progress) = rows
+        .read_record_media(
+            &resource,
+            vec![plan],
+            Mode::PublicAssetRetry,
+            tick(5),
+            tick(80),
+        )
+        .unwrap();
+    progress.cancel();
+    assert!(!request.media_fetch_authority_current(&resource, tick(6)));
+}
+
+#[test]
+fn native_media_session_mode_cannot_be_promoted_to_retry_without_original_proof() {
+    use crate::WorkBrowserMediaFetchMode as Mode;
+    let (mut rows, resource, _, plan) = original_read_fixture();
+    let (mut request, _) = rows
+        .read_record_media(&resource, vec![plan], Mode::SessionOnly, tick(5), tick(80))
+        .unwrap();
+    assert!(request.media_fetch_authority_current(&resource, tick(6)));
+    assert!(request.media.as_ref().unwrap().retry_authority.is_none());
+    request.media.as_mut().unwrap().fetch_mode = Mode::PublicAssetRetry;
+    assert!(!request.media_fetch_authority_current(&resource, tick(6)));
+}

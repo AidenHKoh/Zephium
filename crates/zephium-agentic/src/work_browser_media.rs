@@ -185,8 +185,21 @@ impl WorkBrowserMediaProgress {
         true
     }
 }
+#[derive(Clone)]
+pub(super) struct MediaRetryAuthority {
+    pub(super) original: WorkBrowserAnonymousReadAuthority,
+    pub(super) resource: WorkBrowserResourceJoin,
+    pub(super) generation: u64,
+    pub(super) deadline: AgentPolicyInstant,
+}
+impl fmt::Debug for MediaRetryAuthority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MediaRetryAuthority([redacted])")
+    }
+}
 #[derive(Clone, Debug)]
 pub(super) struct MediaRead {
+    pub(super) retry_authority: Option<MediaRetryAuthority>,
     pub(super) fetch_mode: WorkBrowserMediaFetchMode,
     pub(super) plans: Vec<crate::SemanticRecordMediaPlan>,
     pub(super) progress: WorkBrowserMediaProgress,
@@ -196,6 +209,31 @@ impl WorkBrowserResourceRequest {
     /// Host-admitted original task class, independent of cookie-jar contents.
     pub fn media_fetch_mode(&self) -> WorkBrowserMediaFetchMode {
         self.media.as_ref().map_or(WorkBrowserMediaFetchMode::SessionOnly, |media| media.fetch_mode)
+    }
+
+    /// Rechecks the request's original opaque retry proof at native admission
+    /// and each callback. This does not attest cookie state or permit pixels.
+    /// The supplied resource must be the native owner's independently bound join.
+    pub fn media_fetch_authority_current(
+        &self,
+        resource: &WorkBrowserResourceJoin,
+        now: AgentPolicyInstant,
+    ) -> bool {
+        let Some(media) = self.media.as_ref() else { return false; };
+        if self.operation() != WorkBrowserResourceOperation::ReadMedia
+            || self.resource() != resource || now >= media.deadline
+            || !media.progress.current() || media.plans.is_empty() || media.plans.len() > 12
+        { return false; }
+        if media.fetch_mode == WorkBrowserMediaFetchMode::SessionOnly { return true; }
+        let Some(authority) = &media.retry_authority else { return false; };
+        self.isolated_public && authority.resource == *resource
+            && authority.deadline == media.deadline
+            && media.plans.iter().all(|plan| {
+                plan.frame().frame() == crate::FrameId::MAIN
+                    && plan.frame().context().identity().id() == resource.identity().context()
+                    && plan.frame().context().context_generation().get() == authority.generation
+                    && authority.original.matches(plan.frame().context().identity(), now)
+            })
     }
 
     /// Exact private source-record candidates of this admitted optional read.
@@ -256,6 +294,14 @@ impl WorkBrowserResources {
             }
             proof.bound_deadline(now,deadline).ok_or(WorkBrowserResourceError::Expired)?
         } else { deadline };
+        let retry_authority = if fetch_mode == WorkBrowserMediaFetchMode::PublicAssetRetry {
+            Some(MediaRetryAuthority {
+                original: row.anonymous_read_authority.clone().ok_or(WorkBrowserResourceError::Source)?,
+                resource: resource.clone(),
+                generation: row.anonymous_read_generation.ok_or(WorkBrowserResourceError::Source)?,
+                deadline,
+            })
+        } else { None };
         row.tick(now)?;
         let operation = OperationJoin {
             resource: resource.clone(),
@@ -277,6 +323,7 @@ impl WorkBrowserResources {
                 health: None,
                 human: None,
                 media: Some(Box::new(MediaRead {
+                    retry_authority,
                     fetch_mode,
                     plans,
                     progress: progress.clone(),

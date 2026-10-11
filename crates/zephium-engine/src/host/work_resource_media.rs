@@ -43,7 +43,12 @@ impl Batch {
         let current = self.guard.media_current()
             && self.progress.current()
             && self.presentation.borrow().human_current()
-            && work_browser_monotonic_now().is_some_and(|now| now < self.deadline)
+            && work_browser_monotonic_now().is_some_and(|now| {
+                now < self.deadline && self.task.try_borrow().ok().is_some_and(|task| {
+                    task.as_ref().and_then(WorkLifecycleTask::request)
+                        .is_some_and(|request| request.media_fetch_authority_current(self.guard.resource(), now))
+                })
+            })
             && self
                 .gate
                 .observation_stamp(plan.frame().context())
@@ -295,8 +300,8 @@ impl WorkNativeResource {
                 return None;
             }
             let plans = request.media_plans()?.to_vec();
-            if request.media_fetch_mode() == zephium_agentic::WorkBrowserMediaFetchMode::PublicAssetRetry
-                && (!request.isolated_public() || !request.document_policy().is_public()) { return None; }
+            let now = work_browser_monotonic_now()?;
+            if !request.media_fetch_authority_current(self.guard.resource(), now) { return None; }
             let progress = request.media_progress()?;
             let deadline = request.media_deadline()?;
             if plans.is_empty() || plans.len() > 12 {
