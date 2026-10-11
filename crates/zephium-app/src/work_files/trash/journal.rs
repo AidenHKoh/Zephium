@@ -6,7 +6,10 @@ use zephium_private_fs::{
     ByteLimit, LockedPrivateNamespace, PrivateComponent, PrivateDirectory, PrivateFsError,
 };
 
-pub(super) const MAX_RECORDS: usize = 64;
+pub(super) const MAX_ACTIVE: usize = 64;
+pub(super) const MAX_COMPLETED: usize = 256;
+pub(super) const MAX_RECORDS: usize = MAX_ACTIVE + MAX_COMPLETED;
+mod retention;
 fn component(name: &str) -> Result<PrivateComponent, Failure> {
     PrivateComponent::new(name).map_err(|_| Failure::Storage)
 }
@@ -87,13 +90,7 @@ impl Journal {
         {
             return Err(Failure::Changed);
         }
-        if self
-            .directory
-            .list_components(MAX_RECORDS)
-            .map_err(|_| Failure::Capacity)?
-            .len()
-            >= MAX_RECORDS
-        {
+        if self.maintain()? >= MAX_ACTIVE {
             return Err(Failure::Capacity);
         }
         let directory = self
@@ -118,24 +115,35 @@ impl Journal {
             .list_components(MAX_RECORDS)
             .map_err(|_| Failure::Capacity)?
         {
-            let directory = self
-                .directory
-                .open_private_child(&name)
-                .map_err(|_| Failure::Storage)?;
-            let Some(bytes) = directory
-                .read_bounded_regular(&component("receipt")?, limit(16 * 1024))
-                .map_err(|_| Failure::Storage)?
-            else {
-                // Crash before the prepared receipt: the source was never moved.
-                continue;
-            };
-            let receipt: Receipt = serde_json::from_slice(&bytes).map_err(|_| Failure::Storage)?;
-            if !receipt.valid() || receipt.id != name.as_str() {
-                return Err(Failure::Storage);
+            if let Some(record) = self.read_record(&name)? {
+                // Completed/expired IDs stay unavailable to restore. Keep only
+                // the at-most64 active capabilities open, not256 history FDs.
+                if !record.marked("expiring")? && !record.completed()? {
+                    if records.len() == MAX_ACTIVE {
+                        return Err(Failure::Capacity);
+                    }
+                    records.push(record);
+                }
             }
-            records.push(Record { receipt, directory });
         }
         Ok(records)
+    }
+    fn read_record(&self, name: &PrivateComponent) -> Result<Option<Record>, Failure> {
+        let directory = self
+            .directory
+            .open_private_child(name)
+            .map_err(|_| Failure::Storage)?;
+        let Some(bytes) = directory
+            .read_bounded_regular(&component("receipt")?, limit(16 * 1024))
+            .map_err(|_| Failure::Storage)?
+        else {
+            return Ok(None);
+        };
+        let receipt: Receipt = serde_json::from_slice(&bytes).map_err(|_| Failure::Storage)?;
+        if !receipt.valid() || receipt.id != name.as_str() {
+            return Err(Failure::Storage);
+        }
+        Ok(Some(Record { receipt, directory }))
     }
 }
 impl Record {
@@ -161,7 +169,7 @@ impl Record {
     pub fn mark(&self, phase: &str) -> Result<(), Failure> {
         if !matches!(
             phase,
-            "trashed" | "restored" | "move_backup_trashed" | "moved"
+            "trashed" | "move_backup_trashed" | "moved" | "expiring"
         ) {
             return Err(Failure::Storage);
         }
@@ -173,11 +181,15 @@ impl Record {
     pub fn marked(&self, phase: &str) -> Result<bool, Failure> {
         let value = self
             .directory
-            .read_bounded_regular(&component(phase)?, limit(2))
+            .read_bounded_regular(
+                &component(phase)?,
+                limit(if phase == "restored" { 35 } else { 2 }),
+            )
             .map_err(|_| Failure::Storage)?;
         match value.as_deref() {
             None => Ok(false),
             Some(b"1\n") => Ok(true),
+            Some(bytes) if phase == "restored" && restored_order(bytes).is_some() => Ok(true),
             _ => Err(Failure::Storage),
         }
     }
@@ -196,4 +208,15 @@ impl Record {
         }
         Ok(text)
     }
+}
+
+fn restored_order(bytes: &[u8]) -> Option<&str> {
+    if bytes.len() != 35 || !bytes.starts_with(b"2:") || !bytes.ends_with(b"\n") {
+        return None;
+    }
+    let order = std::str::from_utf8(&bytes[2..34]).ok()?;
+    order
+        .bytes()
+        .all(|byte| byte.is_ascii_hexdigit())
+        .then_some(order)
 }

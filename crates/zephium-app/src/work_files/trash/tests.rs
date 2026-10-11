@@ -102,11 +102,7 @@ fn durable_prepared_and_acknowledged_receipts_survive_reopen_without_replay() {
         .unwrap()
         .unwrap();
     journal
-        .records()
-        .unwrap()
-        .pop()
-        .unwrap()
-        .mark("restored")
+        .mark_restored(&journal.records().unwrap().pop().unwrap())
         .unwrap();
     drop(journal);
     assert!(recoveries_at(&fixture.storage, &fixture.grant, "profile")
@@ -119,14 +115,14 @@ fn journal_capacity_is_bounded_and_never_discards_pending_recovery() {
     let journal = journal::Journal::open(&fixture.storage, "profile", true)
         .unwrap()
         .unwrap();
-    for _ in 0..journal::MAX_RECORDS {
+    for _ in 0..journal::MAX_ACTIVE {
         journal.prepare(fixture.receipt("saved"), b"saved").unwrap();
     }
     assert!(matches!(
         journal.prepare(fixture.receipt("saved"), b"saved"),
         Err(Failure::Capacity)
     ));
-    assert_eq!(journal.records().unwrap().len(), journal::MAX_RECORDS);
+    assert_eq!(journal.records().unwrap().len(), journal::MAX_ACTIVE);
 }
 #[test]
 fn recovery_storage_and_aliases_are_protected_from_computer_reads() {
@@ -288,7 +284,7 @@ fn native_trash_acknowledges_exact_file_and_saved_copy_restores_exclusively() {
     // A replay must not overwrite a newer file.
     let change = fixture.grant.prepare(&kind, None).unwrap();
     assert!(change.fact().before_digest.is_some());
-    record.mark("restored").unwrap();
+    journal.mark_restored(&record).unwrap();
     // Cleanup is restricted to the exact acknowledged inode from this fixture.
     let current = fs::symlink_metadata(&returned).unwrap();
     assert_eq!((current.dev(), current.ino()), (before.dev(), before.ino()));

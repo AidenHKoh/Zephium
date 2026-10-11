@@ -325,7 +325,8 @@ pub(crate) fn restored(profile: &str, id: &str) -> Result<(), Failure> {
         .into_iter()
         .find(|record| record.receipt.id == id)
         .ok_or(Failure::Storage)?;
-    record.mark("restored")
+    journal.mark_restored(&record)?;
+    journal.maintain().map(|_| ())
 }
 
 #[cfg(test)]
