@@ -4303,9 +4303,14 @@
 
   function pixelPrivacy(publicOnly = false) {
     try {
-      return globalThis.__zephiumPixelPrivacyV1.probe((element,value,field) => element === null
-        ? looksLikeSecret(value) || (field && classifyLiveValue(value) !== 2)
-        : credentialField(element, classify(element) || {role:"group",tag:tagName(element)}, attribute(element,"aria-label",512)||"") !== 0, publicOnly);
+      return globalThis.__zephiumPixelPrivacyV1.probe((element,value,field) => {
+        if (element === null) return looksLikeSecret(value) || (field && classifyLiveValue(value) !== 2);
+        const descriptor=classify(element)||{role:"group",tag:tagName(element)};
+        if(credentialField(element,descriptor,attribute(element,"aria-label",512)||"")!==0)return true;
+        if(!["input","textarea","select"].includes(descriptor.tag) && descriptor.role!=="textbox" && !descriptor.contentEditable)return false;
+        return attribute(element,"maxlength",4)==="1" || /(?:^|[^a-z])(?:code|otp[0-9]*|pin)(?:$|[^a-z])|(?:verification|confirmation|security)code/iu.test(
+          ["name","id","aria-label","placeholder"].map(name=>attribute(element,name,512)||"").join(" "));
+      }, publicOnly);
     } catch (_) { return "E1:privacy"; }
   }
   function invoke(encoded) {
