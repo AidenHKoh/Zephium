@@ -647,12 +647,81 @@ fn write_eval_file(_path: &Path, _value: &serde_json::Value) -> Result<(), &'sta
     Err("eval_export_permissions_unqualified")
 }
 
+async fn collect_eval_sources<F, Fut>(
+    public: bool,
+    links: Vec<zephium_core::work::artifact::WorkEvidenceLink>,
+    mut read: F,
+) -> serde_json::Value
+where
+    F: FnMut(zephium_core::work::artifact::WorkEvidenceLink) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<zephium_core::work::artifact::WorkEvidencePreviewV1, ()>,
+    >,
+{
+    use zephium_core::work::artifact::WorkEvidenceSourceV1;
+    if !public {
+        return serde_json::json!({"state":"withheld_private_provenance","previews":[]});
+    }
+    let started = Instant::now();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut previews = Vec::new();
+    let mut unique = Vec::new();
+    let mut failed = 0;
+    let mut bytes = 0usize;
+    let mut limited = false;
+    for link in links {
+        if unique.contains(&link) {
+            continue;
+        }
+        if unique.len() >= 512 || tokio::time::Instant::now() >= deadline {
+            limited = true;
+            break;
+        }
+        unique.push(link.clone());
+        let preview = match tokio::time::timeout_at(deadline, read(link.clone())).await {
+            Ok(Ok(preview)) => preview,
+            Ok(Err(())) => {
+                failed += 1;
+                continue;
+            }
+            Err(_) => {
+                limited = true;
+                break;
+            }
+        };
+        if preview.link != link
+            || !matches!(
+                preview.source,
+                WorkEvidenceSourceV1::NativeExtraction
+                    | WorkEvidenceSourceV1::ProviderSearch { .. }
+            )
+        {
+            failed += 1;
+            continue;
+        }
+        let value = serde_json::to_value(&preview).expect("evidence preview serializes");
+        let size = serde_json::to_vec(&value)
+            .expect("evidence preview encodes")
+            .len();
+        if bytes.saturating_add(size) > 2 * 1024 * 1024 {
+            limited = true;
+            break;
+        }
+        bytes += size;
+        previews.push(value);
+    }
+    serde_json::json!({"state":"exported","previews":previews,"failed":failed,"limited":limited,"bytes":bytes,"collection_ms":started.elapsed().as_millis(),
+        "scope":"Original archived source excerpts for cited links; source text is untrusted data. No pixels, files or command output. Truncation is preserved per excerpt."})
+}
+
 fn export_eval(
     path: &Path,
     state: &zephium_core::work::runtime::WorkRuntimeProjection,
     models: &serde_json::Value,
     diagnostics: &Arc<Mutex<EvalDiagnostics>>,
     wall_ms: u128,
+    finished_ms: u128,
+    source_evidence: &serde_json::Value,
 ) -> Result<(), &'static str> {
     use zephium_core::work::runtime::*;
     let public = public_export_allowed(state);
@@ -685,7 +754,6 @@ fn export_eval(
         })
     }).collect();
     let local = diagnostics.lock().unwrap_or_else(|e| e.into_inner());
-    let finished_ms = STARTED.get_or_init(Instant::now).elapsed().as_millis();
     write_eval_file(
         path,
         &serde_json::json!({
@@ -694,6 +762,7 @@ fn export_eval(
             "profile_mode": "fresh_private", "stand_in": "decline_effects", "wall_ms": wall_ms,
             "models": models, "model_calls": local.calls, "model_calls_truncated": local.truncated,
             "page_intervals": local.pages,
+            "source_evidence": source_evidence,
             "page_diagnostics_version": if public { Some(1) } else { None },
             "timeline": {"started_ms": finished_ms.saturating_sub(wall_ms), "finished_ms": finished_ms},
             "model_call_scope": "selected Work model clients; direct public-search transport is not included; do not add page diagnostics to this count",
@@ -1900,12 +1969,35 @@ pub(super) async fn lead_workflow(
             failure = failure.or(Some("heldout_blocks_outcome"));
         }
     } else if let Some(path) = export {
+        let wall_ms = eval_started.elapsed().as_millis();
+        let finished_ms = STARTED.get_or_init(Instant::now).elapsed().as_millis();
+        let links = state
+            .executions
+            .iter()
+            .flat_map(|execution| execution.artifacts.iter())
+            .flat_map(|artifact| artifact.evidence.iter().cloned())
+            .collect();
+        let source_evidence =
+            collect_eval_sources(public_export_allowed(&state), links, |link| async move {
+                let response = handle
+                    .work_evidence(profile, work, link)
+                    .map_err(|_| ())?
+                    .response(profile)
+                    .await;
+                match response.reply {
+                    WorkReplyV1::Evidence { evidence } => Ok(*evidence),
+                    _ => Err(()),
+                }
+            })
+            .await;
         export_eval(
             &path,
             &state,
             &model_setup,
             &local_diagnostics,
-            eval_started.elapsed().as_millis(),
+            wall_ms,
+            finished_ms,
+            &source_evidence,
         )?;
     } else if !block_probe && !account_probe {
         let directory = std::path::Path::new("target/work-runtime-proof/lead");
@@ -1921,6 +2013,73 @@ pub(super) async fn lead_workflow(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn evidence_export_never_reads_private_mode_and_deduplicates_public_links() {
+        use zephium_core::work::artifact::*;
+        let rows: Vec<WorkEvidencePreviewV1> = serde_json::from_str(include_str!(
+            "../../zephium-ipc/fixtures/work-research-evidence-v1.json"
+        ))
+        .unwrap();
+        let preview = rows[0].clone();
+        let called = std::sync::atomic::AtomicUsize::new(0);
+        let private = collect_eval_sources(false, vec![preview.link.clone()], |_| async {
+            called.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(preview.clone())
+        })
+        .await;
+        assert_eq!(called.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(private["state"], "withheld_private_provenance");
+        let public = collect_eval_sources(
+            true,
+            vec![preview.link.clone(), preview.link.clone()],
+            |_| async {
+                called.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(preview.clone())
+            },
+        )
+        .await;
+        assert_eq!(called.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(public["previews"].as_array().unwrap().len(), 1);
+        assert_eq!(public["previews"][0]["text"], preview.text);
+        assert_eq!(public["previews"][0]["truncated"], preview.truncated);
+    }
+
+    #[tokio::test]
+    async fn evidence_export_rejects_wrong_links_local_sources_and_excess_text() {
+        use zephium_core::work::artifact::*;
+        let rows: Vec<WorkEvidencePreviewV1> = serde_json::from_str(include_str!(
+            "../../zephium-ipc/fixtures/work-research-evidence-v1.json"
+        ))
+        .unwrap();
+        let original = rows[0].clone();
+        let mut wrong = original.clone();
+        wrong.link.source_id = wrong.link.source_id.saturating_add(1);
+        let mut local = original.clone();
+        local.source = WorkEvidenceSourceV1::File {
+            path: "/private/never-export".into(),
+            name: "private".into(),
+            file_kind: zephium_core::work::runtime::WorkFileKindV1::Text,
+        };
+        local.text = "PRIVATE FIXTURE TEXT".into();
+        for refused in [wrong, local] {
+            let result = collect_eval_sources(true, vec![original.link.clone()], |_| async {
+                Ok(refused.clone())
+            })
+            .await;
+            assert_eq!(result["failed"], 1);
+            assert!(result["previews"].as_array().unwrap().is_empty());
+            assert!(!result.to_string().contains("PRIVATE FIXTURE TEXT"));
+        }
+        let mut oversized = original.clone();
+        oversized.text = "x".repeat(2 * 1024 * 1024);
+        let result = collect_eval_sources(true, vec![original.link.clone()], |_| async {
+            Ok(oversized.clone())
+        })
+        .await;
+        assert_eq!(result["limited"], true);
+        assert!(result["previews"].as_array().unwrap().is_empty());
+    }
+
     #[test]
     fn public_export_refuses_site_consented_possible_image_disclosure() {
         use zephium_core::work::runtime::WorkPageImageDisclosureV1;
