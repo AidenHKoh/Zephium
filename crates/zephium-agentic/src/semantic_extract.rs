@@ -484,7 +484,8 @@ impl SemanticExtractionSchema {
         self.source_roles
     }
 
-    /// URL evidence is disclosed only when a field requests it.
+    /// URL evidence is disclosed for URL fields and whole-page findings,
+    /// which may cite the next page to read. Both use the same URL privacy screen.
     pub fn includes_link_destinations(&self) -> bool {
         self.url_sources() & 1 != 0
     }
@@ -498,7 +499,7 @@ impl SemanticExtractionSchema {
         self.fields
             .iter()
             .flat_map(|field| std::iter::once(field).chain(field.row_fields().unwrap_or_default()))
-            .fold(0, |bits, field| {
+            .fold(u8::from(self.is_whole_page_findings()), |bits, field| {
                 bits | match field.kind() {
                     SemanticExtractionValueKind::Url => 1,
                     SemanticExtractionValueKind::ImageUrl => 2,
@@ -3213,6 +3214,57 @@ mod tests {
                 SemanticExtractionFieldSchema::try_money("price".into(), true, currencies).is_err()
             );
         }
+    }
+
+    #[test]
+    fn page_findings_keep_query_bearing_native_link_sources_without_admitting_prose_urls() {
+        let destination = "https://example.test/station?id=8443970&date=2026-11-14";
+        let observation = observation_with_nodes(json!([
+            {"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"link","n":"Station predictions","u":destination},
+            {"k":3,"p":0,"r":"paragraph","t":"https://unobserved.example.test/?account=42"}
+        ]));
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(29).unwrap(),
+            vec![
+                SemanticExtractionFieldSchema::try_text_list("output_0".into(), true, 16, 1024)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+            &schema,
+        )
+        .unwrap();
+        let links: Vec<_> = read
+            .fragments()
+            .iter()
+            .filter(|f| f.field() == crate::SemanticReadField::LinkDestination)
+            .collect();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].content().value_preview().unwrap().text(),
+            destination
+        );
+        let token = links[0].id().model_token();
+        let result = extract_semantic_read(&schema, &read, &delivered(&read), SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&json!({"v":1,"schema":29,"fields":[{"name":"output_0","value":{
+                "k":"text_list","sources":[token],"items":[{"value":"Station predictions are on the linked station page.","sources":[token]}]
+            }}]})).unwrap()).unwrap();
+        let SemanticExtractedValue::TextList(items) = result.fields()[0].value() else {
+            panic!()
+        };
+        let sources = result.sources(items.items()[0].source_span()).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            sources[0].fragment().field(),
+            crate::SemanticReadField::LinkDestination
+        );
     }
 
     #[test]
