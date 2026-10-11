@@ -186,3 +186,46 @@ test("a multiline composer beside loaded conversation content can resume", async
     ),
   ).toBe(false);
 });
+
+test("rich editor descendants remain one editable host and never become page content", async () => {
+  const conversation =
+    "<div><h1>Project channel</h1><div role='list'><div>Welcome to the project channel and its recent discussion.</div><button>Start from a template</button><button>Review channel details</button><button>Browse conversation history</button></div><div role='textbox' aria-multiline='true' contenteditable='true' aria-label='Message to project channel'><p><br></p></div></div>";
+  expect(await survey(conversation)).toBe(true);
+  expect(
+    await survey(
+      conversation.replace(
+        "<p><br></p>",
+        "<h2>Sign in to your account</h2><p>Draft text stays inside the editor.</p>",
+      ),
+    ),
+  ).toBe(true);
+  expect(
+    await survey(
+      conversation.replace(
+        "<p><br></p>",
+        "<span contenteditable='false'><h2>Sign in to your account</h2></span>",
+      ),
+    ),
+  ).toBe(true);
+  for (const control of [
+    "<input type='password'>",
+    "<input autocomplete='one-time-code'>",
+    "<iframe title='hCaptcha challenge' width='300'></iframe>",
+  ]) {
+    expect(await survey(conversation.replace("<p><br></p>", control))).toBe(false);
+  }
+});
+
+test("a short accessible list name does not hide its populated conversation", async () => {
+  const conversation =
+    "<div><h1>Project channel</h1><div role='list' aria-label='Project channel'><div>Welcome to the project channel and its recent discussion.</div><button>Start from a template</button><button>Review channel details</button><button>Browse conversation history</button></div><div role='textbox' aria-multiline='true' contenteditable='true' aria-label='Message to project channel'></div></div>";
+  expect(await survey(conversation)).toBe(true);
+  expect(
+    await survey(
+      conversation.replace(
+        "<div>Welcome to the project channel and its recent discussion.</div><button>Start from a template</button><button>Review channel details</button><button>Browse conversation history</button>",
+        "<div></div>",
+      ),
+    ),
+  ).toBe(false);
+});

@@ -25,6 +25,7 @@
     const signIn = /(?:sign[ -]?in|log[ -]?in|zaloguj|two[ -]?factor|verification code|confirmation code|authentication code|one[ -]?time code|choose (?:an? |your )?(?:account|workspace|organization)|select (?:an? |your )?(?:account|workspace|organization)|find your workspace|workspace url|enter your workspace|continue (?:with|to) (?:google|microsoft|apple|slack|sso)|single sign[ -]?on)/i;
     const authStatus = /^(?:(?:please\s+)?(?:check|open)\s+(?:your\s+)?(?:e[ -]?mail|inbox)|(?:enter|type|provide)\s+(?:(?:the|your|a)\s+)?(?:(?:six|6)[ -]digit\s+)?(?:(?:confirmation|verification|authentication|security|one[ -]?time)\s+)?code|(?:approve|confirm|complete)\s+(?:the\s+|your\s+)?(?:sign[ -]?in|log[ -]?in|authentication)|(?:we(?:'ve| have)?\s+)?sent\s+(?:you\s+)?(?:an?\s+|the\s+)?(?:e[ -]?mail|sign[ -]?in link|verification|confirmation)|waiting\s+for\s+(?:approval|verification|authentication))/i;
     const label = (node) => {
+      if (node.matches("input,textarea,select") || node.isContentEditable) return "";
       const aria = node.getAttribute("aria-label");
       if (aria) return aria.slice(0, 160).trim();
       const pending = [node.firstChild];
@@ -34,7 +35,7 @@
         if (!next) continue;
         if (next.nextSibling) pending.push(next.nextSibling);
         if (next.nodeType === 3) text += (next.nodeValue || "").slice(0, 160 - text.length);
-        else if (next.nodeType === 1 && !next.matches("input,textarea,select,[contenteditable='true']"))
+        else if (next.nodeType === 1 && !next.matches("input,textarea,select") && !next.isContentEditable)
           pending.push(next.firstChild);
       }
       return text.trim();
@@ -57,6 +58,10 @@
       const tag = node.tagName.toLowerCase();
       const role = node.getAttribute("role") || "";
       if (node.getAttribute("aria-busy") === "true" || role === "progressbar") busy = true;
+      // Descendants inherit editability; they are the editor's value, not
+      // separate fields or page content. Still inspect actual nested controls.
+      if (node.parentElement?.closest("[contenteditable='true'],[contenteditable='plaintext-only']") &&
+          !["input", "textarea", "select", "iframe"].includes(tag) && role !== "textbox") continue;
       if (["input", "textarea", "select"].includes(tag) || role === "textbox" || node.isContentEditable) {
         const type = (node.getAttribute("type") || "").toLowerCase();
         const hints = ["autocomplete", "name", "id", "aria-label", "placeholder"].map((name) => node.getAttribute(name) || "");
@@ -102,7 +107,8 @@
       if ((tag === "button" || tag === "a" || role === "button" || role === "link") && signIn.test(short)) authControls++;
       // Legal/help chrome is not evidence that the requested app loaded.
       if (node.closest("nav,footer,aside,[role='navigation'],[role='contentinfo'],[role='complementary']")) continue;
-      if ((["ul", "ol"].includes(tag) || role === "list") && short.length >= 24) lists++;
+      if ((["ul", "ol"].includes(tag) || role === "list") &&
+          Array.from(node.children).slice(0, 64).some(child => visible(child) && label(child).length >= 24)) lists++;
       // Custom app lists often expose each item as a button rather than li/row.
       // Require repeated local siblings; never count global or auth chrome.
       if ((tag === "button" || role === "button") && short.length >= 12 && !signIn.test(short) &&
