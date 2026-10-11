@@ -231,6 +231,10 @@ fn main() {
             work_durable::run_account_read(start)
         }
         #[cfg(feature = "durable-runtime")]
+        [argument, start] if argument == "--live-disposable-slack-send" => {
+            work_durable::run_account_send(start)
+        }
+        #[cfg(feature = "durable-runtime")]
         [argument, start, goal] if argument == "--live-site" => work_durable::run_site(start, goal),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-airbnb-work" => work_durable::run_agent_airbnb(),

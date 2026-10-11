@@ -1737,6 +1737,9 @@ pub(super) async fn lead_workflow(
             execution,
             started.elapsed().as_millis(),
         );
+        if let Some(account) = super::work_account::active() {
+            account.report(execution);
+        }
         if !public_eval && !block_probe && !account_probe && !local_probe {
             page_rows(execution);
             part_rows(execution);

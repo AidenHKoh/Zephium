@@ -233,9 +233,21 @@ pub(super) fn run_local_fixture(
 }
 
 pub(super) fn run_account_read(start: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
-    let request =
-        super::work_account::configure(start.to_str().ok_or(super::ProbeFailure::Authority)?)
-            .map_err(|_| super::ProbeFailure::Authority)?;
+    run_account(start, false)
+}
+
+pub(super) fn run_account_send(start: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
+    run_account(start, true)
+}
+
+fn run_account(start: &std::ffi::OsStr, send: bool) -> Result<(), super::ProbeFailure> {
+    let url = start.to_str().ok_or(super::ProbeFailure::Authority)?;
+    let request = if send {
+        super::work_account::configure_send(url)
+    } else {
+        super::work_account::configure(url)
+    }
+    .map_err(|_| super::ProbeFailure::Authority)?;
     LEAD_SCENARIO
         .set(super::acceptance::request_scenario(&request, ""))
         .map_err(|_| super::ProbeFailure::Authority)?;
@@ -552,8 +564,10 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         super::work_account::active().is_some(),
     );
     let coordinated = !matches!(mode, Mode::Public | Mode::MoneyNode);
+    use std::os::unix::fs::PermissionsExt;
     let data = tempfile::Builder::new()
         .prefix("zephium-durable-work-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir()
         .map_err(|_| Error::Runtime)?;
     let store =
