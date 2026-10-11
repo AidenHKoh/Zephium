@@ -3,8 +3,11 @@
 //! here trusts a server's declared type beyond a coarse `image/*` gate.
 use reqwest::{redirect::Policy, Client};
 use std::{
-    net::{IpAddr, SocketAddr},
-    sync::Arc,
+    net::{IpAddr, SocketAddr, ToSocketAddrs},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, OnceLock,
+    },
     time::Duration,
 };
 
@@ -104,15 +107,82 @@ fn public_addresses(
     }
     Ok(Box::new(kept.into_iter()))
 }
+// getaddrinfo runs on a blocking worker and cannot be cancelled by dropping
+// its async waiter. Keep a global physical bound until that worker returns.
+struct ResolverSlots {
+    used: AtomicUsize,
+    maximum: usize,
+}
+impl ResolverSlots {
+    fn new(maximum: usize) -> Self {
+        Self {
+            used: AtomicUsize::new(0),
+            maximum,
+        }
+    }
+    fn reserve(self: &Arc<Self>) -> Result<ResolverPermit, std::io::Error> {
+        self.used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                (used < self.maximum).then(|| used + 1)
+            })
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "public image resolver capacity",
+                )
+            })?;
+        Ok(ResolverPermit {
+            slots: self.clone(),
+            returned: false,
+        })
+    }
+}
+struct ResolverPermit {
+    slots: Arc<ResolverSlots>,
+    returned: bool,
+}
+impl ResolverPermit {
+    fn returned(mut self) {
+        self.returned = true;
+    }
+}
+impl Drop for ResolverPermit {
+    fn drop(&mut self) {
+        // A panic or a dropped queued worker is not a confirmed resolver return.
+        // Conservatively quarantine its slot instead of advertising false capacity.
+        if self.returned {
+            self.slots.used.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+async fn resolve_with(
+    slots: Arc<ResolverSlots>,
+    resolve: impl FnOnce() -> std::io::Result<reqwest::dns::Addrs> + Send + 'static,
+) -> std::io::Result<reqwest::dns::Addrs> {
+    let permit = slots.reserve()?;
+    tokio::task::spawn_blocking(move || {
+        let result = resolve();
+        permit.returned();
+        result
+    })
+    .await
+    .map_err(|_| std::io::Error::other("public image resolver did not return"))?
+}
 struct PublicResolver;
 impl reqwest::dns::Resolve for PublicResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        static SLOTS: OnceLock<Arc<ResolverSlots>> = OnceLock::new();
+        let slots = SLOTS
+            .get_or_init(|| Arc::new(ResolverSlots::new(4)))
+            .clone();
         let host = name.as_str().to_owned();
         Box::pin(async move {
-            let addresses = tokio::net::lookup_host((host, 0)).await?;
-            // These exact checked addresses reach the connector; there is no
-            // second resolution between validation and socket creation.
-            Ok(public_addresses(addresses)?)
+            Ok(resolve_with(slots, move || {
+                // These exact checked addresses reach the connector; there is no
+                // second resolution between validation and socket creation.
+                public_addresses((host.as_str(), 0).to_socket_addrs()?)
+            })
+            .await?)
         })
     }
 }
@@ -303,6 +373,64 @@ async fn fetch_with(client: &Client, url: url::Url) -> Result<Vec<u8>, PublicAss
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_dns_waiter_retains_capacity_until_physical_return() {
+        let slots = Arc::new(ResolverSlots::new(1));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let owned = slots.clone();
+        let caller = tokio::spawn(async move {
+            resolve_with(owned, move || {
+                let _ = started_tx.send(());
+                release_rx.recv().unwrap();
+                public_addresses(["93.184.216.34:443".parse().unwrap()].into_iter())
+            })
+            .await
+        });
+        started_rx.await.unwrap();
+        caller.abort();
+        assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+        assert_eq!(slots.used.load(Ordering::Acquire), 1);
+        let refused = resolve_with(slots.clone(), || {
+            panic!("capacity must refuse before worker dispatch")
+        })
+        .await;
+        assert!(matches!(refused, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while slots.used.load(Ordering::Acquire) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let next = resolve_with(slots.clone(), || {
+            public_addresses(["93.184.216.34:443".parse().unwrap()].into_iter())
+        })
+        .await
+        .unwrap();
+        assert_eq!(next.count(), 1);
+        assert_eq!(slots.used.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn returned_dns_error_releases_capacity_but_panic_does_not() {
+        let slots = Arc::new(ResolverSlots::new(1));
+        let error = resolve_with(slots.clone(), || {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "injected",
+            ))
+        })
+        .await;
+        assert!(matches!(error, Err(error) if error.kind() == std::io::ErrorKind::NotFound));
+        assert_eq!(slots.used.load(Ordering::Acquire), 0);
+        let panic = resolve_with(slots.clone(), || panic!("injected resolver panic")).await;
+        assert!(matches!(panic, Err(error) if error.kind() == std::io::ErrorKind::Other));
+        assert_eq!(slots.used.load(Ordering::Acquire), 1);
+        assert!(slots.reserve().is_err());
+    }
 
     #[test]
     fn cdns_are_asked_for_a_display_sized_picture() {
