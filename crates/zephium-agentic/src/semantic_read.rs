@@ -326,8 +326,7 @@ pub enum SemanticReadField {
 }
 
 /// What a viewport-image fragment says in place of page text.
-pub const SEMANTIC_VIEWPORT_IMAGE_TEXT: &str =
-    "the viewport screenshot attached to this request; cite this ref for a value read only from its pixels";
+pub const SEMANTIC_VIEWPORT_IMAGE_TEXT: &str = "the viewport screenshot attached to this request; cite this ref for a value read only from its pixels";
 
 /// Non-actionable model-facing identity for one read fragment.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]

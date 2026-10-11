@@ -19,15 +19,15 @@ use zephium_agent_controller::{
 use zephium_agent_provider_transport::AgentProviderCredential;
 use zephium_agentic::*;
 use zephium_app::{
-    AgentWorkApplicationConfig, AgentWorkProfileBinding, AgentWorkReviewDecision, CallbackHandle,
-    RetainedWorkHandle, RetainedWorkPhase,
     work_agent::{
         WorkAgentBrowseRequest, WorkBrowserOutcome, WorkSiteConfirmation, WorkSiteDecision,
         WorkSiteReceipt,
     },
     work_runtime::*,
+    AgentWorkApplicationConfig, AgentWorkProfileBinding, AgentWorkReviewDecision, CallbackHandle,
+    RetainedWorkHandle, RetainedWorkPhase,
 };
-use zephium_core::work::{WorkError, WorkStepId, artifact::*, runtime::*};
+use zephium_core::work::{artifact::*, runtime::*, WorkError, WorkStepId};
 
 /// Trusted provider preference; page/model output cannot change it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1737,7 +1737,8 @@ impl NativeWorkComposition {
                             .iter()
                             .filter(|plan| plan.local_crop_permitted(Instant::now()))
                             .count();
-                        let fetch_mode = public_asset_fetch_mode(public_asset_task, measure.resolved_handoff);
+                        let fetch_mode =
+                            public_asset_fetch_mode(public_asset_task, measure.resolved_handoff);
                         let native_started = !media_plans.is_empty()
                             && guard.0.read_record_media(media_plans.clone(), fetch_mode);
                         media_complete = !native_started;
@@ -1746,7 +1747,8 @@ impl NativeWorkComposition {
                                 plans: media_plans.len(),
                                 original_crop_permits: crop_permits,
                                 native_started,
-                                public_asset_retry: fetch_mode == zephium_agentic::WorkBrowserMediaFetchMode::PublicAssetRetry,
+                                public_asset_retry: fetch_mode
+                                    == zephium_agentic::WorkBrowserMediaFetchMode::PublicAssetRetry,
                                 work_memory,
                             },
                         );
@@ -2421,9 +2423,9 @@ fn page_outcome(
 }
 
 fn page_failure_outcome(failure: AgentWorkFailure) -> WorkPageOutcomeV1 {
+    use zephium_agent_controller::AgentBrowserProviderError as Browser;
     use WorkPageFailureStageV1 as Stage;
     use WorkPageOutcomeV1 as Outcome;
-    use zephium_agent_controller::AgentBrowserProviderError as Browser;
     let stage = match failure {
         AgentWorkFailure::Redirected => return Outcome::Redirected,
         AgentWorkFailure::Cancelled => return Outcome::Cancelled,
@@ -4236,19 +4238,17 @@ mod human_budget_tests {
         assert_eq!((calls, actions), (24, 51));
         assert!(remaining_read(limits, first, 40, 0, true).is_err());
         assert!(remaining_read(limits, first, 0, 61, true).is_err());
-        assert!(
-            remaining_read(
-                limits,
-                WorkUsage {
-                    model_tokens: 1000,
-                    ..first
-                },
-                1,
-                0,
-                false
-            )
-            .is_err()
-        );
+        assert!(remaining_read(
+            limits,
+            WorkUsage {
+                model_tokens: 1000,
+                ..first
+            },
+            1,
+            0,
+            false
+        )
+        .is_err());
         // A reservation bounds the spend from above: the remainder only shrinks.
         let (reserved, _, _) = remaining_read(
             limits,
@@ -4275,7 +4275,6 @@ mod human_budget_tests {
         .is_none());
     }
 }
-
 
 // Original authority, never a claim about which cookies Work's persistent jar
 // contains. Cookie choices/checks may persist; they grant no account authority.

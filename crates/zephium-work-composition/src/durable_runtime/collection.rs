@@ -871,11 +871,9 @@ mod tests {
         assert!(matches!(cells[1][0].value, WorkCellValue::Unknown));
         assert!(matches!(cells[1][1].value, WorkCellValue::Unknown));
         assert_eq!(cells[1][0].evidence, [3]);
-        assert!(
-            schema
-                .comparison(&rows, &mut |_| Err(WorkError::Invalid))
-                .is_err()
-        );
+        assert!(schema
+            .comparison(&rows, &mut |_| Err(WorkError::Invalid))
+            .is_err());
     }
 
     #[test]
