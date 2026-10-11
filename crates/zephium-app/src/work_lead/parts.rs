@@ -346,6 +346,41 @@ fn public_goal(spec: &PartSpec) -> bool {
     PUBLIC.iter().any(|word| text.contains(word)) && !OWN.iter().any(|word| text.contains(word))
 }
 
+// This selects the task path; it never grants a session or an effect.
+// Unknown account services need the same handoff-capable path as known apps.
+fn account_goal(spec: &PartSpec) -> bool {
+    if public_goal(spec) {
+        return false;
+    }
+    let text = format!("{} {} {}", spec.title, spec.goal, spec.brief).to_lowercase();
+    [
+        "my account",
+        "test account",
+        "your account",
+        "person's account",
+        "user's account",
+        "my inbox",
+        "my workspace",
+        "our workspace",
+        "signed-in",
+        "signed in",
+        "sign-in",
+        "sign in",
+        "mfa",
+        "two-factor",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase))
+}
+
+fn account_read_route(spec: &PartSpec, kind: WorkStepKindV1) -> Result<WorkStepKindV1, String> {
+    if account_goal(spec) && matches!(kind, WorkStepKindV1::Read { goal: None, .. }) {
+        Err("Use browse with the original account URL and the requested goal for this account task. Plain read is a public-page fetch and cannot replace a sign-in handoff. Keep all normal permissions; never substitute help or marketing pages for account content.".into())
+    } else {
+        Ok(kind)
+    }
+}
+
 /// The site a browser part works on, by its registrable domain.
 fn part_site(spec: &PartSpec) -> Option<String> {
     if spec.helper != WorkHelperV1::Browser {
@@ -770,6 +805,9 @@ where
         if !spec.brief.is_empty() {
             brief.push_str(&format!("Details: {}\n", spec.brief));
         }
+        if matches!(kit, Kit::Browser) && account_goal(spec) {
+            brief.push_str("This is an account task: use browse with its original URL and requested goal so sign-in/MFA can hand the page to the person. Existing effect approvals still apply. Continue in the browser through app-launch interstitials. Help, marketing and app-launch pages are not the requested account content.\n");
+        }
         if let Some(service) = &spec.service {
             if let Some(host) = &service.host {
                 brief.push_str(&format!("Site: {host}\n"));
@@ -970,7 +1008,8 @@ where
                     | "write_file" | "edit_file" | "run_command"
                         if !matches!(kit, Kit::Registered(_)) =>
                     {
-                        match step_request(&tool_call.name, &tool_call.arguments, self.run) {
+                        match step_request(&tool_call.name, &tool_call.arguments, self.run)
+                            .and_then(|kind| if matches!(kit, Kit::Browser) { account_read_route(spec, kind) } else { Ok(kind) }) {
                             Ok(WorkStepKindV1::Search { .. }) if searches >= PART_SEARCHES => {
                                 results[index] = Some(answer(
                                     "This part has used its searches: place what you found and finish, saying what is missing.".into(),
@@ -1860,6 +1899,9 @@ fn plain_page(url: &str) -> bool {
 /// goal) on the part's own site: a browser part reads them as given first.
 /// Pages in the person's own apps go through the part's page tasks instead.
 fn given_pages(objective: &str, spec: &PartSpec) -> Vec<String> {
+    if account_goal(spec) {
+        return Vec::new();
+    }
     let site = spec
         .service
         .as_ref()
@@ -2441,6 +2483,41 @@ mod tests {
             site_turn(&[part("x-kom", None)], "allegro.pl"),
             SiteTurn::Go
         );
+    }
+
+    #[test]
+    fn unknown_account_services_never_take_the_eager_public_read_path() {
+        let mut part = PartSpec {
+            title: "Test account".into(),
+            helper: WorkHelperV1::Browser,
+            goal: "Read my account inbox".into(),
+            brief: String::new(),
+            service: Some(WorkPartServiceV1 {
+                host: Some("unlisted.example".into()),
+                connection: None,
+            }),
+            records: vec![],
+            search: None,
+            declined: None,
+        };
+        let url = "https://unlisted.example/app/inbox";
+        assert!(given_pages(url, &part).is_empty());
+        let read = WorkStepKindV1::Read {
+            url: url.into(),
+            collection: None,
+            goal: None,
+        };
+        assert!(account_read_route(&part, read.clone()).is_err());
+        let task = WorkStepKindV1::Read {
+            url: url.into(),
+            collection: None,
+            goal: Some("Read visible inbox items without changing anything".into()),
+        };
+        assert_eq!(account_read_route(&part, task.clone()).unwrap(), task);
+        part.title = "Public documentation".into();
+        part.goal = "Read the sign-in and MFA documentation".into();
+        assert_eq!(given_pages(url, &part), [url]);
+        assert_eq!(account_read_route(&part, read.clone()).unwrap(), read);
     }
 
     #[test]

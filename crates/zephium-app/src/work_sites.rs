@@ -107,7 +107,7 @@ const VENDORS: &[(&str, &str, Option<&str>)] = &[
     ("booking.com", "Booking.com", None),
     ("trello.com", "Trello", None),
     ("asana.com", "Asana", Some("https://app.asana.com/")),
-    ("linear.app", "Linear", Some("https://linear.app/")),
+    ("linear.app", "Linear", Some("https://linear.app/login")),
     (
         "discord.com",
         "Discord",
@@ -190,7 +190,9 @@ pub fn view_home(url: &str) -> Option<&'static str> {
             });
         return (!conversation).then_some("https://app.slack.com/client");
     }
-    (host == "linear.app" || host.ends_with(".linear.app")).then_some("https://linear.app/")
+    // Preserve explicit workspace and sign-in routes. The vendor's bare-root
+    // entry below is distinct from a page the person actually requested.
+    None
 }
 
 /// A daily app that is also the public web: a task about its public pages
@@ -748,10 +750,13 @@ mod tests {
             view_home("https://app.slack.com/client/T01ABCDEF/C07LAUNCH1"),
             None
         );
+        assert_eq!(view_home("https://linear.app/team/my-issues"), None);
+        assert_eq!(view_home("https://linear.app/login"), None);
         assert_eq!(
-            view_home("https://linear.app/team/my-issues"),
-            Some("https://linear.app/")
+            entry_url("https://linear.app/"),
+            Some("https://linear.app/login")
         );
+        assert_eq!(entry_url("https://linear.app/team/my-issues"), None);
         assert_eq!(view_home("https://mail.google.com/mail/u/0/"), None);
     }
 
