@@ -534,6 +534,8 @@ class TimingTests(unittest.TestCase):
         result=eval.timing(evidence, '[ 80ms] lead-run: event=PartEnded { helper: Browser }\n[ 90ms] lead-run: event=Ended { status: Succeeded }')
         self.assertEqual([result[k] for k in ('model_busy_ms','page_without_model_ms','other_ms')], [50,20,30])
         self.assertEqual(result['post_browser_finalization_gaps_ms'], [10])
+        evidence['wall_ms']=150
+        self.assertIsNone(eval.timing(evidence,'')['model_busy_ms'], 'clock-origin mismatch must not silently omit setup time')
 
     def test_unfinished_timing_is_unknown_and_followups_reset_finalization(self):
         self.assertIsNone(eval.timing({'timeline':{'started_ms':0,'finished_ms':100}, 'model_calls':[{'started_ms':10}]}, '')['model_busy_ms'])

@@ -453,6 +453,8 @@ def timing(evidence, log):
     valid = isinstance(start, int) and isinstance(end, int) and end >= start and not evidence.get("model_calls_truncated") and all(isinstance(row.get("started_ms"), int) and isinstance(row.get("finished_ms"), int) and row["finished_ms"] >= row["started_ms"] for row in rows)
     if not valid:
         return result
+    if isinstance(evidence.get("wall_ms"), int) and abs(end-start-evidence["wall_ms"]) > 1:
+        return result
     def spans(rows):
         return [[max(start,row["started_ms"]),min(end,row["finished_ms"])] for row in rows if row["finished_ms"] >= start and row["started_ms"] <= end]
     models = interval_union(spans(evidence.get("model_calls", [])))

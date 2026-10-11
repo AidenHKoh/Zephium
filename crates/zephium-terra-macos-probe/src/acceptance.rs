@@ -1415,6 +1415,7 @@ pub(super) async fn lead_workflow(
     };
     let (read_decisions, read_decision_name) = eval_read_decisions(read_decision_env.as_deref())?;
     let block_probe = scenario.name.starts_with("blocks-");
+    let _ = STARTED.get_or_init(Instant::now);
     let eval_started = Instant::now();
     let local_diagnostics = Arc::new(Mutex::new(EvalDiagnostics::default()));
     if public_eval || block_probe || account_probe || local_probe {
