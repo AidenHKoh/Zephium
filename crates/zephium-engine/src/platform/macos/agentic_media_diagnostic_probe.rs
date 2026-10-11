@@ -1,8 +1,12 @@
 //! Release-excluded counts stripped before the shipping observation decoder.
 use std::sync::atomic::{AtomicBool, Ordering};
+#[path = "agentic_media_name_probe.rs"]
+mod names;
+pub(crate) use names::NameRows;
 static ENABLED: AtomicBool = AtomicBool::new(false);
 pub(super) fn configure(public: bool, account: bool) {
     ENABLED.store(public && !account, Ordering::Release);
+    names::configure(public && !account);
 }
 pub(super) fn enabled() -> bool {
     ENABLED.load(Ordering::Acquire)
@@ -52,7 +56,10 @@ pub(super) fn source(original: &str) -> Option<String> {
         )
         .replace("break association;", "{md[0]=2;break association;}");
     source.replace_range(start..end, &body);
-    (source.len() <= original.len() + 4096).then_some(source)
+    if source.len() > original.len() + 4096 {
+        return None;
+    }
+    names::instrument(&source)
 }
 
 /// Borrows precisely the original snapshot tail; invalid envelopes remain invalid
@@ -91,6 +98,25 @@ pub(super) fn normalize(bytes: &[u8]) -> &[u8] {
     }
     bytes
 }
+/// Separates native-only per-node counters before even the shipping decoder sees
+/// the body. A malformed envelope remains invalid; it cannot add semantic nodes.
+pub(super) fn normalize_names(bytes: &[u8]) -> (Option<NameRows>, &[u8]) {
+    if enabled() {
+        if let Some((rows, original)) = names::split(bytes) {
+            return (Some(rows), normalize(original));
+        }
+    }
+    (None, normalize(bytes))
+}
+pub(super) fn remember_names(
+    snapshot: &zephium_agentic::SemanticSnapshot,
+    rows: Option<NameRows>,
+    original: &[u8],
+) {
+    if let Some(rows) = rows {
+        names::remember(snapshot, rows, original);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,6 +154,22 @@ mod tests {
         for (public, account) in [(false, false), (true, false), (false, true), (true, true)] {
             configure(public, account);
             assert_eq!(enabled(), public && !account);
+            let name_bytes = b"MN1:[[4,0,[]]]\nMD1:0,1,2,3\n{}";
+            let (rows, original) = normalize_names(name_bytes);
+            assert_eq!(rows.is_some(), public && !account);
+            assert_eq!(
+                original,
+                if public && !account {
+                    b"{}".as_slice()
+                } else {
+                    name_bytes.as_slice()
+                }
+            );
+            let malformed = b"MN1:[[4,\"not-a-count\",[]]]\nMD1:0,1,2,3\n{}";
+            let (rows, original) = normalize_names(malformed);
+            assert!(rows.is_none());
+            assert_eq!(original, malformed);
+
             assert_eq!(
                 normalize_media(media),
                 if public && !account {

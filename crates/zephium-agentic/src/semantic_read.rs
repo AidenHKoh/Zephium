@@ -759,6 +759,25 @@ impl<'a> SemanticReadResult<'a> {
             ..Default::default()
         }
     }
+    #[cfg(feature = "probe-harness")]
+    pub(crate) fn media_probe_source(
+        &self,
+        record: u16,
+        id: SemanticReadFragmentId,
+    ) -> Option<crate::SemanticMediaNameProbe> {
+        let provenance = self.fragment(id)?.provenance();
+        if provenance.sensitivity() != SemanticSensitivity::Public {
+            return None;
+        }
+        Some(crate::SemanticMediaNameProbe {
+            record,
+            frame: provenance.frame().clone(),
+            invocation: provenance.invocation().get(),
+            snapshot: provenance.snapshot().get(),
+            node: provenance.node_key.get(),
+        })
+    }
+
     pub(crate) fn count_media_relations(
         &self,
         identity: &[SemanticReadFragmentId],

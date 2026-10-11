@@ -17,8 +17,17 @@ pub(super) fn configure_media_diagnostic(public: bool, account: bool) {
 pub(super) fn normalize_media_result_diagnostic(bytes: &[u8]) -> &[u8] {
     media_diagnostic::normalize_media(bytes)
 }
-pub(super) fn normalize_media_diagnostic(bytes: &[u8]) -> &[u8] {
-    media_diagnostic::normalize(bytes)
+pub(super) fn normalize_media_diagnostic(
+    bytes: &[u8],
+) -> (Option<media_diagnostic::NameRows>, &[u8]) {
+    media_diagnostic::normalize_names(bytes)
+}
+pub(super) fn remember_media_names(
+    snapshot: &zephium_agentic::SemanticSnapshot,
+    rows: Option<media_diagnostic::NameRows>,
+    original: &[u8],
+) {
+    media_diagnostic::remember_names(snapshot, rows, original);
 }
 
 pub(super) const PREPARE_MESSAGE: &str = "ZEPHIUM_PREPARED_FILL_WAIT_V1";

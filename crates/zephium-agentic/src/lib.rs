@@ -121,9 +121,15 @@ pub use provider_transport::lead;
 pub mod public_asset;
 mod semantic;
 mod semantic_media;
+#[cfg(feature = "probe-harness")]
+mod semantic_media_probe;
 pub use semantic_media::{
     SemanticMediaEvidence, SemanticMediaKind, SemanticRecordMediaDiagnostics, SemanticRecordMediaPlan, MAX_SEMANTIC_MEDIA,
     MAX_SEMANTIC_MEDIA_RELATIONS,
+};
+#[cfg(feature = "probe-harness")]
+pub use semantic_media_probe::{
+    set_semantic_media_name_probe, SemanticMediaNameObserver, SemanticMediaNameProbe,
 };
 mod secret_shapes;
 mod semantic_action;

@@ -1612,12 +1612,22 @@ pub(crate) fn extract_semantic_read_inner<'a>(
         false,
     )?;
 
+    #[cfg(feature = "probe-harness")]
+    let media_probe = crate::semantic_media_probe::observer();
+    #[cfg(feature = "probe-harness")]
+    let mut media_probe_sources = Vec::new();
+    #[cfg(feature = "probe-harness")]
+    let mut media_probe_incomplete = false;
     let mut media = Vec::new();
     let mut media_diagnostics = read.media_diagnostics();
     let mut record = 0u16;
     for field in &fields {
         if let SemanticExtractedValue::Rows(rows) = field.value() {
             for row in rows.items() {
+                #[cfg(feature = "probe-harness")]
+                if media_probe.is_some() && media.len() >= 12 {
+                    media_probe_incomplete = true;
+                }
                 if media.len() < 12 {
                     if let Some(SemanticExtractedValue::Text(name)) =
                         row.fields().first().map(SemanticExtractedField::value)
@@ -1628,6 +1638,20 @@ pub(crate) fn extract_semantic_read_inner<'a>(
                             .iter()
                             .map(|source| source.fragment().id())
                             .collect::<Vec<_>>();
+                        #[cfg(feature = "probe-harness")]
+                        if media_probe.is_some() {
+                            for id in &identity {
+                                if media_probe_sources.len() >= 128 {
+                                    media_probe_incomplete = true;
+                                    break;
+                                }
+                                if let Some(source) = read.media_probe_source(record, *id) {
+                                    media_probe_sources.push(source);
+                                } else {
+                                    media_probe_incomplete = true;
+                                }
+                            }
+                        }
                         read.count_media_relations(&identity, &mut media_diagnostics);
                         if let Some(plan) = read.media_for_record(record, &identity, result_guard) {
                             media.push(plan);
@@ -1649,6 +1673,10 @@ pub(crate) fn extract_semantic_read_inner<'a>(
             .map_err(|_| SemanticExtractionError::Invariant)?,
         dropped: u16::try_from(counters.dropped).unwrap_or(u16::MAX),
     };
+    #[cfg(feature = "probe-harness")]
+    if let Some(observer) = media_probe {
+        observer(&media_probe_sources, media_probe_incomplete);
+    }
     Ok(SemanticExtractionResult {
         media_diagnostics,
         media,
@@ -2790,6 +2818,94 @@ mod tests {
     };
     use serde_json::{json, Value};
     use zephium_core::ids::ProfileId;
+
+    #[cfg(feature = "probe-harness")]
+    #[test]
+    fn native_name_probe_uses_only_exact_validated_public_name_sources() {
+        use std::sync::{Arc, Mutex};
+        let observation = observation();
+        let read = read(&observation, 31);
+        let delivery = delivered(&read);
+        for fragment in read.fragments() {
+            let probe = read.media_probe_source(9, fragment.id());
+            if fragment.provenance().sensitivity() != SemanticSensitivity::Public {
+                assert!(probe.is_none());
+            } else {
+                let probe = probe.unwrap();
+                assert_eq!(probe.frame(), fragment.provenance().frame());
+                assert_eq!(probe.invocation(), 17);
+                assert_eq!(probe.snapshot(), 19);
+                assert!((1..=4).contains(&probe.node()));
+                assert_eq!(format!("{probe:?}"), "SemanticMediaNameProbe([redacted])");
+            }
+        }
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(29).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows(
+                "records".into(),
+                true,
+                vec![SemanticExtractionFieldSchema::try_text("name".into(), true, 64).unwrap()],
+                2,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let output=serde_json::to_vec(&json!({"v":1,"schema":29,"fields":[{"name":"records","value":{"k":"rows","items":[
+            {"fields":[{"name":"name","value":{"k":"text","value":"Quarterly summary","sources":["@r1"]}}]},
+            {"fields":[{"name":"name","value":{"k":"text","value":"Another record","sources":["@r1"]}}]}
+        ]}}]})).unwrap();
+        let run = || {
+            extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &output,
+            )
+            .unwrap()
+            .into_owned()
+            .unwrap()
+        };
+        let before = run();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let captured = received.clone();
+        let thread = std::thread::current().id();
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::set_semantic_media_name_probe(None);
+            }
+        }
+        let reset = Reset;
+        crate::set_semantic_media_name_probe(Some(Arc::new(move |sources, incomplete| {
+            if std::thread::current().id() != thread {
+                return;
+            }
+            assert!(!incomplete);
+            *captured.lock().unwrap() = sources
+                .iter()
+                .map(|source| {
+                    (
+                        source.record(),
+                        source.invocation(),
+                        source.snapshot(),
+                        source.node(),
+                    )
+                })
+                .collect();
+        })));
+        let after = run();
+        drop(reset);
+        assert_eq!(
+            *received.lock().unwrap(),
+            vec![(0, 17, 19, 2), (1, 17, 19, 2)]
+        );
+        assert_eq!(before.guard, after.guard);
+        assert_eq!(before.fields, after.fields);
+        assert_eq!(before.edges, after.edges);
+        assert_eq!(before.sources.len(), after.sources.len());
+        assert_eq!(before.media_diagnostics, after.media_diagnostics);
+    }
 
     fn observation() -> SemanticObservation {
         observation_with_nodes(json!([

@@ -826,11 +826,15 @@ impl SemanticRuntimeChannelState {
                 completion,
             } => {
                 #[cfg(feature = "native-agentic-semantic-probe")]
-                let bytes = program_probe::normalize_media_diagnostic(bytes);
+                let (name_rows, bytes) = program_probe::normalize_media_diagnostic(bytes);
                 let outcome = invocation
                     .decode_result(bytes)
                     .map(Box::new)
                     .map_err(AgentSemanticRuntimeFailure::Result);
+                #[cfg(feature = "native-agentic-semantic-probe")]
+                if let Ok(snapshot) = &outcome {
+                    program_probe::remember_media_names(snapshot, name_rows, bytes);
+                }
                 let recoverable = matches!(
                     &outcome,
                     Ok(_)
