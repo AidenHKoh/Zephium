@@ -10,6 +10,7 @@ mod macos_python;
 #[cfg(target_os = "macos")]
 mod macos_spawn;
 pub(crate) mod python;
+mod review;
 mod snapshot;
 #[cfg(windows)]
 mod windows;
@@ -34,6 +35,8 @@ pub(crate) enum Failure {
     Sensitive,
     PythonUnavailable,
     GitHubUnavailable,
+    CleanupPending,
+    ReviewBusy,
 }
 impl Failure {
     pub fn note(self) -> &'static str {
@@ -49,6 +52,8 @@ impl Failure {
             Self::Storage => "The private copied workspace could not be prepared",
             Self::Launch => "The confined process could not be started",
             Self::Stopped => "The confined process stopped",
+            Self::ReviewBusy => "Review capacity is occupied by running work or unconfirmed cleanup",
+            Self::CleanupPending => "Stop was requested; review process or copied-workspace cleanup is not yet confirmed",
             Self::StopUnconfirmed => "Stop was requested, but process exit has not been confirmed",
             Self::Failed => "The operation in the copied workspace failed",
             Self::GitHubUnavailable => "Public GitHub CLI reads require the qualified macOS build 25G83 and the pinned Homebrew gh 2.96.0 image; Windows awaits packaged runtime and AF_UNIX/LPAC qualification",
@@ -88,6 +93,7 @@ pub(crate) struct Output {
 }
 
 /// The first approved version and latest accepted version of one local file.
+#[derive(Clone)]
 pub(crate) struct ApprovedChange {
     pub path: std::path::PathBuf,
     pub before: Option<Vec<u8>>,
@@ -107,51 +113,18 @@ where
     C: Fn() -> CF,
     CF: Future<Output = bool>,
 {
-    ensure_available()?;
-    if changes.is_empty() || changes.len() > 2_000 {
-        return Err(Failure::Input);
-    }
-    if cancellation_requested(&cancelled).await {
-        return Err(Failure::Stopped);
-    }
-    let selected: Vec<_> = changes.iter().map(|change| change.path.clone()).collect();
-    let snapshot = Snapshot::capture(grant, root, &selected)?;
-    prepare_baseline(&snapshot, changes)?;
-    for operation in [
-        GitOperation::Initialize,
-        GitOperation::CaptureIndex,
-        GitOperation::CommitBaseline,
-    ] {
-        if !execute(&snapshot, operation, &cancelled).await?.success {
-            return Err(Failure::Failed);
-        }
-    }
-    for change in changes {
-        snapshot.write(&change.path, &change.after)?;
-    }
-    if !execute(&snapshot, GitOperation::IntentToAdd, &cancelled)
-        .await?
-        .success
-    {
-        return Err(Failure::Failed);
-    }
-    let output = execute(&snapshot, GitOperation::Read(operation), &cancelled).await?;
-    for change in changes {
-        if crate::work_files::snapshot_bytes(&root.join(&change.path), 1024 * 1024)
-            .ok()
-            .as_ref()
-            != Some(&change.after)
-        {
-            return Err(Failure::Changed);
-        }
-    }
-    Ok(output)
+    review::run(grant, root, changes, operation, cancelled).await
 }
 
-fn prepare_baseline(snapshot: &Snapshot, changes: &[ApprovedChange]) -> Result<(), Failure> {
+fn prepare_baseline_checked(
+    snapshot: &Snapshot,
+    changes: &[ApprovedChange],
+    check: &dyn Fn() -> Result<(), Failure>,
+) -> Result<(), Failure> {
     let mut seen = std::collections::BTreeSet::new();
     let mut total: usize = snapshot.files.values().map(Vec::len).sum();
     for change in changes {
+        check()?;
         if !seen.insert(&change.path) || snapshot.files.get(&change.path) != Some(&change.after) {
             return Err(Failure::Changed);
         }

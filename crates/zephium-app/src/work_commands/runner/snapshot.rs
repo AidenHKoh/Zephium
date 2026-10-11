@@ -25,19 +25,21 @@ pub(super) struct Snapshot {
     pub files: BTreeMap<PathBuf, Vec<u8>>,
 }
 impl Snapshot {
-    pub fn capture(
+    pub fn capture_checked(
         grant: &WorkFileGrant,
         requested: &Path,
         selected: &[PathBuf],
+        check: &dyn Fn() -> Result<(), Failure>,
     ) -> Result<Self, Failure> {
+        check()?;
         let root = grant
             .resolve(requested.to_str().ok_or(Failure::Input)?, false)
             .map_err(|_| Failure::Input)?;
         if root != requested {
             return Err(Failure::Input);
         }
-        let files = collect(&root, selected)?;
-        Self::from_files(files)
+        let files = collect_checked(&root, selected, check)?;
+        Self::prepare_checked(files, true, check)
     }
 
     pub(super) fn from_files(files: BTreeMap<PathBuf, Vec<u8>>) -> Result<Self, Failure> {
@@ -49,11 +51,20 @@ impl Snapshot {
     }
 
     fn prepare(files: BTreeMap<PathBuf, Vec<u8>>, git_metadata: bool) -> Result<Self, Failure> {
+        Self::prepare_checked(files, git_metadata, &|| Ok(()))
+    }
+    fn prepare_checked(
+        files: BTreeMap<PathBuf, Vec<u8>>,
+        git_metadata: bool,
+        check: &dyn Fn() -> Result<(), Failure>,
+    ) -> Result<Self, Failure> {
+        check()?;
         if files.len() > MAX_FILES {
             return Err(Failure::Limit);
         }
         let mut total = 0usize;
         for (path, bytes) in &files {
+            check()?;
             if path.as_os_str().is_empty()
                 || path.is_absolute()
                 || protected_path(path)
@@ -70,6 +81,7 @@ impl Snapshot {
             }
         }
         for bytes in files.values() {
+            check()?;
             reject_recognized_secret(bytes)?;
         }
         let mut builder = tempfile::Builder::new();
@@ -86,12 +98,18 @@ impl Snapshot {
         #[cfg(not(target_os = "macos"))]
         let directory = builder.tempdir();
         let directory = directory.map_err(|_| Failure::Storage)?;
-        let private = directory
-            .path()
-            .canonicalize()
-            .map_err(|_| Failure::Storage)?;
+        let private = match directory.path().canonicalize() {
+            Ok(path) => path,
+            Err(_) => {
+                directory.close().map_err(|_| Failure::CleanupPending)?;
+                return Err(Failure::Storage);
+            }
+        };
         #[cfg(windows)]
-        super::windows::protect_root(&private)?;
+        if let Err(error) = super::windows::protect_root(&private) {
+            directory.close().map_err(|_| Failure::CleanupPending)?;
+            return Err(error);
+        }
         let result = Self {
             _directory: directory,
             work: private.join("work"),
@@ -101,39 +119,54 @@ impl Snapshot {
             root: private,
             files,
         };
-        for directory in [&result.work, &result.home, &result.temporary, &result.empty] {
-            fs::create_dir(directory).map_err(|_| Failure::Storage)?;
-        }
-        if git_metadata {
-            fs::create_dir(result.work.join(".git")).map_err(|_| Failure::Storage)?;
-            fs::create_dir(result.work.join(".git/info")).map_err(|_| Failure::Storage)?;
-            // Git's highest-priority attributes are broker-owned: copied attribute
-            // files are data and cannot transform, hide, or disable checks of edits.
-            fs::write(result.work.join(".git/info/attributes"),
+        let prepared = (|| -> Result<(), Failure> {
+            for directory in [&result.work, &result.home, &result.temporary, &result.empty] {
+                check()?;
+                fs::create_dir(directory).map_err(|_| Failure::Storage)?;
+            }
+            if git_metadata {
+                check()?;
+                fs::create_dir(result.work.join(".git")).map_err(|_| Failure::Storage)?;
+                fs::create_dir(result.work.join(".git/info")).map_err(|_| Failure::Storage)?;
+                // Git's highest-priority attributes are broker-owned: copied attribute
+                // files are data and cannot transform, hide, or disable checks of edits.
+                fs::write(result.work.join(".git/info/attributes"),
             b"* -filter -ident -text -eol -working-tree-encoding diff whitespace=blank-at-eol,blank-at-eof,space-before-tab\n")
             .map_err(|_| Failure::Storage)?;
-        }
-        for (path, bytes) in &result.files {
-            // Create-only catches case/normalization aliases that collide on
-            // the destination filesystem instead of silently merging files.
-            use std::io::Write;
-            let destination = result.work.join(path);
-            fs::create_dir_all(destination.parent().ok_or(Failure::Input)?)
-                .map_err(|_| Failure::Storage)?;
-            let mut options = fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
             }
-            options
-                .open(destination)
-                .map_err(|_| Failure::Input)?
-                .write_all(bytes)
-                .map_err(|_| Failure::Storage)?;
+            for (path, bytes) in &result.files {
+                check()?;
+                // Create-only catches case/normalization aliases that collide on
+                // the destination filesystem instead of silently merging files.
+                use std::io::Write;
+                let destination = result.work.join(path);
+                fs::create_dir_all(destination.parent().ok_or(Failure::Input)?)
+                    .map_err(|_| Failure::Storage)?;
+                let mut options = fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                options
+                    .open(destination)
+                    .map_err(|_| Failure::Input)?
+                    .write_all(bytes)
+                    .map_err(|_| Failure::Storage)?;
+            }
+            check()?;
+            Ok(())
+        })();
+        if let Err(error) = prepared {
+            result.close()?;
+            return Err(error);
         }
         Ok(result)
+    }
+
+    pub(super) fn close(self) -> Result<(), Failure> {
+        self._directory.close().map_err(|_| Failure::CleanupPending)
     }
 
     #[cfg(test)]
@@ -189,13 +222,22 @@ impl Snapshot {
     }
 }
 
+#[cfg(test)]
 fn collect(root: &Path, selected: &[PathBuf]) -> Result<BTreeMap<PathBuf, Vec<u8>>, Failure> {
+    collect_checked(root, selected, &|| Ok(()))
+}
+fn collect_checked(
+    root: &Path,
+    selected: &[PathBuf],
+    check: &dyn Fn() -> Result<(), Failure>,
+) -> Result<BTreeMap<PathBuf, Vec<u8>>, Failure> {
     if selected.len() > MAX_FILES {
         return Err(Failure::Limit);
     }
     let mut files = BTreeMap::new();
     let mut total = 0usize;
     for relative in selected {
+        check()?;
         if relative.is_absolute()
             || protected_path(relative)
             || relative.as_os_str().is_empty()
@@ -209,6 +251,7 @@ fn collect(root: &Path, selected: &[PathBuf]) -> Result<BTreeMap<PathBuf, Vec<u8
             return Err(Failure::Limit);
         }
         let bytes = snapshot_bytes(&root.join(relative), MAX_FILE).map_err(|_| Failure::Input)?;
+        check()?;
         total = total.checked_add(bytes.len()).ok_or(Failure::Limit)?;
         if total > MAX_TOTAL {
             return Err(Failure::Limit);
