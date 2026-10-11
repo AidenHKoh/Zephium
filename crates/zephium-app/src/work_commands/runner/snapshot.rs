@@ -74,6 +74,13 @@ impl Snapshot {
         }
         let mut builder = tempfile::Builder::new();
         builder.prefix("zephium-work-copy-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // tempfile directories otherwise inherit the process umask. This
+            // root also contains Git-generated metadata and must never be public.
+            builder.permissions(fs::Permissions::from_mode(0o700));
+        }
         #[cfg(target_os = "macos")]
         let directory = builder.tempdir_in("/private/tmp");
         #[cfg(not(target_os = "macos"))]
@@ -153,6 +160,31 @@ impl Snapshot {
         reject_recognized_secret(bytes)?;
         let path = self.work.join(relative);
         fs::create_dir_all(path.parent().ok_or(Failure::Input)?).map_err(|_| Failure::Storage)?;
+        #[cfg(unix)]
+        {
+            use std::{
+                io::Write,
+                os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+            };
+            // Creation and replacement both keep source contents private, even
+            // if an earlier copied entry carried broader mode bits.
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(path)
+                .map_err(|_| Failure::Storage)?;
+            let metadata = file.metadata().map_err(|_| Failure::Storage)?;
+            if !metadata.is_file() || metadata.nlink() != 1 {
+                return Err(Failure::Storage);
+            }
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|_| Failure::Storage)?;
+            file.set_len(0).map_err(|_| Failure::Storage)?;
+            file.write_all(bytes).map_err(|_| Failure::Storage)
+        }
+        #[cfg(not(unix))]
         fs::write(path, bytes).map_err(|_| Failure::Storage)
     }
 }
@@ -191,6 +223,75 @@ fn collect(root: &Path, selected: &[PathBuf]) -> Result<BTreeMap<PathBuf, Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    fn assert_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let copied = Snapshot::fixture(&[("existing.txt", b"inert before")]);
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&copied.root), 0o700);
+        assert_eq!(mode(&copied.work.join("existing.txt")), 0o600);
+        // Match a newly approved file removed while constructing its baseline.
+        fs::remove_file(copied.work.join("existing.txt")).unwrap();
+        copied
+            .write(Path::new("existing.txt"), b"inert recreated")
+            .unwrap();
+        assert_eq!(mode(&copied.work.join("existing.txt")), 0o600);
+        copied.write(Path::new("new.txt"), b"inert new").unwrap();
+        assert_eq!(mode(&copied.work.join("new.txt")), 0o600);
+        fs::set_permissions(
+            copied.work.join("new.txt"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        copied
+            .write(Path::new("new.txt"), b"inert rewritten")
+            .unwrap();
+        assert_eq!(mode(&copied.work.join("new.txt")), 0o600);
+        assert_eq!(
+            fs::read(copied.work.join("new.txt")).unwrap(),
+            b"inert rewritten"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn copied_root_and_created_or_rewritten_files_are_private() {
+        assert_private_permissions();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permissive_umask_cannot_publish_snapshot_contents() {
+        // The mask changes only in this dedicated child, never the shared test
+        // process. No shell or model-supplied program is involved.
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "work_commands::runner::snapshot::tests::permission_fixture_child",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env_clear()
+            .env("ZEPHIUM_SNAPSHOT_PERMISSION_CHILD", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "Only the isolated permissive-umask fixture subprocess changes its process mask"]
+    fn permission_fixture_child() {
+        if std::env::var("ZEPHIUM_SNAPSHOT_PERMISSION_CHILD").as_deref() != Ok("1") {
+            return;
+        }
+        unsafe {
+            libc::umask(0);
+        }
+        assert_private_permissions();
+    }
+
     #[test]
     fn protected_files_aliases_and_links_are_not_staged() {
         let scratch = tempfile::tempdir().unwrap();
