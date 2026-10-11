@@ -5,6 +5,7 @@
   const snapshots=new Map(), style=getComputedStyle, rect=Element.prototype.getBoundingClientRect;
   const fetchAsset=fetch, encode=btoa, stringify=JSON.stringify, parse=JSON.parse;
   const MAX_RAW=524288, MAX_OUTPUT=65536;
+  const relations=new WeakMap();
   let pending=null;
   addEventListener("pagehide",()=>{if(pending)pending.abort();snapshots.clear();},true);
   function source(node,kind) {
@@ -61,7 +62,7 @@
         const name=records.find(record=>record.wire.k===key);if(!name)continue;
         const card=sharedCard(record.element,name.element);
         const text=label(name.element);
-        if(text!==null && (card || row.t==="page_image")) names.set(key,{node:new WeakRef(name.element),card:card?new WeakRef(card):null,text});
+        if(text!==null && (card || row.t==="page_image")) names.set(key,{node:new WeakRef(name.element),card:card?new WeakRef(card):null,text,witness:relations.get(row)?.get(key)});
       }
       const url=source(record.element,row.t);if(url.length>4096)continue;
       const content=row.t==="record"?label(record.element):null;
@@ -71,6 +72,108 @@
     const key=i+":"+g;snapshots.delete(key);snapshots.set(key,entries);
     while(snapshots.size>8)snapshots.delete(snapshots.keys().next().value);
   }
+
+function ariaRecordProof(records, nameRecord, charge, cache) {
+  const name = nameRecord.element;
+  if (nameRecord.wire.r !== 'paragraph' || !name.id || name.getRootNode() !== document) return null;
+  // No uniqueness inference from the truncated semantic snapshot.
+  const walk = (root, limit, visitor) => {
+    const stack = [root]; let seen = 0;
+    while (stack.length) {
+      const node = stack.pop();
+      if (++seen > limit || !charge()) return false;
+      if (visitor(node) === false) return false;
+      for (let i = node.childNodes.length - 1; i >= 0; i--) {
+        if (stack.length >= limit) return false;
+        stack.push(node.childNodes[i]);
+      }
+    }
+    return true;
+  };
+  if (!walk(name,32,node=>{
+    if (node.nodeType!==1 || node===name) return;
+    if (!["span","b","strong","em","i","u","s","small","mark","time","abbr","br"].includes(node.localName)) return false;
+    if (node.shadowRoot || node.isContentEditable || ["link","button","textbox"].includes(node.getAttribute("role"))) return false;
+  })) return null;
+  if (!cache.ids) {
+    const ids=new Map();
+    for(const record of records) {
+      if(!charge())return null;
+      const id=record.element.id;
+      if(record.wire.r==='paragraph' && id && id.length<=512)ids.set(id,0);
+    }
+    cache.ids=ids;
+    cache.complete=walk(document.documentElement,16384,node=>{
+      if(node.nodeType===1 && ids.has(node.id))ids.set(node.id,Math.min(2,ids.get(node.id)+1));
+    });
+  }
+  if(!cache.complete || cache.ids.get(name.id)!==1)return null;
+  const visible = node => {
+    const s = style(node), b = rect.call(node);
+    return s.display !== 'none' && s.visibility === 'visible' && b.width > 0 && b.height > 0;
+  };
+  const bname = rect.call(name);
+  const sameBox = (a, b) => Math.abs(a.x-b.x)<=2 && Math.abs(a.y-b.y)<=2 && Math.abs(a.width-b.width)<=2 && Math.abs(a.height-b.height)<=2;
+  let root = name.parentElement;
+  for (let depth=0; root && depth<8; depth++,root=root.parentElement) {
+    if (!charge() || ['html','body','main','nav','header','footer','aside','article','li'].includes(root.localName) || root.getAttribute('role')==='listitem') return null;
+    const links = [], visuals = [], texts = [];
+    if (!walk(root,64,node => {
+      if (node.nodeType===3) {
+        if (node.nodeValue.length>2048) return false;
+        if (/\S/.test(node.nodeValue) && node.parentElement && visible(node.parentElement)) texts.push(node);
+        return;
+      }
+      if (node.nodeType!==1) return;
+      const tag=node.localName, s=style(node);
+      if (node.shadowRoot || tag.includes('-') || ['iframe','frame','object','embed','input','textarea','select','button'].includes(tag) || node.isContentEditable) return false;
+      if (node!==root && (['article','li'].includes(tag) || node.getAttribute('role')==='listitem')) return false;
+      if (tag==='a' || node.getAttribute('role')==='link') links.push(node);
+      const visual=['img','video','canvas','svg'].includes(tag) || s.backgroundImage!=='none';
+      if (visual) visuals.push(node);
+      for (const pseudo of ['::before','::after']) {
+        const p=style(node,pseudo);
+        if (p.backgroundImage!=='none' || p.content.includes('url(')) return false;
+      }
+    })) return null;
+    if (!visuals.length || !links.length) continue;
+    if (visuals.length!==1 || links.length!==1) return null;
+    const visual=visuals[0], link=links[0], box=rect.call(root);
+    const labelled=(link.getAttribute('aria-labelledby')||'').trim().split(/\s+/);
+    if (labelled.length!==1 || labelled[0]!==name.id || !link.hasAttribute('href') || !visible(link) || !visible(visual) || !sameBox(rect.call(link),box)) return null;
+    const imageRecord=records.find(r=>r.element===visual && r.media && r.media!=='page_image' && r.media!=='record');
+    const linkRecord=records.find(r=>r.element===link && r.wire.r==='link' && r.wire.u);
+    if (!imageRecord || !linkRecord || link.href.length>4096) return null;
+    const image=rect.call(visual);
+    if (image.width<64 || image.height<48 || image.x<0 || image.y<0 || image.right>innerWidth || image.bottom>innerHeight ||
+        bname.x<0 || bname.y<0 || bname.right>innerWidth || bname.bottom>innerHeight || bname.y<image.bottom-2 || bname.y-image.bottom>32 || bname.x<image.x-2 || bname.right>image.right+2 ||
+        box.width>image.width+32 || image.x<box.x-2 || image.right>box.right+2) return null;
+    let content=visual.parentElement;
+    for(let depth=0;content && !content.contains(name) && depth<8;depth++){if(!charge())return null;content=content.parentElement;}
+    if(!content || !root.contains(content) || !content.contains(name))return null;
+    let branch=visual;
+    while(branch.parentElement!==content) {
+      if (!charge() || !branch.parentElement) return null;
+      branch=branch.parentElement;
+    }
+    // First card text must be this Name; photo-branch text is ambiguous.
+    if (texts.some(text=>branch.contains(text)) || !texts.length || !name.contains(texts[0])) return null;
+    const peers=root.parentElement?.children;
+    if (!peers || peers.length<2 || peers.length>64) return null;
+    let repeated=false;
+    for (const peer of peers) {
+      if (!charge()) return null;
+      if (peer===root || peer.localName!==root.localName || !visible(peer)) continue;
+      const b=rect.call(peer);
+      if (Math.abs(b.width-box.width)<=2 && Math.abs(b.height-box.height)<=2 &&
+          (b.right<=box.left+2 || b.left>=box.right-2 || b.bottom<=box.top+2 || b.top>=box.bottom-2)) repeated=true;
+    }
+    if (!repeated) return null;
+    return {name,link,root,visual,imageRecord,linkRecord,id:name.id,href:link.href};
+  }
+  return null;
+}
+
   function evidence(records, invocation, generation, helpers) {
     const {apply,read,nodeContains,elementRect,tagName,nodeType,nodeParentGetter,imageCompleteGetter,imageNaturalWidthGetter,pageTitleText}=helpers;
     const candidates=records.filter(record=>record.media!==null && record.sensitivity!=="secret" &&
@@ -211,6 +314,20 @@
         }
       }
     }
+    // An exact accessibility label still needs a unique local record proof.
+    // First-pass and enclosing-link associations above remain unchanged.
+    const ariaIndex={};
+    for(const record of records) {
+      if(work>=16384)break;
+      if (record.wire.r!=="paragraph" || record.sensitivity==="secret" || provenNames.has(record.wire.k))continue;
+      const proof=ariaRecordProof(records,record,()=>++work<=16384,ariaIndex);
+      if(!proof)continue;
+      const index=images.findIndex(image=>image.element===proof.visual),row=rows[index];
+      if(!row || row.r.length>=8 || row.r.includes(record.wire.k))continue;
+      row.r.push(record.wire.k);
+      let bound=relations.get(row);if(!bound){bound=new Map();relations.set(row,bound);}
+      bound.set(record.wire.k,{link:new WeakRef(proof.link),root:new WeakRef(proof.root),id:proof.id,href:proof.href});
+    }
     remember(invocation,generation,records,rows);
     return rows;
   }
@@ -220,6 +337,14 @@
     const node=entry?.node.deref(),named=name?.node.deref(),card=name?.card?.deref();
     if(!node?.isConnected || !named?.isConnected || label(named)!==name.text ||
        (entry.kind!=="page_image" && (!card?.isConnected || !card.contains(node) || !card.contains(named))))return null;
+    if(name.witness) {
+      const witness=name.witness,link=witness.link.deref(),root=witness.root.deref();
+      if(!link?.isConnected || !root?.isConnected)return null;
+      const records=[{element:named,media:null,wire:{r:"paragraph"}},{element:node,media:entry.kind,wire:{r:"image"}},{element:link,media:null,wire:{r:"link",u:witness.href}}];
+      let spent=0;
+      const proof=ariaRecordProof(records,records[0],()=>++spent<=16384,{});
+      if(!proof || proof.link!==link || proof.root!==root || proof.id!==witness.id || proof.href!==witness.href)return null;
+    }
     if(entry.kind==="record" && label(node)!==entry.content)return null;
     const url=source(node,entry.kind);
     if(url!==entry.source && !(entry.kind==="image" && entry.lazy?.has(url) && node.complete && node.naturalWidth>=32))return null;

@@ -1775,10 +1775,10 @@ mod tests {
     #[test]
     fn record_media_program_has_independent_pin_and_bound() {
         let source = include_str!("../assets/semantic-record-media-v1.js");
-        assert!(source.len() <= 20 * 1024);
+        assert!(source.len() <= 26 * 1024);
         assert_eq!(
             format!("{:x}", Sha256::digest(source.as_bytes())),
-            "febd92e17844a81c745b754742d540ecd30de24bac24feb523c70443812c8993"
+            "1147b24552b74113069740245252d47b90834326a81effcc7c52ce8683d9e24e"
         );
         assert!(source.contains("new AbortController()"));
         assert!(source.contains("redirect:\"error\""));

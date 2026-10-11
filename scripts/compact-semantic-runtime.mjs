@@ -12,16 +12,21 @@ const source = readFileSync(new URL("semantic-record-media-v1.js", assets), "utf
 let end = 0;
 let compact = "";
 let previous = "";
-// Keep every original newline (including inside removed comments) for ASI.
-// Only omit horizontal gaps next to delimiters that cannot merge tokens.
-// The complete parsed AST comparison below remains mandatory before writes.
-const leftDelimiter = new Set(["{", "(", "[", ",", ";", ":"]);
-const rightDelimiter = new Set(["}", ")", "]", ",", ";", ":"]);
+// Preserve every original newline for ASI. Token boundaries are conservative;
+// full parsed AST equality below is mandatory before any output is written.
+const word = (c) => /[\w$]/u.test(c);
+const operator = (c) => /[+\-*%=&|^<>!?/]/u.test(c);
+const needsSpace = (left, right) => {
+  const a = left.at(-1) || "", b = right[0] || "";
+  return (word(a) && word(b)) || (operator(a) && operator(b))
+    || (a === "/" && word(b)) || (/[0-9.]/u.test(a) && b === ".")
+    || (a === "." && /[0-9.]/u.test(b));
+};
 for (const token of tokenizer(source, { ecmaVersion: "latest" })) {
   const gap = source.slice(end, token.start);
   const raw = source.slice(token.start, token.end);
   compact += /\r|\n/.test(gap) ? "\n"
-    : gap.length && !leftDelimiter.has(previous) && !rightDelimiter.has(raw) ? " " : "";
+    : gap.length && needsSpace(previous, raw) ? " " : "";
   compact += raw;
   previous = raw;
   end = token.end;
