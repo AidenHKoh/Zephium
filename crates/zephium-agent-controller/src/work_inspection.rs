@@ -160,7 +160,8 @@ impl AgentBrowserSession {
                 refusal,
             )
             .map_err(AgentBrowserProviderError::from_request)?;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 
     pub(super) async fn continue_after_action_refusal(
@@ -186,7 +187,8 @@ impl AgentBrowserSession {
                 refusal,
             )
             .map_err(AgentBrowserProviderError::from_request)?;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 
     pub(super) async fn continue_after_scope_refusal(
@@ -211,7 +213,8 @@ impl AgentBrowserSession {
             refusal,
         )
         .map_err(AgentBrowserProviderError::from_request)?;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 
     async fn continue_after_observation(
@@ -245,6 +248,7 @@ impl AgentBrowserSession {
                 action_authority,
             )
             .map_err(AgentBrowserProviderError::from_request)?;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 }

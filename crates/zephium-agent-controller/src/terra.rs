@@ -2347,7 +2347,8 @@ impl AgentBrowserSession {
         }
         .map_err(AgentBrowserProviderError::from_request)?;
         self.initial_provider_started = true;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 
     /// Sends independently verified action state as the exact tool result.
@@ -2425,7 +2426,9 @@ impl AgentBrowserSession {
                 action_authority,
             )
                 .map_err(AgentBrowserProviderError::from_request)?;
-            return self.drive(prepared.into_transport_input()).await;
+            return self
+                .drive(prepared.into_transport_input(), Some(observation))
+                .await;
         };
         let payload = payload.ok_or(AgentBrowserProviderError::Continuation)?;
         let continuation = match result.action_result() {
@@ -2448,7 +2451,11 @@ impl AgentBrowserSession {
         let prepared = draft
             .try_prepare_for_provider_exact_count(&mut self.policy, request, diff)
             .map_err(AgentBrowserProviderError::from_request)?;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(
+            prepared.into_transport_input(),
+            result.action_result().map(|result| result.observation()),
+        )
+        .await
     }
 
     /// Executes one bounded semantic locate requested by the prior model turn.
@@ -2520,7 +2527,8 @@ impl AgentBrowserSession {
         let prepared = draft
             .try_prepare_for_provider_exact_count(&mut self.policy, model_request, &result)
             .map_err(AgentBrowserProviderError::from_request)?;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 
     fn next_model_call_request(
@@ -2641,7 +2649,8 @@ impl AgentBrowserSession {
                 draft.try_prepare_for_provider_exact_count(&mut self.policy, request, &read)
             })
             .map_err(AgentBrowserProviderError::from_request)?;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 
     /// Delivers one policy-admitted, canonical viewport capture requested by
@@ -2681,7 +2690,8 @@ impl AgentBrowserSession {
                 draft.try_prepare_for_provider_exact_count(&mut self.policy, request, observation)
             })
             .map_err(AgentBrowserProviderError::from_request)?;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 
     /// Continues after one bounded standalone wait. The semantic runtime, not
@@ -2737,7 +2747,7 @@ impl AgentBrowserSession {
             .map_err(AgentBrowserProviderError::from_request)?;
         let input = prepared.into_transport_input();
         let observation = result.into_observation();
-        let turn = self.drive(input).await?;
+        let turn = self.drive(input, Some(&observation)).await?;
         Ok((turn, observation))
     }
 
@@ -3125,19 +3135,65 @@ impl AgentBrowserSession {
 
     async fn drive(
         &mut self,
-        input: AgentProviderTransportInput,
+        mut request_input: AgentProviderTransportInput,
+        observation: Option<&zephium_agentic::SemanticObservation>,
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
-        let (terminal, input, provider_elapsed) = self.drive_terminal(input, None).await?;
-        let receipt = terminal.receipt();
-        let turn = terminal
-            .into_tool_turn()
-            .ok_or(AgentBrowserProviderError::Proposal)?;
-        Ok(AgentBrowserProviderTurn {
-            receipt,
-            input,
-            turn,
-            provider_elapsed,
-        })
+        let started = Instant::now();
+        for repair in 0..=1 {
+            let (mut terminal, input, _) = self.drive_terminal(request_input, None).await?;
+            if let Some(refusal) = terminal.take_rejected_action() {
+                let error = refusal.error();
+                if let Some(journal) = &self.journal {
+                    journal
+                        .emit(work::AgentWorkEventKind::ModelActionRejected(error))
+                        .map_err(|_| AgentBrowserProviderError::Journal)?;
+                }
+                if repair == 1 || observation.is_none() {
+                    return Err(AgentBrowserProviderError::ModelProtocol(
+                        zephium_agentic::AgentProviderProtocolError::ToolContract(
+                            AgentBrowserToolKind::Act,
+                            error,
+                        ),
+                        None,
+                    ));
+                }
+                self.check_live()?;
+                if self.turns >= self.max_model_calls {
+                    return Err(AgentBrowserProviderError::TurnLimit);
+                }
+                let observation = observation.ok_or(AgentBrowserProviderError::Continuation)?;
+                let payload = encode_semantic_observation(
+                    observation,
+                    SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+                )
+                .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+                .map_err(AgentBrowserProviderError::InitialEncoding)?;
+                let request = self.next_model_call_request()?;
+                let prepared =
+                    AgentPreparedObservationRequest::try_rejected_action_for_provider_exact_count(
+                        &mut self.policy,
+                        request,
+                        observation,
+                        payload,
+                        self.config.clone(),
+                        refusal,
+                    )
+                    .map_err(AgentBrowserProviderError::from_request)?;
+                request_input = prepared.into_transport_input();
+                continue;
+            }
+            let receipt = terminal.receipt();
+            let turn = terminal
+                .into_tool_turn()
+                .ok_or(AgentBrowserProviderError::Proposal)?;
+            return Ok(AgentBrowserProviderTurn {
+                receipt,
+                input,
+                turn,
+                provider_elapsed: started.elapsed(),
+            });
+        }
+        unreachable!("one bounded repair")
     }
 
     async fn drive_terminal(
@@ -5451,7 +5507,9 @@ mod tests {
                 }
             };
             assert_eq!(
-                runtime.block_on(session.drive(input)).expect_err("stop"),
+                runtime
+                    .block_on(session.drive(input, None))
+                    .expect_err("stop"),
                 expected
             );
             assert_eq!(session.policy.pending_model_calls(), 0);

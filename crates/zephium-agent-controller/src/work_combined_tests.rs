@@ -5,6 +5,7 @@ use super::*;
 pub(super) enum CombinedFault {
     None,
     BoundaryAfterAction,
+    MalformedAfterAction,
     OversizedDiffAfterAction,
     Premature,
     ExtraAction,
@@ -171,6 +172,7 @@ pub(super) fn assert_outcome(
         CombinedFault::None
             | CombinedFault::Ceiling
             | CombinedFault::BoundaryAfterAction
+            | CombinedFault::MalformedAfterAction
             | CombinedFault::OversizedDiffAfterAction
     ) {
         let AgentWorkOutcome::Succeeded(mut success) = outcome else {
@@ -181,6 +183,8 @@ pub(super) fn assert_outcome(
             success.closure().model_calls(),
             if fault == CombinedFault::Ceiling {
                 8
+            } else if fault == CombinedFault::MalformedAfterAction {
+                4
             } else {
                 3
             }
@@ -261,4 +265,10 @@ pub(super) fn assert_outcome(
             _ => assert!(matches!(closed.failure(), AgentWorkFailure::Browser(_))),
         }
     }
+}
+
+#[test]
+fn malformed_followup_preserves_verified_action_and_extracts_without_replay() {
+    let _serial = lock(&SERIAL);
+    provider_fixture(ProviderFault::Combined(CombinedFault::MalformedAfterAction));
 }

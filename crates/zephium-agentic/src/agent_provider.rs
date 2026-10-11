@@ -61,7 +61,7 @@ pub use pricing::{
 };
 pub use settlement::{
     AgentProviderPricingSettlement, AgentProviderPricingSettlementError,
-    AgentProviderSettledTerminal, AgentProviderSettledToolTurn,
+    AgentProviderRejectedAction, AgentProviderSettledTerminal, AgentProviderSettledToolTurn,
 };
 
 use crate::{

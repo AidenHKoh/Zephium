@@ -6677,6 +6677,8 @@ pub enum AgentWorkEventKind {
     /// A chosen model's reply had no usable browser call; it was told why
     /// and asked again this many times within the one call.
     ModelAskedAgain(u8),
+    /// A fully received action call failed local decoding; nothing executed.
+    ModelActionRejected(zephium_agentic::AgentBrowserToolContractError),
     /// A sparse page's mapping carried the host's viewport screenshot.
     ViewportImageAttached,
     /// The model proposed a bounded typed tool.

@@ -117,6 +117,14 @@ impl SemanticActionResult {
         }
     }
 
+    /// Exact verified successor, including when the model received its diff.
+    pub const fn observation(&self) -> &SemanticObservation {
+        match &self.update {
+            SemanticActionStateUpdate::Diff { observation, .. }
+            | SemanticActionStateUpdate::FreshSnapshot { observation, .. } => observation,
+        }
+    }
+
     /// Exact current observation that must be encoded in full after diff fallback.
     pub const fn fresh_snapshot(&self) -> Option<&SemanticObservation> {
         match &self.update {

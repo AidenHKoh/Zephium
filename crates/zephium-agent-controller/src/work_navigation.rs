@@ -863,7 +863,8 @@ impl AgentBrowserSession {
             self.account_attestations.push(account.attestation());
             self.account = account;
         }
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 
     fn validate_arrival(

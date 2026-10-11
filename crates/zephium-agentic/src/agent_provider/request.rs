@@ -1762,6 +1762,30 @@ impl AgentPreparedObservationRequest {
         )
     }
 
+    /// A malformed action gets one error result against its original baseline.
+    /// The caller must bound retries; every retry is newly admitted and priced.
+    pub fn try_rejected_action_for_provider_exact_count(
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        payload: SemanticModelPayload,
+        config: AgentProviderCallConfig,
+        refusal: super::AgentProviderRejectedAction,
+    ) -> Result<Self, AgentProviderRequestError> {
+        let (prior, transcript) = refusal
+            .bind(observation, &config, payload.as_str().to_owned())
+            .map_err(|_| AgentPolicyError::Authority)?;
+        Self::try_bound_observation_for_provider_exact_count(
+            policy,
+            call_request,
+            observation,
+            payload,
+            config,
+            prior,
+            transcript,
+        )
+    }
+
     /// Return an exact pre-dispatch scope refusal through the authenticated
     /// provider tool-result protocol. The current observation is redelivered,
     /// not recaptured; all bytes and the next call use the original run budget.

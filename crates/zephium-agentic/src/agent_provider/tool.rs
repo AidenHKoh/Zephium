@@ -643,7 +643,7 @@ impl fmt::Debug for AgentBrowserToolProposal {
 pub(crate) struct AgentBrowserToolCall {
     source_call: AgentProviderCallIdentity,
     id: AgentBrowserToolCallId,
-    proposal: Box<AgentBrowserToolProposal>,
+    proposal: Result<Box<AgentBrowserToolProposal>, (AgentBrowserToolContractError, String)>,
     provider_item_id: Option<String>,
     arguments: String,
     openai_replay: Option<Box<OpenAiResponseReplay>>,
@@ -701,6 +701,50 @@ impl AgentBrowserToolCall {
         )
     }
 
+    /// Retains a rejected Act solely for one authenticated error result. It
+    /// contains no proposal and cannot yield native action authority.
+    pub(super) fn decode_openai_or_rejected_action(
+        source_call: AgentProviderCallIdentity,
+        provider_item_id: String,
+        id: String,
+        name: &str,
+        arguments: String,
+    ) -> Result<Self, AgentBrowserToolContractError> {
+        if !valid_provider_item_id(&provider_item_id) {
+            return Err(AgentBrowserToolContractError::CallId);
+        }
+        let id = AgentBrowserToolCallId::try_new(id)?;
+        let proposal = match decode_proposal(name, &arguments) {
+            Ok(proposal) => Ok(Box::new(proposal)),
+            Err(error)
+                if name == "act"
+                    && matches!(
+                        error,
+                        AgentBrowserToolContractError::Arguments
+                            | AgentBrowserToolContractError::Action
+                            | AgentBrowserToolContractError::ActionBatch
+                            | AgentBrowserToolContractError::Reference
+                            | AgentBrowserToolContractError::Wait
+                    ) =>
+            {
+                validate_json_depth(&arguments)?;
+                Err((
+                    error,
+                    browser_call_problem(name, &arguments, None).ok_or(error)?,
+                ))
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(Self {
+            source_call,
+            id,
+            proposal,
+            provider_item_id: Some(provider_item_id),
+            arguments,
+            openai_replay: None,
+        })
+    }
+
     pub(super) fn attach_openai_replay(&mut self, replay: OpenAiResponseReplay) {
         self.openai_replay = Some(Box::new(replay));
     }
@@ -718,7 +762,7 @@ impl AgentBrowserToolCall {
         Ok(Self {
             source_call,
             id,
-            proposal,
+            proposal: Ok(proposal),
             provider_item_id,
             arguments,
             openai_replay: openai_replay.map(Box::new),
@@ -734,13 +778,13 @@ impl AgentBrowserToolCall {
     /// Closed pre-policy browser proposal.
     #[cfg(test)]
     pub fn proposal(&self) -> &AgentBrowserToolProposal {
-        self.proposal.as_ref()
+        self.proposal.as_deref().expect("validated fixture call")
     }
 
     /// Consumes the call without copying model-authored text.
     #[cfg(test)]
     pub fn into_parts(self) -> (AgentBrowserToolCallId, AgentBrowserToolProposal) {
-        (self.id, *self.proposal)
+        (self.id, *self.proposal.expect("validated fixture call"))
     }
 
     /// Splits the proposal from its exact one-shot provider-result correlation.
@@ -748,34 +792,48 @@ impl AgentBrowserToolCall {
     /// The correlation retains bounded provider-authored arguments only for a
     /// later fixed continuation request. It exposes no raw JSON or browser
     /// authority and must never be logged or persisted.
+    #[cfg(test)]
     pub(super) fn into_continuation_parts(
         self,
     ) -> (AgentProviderToolCallCorrelation, AgentBrowserToolProposal) {
-        let extraction_schema = match self.proposal.as_ref() {
-            AgentBrowserToolProposal::Extract { schema, .. } => Some(*schema),
+        let (correlation, proposal) = self.into_checked_continuation_parts();
+        (correlation, proposal.expect("validated fixture call"))
+    }
+
+    pub(super) fn into_checked_continuation_parts(
+        self,
+    ) -> (
+        AgentProviderToolCallCorrelation,
+        Result<AgentBrowserToolProposal, (AgentBrowserToolContractError, String)>,
+    ) {
+        let extraction_schema = match self.proposal.as_deref().ok() {
+            Some(AgentBrowserToolProposal::Extract { schema, .. }) => Some(*schema),
             _ => None,
         };
-        let extraction_scope = match self.proposal.as_ref() {
-            AgentBrowserToolProposal::Extract { scope, .. } => Some(scope.clone()),
+        let extraction_scope = match self.proposal.as_deref().ok() {
+            Some(AgentBrowserToolProposal::Extract { scope, .. }) => Some(scope.clone()),
             _ => None,
         };
-        let read_scope = match self.proposal.as_ref() {
-            AgentBrowserToolProposal::Read(scope) => Some(scope.clone()),
+        let read_scope = match self.proposal.as_deref().ok() {
+            Some(AgentBrowserToolProposal::Read(scope)) => Some(scope.clone()),
             _ => None,
         };
-        let snapshot_scope = match self.proposal.as_ref() {
-            AgentBrowserToolProposal::Snapshot(scope) => Some(scope.clone()),
+        let snapshot_scope = match self.proposal.as_deref().ok() {
+            Some(AgentBrowserToolProposal::Snapshot(scope)) => Some(scope.clone()),
             _ => None,
         };
-        let navigation_target = match self.proposal.as_ref() {
-            AgentBrowserToolProposal::Navigate(target) => Some(target.clone()),
+        let navigation_target = match self.proposal.as_deref().ok() {
+            Some(AgentBrowserToolProposal::Navigate(target)) => Some(target.clone()),
             _ => None,
         };
         (
             AgentProviderToolCallCorrelation {
                 source_call: self.source_call,
                 id: self.id,
-                kind: self.proposal.kind(),
+                kind: self
+                    .proposal
+                    .as_ref()
+                    .map_or(AgentBrowserToolKind::Act, |proposal| proposal.kind()),
                 extraction_schema,
                 extraction_scope,
                 read_scope,
@@ -785,7 +843,7 @@ impl AgentBrowserToolCall {
                 arguments: self.arguments,
                 openai_replay: self.openai_replay,
             },
-            *self.proposal,
+            self.proposal.map(|proposal| *proposal),
         )
     }
 
@@ -802,7 +860,11 @@ impl fmt::Debug for AgentBrowserToolCall {
         formatter
             .debug_struct("AgentBrowserToolCall")
             .field("id", &self.id)
-            .field("proposal", &self.proposal)
+            .field("proposal", &self.proposal.as_ref().ok())
+            .field(
+                "rejection",
+                &self.proposal.as_ref().err().map(|(error, _)| error),
+            )
             .finish()
     }
 }
@@ -1051,7 +1113,7 @@ pub(crate) fn browser_call_problem(
         AgentBrowserToolKind::Extract => serde_problem::<ExtractWire>(arguments),
         AgentBrowserToolKind::ShowForHuman => serde_problem::<HumanWire>(arguments),
     });
-    let detail = shape.unwrap_or_else(|| {
+    let detail = shape.or_else(|| action_problem(kind, arguments)).unwrap_or_else(|| {
         let text = match error {
             AgentBrowserToolContractError::ArgumentLimit => "the arguments are too long",
             AgentBrowserToolContractError::Arguments => {
@@ -1093,6 +1155,34 @@ pub(crate) fn browser_call_problem(
         "invalid_tool_call: nothing ran. The {} call was refused: {detail}. Call one tool again with corrected arguments that match its schema exactly.",
         kind.as_str()
     ))
+}
+
+fn action_problem(kind: AgentBrowserToolKind, arguments: &str) -> Option<String> {
+    if kind != AgentBrowserToolKind::Act {
+        return None;
+    }
+    let value: Value = serde_json::from_str(arguments).ok()?;
+    let wire: ActWire = serde_json::from_str(arguments).ok()?;
+    for (index, action) in wire.actions.into_iter().enumerate() {
+        let Err(error) = decode_action(action) else {
+            continue;
+        };
+        let fields = &value["actions"][index];
+        let detail = match error {
+            AgentBrowserToolContractError::Action if fields["settle_millis"].as_u64().is_some_and(|n| n == 0 || n > 30000) =>
+                "settle_millis must be between 1 and 30000".to_owned(),
+            AgentBrowserToolContractError::Action if fields["value"].as_str().is_some_and(|value| SemanticActionText::try_new(value.to_owned()).is_err()) =>
+                "value exceeds the text limit or contains forbidden control characters".to_owned(),
+            AgentBrowserToolContractError::Action => format!(
+                "kind={} is incompatible with wait={} and verification={}; choose the outcome that this action can independently verify",
+                fields["kind"].as_str()?, fields["wait"]["kind"].as_str()?, fields["verification"]["kind"].as_str()?),
+            AgentBrowserToolContractError::Reference => "target or option must be a canonical ref from the latest look, such as @a12".to_owned(),
+            AgentBrowserToolContractError::Wait => "wait.millis is outside the permitted mutation_quiet interval".to_owned(),
+            _ => return None,
+        };
+        return Some(format!("actions[{index}]: {detail}"));
+    }
+    None
 }
 
 fn serde_problem<'a, T: Deserialize<'a>>(arguments: &'a str) -> Option<String> {

@@ -2058,6 +2058,9 @@ fn variable_provider_turns_use_real_worker_io_and_stop_at_the_exact_ceiling() {
 #[cfg(feature = "probe-harness")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProviderFault {
+    ActionRepair,
+    ActionRepairRepeated,
+    ActionRepairCancelled,
     Navigation(NavigationFault),
     Read(ReadFault),
     Scoped(ScopedFault),
@@ -2337,9 +2340,13 @@ fn provider_fixture_with_discovery_account(
             ProviderFault::Combined(CombinedFault::CancelMapCount) => 5,
             ProviderFault::Combined(CombinedFault::Ceiling) => 16,
             // A refused mapping is mapped once more, told why.
-            ProviderFault::Combined(CombinedFault::ForeignSource) => 8,
+            ProviderFault::Combined(
+                CombinedFault::ForeignSource | CombinedFault::MalformedAfterAction,
+            ) => 8,
             ProviderFault::Combined(_) => 6,
             ProviderFault::Ceiling => 16,
+            ProviderFault::ActionRepair | ProviderFault::ActionRepairRepeated => 4,
+            ProviderFault::ActionRepairCancelled => 3,
             ProviderFault::CountRefused | ProviderFault::CancelCount => 1,
             ProviderFault::Extraction(ExtractionFault::CancelCount) => 3,
             ProviderFault::Extraction(
@@ -2414,7 +2421,10 @@ fn provider_fixture_with_discovery_account(
             } else {
                 None
             };
-            let cancelled = read_stop.is_some()
+            let cancelled = (fault == ProviderFault::ActionRepairCancelled
+                && turns == 1
+                && is_count)
+                || read_stop.is_some()
                 || matches!(fault, ProviderFault::Navigation(fault) if fault.cancelled(turns, is_count))
                 || matches!(fault, ProviderFault::Scoped(fault) if fault.cancelled(turns, is_count))
                 || (turns == 2
@@ -2438,6 +2448,36 @@ fn provider_fixture_with_discovery_account(
             let refused = (is_count && fault == ProviderFault::CountRefused)
                 || (!is_count && fault == ProviderFault::StreamRefused)
                 || matches!(fault, ProviderFault::Read(fault) if fault.refused(turns, is_count));
+            if matches!(
+                fault,
+                ProviderFault::ActionRepair
+                    | ProviderFault::ActionRepairRepeated
+                    | ProviderFault::ActionRepairCancelled
+            ) && turns == 1
+            {
+                let wire: serde_json::Value =
+                    serde_json::from_slice(&request[header + 4..]).unwrap();
+                let outputs = wire["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|item| item["type"] == "function_call_output")
+                    .collect::<Vec<_>>();
+                assert_eq!(outputs.len(), 1);
+                assert_eq!(outputs[0]["call_id"], "call_1");
+                let output: serde_json::Value =
+                    serde_json::from_str(outputs[0]["output"].as_str().unwrap()).unwrap();
+                assert_eq!(output["executed"], false);
+                assert!(output["guidance"]
+                    .as_str()
+                    .unwrap()
+                    .contains("settle_millis"));
+                assert!(wire["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|tool| tool["strict"] == true));
+            }
             if let ProviderFault::Read(fault) = fault {
                 fault.check_request(&request[header + 4..], turns);
             }
@@ -2461,6 +2501,16 @@ fn provider_fixture_with_discovery_account(
                     .expect("verified action history reaches count and generation requests");
                 assert!(progress.contains("ExactTargetValue"));
                 assert!(!progress.contains("fixture value") && !progress.contains("@a2"));
+            }
+            if fault == ProviderFault::Combined(CombinedFault::MalformedAfterAction) && turns == 2 {
+                let wire: serde_json::Value =
+                    serde_json::from_slice(&request[header + 4..]).unwrap();
+                let input = serde_json::to_string(&wire["input"]).unwrap();
+                assert!(
+                    input.contains("ExactTargetValue"),
+                    "the repair remembers the verified write"
+                );
+                assert!(input.contains("invalid_tool_call"));
             }
             if fault == ProviderFault::Combined(CombinedFault::BoundaryAfterAction) && turns == 1 {
                 let wire: serde_json::Value =
@@ -2526,12 +2576,39 @@ fn provider_fixture_with_discovery_account(
                 turns += 1;
                 (
                     "text/event-stream",
-                    if let ProviderFault::Navigation(fault) = fault {
+                    if matches!(
+                        fault,
+                        ProviderFault::ActionRepair
+                            | ProviderFault::ActionRepairRepeated
+                            | ProviderFault::ActionRepairCancelled
+                    ) {
+                        let stream = tool_stream(turns, true);
+                        if turns == 1 || fault == ProviderFault::ActionRepairRepeated {
+                            stream.replace("settle_millis\\\":2000", "settle_millis\\\":0")
+                        } else {
+                            stream
+                        }
+                    } else if let ProviderFault::Navigation(fault) = fault {
                         fault.stream(turns)
                     } else if let ProviderFault::Read(fault) = fault {
                         fault.stream(turns)
                     } else if let ProviderFault::Scoped(fault) = fault {
                         fault.stream(turns)
+                    } else if fault == ProviderFault::Combined(CombinedFault::MalformedAfterAction)
+                    {
+                        match turns {
+                            1 => tool_stream(turns, true),
+                            2 => tool_stream(turns, true)
+                                .replace("settle_millis\\\":2000", "settle_millis\\\":0"),
+                            3 => named_tool_stream(
+                                turns,
+                                "extract",
+                                r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+                            ),
+                            _ => extraction_stream(ExtractionFault::None)
+                                .replace("resp_2", &format!("resp_{turns}"))
+                                .replace("msg_2", &format!("msg_{turns}")),
+                        }
                     } else if let ProviderFault::Combined(fault) = fault {
                         if fault == CombinedFault::Ceiling && turns == 1 {
                             tool_stream(turns, true)
@@ -2700,6 +2777,13 @@ fn provider_fixture_with_discovery_account(
             &[SemanticEffectClass::Read],
             Some(navigation_tests::route_tests::route()),
         )
+    } else if matches!(
+        fault,
+        ProviderFault::ActionRepair
+            | ProviderFault::ActionRepairRepeated
+            | ProviderFault::ActionRepairCancelled
+    ) {
+        input_with_effects(&[SemanticEffectClass::Read])
     } else if matches!(fault, ProviderFault::Native(native) if native.unissued_human()) {
         input_with_effects(&[SemanticEffectClass::Read])
     } else {
@@ -2955,6 +3039,58 @@ fn provider_fixture_with_discovery_account(
         fault == ProviderFault::Read(ReadFault::LongExtraction),
         navigation_schedule,
     );
+    if matches!(
+        fault,
+        ProviderFault::ActionRepair
+            | ProviderFault::ActionRepairRepeated
+            | ProviderFault::ActionRepairCancelled
+    ) {
+        let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+            panic!("{fault:?}: {outcome:?}");
+        };
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        assert_eq!(closed.policy_settlement().closure().effects(), 0);
+        assert!(
+            !calls.contains(&7),
+            "invalid or unapproved actions never dispatch"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind(), AgentWorkEventKind::ModelActionRejected(_)))
+                .count(),
+            if fault == ProviderFault::ActionRepairRepeated {
+                2
+            } else {
+                1
+            }
+        );
+        if fault == ProviderFault::ActionRepair {
+            assert!(
+                closed.human_review().is_some(),
+                "the corrected write still requires approval: {:?}",
+                closed.failure()
+            );
+            assert_eq!(closed.policy_settlement().closure().model_calls(), 2);
+        } else if fault == ProviderFault::ActionRepairRepeated {
+            assert!(matches!(
+                closed.failure(),
+                AgentWorkFailure::Browser(AgentBrowserProviderError::ModelProtocol(..))
+            ));
+            assert_eq!(closed.policy_settlement().closure().model_calls(), 2);
+        } else {
+            assert_eq!(closed.failure(), AgentWorkFailure::HumanTakeover);
+        }
+        assert_eq!(
+            server.join().unwrap(),
+            if fault == ProviderFault::ActionRepairCancelled {
+                1
+            } else {
+                2
+            }
+        );
+        return;
+    }
     if let ProviderFault::Navigation(fault) = fault {
         // Report the original controller failure before a missing follow-up
         // request can obscure it as a fixture-server timeout.
@@ -3956,4 +4092,13 @@ fn original_anonymous_read_requires_explicit_intent_and_original_account_scope_n
         // An original anonymous task may use Work-memory cookies; this result
         // proves neither cookie absence nor signed-out screenshot permission.
     }
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn malformed_action_gets_one_priced_repair_and_still_needs_approval() {
+    let _guard = lock(&SERIAL);
+    provider_fixture(ProviderFault::ActionRepair);
+    provider_fixture(ProviderFault::ActionRepairRepeated);
+    provider_fixture(ProviderFault::ActionRepairCancelled);
 }

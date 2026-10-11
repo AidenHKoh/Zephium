@@ -6960,3 +6960,40 @@ pub enum AgentProviderContinuationError {
     #[error("agent provider continuation transcript ceiling exceeded")]
     TranscriptLimit,
 }
+
+impl super::AgentProviderRejectedAction {
+    pub(in crate::agent_provider) fn bind(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+        payload: String,
+    ) -> Result<
+        (AgentProviderCallIdentity, AgentProviderBoundTranscript),
+        AgentProviderContinuationError,
+    > {
+        if config != &self.continuation.config || !config.permits_tool(AgentBrowserToolKind::Act) {
+            return Err(AgentProviderContinuationError::Config);
+        }
+        if !self.continuation.baseline.matches(observation) {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        let result = serde_json::json!({"status":"invalid_tool_call", "executed":false, "guidance":self.problem}).to_string();
+        let (call, _, _, correlation, mut prior) = self.continuation.into_parts();
+        let targets = prior.take_action_targets();
+        let mut transcript = AgentProviderTranscript::try_initial_with_progress(
+            prior.objective,
+            payload,
+            prior.navigation_checkpoint,
+            prior.inspection_checkpoint,
+            prior.action_progress,
+        )
+        .ok_or(AgentProviderContinuationError::TranscriptLimit)?;
+        if let Some(targets) = targets {
+            if !targets.matches(observation) {
+                return Err(AgentProviderContinuationError::Baseline);
+            }
+            transcript.set_action_targets(targets);
+        }
+        Ok((call, transcript.try_bind(correlation, result)?))
+    }
+}

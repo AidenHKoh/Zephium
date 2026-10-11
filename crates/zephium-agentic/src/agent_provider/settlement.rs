@@ -144,17 +144,27 @@ impl AgentProviderPricingSettlement {
             mut settlement,
         } = self;
         let (conclusion, tool) = finished.into_parts();
+        let mut rejected_action = None;
         let tool_turn = match tool {
             Some(tool) => {
                 if let AgentProviderStreamConclusion::Completed(completion) = conclusion {
                     continuation.and_then(|seed| {
-                        let (correlation, proposal) = tool.into_continuation_parts();
-                        seed.join_terminal_tool(completion, correlation)
-                            .ok()
-                            .map(|continuation| AgentProviderSettledToolTurn {
+                        let (correlation, proposal) = tool.into_checked_continuation_parts();
+                        let continuation = seed.join_terminal_tool(completion, correlation).ok()?;
+                        match proposal {
+                            Ok(proposal) => Some(AgentProviderSettledToolTurn {
                                 proposal,
                                 continuation,
-                            })
+                            }),
+                            Err((error, problem)) => {
+                                rejected_action = Some(AgentProviderRejectedAction {
+                                    error,
+                                    problem,
+                                    continuation,
+                                });
+                                None
+                            }
+                        }
                     })
                 } else {
                     None
@@ -167,6 +177,7 @@ impl AgentProviderPricingSettlement {
             AgentProviderStreamConclusion::Completed(completion)
                 if completion.stop() == AgentProviderStopReason::ToolCalls
         ) && tool_turn.is_none()
+            && rejected_action.is_none()
         {
             settlement = AgentModelCallSettlement::ProviderFailed;
         }
@@ -176,6 +187,11 @@ impl AgentProviderPricingSettlement {
         Ok(AgentProviderSettledTerminal {
             receipt,
             conclusion,
+            rejected_action: if settlement == AgentModelCallSettlement::Completed {
+                rejected_action
+            } else {
+                None
+            },
             tool_turn: if settlement == AgentModelCallSettlement::Completed {
                 tool_turn
             } else {
@@ -259,6 +275,7 @@ pub struct AgentProviderSettledTerminal {
     receipt: AgentModelCallReceipt,
     conclusion: AgentProviderStreamConclusion,
     tool_turn: Option<AgentProviderSettledToolTurn>,
+    rejected_action: Option<AgentProviderRejectedAction>,
 }
 
 impl AgentProviderSettledTerminal {
@@ -272,6 +289,7 @@ impl AgentProviderSettledTerminal {
             receipt,
             conclusion,
             tool_turn,
+            rejected_action: None,
         }
     }
 
@@ -290,6 +308,11 @@ impl AgentProviderSettledTerminal {
         self.tool_turn.is_some()
     }
 
+    /// Releases only the exact settled rejection, never an executable action.
+    pub fn take_rejected_action(&mut self) -> Option<AgentProviderRejectedAction> {
+        self.rejected_action.take()
+    }
+
     /// Consumes the settled terminal and releases its sole browser proposal turn.
     pub fn into_tool_turn(self) -> Option<AgentProviderSettledToolTurn> {
         self.tool_turn
@@ -305,6 +328,30 @@ impl fmt::Debug for AgentProviderSettledTerminal {
             .field("has_tool_turn", &self.tool_turn.is_some())
             .field("content", &"[redacted]")
             .finish()
+    }
+}
+
+/// A malformed action retained after complete provider framing and pricing.
+/// Its private message is returned only to the model, never diagnostics.
+#[must_use]
+pub struct AgentProviderRejectedAction {
+    pub(super) error: super::AgentBrowserToolContractError,
+    pub(super) problem: String,
+    pub(super) continuation: AgentProviderContinuation,
+}
+
+impl AgentProviderRejectedAction {
+    /// Content-free category for local reliability counters.
+    pub const fn error(&self) -> super::AgentBrowserToolContractError {
+        self.error
+    }
+}
+
+impl fmt::Debug for AgentProviderRejectedAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentProviderRejectedAction")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 

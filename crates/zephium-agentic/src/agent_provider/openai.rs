@@ -1008,13 +1008,12 @@ impl OpenAiResponsesStreamDecoder {
         let guard: [u8; 32] = Sha256::digest(arguments.as_bytes()).into();
         #[cfg(feature = "probe-harness")]
         let retained_arguments = self.config.store_response.then(|| arguments.clone());
-        let call = AgentBrowserToolCall::decode_openai_with_replay(
+        let call = AgentBrowserToolCall::decode_openai_or_rejected_action(
             self.call,
             tool.item_id.clone(),
             tool.call_id.clone(),
             tool.name.as_str(),
             arguments,
-            None,
         )
         .map_err(|error| {
             #[cfg(feature = "probe-harness")]
@@ -2633,6 +2632,61 @@ mod tests {
             .iter()
             .map(|event| sse(event["type"].as_str().expect("kind"), &event.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn malformed_action_retains_only_a_rejection_after_complete_authenticated_eof() {
+        let arguments = r#"{"actions":[{"kind":"fill","target":"@a2","value":"private fixture value","effect":"local_write","wait":{"kind":"immediate"},"verification":{"kind":"target_value_matches_input"},"settle_millis":0}]}"#;
+        let mut events = natural_language_locate_events();
+        for index in [1, 5] {
+            events[index]["item"]["name"] = json!("act");
+        }
+        events[2]["delta"] = json!(arguments);
+        events[3]["delta"] = json!("");
+        events[4]["name"] = json!("act");
+        events[4]["arguments"] = json!(arguments);
+        events[5]["item"]["arguments"] = json!(arguments);
+        events[6]["response"]["output"][0] = events[5]["item"].clone();
+        let config = config_with_effective_models(64, &["gpt-5.6-terra", "gpt-5.6-luna"]);
+        let wire = encode_test_events(&events);
+        for size in [1, 7, wire.len()] {
+            let mut decoder = OpenAiResponsesStreamDecoder::try_new(call(), &config).unwrap();
+            for chunk in wire.as_bytes().chunks(size) {
+                assert!(decoder.push(chunk).unwrap().deltas().is_empty());
+            }
+            let (conclusion, call) = decoder.finish().unwrap().into_parts();
+            let AgentProviderStreamConclusion::Completed(completion) = conclusion else {
+                panic!("complete usage");
+            };
+            assert_eq!(completion.usage().input_tokens(), 4617);
+            let call = call.unwrap();
+            assert!(!format!("{call:?}").contains("private fixture value"));
+            let (correlation, result) = call.into_checked_continuation_parts();
+            assert_eq!(correlation.kind(), AgentBrowserToolKind::Act);
+            let (error, message) = result.expect_err("malformed action is never executable");
+            assert_eq!(error, super::super::AgentBrowserToolContractError::Action);
+            assert!(message.contains("actions[0]: settle_millis"));
+        }
+        for count in 1..events.len() {
+            let mut decoder = OpenAiResponsesStreamDecoder::try_new(call(), &config).unwrap();
+            decoder
+                .push(encode_test_events(&events[..count]).as_bytes())
+                .unwrap();
+            assert!(decoder.finish().is_err(), "no recovery from prefix {count}");
+        }
+        let mut mismatch = events.clone();
+        mismatch[6]["response"]["output"][0]["arguments"] = json!("{}");
+        let mut decoder = OpenAiResponsesStreamDecoder::try_new(call(), &config).unwrap();
+        assert!(decoder
+            .push(encode_test_events(&mismatch).as_bytes())
+            .is_err());
+        assert!(decoder.finish().is_err());
+        let mut decoder = OpenAiResponsesStreamDecoder::try_new(call(), &config).unwrap();
+        decoder.push(wire.as_bytes()).unwrap();
+        assert!(decoder
+            .push(encode_test_events(&events[6..]).as_bytes())
+            .is_err());
+        assert!(decoder.finish().is_err());
     }
 
     #[test]
