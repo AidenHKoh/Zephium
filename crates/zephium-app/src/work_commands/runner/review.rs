@@ -1,25 +1,25 @@
 //! The worker owns the entire copied workspace, including acknowledged cleanup.
 //! Granted folders are read-only inputs. Cancellation is checked before each
 //! child admission; no worker publishes changes back to a granted folder.
-use super::worker_slots::{Permit, Slots};
+use super::worker::{self, Control, Limits};
+#[cfg(test)]
+use super::worker_slots::Permit;
+use super::worker_slots::Slots;
 use super::{ApprovedChange, Failure, GitOperation, Output, ReadOperation, Snapshot};
 use crate::work_files::WorkFileGrant;
 use std::{
     future::Future,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, OnceLock,
-    },
-    time::{Duration, Instant},
+    sync::{atomic::Ordering, Arc, OnceLock},
+    time::Duration,
 };
-const FILESYSTEM_LIMIT: Duration = Duration::from_secs(10);
-const REVIEW_LIMIT: Duration = Duration::from_secs(90);
+#[cfg(test)]
 const CLEANUP_GRACE: Duration = Duration::from_millis(300);
 fn slots() -> &'static Arc<Slots> {
     static SLOTS: OnceLock<Arc<Slots>> = OnceLock::new();
     SLOTS.get_or_init(|| Arc::new(Slots::new(4)))
 }
+#[cfg(test)]
 fn launch_owned(
     permit: Permit,
     work: impl FnOnce() -> Result<Output, Failure> + Send + 'static,
@@ -30,48 +30,6 @@ fn launch_owned(
             Err(Failure::CleanupPending | Failure::StopUnconfirmed)
         )
     })
-}
-
-struct Control {
-    cancelled: AtomicBool,
-    started: Instant,
-    filesystem_deadline: AtomicU64,
-    filesystem_limit: Duration,
-}
-impl Control {
-    fn new(limit: Duration) -> Self {
-        Self {
-            cancelled: AtomicBool::new(false),
-            started: Instant::now(),
-            filesystem_deadline: AtomicU64::new(limit.as_millis() as u64),
-            filesystem_limit: limit,
-        }
-    }
-    fn filesystem(&self) {
-        self.filesystem_deadline.store(
-            self.started.elapsed().as_millis() as u64 + self.filesystem_limit.as_millis() as u64,
-            Ordering::Release,
-        );
-    }
-    fn native(&self) {
-        self.filesystem_deadline.store(0, Ordering::Release);
-    }
-    fn check(&self) -> Result<(), Failure> {
-        if self.cancelled.load(Ordering::Acquire) {
-            return Err(Failure::Stopped);
-        }
-        let deadline = self.filesystem_deadline.load(Ordering::Acquire);
-        if deadline != 0 && self.started.elapsed().as_millis() >= deadline as u128 {
-            return Err(Failure::Limit);
-        }
-        Ok(())
-    }
-}
-struct CancelOnDrop(Arc<Control>);
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.cancelled.store(true, Ordering::Release);
-    }
 }
 
 pub(super) async fn run<C, CF>(
@@ -89,20 +47,16 @@ where
     if changes.is_empty() || changes.len() > 2_000 {
         return Err(Failure::Input);
     }
-    if super::cancellation_requested(&cancelled).await {
-        return Err(Failure::Stopped);
-    }
-    let permit = slots().reserve().map_err(|_| Failure::ReviewBusy)?;
-    let control = Arc::new(Control::new(FILESYSTEM_LIMIT));
-    let _cancel = CancelOnDrop(control.clone());
     let (grant, root, changes) = (grant.clone(), root.to_owned(), changes.to_vec());
-    let worker_control = control.clone();
-    let runtime = tokio::runtime::Handle::current();
-    let worker = launch_owned(permit, move || {
-        runtime.block_on(owned(grant, root, changes, operation, &worker_control))
-    });
-    await_worker(worker, &control, &cancelled, REVIEW_LIMIT, CLEANUP_GRACE).await
+    worker::run(
+        slots(),
+        &cancelled,
+        Limits::standard(Duration::from_secs(90)),
+        move |control| async move { owned(grant, root, changes, operation, &control).await },
+    )
+    .await
 }
+
 async fn owned(
     grant: WorkFileGrant,
     root: PathBuf,
@@ -118,11 +72,7 @@ async fn owned(
     // Explicit close is the acknowledgement. Best-effort Drop is never used
     // as evidence that cancellation finished removing the private copy.
     let closed = snapshot.close();
-    match (result, closed) {
-        (Err(Failure::StopUnconfirmed), _) => Err(Failure::StopUnconfirmed),
-        (_, Err(_)) => Err(Failure::CleanupPending),
-        (result, Ok(())) => result,
-    }
+    worker::closed(result, closed)
 }
 async fn inspect(
     snapshot: &Snapshot,
@@ -182,43 +132,14 @@ async fn inspect(
     control.check()?;
     Ok(output)
 }
-async fn await_worker<C, CF>(
-    mut worker: tokio::task::JoinHandle<Result<Output, Failure>>,
-    control: &Control,
-    cancelled: &C,
-    limit: Duration,
-    grace: Duration,
-) -> Result<Output, Failure>
-where
-    C: Fn() -> CF,
-    CF: Future<Output = bool>,
-{
-    let deadline = tokio::time::sleep(limit);
-    tokio::pin!(deadline);
-    let mut tick = tokio::time::interval(Duration::from_millis(25));
-    let reason = loop {
-        tokio::select! {
-            result=&mut worker=>return result.unwrap_or(Err(Failure::CleanupPending)),
-            _=&mut deadline=>break Failure::Limit,
-            _=tick.tick()=>{
-                if super::cancellation_requested(cancelled).await{break Failure::Stopped}
-                if let Err(error)=control.check(){break error}
-            }
-        }
-    };
-    control.cancelled.store(true, Ordering::Release);
-    match tokio::time::timeout(grace, &mut worker).await {
-        Ok(Ok(Ok(_))) => Err(reason),
-        Ok(Ok(Err(Failure::Stopped))) => Err(reason),
-        Ok(Ok(Err(error))) => Err(error),
-        Ok(Err(_)) | Err(_) => Err(Failure::CleanupPending),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::worker::await_worker;
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::{
+        sync::atomic::{AtomicBool, AtomicUsize},
+        time::Instant,
+    };
     fn output() -> Output {
         Output {
             text: String::new(),
@@ -239,7 +160,7 @@ mod tests {
             }
             snapshot.close()?;
             ack.store(true, Ordering::Release);
-            Err(Failure::Stopped)
+            Err::<Output, Failure>(Failure::Stopped)
         });
         let result = await_worker(
             worker,
@@ -306,7 +227,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(2));
             }
             snapshot.close()?;
-            Err(Failure::Stopped)
+            Err::<Output, Failure>(Failure::Stopped)
         });
         assert!(matches!(
             await_worker(
@@ -333,7 +254,8 @@ mod tests {
     #[tokio::test]
     async fn failed_cleanup_acknowledgement_is_never_reported_as_stopped() {
         let control = Arc::new(Control::new(Duration::from_secs(2)));
-        let worker = tokio::task::spawn_blocking(|| Err(Failure::CleanupPending));
+        let worker =
+            tokio::task::spawn_blocking(|| Err::<Output, Failure>(Failure::CleanupPending));
         assert!(matches!(
             await_worker(
                 worker,

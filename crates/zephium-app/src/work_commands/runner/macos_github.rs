@@ -20,7 +20,8 @@ pub(super) fn present() -> bool {
     super::macos::qualified() && Path::new(IMAGE).is_file()
 }
 impl Runtime {
-    pub fn prepare() -> Result<Self, Failure> {
+    pub fn prepare_checked(check: &dyn Fn() -> Result<(), Failure>) -> Result<Self, Failure> {
+        check()?;
         if !super::macos::qualified() {
             return Err(Failure::GitHubUnavailable);
         }
@@ -32,55 +33,70 @@ impl Runtime {
         if !meta.is_file() || meta.nlink() != 1 || meta.len() != IMAGE_BYTES {
             return Err(Failure::GitHubUnavailable);
         }
-        let snapshot = Snapshot::read_only(Default::default())?;
-        let executable = snapshot.root.join("gh");
-        let mut output = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o500)
-            .open(&executable)
-            .map_err(|_| Failure::Storage)?;
-        let mut digest = Sha256::new();
-        let mut total = 0u64;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let mut bytes = [0u8; 64 * 1024];
-        loop {
-            if std::time::Instant::now() >= deadline {
-                return Err(Failure::Limit);
+        let snapshot = Snapshot::read_only_checked(Default::default(), check)?;
+        let prepared = (|| -> Result<(PathBuf, PathBuf), Failure> {
+            let executable = snapshot.root.join("gh");
+            let mut output = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o500)
+                .open(&executable)
+                .map_err(|_| Failure::Storage)?;
+            let mut digest = Sha256::new();
+            let mut total = 0u64;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut bytes = [0u8; 64 * 1024];
+            loop {
+                check()?;
+                if std::time::Instant::now() >= deadline {
+                    return Err(Failure::Limit);
+                }
+                let got = input
+                    .read(&mut bytes)
+                    .map_err(|_| Failure::GitHubUnavailable)?;
+                if got == 0 {
+                    break;
+                }
+                total = total.checked_add(got as u64).ok_or(Failure::Limit)?;
+                if total > IMAGE_BYTES {
+                    return Err(Failure::GitHubUnavailable);
+                }
+                digest.update(&bytes[..got]);
+                output
+                    .write_all(&bytes[..got])
+                    .map_err(|_| Failure::Storage)?;
             }
-            let got = input
-                .read(&mut bytes)
-                .map_err(|_| Failure::GitHubUnavailable)?;
-            if got == 0 {
-                break;
-            }
-            total = total.checked_add(got as u64).ok_or(Failure::Limit)?;
-            if total > IMAGE_BYTES {
+            if total != IMAGE_BYTES
+                || format!("{:x}", digest.finalize()) != IMAGE_DIGEST
+                || input
+                    .metadata()
+                    .map_err(|_| Failure::GitHubUnavailable)?
+                    .nlink()
+                    != 1
+            {
                 return Err(Failure::GitHubUnavailable);
             }
-            digest.update(&bytes[..got]);
-            output
-                .write_all(&bytes[..got])
-                .map_err(|_| Failure::Storage)?;
-        }
-        if total != IMAGE_BYTES
-            || format!("{:x}", digest.finalize()) != IMAGE_DIGEST
-            || input
-                .metadata()
-                .map_err(|_| Failure::GitHubUnavailable)?
-                .nlink()
-                != 1
-        {
-            return Err(Failure::GitHubUnavailable);
-        }
-        output.sync_all().map_err(|_| Failure::Storage)?;
-        let socket = snapshot.root.join("broker.sock");
-        super::github::write_config(&snapshot.home, &socket)?;
+            output.sync_all().map_err(|_| Failure::Storage)?;
+            let socket = snapshot.root.join("broker.sock");
+            super::github::write_config(&snapshot.home, &socket)?;
+            check()?;
+            Ok((executable, socket))
+        })();
+        let (executable, socket) = match prepared {
+            Ok(value) => value,
+            Err(error) => {
+                snapshot.close()?;
+                return Err(error);
+            }
+        };
         Ok(Self {
             snapshot,
             executable,
             socket,
         })
+    }
+    pub fn close(self) -> Result<(), Failure> {
+        self.snapshot.close()
     }
     pub fn grant_socket(&mut self) -> Result<(), Failure> {
         Ok(())

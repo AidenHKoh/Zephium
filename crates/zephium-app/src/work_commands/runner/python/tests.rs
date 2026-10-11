@@ -148,3 +148,24 @@ async fn native_python_stop_survives_group_change() {
     assert!(matches!(result, Err(Failure::Stopped)));
     assert!(started.elapsed() < Duration::from_secs(1));
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "Qualified Python class admission under pending worker debt; no interpreter starts"]
+async fn native_python_pending_workers_hold_capacity_before_preparation() {
+    ensure_available().unwrap();
+    super::super::worker::pending_capacity_fixture(slots().clone(), || async {
+        let request = UnittestRequest::new(&["test_inert.py".into()], &[]).unwrap();
+        matches!(
+            run(
+                &WorkFileGrant::default(),
+                Path::new("/unused-fixture-path"),
+                &request,
+                || async { false }
+            )
+            .await,
+            Err(Failure::WorkerBusy)
+        )
+    })
+    .await;
+}

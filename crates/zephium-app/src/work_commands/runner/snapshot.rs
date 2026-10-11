@@ -50,6 +50,19 @@ impl Snapshot {
         Self::prepare(files, false)
     }
 
+    pub(super) fn from_files_checked(
+        files: BTreeMap<PathBuf, Vec<u8>>,
+        check: &dyn Fn() -> Result<(), Failure>,
+    ) -> Result<Self, Failure> {
+        Self::prepare_checked(files, true, check)
+    }
+    pub(super) fn read_only_checked(
+        files: BTreeMap<PathBuf, Vec<u8>>,
+        check: &dyn Fn() -> Result<(), Failure>,
+    ) -> Result<Self, Failure> {
+        Self::prepare_checked(files, false, check)
+    }
+
     fn prepare(files: BTreeMap<PathBuf, Vec<u8>>, git_metadata: bool) -> Result<Self, Failure> {
         Self::prepare_checked(files, git_metadata, &|| Ok(()))
     }

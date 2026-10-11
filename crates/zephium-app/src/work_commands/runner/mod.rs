@@ -16,6 +16,7 @@ mod snapshot;
 mod windows;
 #[cfg(windows)]
 mod windows_github;
+mod worker;
 pub(crate) mod worker_slots;
 use crate::work_files::WorkFileGrant;
 use snapshot::Snapshot;
@@ -37,7 +38,7 @@ pub(crate) enum Failure {
     PythonUnavailable,
     GitHubUnavailable,
     CleanupPending,
-    ReviewBusy,
+    WorkerBusy,
 }
 impl Failure {
     pub fn note(self) -> &'static str {
@@ -53,8 +54,8 @@ impl Failure {
             Self::Storage => "The private copied workspace could not be prepared",
             Self::Launch => "The confined process could not be started",
             Self::Stopped => "The confined process stopped",
-            Self::ReviewBusy => "Review capacity is occupied by running work or unconfirmed cleanup",
-            Self::CleanupPending => "Stop was requested; review process or copied-workspace cleanup is not yet confirmed",
+            Self::WorkerBusy => "Runner worker capacity is occupied by running work or unconfirmed cleanup",
+            Self::CleanupPending => "The runner operation or copied-workspace cleanup is not yet confirmed; do not automatically retry",
             Self::StopUnconfirmed => "Stop was requested, but process exit has not been confirmed",
             Self::Failed => "The operation in the copied workspace failed",
             Self::GitHubUnavailable => "Public GitHub CLI reads require the qualified macOS build 25G83 and the pinned Homebrew gh 2.96.0 image; Windows awaits packaged runtime and AF_UNIX/LPAC qualification",

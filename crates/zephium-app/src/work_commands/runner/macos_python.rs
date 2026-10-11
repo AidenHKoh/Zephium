@@ -20,7 +20,12 @@ pub(super) struct Runtime {
     dynamic: PathBuf,
 }
 impl Runtime {
+    #[cfg(test)]
     pub fn qualified() -> Result<Self, Failure> {
+        Self::qualified_checked(&|| Ok(()))
+    }
+    pub fn qualified_checked(check: &dyn Fn() -> Result<(), Failure>) -> Result<Self, Failure> {
+        check()?;
         if !super::macos::qualified() {
             return Err(Failure::PythonUnavailable);
         }
@@ -37,11 +42,12 @@ impl Runtime {
             &result.stdlib,
             &result.dynamic,
         ] {
+            check()?;
             immutable_root_path(path)?;
         }
-        verify_image(&result.executable, EXECUTABLE_HASH)?;
-        verify_image(&result.library, LIBRARY_HASH)?;
-        verify_stdlib(&result.stdlib)?;
+        verify_image(&result.executable, EXECUTABLE_HASH, check)?;
+        verify_image(&result.library, LIBRARY_HASH, check)?;
+        verify_stdlib(&result.stdlib, check)?;
         Ok(result)
     }
     fn profile(&self, snapshot: &Snapshot) -> Result<String, Failure> {
@@ -82,7 +88,11 @@ fn immutable_root_path(path: &Path) -> Result<(), Failure> {
     }
     Ok(())
 }
-fn verify_image(path: &Path, expected: &str) -> Result<(), Failure> {
+fn verify_image(
+    path: &Path,
+    expected: &str,
+    check: &dyn Fn() -> Result<(), Failure>,
+) -> Result<(), Failure> {
     use std::io::Read;
     let mut file = std::fs::File::open(path).map_err(|_| Failure::PythonUnavailable)?;
     let metadata = file.metadata().map_err(|_| Failure::PythonUnavailable)?;
@@ -93,6 +103,7 @@ fn verify_image(path: &Path, expected: &str) -> Result<(), Failure> {
     let mut bytes = [0u8; 64 * 1024];
     let mut count = 0u64;
     loop {
+        check()?;
         let got = file
             .read(&mut bytes)
             .map_err(|_| Failure::PythonUnavailable)?;
@@ -113,13 +124,14 @@ fn verify_image(path: &Path, expected: &str) -> Result<(), Failure> {
 // Bound and pin the complete stdlib/extension closure, including bytecode that
 // CPython may load before the seal. Only two vendor links to the pinned framework
 // image are admitted; source snapshots never inherit this exception.
-fn verify_stdlib(root: &Path) -> Result<(), Failure> {
+fn verify_stdlib(root: &Path, check: &dyn Fn() -> Result<(), Failure>) -> Result<(), Failure> {
     use std::io::Read;
     let mut pending = vec![root.to_owned()];
     let mut rows = std::collections::BTreeMap::new();
     let mut entries = 0usize;
     while let Some(directory) = pending.pop() {
         for entry in std::fs::read_dir(directory).map_err(|_| Failure::PythonUnavailable)? {
+            check()?;
             entries += 1;
             if entries > 10_000 {
                 return Err(Failure::PythonUnavailable);
@@ -164,6 +176,7 @@ fn verify_stdlib(root: &Path) -> Result<(), Failure> {
     let mut total = 0u64;
     let mut buffer = [0u8; 64 * 1024];
     for (name, (path, metadata, link)) in rows {
+        check()?;
         let size = link.map_or(metadata.len(), |link| link.len() as u64);
         total = total.checked_add(size).ok_or(Failure::PythonUnavailable)?;
         if total > 256 * 1024 * 1024 {
@@ -191,6 +204,7 @@ fn verify_stdlib(root: &Path) -> Result<(), Failure> {
         }
         let mut count = 0u64;
         loop {
+            check()?;
             let got = file
                 .read(&mut buffer)
                 .map_err(|_| Failure::PythonUnavailable)?;

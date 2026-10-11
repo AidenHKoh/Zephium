@@ -22,7 +22,6 @@ use std::{
     time::{Duration, Instant},
 };
 type Oid = [u8; 20];
-const WORKER_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_INDEX: usize = 16 * 1024 * 1024;
 const MAX_OBJECTS: usize = 100_000;
 const MAX_BLOB: usize = 1024 * 1024;
@@ -40,6 +39,26 @@ pub(crate) enum Error {
     Changed,
     Stopped,
     Runner(Failure),
+}
+impl From<Failure> for Error {
+    fn from(error: Failure) -> Self {
+        match error {
+            Failure::Stopped => Self::Stopped,
+            Failure::Limit => Self::Limit,
+            error => Self::Runner(error),
+        }
+    }
+}
+impl super::worker::WorkerError for Error {
+    fn stopped(&self) -> bool {
+        matches!(self, Self::Stopped | Self::Runner(Failure::Stopped))
+    }
+    fn unsettled(&self) -> bool {
+        matches!(
+            self,
+            Self::Runner(Failure::CleanupPending | Failure::StopUnconfirmed)
+        )
+    }
 }
 impl Error {
     pub fn note(self) -> &'static str {
@@ -389,6 +408,10 @@ impl Captured {
         Ok(())
     }
 }
+fn slots() -> &'static Arc<super::worker_slots::Slots> {
+    static SLOTS: std::sync::OnceLock<Arc<super::worker_slots::Slots>> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| Arc::new(super::worker_slots::Slots::new(4)))
+}
 pub(crate) async fn inspect<C, CF>(
     grant: &WorkFileGrant,
     root: &Path,
@@ -401,86 +424,71 @@ where
     CF: Future<Output = bool>,
 {
     super::ensure_available().map_err(Error::Runner)?;
-    if super::cancellation_requested(&cancelled).await {
-        return Err(Error::Stopped);
-    }
-    let flag = Arc::new(AtomicBool::new(false));
-    let _cancel_on_drop = CancelOnDrop(flag.clone());
-    let (owned_grant, owned_root, owned_paths) = (grant.clone(), root.to_owned(), paths.to_vec());
-    let worker_flag = flag.clone();
-    let worker = tokio::task::spawn_blocking(move || {
-        let mut captured = capture(&owned_grant, &owned_root, &owned_paths, worker_flag.clone())?;
-        if worker_flag.load(Ordering::Acquire) {
-            return Err(Error::Stopped);
-        }
-        let snapshot =
-            Snapshot::from_files(std::mem::take(&mut captured.before)).map_err(Error::Runner)?;
-        Ok((captured, snapshot))
-    });
-    let (captured, snapshot) = await_worker(worker, &flag, &cancelled).await?;
-    for operation in [
-        GitOperation::Initialize,
-        GitOperation::CaptureIndex,
-        GitOperation::CommitBaseline,
-    ] {
-        if !super::execute(&snapshot, operation, &cancelled)
-            .await
-            .map_err(Error::Runner)?
-            .success
-        {
-            return Err(Error::Invalid);
-        }
-    }
-    for (path, bytes) in &captured.after {
-        match bytes {
-            Some(bytes) => snapshot.write(path, bytes).map_err(Error::Runner)?,
-            None => {
-                let target = snapshot.work.join(path);
-                if target.exists() {
-                    std::fs::remove_file(target).map_err(|_| Error::Invalid)?;
+    let (grant, root, paths) = (grant.clone(), root.to_owned(), paths.to_vec());
+    super::worker::run(
+        slots(),
+        &cancelled,
+        super::worker::Limits::standard(Duration::from_secs(100)),
+        move |control| async move {
+            let mut captured = capture(&grant, &root, &paths, control.cancelled.clone())?;
+            control.check().map_err(Error::from)?;
+            let snapshot =
+                Snapshot::from_files_checked(std::mem::take(&mut captured.before), &|| {
+                    control.check()
+                })
+                .map_err(Error::from)?;
+            let result = async {
+                let cancelled = || async { control.cancelled.load(Ordering::Acquire) };
+                for operation in [
+                    GitOperation::Initialize,
+                    GitOperation::CaptureIndex,
+                    GitOperation::CommitBaseline,
+                ] {
+                    control.check().map_err(Error::from)?;
+                    control.native();
+                    if !super::execute(&snapshot, operation, &cancelled)
+                        .await
+                        .map_err(Error::from)?
+                        .success
+                    {
+                        return Err(Error::Invalid);
+                    }
                 }
+                control.filesystem();
+                for (path, bytes) in &captured.after {
+                    control.check().map_err(Error::from)?;
+                    match bytes {
+                        Some(bytes) => snapshot.write(path, bytes).map_err(Error::from)?,
+                        None => {
+                            let target = snapshot.work.join(path);
+                            if target.exists() {
+                                std::fs::remove_file(target).map_err(|_| Error::Invalid)?;
+                            }
+                        }
+                    }
+                }
+                control.check().map_err(Error::from)?;
+                control.native();
+                if !super::execute(&snapshot, GitOperation::IntentToAdd, &cancelled)
+                    .await
+                    .map_err(Error::from)?
+                    .success
+                {
+                    return Err(Error::Invalid);
+                }
+                control.check().map_err(Error::from)?;
+                let output = super::execute(&snapshot, GitOperation::Read(operation), &cancelled)
+                    .await
+                    .map_err(Error::from)?;
+                control.filesystem();
+                captured.unchanged(&control.cancelled)?;
+                control.check().map_err(Error::from)?;
+                Ok(output)
             }
-        }
-    }
-    if !super::execute(&snapshot, GitOperation::IntentToAdd, &cancelled)
-        .await
-        .map_err(Error::Runner)?
-        .success
-    {
-        return Err(Error::Invalid);
-    }
-    let output = super::execute(&snapshot, GitOperation::Read(operation), &cancelled)
-        .await
-        .map_err(Error::Runner)?;
-    let worker_flag = flag.clone();
-    let worker = tokio::task::spawn_blocking(move || captured.unchanged(&worker_flag));
-    await_worker(worker, &flag, &cancelled).await?;
-    Ok(output)
-}
-
-struct CancelOnDrop(Arc<AtomicBool>);
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
-async fn await_worker<T, C, CF>(
-    mut worker: tokio::task::JoinHandle<Result<T, Error>>,
-    flag: &Arc<AtomicBool>,
-    cancelled: &C,
-) -> Result<T, Error>
-where
-    C: Fn() -> CF,
-    CF: Future<Output = bool>,
-{
-    let mut tick = tokio::time::interval(Duration::from_millis(25));
-    let deadline = tokio::time::sleep(WORKER_TIMEOUT);
-    tokio::pin!(deadline);
-    loop {
-        tokio::select! {
-            result=&mut worker=>return result.map_err(|_|Error::Invalid)?,
-            _=&mut deadline=>{flag.store(true,Ordering::Release);return Err(Error::Limit);}
-            _=tick.tick()=>if super::cancellation_requested(cancelled).await{flag.store(true,Ordering::Release);return Err(Error::Stopped);}
-        }
-    }
+            .await;
+            control.filesystem();
+            super::worker::closed(result, snapshot.close())
+        },
+    )
+    .await
 }

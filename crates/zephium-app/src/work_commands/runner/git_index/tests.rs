@@ -601,19 +601,46 @@ fn secret_index_and_current_content_are_refused() {
 
 #[tokio::test]
 async fn blocked_worker_has_absolute_deadline_and_cooperative_cancel() {
-    let flag = Arc::new(AtomicBool::new(false));
-    let worker_flag = flag.clone();
-    let worker = tokio::task::spawn_blocking(move || {
-        while !worker_flag.load(Ordering::Acquire) {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        Ok(())
-    });
-    let started = Instant::now();
-    assert_eq!(
-        await_worker(worker, &flag, &|| async { false }).await,
-        Err(Error::Limit)
-    );
-    assert!(flag.load(Ordering::Acquire));
-    assert!(started.elapsed() < WORKER_TIMEOUT + Duration::from_secs(1));
+    let slots = Arc::new(super::super::worker_slots::Slots::new(1));
+    let began = Instant::now();
+    let result: Result<(), Error> = super::super::worker::run(
+        &slots,
+        &|| async { false },
+        super::super::worker::Limits {
+            filesystem: Duration::from_millis(20),
+            total: Duration::from_secs(2),
+            grace: Duration::from_millis(300),
+        },
+        |control| async move {
+            while !control.cancelled.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(Error::Stopped)
+        },
+    )
+    .await;
+    assert_eq!(result, Err(Error::Limit));
+    assert!(began.elapsed() < Duration::from_secs(1));
+    assert_eq!(slots.outstanding(), 0);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "Qualified current-index class admission under pending worker debt; no Git starts"]
+async fn native_git_index_pending_workers_hold_capacity_before_capture() {
+    super::super::ensure_available().unwrap();
+    super::super::worker::pending_capacity_fixture(slots().clone(), || async {
+        matches!(
+            inspect(
+                &WorkFileGrant::default(),
+                Path::new("/unused-fixture-path"),
+                &["note.txt".into()],
+                ReadOperation::Diff,
+                || async { false }
+            )
+            .await,
+            Err(Error::Runner(Failure::WorkerBusy))
+        )
+    })
+    .await;
 }

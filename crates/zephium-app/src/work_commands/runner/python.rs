@@ -6,10 +6,7 @@ use std::{
     collections::BTreeSet,
     future::Future,
     path::{Component, Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::{atomic::Ordering, Arc},
     time::Duration,
 };
 
@@ -85,31 +82,9 @@ pub(crate) fn ensure_available() -> Result<(), Failure> {
     // Windows requires packaged runtime hashes and native LPAC/Job qualification.
     Err(Failure::PythonUnavailable)
 }
-struct CancelOnDrop(Arc<AtomicBool>);
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
-async fn worker<T, C, CF>(
-    mut task: tokio::task::JoinHandle<Result<T, Failure>>,
-    flag: &Arc<AtomicBool>,
-    cancelled: &C,
-) -> Result<T, Failure>
-where
-    C: Fn() -> CF,
-    CF: Future<Output = bool>,
-{
-    let deadline = tokio::time::sleep(Duration::from_secs(10));
-    tokio::pin!(deadline);
-    let mut tick = tokio::time::interval(Duration::from_millis(25));
-    loop {
-        tokio::select! {
-            result=&mut task=>return result.map_err(|_|Failure::Failed)?,
-            _=&mut deadline=>{flag.store(true,Ordering::Release);return Err(Failure::Limit);}
-            _=tick.tick()=>if super::cancellation_requested(cancelled).await {flag.store(true,Ordering::Release);return Err(Failure::Stopped);}
-        }
-    }
+fn slots() -> &'static Arc<super::worker_slots::Slots> {
+    static SLOTS: std::sync::OnceLock<Arc<super::worker_slots::Slots>> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| Arc::new(super::worker_slots::Slots::new(4)))
 }
 pub(crate) async fn run<C, CF>(
     grant: &WorkFileGrant,
@@ -122,83 +97,78 @@ where
     CF: Future<Output = bool>,
 {
     ensure_available()?;
-    if super::cancellation_requested(&cancelled).await {
-        return Err(Failure::Stopped);
-    }
-    let flag = Arc::new(AtomicBool::new(false));
-    let _cancel = CancelOnDrop(flag.clone());
     let (grant, root, request) = (grant.clone(), root.to_owned(), request.clone());
-    let (input_grant, input_root, input_request, working_flag) =
-        (grant.clone(), root.clone(), request.clone(), flag.clone());
-    let task = tokio::task::spawn_blocking(move || {
-        #[cfg(target_os = "macos")]
-        let runtime = super::macos_python::Runtime::qualified()?;
-        let resolved = input_grant
-            .resolve(input_root.to_str().ok_or(Failure::Input)?, false)
-            .map_err(|_| Failure::Input)?;
-        if resolved != input_root {
-            return Err(Failure::Input);
-        }
-        let mut files = std::collections::BTreeMap::new();
-        let mut total = 0usize;
-        for path in &input_request.selected {
-            if working_flag.load(Ordering::Acquire) {
-                return Err(Failure::Stopped);
-            }
-            let (_, _, text) =
-                read_text_limited(&input_root.join(path), 1024 * 1024).map_err(|error| {
-                    if error == crate::work_files::WorkFileError::Sensitive {
-                        Failure::Sensitive
-                    } else {
-                        Failure::Input
-                    }
-                })?;
-            let text = text.ok_or(Failure::Input)?;
-            total = total.checked_add(text.len()).ok_or(Failure::Limit)?;
-            if total > 32 * 1024 * 1024 {
-                return Err(Failure::Limit);
-            }
-            files.insert(path.clone(), text.into_bytes());
-        }
-        if working_flag.load(Ordering::Acquire) {
-            return Err(Failure::Stopped);
-        }
-        let snapshot = Snapshot::read_only(files)?;
-        #[cfg(target_os = "macos")]
-        return Ok((snapshot, runtime));
-        #[cfg(not(target_os = "macos"))]
-        Ok((snapshot, ()))
-    });
-    let (snapshot, runtime) = worker(task, &flag, &cancelled).await?;
-    #[cfg(target_os = "macos")]
-    let output =
-        super::macos_python::run(&snapshot, &runtime, &request.modules, &cancelled).await?;
-    #[cfg(windows)]
-    let output = super::windows::python(&snapshot, &request.modules, &cancelled).await?;
-    #[cfg(not(any(target_os = "macos", windows)))]
-    let output = {
-        let _ = (&runtime, &snapshot);
-        return Err(Failure::PythonUnavailable);
-    };
-    let working_flag = flag.clone();
-    let task = tokio::task::spawn_blocking(move || {
-        let _ = runtime;
-        for (path, bytes) in &snapshot.files {
-            if working_flag.load(Ordering::Acquire) {
-                return Err(Failure::Stopped);
-            }
-            if crate::work_files::snapshot_bytes(&root.join(path), 1024 * 1024)
-                .ok()
-                .as_ref()
-                != Some(bytes)
+    super::worker::run(
+        slots(),
+        &cancelled,
+        super::worker::Limits::standard(Duration::from_secs(40)),
+        move |control| async move {
+            #[cfg(target_os = "macos")]
+            let runtime = super::macos_python::Runtime::qualified_checked(&|| control.check())?;
+            control.check()?;
+            if grant
+                .resolve(root.to_str().ok_or(Failure::Input)?, false)
+                .map_err(|_| Failure::Input)?
+                != root
             {
-                return Err(Failure::Changed);
+                return Err(Failure::Input);
             }
-        }
-        Ok(())
-    });
-    worker(task, &flag, &cancelled).await?;
-    Ok(output)
+            let mut files = std::collections::BTreeMap::new();
+            let mut total = 0usize;
+            for path in &request.selected {
+                control.check()?;
+                let (_, _, text) =
+                    read_text_limited(&root.join(path), 1024 * 1024).map_err(|error| {
+                        if error == crate::work_files::WorkFileError::Sensitive {
+                            Failure::Sensitive
+                        } else {
+                            Failure::Input
+                        }
+                    })?;
+                let text = text.ok_or(Failure::Input)?;
+                total = total.checked_add(text.len()).ok_or(Failure::Limit)?;
+                if total > 32 * 1024 * 1024 {
+                    return Err(Failure::Limit);
+                }
+                files.insert(path.clone(), text.into_bytes());
+            }
+            let snapshot = Snapshot::read_only_checked(files, &|| control.check())?;
+            let result = async {
+                control.check()?;
+                control.native();
+                let cancelled = || async { control.cancelled.load(Ordering::Acquire) };
+                #[cfg(target_os = "macos")]
+                let output =
+                    super::macos_python::run(&snapshot, &runtime, &request.modules, &cancelled)
+                        .await?;
+                #[cfg(windows)]
+                let output =
+                    super::windows::python(&snapshot, &request.modules, &cancelled).await?;
+                #[cfg(not(any(target_os = "macos", windows)))]
+                return Err(Failure::PythonUnavailable);
+                #[cfg(any(target_os = "macos", windows))]
+                {
+                    control.filesystem();
+                    for (path, bytes) in &snapshot.files {
+                        control.check()?;
+                        if crate::work_files::snapshot_bytes(&root.join(path), 1024 * 1024)
+                            .ok()
+                            .as_ref()
+                            != Some(bytes)
+                        {
+                            return Err(Failure::Changed);
+                        }
+                    }
+                    control.check()?;
+                    Ok(output)
+                }
+            }
+            .await;
+            control.filesystem();
+            super::worker::closed(result, snapshot.close())
+        },
+    )
+    .await
 }
 
 #[cfg(test)]

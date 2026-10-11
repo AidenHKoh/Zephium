@@ -27,6 +27,12 @@ pub(crate) fn available() -> bool {
         false
     }
 }
+#[cfg(any(target_os = "macos", windows))]
+fn slots() -> &'static std::sync::Arc<super::worker_slots::Slots> {
+    static SLOTS: std::sync::OnceLock<std::sync::Arc<super::worker_slots::Slots>> =
+        std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| std::sync::Arc::new(super::worker_slots::Slots::new(4)))
+}
 pub(crate) async fn run<C, CF, F, FF>(cancelled: &C, fetch: F) -> Result<Output, Failure>
 where
     C: Fn() -> CF,
@@ -39,65 +45,34 @@ where
     }
     #[cfg(any(target_os = "macos", windows))]
     {
-        if super::cancellation_requested(cancelled).await {
-            return Err(Failure::Stopped);
-        }
-        let mut worker = tokio::task::spawn_blocking(Runtime::prepare);
-        let deadline = tokio::time::sleep(Duration::from_secs(10));
-        tokio::pin!(deadline);
-        let mut tick = tokio::time::interval(Duration::from_millis(25));
-        let mut runtime = loop {
-            tokio::select! {
-                ready = &mut worker => break ready.map_err(|_| Failure::GitHubUnavailable)??,
-                _ = &mut deadline => return Err(Failure::Limit),
-                _ = tick.tick() => if super::cancellation_requested(cancelled).await { return Err(Failure::Stopped); }
-            }
-        };
-        let listener = Listener::bind(&runtime.socket)?;
-        runtime.grant_socket()?;
-        let port = 1;
-        let nonce = format!(
-            "{:032x}",
-            u128::from_be_bytes(zephium_core::work::WorkArtifactId::generate().bytes())
+        let slots = slots();
+        let (asked, request) = tokio::sync::oneshot::channel();
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let observing = super::worker::run(
+            slots,
+            cancelled,
+            super::worker::Limits::standard(Duration::from_secs(30)),
+            move |control| async move {
+                let mut runtime = Runtime::prepare_checked(&|| control.check())?;
+                let outcome = exchange(&mut runtime, &control, || async {
+                    asked.send(()).map_err(|_| Failure::Stopped)?;
+                    response.await.map_err(|_| Failure::Stopped)?
+                })
+                .await;
+                control.filesystem();
+                super::worker::closed(outcome, runtime.close())
+            },
         );
-        let halt = AtomicBool::new(false);
-        let external = AtomicBool::new(false);
-        let cancellation = || async {
-            let stopped = super::cancellation_requested(cancelled).await;
-            if stopped {
-                external.store(true, Ordering::Release);
+        tokio::pin!(observing);
+        let bridge = async {
+            if request.await.is_ok() {
+                let result = fetch().await;
+                let _ = reply.send(result);
             }
-            stopped || halt.load(Ordering::Acquire)
         };
-        let child = async {
-            let result = runtime.run(&nonce, &cancellation).await;
-            if result.is_err() || result.as_ref().is_ok_and(|out| !out.success) {
-                halt.store(true, Ordering::Release);
-            }
-            result
-        };
-        let broker = async {
-            let result = serve(listener, port, &nonce, &halt, fetch).await;
-            if result.is_err() {
-                halt.store(true, Ordering::Release);
-            }
-            result
-        };
-        let (child, broker) = tokio::join!(child, broker);
-        if matches!(child, Err(Failure::StopUnconfirmed)) {
-            return Err(Failure::StopUnconfirmed);
-        }
-        if external.load(Ordering::Acquire) {
-            return Err(Failure::Stopped);
-        }
-        let expected = broker?;
-        let output = child?;
-        if !output.success
-            || serde_json::from_str::<serde_json::Value>(&output.text).ok() != Some(expected)
-        {
-            return Err(Failure::Failed);
-        }
-        Ok(output)
+        // Only an exact validated child request starts the caller-owned fetch.
+        // Dropping the caller cancels the worker; neither side can replay it.
+        tokio::select! {result=&mut observing=>result,_=bridge=>observing.await}
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
@@ -105,6 +80,59 @@ where
         Err(Failure::GitHubUnavailable)
     }
 }
+#[cfg(any(target_os = "macos", windows))]
+async fn exchange<F, FF>(
+    runtime: &mut Runtime,
+    control: &super::worker::Control,
+    fetch: F,
+) -> Result<Output, Failure>
+where
+    F: FnOnce() -> FF,
+    FF: Future<Output = Result<Vec<u8>, Failure>>,
+{
+    control.check()?;
+    let listener = Listener::bind(&runtime.socket)?;
+    runtime.grant_socket()?;
+    control.check()?;
+    control.native();
+    let nonce = format!(
+        "{:032x}",
+        u128::from_be_bytes(zephium_core::work::WorkArtifactId::generate().bytes())
+    );
+    let halt = AtomicBool::new(false);
+    let cancellation =
+        || async { control.cancelled.load(Ordering::Acquire) || halt.load(Ordering::Acquire) };
+    let child = async {
+        let result = runtime.run(&nonce, &cancellation).await;
+        if result.is_err() || result.as_ref().is_ok_and(|out| !out.success) {
+            halt.store(true, Ordering::Release);
+        }
+        result
+    };
+    let broker = async {
+        let result = serve(listener, 1, &nonce, &halt, fetch).await;
+        if result.is_err() {
+            halt.store(true, Ordering::Release);
+        }
+        result
+    };
+    let (child, broker) = tokio::join!(child, broker);
+    if matches!(child, Err(Failure::StopUnconfirmed)) {
+        return Err(Failure::StopUnconfirmed);
+    }
+    if control.cancelled.load(Ordering::Acquire) {
+        return Err(Failure::Stopped);
+    }
+    let expected = broker?;
+    let output = child?;
+    if !output.success
+        || serde_json::from_str::<serde_json::Value>(&output.text).ok() != Some(expected)
+    {
+        return Err(Failure::Failed);
+    }
+    Ok(output)
+}
+
 pub(super) async fn serve<F, FF>(
     listener: Listener,
     port: u16,
@@ -294,6 +322,22 @@ mod tests {
             assert!(matches!(reply, Err(Failure::Sensitive | Failure::Limit)));
             assert!(bytes.is_empty());
         }
+    }
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "Qualified gh class admission under pending worker debt; no service request"]
+    async fn native_github_pending_workers_hold_capacity_before_fetch_or_launch() {
+        assert!(available());
+        super::super::worker::pending_capacity_fixture(slots().clone(), || async {
+            let called = AtomicBool::new(false);
+            let result = run(&|| async { false }, || async {
+                called.store(true, Ordering::Release);
+                Ok(b"{}".to_vec())
+            })
+            .await;
+            !called.load(Ordering::Acquire) && matches!(result, Err(Failure::WorkerBusy))
+        })
+        .await;
     }
     #[cfg(target_os = "macos")]
     #[tokio::test]

@@ -22,7 +22,8 @@ pub(super) struct Runtime {
     pub socket: PathBuf,
 }
 impl Runtime {
-    pub fn prepare() -> Result<Self, Failure> {
+    pub fn prepare_checked(check: &dyn Fn() -> Result<(), Failure>) -> Result<Self, Failure> {
+        check()?;
         // No installed/PATH fallback. Packaging and native Windows qualification
         // are mandatory; a Mac source check cannot populate this eligibility.
         const QUALIFIED: bool = false;
@@ -34,9 +35,17 @@ impl Runtime {
             .parent()
             .ok_or(Failure::GitHubUnavailable)?
             .join("work-runtime/gh-2.96.0/gh.exe");
-        Self::prepare_image(&image)
+        Self::prepare_image_checked(&image, check)
     }
+    #[cfg(test)]
     fn prepare_image(image: &Path) -> Result<Self, Failure> {
+        Self::prepare_image_checked(image, &|| Ok(()))
+    }
+    fn prepare_image_checked(
+        image: &Path,
+        check: &dyn Fn() -> Result<(), Failure>,
+    ) -> Result<Self, Failure> {
+        check()?;
         let _pins = crate::work_files::pin_directories(image.parent().ok_or(Failure::Input)?)
             .map_err(|_| Failure::GitHubUnavailable)?;
         let mut input = OpenOptions::new()
@@ -53,49 +62,62 @@ impl Runtime {
         {
             return Err(Failure::GitHubUnavailable);
         }
-        let snapshot = Snapshot::read_only(Default::default())?;
-        std::fs::create_dir(snapshot.root.join("tool")).map_err(|_| Failure::Storage)?;
-        let executable = snapshot.root.join("tool/gh.exe");
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&executable)
-            .map_err(|_| Failure::Storage)?;
-        let mut digest = Sha256::new();
-        let mut total = 0u64;
-        let mut chunk = [0u8; 64 * 1024];
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if std::time::Instant::now() >= deadline {
-                return Err(Failure::Limit);
+        let snapshot = Snapshot::read_only_checked(Default::default(), check)?;
+        let prepared = (|| -> Result<(PathBuf, PathBuf, super::windows::Profile), Failure> {
+            std::fs::create_dir(snapshot.root.join("tool")).map_err(|_| Failure::Storage)?;
+            let executable = snapshot.root.join("tool/gh.exe");
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&executable)
+                .map_err(|_| Failure::Storage)?;
+            let mut digest = Sha256::new();
+            let mut total = 0u64;
+            let mut chunk = [0u8; 64 * 1024];
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                check()?;
+                if std::time::Instant::now() >= deadline {
+                    return Err(Failure::Limit);
+                }
+                let count = input
+                    .read(&mut chunk)
+                    .map_err(|_| Failure::GitHubUnavailable)?;
+                if count == 0 {
+                    break;
+                }
+                total = total.checked_add(count as u64).ok_or(Failure::Limit)?;
+                if total > IMAGE_BYTES {
+                    return Err(Failure::GitHubUnavailable);
+                }
+                digest.update(&chunk[..count]);
+                output
+                    .write_all(&chunk[..count])
+                    .map_err(|_| Failure::Storage)?;
             }
-            let count = input
-                .read(&mut chunk)
-                .map_err(|_| Failure::GitHubUnavailable)?;
-            if count == 0 {
-                break;
-            }
-            total = total.checked_add(count as u64).ok_or(Failure::Limit)?;
-            if total > IMAGE_BYTES {
+            if total != IMAGE_BYTES
+                || format!("{:x}", digest.finalize()) != IMAGE_DIGEST
+                || !crate::work_files::single_link(&input)
+                    .map_err(|_| Failure::GitHubUnavailable)?
+            {
                 return Err(Failure::GitHubUnavailable);
             }
-            digest.update(&chunk[..count]);
-            output
-                .write_all(&chunk[..count])
-                .map_err(|_| Failure::Storage)?;
-        }
-        if total != IMAGE_BYTES
-            || format!("{:x}", digest.finalize()) != IMAGE_DIGEST
-            || !crate::work_files::single_link(&input).map_err(|_| Failure::GitHubUnavailable)?
-        {
-            return Err(Failure::GitHubUnavailable);
-        }
-        output.sync_all().map_err(|_| Failure::Storage)?;
-        drop(output);
-        let socket = snapshot.root.join("broker.sock");
-        super::github::write_config(&snapshot.home, &socket)?;
-        let profile = super::windows::Profile::create()?;
-        profile.grant_copy(&snapshot, true)?;
+            output.sync_all().map_err(|_| Failure::Storage)?;
+            drop(output);
+            let socket = snapshot.root.join("broker.sock");
+            super::github::write_config(&snapshot.home, &socket)?;
+            let profile = super::windows::Profile::create()?;
+            profile.grant_copy(&snapshot, true)?;
+            check()?;
+            Ok((executable, socket, profile))
+        })();
+        let (executable, socket, profile) = match prepared {
+            Ok(value) => value,
+            Err(error) => {
+                snapshot.close()?;
+                return Err(error);
+            }
+        };
         Ok(Self {
             endpoint: None,
             profile,
@@ -103,6 +125,17 @@ impl Runtime {
             executable,
             socket,
         })
+    }
+    pub fn close(self) -> Result<(), Failure> {
+        let Self {
+            endpoint,
+            profile,
+            snapshot,
+            ..
+        } = self;
+        drop(endpoint);
+        drop(profile);
+        snapshot.close()
     }
     pub fn grant_socket(&mut self) -> Result<(), Failure> {
         self.endpoint = Some(self.profile.grant_socket(&self.snapshot, &self.socket)?);
