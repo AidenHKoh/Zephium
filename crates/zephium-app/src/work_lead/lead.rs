@@ -57,7 +57,9 @@ struct LeadState {
     parts_started: usize,
     parts_running: usize,
     reply: Option<WorkArtifactId>,
+    reply_input: Option<Value>,
     finish_refusals: u8,
+    final_records: Option<Value>,
     title_refused: bool,
     /// Objects refused in this run, by what they are, and how often.
     refused: std::collections::BTreeMap<String, u8>,
@@ -93,6 +95,21 @@ pub(crate) struct Lead<'a, B> {
 struct EarlyReply {
     call: WorkModelToolCall,
     answer: (String, bool),
+}
+
+fn early_reply_args(tool: &WorkModelToolCall) -> Option<Value> {
+    if tool.name == "create"
+        && tool.arguments.get("kind").and_then(Value::as_str) == Some("reply")
+        && tool.arguments.get("part").is_none_or(Value::is_null)
+    {
+        Some(tool.arguments.clone())
+    } else if tool.name == "finish" {
+        tool.arguments.get("reply").filter(|reply| reply.is_object()).map(|reply| serde_json::json!({
+            "kind":"reply", "title":tool.arguments.get("title").and_then(Value::as_str).unwrap_or("Answer"), "data":reply
+        }))
+    } else {
+        None
+    }
 }
 
 type Answer = (usize, String, bool);
@@ -435,9 +452,7 @@ where
         let (send, mut receive) = tokio::sync::mpsc::channel(1);
         let offered = std::sync::atomic::AtomicBool::new(false);
         let completed = |tool: WorkModelToolCall| {
-            if tool.name == "create"
-                && tool.arguments.get("kind").and_then(Value::as_str) == Some("reply")
-                && tool.arguments.get("part").is_none_or(Value::is_null)
+            if early_reply_args(&tool).is_some()
                 && !offered.swap(true, std::sync::atomic::Ordering::Relaxed)
             {
                 let _ = send.try_send(tool);
@@ -461,7 +476,7 @@ where
                     publication = Some(Box::pin(async move {
                         // Only a complete reply uses this path, through the same
                         // schema, source, honesty and durable publication checks.
-                        let answer = self.create(&tool.arguments, None, false).await;
+                        let answer = self.publish_early_reply(&tool).await;
                         EarlyReply { call: tool, answer }
                     }));
                 }
@@ -486,7 +501,7 @@ where
             {
                 if let Ok(tool) = receive.try_recv() {
                     publication = Some(Box::pin(async move {
-                        let answer = self.create(&tool.arguments, None, false).await;
+                        let answer = self.publish_early_reply(&tool).await;
                         EarlyReply { call: tool, answer }
                     }));
                     continue;
@@ -514,6 +529,53 @@ where
         }
     }
 
+    fn check_finish_records(&self, args: &Value) -> Result<(), (String, ObjectRefusal)> {
+        if let Some(records) = args.get("records") {
+            let kind = args
+                .get("layout")
+                .and_then(Value::as_str)
+                .unwrap_or("picks");
+            if !matches!(kind, "picks" | "sheet") {
+                return Err(("layout must be picks or sheet".into(), ObjectRefusal::Shape));
+            }
+            let title = args
+                .get("records_title")
+                .and_then(Value::as_str)
+                .unwrap_or("Results");
+            objects::propose(
+                self.run,
+                &[],
+                kind,
+                title,
+                serde_json::json!({"records": records}),
+                &[],
+                &[],
+                false,
+            )?;
+        }
+        Ok(())
+    }
+
+    async fn publish_early_reply(&self, tool: &WorkModelToolCall) -> (String, bool) {
+        if tool.name == "finish" {
+            if let Err((message, reason)) = self.check_finish_records(&tool.arguments) {
+                return self.refuse("finish records", reason, message);
+            }
+            let state = self.state();
+            if state.reply.is_some() {
+                return if state.reply_input.as_ref() == tool.arguments.get("reply") {
+                    ("Reply already published".into(), false)
+                } else {
+                    ("A different reply is already published; revise it explicitly, then finish without reply.".into(), true)
+                };
+            }
+        }
+        let Some(args) = early_reply_args(tool) else {
+            return ("no complete reply".into(), true);
+        };
+        self.create(&args, None, false).await
+    }
+
     /// The tool calls of one turn, run together; `finish` last.
     async fn execute(
         &self,
@@ -528,6 +590,14 @@ where
         let mut ran = vec![false; calls.len()];
         for (index, tool_call) in calls.iter().enumerate() {
             if let Some(reply) = early_reply.filter(|reply| reply.call.id == tool_call.id) {
+                if tool_call.name == "finish"
+                    && reply.call.name == tool_call.name
+                    && reply.call.arguments == tool_call.arguments
+                    && !reply.answer.1
+                {
+                    finish_at = Some(index);
+                    continue;
+                }
                 answers[index] = Some(
                     if reply.call.name == tool_call.name
                         && reply.call.arguments == tool_call.arguments
@@ -914,6 +984,7 @@ where
                 self.placed(&key);
                 if kind == "reply" {
                     self.state().reply = Some(id);
+                    self.state().reply_input = args.get("data").cloned();
                 }
                 self.run.activity(WorkActivityV1::ProducingArtifact);
                 (
@@ -1013,6 +1084,7 @@ where
                 self.placed(&key);
                 if kind == "reply" {
                     self.state().reply = Some(new);
+                    self.state().reply_input = args.get("data").cloned();
                 }
                 let forwarded = if target.artifact.id == id {
                     String::new()
@@ -1150,6 +1222,52 @@ where
     }
 
     async fn finish(&self, args: &Value) -> (String, bool) {
+        if let Err((message, reason)) = self.check_finish_records(args) {
+            return self.refuse("finish records", reason, message);
+        }
+        if let Some(reply) = args.get("reply") {
+            let state = self.state();
+            if state.reply.is_some() && state.reply_input.as_ref() != Some(reply) {
+                return ("A different reply is already published; revise it explicitly, then finish without reply.".into(), true);
+            }
+        }
+        let checked_title = if args.get("reply").is_some() || args.get("records").is_some() {
+            match self.title(args.get("title")) {
+                Ok(title) => Some(title),
+                Err(fault) => return (fault, true),
+            }
+        } else {
+            None
+        };
+        if self.state().reply.is_none() {
+            if let Some(reply) = args.get("reply") {
+                let request = serde_json::json!({"kind":"reply", "title":args.get("title").and_then(Value::as_str).unwrap_or("Answer"), "data":reply});
+                let result = self.create(&request, None, false).await;
+                if result.1 {
+                    return result;
+                }
+            }
+        }
+        if let Some(records) = args.get("records") {
+            let layout = args
+                .get("layout")
+                .and_then(Value::as_str)
+                .unwrap_or("picks");
+            if !matches!(layout, "picks" | "sheet") {
+                return ("layout must be picks or sheet".into(), true);
+            }
+            let request = serde_json::json!({"kind":layout, "title":args.get("records_title").and_then(Value::as_str).unwrap_or("Results"), "data":{"records":records}});
+            let prior = self.state().final_records.clone();
+            match prior {
+                Some(prior) if prior == request => {},
+                Some(_) => return ("The final records were already published. Use revise to change them, then finish without records.".into(), true),
+                None => {
+                    let result = self.create(&request, None, false).await;
+                    if result.1 { return result; }
+                    self.state().final_records = Some(request);
+                }
+            }
+        }
         if self.state().reply.is_none() {
             let refusals = {
                 let mut state = self.state();
@@ -1186,9 +1304,12 @@ where
                 followups.push(followup);
             }
         }
-        let title = match self.title(args.get("title")) {
-            Ok(title) => title,
-            Err(fault) => return (fault, true),
+        let title = match checked_title {
+            Some(title) => title,
+            None => match self.title(args.get("title")) {
+                Ok(title) => title,
+                Err(fault) => return (fault, true),
+            },
         };
         self.run.activity(WorkActivityV1::Finishing);
         let mut step = self.run.step(

@@ -311,15 +311,19 @@ pub(crate) fn any(kinds: &[&str]) -> Value {
         .collect();
     let mut options = options;
     if kinds.iter().any(|kind| matches!(*kind, "picks" | "sheet")) {
-        options.push(serde_json::json!({
+        options.push(record_selection());
+    }
+    json!({"anyOf": options, "description": "For extracted records, picks/sheet data is records in desired order: source is the r key returned by a read, annotation is optional. Rust copies values, links and images. Other objects use their kind schema."})
+}
+
+pub(crate) fn record_selection() -> Value {
+    serde_json::json!({
             "title":"native_records", "type":"object", "additionalProperties":false,
             "properties":{"records":{"type":"array", "minItems":1, "maxItems":12, "items":{
                 "type":"object", "additionalProperties":false,
                 "properties":{"source":{"type":"string"},"annotation":{"type":"string","maxLength":160},"recommended":{"type":"boolean"}},
                 "required":["source"]}}}, "required":["records"]
-        }));
-    }
-    json!({"anyOf": options, "description": "For extracted records, picks/sheet data is records in desired order: source is the r key returned by a read, annotation is optional. Rust copies values, links and images. Other objects use their kind schema."})
+    })
 }
 
 /// Where the model's data leaves its kind's shape, in closed words.

@@ -2491,6 +2491,7 @@ struct EarlyReplyModel {
     profile: zephium_core::ids::ProfileId,
     work: WorkId,
     truncations: usize,
+    combined: bool,
     calls: std::sync::atomic::AtomicUsize,
     observed: std::sync::atomic::AtomicBool,
 }
@@ -2502,11 +2503,19 @@ impl WorkModelClient for EarlyReplyModel {
     ) -> WorkModelFuture<'a> {
         Box::pin(async move {
             let turn = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let reply = call(
-                "early-reply",
-                "create",
-                json!({"kind":"reply","title":"First answer","data":{"headline":"A short result","text":"The result is available; supporting details may follow."}}),
-            );
+            let reply = if self.combined {
+                call(
+                    "early-reply",
+                    "finish",
+                    json!({"title":"First answer","say":"The result is ready.","reply":{"headline":"A short result","text":"The result is available; supporting details may follow."}}),
+                )
+            } else {
+                call(
+                    "early-reply",
+                    "create",
+                    json!({"kind":"reply","title":"First answer","data":{"headline":"A short result","text":"The result is available; supporting details may follow."}}),
+                )
+            };
             let finish = call(
                 "finish",
                 "finish",
@@ -2589,7 +2598,8 @@ impl WorkModelClient for EarlyReplyModel {
                     let WorkModelPart::ToolCall(mut changed) = reply.clone() else {
                         unreachable!()
                     };
-                    changed.arguments["data"]["headline"] = json!("Changed after publication");
+                    changed.arguments[if self.combined { "reply" } else { "data" }]["headline"] =
+                        json!("Changed after publication");
                     assistant.insert(0, WorkModelPart::ToolCall(changed));
                 }
                 if self.truncations == 8 {
@@ -2606,15 +2616,18 @@ impl WorkModelClient for EarlyReplyModel {
             let assistant = if truncated {
                 vec![reply]
             } else if turn == 0 {
-                vec![
+                let mut tools = vec![
                     reply,
                     call(
                         "details",
                         "create",
                         json!({"kind":"list","title":"Optional details","data":{"style":"todo","items":[{"title":"A supporting detail"}]}}),
                     ),
-                    finish,
-                ]
+                ];
+                if !self.combined {
+                    tools.push(finish);
+                }
+                tools
             } else {
                 vec![finish]
             };
@@ -2636,7 +2649,10 @@ impl WorkModelClient for EarlyReplyModel {
 }
 #[tokio::test]
 async fn a_completed_reply_is_visible_before_generation_finishes_and_survives_compact_recovery() {
-    for truncations in 0..=8 {
+    for (combined, truncations) in [false, true]
+        .into_iter()
+        .flat_map(|combined| (0..=8).map(move |n| (combined, n)))
+    {
         let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
         let (mut shell, queue, handle, profile) = fixture(store);
         let create = handle
@@ -2651,6 +2667,7 @@ async fn a_completed_reply_is_visible_before_generation_finishes_and_survives_co
             profile,
             work,
             truncations,
+            combined,
             calls: std::sync::atomic::AtomicUsize::new(0),
             observed: std::sync::atomic::AtomicBool::new(false),
         });
@@ -2874,23 +2891,15 @@ async fn native_records_publish_with_reply_and_finish_in_one_final_model_turn() 
             )],
             1 => {
                 assert!(seen.contains("record r1:"), "{seen}");
-                vec![
-                    call(
-                        "reply",
-                        "create",
-                        json!({"kind":"reply","title":"Offers","data":{"headline":"Two offers found","text":"The table carries the original prices and availability."}}),
-                    ),
-                    call(
-                        "records",
-                        "create",
-                        json!({"kind":"picks","title":"Offers","data":{"records":[{"source":"r2"},{"source":"r1"}]}}),
-                    ),
-                    call(
-                        "finish",
-                        "finish",
-                        json!({"say":"Both original records are available.","title":"Original offers"}),
-                    ),
-                ]
+                vec![call(
+                    "finish",
+                    "finish",
+                    json!({
+                        "reply":{"headline":"Two offers found","text":"The result carries the original prices and availability."},
+                        "records":[{"source":"r2"},{"source":"r1"}],"layout":"picks","records_title":"Offers",
+                        "say":"Both original records are available.","title":"Original offers"
+                    }),
+                )]
             }
             _ => panic!("native projection must not require another model call: {turn}: {seen}"),
         }
