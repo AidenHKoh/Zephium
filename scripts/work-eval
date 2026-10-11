@@ -559,8 +559,14 @@ def grade(task, evidence, reference, manifest):
     answer_evidence = {evidence_key(link) for link in published.get("evidence", [])}
     by_id = {artifact["id"]: artifact for artifact in artifacts}
     for index, url in enumerate(task["urls"]):
+        allowed = {normal_url(url)}
+        oracle_sources = list(task.get("oracle", {}).get("sources", {}).values())
+        # A single-source task's predeclared ground-truth endpoint is also
+        # valid native provenance. This never admits arbitrary same-host URLs.
+        if manifest.get("suite") == "work-heldout-v2" and len(task["urls"]) == 1 and len(oracle_sources) == 1:
+            allowed.add(normal_url(oracle_sources[0]["url"]))
         reads = [step for step in steps if step.get("kind") == "read" and step.get("status") == "succeeded"
-                 and step.get("url") and normal_url(step["url"]) == normal_url(url)]
+                 and step.get("url") and normal_url(step["url"]) in allowed]
         proven = any(any(answer_evidence & {evidence_key(link) for link in by_id.get(identity, {}).get("evidence", [])}
                          for identity in step.get("artifacts", [])) for step in reads)
         checks.append({"id": f"native_source_{index + 1}", "state": "passed" if proven else "failed"})

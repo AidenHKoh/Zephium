@@ -588,5 +588,20 @@ class PilotMeasurementTests(unittest.TestCase):
         self.assertEqual(eval.grade(task,evidence,reference,manifest)['task_outcome'],'failed')
 
 
+class CanonicalMetadataSourceTests(unittest.TestCase):
+    def test_only_the_predeclared_single_source_oracle_can_substitute_for_page_provenance(self):
+        task,evidence,reference,manifest=fixture()
+        manifest['suite']='work-heldout-v2'
+        task['oracle']={'sources':{'metadata':{'url':'https://example.test/api/release-1'}}}
+        step=evidence['executions'][0]['steps'][0]
+        step['url']='https://example.test/api/release-1'
+        self.assertEqual(eval.grade(task,evidence,reference,manifest)['task_outcome'],'passed')
+        step['url']='https://example.test/api/release-2'
+        self.assertEqual(eval.grade(task,evidence,reference,manifest)['task_outcome'],'failed')
+        step['url']='https://example.test/api/release-1'
+        manifest['suite']='work-heldout-v1'
+        self.assertEqual(eval.grade(task,evidence,reference,manifest)['task_outcome'],'failed', 'historical grading remains immutable')
+
+
 if __name__ == '__main__':
     unittest.main()
