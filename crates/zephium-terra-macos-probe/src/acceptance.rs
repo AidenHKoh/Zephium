@@ -375,6 +375,7 @@ mod read_decision_tests {
 #[derive(Default)]
 struct EvalDiagnostics {
     calls: Vec<serde_json::Value>,
+    pages: Vec<serde_json::Value>,
     truncated: bool,
 }
 struct EvalModelClient {
@@ -419,6 +420,7 @@ impl zephium_core::work::model::WorkModelClient for EvalModelClient {
                         "role": self.role, "model": request.model, "reasoning": request.reasoning,
                         "max_output_tokens": request.max_output_tokens, "native_search": request.native_search,
                         "parallel_tools": request.parallel_tools, "state": "unsettled",
+                        "started_ms": STARTED.get_or_init(Instant::now).elapsed().as_millis(),
                     }));
                     if self.visual_diagnostics {
                         let (parts, bytes) = eval_image_inputs(&request.messages);
@@ -433,6 +435,8 @@ impl zephium_core::work::model::WorkModelClient for EvalModelClient {
                 let mut local = self.diagnostics.lock().unwrap_or_else(|e| e.into_inner());
                 let row = &mut local.calls[index];
                 row["wall_ms"] = serde_json::json!(started.elapsed().as_millis());
+                row["finished_ms"] =
+                    serde_json::json!(STARTED.get_or_init(Instant::now).elapsed().as_millis());
                 match &result {
                     Ok(outcome) => {
                         let usage = outcome.usage;
@@ -681,6 +685,7 @@ fn export_eval(
         })
     }).collect();
     let local = diagnostics.lock().unwrap_or_else(|e| e.into_inner());
+    let finished_ms = STARTED.get_or_init(Instant::now).elapsed().as_millis();
     write_eval_file(
         path,
         &serde_json::json!({
@@ -688,6 +693,9 @@ fn export_eval(
             "public_artifacts": if public { "exported" } else { "withheld_private_provenance" },
             "profile_mode": "fresh_private", "stand_in": "decline_effects", "wall_ms": wall_ms,
             "models": models, "model_calls": local.calls, "model_calls_truncated": local.truncated,
+            "page_intervals": local.pages,
+            "page_diagnostics_version": if public { Some(1) } else { None },
+            "timeline": {"started_ms": finished_ms.saturating_sub(wall_ms), "finished_ms": finished_ms},
             "model_call_scope": "selected Work model clients; direct public-search transport is not included; do not add page diagnostics to this count",
             "executions": executions,
         }),
@@ -1698,6 +1706,7 @@ pub(super) async fn lead_workflow(
                 let callback = &callback;
                 let chosen_page = chosen_page.clone();
                 let chosen_light = chosen_light.clone();
+                let page_diagnostics = local_diagnostics.clone();
                 async move {
                     if local_probe {
                         return Err(WorkError::Unavailable);
@@ -1745,9 +1754,22 @@ pub(super) async fn lead_workflow(
                     ) {
                         settings.diagnostic = Some(public_page_diagnostic);
                     }
-                    composition
-                        .run_agent_step(callback, &probe, request, settings)
-                        .await
+                    let page_index = public_eval.then(|| {
+                        let mut diagnostics = page_diagnostics.lock().unwrap_or_else(|e| e.into_inner());
+                        if diagnostics.pages.len() >= 4096 { diagnostics.truncated = true; return None; }
+                        let index = diagnostics.pages.len();
+                        diagnostics.pages.push(serde_json::json!({"started_ms": STARTED.get_or_init(Instant::now).elapsed().as_millis()}));
+                        Some(index)
+                    }).flatten();
+                    if public_eval {
+                        settings.model_diagnostic = Some(|event| say(format_args!("page-model: event={event:?}")));
+                    }
+                    let result = composition.run_agent_step(callback, &probe, request, settings).await;
+                    if let Some(index) = page_index {
+                        let mut diagnostics = page_diagnostics.lock().unwrap_or_else(|e| e.into_inner());
+                        diagnostics.pages[index]["finished_ms"] = serde_json::json!(STARTED.get_or_init(Instant::now).elapsed().as_millis());
+                    }
+                    result
                 }
             },
             |_| {},

@@ -26,6 +26,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
+import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST = ROOT / "eval/work-heldout-v1.json"
@@ -110,8 +111,9 @@ def excluded(url, manifest):
 
 def load_manifest(path):
     manifest = read_json(path)
-    if manifest.get("schema_version") != SCHEMA or len(manifest["tasks"]) != 100:
-        raise ValueError("expected the versioned 100-task manifest")
+    expected = {"work-heldout-v1": 100, "work-heldout-v2": 150, "work-external-webvoyager-v1": 50}.get(manifest.get("suite"))
+    if manifest.get("schema_version") != SCHEMA or expected is None or len(manifest["tasks"]) != expected:
+        raise ValueError("expected an unsealed versioned Work manifest")
     ids = [task["id"] for task in manifest["tasks"]]
     if len(set(ids)) != len(ids) or any(not re.fullmatch(r"[a-z0-9-]{1,64}", name) for name in ids):
         raise ValueError("invalid or duplicate task IDs")
@@ -120,6 +122,11 @@ def load_manifest(path):
     for task in manifest["tasks"]:
         if not task["predicates"] or len(task["prompt"].encode()) > 2400 or "\n" in task["prompt"]:
             raise ValueError(f"invalid task contract: {task['id']}")
+        followups = task.get("follow_ups", [])
+        if any(not isinstance(follow.get("prompt"), str) or not follow["prompt"] or "\n" in follow["prompt"] or not follow.get("criteria") for follow in followups):
+            raise ValueError(f"invalid follow-up criteria: {task['id']}")
+        if len(task_request(task).encode()) > 2400:
+            raise ValueError(f"combined request exceeds probe limit: {task['id']}")
         for url in task.get("urls", []):
             if excluded(url, manifest):
                 exceptions = manifest.get("domain_overlap_exceptions", {}).get(task.get("holdout_scope"), [])
@@ -130,6 +137,10 @@ def load_manifest(path):
             if excluded(source["url"], manifest):
                 raise ValueError(f"tuned/recipe oracle in holdout: {task['id']}")
     return manifest
+
+
+def task_request(task):
+    return "\n".join([task["prompt"], *[follow["prompt"] for follow in task.get("follow_ups", [])]])
 
 
 class Metadata(html.parser.HTMLParser):
@@ -264,8 +275,9 @@ def freeze(args):
               "source_patch_sha256": digest_bytes(patch), "changed_files": sorted(changed),
               "probe_sha256": original_hash, "signature": signed,
               "manifest_sha256": digest(out / "manifest.json"), "references_sha256": digest(out / "references.json"),
-              "runner_sha256": digest(out / "work-eval.py"), "model": MODEL,
-              "model_setup": "Luna lead/page/light; shipped recommended Jev read triage when eligible; actual primary/emulation counters are reported separately",
+              "runner_sha256": digest(out / "work-eval.py"), "model": MODEL, "evaluation_lane": manifest["suite"],
+              "read_decisions": getattr(args, "read_decisions", "recommended"),
+              "model_setup": "Luna lead/page/light; read-decision mode is frozen separately; actual primary/emulation counters are reported separately",
               "platform": list(os.uname()), "python": sys.version, "timeout_seconds": args.timeout,
               "oracle_scope": "deterministic predicates and separately identified human or agent source audits; form task effects use bounded native action/navigation and DOM submit receipts, not universal HTTP observation"}
     if tuned:
@@ -408,6 +420,50 @@ def answer_object(artifacts):
     return None, None
 
 
+def interval_union(intervals):
+    merged = []
+    for start, end in sorted(intervals):
+        if end < start:
+            raise ValueError("reversed timing interval")
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(end, merged[-1][1])
+        else:
+            merged.append([start, end])
+    return merged
+
+
+def timing(evidence, log):
+    timeline = evidence.get("timeline") or {}
+    start, end = timeline.get("started_ms"), timeline.get("finished_ms")
+    result = {"model_busy_ms": None, "page_without_model_ms": None, "other_ms": None, "post_browser_finalization_gaps_ms": []}
+    # A finalization gap is per execution; follow-ups must not share its last part.
+    last = None
+    for line in log.splitlines():
+        match = re.match(r"\[\s*(\d+)ms\] lead-run: event=(.*)", line)
+        if not match:
+            continue
+        at, event = int(match[1]), match[2]
+        if event.startswith("PartEnded { helper: Browser"):
+            last = at
+        elif event.startswith("Ended {"):
+            if last is not None:
+                result["post_browser_finalization_gaps_ms"].append(max(0, at-last))
+            last = None
+    rows = evidence.get("model_calls", []) + evidence.get("page_intervals", [])
+    valid = isinstance(start, int) and isinstance(end, int) and end >= start and not evidence.get("model_calls_truncated") and all(isinstance(row.get("started_ms"), int) and isinstance(row.get("finished_ms"), int) and row["finished_ms"] >= row["started_ms"] for row in rows)
+    if not valid:
+        return result
+    def spans(rows):
+        return [[max(start,row["started_ms"]),min(end,row["finished_ms"])] for row in rows if row["finished_ms"] >= start and row["started_ms"] <= end]
+    models = interval_union(spans(evidence.get("model_calls", [])))
+    pages = interval_union(spans(evidence.get("page_intervals", [])))
+    duration = lambda intervals: sum(end-start for start,end in intervals)
+    together = duration(interval_union(models+pages))
+    result.update(model_busy_ms=duration(models), page_without_model_ms=together-duration(models), other_ms=end-start-together,
+                  qualification="Disjoint wall intervals, model first then page. Other includes orchestration, storage, and uninstrumented search-provider I/O; it is not a pure CPU-overhead measurement.")
+    return result
+
+
 def metrics(evidence, log):
     executions = evidence.get("executions", [])
     attempts = [attempt for execution in executions for attempt in execution.get("attempts", [])]
@@ -426,7 +482,19 @@ def metrics(evidence, log):
             handoffs[measured["resolved_handoff"]] += 1
     internal = collections.Counter(re.findall(r"lead-run: event=(ObjectRefused|CommitRefused|ModelRefused|BudgetSpent|Closed)\b", log))
     reasons = collections.Counter(re.findall(r"ObjectRefused \{ reason: Some\((\w+)\)", log))
-    return {"wall_ms": evidence.get("wall_ms"), "selected_model_call_attempts": len(calls) if isinstance(calls, list) else None,
+    page_calls = sum((step.get("measurements") or {}).get("planner_calls", 0) for step in steps)
+    page_reasks = sum(map(int, re.findall(r"ModelAskedAgain\((\d+)\)", log)))
+    page_turns = page_calls + page_reasks if evidence.get("page_diagnostics_version") == 1 else None
+    malformed = len(re.findall(r"ModelActionRejected\(", log)) if page_turns is not None else None
+    selected_cost = sum(row["cost_micro_usd"] for row in call_rows) if isinstance(calls, list) and all(row.get("state") == "settled" and isinstance(row.get("cost_micro_usd"), int) for row in call_rows) else None
+    fully_observed_cost = selected_cost is not None and not evidence.get("model_calls_truncated") and not any(step.get("kind") == "search" or (step.get("measurements") or {}).get("decision_calls", 0) for step in steps)
+    return {"wall_ms": evidence.get("wall_ms"), "timing": timing(evidence, log),
+            "selected_client_reported_cost_micro_usd": selected_cost,
+            "cost_for_target_micro_usd": selected_cost if fully_observed_cost else None,
+            "cost_for_target_qualification": "Available only when all selected-client calls settled with reported cost and neither public search nor primary decision calls can add unobserved charges.",
+            "malformed_action_events": malformed, "page_agent_turns": page_turns,
+            "malformed_actions_per_100_page_turns": 100 * malformed / page_turns if page_turns else None,
+            "selected_model_call_attempts": len(calls) if isinstance(calls, list) else None,
             "model_call_scope": evidence.get("model_call_scope", "unavailable"),
             "unsettled_model_calls": sum(call.get("state") == "unsettled" for call in call_rows) if isinstance(calls, list) else None,
             "reported_cost_micro_usd": sum(item["cost_micro_usd"] for item in usage) if usage and all(item is not None for item in usage) else None,
@@ -869,7 +937,7 @@ def run_case(root, frozen, task, reference, manifest, out):
     for key in list(env):
         if key.startswith("ZEPHIUM_") or key in ("RUST_LOG", "RUST_BACKTRACE"):
             env.pop(key)
-    env.update(ZEPHIUM_EVAL_PUBLIC_EXPORT=str(export), ZEPHIUM_EVAL_CASE_ID=task["id"])
+    env.update(ZEPHIUM_EVAL_PUBLIC_EXPORT=str(export), ZEPHIUM_EVAL_CASE_ID=task["id"], ZEPHIUM_EVAL_READ_DECISIONS=frozen.get("read_decisions", "recommended"))
     form = task.get("eligibility") == "pending_form_state_oracle"
     if form:
         if frozen.get("form_oracle", {}).get("version") != 2 or task["id"] not in FORM_CHECK_COUNTS:
@@ -877,7 +945,7 @@ def run_case(root, frozen, task, reference, manifest, out):
         env["ZEPHIUM_EVAL_FORM_ORACLE"] = task["id"]
     if digest(root / "probe") != frozen["probe_sha256"]:
         raise ValueError("frozen probe changed before launch")
-    command = [str(root / "probe"), "--live-lead-request", task["prompt"],
+    command = [str(root / "probe"), "--live-lead-request", task_request(task),
                "Use only the specified public sources. Do not sign in, submit forms, send messages, or access local files."]
     started = time.monotonic()
     timed_out = False
@@ -931,6 +999,8 @@ def summarize(rows):
         "selected_client_calls": distribution([row["metrics"].get("selected_model_call_attempts") for row in attempted], excluded_runs),
         "process_latency_ms": distribution(times, excluded_runs),
         "work_wall_latency_ms": distribution([row["metrics"].get("wall_ms") for row in attempted], excluded_runs),
+        "fully_observed_cost_micro_usd": distribution([row["metrics"].get("cost_for_target_micro_usd") for row in attempted], excluded_runs),
+        "post_browser_finalization_gap_ms": distribution([gap for row in attempted for gap in (row["metrics"].get("timing", {}).get("post_browser_finalization_gaps_ms", []) or [None])], excluded_runs),
     }
     cost_groups = collections.defaultdict(list)
     for row in attempted:
@@ -960,7 +1030,7 @@ def summarize(rows):
             "qualification": "Constrained deterministic predicates or recorded source audits only; operational completion and historical tuned-site passes are not task correctness."}
 
 
-def run(args):
+def run_once(args):
     root, frozen = verify_freeze(args.freeze)
     manifest = evaluation_manifest(load_manifest(root / "manifest.json"), frozen)
     references = read_json(root / "references.json")["tasks"]
@@ -969,6 +1039,8 @@ def run(args):
         raise ValueError("unknown requested task")
     out = Path(args.out).resolve()
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
+    run_id = uuid.uuid4().hex
+    write_private(out / "attempt.json", {"run_id": run_id, "freeze_sha256": digest(args.freeze), "started_at": now()})
     rows = []
     with live_lease():
         signature(root / "probe")
@@ -990,11 +1062,77 @@ def run(args):
             # Append-only progress survives interruptions; a resumed run gets a new directory.
             with open(os.open(out / "progress.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a") as stream:
                 stream.write(json.dumps(row) + "\n")
-    record = {"schema_version": SCHEMA, "freeze": str(Path(args.freeze).resolve()), "freeze_sha256": digest(args.freeze),
+    record = {"schema_version": SCHEMA, "run_id": run_id, "freeze": str(Path(args.freeze).resolve()), "freeze_sha256": digest(args.freeze),
               "started_from": frozen["label"], "finished_at": now(), "rows": rows, "summary": summarize(rows)}
     write_private(out / "run.json", record)
     print(json.dumps(record["summary"], indent=2))
     print(out / "run.json")
+
+
+def reliability(runs):
+    if len(runs) != 3 or len({run["freeze_sha256"] for run in runs}) != 1:
+        raise ValueError("three runs of exactly the same frozen setup are required")
+    identities = [run.get("run_id") for run in runs]
+    if any(not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{32}", identity) for identity in identities) or len(set(identities)) != 3:
+        raise ValueError("three independently recorded attempt identities are required")
+    indexes = [{row["id"]: row for row in run["rows"]} for run in runs]
+    if any(len(index) != len(run["rows"]) for index, run in zip(indexes, runs)) or any(set(index) != set(indexes[0]) for index in indexes[1:]):
+        raise ValueError("each run must contain the same task IDs exactly once")
+    tasks = [key for key, row in indexes[0].items() if row["eligibility"] == "eligible_public"]
+    if not tasks:
+        raise ValueError("no public tasks")
+    if any(index[key].get("eligibility") != "eligible_public" for index in indexes for key in tasks):
+        raise ValueError("eligibility changed between attempts")
+    outcomes = [[index[key].get("task_outcome", "pending") for index in indexes] for key in tasks]
+    known = {"passed", "partial", "failed"}
+    return {
+        "tasks": len(tasks), "attempts": len(tasks) * 3,
+        "pass_at_1": sum(row[0] == "passed" for row in outcomes) / len(tasks),
+        "pass_power_3": sum(all(value == "passed" for value in row) for row in outcomes) / len(tasks),
+        "ungraded_attempts": sum(value not in known for row in outcomes for value in row),
+        "fully_graded": all(value in known for row in outcomes for value in row),
+        "qualification": "Until fully_graded, rates are lower bounds; partial, unknown, missing and completed-without-a-grade are never passes. pass_at_1 uses the first attempt; pass_power_3 requires all three.",
+        "attempt_summary": summarize([index[key] for index in indexes for key in tasks]),
+        "outcomes": dict(zip(tasks, outcomes)),
+    }
+
+
+def run(args):
+    repetitions = getattr(args, "repetitions", 1)
+    if repetitions == 1:
+        return run_once(args)
+    out = Path(args.out).resolve()
+    out.mkdir(mode=0o700, parents=True, exist_ok=False)
+    for attempt in range(1, repetitions + 1):
+        one = argparse.Namespace(**vars(args))
+        one.out = str(out / f"attempt-{attempt}")
+        run_once(one)
+    if repetitions == 3:
+        runs = [read_json(out / f"attempt-{attempt}" / "run.json") for attempt in (1, 2, 3)]
+        write_private(out / "round.json", reliability(runs))
+
+
+def round_report(args):
+    if len(set(str(Path(path).resolve()) for path in args.runs)) != 3:
+        raise ValueError("the same run cannot count as multiple attempts")
+    runs = [read_json(path) for path in args.runs]
+    report = reliability(runs)
+    report["inputs"] = [{"path": str(Path(path).resolve()), "sha256": digest(path)} for path in args.runs]
+    write_private(args.out, report)
+    print(json.dumps({key: value for key, value in report.items() if key not in ("outcomes", "attempt_summary")}, indent=2))
+
+
+def predicate_outcome(checks):
+    states = [check["state"] for check in checks]
+    if not states or any(state not in ("passed", "partial", "failed", "unknown") for state in states):
+        raise ValueError("invalid predicate states")
+    if "failed" in states:
+        return "failed"
+    if "unknown" in states:
+        return "unknown"
+    if "partial" in states:
+        return "partial"
+    return "passed"
 
 
 def review(args):
@@ -1014,9 +1152,10 @@ def review(args):
         checks = entry["predicates"]
         if {check["id"] for check in checks} != {check["id"] for check in task["predicates"]} or len(checks) != len(task["predicates"]):
             raise ValueError("audit must address every declared predicate exactly once")
-        if any(check["state"] not in ("passed", "failed", "unknown") or not check.get("evidence") or not check.get("reason") for check in checks):
+        allowed_states = ("passed", "failed", "unknown") if manifest["suite"] == "work-heldout-v1" else ("passed", "partial", "failed", "unknown")
+        if any(check["state"] not in allowed_states or not check.get("evidence") or not check.get("reason") for check in checks):
             raise ValueError("each audit result needs concrete evidence references and reasoning")
-        row["task_outcome"] = "failed" if any(check["state"] == "failed" for check in checks) else "passed" if all(check["state"] == "passed" for check in checks) else "unknown"
+        row["task_outcome"] = predicate_outcome(checks)
         row["predicates"] = checks
         row["review"] = {"reviewer": audit["reviewer"], "type": audit["reviewer_type"], "audit_sha256": digest(args.audit)}
         row["reason"] = "recorded_source_audit"
@@ -1030,7 +1169,7 @@ def compare(args):
     a, b = read_json(args.before), read_json(args.after)
     freezes = [read_json(run["freeze"]) for run in (a, b)]
     matching = all(freezes[0].get(key) == freezes[1].get(key) for key in
-                   ("manifest_sha256", "references_sha256", "runner_sha256", "model", "platform", "python", "timeout_seconds", "evaluation_lane"))
+                   ("manifest_sha256", "references_sha256", "runner_sha256", "model", "platform", "python", "timeout_seconds", "evaluation_lane", "read_decisions"))
     form_versions = [record.get("form_oracle", {}).get("version") for record in freezes]
     if any(form_versions):
         matching = matching and form_versions == [2, 2] and bool(freezes[0]["form_oracle"].get("predicate_files")) and freezes[0]["form_oracle"].get("predicate_files") == freezes[1]["form_oracle"].get("predicate_files")
@@ -1067,11 +1206,16 @@ def main():
     freezing.add_argument("--tuned-matrix", action="store_true", help="separate candidate lane for exact 23 tuned goals; source audits required")
     freezing.add_argument("--matrix-source", type=Path, help="original matrix.sh literal-pair provenance; never executed")
     freezing.add_argument("--timeout", type=int, default=300)
+    freezing.add_argument("--read-decisions", choices=["recommended", "emulation", "disabled"], default="recommended")
     freezing.add_argument("--out", required=True)
     running = commands.add_parser("run")
     running.add_argument("--freeze", required=True)
     running.add_argument("--out", required=True)
     running.add_argument("--tasks", nargs="*")
+    running.add_argument("--repetitions", type=int, choices=[1, 3], default=1)
+    reporting = commands.add_parser("round-report")
+    reporting.add_argument("--runs", nargs=3, required=True)
+    reporting.add_argument("--out", required=True)
     reviewing = commands.add_parser("review")
     reviewing.add_argument("--run", required=True)
     reviewing.add_argument("--audit", required=True)
@@ -1086,7 +1230,7 @@ def main():
                           "grading": dict(collections.Counter(task["grading"] for task in manifest["tasks"])),
                           "tuned_cases_excluded": len(manifest["tuned_cases"]), "ids": [task["id"] for task in manifest["tasks"]]}, indent=2))
     else:
-        {"prepare": prepare_references, "freeze": freeze, "run": run, "review": review, "compare": compare}[args.command](args)
+        {"prepare": prepare_references, "freeze": freeze, "run": run, "review": review, "compare": compare, "round-report": round_report}[args.command](args)
 
 
 if __name__ == "__main__":

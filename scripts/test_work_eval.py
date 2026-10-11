@@ -492,5 +492,84 @@ class FixtureCleanupTests(unittest.TestCase):
         child.wait.assert_called_once_with()
 
 
+
+
+class RepeatedEvaluationTests(unittest.TestCase):
+    def test_v2_keeps_original_public_tasks_and_contextual_followups(self):
+        original = eval.load_manifest(eval.DEFAULT_MANIFEST)
+        expanded = eval.load_manifest(eval.ROOT / "eval/work-heldout-v2.json")
+        self.assertEqual(len(expanded['tasks']), 150)
+        self.assertEqual(expanded['tasks'][:70], [task for task in original['tasks'] if task['eligibility'] == 'eligible_public'])
+        followups = [task for task in expanded['tasks'] if task.get('follow_ups')]
+        self.assertEqual(len(followups), 5)
+        for task in followups:
+            self.assertEqual(eval.task_request(task).splitlines(), [task['prompt'], task['follow_ups'][0]['prompt']])
+
+    def test_reliability_counts_every_attempt_and_never_treats_unknown_as_success(self):
+        def run(outcomes):
+            _, evidence, _, _ = fixture()
+            return {'run_id':eval.uuid.uuid4().hex, 'freeze_sha256':'same', 'rows':[{'id':str(i), 'eligibility':'eligible_public', 'exit':0, 'process_completed':True, 'process_ms':10, 'task_outcome':outcome, 'metrics':eval.metrics(evidence, '')} for i,outcome in enumerate(outcomes)]}
+        runs = [run(['passed','passed','partial','unknown']), run(['passed','failed','passed','passed']), run(['passed','passed','passed','passed'])]
+        report = eval.reliability(runs)
+        self.assertEqual(report['pass_at_1'], .5)
+        self.assertEqual(report['pass_power_3'], .25)
+        self.assertEqual(report['ungraded_attempts'], 1)
+        self.assertFalse(report['fully_graded'])
+        runs[2]['freeze_sha256']='other'
+        with self.assertRaises(ValueError): eval.reliability(runs)
+
+    def test_round_rejects_missing_and_duplicate_tasks(self):
+        a={'freeze_sha256':'same','rows':[{'id':'a','eligibility':'eligible_public','task_outcome':'pending'}]}
+        with self.assertRaises(ValueError): eval.reliability([a,a,{'freeze_sha256':'same','rows':[]}])
+        with self.assertRaises(ValueError): eval.reliability([a,a,{'freeze_sha256':'same','rows':a['rows']*2}])
+
+    def test_same_attempt_cannot_be_copied_into_three_successes(self):
+        one = {'run_id':'a'*32, 'freeze_sha256':'same', 'rows':[]}
+        with self.assertRaises(ValueError): eval.reliability([one, copy.deepcopy(one), copy.deepcopy(one)])
+
+
+class TimingTests(unittest.TestCase):
+    def test_parallel_model_and_page_intervals_are_not_double_counted(self):
+        evidence={'timeline':{'started_ms':0,'finished_ms':100},'model_calls':[{'started_ms':10,'finished_ms':40},{'started_ms':30,'finished_ms':60}], 'page_intervals':[{'started_ms':20,'finished_ms':80}]}
+        result=eval.timing(evidence, '[ 80ms] lead-run: event=PartEnded { helper: Browser }\n[ 90ms] lead-run: event=Ended { status: Succeeded }')
+        self.assertEqual([result[k] for k in ('model_busy_ms','page_without_model_ms','other_ms')], [50,20,30])
+        self.assertEqual(result['post_browser_finalization_gaps_ms'], [10])
+
+    def test_unfinished_timing_is_unknown_and_followups_reset_finalization(self):
+        self.assertIsNone(eval.timing({'timeline':{'started_ms':0,'finished_ms':100}, 'model_calls':[{'started_ms':10}]}, '')['model_busy_ms'])
+        log='[ 5ms] lead-run: event=PartEnded { helper: Browser }\n[ 9ms] lead-run: event=Ended {}\n[ 15ms] lead-run: event=Ended {}'
+        self.assertEqual(eval.timing({}, log)['post_browser_finalization_gaps_ms'], [4])
+
+
+class CostAndPartialTests(unittest.TestCase):
+    def test_partial_never_passes_and_unknown_never_becomes_partial(self):
+        state=lambda *values: eval.predicate_outcome([{'state':value} for value in values])
+        self.assertEqual(state('partial','passed'), 'partial')
+        self.assertEqual(state('partial','unknown'), 'unknown')
+        self.assertEqual(state('partial','failed'), 'failed')
+        with self.assertRaises(ValueError): state()
+
+    def test_cost_target_refuses_unobserved_search_or_decision_cost(self):
+        _, evidence, _, _=fixture()
+        evidence['model_calls']=[{'state':'settled','cost_micro_usd':31}]
+        self.assertEqual(eval.metrics(evidence,'')['cost_for_target_micro_usd'],31)
+        evidence['executions'][0]['steps'][0]['measurements']['decision_calls']=1
+        self.assertIsNone(eval.metrics(evidence,'')['cost_for_target_micro_usd'])
+        evidence['executions'][0]['steps'][0]['measurements']['decision_calls']=0
+        evidence['executions'][0]['steps'][0]['kind']='search'
+        self.assertIsNone(eval.metrics(evidence,'')['cost_for_target_micro_usd'])
+
+
+class ActionFrequencyTests(unittest.TestCase):
+    def test_internal_repairs_are_counted_as_turns_and_old_logs_are_not_zero(self):
+        _, evidence, _, _=fixture()
+        self.assertIsNone(eval.metrics(evidence,'')['malformed_action_events'])
+        evidence['page_diagnostics_version']=1
+        counts=eval.metrics(evidence,'page-model: event=ModelAskedAgain(1)\npage-model: event=ModelActionRejected(Action)')
+        self.assertEqual(counts['page_agent_turns'],3)
+        self.assertEqual(counts['malformed_action_events'],1)
+        self.assertAlmostEqual(counts['malformed_actions_per_100_page_turns'],100/3)
+
+
 if __name__ == '__main__':
     unittest.main()
