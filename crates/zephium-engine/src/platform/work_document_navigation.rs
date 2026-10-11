@@ -28,6 +28,8 @@ enum AdmissionKind {
     HistoryBackGet,
 }
 struct State {
+    #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+    form_audit: super::form_qualification::NavigationAudit,
     phase: Phase,
     bootstrap_available: bool,
     bootstrap_id: Option<wry::NavigationId>,
@@ -196,6 +198,8 @@ impl WorkDocumentStamp {
 impl Default for WorkDocumentNavigation {
     fn default() -> Self {
         Self(Arc::new(Mutex::new(State {
+            #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+            form_audit: super::form_qualification::NavigationAudit::default(),
             phase: Phase::Bootstrap,
             bootstrap_available: true,
             bootstrap_id: None,
@@ -1241,6 +1245,10 @@ impl WorkDocumentNavigation {
                 Ok((true, false))
             }
             (Phase::Committed, E::Finished) if exact && state.native_id == Some(event.id) => {
+                #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+                if super::form_qualification::selection().is_some() {
+                    state.form_audit.initial_finished = true;
+                }
                 #[cfg(feature = "native-agentic-work-resource-probe")]
                 {
                     state.evidence.finished = true;
@@ -3133,5 +3141,25 @@ mod tests {
         assert!(gate.retire());
         assert!(!gate.allows(URL));
         assert!(gate.failed());
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+impl WorkDocumentNavigation {
+    pub(crate) fn record_form_probe_navigation(
+        &self,
+        action: wry::AppleNavigationAction,
+        allowed: bool,
+    ) {
+        if super::form_qualification::selection().is_none() {
+            return;
+        }
+        if let Ok(mut state) = self.0.lock() {
+            let consent = state.follow.as_ref().is_some_and(|follow| follow.consent);
+            state.form_audit.navigation(action, allowed, consent);
+        }
+    }
+    pub(crate) fn form_probe_evidence(&self) -> Option<super::form_qualification::NavigationAudit> {
+        Some(self.0.lock().ok()?.form_audit)
     }
 }

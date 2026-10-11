@@ -1,10 +1,12 @@
 //! Opt-in, release-excluded public-form final-state qualification.
 //! A timed-out observer never invents native callback drain or a network proof.
 use super::*;
+#[cfg(test)]
+use crate::platform::form_qualification::target;
+use crate::platform::form_qualification::{selection, NavigationAudit};
 use crate::platform::work_document_navigation::{WorkDocumentNavigation, WorkDocumentStamp};
 use objc2::runtime::AnyObject;
 use objc2_foundation::{MainThreadMarker, NSError, NSString};
-use objc2_web_kit::WKContentWorld;
 use std::sync::Mutex;
 use wry::WebViewExtMacOS as _;
 
@@ -22,14 +24,14 @@ pub(super) enum State {
 struct Completion {
     returned: bool,
     timed_out: bool,
-    checks: Option<Vec<Option<bool>>>,
+    checks: Option<Receipt>,
 }
 impl Completion {
     fn expire(&mut self) {
         self.timed_out = true;
         self.checks = None;
     }
-    fn settle(&mut self, checks: Option<Vec<Option<bool>>>) -> bool {
+    fn settle(&mut self, checks: Option<Receipt>) -> bool {
         if self.returned {
             return false;
         }
@@ -65,49 +67,25 @@ fn admission_current(
         && !work_website_data
         && session.is_some_and(zephium_agentic::WorkBrowserSession::is_current)
 }
-fn target(case: &str) -> Option<(&'static str, &'static str)> {
-    Some(match case {
-        "form-httpbin-draft" => ("form-httpbin-draft", "https://httpbin.org/forms/post"),
-        "form-selenium-controls" => (
-            "form-selenium-controls",
-            "https://www.selenium.dev/selenium/web/web-form.html",
-        ),
-        "form-selenium-date" => (
-            "form-selenium-date",
-            "https://www.selenium.dev/selenium/web/web-form.html",
-        ),
-        "form-expand-inputs" => (
-            "form-expand-inputs",
-            "https://practice.expandtesting.com/inputs",
-        ),
-        "form-heroku-numeric" => (
-            "form-heroku-numeric",
-            "https://the-internet.herokuapp.com/inputs",
-        ),
-        "form-heroku-dropdown" => (
-            "form-heroku-dropdown",
-            "https://the-internet.herokuapp.com/dropdown",
-        ),
-        "form-heroku-checkboxes" => (
-            "form-heroku-checkboxes",
-            "https://the-internet.herokuapp.com/checkboxes",
-        ),
-        "form-heroku-editor" => (
-            "form-heroku-editor",
-            "https://the-internet.herokuapp.com/tinymce",
-        ),
-        "form-qa-select" => ("form-qa-select", "https://demoqa.com/select-menu"),
-        "form-qa-date" => ("form-qa-date", "https://demoqa.com/date-picker"),
-        _ => return None,
-    })
+#[derive(Debug, PartialEq)]
+struct Receipt {
+    checks: Vec<Option<bool>>,
+    no_task_submit: Option<bool>,
 }
-fn decode(case: &str, bytes: &str) -> Option<Vec<Option<bool>>> {
+fn boolean(value: &serde_json::Value) -> Option<Option<bool>> {
+    if value.is_null() {
+        Some(None)
+    } else {
+        value.as_bool().map(Some)
+    }
+}
+fn decode(case: &str, bytes: &str) -> Option<Receipt> {
     if bytes.len() > 256 {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(bytes).ok()?;
     let object = value.as_object()?;
-    if object.len() != 2 || object.get("version")?.as_u64()? != 1 {
+    if object.len() != 3 || object.get("version")?.as_u64()? != 1 {
         return None;
     }
     let checks = object.get("checks")?.as_array()?;
@@ -120,22 +98,16 @@ fn decode(case: &str, bytes: &str) -> Option<Vec<Option<bool>>> {
     if checks.len() != expected {
         return None;
     }
-    checks
-        .iter()
-        .map(|value| {
-            if value.is_null() {
-                Some(None)
-            } else {
-                value.as_bool().map(Some)
-            }
-        })
-        .collect()
+    Some(Receipt {
+        checks: checks.iter().map(boolean).collect::<Option<Vec<_>>>()?,
+        no_task_submit: boolean(object.get("no_task_submit")?)?,
+    })
 }
 #[allow(clippy::print_stderr)]
 fn report(
     resource: &WorkNativeResource,
     pending: &Pending,
-    checks: Option<&[Option<bool>]>,
+    receipt: Option<&Receipt>,
     reason: &'static str,
 ) {
     let identity = resource.guard.resource().identity();
@@ -145,17 +117,46 @@ fn report(
         "work":format!("{:?}", identity.work()),
         "context":format!("{:?}", identity.context()),
         "document":format!("{:?}", pending.stamp), "invocation":pending.invocation,
-        "checks":checks, "reason":reason,
+        "checks":receipt.map(|value| &value.checks), "reason":reason,
+        "no_task_submit_event":receipt.and_then(|value| value.no_task_submit),
+        "submission_scope":"observed_main_document_events; closed_shadow_roots_unobserved",
         "observer_ms":pending.started.elapsed().as_millis(),
-        "accepted_action_history":"not_observed", "network_no_submit":"unknown",
+        "effects":effects(resource).json(), "background_http_activity":"not_measured_or_claimed",
         "content_exported":false
     });
     eprintln!("form-oracle: {evidence}");
 }
 
+fn effects(resource: &WorkNativeResource) -> crate::platform::form_qualification::Evidence {
+    let mut navigation = resource
+        .view
+        .as_ref()
+        .and_then(|view| view.work_navigation())
+        .and_then(|gate| gate.form_probe_evidence())
+        .unwrap_or(NavigationAudit {
+            uncertain: true,
+            ..Default::default()
+        });
+    if !resource.guard.is_healthy() {
+        navigation.uncertain = true;
+    }
+    resource.form_actions.evidence(navigation)
+}
+#[allow(clippy::print_stderr)]
+fn report_effects(resource: &WorkNativeResource, case: &'static str) {
+    let evidence = serde_json::json!({"version":1,"case":case,"effects":effects(resource).json(),"content_exported":false});
+    eprintln!("form-effects: {evidence}");
+}
+
 pub(super) fn before_retire(resource: &mut WorkNativeResource) -> bool {
     let mut state = std::mem::take(&mut resource.form_oracle);
+    let already_finished = matches!(state, State::Finished);
     let ready = state.progress(resource);
+    if ready && !already_finished {
+        if let Some((case, _)) = selection() {
+            report_effects(resource, case);
+        }
+    }
     resource.form_oracle = state;
     ready
 }
@@ -164,10 +165,7 @@ impl State {
         match self {
             Self::Finished => true,
             Self::Unstarted => {
-                let selection = std::env::var("ZEPHIUM_EVAL_FORM_ORACLE")
-                    .ok()
-                    .filter(|_| std::env::var_os("ZEPHIUM_EVAL_PUBLIC_EXPORT").is_some())
-                    .and_then(|case| target(&case));
+                let selection = selection();
                 let Some((case, url)) = selection else {
                     *self = Self::Finished;
                     return true;
@@ -210,7 +208,11 @@ impl State {
                     *self = Self::Finished;
                     return true;
                 };
-                let Some(mtm) = MainThreadMarker::new() else {
+                let Some(_mtm) = MainThreadMarker::new() else {
+                    *self = Self::Finished;
+                    return true;
+                };
+                let Some(world) = view.form_observer_world() else {
                     *self = Self::Finished;
                     return true;
                 };
@@ -256,13 +258,9 @@ impl State {
                 let source = NSString::from_str(
                     &SOURCE.replace("__FORM_ORACLE_CASE__", &format!("\"{case}\"")),
                 );
-                // SAFETY: named isolated world, fixed allowlisted read-only source, exact
+                // SAFETY: attested exact active private world, fixed allowlisted read-only source, exact
                 // owned live main-frame view; the callback owns only bounded evidence.
                 let dispatched = objc2::exception::catch(std::panic::AssertUnwindSafe(|| unsafe {
-                    let world = WKContentWorld::worldWithName(
-                        &NSString::from_str("zephium-public-form-oracle-v1"),
-                        mtm,
-                    );
                     view.view()
                         .webview()
                         .evaluateJavaScript_inFrame_inContentWorld_completionHandler(
@@ -328,7 +326,7 @@ impl State {
                         resource,
                         pending,
                         if current && !expired {
-                            completion.checks.as_deref()
+                            completion.checks.as_ref()
                         } else {
                             None
                         },
@@ -382,22 +380,40 @@ mod tests {
         let mut timed_out = Completion::default();
         timed_out.expire();
         assert!(!timed_out.returned, "a timeout is not callback return");
-        assert!(timed_out.settle(Some(vec![Some(true)])));
+        assert!(timed_out.settle(Some(Receipt {
+            checks: vec![Some(true)],
+            no_task_submit: Some(true)
+        })));
         assert!(timed_out.returned);
         assert!(timed_out.checks.is_none(), "late content stays unavailable");
         let mut completed = Completion::default();
-        assert!(completed.settle(Some(vec![Some(false)])));
-        assert!(!completed.settle(Some(vec![Some(true)])));
-        assert_eq!(completed.checks, Some(vec![Some(false)]));
+        assert!(completed.settle(Some(Receipt {
+            checks: vec![Some(false)],
+            no_task_submit: Some(true)
+        })));
+        assert!(!completed.settle(Some(Receipt {
+            checks: vec![Some(true)],
+            no_task_submit: Some(true)
+        })));
+        assert_eq!(
+            completed.checks,
+            Some(Receipt {
+                checks: vec![Some(false)],
+                no_task_submit: Some(true)
+            })
+        );
     }
     #[test]
     fn form_payload_is_closed_boolean_evidence_only() {
         assert_eq!(
             decode(
                 "form-expand-inputs",
-                r#"{"version":1,"checks":[true,false,null]}"#
+                r#"{"version":1,"checks":[true,false,null],"no_task_submit":true}"#
             ),
-            Some(vec![Some(true), Some(false), None])
+            Some(Receipt {
+                checks: vec![Some(true), Some(false), None],
+                no_task_submit: Some(true)
+            })
         );
         for invalid in [
             r#"{"version":1,"checks":["private"]}"#,

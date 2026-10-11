@@ -1,6 +1,11 @@
 //! Release-excluded, fixed source variants for local owned-view qualifications.
 
 use zephium_agentic::{SemanticActionRuntimeFault, SEMANTIC_RUNTIME_PROGRAM};
+#[path = "agentic_form_diagnostic_probe.rs"]
+mod form_diagnostic;
+pub(super) fn normalize_form_result(bytes: &[u8]) -> (Option<u16>, &[u8]) {
+    form_diagnostic::normalize(bytes)
+}
 #[path = "agentic_media_diagnostic_probe.rs"]
 mod media_diagnostic;
 pub(super) fn configure_media_diagnostic(public: bool, account: bool) {
@@ -277,6 +282,16 @@ pub(super) fn normalize_diagnostic(bytes: &[u8]) -> &[u8] {
 }
 
 pub(super) fn source() -> std::borrow::Cow<'static, str> {
+    if let Some((case, url)) = crate::platform::form_qualification::selection() {
+        if !media_diagnostic::enabled() && !isolated_fill_selected() {
+            return form_diagnostic::select(
+                SEMANTIC_RUNTIME_PROGRAM.installation_source(),
+                Some((case, url)),
+            );
+        }
+        // Conflicting variants or changed anchors never produce qualified form receipts.
+        return std::borrow::Cow::Borrowed(SEMANTIC_RUNTIME_PROGRAM.installation_source());
+    }
     if media_diagnostic::enabled() {
         if let Some(source) = media_diagnostic::source(SEMANTIC_RUNTIME_PROGRAM.installation_source()) {
             return std::borrow::Cow::Owned(source);
@@ -295,7 +310,7 @@ pub(super) fn source() -> std::borrow::Cow<'static, str> {
             include_str!("agentic_owned_display_command_probe.js")
         ));
     }
-    std::borrow::Cow::Borrowed(SEMANTIC_RUNTIME_PROGRAM.installation_source())
+    form_diagnostic::select(SEMANTIC_RUNTIME_PROGRAM.installation_source(), None)
 }
 
 #[allow(clippy::print_stderr)]

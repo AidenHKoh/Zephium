@@ -15,7 +15,17 @@
     "form-qa-select": "https://demoqa.com/select-menu",
     "form-qa-date": "https://demoqa.com/date-picker"
   };
-  const output = checks => JSON.stringify({version:1, checks});
+  const output = checks => {
+    let no_task_submit = null;
+    try {
+      const receipt = globalThis.__zephiumPublicFormSubmitReceiptV1;
+      if (typeof receipt === "function") {
+        const value = receipt();
+        if (typeof value === "boolean") no_task_submit = value;
+      }
+    } catch (_) { /* Missing or invalid event accounting stays unknown. */ }
+    return JSON.stringify({version:1, checks, no_task_submit});
+  };
   if (location.href !== urls[task]) return output([null]);
   const one = selector => {
     const nodes = document.querySelectorAll(selector);

@@ -56,6 +56,20 @@ export default defineConfig({
         test: {
           name: "component",
           provide: {
+            formSubmitRuntime: readFileSync(
+              new URL(
+                "../crates/zephium-engine/src/platform/form_submit_observer.js",
+                import.meta.url,
+              ),
+              "utf8",
+            ),
+            formActionRuntime: readFileSync(
+              new URL(
+                "../crates/zephium-engine/src/platform/macos/agentic_form_diagnostic_probe.js",
+                import.meta.url,
+              ),
+              "utf8",
+            ),
             formOracleRuntime: readFileSync(
               new URL("../crates/zephium-engine/src/host/work_form_oracle.js", import.meta.url),
               "utf8",

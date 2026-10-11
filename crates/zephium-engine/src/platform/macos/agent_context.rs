@@ -245,6 +245,11 @@ impl AgentOwnedView {
         self.work_navigation.as_ref()
     }
 
+    #[cfg(feature = "native-agentic-semantic-probe")]
+    pub(crate) fn form_observer_world(&self) -> Option<objc2::rc::Retained<objc2_web_kit::WKContentWorld>> {
+        self.semantic.as_ref()?.form_observer_world()
+    }
+
     pub(crate) fn semantic(&self) -> Option<&AgentSemanticRuntimeController> {
         self.semantic
             .as_ref()
@@ -822,6 +827,10 @@ where
                     "agent_view frame=challenge requested=true allowed={allowed} main={:?}",
                     action.target_is_main_frame
                 ));
+            }
+            #[cfg(feature = "native-agentic-semantic-probe")]
+            if let Some(gate) = &work_policy {
+                gate.record_form_probe_navigation(action, allowed);
             }
             allowed
         })

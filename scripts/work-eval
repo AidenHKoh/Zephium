@@ -42,6 +42,16 @@ FORM_INSTRUMENTATION = {
     "crates/zephium-engine/src/host/work_resource.rs",
     "crates/zephium-engine/src/host/work_resource_form_oracle.rs",
     "crates/zephium-engine/src/host/work_form_oracle.js",
+    "crates/zephium-engine/src/host/work_resource_action.rs",
+    "crates/zephium-engine/src/platform/mod.rs",
+    "crates/zephium-engine/src/platform/form_qualification.rs",
+    "crates/zephium-engine/src/platform/form_submit_observer.js",
+    "crates/zephium-engine/src/platform/work_document_navigation.rs",
+    "crates/zephium-engine/src/platform/macos/agent_context.rs",
+    "crates/zephium-engine/src/platform/macos/semantic_runtime.rs",
+    "crates/zephium-engine/src/platform/macos/agentic_semantic_program_probe.rs",
+    "crates/zephium-engine/src/platform/macos/agentic_form_diagnostic_probe.rs",
+    "crates/zephium-engine/src/platform/macos/agentic_form_diagnostic_probe.js",
 }
 FORM_CHECK_COUNTS = {
     "form-httpbin-draft": 11, "form-selenium-controls": 3, "form-selenium-date": 2,
@@ -237,16 +247,19 @@ def freeze(args):
               "probe_sha256": original_hash, "signature": signed,
               "manifest_sha256": digest(out / "manifest.json"), "references_sha256": digest(out / "references.json"),
               "runner_sha256": digest(out / "work-eval.py"), "model": MODEL,
+              "model_setup": "Luna lead/page/light; shipped recommended Jev read triage when eligible; actual primary/emulation counters are reported separately",
               "platform": list(os.uname()), "python": sys.version, "timeout_seconds": args.timeout,
-              "oracle_scope": "deterministic predicates and separately identified human or agent source audits; form network effects remain unverified"}
+              "oracle_scope": "deterministic predicates and separately identified human or agent source audits; form task effects use bounded native action/navigation and DOM submit receipts, not universal HTTP observation"}
     if forms:
         directory = out / "form-observer"
         directory.mkdir(mode=0o700)
-        record["form_oracle"] = {"version": 1, "files": {}}
+        record["form_oracle"] = {"version": 2, "resource_selection": "single fresh page, or unique action-bearing native document with complete matching retirement ledgers and p2 evidence for every opened page; otherwise unknown", "files": {}, "predicate_files": {}}
         for name in sorted(FORM_INSTRUMENTATION):
             copied = "form-observer/" + Path(name).name
             write_private(out / copied, (source / name).read_bytes())
             record["form_oracle"]["files"][copied] = digest(out / copied)
+            if Path(name).name in ("work_resource_form_oracle.rs", "work_form_oracle.js", "form_qualification.rs", "form_submit_observer.js", "agentic_form_diagnostic_probe.rs", "agentic_form_diagnostic_probe.js"):
+                record["form_oracle"]["predicate_files"][copied] = digest(out / copied)
     write_private(out / "freeze.json", record)
     print(out / "freeze.json")
 
@@ -329,7 +342,8 @@ def metrics(evidence, log):
     attempts = [attempt for execution in executions for attempt in execution.get("attempts", [])]
     usage = [attempt.get("usage") for attempt in attempts]
     steps = [step for execution in executions for step in execution.get("steps", [])]
-    calls = evidence.get("model_calls", [])
+    calls = evidence.get("model_calls")
+    call_rows = calls if isinstance(calls, list) else []
     failures = collections.Counter()
     handoffs = collections.Counter()
     for step in steps:
@@ -341,12 +355,15 @@ def metrics(evidence, log):
             handoffs[measured["resolved_handoff"]] += 1
     internal = collections.Counter(re.findall(r"lead-run: event=(ObjectRefused|CommitRefused|ModelRefused|BudgetSpent|Closed)\b", log))
     reasons = collections.Counter(re.findall(r"ObjectRefused \{ reason: Some\((\w+)\)", log))
-    return {"wall_ms": evidence.get("wall_ms"), "selected_model_call_attempts": len(calls),
+    return {"wall_ms": evidence.get("wall_ms"), "selected_model_call_attempts": len(calls) if isinstance(calls, list) else None,
             "model_call_scope": evidence.get("model_call_scope", "unavailable"),
-            "unsettled_model_calls": sum(call.get("state") == "unsettled" for call in calls),
+            "unsettled_model_calls": sum(call.get("state") == "unsettled" for call in call_rows) if isinstance(calls, list) else None,
             "reported_cost_micro_usd": sum(item["cost_micro_usd"] for item in usage) if usage and all(item is not None for item in usage) else None,
             "reported_tokens": sum(item["model_tokens"] for item in usage) if usage and all(item is not None for item in usage) else None,
             "accounting_bases": [item["accounting"] if item else "unknown" for item in usage],
+            "primary_decision_calls": sum((step.get("measurements") or {}).get("decision_calls", 0) for step in steps) if "executions" in evidence else None,
+            "emulation_calls_overlapping_selected_client": sum((step.get("measurements") or {}).get("emulation_calls", 0) for step in steps) if "executions" in evidence else None,
+            "cost_scope": "Selected-client or durable-attempt accounting basis as exported; primary Jev/direct search may be excluded. Never add overlapping page and attempt costs.",
             "page_model_calls": sum((step.get("measurements") or {}).get("planner_calls", 0) for step in steps),
             "search_steps": sum(step.get("kind") == "search" for step in steps),
             "asks": sum(step.get("kind") == "ask" for step in steps), "confirmations": sum(step.get("kind") == "confirm" for step in steps),
@@ -428,33 +445,95 @@ def stop_child(child):
         child.wait()
 
 
+def form_effects(value):
+    if not isinstance(value, dict) or value.get("version") != 1:
+        return None
+    for key in ("native_actions_started", "native_actions_settled", "native_commits_applied"):
+        if type(value.get(key)) is not int or not 0 <= value[key] <= 256:
+            return None
+    for key in ("no_task_submit_or_navigation", "fill_then_clear", "fill_then_increment_once"):
+        if value.get(key) is not None and type(value[key]) is not bool:
+            return None
+    nav = value.get("navigation")
+    if not isinstance(nav, dict) or type(value.get("incomplete")) is not bool:
+        return None
+    for key in ("callbacks", "accepted_main_forms", "accepted_subframe_forms", "post_initial_main", "consent_navigation"):
+        if type(nav.get(key)) is not int or not 0 <= nav[key] <= 256:
+            return None
+    if any(type(nav.get(key)) is not bool for key in ("initial_finished", "uncertain")):
+        return None
+    # Validate the positive receipt invariants independently of its asserted bit.
+    if value.get("no_task_submit_or_navigation") is True and (
+        value["incomplete"] or value["native_actions_started"] != value["native_actions_settled"] or
+        value["native_commits_applied"] or nav["uncertain"] or not nav["initial_finished"] or
+        not nav["callbacks"] or any(nav[key] for key in ("accepted_main_forms", "accepted_subframe_forms", "post_initial_main", "consent_navigation"))):
+        return None
+    return value
+
+
 def grade_form(task, evidence, log):
     unknown = {"task_outcome": "unknown", "reason": "form_observation_unavailable", "predicates": [
         {"id": "p1", "state": "unknown"}, {"id": "p2", "state": "unknown"}]}
     if evidence.get("case_id") != task["id"] or evidence.get("public_artifacts") != "exported":
         return unknown
-    observations = []
+    observations, settlements = [], []
     for line in log.splitlines():
-        if not line.startswith("form-oracle: "):
+        prefix = next((prefix for prefix in ("form-oracle: ", "form-effects: ") if line.startswith(prefix)), None)
+        if prefix is None:
             continue
         try:
-            row = json.loads(line.removeprefix("form-oracle: "))
+            row = json.loads(line.removeprefix(prefix))
         except ValueError:
             return unknown
+        if not isinstance(row, dict):
+            return unknown
         if row.get("case") == task["id"]:
-            observations.append(row)
-    # Multiple pages cannot be silently resolved by selecting the best result.
-    if len(observations) != 1:
+            (observations if prefix == "form-oracle: " else settlements).append(row)
+    if not observations:
         return unknown
-    row = observations[0]
-    checks = row.get("checks")
-    if row.get("version") != 1 or row.get("reason") != "observed" or row.get("content_exported") is not False or not isinstance(checks, list) or len(checks) != FORM_CHECK_COUNTS.get(task["id"]) or any(value is not None and type(value) is not bool for value in checks):
-        return unknown
+    for row in observations:
+        checks = row.get("checks")
+        if row.get("version") != 1 or row.get("reason") != "observed" or row.get("content_exported") is not False or not isinstance(checks, list) or len(checks) != FORM_CHECK_COUNTS.get(task["id"]) or any(value is not None and type(value) is not bool for value in checks):
+            return unknown
+    effects = [form_effects(row.get("effects")) for row in observations]
+    settled = [form_effects(row.get("effects")) for row in settlements if row.get("version") == 1 and row.get("content_exported") is False]
+    complete = len(settled) == len(settlements) == len(observations) and all(item is not None for item in effects + settled)
+    if complete:
+        # Each owned resource reports its fresh oracle then exactly one retirement
+        # ledger. Matching the entire multiset detects skipped/extra/unsettled pages;
+        # equivalent ledgers need not be assigned an invented identity.
+        complete = collections.Counter(json.dumps(item, sort_keys=True) for item in effects) == collections.Counter(json.dumps(item, sort_keys=True) for item in settled)
+    selected = 0
+    rule = "single_fresh_page"
+    if len(observations) > 1:
+        stamps = [row.get("document") for row in observations]
+        profiles = [row.get("profile") for row in observations]
+        exact_stamps = all(isinstance(stamp, str) and re.fullmatch(r"WorkDocumentStamp \{ native_id: NavigationId\(\d+\), epoch: \d+ \}", stamp) for stamp in stamps)
+        if not complete or any(item["incomplete"] for item in effects) or not exact_stamps or len(set(stamps)) != len(stamps) or any(not isinstance(profile, str) for profile in profiles) or len(set(profiles)) != 1:
+            return unknown
+        action_pages = [index for index, item in enumerate(effects) if item["native_actions_started"] > 0]
+        if len(action_pages) != 1:
+            return dict(unknown, reason="ambiguous_form_action_resource")
+        selected = action_pages[0]
+        rule = "unique_action_page_with_every_opened_page_accounted"
+    row = observations[selected]
+    chosen = effects[selected]
+    checks = list(row["checks"])
+    if complete and not chosen["incomplete"]:
+        if task["id"] == "form-expand-inputs":
+            checks[2] = chosen.get("fill_then_clear")
+        elif task["id"] == "form-heroku-numeric":
+            checks[1] = chosen.get("fill_then_increment_once")
     state = "failed" if False in checks else "unknown" if None in checks else "passed"
-    return {"task_outcome": "failed" if state == "failed" else "unknown", "reason": "native_form_predicates_network_unverified",
+    events = [row.get("no_task_submit_event") for row in observations]
+    native = [item.get("no_task_submit_or_navigation") for item in effects] if complete else [None]
+    p2 = "failed" if any(value is False for value in events + native) else "passed" if all(value is True for value in events + native) else "unknown"
+    outcome = "failed" if "failed" in (state, p2) else "passed" if state == p2 == "passed" else "unknown"
+    return {"task_outcome": outcome, "reason": "native_form_predicates_and_effect_receipts",
             "predicates": [{"id": "p1", "state": state, "checks": checks},
-                           {"id": "p2", "state": "unknown", "reason": "No complete native HTTP submission/request observer; declined actions are not network proof."}],
-            "form_observer": row, "grading_evidence": "native_fixed_form_predicates"}
+                           {"id": "p2", "state": p2, "reason": "Observed main-document task-submit plus native commit/navigation receipts for every accounted page; closed shadow roots and unrelated background HTTP activity are not measured or claimed."}],
+            "form_observer": row, "form_resource_selection": rule, "observed_pages": len(observations),
+            "grading_evidence": "native_fixed_form_predicates_and_bounded_effect_ledger"}
 
 
 def run_case(root, frozen, task, reference, manifest, out):
@@ -468,7 +547,7 @@ def run_case(root, frozen, task, reference, manifest, out):
     env.update(ZEPHIUM_EVAL_PUBLIC_EXPORT=str(export), ZEPHIUM_EVAL_CASE_ID=task["id"])
     form = task.get("eligibility") == "pending_form_state_oracle"
     if form:
-        if frozen.get("form_oracle", {}).get("version") != 1 or task["id"] not in FORM_CHECK_COUNTS:
+        if frozen.get("form_oracle", {}).get("version") != 2 or task["id"] not in FORM_CHECK_COUNTS:
             raise ValueError("form task requires an explicit frozen observer")
         env["ZEPHIUM_EVAL_FORM_ORACLE"] = task["id"]
     if digest(root / "probe") != frozen["probe_sha256"]:
@@ -522,7 +601,10 @@ def summarize(rows):
             "process_completions": sum(row["process_completed"] for row in attempted),
             "reported_cost_micro_usd_known": sum(cost for cost in costs if cost is not None), "unknown_cost_runs": sum(cost is None for cost in costs),
             "latency_median_ms": statistics.median(times) if times else None,
-            "selected_model_call_attempts": sum(row["metrics"]["selected_model_call_attempts"] for row in attempted),
+            "selected_model_call_attempts": sum(row["metrics"]["selected_model_call_attempts"] or 0 for row in attempted),
+            "unknown_selected_model_call_runs": sum(row["metrics"]["selected_model_call_attempts"] is None for row in attempted),
+            "primary_decision_calls_known": sum(row["metrics"].get("primary_decision_calls") or 0 for row in attempted),
+            "emulation_calls_overlapping_selected_client_known": sum(row["metrics"].get("emulation_calls_overlapping_selected_client") or 0 for row in attempted),
             "internal_failures": dict(internal), "failure_taxonomy": dict(taxonomy), "resolved_handoffs": dict(handoffs),
             "qualification": "Constrained deterministic predicates or recorded source audits only; operational completion and historical tuned-site passes are not task correctness."}
 
@@ -544,7 +626,7 @@ def run(args):
             reason = task["eligibility"]
             if not selected:
                 row = {"id": task["id"], "eligibility": reason, "task_outcome": "pending", "reason": "not_selected"}
-            elif reason != "eligible_public" and not (reason == "pending_form_state_oracle" and frozen.get("form_oracle", {}).get("version") == 1):
+            elif reason != "eligible_public" and not (reason == "pending_form_state_oracle" and frozen.get("form_oracle", {}).get("version") == 2):
                 row = {"id": task["id"], "eligibility": reason, "task_outcome": "pending", "reason": reason}
             elif task.get("oracle") and references.get(task["id"], {}).get("state") != "ready":
                 row = {"id": task["id"], "eligibility": "blocked_reference", "task_outcome": "pending", "reason": "reference_unavailable"}
@@ -598,6 +680,9 @@ def compare(args):
     freezes = [read_json(run["freeze"]) for run in (a, b)]
     matching = all(freezes[0].get(key) == freezes[1].get(key) for key in
                    ("manifest_sha256", "references_sha256", "runner_sha256", "model", "platform", "python", "timeout_seconds"))
+    form_versions = [record.get("form_oracle", {}).get("version") for record in freezes]
+    if any(form_versions):
+        matching = matching and form_versions == [2, 2] and bool(freezes[0]["form_oracle"].get("predicate_files")) and freezes[0]["form_oracle"].get("predicate_files") == freezes[1]["form_oracle"].get("predicate_files")
     if not matching:
         raise ValueError("unmatched manifest/reference/grader/model/platform/setup; no comparative success claim")
     old = {row["id"]: row for row in a["rows"]}
@@ -623,7 +708,7 @@ def main():
     freezing.add_argument("--source-root", required=True)
     freezing.add_argument("--base-ref", default="3fcd07c5")
     freezing.add_argument("--label", choices=["baseline", "candidate"], required=True)
-    freezing.add_argument("--form-oracle", action="store_true", help="freeze exact probe-only public-form observer; network non-submission remains unknown")
+    freezing.add_argument("--form-oracle", action="store_true", help="freeze exact probe-only final-form, action, navigation and submit-event observers")
     freezing.add_argument("--timeout", type=int, default=300)
     freezing.add_argument("--out", required=True)
     running = commands.add_parser("run")

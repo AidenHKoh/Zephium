@@ -207,6 +207,8 @@ pub(super) struct WorkNativeResource {
     hand_on_wake: Option<crate::platform::imp::ContentPolicyTimeout>,
     #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
     form_oracle: form_oracle::State,
+    #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+    pub(super) form_actions: crate::platform::form_qualification::ActionAudit,
     pub(super) last_invocation: u64,
     /// The document a look last completed on: a document's first look waits
     /// longer for a heavy app still starting its own scripts.
@@ -307,6 +309,8 @@ impl WorkNativeResource {
             hand_on_wake: None,
             #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
             form_oracle: form_oracle::State::default(),
+            #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+            form_actions: crate::platform::form_qualification::ActionAudit::default(),
             last_invocation: 0,
             looked_document: None,
             document_started: false,
@@ -1406,6 +1410,8 @@ impl EngineHost {
             hand_on_wake: None,
             #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
             form_oracle: form_oracle::State::default(),
+            #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+            form_actions: crate::platform::form_qualification::ActionAudit::default(),
             last_invocation: 0,
             looked_document: None,
             document_started: false,

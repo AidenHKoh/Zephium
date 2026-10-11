@@ -275,6 +275,8 @@ struct SemanticRuntimeChannelState {
     completed_invocations: u16,
     #[cfg(feature = "native-agentic-semantic-probe")]
     prepared_fill: Option<program_probe::PreparedFill>,
+    #[cfg(feature = "native-agentic-semantic-probe")]
+    form_receipt: Option<(SemanticActionAttemptId, u16)>,
 }
 
 impl Default for SemanticRuntimeChannelState {
@@ -291,6 +293,8 @@ impl Default for SemanticRuntimeChannelState {
             completed_invocations: 0,
             #[cfg(feature = "native-agentic-semantic-probe")]
             prepared_fill: None,
+            #[cfg(feature = "native-agentic-semantic-probe")]
+            form_receipt: None,
         }
     }
 }
@@ -841,9 +845,19 @@ impl SemanticRuntimeChannelState {
             } => {
                 #[cfg(feature = "native-agentic-semantic-probe")]
                 let bytes = program_probe::normalize_diagnostic(bytes);
+                #[cfg(feature = "native-agentic-semantic-probe")]
+                let (form_witness, bytes) = program_probe::normalize_form_result(bytes);
                 let outcome = invocation
                     .decode_result(bytes)
                     .map_err(AgentSemanticActionRuntimeFailure::Result);
+                #[cfg(feature = "native-agentic-semantic-probe")]
+                {
+                    self.form_receipt = if outcome.is_ok() && self.form_receipt.is_none() {
+                        form_witness.map(|bits| (invocation.attempt(), bits))
+                    } else {
+                        None
+                    };
+                }
                 self.settling_action = matches!(
                     &outcome,
                     Err(AgentSemanticActionRuntimeFailure::Result(
@@ -985,6 +999,12 @@ impl AgentSemanticRuntimeController {
         self.state
             .try_borrow()
             .is_ok_and(|state| state.draining_action(attempt))
+    }
+    /// Consume one probe witness matched to the native action attempt.
+    #[cfg(feature = "native-agentic-semantic-probe")]
+    pub(crate) fn take_form_receipt(&self, attempt: SemanticActionAttemptId) -> Option<u16> {
+        let (expected, bits) = self.state.try_borrow_mut().ok()?.form_receipt.take()?;
+        (expected == attempt).then_some(bits)
     }
     /// Passive rendering eligibility only, never document authority.
     pub(crate) fn settling_action(&self, attempt: SemanticActionAttemptId) -> bool {
@@ -1982,6 +2002,20 @@ impl AgentSemanticRuntimeRegistration {
 }
 
 impl SemanticDocumentInstallation {
+    #[cfg(feature = "native-agentic-semantic-probe")]
+    pub(crate) fn form_observer_world(&self) -> Option<Retained<WKContentWorld>> {
+        crate::platform::form_qualification::selection()?;
+        self.attest_controller().ok()?;
+        Some(
+            self.epochs
+                .try_borrow()
+                .ok()?
+                .active
+                .as_ref()?
+                .world
+                .clone(),
+        )
+    }
     /// Revokes the old document world and installs the immutable program in a
     /// fresh one before native navigation can begin.
     fn prepare_document_load(&self) -> Result<(), ()> {

@@ -116,6 +116,15 @@ class GradingTests(unittest.TestCase):
         self.assertEqual(metrics['unsettled_model_calls'], 1)
         self.assertEqual(metrics['page_model_calls'], 2)
 
+    def test_missing_calls_are_unknown_and_emulation_is_not_added_twice(self):
+        self.assertIsNone(eval.metrics({}, '')['selected_model_call_attempts'])
+        _, evidence, _, _ = fixture()
+        evidence['executions'][0]['steps'][0]['measurements'].update(decision_calls=2,emulation_calls=1)
+        row=eval.metrics(evidence,'')
+        self.assertEqual(row['selected_model_call_attempts'],2)
+        self.assertEqual(row['primary_decision_calls'],2)
+        self.assertEqual(row['emulation_calls_overlapping_selected_client'],1)
+
     def test_missing_usage_is_unknown_not_zero(self):
         _, evidence, _, _ = fixture()
         evidence['executions'][0]['attempts'][0]['usage'] = None
@@ -165,6 +174,62 @@ class FormOracleTests(unittest.TestCase):
 
     def grade(self, log):
         return eval.grade_form({"id": "form-selenium-controls"}, {"case_id": "form-selenium-controls", "public_artifacts": "exported"}, log)
+
+    def effects(self, **changes):
+        row = {"version":1,"native_actions_started":2,"native_actions_settled":2,
+               "native_commits_applied":0,"incomplete":False,
+               "navigation":{"callbacks":2,"accepted_main_forms":0,"accepted_subframe_forms":0,
+                             "post_initial_main":0,"consent_navigation":0,"initial_finished":True,"uncertain":False},
+               "no_task_submit_or_navigation":True,"fill_then_clear":False,"fill_then_increment_once":False}
+        row.update(changes)
+        return row
+
+    def settled_receipt(self, checks, effects=None, event=True, task="form-selenium-controls"):
+        effects = effects or self.effects()
+        return self.receipt(checks, case=task, effects=effects, no_task_submit_event=event) + "form-effects: " + json.dumps({"version":1,"case":task,"effects":effects,"content_exported":False}) + "\n"
+
+    def test_complete_native_effects_and_submit_event_qualify_exact_p2(self):
+        self.assertEqual(self.grade(self.settled_receipt([True,True,True]))['task_outcome'], 'passed')
+        self.assertEqual(self.grade(self.settled_receipt([True,True,True],event=False))['predicates'][1]['state'], 'failed')
+        self.assertEqual(self.grade(self.settled_receipt([True,True,True],event=None))['predicates'][1]['state'], 'unknown')
+        commit = self.effects(native_commits_applied=1,no_task_submit_or_navigation=False)
+        self.assertEqual(self.grade(self.settled_receipt([True,True,True],effects=commit))['task_outcome'], 'failed')
+        for changes in ({"incomplete":True}, {"native_actions_settled":1}, {"native_actions_started":257}):
+            self.assertEqual(self.grade(self.settled_receipt([True,True,True],effects=self.effects(**changes)))['predicates'][1]['state'], 'unknown')
+        missing = self.receipt([True,True,True],effects=self.effects(),no_task_submit_event=True)
+        self.assertEqual(self.grade(missing)['predicates'][1]['state'], 'unknown')
+        self.assertEqual(self.grade(self.settled_receipt([True,True,True])+missing)['task_outcome'], 'unknown')
+
+    def test_unique_action_resource_requires_all_page_receipts_and_exact_stamps(self):
+        readonly = self.effects(native_actions_started=0,native_actions_settled=0)
+        def page(checks, effects, stamp, event=True):
+            oracle=self.receipt(checks, effects=effects, no_task_submit_event=event,
+                                document=f"WorkDocumentStamp {{ native_id: NavigationId({stamp}), epoch: 1 }}", profile="synthetic-profile")
+            return oracle+"form-effects: "+json.dumps({"version":1,"case":"form-selenium-controls","effects":effects,"content_exported":False})+"\n"
+        initial=page([False,False,True],readonly,1)
+        action=page([True,True,True],self.effects(),2)
+        result=self.grade(initial+action)
+        self.assertEqual(result['task_outcome'],'passed')
+        self.assertEqual(result['form_resource_selection'],'unique_action_page_with_every_opened_page_accounted')
+        self.assertEqual(self.grade(initial+page([True,True,True],self.effects(),2,event=None))['task_outcome'],'unknown')
+        self.assertEqual(self.grade(page([False,False,True],readonly,1,event=False)+action)['task_outcome'],'failed')
+        for log in (action+page([True,True,True],self.effects(),3),
+                    initial+page([True,True,True],self.effects(),1),
+                    initial+action.split('form-effects: ')[0],
+                    initial+page([True,True,True],self.effects(incomplete=True,no_task_submit_or_navigation=None),2),
+                    initial+page([True,True,True],readonly,2)):
+            self.assertEqual(self.grade(log)['task_outcome'],'unknown')
+
+    def test_sequence_needs_target_bound_settled_history(self):
+        for task, checks, field in (("form-expand-inputs",[True,True,None],"fill_then_clear"),
+                                    ("form-heroku-numeric",[True,None],"fill_then_increment_once")):
+            evidence={"case_id":task,"public_artifacts":"exported"}
+            log=self.settled_receipt(checks, self.effects(**{field:True}), task=task)
+            self.assertEqual(eval.grade_form({"id":task},evidence,log)['task_outcome'],'passed')
+            log=self.settled_receipt(checks, self.effects(**{field:False}), task=task)
+            self.assertEqual(eval.grade_form({"id":task},evidence,log)['task_outcome'],'failed')
+            log=self.settled_receipt(checks, self.effects(incomplete=True,no_task_submit_or_navigation=None,**{field:True}), task=task)
+            self.assertEqual(eval.grade_form({"id":task},evidence,log)['task_outcome'],'unknown')
 
     def test_correct_final_values_are_not_network_non_submission_proof(self):
         row = self.grade(self.receipt([True, True, True]))
