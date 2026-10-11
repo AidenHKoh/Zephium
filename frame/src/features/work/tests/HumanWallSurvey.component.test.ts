@@ -243,3 +243,16 @@ test("non-text input controls do not impersonate credential entry", async () => 
     );
   }
 });
+
+test("nested conversation logs and feeds supply visible content without shallow text scanning", async () => {
+  for (const role of ["list", "log", "feed"]) {
+    const nested =
+      "<div>".repeat(40) +
+      "<p>A source-backed message is visible in this conversation.</p>" +
+      "</div>".repeat(40);
+    const page = `<div><h1>Project channel</h1><div role='${role}' aria-label='Project'>${nested}</div><div><button>Review channel details</button><button>Browse conversation history</button><button>Open message settings</button></div><div role='textbox' aria-multiline='true' contenteditable='true'><p><br></p></div></div>`;
+    expect(await survey(page), role).toBe(true);
+    expect(await survey(page.replace(nested, "<div></div>")), role).toBe(false);
+    expect(await survey(page + "<input autocomplete='one-time-code'>"), role).toBe(false);
+  }
+});

@@ -19,7 +19,7 @@
       const hint = ["type", "autocomplete", "name", "id", "aria-label", "placeholder"].map((name) => active.getAttribute(name) || "").join(" ");
       if (/(?:password|one-time-code|totp|otp|authentication.?code|verification.?code|confirmation.?code|email|user.?name|workspace)/i.test(hint)) return 2;
     }
-    const nodes = document.querySelectorAll("input,textarea,select,iframe,ul,ol,[role='list'],h1,h2,h3,h4,h5,h6,p,button,a,main,article,li,tr,[role='heading'],[role='alert'],[role='main'],[role='dialog'],[role='row'],[role='listitem'],[role='option'],[role='link'],[role='button'],[role='grid'],[role='status'],[role='progressbar'],[role='textbox'],[contenteditable='true'],[aria-busy='true']");
+    const nodes = document.querySelectorAll("input,textarea,select,iframe,ul,ol,[role='list'],[role='log'],[role='feed'],h1,h2,h3,h4,h5,h6,p,button,a,main,article,li,tr,[role='heading'],[role='alert'],[role='main'],[role='dialog'],[role='row'],[role='listitem'],[role='option'],[role='link'],[role='button'],[role='grid'],[role='status'],[role='progressbar'],[role='textbox'],[contenteditable='true'],[aria-busy='true']");
     if (nodes.length > 4096) return 3;
     const challenge = /^(?:just a moment|checking (?:your browser|if the site connection)|verifying you are human|verify you are human|please verify|confirm you are human|are you (?:a human|a robot)|prove you are human|press (?:&|and) hold|human verification|security (?:check|verification)|complete the security check|pardon our interruption|access denied|unusual traffic|something went wrong|please wait)/i;
     const signIn = /(?:sign[ -]?in|log[ -]?in|zaloguj|two[ -]?factor|verification code|confirmation code|authentication code|one[ -]?time code|choose (?:an? |your )?(?:account|workspace|organization)|select (?:an? |your )?(?:account|workspace|organization)|find your workspace|workspace url|enter your workspace|continue (?:with|to) (?:google|microsoft|apple|slack|sso)|single sign[ -]?on)/i;
@@ -110,8 +110,13 @@
       if ((tag === "button" || tag === "a" || role === "button" || role === "link") && signIn.test(short)) authControls++;
       // Legal/help chrome is not evidence that the requested app loaded.
       if (node.closest("nav,footer,aside,[role='navigation'],[role='contentinfo'],[role='complementary']")) continue;
-      if ((["ul", "ol"].includes(tag) || role === "list") &&
+      if ((["ul", "ol"].includes(tag) || ["list", "log", "feed"].includes(role)) &&
           Array.from(node.children).slice(0, 64).some(child => visible(child) && label(child).length >= 24)) lists++;
+      // Virtualized histories can put their text beyond a container's bounded
+      // label walk. Use semantic descendants already sampled by this survey.
+      if ((isHeading || tag === "p" || tag === "li" || tag === "a" ||
+           ["listitem", "link"].includes(role)) && short.length >= 8 &&
+          node.closest("ul,ol,[role='list'],[role='log'],[role='feed']")) lists++;
       // Custom app lists often expose each item as a button rather than li/row.
       // Require repeated local siblings; never count global or auth chrome.
       if ((tag === "button" || role === "button") && short.length >= 12 && !signIn.test(short) &&
