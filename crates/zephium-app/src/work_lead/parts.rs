@@ -862,6 +862,23 @@ where
             Kit::Browser => given_pages(&self.objective, spec),
             _ => Vec::new(),
         };
+        if matches!(kit, Kit::Browser) && !account_goal(spec) {
+            if let Some(collection) = records_collection(&spec.title, &spec.records) {
+                let mut records = self.run.records.lock().unwrap_or_else(|e| e.into_inner());
+                for url in &given {
+                    if let Some(host) = crate::work_sites::host_of(url) {
+                        records.remember_site(&host, &collection);
+                    }
+                }
+                if let Some(host) = spec
+                    .service
+                    .as_ref()
+                    .and_then(|service| service.host.as_deref())
+                {
+                    records.remember_site(host, &collection);
+                }
+            }
+        }
         if !given.is_empty() {
             let collection = records_collection(&spec.title, &spec.records);
             let requests = given
@@ -1882,11 +1899,10 @@ fn admit_kind(
     } = &mut kind
     {
         if collection.is_none() {
-            *collection = run
-                .records
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .collection_for_document(url);
+            let records = run.records.lock().unwrap_or_else(|e| e.into_inner());
+            *collection = records
+                .collection_for_document(url)
+                .or_else(|| records.collection_for_site(url));
         }
     }
     if let WorkStepKindV1::Search { query } = &kind {

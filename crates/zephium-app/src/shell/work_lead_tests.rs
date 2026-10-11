@@ -2957,3 +2957,125 @@ async fn native_records_publish_with_reply_and_finish_in_one_final_model_turn() 
         1
     );
 }
+
+struct FailedCatalogThenDetail;
+impl WorkModelClient for FailedCatalogThenDetail {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let lead = request.tools.iter().any(|tool| tool.name == "start_part");
+            let turn = request
+                .messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
+                .count();
+            let assistant = if !lead {
+                vec![call(
+                    "part-end",
+                    "finish",
+                    json!({"summary":"Catalog unavailable","digest":"No catalog rows were returned.","found":false}),
+                )]
+            } else {
+                match turn {
+                    0 => vec![call(
+                        "catalog",
+                        "start_part",
+                        json!({"helper":"browser","title":"Books","goal":"Find books and return their prices and availability","service":"shop.example.com","records":["price","availability","url"]}),
+                    )],
+                    1 => vec![call(
+                        "detail",
+                        "web_fetch",
+                        json!({"url":"https://shop.example.com/book"}),
+                    )],
+                    2 => {
+                        assert!(results(&request).contains("record r1:"));
+                        vec![
+                            call(
+                                "reply",
+                                "create",
+                                json!({"kind":"reply","title":"Book found","data":{"headline":"Book found","text":"The detail page supplied price and availability."}}),
+                            ),
+                            call(
+                                "pick",
+                                "create",
+                                json!({"kind":"picks","title":"Book","data":{"records":[{"source":"r1"}]}}),
+                            ),
+                            call(
+                                "done",
+                                "finish",
+                                json!({"say":"The original record is preserved.","title":"Book availability"}),
+                            ),
+                        ]
+                    }
+                    _ => panic!(
+                        "unexpected additional lead turn {turn}: {}",
+                        results(&request)
+                    ),
+                }
+            };
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                assistant,
+                usage: WorkModelUsage {
+                    input_tokens: 100,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 100,
+                    reasoning_tokens: 0,
+                    cost_micros: None,
+                },
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_failed_browser_catalog_keeps_stock_in_the_leads_fallback_detail_read() {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create=handle.work_document(WorkIntent::Create{objective:"Find an available book at https://shop.example.com/catalog with its price and availability".into()}).unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let lead = LeadModel {
+        client: Arc::new(FailedCatalogThenDetail),
+        ..model(Arc::new(Script {
+            calls: Mutex::new(vec![]),
+        }))
+    };
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let done=drive(&mut shell,&queue,WorkLeadService::new(handle).run(profile,command(work,WorkRevision::INITIAL),None,models,&Search,|_,request|async move{
+        let WorkStepKindV1::Read{url,collection,..}=&request.step else {panic!()};
+        if url.ends_with("/catalog") {return Err(WorkError::Unavailable);}
+        assert!(url.ends_with("/book"));
+        let collection=collection.as_ref().expect("fallback must retain requested native records");
+        assert!(collection.columns.iter().any(|column|column.name=="availability"));
+        let source=WorkEvidenceLink{extraction_id:WorkArtifactId::from(950),source_id:1};
+        Ok(outcome(None,vec![WorkArtifactDraft{output:request.output,title:"Book metadata".into(),evidence:vec![source],data:serde_json::from_value(json!({
+            "kind":"comparison_matrix","subjects":[{"name":"Book Alpha","homepage":"https://shop.example.com/book"}],
+            "criteria":[{"name":"price","kind":{"kind":"text"}},{"name":"availability","kind":{"kind":"text"}}],
+            "cells":[[{"value":{"kind":"text","text":"14.99 PLN"},"evidence":[0]},{"value":{"kind":"text","text":"InStock"},"evidence":[0]}]]
+        })).unwrap()}]))
+    },|_|{})).await.unwrap();
+    let execution = &done.executions[0];
+    assert!(matches!(
+        execution.status,
+        WorkExecutionStatus::Completed | WorkExecutionStatus::NeedsReview
+    ));
+    let pick = execution
+        .artifacts
+        .iter()
+        .find_map(|artifact| match &artifact.data {
+            WorkArtifactDataV1::Picks { items, .. } => items.first(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(pick.price.as_ref().unwrap().display, "14.99 PLN");
+    assert_eq!(pick.facts[0].value, "InStock");
+}

@@ -4,9 +4,29 @@ use serde::Deserialize;
 use serde_json::json;
 use zephium_core::work::{artifact::*, objects::*, WorkArtifactId};
 
+#[derive(Debug)]
+pub(crate) struct RecordError {
+    pub message: String,
+    pub reason: super::objects::ObjectRefusal,
+}
+impl std::fmt::Display for RecordError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl From<&str> for RecordError {
+    fn from(message: &str) -> Self {
+        Self {
+            message: message.into(),
+            reason: super::objects::ObjectRefusal::Source,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Records {
     rows: Vec<Record>,
+    intents: Vec<(String, zephium_core::work::collection::WorkBrowseCollection)>,
 }
 struct Record {
     artifact: WorkArtifactId,
@@ -17,6 +37,17 @@ struct Record {
     fields: Vec<(WorkCriterion, WorkCell)>,
     evidence: Vec<WorkEvidenceLink>,
 }
+impl Record {
+    fn field_kind(&self, name: &str) -> Option<&zephium_core::work::collection::WorkBrowseValue> {
+        self.collection
+            .as_ref()?
+            .columns
+            .iter()
+            .find(|column| column.name.replace('_', " ") == name)
+            .map(|column| &column.value)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Selection {
@@ -40,6 +71,36 @@ pub(crate) enum Layout {
 }
 
 impl Records {
+    pub fn remember_site(
+        &mut self,
+        host: &str,
+        collection: &zephium_core::work::collection::WorkBrowseCollection,
+    ) {
+        let host = host.trim_start_matches("www.").to_ascii_lowercase();
+        if self.intents.len() < 32
+            && !self
+                .intents
+                .iter()
+                .any(|(known, schema)| known == &host && schema.columns == collection.columns)
+        {
+            self.intents.push((host, collection.clone()));
+        }
+    }
+
+    pub fn collection_for_site(
+        &self,
+        url: &str,
+    ) -> Option<zephium_core::work::collection::WorkBrowseCollection> {
+        let target = url::Url::parse(url).ok()?;
+        let host = target.host_str()?.trim_start_matches("www.");
+        let mut matching = self.intents.iter().filter(|(site, _)| site == host);
+        let (_, first) = matching.next()?;
+        if matching.any(|(_, schema)| schema.columns != first.columns) {
+            return None;
+        }
+        Some(first.clone())
+    }
+
     /// Register only already-admitted native artifacts; repeated reads of the
     /// same artifact retain their keys. Equal names never merge different rows.
     pub fn register(
@@ -102,9 +163,11 @@ impl Records {
             .filter(|row| row.subject.homepage.as_deref() == Some(url));
         let first = candidates.next()?;
         // The same address on two variants is not a unique record identity.
-        if candidates
-            .any(|row| row.subject.name != first.subject.name || row.collection != first.collection)
-        {
+        if candidates.any(|row| {
+            row.subject.name != first.subject.name
+                || row.collection.as_ref().map(|c| &c.columns)
+                    != first.collection.as_ref().map(|c| &c.columns)
+        }) {
             return None;
         }
         let mut collection = first.collection.clone()?;
@@ -141,7 +204,7 @@ impl Records {
         out
     }
 
-    pub fn present(&self, request: &Presentation) -> Result<super::objects::Proposed, String> {
+    pub fn present(&self, request: &Presentation) -> Result<super::objects::Proposed, RecordError> {
         if request.title.trim() != request.title
             || request.title.is_empty()
             || request.title.chars().count() > super::objects::MAX_TITLE_CHARS
@@ -218,6 +281,18 @@ impl Records {
                         let Some(text) = display(&cell.value) else {
                             continue;
                         };
+                        if matches!(
+                            record.field_kind(&criterion.name),
+                            Some(zephium_core::work::collection::WorkBrowseValue::ImageUrl)
+                        ) {
+                            let images = value["image_candidates"]
+                                .as_array_mut()
+                                .expect("native image array");
+                            if !images.iter().any(|image| image.as_str() == Some(&text)) {
+                                images.push(json!(text));
+                            }
+                            continue;
+                        }
                         // Skip only values already represented exactly, never a
                         // label-based guess that silently discards another URL.
                         if record.subject.homepage.as_ref() == Some(&text)
@@ -264,7 +339,24 @@ impl Records {
                 }
                 let mut columns = vec![json!({"label":"Name","kind":"text"})];
                 for name in &names {
-                    columns.push(json!({"label":name,"kind":"text"}));
+                    let link = selected
+                        .iter()
+                        .filter(|(_, record, _)| {
+                            record
+                                .fields
+                                .iter()
+                                .any(|(criterion, _)| criterion.name == *name)
+                        })
+                        .all(|(_, record, _)| {
+                            matches!(
+                                record.field_kind(name),
+                                Some(
+                                    zephium_core::work::collection::WorkBrowseValue::Url
+                                        | zephium_core::work::collection::WorkBrowseValue::ImageUrl
+                                )
+                            )
+                        });
+                    columns.push(json!({"label":name,"kind":if link { "link" } else { "text" }}));
                 }
                 columns.push(json!({"label":"Source link","kind":"link"}));
                 let annotate = request.records.iter().any(|r| r.annotation.is_some());
@@ -307,10 +399,13 @@ impl Records {
             }
         };
         if let Some(fault) = data.lead_fault(evidence.len()) {
-            return Err(format!(
-                "native record presentation: {}; original records remain unchanged",
-                fault.describe()
-            ));
+            return Err(RecordError {
+                message: format!(
+                    "native record presentation: {}; original records remain unchanged",
+                    fault.describe()
+                ),
+                reason: super::objects::ObjectRefusal::Field(fault.field),
+            });
         }
         Ok(super::objects::Proposed {
             title: request.title.clone(),
@@ -482,6 +577,98 @@ mod tests {
     }
 
     #[test]
+    fn a_withheld_image_url_is_not_misclassified_as_an_oversized_text_fact() {
+        let mut artifact = fixture();
+        let image = format!(
+            "https://images.example.com/{}.jpg?width=400",
+            "a".repeat(180)
+        );
+        let WorkArtifactDataV1::ComparisonMatrix {
+            subjects,
+            criteria,
+            cells,
+            ..
+        } = &mut artifact.data
+        else {
+            panic!()
+        };
+        for subject in subjects {
+            subject.image_candidates.clear();
+            subject.record_media = None;
+        }
+        criteria.push(WorkCriterion {
+            name: "image".into(),
+            kind: WorkCriterionKind::Text,
+        });
+        for row in cells {
+            row.push(WorkCell {
+                value: WorkCellValue::Text {
+                    text: image.clone(),
+                },
+                evidence: vec![0],
+                note: None,
+                general_knowledge: false,
+            });
+        }
+        let schema=serde_json::from_value(json!({"title":"Items","max_items":3,"columns":[{"name":"image","value":{"kind":"image_url"},"required":false}]})).unwrap();
+        let mut bank = Records::default();
+        bank.register(&artifact, Some(&schema));
+        let picks = bank
+            .present(&request("picks"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let WorkArtifactDataV1::Picks { items, .. } = picks.data else {
+            panic!()
+        };
+        assert_eq!(items[0].image_candidates, [image.clone()]);
+        assert!(
+            items[0].media_attempted && items[0].record_media.is_none(),
+            "a withheld native image must stay withheld"
+        );
+        assert!(items[0].facts.iter().all(|fact| fact.label != "image"));
+        let table = bank
+            .present(&request("table"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let WorkArtifactDataV1::Sheet { columns, rows, .. } = table.data else {
+            panic!()
+        };
+        let index = columns
+            .iter()
+            .position(|column| column.label == "image")
+            .unwrap();
+        assert_eq!(columns[index].kind, WorkSheetColumnKindV1::Link);
+        assert_eq!(rows[0].cells[index], image);
+    }
+
+    #[test]
+    fn failed_catalog_read_cannot_erase_requested_columns_from_same_site_fallback() {
+        let schema: zephium_core::work::collection::WorkBrowseCollection = serde_json::from_value(json!({
+            "title":"Books", "max_items":3,"columns":[
+                {"name":"price","value":{"kind":"text"},"required":false,"extraction":"verbatim"},
+                {"name":"availability","value":{"kind":"text"},"required":false,"extraction":"verbatim"}
+            ]
+        })).unwrap();
+        let mut bank = Records::default();
+        bank.remember_site("shop.example.com", &schema);
+        assert!(bank.rows.is_empty());
+        let retained = bank
+            .collection_for_site("https://www.shop.example.com/book?id=3")
+            .unwrap();
+        assert_eq!(retained.columns, schema.columns);
+        assert!(bank
+            .collection_for_site("https://other.example.com/book?id=3")
+            .is_none());
+        assert!(bank
+            .collection_for_site("https://shop.example.com.attacker.test/book")
+            .is_none());
+        let mut conflicting = schema.clone();
+        conflicting.columns[1].name = "publication_date".into();
+        bank.remember_site("shop.example.com", &conflicting);
+        assert!(bank
+            .collection_for_site("https://shop.example.com/book?id=3")
+            .is_none());
+    }
+
+    #[test]
     fn keys_cannot_invent_or_rewrite_records_and_overflow_is_never_truncated() {
         let mut records = Records::default();
         records.register(&fixture(), None);
@@ -500,7 +687,11 @@ mod tests {
         records.rows[0].subject.name = "界".repeat(200);
         assert!(records.present(&request("picks")).is_ok());
         records.rows[0].subject.name = "界".repeat(201);
-        assert!(records.present(&request("picks")).is_err());
+        let error = records.present(&request("picks")).err().unwrap();
+        assert!(matches!(
+            error.reason,
+            super::super::objects::ObjectRefusal::Field(WorkArtifactField::PickName)
+        ));
         assert_eq!(records.rows[0].subject.name.chars().count(), 201);
     }
 }

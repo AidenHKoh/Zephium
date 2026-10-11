@@ -346,7 +346,7 @@ pub(crate) fn propose(
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .present(&request)
-            .map_err(|message| (message, ObjectRefusal::Source));
+            .map_err(|error| (error.message, error.reason));
     }
     let title = super::call::plain(title);
     let title = title.trim();
