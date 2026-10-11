@@ -382,6 +382,7 @@ struct EvalModelClient {
     role: &'static str,
     diagnostics: Arc<Mutex<EvalDiagnostics>>,
     visual_diagnostics: bool,
+    reject_images: bool,
 }
 fn eval_image_inputs(messages: &[zephium_core::work::model::WorkModelMessage]) -> (usize, usize) {
     use zephium_core::work::model::{WorkModelMessage as M, WorkModelPart as P};
@@ -403,6 +404,9 @@ impl zephium_core::work::model::WorkModelClient for EvalModelClient {
         events: &'a (dyn Fn(zephium_core::work::model::WorkModelEvent) + Send + Sync),
     ) -> zephium_core::work::model::WorkModelFuture<'a> {
         Box::pin(async move {
+            if self.reject_images && eval_image_inputs(&request.messages).0 != 0 {
+                return Err(zephium_core::work::model::WorkModelError::BadRequest);
+            }
             let started = Instant::now();
             let index = {
                 let mut local = self.diagnostics.lock().unwrap_or_else(|e| e.into_inner());
@@ -499,6 +503,7 @@ mod visual_diagnostic_tests {
                 role: "page",
                 diagnostics: diagnostics.clone(),
                 visual_diagnostics: public,
+                reject_images: false,
             };
             let request = WorkModelRequest {
                 model: WorkModelRef {
@@ -534,6 +539,11 @@ mod visual_diagnostic_tests {
                 volatile_tail: 0,
                 cache_key: None,
             };
+            let rejecting = EvalModelClient {
+                inner: Arc::new(Echo), role: "page", diagnostics: Arc::new(Mutex::new(EvalDiagnostics::default())), visual_diagnostics: false, reject_images: true,
+            };
+            assert!(matches!(rejecting.call(request.clone(), &|_| {}).await, Err(WorkModelError::BadRequest)));
+            assert!(rejecting.diagnostics.lock().unwrap().calls.is_empty());
             let outcome = client.call(request, &|_| {}).await.unwrap();
             assert_eq!(outcome.assistant.len(), 1);
             let local = diagnostics.lock().unwrap();
@@ -1412,6 +1422,11 @@ pub(super) async fn lead_workflow(
     let mut light = resolve(WorkModelRole::Light)
         .await
         .unwrap_or_else(|| page.clone());
+    if account_probe {
+        for model in [&mut lead, &mut page, &mut light] {
+            model.entry.supports.vision = false;
+        }
+    }
     let model_setup = serde_json::json!({ "lead": lead.entry, "page": page.entry, "light": light.entry, "public_search_model": PUBLIC_SEARCH_MODEL, "read_triage": read_decision_name });
     if public_eval || block_probe || account_probe || local_probe {
         for (role, model) in [
@@ -1430,6 +1445,7 @@ pub(super) async fn lead_workflow(
                 role,
                 diagnostics: local_diagnostics.clone(),
                 visual_diagnostics: public_eval,
+                reject_images: account_probe,
             });
         }
     }
