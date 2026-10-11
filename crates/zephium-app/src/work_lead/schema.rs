@@ -145,6 +145,7 @@ pub(crate) fn data(kind: &str) -> Option<Value> {
                     "title": text(L::ITEM_TITLE),
                     "detail": text(L::ITEM_DETAIL),
                     "due": text(L::ITEM_DUE),
+                    "done": {"type": "boolean"},
                     "priority": one_of(&["high"]),
                     "from": object(json!({
                         "host": string(), "app": text(L::FROM_APP), "who": text(L::FROM_WHO),
@@ -682,6 +683,36 @@ mod tests {
             data("reply").unwrap()["properties"]["points"]["maxItems"],
             L::REPLY_POINTS
         );
+    }
+
+    #[test]
+    fn checklist_completion_survives_model_schema_pruning_and_typed_storage() {
+        let mut data = json!({"style":"todo", "items":[
+            {"title":"First"}, {"title":"Middle", "done":true}, {"title":"Last", "done":false}
+        ]});
+        assert_eq!(mismatch("list", &data), None);
+        assert!(prune("list", &mut data).is_empty());
+        data["kind"] = json!("list");
+        let typed: zephium_core::work::artifact::WorkArtifactDataV1 =
+            serde_json::from_value(data).unwrap();
+        let zephium_core::work::artifact::WorkArtifactDataV1::List { items, .. } = typed else {
+            panic!("list")
+        };
+        assert_eq!(
+            items.iter().map(|item| item.done).collect::<Vec<_>>(),
+            [false, true, false]
+        );
+        let mut absent = json!({"style":"todo","items":[{"title":"Middle","done":null}]});
+        assert_eq!(mismatch("list", &absent), None);
+        assert!(prune("list", &mut absent).is_empty());
+        assert!(absent["items"][0].get("done").is_none());
+        for invalid in [json!("true"), json!(1)] {
+            assert!(mismatch(
+                "list",
+                &json!({"style":"todo","items":[{"title":"Middle","done":invalid}]})
+            )
+            .is_some());
+        }
     }
 
     #[test]
