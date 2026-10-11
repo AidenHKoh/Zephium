@@ -281,7 +281,7 @@ test("Check again waits for the native answer and never continues the page", asy
     const button = screen.getByRole("button", { name: "Check again", exact: true });
     await button.click();
     await expect.element(button).toBeDisabled();
-    await expect.element(screen.getByRole("status")).toHaveTextContent("Checking…");
+    await expect.element(button).toHaveAttribute("aria-busy", "true");
     expect(checkPage).toHaveBeenCalledExactlyOnceWith(page);
     settle("waiting");
     await expect

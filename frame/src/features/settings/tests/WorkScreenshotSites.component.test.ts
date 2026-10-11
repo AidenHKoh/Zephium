@@ -27,15 +27,15 @@ test("forgetting a screenshot origin waits for Rust and shows unconfirmed revoca
       }),
   );
   const screen = await render(WorkScreenshotSites, { profile: PROFILE });
-  await expect.element(screen.getByRole("heading", { name: ORIGIN })).toBeVisible();
+  await expect.element(screen.getByRole("heading", { name: "app.example.test" })).toBeVisible();
   const forget = screen.getByRole("button", { name: "Ask next time" });
   await forget.click();
   expect(native.change).toHaveBeenCalledWith(PROFILE, { origin: ORIGIN, allow: false });
   await expect.element(forget).toBeDisabled();
-  await expect.element(screen.getByRole("heading", { name: ORIGIN })).toBeVisible();
+  await expect.element(screen.getByRole("heading", { name: "app.example.test" })).toBeVisible();
   settle(reply([{ ...row, unconfirmed: true }]));
   await expect
-    .element(screen.getByText("The change could not be confirmed. Page pictures remain blocked."))
+    .element(screen.getByText("Couldn't confirm the change. Pictures stay off for this site."))
     .toBeVisible();
 });
 
@@ -43,6 +43,8 @@ test("a different profile reply is not displayed as this profile's permission", 
   native.read.mockResolvedValue({ ...reply(), profile: "00000000000000000000000002" });
   const screen = await render(WorkScreenshotSites, { profile: PROFILE });
   await expect.element(screen.getByRole("alert")).toBeVisible();
-  await expect.element(screen.getByRole("heading", { name: ORIGIN })).not.toBeInTheDocument();
+  await expect
+    .element(screen.getByRole("heading", { name: "app.example.test" }))
+    .not.toBeInTheDocument();
   expect(native.read).toHaveBeenCalledWith(PROFILE);
 });

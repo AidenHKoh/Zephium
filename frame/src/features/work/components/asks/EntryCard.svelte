@@ -4,7 +4,7 @@
   import HostGlyph from "../cards/HostGlyph.svelte";
   import AskReceipt from "./AskReceipt.svelte";
   import AskShell from "./AskShell.svelte";
-  import { ASK_WORDS, registrableSite, type EntryAsk } from "./asks";
+  import { ASK_WORDS, registrableSite, siteName, type EntryAsk } from "./asks";
 
   /** The one question before the agent works in the person's session on a site. */
   let {
@@ -20,19 +20,17 @@
     onanswer: (answer: string) => void;
   } = $props();
 
+  /** Screenshot consent names the site as a person knows it; Rust keys it by exact origin. */
+  const site = $derived(ask.screenshotOrigin ? siteName(ask.host ?? ask.name) : null);
   const title = $derived(
-    ask.screenshotOrigin
-      ? m.work_ask_screenshot_title({ origin: ask.screenshotOrigin })
-      : m.work_ask_entry_title({ name: ask.name }),
+    site ? m.work_ask_screenshot_title({ site }) : m.work_ask_entry_title({ name: ask.name }),
   );
   const answered = $derived(
-    ask.screenshotOrigin && ask.answer !== ASK_WORDS.notNow
-      ? m.work_ask_screenshot_choice_received()
-      : ask.answer === ASK_WORDS.allow
-        ? m.work_ask_allowed()
-        : ask.answer === ask.always
-          ? m.work_ask_always_short()
-          : m.work_ask_not_now(),
+    ask.answer === ASK_WORDS.allow
+      ? m.work_ask_allowed()
+      : ask.answer === ask.always
+        ? m.work_ask_always_short()
+        : m.work_ask_not_now(),
   );
 </script>
 
@@ -41,8 +39,8 @@
     {placement}
     {busy}
     label={title}
-    note={ask.screenshotOrigin ? m.work_ask_screenshot_note() : m.work_ask_entry_note()}
-    where={ask.screenshotOrigin ?? (ask.host ? registrableSite(ask.host) : ask.name)}
+    note={site ? m.work_ask_screenshot_note() : m.work_ask_entry_note()}
+    where={ask.host ? registrableSite(ask.host) : ask.name}
     {title}
   >
     {#snippet mark()}
@@ -69,8 +67,8 @@
   <AskReceipt
     tone={ask.answer === ASK_WORDS.notNow ? "declined" : "done"}
     status={answered}
-    text={ask.screenshotOrigin
-      ? m.work_ask_screenshot_receipt({ origin: ask.screenshotOrigin })
+    text={site
+      ? m.work_ask_screenshot_receipt({ site })
       : m.work_ask_entry_receipt({ name: ask.name })}
   />
 {/if}

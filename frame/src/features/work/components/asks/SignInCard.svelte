@@ -56,29 +56,28 @@
   <AskShell {placement} {busy} label={title} where={registrableSite(ask.host)} {title}>
     {#snippet mark()}<HostGlyph host={ask.host} size={18} initial={false} />{/snippet}
     <p class="how">{m.work_ask_handoff_how()}</p>
-    {#if checking || result}
+    {#if result}
       <p class="how" role="status">
-        {checking
-          ? m.work_human_checking()
-          : result === "waiting"
-            ? ask.kind === "check"
-              ? m.work_human_check_waiting()
-              : m.work_human_still_signed_out()
-            : result === "clear"
-              ? m.work_human_check_ready()
-              : result === "open_page"
-                ? m.work_human_check_open_page()
-                : m.work_human_check_unavailable()}
+        {result === "waiting"
+          ? ask.kind === "check"
+            ? m.work_human_check_waiting()
+            : m.work_human_still_signed_out()
+          : result === "clear"
+            ? m.work_human_check_ready()
+            : result === "open_page"
+              ? m.work_human_check_open_page()
+              : m.work_human_check_unavailable()}
       </p>
     {/if}
     {#snippet actions()}
-      {#if onopen}<Button variant="primary" disabled={busy} onclick={() => onopen?.()}
-          >{ask.kind === "check" ? m.work_human_open() : m.work_ask_sign_in()}</Button
-        >{/if}
       {#if oncheck}<Button
           variant="ghost"
-          disabled={busy || checking}
+          disabled={busy}
+          pending={checking}
           onclick={() => void checkAgain()}>{m.work_human_check_again()}</Button
+        >{/if}
+      {#if onopen}<Button variant="primary" disabled={busy} onclick={() => onopen?.()}
+          >{ask.kind === "check" ? m.work_human_open() : m.work_ask_sign_in()}</Button
         >{/if}
     {/snippet}
   </AskShell>

@@ -66,7 +66,7 @@
   </SettingsRow>
   {#each sites as site (site.origin)}
     <SettingsRow
-      title={site.origin}
+      title={site.name}
       description={site.unconfirmed || unconfirmed === site.origin
         ? m.settings_work_screenshot_unconfirmed()
         : m.settings_work_screenshot_allowed()}
