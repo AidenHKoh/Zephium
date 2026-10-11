@@ -157,7 +157,7 @@
         value={score.value}
         max={score.max}
         label={m.work_object_rating({ value: score.value, max: score.max })}
-      />{:else}<span class="text">{text}</span>{/if}
+      />{:else}<span class="text" title={text}>{text}</span>{/if}
   {:else if column.kind === "entity"}
     {@const known = vendorHost(undefined, text)}
     <span class="subject"
@@ -178,7 +178,7 @@
       }}><Mark address={text} size={14} /><span>{host(text)}</span></a
     >
   {:else if numeric(column)}<span class="figure" class:best={marked}>{figure(column, text)}</span>
-  {:else}<span class="text">{text}</span>{/if}
+  {:else}<span class="text" title={text}>{text}</span>{/if}
 {/snippet}
 
 {#if facing}
@@ -305,12 +305,16 @@
   }
 
   .text {
-    display: block;
     min-inline-size: 12ch;
     max-inline-size: 34ch;
     color: var(--color-label-secondary);
     overflow-wrap: break-word;
     text-wrap: pretty;
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
   }
 
   /* Columns that run on past the edge fade into it; the subject column stays. */

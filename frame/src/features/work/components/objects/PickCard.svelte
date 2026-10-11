@@ -124,7 +124,7 @@
     <header>
       {#if logo}<Mark address={logo} size={20} />{/if}
       <div class="names" bind:clientWidth={room}>
-        <h4 style:--longest={longest} class:hyphenate>
+        <h4 style:--longest={longest} class:hyphenate title={pick.name}>
           {#if pick.url}<a
               class="nodrag"
               href={pick.url}
@@ -158,7 +158,9 @@
                   value={fact.kind}
                   size={14}
                 />{/if}{#if !/^(yes|no)$/iu.test(fact.value.trim())}<span
-                  class:quiet={fact.kind === "no"}>{fact.value}</span
+                  class="value"
+                  class:quiet={fact.kind === "no"}
+                  title={fact.value}>{fact.value}</span
                 >{/if}
             </dd>
           </div>
@@ -336,6 +338,13 @@
     line-height: 19px;
     letter-spacing: -0.005em;
     text-wrap: pretty;
+
+    /* Extracted names stay whole in the data; the card shows three lines. */
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
   }
 
   h4.hyphenate {
@@ -408,6 +417,15 @@
     margin: 0;
     min-inline-size: 0;
     text-align: end;
+  }
+
+  dd .value {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow-wrap: anywhere;
   }
 
   dd :global(.mark) {
