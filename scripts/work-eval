@@ -37,6 +37,7 @@ INSTRUMENTATION = {
     "crates/zephium-terra-macos-probe/src/acceptance.rs",
     "crates/zephium-terra-macos-probe/src/work_durable.rs",
     "crates/zephium-terra-macos-probe/src/loopback_support.rs",
+    "scripts/work-eval", "scripts/test_work_eval.py",
 }
 
 
@@ -438,6 +439,7 @@ def timing(evidence, log):
     result = {"model_busy_ms": None, "page_without_model_ms": None, "other_ms": None, "post_browser_finalization_gaps_ms": []}
     # A finalization gap is per execution; follow-ups must not share its last part.
     last = None
+    previous_end = -1
     for line in log.splitlines():
         match = re.match(r"\[\s*(\d+)ms\] lead-run: event=(.*)", line)
         if not match:
@@ -446,9 +448,13 @@ def timing(evidence, log):
         if event.startswith("PartEnded { helper: Browser"):
             last = at
         elif event.startswith("Ended {"):
+            if last is None:
+                finished_pages = [page["finished_ms"] for page in evidence.get("page_intervals", []) if isinstance(page.get("finished_ms"), int) and previous_end < page["finished_ms"] <= at]
+                last = max(finished_pages) if finished_pages else None
             if last is not None:
                 result["post_browser_finalization_gaps_ms"].append(max(0, at-last))
             last = None
+            previous_end = at
     rows = evidence.get("model_calls", []) + evidence.get("page_intervals", [])
     valid = isinstance(start, int) and isinstance(end, int) and end >= start and not evidence.get("model_calls_truncated") and all(isinstance(row.get("started_ms"), int) and isinstance(row.get("finished_ms"), int) and row["finished_ms"] >= row["started_ms"] for row in rows)
     if not valid:
@@ -558,7 +564,15 @@ def grade(task, evidence, reference, manifest):
         proven = any(any(answer_evidence & {evidence_key(link) for link in by_id.get(identity, {}).get("evidence", [])}
                          for identity in step.get("artifacts", [])) for step in reads)
         checks.append({"id": f"native_source_{index + 1}", "state": "passed" if proven else "failed"})
-    return dict(result, task_outcome="passed" if checks and all(check["state"] == "passed" for check in checks) else "failed", predicates=checks)
+    outcome = "passed" if checks and all(check["state"] == "passed" for check in checks) else "failed"
+    # A source-backed answer with some correct requested fields is partial,
+    # never a pass. Preserve v1's historical binary grades unchanged.
+    if outcome == "failed" and manifest.get("suite") == "work-heldout-v2":
+        fields = [check for check in checks if check["id"] in reference["expected"]]
+        structure = [check for check in checks if check["id"] not in reference["expected"]]
+        if fields and any(check["state"] == "passed" for check in fields) and all(check["state"] == "passed" for check in structure):
+            outcome = "partial"
+    return dict(result, task_outcome=outcome, predicates=checks)
 
 
 @contextlib.contextmanager

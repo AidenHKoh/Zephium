@@ -573,5 +573,20 @@ class ActionFrequencyTests(unittest.TestCase):
         self.assertAlmostEqual(counts['malformed_actions_per_100_page_turns'],100/3)
 
 
+class PilotMeasurementTests(unittest.TestCase):
+    def test_inline_page_finalization_is_counted_without_borrowing_a_prior_execution(self):
+        evidence={'page_intervals':[{'started_ms':1,'finished_ms':5}]}
+        log='[ 9ms] lead-run: event=Ended {}\n[ 15ms] lead-run: event=Ended {}'
+        self.assertEqual(eval.timing(evidence,log)['post_browser_finalization_gaps_ms'],[4])
+
+    def test_partial_fields_do_not_raise_pass_rate_or_hide_missing_provenance(self):
+        task,evidence,reference,manifest=fixture()
+        manifest['suite']='work-heldout-v2'
+        evidence['executions'][0]['artifacts'][1]['data']['text']='{"title":"Wrong","count":3}'
+        self.assertEqual(eval.grade(task,evidence,reference,manifest)['task_outcome'],'partial')
+        evidence['executions'][0]['steps'][0]['status']='failed'
+        self.assertEqual(eval.grade(task,evidence,reference,manifest)['task_outcome'],'failed')
+
+
 if __name__ == '__main__':
     unittest.main()
