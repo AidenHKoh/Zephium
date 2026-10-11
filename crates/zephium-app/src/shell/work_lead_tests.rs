@@ -2205,3 +2205,121 @@ async fn list_record_source_survives_real_propose_and_read_canvas_without_privat
         .filter(|step| matches!(step.kind, WorkStepKindV1::Search { .. }))
         .all(|step| step.status != WorkStepStatus::Succeeded));
 }
+
+struct FailedSiteAdvice {
+    account: bool,
+}
+impl WorkModelClient for FailedSiteAdvice {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let turn = request
+                .messages
+                .iter()
+                .filter(|message| matches!(message, WorkModelMessage::Assistant(_)))
+                .count();
+            let lead = request
+                .system
+                .iter()
+                .any(|block| block.text.contains("You are the Work agent"));
+            let seen = results(&request);
+            let assistant = match (lead, turn) {
+                (true, 0) => vec![call(
+                    "part",
+                    "start_part",
+                    json!({"title":"Account","helper":"browser","service":"work.example.test","goal":if self.account {"Read my account inbox"}else{"Read the public documentation"}}),
+                )],
+                (true, 1) => {
+                    assert!(seen.contains("could not do its job"), "{seen}");
+                    assert_eq!(
+                        seen.contains("search the web once"),
+                        !self.account,
+                        "account={} {seen}",
+                        self.account
+                    );
+                    vec![call(
+                        "reply",
+                        "create",
+                        json!({"kind":"reply","title":"Site unavailable","data":{"headline":"The requested content could not be read","text":"The browser helper could not read the requested site."}}),
+                    )]
+                }
+                (true, _) => vec![call(
+                    "finish",
+                    "finish",
+                    json!({"say":"The requested content could not be read."}),
+                )],
+                (false, _) => vec![call(
+                    "helper-finish",
+                    "finish",
+                    json!({"summary":"Could not read the site","digest":"The browser did not obtain the requested content.","found":false,"need":{"kind":"retry","target":"https://work.example.test/"}}),
+                )],
+            };
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                assistant,
+                usage: WorkModelUsage {
+                    input_tokens: 100,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 10,
+                    reasoning_tokens: 0,
+                    cost_micros: None,
+                },
+            })
+        })
+    }
+}
+#[tokio::test]
+async fn failed_account_parts_never_suggest_public_source_substitution() {
+    for account in [true, false] {
+        let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+        let (mut shell, queue, handle, profile) = fixture(store);
+        let create = handle
+            .work_document(WorkIntent::Create {
+                objective: if account {
+                    "Read my account inbox".into()
+                } else {
+                    "Read the public documentation".into()
+                },
+            })
+            .unwrap();
+        let work = create.work_id().unwrap();
+        drive(&mut shell, &queue, create).await.unwrap();
+        let lead = LeadModel {
+            client: Arc::new(FailedSiteAdvice { account }),
+            ..model(Arc::new(Script {
+                calls: Mutex::new(Vec::new()),
+            }))
+        };
+        let models = WorkLeadModels {
+            lead: lead.clone(),
+            page: lead.clone(),
+            light: lead,
+        };
+        let projection = drive(
+            &mut shell,
+            &queue,
+            WorkLeadService::new(handle).run(
+                profile,
+                command(work, WorkRevision::INITIAL),
+                None,
+                models,
+                &Search,
+                |_, _| async { panic!("scripted failure requires no browsing") },
+                |_| {},
+            ),
+        )
+        .await
+        .unwrap();
+        let execution = &projection.executions[0];
+        assert_eq!(execution.parts.len(), 1);
+        assert_eq!(execution.parts[0].state, WorkPartStateV1::Failed);
+        assert!(!execution
+            .steps
+            .iter()
+            .any(|step| step.status == WorkStepStatus::Running));
+    }
+}

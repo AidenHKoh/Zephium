@@ -348,6 +348,15 @@ fn public_goal(spec: &PartSpec) -> bool {
 
 // This selects the task path; it never grants a session or an effect.
 // Unknown account services need the same handoff-capable path as known apps.
+fn public_source_retry(spec: &PartSpec) -> bool {
+    !account_goal(spec)
+        && spec.declined.is_none()
+        && spec.helper != WorkHelperV1::Connection
+        && (public_goal(spec)
+            || !super::route::brand(spec.service.as_ref(), &spec.title)
+                .is_some_and(|brand| super::route::site(&brand).is_some()))
+}
+
 fn account_goal(spec: &PartSpec) -> bool {
     if public_goal(spec) {
         return false;
@@ -574,7 +583,7 @@ where
             &site,
             report.objects.is_empty(),
             report.state == WorkPartStateV1::Failed,
-            public_retry && !self.run.browser_down(),
+            public_retry && public_source_retry(&spec) && !self.run.browser_down(),
         ) {
             out.push_str(&format!(
                 "Before you settle for nothing from {site}: search the web once for what the part looked for there, and read the one to three best {site} pages the search lists; a product or listing page often reads where the site's search did not.\n"
@@ -2545,6 +2554,9 @@ mod tests {
         )));
         assert!(!public_goal(&part("What is assigned to me in Linear")));
         assert!(!public_goal(&part("Read my Linear inbox")));
+        assert!(public_source_retry(&part("Read Linear's documentation")));
+        assert!(!public_source_retry(&part("What is assigned to me in Linear")));
+        assert!(!public_source_retry(&part("Read my Linear inbox")));
     }
 
     #[test]
