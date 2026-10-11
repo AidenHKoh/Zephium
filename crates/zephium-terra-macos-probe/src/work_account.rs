@@ -4,7 +4,7 @@ mod approval;
 use std::{
     io::{Read, Write},
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex, OnceLock,
     },
     time::Duration,
@@ -23,14 +23,12 @@ pub(super) struct Account {
     input: Mutex<mpsc::Receiver<Input>>,
     stopped: Arc<AtomicBool>,
     send: bool,
-    offered: Arc<AtomicU32>,
     approval: Mutex<approval::Gate>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Input {
     Check,
     Stop,
-    Decision(approval::Decision),
 }
 static ACCOUNT: OnceLock<Account> = OnceLock::new();
 pub(super) fn active() -> Option<&'static Account> {
@@ -52,28 +50,25 @@ fn origin(url: &str) -> Option<&'static str> {
                 .any(|b| b.is_ascii_control() || b == b' ' || b == b'\\' || b == b'?' || b == b'#')
     })
 }
+fn presentable_reason(reason: WorkHumanReasonV1) -> bool {
+    matches!(
+        reason,
+        WorkHumanReasonV1::SignIn | WorkHumanReasonV1::Challenge
+    )
+}
 fn command(bytes: &[u8]) -> Option<Input> {
     match bytes {
         b"check" => Some(Input::Check),
         b"stop" => Some(Input::Stop),
-        _ => approval::command(bytes).map(Input::Decision),
+        _ => None,
     }
 }
-fn route_command(
-    bytes: &[u8],
-    tx: &mpsc::SyncSender<Input>,
-    stopped: &AtomicBool,
-    offered: &AtomicU32,
-) {
+fn route_command(bytes: &[u8], tx: &mpsc::SyncSender<Input>, stopped: &AtomicBool) {
     match command(bytes) {
         Some(Input::Stop) => stopped.store(true, Ordering::Release),
         Some(Input::Check) => {
             let _ = tx.try_send(Input::Check);
         }
-        Some(Input::Decision(decision)) if offered.load(Ordering::Acquire) == decision.offer => {
-            let _ = tx.try_send(Input::Decision(decision));
-        }
-        Some(Input::Decision(_)) => {}
         None => {}
     }
 }
@@ -125,8 +120,6 @@ fn configure_mode(url: &str, send: bool) -> Result<String, &'static str> {
     let (tx, rx) = mpsc::sync_channel(4);
     let stopped = Arc::new(AtomicBool::new(false));
     let input_stop = stopped.clone();
-    let offered = Arc::new(AtomicU32::new(0));
-    let input_offer = offered.clone();
     std::thread::Builder::new()
         .name("account-probe-input".into())
         .spawn(move || {
@@ -136,7 +129,7 @@ fn configure_mode(url: &str, send: bool) -> Result<String, &'static str> {
             while std::io::stdin().read_exact(&mut byte).is_ok() {
                 if byte[0] == b'\n' {
                     if length <= line.len() {
-                        route_command(&line[..length], &tx, &input_stop, &input_offer);
+                        route_command(&line[..length], &tx, &input_stop);
                     }
                     line.fill(0);
                     length = 0;
@@ -160,7 +153,6 @@ fn configure_mode(url: &str, send: bool) -> Result<String, &'static str> {
             input: Mutex::new(rx),
             stopped,
             send,
-            offered,
             approval: Mutex::new(approval::Gate::default()),
         })
         .map_err(|_| "account_duplicate")?;
@@ -259,24 +251,40 @@ impl Account {
     ) {
         let mut presented = Vec::new();
         let mut previous = None;
+        let mut review: Option<approval::Review> = None;
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let input = self.input.lock().ok().and_then(|rx| rx.try_recv().ok());
-            let mut decision_page = None;
+            let decision = if review.as_ref().is_some_and(approval::Review::ready) {
+                let decision = match review.as_mut() {
+                    Some(review) => review.finish().await,
+                    None => continue,
+                };
+                review = None;
+                Some(decision)
+            } else {
+                None
+            };
+            let mut decision_pages = std::collections::BTreeSet::new();
             if let Ok(pages) = composition.human_pages(profile, work) {
+                decision_pages.extend(
+                    pages
+                        .iter()
+                        .filter(|page| {
+                            page.reason == WorkHumanReasonV1::UserDecision
+                                && page.phase == WorkHumanPhaseV1::WaitingForHuman
+                        })
+                        .map(|page| page.id.step),
+                );
                 if let Some(page) = pages.iter().find(|page| {
-                    matches!(
-                        page.phase,
-                        WorkHumanPhaseV1::WaitingForHuman
-                            | WorkHumanPhaseV1::Presenting
-                            | WorkHumanPhaseV1::Presented
-                    )
+                    presentable_reason(page.reason)
+                        && matches!(
+                            page.phase,
+                            WorkHumanPhaseV1::WaitingForHuman
+                                | WorkHumanPhaseV1::Presenting
+                                | WorkHumanPhaseV1::Presented
+                        )
                 }) {
-                    if page.phase == WorkHumanPhaseV1::Presented
-                        && page.reason == WorkHumanReasonV1::UserDecision
-                    {
-                        decision_page = Some(page.id.step);
-                    }
                     let state = (page.id, page.phase, page.reason);
                     if previous != Some(state) {
                         let _ = writeln!(
@@ -340,22 +348,24 @@ impl Account {
                 .find(|e| !e.status.terminal())
             else {
                 self.clear_offer();
+                review = None;
                 continue;
             };
             // Invalidate even a queued approval if its original confirmation or
-            // retained visible page disappeared between observations.
+            // retained approval page disappeared between observations.
             let candidate = self
                 .send
                 .then(|| {
                     execution.steps.iter().find(|step| {
                         step.status == WorkStepStatus::Running
                             && matches!(&step.kind, WorkStepKindV1::Confirm { confirm }
-                        if approval::Gate::eligible(confirm) && confirm.page == decision_page)
+                        if approval::Gate::eligible(confirm) && confirm.page.is_some_and(|page| decision_pages.contains(&page)))
                     })
                 })
                 .flatten();
-            if candidate.is_none() {
+            if candidate.is_none() || self.stopped() {
                 self.clear_offer();
+                review = None;
             }
             let intent = if self.stopped() {
                 Some(WorkRuntimeIntent::Cancel {
@@ -381,17 +391,15 @@ impl Account {
                     if waiting && self.send {
                         if let WorkStepKindV1::Confirm { confirm } = &step.kind {
                             if approval::Gate::eligible(confirm) {
-                                if confirm.page != decision_page { return None; }
+                                if !confirm.page.is_some_and(|page| decision_pages.contains(&page)) { return None; }
                                 let mut gate = self.approval.lock().ok()?;
                                 if let Some((offer, fresh)) = gate.offer(execution.id, step.id, confirm) {
-                                    self.offered.store(offer, Ordering::Release);
                                     if fresh {
-                                        let _ = writeln!(std::io::stdout().lock(),
-                                            "account-probe: approval_offer={offer}; review the retained disposable Slack channel; exact fixture message: {}; type approve {offer} or decline {offer}; all other effects remain refused", approval::MESSAGE);
+                                        review = Some(approval::Review::start(offer, &self.start, confirm));
+                                        let _ = writeln!(std::io::stdout().lock(), "account-probe: approval_offer={offer}; native_review=open; content=redacted");
                                     }
-                                    let Some(Input::Decision(decision)) = input else { return None; };
+                                    let decision = decision?;
                                     let approve = gate.decide(decision, execution.id, step.id, confirm)?;
-                                    self.offered.store(0, Ordering::Release);
                                     return Some(WorkRuntimeIntent::ApproveStep {
                                         execution: execution.id, step: step.id, approve, for_run: false,
                                     });
@@ -426,7 +434,6 @@ impl Account {
         }
     }
     fn clear_offer(&self) {
-        self.offered.store(0, Ordering::Release);
         if let Ok(mut gate) = self.approval.lock() {
             gate.clear();
         }
@@ -446,6 +453,20 @@ impl WorkPublicSearchProvider for NoSearch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_presentation_never_advances_a_hidden_approval_handoff() {
+        assert!(presentable_reason(WorkHumanReasonV1::SignIn));
+        assert!(presentable_reason(WorkHumanReasonV1::Challenge));
+        for reason in [
+            WorkHumanReasonV1::Permission,
+            WorkHumanReasonV1::Verification,
+            WorkHumanReasonV1::UserDecision,
+            WorkHumanReasonV1::SensitiveEffect,
+            WorkHumanReasonV1::UnsupportedInteraction,
+        ] {
+            assert!(!presentable_reason(reason));
+        }
+    }
     #[test]
     fn account_origins_and_input_are_closed() {
         assert_eq!(
@@ -481,7 +502,6 @@ mod tests {
             input: Mutex::new(rx),
             stopped: Arc::new(AtomicBool::new(false)),
             send: false,
-            offered: Arc::new(AtomicU32::new(0)),
             approval: Mutex::new(approval::Gate::default()),
         };
         let ask = |prompt: &str, purpose| WorkStepKindV1::Ask {
@@ -513,11 +533,10 @@ mod tests {
     async fn stop_bypasses_full_input_queue_and_a_pending_native_check() {
         let (tx, rx) = mpsc::sync_channel(4);
         let stop = AtomicBool::new(false);
-        let offered = AtomicU32::new(0);
         for _ in 0..8 {
-            route_command(b"check", &tx, &stop, &offered);
+            route_command(b"check", &tx, &stop);
         }
-        route_command(b"stop", &tx, &stop, &offered);
+        route_command(b"stop", &tx, &stop);
         assert!(stop.load(Ordering::Acquire));
         assert_eq!(rx.try_iter().count(), 4);
         let result = tokio::time::timeout(
@@ -528,7 +547,7 @@ mod tests {
         assert!(matches!(result, Ok(None)));
     }
     #[test]
-    fn send_fixture_is_a_named_channel_and_prequeued_approvals_are_ignored() {
+    fn send_fixture_is_a_named_channel_and_stdin_cannot_approve() {
         assert!(slack_channel("https://app.slack.com/client/T0/C0"));
         for bad in [
             "https://app.slack.com/client/T0/D0",
@@ -542,19 +561,7 @@ mod tests {
         }
         let (tx, rx) = mpsc::sync_channel(4);
         let stop = AtomicBool::new(false);
-        let offered = AtomicU32::new(0);
-        route_command(b"approve 1", &tx, &stop, &offered);
+        route_command(b"approve 1", &tx, &stop);
         assert!(rx.try_recv().is_err());
-        offered.store(2, Ordering::Release);
-        route_command(b"approve 1", &tx, &stop, &offered);
-        assert!(rx.try_recv().is_err());
-        route_command(b"approve 2", &tx, &stop, &offered);
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            Input::Decision(approval::Decision {
-                offer: 2,
-                approve: true
-            })
-        );
     }
 }

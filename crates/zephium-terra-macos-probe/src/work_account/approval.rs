@@ -10,25 +10,120 @@ pub(super) struct Decision {
     pub approve: bool,
 }
 
-pub(super) fn command(bytes: &[u8]) -> Option<Decision> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let (verb, number) = text.split_once(' ')?;
-    let approve = match verb {
-        "approve" => true,
-        "decline" => false,
-        _ => return None,
-    };
-    if number.is_empty()
-        || number.len() > 10
-        || number.starts_with('0')
-        || !number.bytes().all(|b| b.is_ascii_digit())
+fn approved_output(bytes: &[u8]) -> bool {
+    bytes == b"approved\n"
+}
+
+/// The native dialog receives the full confirmation over stdin, never argv or
+/// logs. Its fixed script interprets JSON as data and returns one closed word.
+const DIALOG: &str = r#"function run() {
+  ObjC.import('Foundation');
+  try {
+    const raw = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
+    const body = JSON.parse(ObjC.unwrap($.NSString.alloc.initWithDataEncoding(raw, $.NSUTF8StringEncoding)));
+    if (typeof body !== 'string') return 'declined';
+    const app = Application.currentApplication(); app.includeStandardAdditions = true;
+    const answer = app.displayDialog(body, {withTitle: 'Zephium Work test approval', buttons: ['Decline', 'Approve once'], defaultButton: 'Decline', cancelButton: 'Decline', givingUpAfter: 90});
+    return !answer.gaveUp && answer.buttonReturned === 'Approve once' ? 'approved' : 'declined';
+  } catch (_) { return 'declined'; }
+}"#;
+
+fn dialog_body(start: &str, confirm: &WorkConfirmV1) -> Option<Vec<u8>> {
+    if !Gate::eligible(confirm)
+        || start.len() > 1024
+        || confirm.facts.len() > 12
+        || confirm.headline.len() > 300
+        || confirm.action.len() > 300
+        || confirm
+            .facts
+            .iter()
+            .any(|fact| fact.label.len() > 300 || fact.value.len() > 300)
     {
         return None;
     }
-    Some(Decision {
-        offer: number.parse().ok()?,
-        approve,
+    let mut body = format!("Disposable-account qualification only. Review the destination and exact message. Approve once only if they match your intended test channel.\n\nRequested channel: {start}\n\nPage-provided confirmation:\n{}\nAction: {}\n", confirm.headline, confirm.action);
+    for fact in &confirm.facts {
+        body.push_str(&format!("{}: {}\n", fact.label, fact.value));
+    }
+    body.push_str(&format!("\nExact message:\n{MESSAGE}\n\nThis grants only this one held action. Closing or timing out declines it."));
+    let bytes = serde_json::to_vec(&body).ok()?;
+    (bytes.len() <= 16 * 1024).then_some(bytes)
+}
+
+async fn native_review(body: Vec<u8>) -> bool {
+    use std::{process::Stdio, time::Duration};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    tokio::time::timeout(Duration::from_secs(100), async {
+        let Ok(mut child) = tokio::process::Command::new("/usr/bin/osascript")
+            .args(["-l", "JavaScript", "-e", DIALOG])
+            .env_clear()
+            .env("LC_ALL", "C")
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+        else {
+            return false;
+        };
+        let Some(mut input) = child.stdin.take() else {
+            return false;
+        };
+        if input.write_all(&body).await.is_err() {
+            return false;
+        }
+        drop(input);
+        let Some(output) = child.stdout.take() else {
+            return false;
+        };
+        let mut result = Vec::new();
+        if output.take(16).read_to_end(&mut result).await.is_err() {
+            return false;
+        }
+        child.wait().await.is_ok_and(|status| status.success()) && approved_output(&result)
     })
+    .await
+    .unwrap_or(false)
+}
+
+pub(super) struct Review {
+    offer: u32,
+    task: Option<tokio::task::JoinHandle<bool>>,
+}
+impl Review {
+    pub(super) fn start(offer: u32, start: &str, confirm: &WorkConfirmV1) -> Self {
+        let body = dialog_body(start, confirm);
+        Self {
+            offer,
+            task: Some(tokio::spawn(async move {
+                match body {
+                    Some(body) => native_review(body).await,
+                    None => false,
+                }
+            })),
+        }
+    }
+    pub(super) fn ready(&self) -> bool {
+        self.task.as_ref().is_some_and(|task| task.is_finished())
+    }
+    pub(super) async fn finish(&mut self) -> Decision {
+        let approve = match self.task.take() {
+            Some(task) => task.await.unwrap_or(false),
+            None => false,
+        };
+        Decision {
+            offer: self.offer,
+            approve,
+        }
+    }
+}
+impl Drop for Review {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -40,7 +135,7 @@ pub(super) struct Gate {
 
 impl Gate {
     pub(super) fn eligible(confirm: &WorkConfirmV1) -> bool {
-        confirm.site == "app.slack.com"
+        confirm.site == "slack.com"
             && confirm.category == WorkConfirmCategoryV1::Communication
             && confirm.text.as_deref() == Some(MESSAGE)
             && confirm.page.is_some()
@@ -105,7 +200,7 @@ mod tests {
     use super::*;
     fn confirm() -> WorkConfirmV1 {
         WorkConfirmV1 {
-            site: "app.slack.com".into(),
+            site: "slack.com".into(),
             category: WorkConfirmCategoryV1::Communication,
             headline: "Send the qualification message?".into(),
             action: "press Send".into(),
@@ -118,37 +213,37 @@ mod tests {
         }
     }
     #[test]
-    fn commands_require_one_exact_offer() {
-        assert_eq!(
-            command(b"approve 1"),
-            Some(Decision {
-                offer: 1,
-                approve: true
-            })
-        );
-        assert_eq!(
-            command(b"decline 2"),
-            Some(Decision {
-                offer: 2,
-                approve: false
-            })
-        );
+    fn only_the_closed_native_approval_result_is_accepted() {
+        assert!(approved_output(b"approved\n"));
         for bytes in [
-            "approve",
-            "approve 0",
-            "approve 01",
-            "approve +1",
-            "approve 1 ",
-            "approve 1\napprove 2",
-            "approve 4294967296",
-            "allow 1",
-            "check 1",
+            "approved",
+            "declined\n",
+            " approved\n",
+            "approved\napproved\n",
+            "true",
+            "approve 1",
         ] {
-            assert!(command(bytes.as_bytes()).is_none(), "{bytes}");
+            assert!(!approved_output(bytes.as_bytes()));
         }
+        let mut c = confirm();
+        c.headline = "Untrusted \"quote\"\\\n); throw 'inert';".into();
+        let body = dialog_body("https://app.slack.com/client/T0/C0", &c).unwrap();
+        let decoded: String = serde_json::from_slice(&body).unwrap();
+        assert!(decoded.contains(&c.headline));
+        assert!(decoded.contains(MESSAGE));
+        assert!(!DIALOG.contains(&c.headline));
+        c.facts = vec![WorkConfirmFactV1 {
+            label: "x".into(),
+            value: "x".repeat(301),
+        }];
+        assert!(dialog_body("https://app.slack.com/client/T0/C0", &c).is_none());
     }
     #[test]
     fn approvals_are_exact_single_use_and_never_cover_other_effects() {
+        assert_eq!(
+            zephium_app::work_sites::site_of("https://app.slack.com/client/T0/C0").as_deref(),
+            Some("slack.com")
+        );
         let mut gate = Gate::default();
         let original = confirm();
         let yes = Decision {
@@ -233,5 +328,39 @@ mod tests {
             Some(false)
         );
         assert_eq!(gate.offer(1.into(), 2.into(), &c), None);
+    }
+    #[tokio::test]
+    async fn leaving_the_account_flow_cancels_a_pending_review() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        struct Finished(Arc<AtomicBool>);
+        impl Drop for Finished {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let finished = Arc::new(AtomicBool::new(false));
+        let observed = finished.clone();
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let review = Review {
+            offer: 1,
+            task: Some(tokio::spawn(async move {
+                let _finished = Finished(observed);
+                let _ = ready.send(());
+                std::future::pending::<bool>().await
+            })),
+        };
+        started.await.unwrap();
+        assert!(!review.ready());
+        drop(review);
+        tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            while !finished.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }

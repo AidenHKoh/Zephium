@@ -49,7 +49,7 @@ zephium-work-composition.workspace = true
 zephium-blocker.workspace = true
 zephium-blocker-service.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["rt", "time", "process", "io-util"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 zephium-blocker = { workspace = true, features = ["webkit"] }
