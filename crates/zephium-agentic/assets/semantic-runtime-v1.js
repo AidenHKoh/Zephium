@@ -4301,17 +4301,18 @@
     return encodeSnapshot(request, records, state.completeness);
   }
 
-  function pixelPrivacy() {
+  function pixelPrivacy(publicOnly = false) {
     try {
       return globalThis.__zephiumPixelPrivacyV1.probe((element,value,field) => element === null
         ? looksLikeSecret(value) || (field && classifyLiveValue(value) !== 2)
-        : credentialField(element, classify(element) || {role:"group",tag:tagName(element)}, attribute(element,"aria-label",512)||"") !== 0);
+        : credentialField(element, classify(element) || {role:"group",tag:tagName(element)}, attribute(element,"aria-label",512)||"") !== 0, publicOnly);
     } catch (_) { return "E1:privacy"; }
   }
   function invoke(encoded) {
     if (busy) return fault("busy");
     if (typeof encoded === "string" && (encoded.startsWith("M1:") || encoded.startsWith("V1:"))) return globalThis.__zephiumRecordMediaV1.invoke(encoded, pixelPrivacy);
     if (encoded === "P1:privacy") return pixelPrivacy();
+    if (encoded === "P1:public") return pixelPrivacy(true);
     const request = parseRequest(encoded);
     if (request === null) return fault("invalid_request");
     busy = true;

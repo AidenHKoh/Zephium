@@ -11,10 +11,19 @@ const assets = new URL("../crates/zephium-agentic/assets/", import.meta.url);
 const source = readFileSync(new URL("semantic-record-media-v1.js", assets), "utf8") + readFileSync(new URL("semantic-pixel-privacy-v1.js", assets), "utf8") + readFileSync(new URL("semantic-runtime-v1.js", assets), "utf8");
 let end = 0;
 let compact = "";
+let previous = "";
+// Keep every original newline (including inside removed comments) for ASI.
+// Only omit horizontal gaps next to delimiters that cannot merge tokens.
+// The complete parsed AST comparison below remains mandatory before writes.
+const leftDelimiter = new Set(["{", "(", "[", ",", ";", ":"]);
+const rightDelimiter = new Set(["}", ")", "]", ",", ";", ":"]);
 for (const token of tokenizer(source, { ecmaVersion: "latest" })) {
   const gap = source.slice(end, token.start);
-  compact += /\r|\n/.test(gap) ? "\n" : gap.length ? " " : "";
-  compact += source.slice(token.start, token.end);
+  const raw = source.slice(token.start, token.end);
+  compact += /\r|\n/.test(gap) ? "\n"
+    : gap.length && !leftDelimiter.has(previous) && !rightDelimiter.has(raw) ? " " : "";
+  compact += raw;
+  previous = raw;
   end = token.end;
 }
 compact += "\n";

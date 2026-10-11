@@ -25,8 +25,31 @@
   watch(document);
   for (const type of ["input", "change", "scroll", "resize", "load", "transitionrun", "animationstart"])
     addEventListener(type, changed, true);
-  function probe(secret) {
-    let clear = !exhausted;
+  function boundedLabel(root) {
+    let text="", count=0, node=root;
+    const walk=document.createTreeWalker(root,0xffffffff);
+    do {
+      if(++count>64)return null;
+      if(node.nodeType===3) {const value=node.nodeValue||"";if(text.length+value.length>512)return null;text+=value;}
+    } while((node=walk.nextNode()));
+    return text;
+  }
+  function probe(secret, publicOnly = false) {
+    let clear = !exhausted, accountFree = true;
+    const identity = /(?:sign[ -]?in|log[ -]?in|sign[ -]?up|password|passcode|one[ -]?time|\b(?:verification[ -]?)?code\b|\botp\b|\bmfa\b|two[ -]?factor|authenticate|your account|account menu|workspace.{0,32}url|find your workspace|enter your workspace|choose an account|verify your identity|enter a code|e[ -]?mail|user[ -]?name)/iu;
+    const waiting = /check your (?:e[ -]?mail|inbox|phone|device)|sign[ -]?in link|confirmation[ -]?code|approve (?:this |the |your )?(?:request|sign[ -]?in)|authenticator|push notification|signing you in|logging you in|authenticating/iu;
+    if (publicOnly) {
+      try {
+        const address = location.href;
+        if (address.length > 8192) accountFree = false;
+        else {
+          const url = new URL(address);
+          if (!/^https?:$/u.test(url.protocol) || url.username || url.password ||
+              /(?:^|[/_.-])(?:login|signin|sign-in|signup|sign-up|sso|oauth|authorize|mfa|otp|authenticate|account)(?:[/_.-]|$)/iu.test(url.pathname) ||
+              [...url.searchParams.keys()].some(key => /^(?:token|code|session|auth|key)$/iu.test(key))) accountFree = false;
+        }
+      } catch (_) { accountFree = false; }
+    }
     const w=innerWidth, h=innerHeight, x=scrollX, y=scrollY;
     try {
       if (observer.takeRecords().length) changed();
@@ -46,6 +69,7 @@
           return !secret(null,attributeTail) && !secret(null,attributeSpaced);
         }
         tail=(tail+text).slice(-4096);spaced=(spaced+" "+text).slice(-4096);
+        if(publicOnly && waiting.test(spaced.replace(/\s+/gu," ")))accountFree=false;
         return !secret(null,tail) && !secret(null,spaced);
       };
       while (stack.length && clear) {
@@ -64,13 +88,30 @@
         const b=rect.call(node), s=getStyle(node);
         const visible=b.width>0 && b.height>0 && b.bottom>0 && b.right>0 && b.top<h && b.left<w && s.visibility==="visible" && s.display!=="none";
         const tag=node.localName;
+        if (publicOnly && visible) {
+          const role = node.getAttribute("role") || "";
+          if(node.getAttribute("aria-busy")==="true" || role==="progressbar" || tag==="input" && node.getAttribute("maxlength")==="1")accountFree=false;
+          if (["input","textarea","select"].includes(tag) || role === "textbox" || node.isContentEditable || /^h[1-6]$/u.test(tag) || role === "heading" || role === "status") {
+            for (const name of ["type","autocomplete","name","id","aria-label","placeholder"]) {
+              const value = node.getAttribute(name) || "";
+              if (value.length > 512 || identity.test(value)) accountFree = false;
+            }
+            if (role === "heading" || role === "status" || /^h[1-6]$/u.test(tag)) {
+              const text = boundedLabel(node);
+              if (text === null || identity.test(text) || /loading|please wait|just a moment|redirecting/iu.test(text)) accountFree = false;
+            }
+          }
+          if (["button","a"].includes(tag) || role === "button") {
+            const label = node.getAttribute("aria-label") || boundedLabel(node);
+            if (label === null || label.length > 512 || /(?:log[ -]?out|sign[ -]?out|account menu|your account)/iu.test(label)) accountFree = false;
+          }
+        }
         if(visible) for(const name of ["aria-label","title","alt","placeholder"]) {
           if(!inspect(node.getAttribute(name)||"",true)) {clear=false;break;}
         }
         if(!clear)break;
         if (visible && (["iframe","frame","object","embed"].includes(tag) || tag.includes("-") && !node.shadowRoot || secret(node,null))) {clear=false; break;}
-        // Known credential controls can be moved, filled, and restored by page
-        // script while native capture is pending. Exclude them even offscreen.
+        // Exclude credential controls even offscreen; scripts can restore them.
         if (["input","textarea","select"].includes(tag) && secret(node,null)) {clear=false; break;}
         if (tag==="input" || tag==="textarea") {
           const value=(tag==="input" ? inputValue : areaValue).call(node);
@@ -89,7 +130,9 @@
       }
       if (observer.takeRecords().length) {changed(); clear=false;}
     } catch (_) {clear=false;}
-    return stringify({v:1,r:revision,c:clear && !exhausted,w,h,x,y});
+    const proof = {v:1,r:revision,c:clear && !exhausted,w,h,x,y};
+    if (publicOnly) proof.a = clear && !exhausted && accountFree;
+    return stringify(proof);
   }
   Object.defineProperty(globalThis, NAME, {value:Object.freeze({probe}), writable:false, configurable:false});
 })();
