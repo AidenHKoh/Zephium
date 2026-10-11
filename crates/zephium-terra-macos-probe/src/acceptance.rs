@@ -1709,6 +1709,9 @@ pub(super) async fn lead_workflow(
                         settings.resource_diagnostic = None;
                         settings.diagnostic = None;
                     }
+                    if account_probe {
+                        settings.stage_diagnostic = Some(super::work_account::stage);
+                    }
                     if public_page_diagnostic_enabled(
                         public_eval,
                         account_probe,

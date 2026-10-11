@@ -1348,9 +1348,11 @@ impl NativeWorkComposition {
                     if let Some(since) = human_wait {
                         waited += now.saturating_duration_since(since);
                     }
+                    let mut resume_stage = "plan";
                     let result = async {
                         let plan = resume_plan.as_ref().ok_or(WorkError::Invalid)?;
                         // A page continues in the session it started in.
+                        resume_stage = "account";
                         let account = match session_account(&plan.request)? {
                             Some(account) => PublicReadWorkAccount::Identified {
                                 account,
@@ -1366,7 +1368,9 @@ impl NativeWorkComposition {
                         let actions = prior_actions
                             .checked_add(resume.actions)
                             .ok_or(WorkError::Capacity)?;
+                        resume_stage = "remaining";
                         let remaining = remaining_read(limits, total, calls, actions, task)?;
+                        resume_stage = "access";
                         let access = resume_access(plan.chosen.as_ref()).await?;
                         let mut request = plan.request.clone();
                         request.limits = remaining.0;
@@ -1390,8 +1394,13 @@ impl NativeWorkComposition {
                         settings.refusal_diagnostic = refusals.product;
                         #[cfg(feature = "public-qualification")]
                         {
+                            settings.stage_diagnostic = refusals.stage;
+                        }
+                        #[cfg(feature = "public-qualification")]
+                        {
                             settings.loopback_anonymous = plan.loopback_anonymous;
                         }
+                        resume_stage = "deadline";
                         let owner_deadline =
                             guard.0.active_deadline().ok_or(WorkError::Unavailable)?;
                         let resume_deadline = owner_deadline.min(attempt.deadline()).min(if task {
@@ -1401,6 +1410,7 @@ impl NativeWorkComposition {
                         } else {
                             owner_deadline
                         });
+                        resume_stage = "compile";
                         let mut invocation = compile_page_step(
                             attempt,
                             request,
@@ -1418,14 +1428,17 @@ impl NativeWorkComposition {
                             gate.clone(),
                             plan.results.clone(),
                         )?;
+                        resume_stage = "decisions";
                         configure_decisions(&mut invocation, plan.decisions, resume_deadline)
                             .await?;
+                        resume_stage = "spec";
                         let successor_run = invocation
                             .input
                             .retained_resource_spec()
                             .map_err(|_| WorkError::Invalid)?
                             .identity
                             .owner();
+                        resume_stage = "prepare";
                         let prepared = zephium_app::PreparedRetainedContinuation::try_new(
                             resume.generation,
                             invocation.input,
@@ -1434,6 +1447,7 @@ impl NativeWorkComposition {
                             invocation.task,
                         )
                         .map_err(|_| WorkError::Invalid)?;
+                        resume_stage = "queue";
                         if !guard.0.resume_after_human(prepared) {
                             return Err(WorkError::Unavailable);
                         }
@@ -1466,6 +1480,7 @@ impl NativeWorkComposition {
                     }
                     .await;
                     if let Err(error) = result {
+                        trace(&format!("human:resume_stage:{resume_stage}"));
                         trace(&format!("human:resume_refused:{error:?}"));
                         requested_close = true;
                     }

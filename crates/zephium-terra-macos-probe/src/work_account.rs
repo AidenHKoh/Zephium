@@ -4,8 +4,9 @@ mod approval;
 use std::{
     io::{Read, Write},
     sync::{
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex, OnceLock,
+        mpsc,
     },
     time::Duration,
 };
@@ -15,6 +16,61 @@ use zephium_core::{
 };
 use zephium_ipc::work::*;
 use zephium_work_composition::MacosWorkComposition;
+
+fn stage_label(line: &str) -> Option<&str> {
+    Some(match line {
+        "human:resume_stage:plan"
+        | "human:resume_stage:account"
+        | "human:resume_stage:remaining"
+        | "human:resume_stage:access"
+        | "human:resume_stage:deadline"
+        | "human:resume_stage:compile"
+        | "human:resume_stage:decisions"
+        | "human:resume_stage:spec"
+        | "human:resume_stage:prepare"
+        | "human:resume_stage:queue"
+        | "compile:profile"
+        | "compile:budget"
+        | "compile:navigation"
+        | "compile:capacity"
+        | "compile:fields"
+        | "compile:extraction"
+        | "compile:findings"
+        | "human:wall_cleared"
+        | "human:successor_queued"
+        | "close:recovery"
+        | "close:cancel_requested"
+        | "close:cancel_read_failed"
+        | "close:attempt_deadline"
+        | "close:abandoned"
+        | "close:entry_declined"
+        | "close:unconfirmed_commit"
+        | "close:uncertain"
+        | "close:retired"
+        | "close:lost" => line,
+        "human:resume_refused:Invalid"
+        | "human:resume_refused:Capacity"
+        | "human:resume_refused:Unavailable"
+        | "human:resume_refused:OutcomeUnknown"
+        | "human:resume_refused:Conflict" => line,
+        value if value.starts_with("compile:admission:") => "compile:admission",
+        value if value.starts_with("human:resume_refused:") => "human:resume_refused",
+        value if value.starts_with("close:human_wait:") => "close:human_wait",
+        value if value.starts_with("close:not_ready:") => "close:not_ready",
+        value if value.starts_with("close:terminal:") => "close:terminal",
+        _ => return None,
+    })
+}
+
+pub(super) fn stage(line: &str) {
+    let Some(label) = stage_label(line) else {
+        return;
+    };
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "account-probe: stage={label}; content=redacted"
+    );
+}
 
 pub(super) struct Account {
     origin: &'static str,
@@ -157,9 +213,14 @@ fn configure_mode(url: &str, send: bool) -> Result<String, &'static str> {
         })
         .map_err(|_| "account_duplicate")?;
     if send {
-        return Ok(format!("Open my disposable Slack test channel at {url} with the Browser helper. Read the currently visible messages. If sign-in or MFA is needed, hand the live page to me and resume after native verification. Do not search or use Computer.\nIn the same disposable test channel at {url}, compose exactly this message: {} Wait for the normal explicit confirmation before sending it once. After sending, read the channel to verify it appears, and report the result honestly. Never resend after uncertain verification or extraction failure. Do not edit, delete, invite, or change any other account data.\nExplain from recorded state whether the approved message was sent and what verification was obtained. Do not send or retry any action to explain the previous result.", approval::MESSAGE));
+        return Ok(format!(
+            "Open my disposable Slack test channel at {url} with the Browser helper. Read the currently visible messages. If sign-in or MFA is needed, hand the live page to me and resume after native verification. Do not search or use Computer.\nIn the same disposable test channel at {url}, compose exactly this message: {} Wait for the normal explicit confirmation before sending it once. After sending, read the channel to verify it appears, and report the result honestly. Never resend after uncertain verification or extraction failure. Do not edit, delete, invite, or change any other account data.\nExplain from recorded state whether the approved message was sent and what verification was obtained. Do not send or retry any action to explain the previous result.",
+            approval::MESSAGE
+        ));
     }
-    Ok(format!("Open my test account at {url} with the Browser helper and read only the currently visible channel, inbox or issue list. If sign-in or MFA is needed, hand the live page to me and resume after native verification. Summarize at most three visible items with sources, or report honestly what blocks access. Do not search, substitute documentation, use Computer, type into account content, send, create, edit or delete anything.\nExplain the previous result from recorded state and evidence. If access was blocked, say exactly what is needed; do not retry or open a new page just to explain."))
+    Ok(format!(
+        "Open my test account at {url} with the Browser helper and read only the currently visible channel, inbox or issue list. If sign-in or MFA is needed, hand the live page to me and resume after native verification. Summarize at most three visible items with sources, or report honestly what blocks access. Do not search, substitute documentation, use Computer, type into account content, send, create, edit or delete anything.\nExplain the previous result from recorded state and evidence. If access was blocked, say exactly what is needed; do not retry or open a new page just to explain."
+    ))
 }
 impl Account {
     pub(super) fn report(&self, execution: &WorkExecutionFact) {
@@ -193,11 +254,15 @@ impl Account {
             .filter(|s| matches!(s.kind, WorkStepKindV1::Read { .. }))
             .enumerate()
         {
-            let _ = writeln!(std::io::stdout().lock(),
+            let _ = writeln!(
+                std::io::stdout().lock(),
                 "account-probe: page={} status={:?} outcome={:?} native_actions={:?} planner_calls={:?}; content=redacted",
-                index + 1, step.status, step.measurements.as_ref().and_then(|m| m.outcome),
+                index + 1,
+                step.status,
+                step.measurements.as_ref().and_then(|m| m.outcome),
                 step.measurements.as_ref().map(|m| m.native_actions),
-                step.measurements.as_ref().map(|m| m.planner_calls));
+                step.measurements.as_ref().map(|m| m.planner_calls)
+            );
         }
     }
     pub(super) fn stopped(&self) -> bool {
@@ -453,6 +518,30 @@ impl WorkPublicSearchProvider for NoSearch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn account_stage_diagnostics_never_include_arbitrary_details() {
+        assert_eq!(
+            stage_label("human:resume_refused:Invalid"),
+            Some("human:resume_refused:Invalid")
+        );
+        for (prefix, closed) in [
+            ("human:resume_refused:", "human:resume_refused"),
+            ("compile:admission:", "compile:admission"),
+            ("close:human_wait:", "close:human_wait"),
+            ("close:not_ready:", "close:not_ready"),
+            ("close:terminal:", "close:terminal"),
+        ] {
+            assert_eq!(
+                stage_label(&format!("{prefix}private fixture detail")),
+                Some(closed)
+            );
+        }
+        assert_eq!(stage_label("private fixture detail"), None);
+        assert_eq!(
+            stage_label("human:wall_cleared private fixture detail"),
+            None
+        );
+    }
     #[test]
     fn native_presentation_never_advances_a_hidden_approval_handoff() {
         assert!(presentable_reason(WorkHumanReasonV1::SignIn));

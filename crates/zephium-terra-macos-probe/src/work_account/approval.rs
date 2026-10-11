@@ -1,6 +1,6 @@
 //! One explicit approval of the fixed disposable-account fixture. The offer is
 //! process-local and never a model tool, durable grant, or run-wide permission.
-use zephium_core::work::{runtime::*, WorkExecutionId, WorkStepId};
+use zephium_core::work::{WorkExecutionId, WorkStepId, runtime::*};
 
 pub(super) const MESSAGE: &str = "Zephium Work qualification: approved send and extraction test.";
 
@@ -41,7 +41,10 @@ fn dialog_body(start: &str, confirm: &WorkConfirmV1) -> Option<Vec<u8>> {
     {
         return None;
     }
-    let mut body = format!("Disposable-account qualification only. Review the destination and exact message. Approve once only if they match your intended test channel.\n\nRequested channel: {start}\n\nPage-provided confirmation:\n{}\nAction: {}\n", confirm.headline, confirm.action);
+    let mut body = format!(
+        "Disposable-account qualification only. Review the destination and exact message. Approve once only if they match your intended test channel.\n\nRequested channel: {start}\n\nPage-provided confirmation:\n{}\nAction: {}\n",
+        confirm.headline, confirm.action
+    );
     for fact in &confirm.facts {
         body.push_str(&format!("{}: {}\n", fact.label, fact.value));
     }
@@ -332,8 +335,8 @@ mod tests {
     #[tokio::test]
     async fn leaving_the_account_flow_cancels_a_pending_review() {
         use std::sync::{
-            atomic::{AtomicBool, Ordering},
             Arc,
+            atomic::{AtomicBool, Ordering},
         };
         struct Finished(Arc<AtomicBool>);
         impl Drop for Finished {

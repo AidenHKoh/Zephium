@@ -13,6 +13,8 @@ const WAIT: usize = 0;
 const CLEAR_FIRST: usize = 1;
 const NEXT_DOCUMENT: usize = 2;
 const CLEAR_OLD_DOCUMENT: usize = 3;
+const EMAIL_CODE: usize = 4;
+static EMAIL_SHOWN: AtomicBool = AtomicBool::new(false);
 static CONTROL: AtomicUsize = AtomicUsize::new(WAIT);
 static CLEARED_DOCUMENT: AtomicUsize = AtomicUsize::new(0);
 static POLLED_DOCUMENT: AtomicUsize = AtomicUsize::new(0);
@@ -20,14 +22,16 @@ static POLLED_DOCUMENT: AtomicUsize = AtomicUsize::new(0);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Scenario {
     SignIn,
+    EmailCode,
     Check,
     Unresolved,
     Cancel,
     StaleDocument,
     LongWait,
 }
-pub(super) const SCENARIOS: [Scenario; 6] = [
+pub(super) const SCENARIOS: [Scenario; 7] = [
     Scenario::SignIn,
+    Scenario::EmailCode,
     Scenario::Check,
     Scenario::Unresolved,
     Scenario::Cancel,
@@ -38,6 +42,7 @@ impl Scenario {
     fn name(self) -> &'static str {
         match self {
             Self::SignIn => "signin",
+            Self::EmailCode => "email-code",
             Self::Check => "check",
             Self::Unresolved => "unresolved",
             Self::Cancel => "cancel",
@@ -60,7 +65,10 @@ impl Scenario {
         }
     }
     fn resumes(self) -> bool {
-        matches!(self, Self::SignIn | Self::Check | Self::LongWait)
+        matches!(
+            self,
+            Self::SignIn | Self::EmailCode | Self::Check | Self::LongWait
+        )
     }
 }
 
@@ -77,6 +85,7 @@ pub(super) struct Session {
     presented_since: Option<Instant>,
     presented_samples: usize,
     signal_at: Option<Instant>,
+    email_since: Option<Instant>,
     stale_revision: Option<String>,
     unresolved_held: bool,
     check_waiting: bool,
@@ -96,6 +105,7 @@ impl Session {
             presented_since: None,
             presented_samples: 0,
             signal_at: None,
+            email_since: None,
             stale_revision: None,
             unresolved_held: false,
             check_waiting: false,
@@ -129,6 +139,7 @@ fn instruction(control: usize, document: usize) -> &'static str {
     match (control, document) {
         (CLEAR_FIRST | CLEAR_OLD_DOCUMENT, 1) => "clear",
         (NEXT_DOCUMENT, 1) => "navigate",
+        (EMAIL_CODE, 1) => "email",
         _ => "wait",
     }
 }
@@ -136,10 +147,14 @@ fn instruction(control: usize, document: usize) -> &'static str {
 pub(super) fn response(path: &str) -> String {
     let path = path.split('?').next().unwrap_or(path);
     let parts: Vec<_> = path.trim_start_matches(PREFIX).split('/').collect();
-    if let [operation @ ("state" | "ack"), document] = parts.as_slice() {
+    if let [operation @ ("state" | "ack" | "email-ack"), document] = parts.as_slice() {
         let document = document.parse::<usize>().unwrap_or(0);
         if !(1..=2).contains(&document) {
             return "wait".into();
+        }
+        if *operation == "email-ack" {
+            EMAIL_SHOWN.store(true, Ordering::SeqCst);
+            return "ok".into();
         }
         if *operation == "ack" {
             CLEARED_DOCUMENT.store(document, Ordering::SeqCst);
@@ -157,6 +172,7 @@ pub(super) fn response(path: &str) -> String {
     let document = document.parse::<usize>().unwrap_or(0);
     if ![
         "signin",
+        "email-code",
         "check",
         "unresolved",
         "cancel",
@@ -169,9 +185,15 @@ pub(super) fn response(path: &str) -> String {
         return String::new();
     }
     let (title, wall) = if *scenario == "check" {
-        ("Verify you are human", "<h1>Verify you are human</h1><p>Complete this local human check to view the fixture dashboard.</p><iframe title=\"Security verification captcha\" src=\"/human-fixture/frame\" width=\"320\" height=\"120\"></iframe>")
+        (
+            "Verify you are human",
+            "<h1>Verify you are human</h1><p>Complete this local human check to view the fixture dashboard.</p><iframe title=\"Security verification captcha\" src=\"/human-fixture/frame\" width=\"320\" height=\"120\"></iframe>",
+        )
     } else {
-        ("Sign in", "<h1>Sign in to the fixture dashboard</h1><p>Local qualification only. Do not enter real credentials.</p><form onsubmit=\"return false\"><label>Fixture password <input type=\"password\" autocomplete=\"off\"></label><button type=\"button\" disabled>Fixture human sign-in</button></form>")
+        (
+            "Sign in",
+            "<h1>Sign in to the fixture dashboard</h1><p>Local qualification only. Do not enter real credentials.</p><form onsubmit=\"return false\"><label>Fixture password <input type=\"password\" autocomplete=\"off\"></label><button type=\"button\" disabled>Fixture human sign-in</button></form>",
+        )
     };
     // This polling simulation is present only in a synthetic loopback document.
     // Its controller never publishes a clear before observing native Presented.
@@ -179,13 +201,18 @@ pub(super) fn response(path: &str) -> String {
         r#"<!doctype html><html><head><title>{title}</title></head><body>
 <main id="wall">{wall}</main><script>
 (function(){{
- const documentNumber={document}; let finished=false;
+ const documentNumber={document}; let finished=false, emailShown=false;
  async function poll(){{
   if(finished)return;
   try{{
    const response=await fetch('/human-fixture/state/'+documentNumber,{{cache:'no-store'}});
    const action=await response.text();
    if(action==='navigate'){{finished=true;location.replace('/human-fixture/stale/2');return;}}
+   if(action==='email' && !emailShown){{
+    emailShown=true;document.title='Fixture confirmation';
+    document.body.innerHTML='<main><h1>Continue to your workspace</h1><p>Complete the next step to open your account.</p><input type="text" name="code"><button type="button">Continue</button></main>';
+    await fetch('/human-fixture/email-ack/'+documentNumber,{{cache:'no-store'}});
+   }}
    if(action==='clear'){{
     finished=true;document.title='Fixture dashboard';
     document.body.innerHTML='<main><h1>Fixture dashboard</h1><p>{FACT}.</p><p>This dashboard is public synthetic test data. The retained page now exposes its balance and reference without a reload, route change, cookie signal or manual continue command.</p></main>';
@@ -264,8 +291,22 @@ fn advance(session: &mut Session, pages: &[WorkHumanPageV1]) -> Action {
             return Action::None;
         }
         session.unresolved_held = session.presented_samples >= 3;
+        if session.scenario == Scenario::EmailCode {
+            CONTROL.store(EMAIL_CODE, Ordering::SeqCst);
+            if !EMAIL_SHOWN.load(Ordering::SeqCst) {
+                return Action::None;
+            }
+            if session.email_since.is_none() {
+                session.email_since = Some(Instant::now());
+                session.check_waiting = false;
+                return Action::Check(page.id, false);
+            }
+            if session.email_since.is_some_and(|at| at.elapsed() < HOLD) {
+                return Action::None;
+            }
+        }
         match session.scenario {
-            Scenario::SignIn | Scenario::Check | Scenario::LongWait => {
+            Scenario::SignIn | Scenario::EmailCode | Scenario::Check | Scenario::LongWait => {
                 CONTROL.store(CLEAR_FIRST, Ordering::SeqCst);
                 session.signal_at = Some(Instant::now());
             }
@@ -403,7 +444,10 @@ pub(super) async fn person(context: &Context<'_>, work: WorkId, pages: &[WorkHum
                     }
                 }
             }
-            let _ = writeln!(std::io::stdout().lock(), "loopback-human-recheck: expected_clear={clear} first={first:?} repeated={repeated:?} stale_refused={stale_refused} same_page_held={unchanged}; content=synthetic");
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                "loopback-human-recheck: expected_clear={clear} first={first:?} repeated={repeated:?} stale_refused={stale_refused} same_page_held={unchanged}; content=synthetic"
+            );
         }
         Action::Cancel => {
             let Some(state) = context.projection(work).await else {
@@ -526,6 +570,7 @@ pub(super) async fn run(
     scenario: Scenario,
 ) -> Result<(Run, bool), &'static str> {
     CONTROL.store(WAIT, Ordering::SeqCst);
+    EMAIL_SHOWN.store(false, Ordering::SeqCst);
     CLEARED_DOCUMENT.store(0, Ordering::SeqCst);
     POLLED_DOCUMENT.store(0, Ordering::SeqCst);
     *context
@@ -609,6 +654,8 @@ pub(super) async fn run(
         && state.check_waiting
         && retired_check_refused
         && state.unresolved_held
+        && (scenario != Scenario::EmailCode
+            || state.email_since.is_some_and(|at| at.elapsed() >= HOLD))
         && main_loads == 1
         && retired
         && original_limits_unchanged
@@ -640,11 +687,18 @@ pub(super) async fn run(
     let check_clear = state.check_clear;
     let cancel_millis = state.cancel_millis.unwrap_or(0);
     let durable_cancelled = state.cancel_millis.is_some();
-    let _ = writeln!(std::io::stdout().lock(),
+    let _ = writeln!(
+        std::io::stdout().lock(),
         "loopback-human: scenario={} presented={presented} unresolved_held={} native_page_identity_stable={} same_document={} main_loads={main_loads} resolved_handoff={receipt} planner_calls={calls} cancelled={cancelled} durable_cancelled={durable_cancelled} cancel_millis={cancel_millis} retired={retired} stale_fixture_document_held={} manual_continue_calls=0 check_waiting={check_waiting} check_clear={check_clear} retired_check_refused={retired_check_refused} admitted_timeout_seconds={admitted_timeout} presented_hold_ms={held_ms} elapsed_ms={elapsed_ms} original_limits_unchanged={original_limits_unchanged} past_original_deadline={past_original_deadline} simulated_human=loopback_dom_only passed={passed} failure={}; content=synthetic",
-        scenario.name(), state.unresolved_held, state.id.is_some() && state.failure != Some("human_page_identity_changed"),
-        scenario.resumes() && state.revision.is_some() && state.failure != Some("same_document_revision_changed"),
-        state.stale_revision.is_some(), state.failure.unwrap_or("none"));
+        scenario.name(),
+        state.unresolved_held,
+        state.id.is_some() && state.failure != Some("human_page_identity_changed"),
+        scenario.resumes()
+            && state.revision.is_some()
+            && state.failure != Some("same_document_revision_changed"),
+        state.stale_revision.is_some(),
+        state.failure.unwrap_or("none")
+    );
     Ok((run, passed))
 }
 

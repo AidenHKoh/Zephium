@@ -107,6 +107,18 @@ impl WorkHumanPresentation {
         }
         #[cfg(feature = "agentic-browser-qa")]
         if self.presented {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "agent_view human_retire expired={} window_visible={} minimized={} page_hidden={} page_geometry={} parent_geometry={} current={}",
+                Instant::now() >= self.deadline,
+                self.window.isVisible(),
+                self.window.isMiniaturized(),
+                self.page.isHidden(),
+                self.page.frame() == self.region,
+                self.parent_geometry == HumanParentGeometry::capture(&self.parent),
+                self.current()
+            );
             record_cookie_facts(&self.page, "Retiring");
         }
         let fenced = super::passive_page::register(&self.page);
@@ -189,8 +201,11 @@ fn record_cookie_facts(page: &WKWebView, phase: &'static str) {
             clearance |= name.isEqualToString(objc2_foundation::ns_string!("cf_clearance"));
             bot_management |= name.isEqualToString(objc2_foundation::ns_string!("__cf_bm"));
         }
-        let _ = writeln!(std::io::stderr(),
-            "agent_view human_phase={phase} cookies={} clearance={clearance} bot_management={bot_management}", values.len());
+        let _ = writeln!(
+            std::io::stderr(),
+            "agent_view human_phase={phase} cookies={} clearance={clearance} bot_management={bot_management}",
+            values.len()
+        );
     });
     // SAFETY: the retained page is on the AppKit thread; WebKit copies the callback.
     unsafe {

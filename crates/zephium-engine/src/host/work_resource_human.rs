@@ -352,6 +352,23 @@ impl WorkNativeResource {
             })
             || !self.schedule_human_wake()
         {
+            #[cfg(feature = "agentic-browser-qa")]
+            {
+                use std::io::Write;
+                let present = work_browser_monotonic_now()
+                    .is_some_and(|now| self.guard.human_current(Operation::PresentHuman, now));
+                let continuing = work_browser_monotonic_now().is_some_and(|now| {
+                    self.guard.human_current(Operation::ContinueAfterHuman, now)
+                });
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "agent_view human_retire_fault erased={erased} presentation={} present_guard={present} continue_guard={continuing} wake={}",
+                    self.human_presentation
+                        .as_ref()
+                        .is_some_and(|p| p.current()),
+                    self.human_wake.is_some()
+                );
+            }
             self.retire_human_presentation();
             #[cfg(target_os = "windows")]
             if let Some(view) = self.view.as_ref() {

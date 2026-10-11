@@ -5,8 +5,8 @@ use std::{
     io::{Read as _, Write as _},
     net::{TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -23,7 +23,7 @@ use zephium_core::{
 use zephium_ipc::work::*;
 use zephium_work_composition::NativeWorkComposition;
 
-use super::work_durable::{browser_settings, WorkflowResult};
+use super::work_durable::{WorkflowResult, browser_settings};
 
 #[path = "work_site_human.rs"]
 mod human_fixture;
@@ -300,6 +300,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("held") => vec![Check::Held],
         Some("wall") => vec![Check::Wall],
         Some("human-signin") => vec![Check::Human(human_fixture::Scenario::SignIn)],
+        Some("human-email-code") => vec![Check::Human(human_fixture::Scenario::EmailCode)],
         Some("human-check") => vec![Check::Human(human_fixture::Scenario::Check)],
         Some("human-long-wait") => vec![Check::Human(human_fixture::Scenario::LongWait)],
         Some("human-unresolved") => vec![Check::Human(human_fixture::Scenario::Unresolved)],
@@ -548,7 +549,9 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
         return;
     }
     let page = |title: &str, body: &str| {
-        format!("<!doctype html><html><head><title>{title}</title></head><body><main>{body}</main></body></html>")
+        format!(
+            "<!doctype html><html><head><title>{title}</title></head><body><main>{body}</main></body></html>"
+        )
     };
     let consented = |name: &str| cookie.contains(&format!("{name}=no"));
     let banner = |form: bool| {
@@ -557,12 +560,14 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
         } else {
             "<button id=\"r\" type=\"button\">Reject all</button><button id=\"a\" type=\"button\">Accept all</button><script>document.getElementById('r').addEventListener('click',function(){this.disabled=true;fetch('/consent/jsave',{method:'POST'}).then(function(){location.reload();});});</script>"
         };
-        format!("<div role=\"dialog\" aria-modal=\"true\" aria-label=\"Before you continue\"><h2>Before you continue</h2><p>We use cookies and data to deliver and maintain our services.</p>{buttons}</div><main><p>Loading fares</p></main>")
+        format!(
+            "<div role=\"dialog\" aria-modal=\"true\" aria-label=\"Before you continue\"><h2>Before you continue</h2><p>We use cookies and data to deliver and maintain our services.</p>{buttons}</div><main><p>Loading fares</p></main>"
+        )
     };
     let (status, headers, body) = match (site, method.as_str(), path.as_str()) {
-        (Site::Account, "GET", path) if path.starts_with("/human-fixture/") => (
-            "200 OK", String::new(), human_fixture::response(path),
-        ),
+        (Site::Account, "GET", path) if path.starts_with("/human-fixture/") => {
+            ("200 OK", String::new(), human_fixture::response(path))
+        }
         (Site::Account, "POST", "/consent/save") => (
             "303 See Other",
             "Set-Cookie: zconsent=no; Path=/; Max-Age=3600\r\nLocation: /gconsent\r\n".into(),
@@ -594,37 +599,46 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
         (Site::Account | Site::Board | Site::Third, _, "/seed") => (
             "200 OK",
             format!("Set-Cookie: {ACCOUNT_COOKIE}; Path=/; Max-Age=3600; HttpOnly\r\n"),
-            page("Account", "<h1>Signed in</h1><p>Welcome back to the account site.</p>"),
+            page(
+                "Account",
+                "<h1>Signed in</h1><p>Welcome back to the account site.</p>",
+            ),
         ),
         (Site::Account, _, "/leave") => (
             "302 Found",
             format!("Location: http://localhost:{}/landing\r\n", ports.1),
             String::new(),
         ),
-        (Site::Account, _, "/start") => (
-            "302 Found",
-            "Location: /landed\r\n".into(),
-            String::new(),
-        ),
+        (Site::Account, _, "/start") => {
+            ("302 Found", "Location: /landed\r\n".into(), String::new())
+        }
         (Site::Account, _, "/landed") => (
             "200 OK",
             String::new(),
-            page("Landed", &format!("<h1>Front desk</h1><p>{LANDED_FACT}.</p>")),
+            page(
+                "Landed",
+                &format!("<h1>Front desk</h1><p>{LANDED_FACT}.</p>"),
+            ),
         ),
         (Site::Account, _, "/visual") => (
             "200 OK",
             String::new(),
-            page("Chart", r##"<h1>Inventory chart</h1><canvas id="chart" width="700" height="420" aria-label="Inventory bar chart"></canvas><script>
+            page(
+                "Chart",
+                r##"<h1>Inventory chart</h1><canvas id="chart" width="700" height="420" aria-label="Inventory bar chart"></canvas><script>
 const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.fillRect(0,0,700,420);c.font='28px sans-serif';
 [['Red',17,'#b22222'],['Blue',43,'#1644bb'],['Green',29,'#16753e']].forEach(function(row,i){let y=55+i*115;c.fillStyle='black';c.fillText(row[0],20,y+28);c.fillStyle=row[2];c.fillRect(130,y,row[1]*10,45);c.fillStyle='black';c.fillText(String(row[1]),145+row[1]*10,y+30);});
-</script>"##),
+</script>"##,
+            ),
         ),
         (Site::Account, _, "/app") => (
             "200 OK",
             String::new(),
             page(
                 "App",
-                &format!("<h1>Dashboard</h1><button id=\"r\" type=\"button\">Reports</button><section id=\"view\"><p>Pick a view.</p></section><script>document.getElementById('r').addEventListener('click',function(){{history.pushState({{}},'','/app/reports');document.getElementById('view').innerHTML='<h2>Reports</h2><p>{REPORT_FACT}.</p>';}});</script>"),
+                &format!(
+                    "<h1>Dashboard</h1><button id=\"r\" type=\"button\">Reports</button><section id=\"view\"><p>Pick a view.</p></section><script>document.getElementById('r').addEventListener('click',function(){{history.pushState({{}},'','/app/reports');document.getElementById('view').innerHTML='<h2>Reports</h2><p>{REPORT_FACT}.</p>';}});</script>"
+                ),
             ),
         ),
         (Site::Account, _, "/autopost") => (
@@ -632,7 +646,9 @@ const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.
             String::new(),
             page(
                 "Autopost",
-                &format!("<h1>Drafts</h1><p>{AUTOPOST_FACT}.</p><form id=\"f\" method=\"post\" action=\"/autopost/submit\"><input type=\"hidden\" name=\"x\" value=\"1\"></form><script>setTimeout(function(){{document.getElementById('f').submit();}},600);</script>"),
+                &format!(
+                    "<h1>Drafts</h1><p>{AUTOPOST_FACT}.</p><form id=\"f\" method=\"post\" action=\"/autopost/submit\"><input type=\"hidden\" name=\"x\" value=\"1\"></form><script>setTimeout(function(){{document.getElementById('f').submit();}},600);</script>"
+                ),
             ),
         ),
         (Site::Account, _, "/compose") => (
@@ -651,8 +667,14 @@ const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.
                 String::new(),
                 page(
                     "Cabin",
-                    &format!("<h1>Cabin by the lake</h1><form method=\"post\" action=\"/book/confirm\" aria-label=\"Reserve\"><p>Dates: 3-5 May</p><p>Guests: 2</p><p>Total: <span id=\"t\">$1,240</span></p><button>Request to book</button></form>{}",
-                        if live { "<script>var n=1240,s=Date.now();setInterval(function(){document.getElementById('t').textContent='$'+(n+Math.floor((Date.now()-s)/1000)*10).toLocaleString('en-US');},250);</script>" } else { "" }),
+                    &format!(
+                        "<h1>Cabin by the lake</h1><form method=\"post\" action=\"/book/confirm\" aria-label=\"Reserve\"><p>Dates: 3-5 May</p><p>Guests: 2</p><p>Total: <span id=\"t\">$1,240</span></p><button>Request to book</button></form>{}",
+                        if live {
+                            "<script>var n=1240,s=Date.now();setInterval(function(){document.getElementById('t').textContent='$'+(n+Math.floor((Date.now()-s)/1000)*10).toLocaleString('en-US');},250);</script>"
+                        } else {
+                            ""
+                        }
+                    ),
                 ),
             )
         }
@@ -669,7 +691,9 @@ const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.
             String::new(),
             page(
                 "Home",
-                &format!("<header><nav><a href=\"/login\">Sign in</a></nav></header><h1>Welcome</h1><p>{HOME_FACT}.</p>"),
+                &format!(
+                    "<header><nav><a href=\"/login\">Sign in</a></nav></header><h1>Welcome</h1><p>{HOME_FACT}.</p>"
+                ),
             ),
         ),
         (Site::Account, _, "/churn") => (
@@ -677,7 +701,9 @@ const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.
             String::new(),
             page(
                 "Churn",
-                &format!("<h1>List</h1><button id=\"c\" type=\"button\">Continue</button><p id=\"p\">Press Continue to load the list.</p><script>var n=+(sessionStorage.getItem('churn')||0);if(n>0&&n<7){{document.getElementById('p').textContent='Loading';sessionStorage.setItem('churn',n+1);setTimeout(function(){{location.reload();}},350);}}else if(n>=7){{document.getElementById('p').textContent='{CHURN_FACT}.';}}document.getElementById('c').addEventListener('click',function(){{sessionStorage.setItem('churn',1);setTimeout(function(){{location.reload();}},120);}});</script>"),
+                &format!(
+                    "<h1>List</h1><button id=\"c\" type=\"button\">Continue</button><p id=\"p\">Press Continue to load the list.</p><script>var n=+(sessionStorage.getItem('churn')||0);if(n>0&&n<7){{document.getElementById('p').textContent='Loading';sessionStorage.setItem('churn',n+1);setTimeout(function(){{location.reload();}},350);}}else if(n>=7){{document.getElementById('p').textContent='{CHURN_FACT}.';}}document.getElementById('c').addEventListener('click',function(){{sessionStorage.setItem('churn',1);setTimeout(function(){{location.reload();}},120);}});</script>"
+                ),
             ),
         ),
         (Site::Account, _, "/freeze") => (
@@ -690,12 +716,19 @@ const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.
         ),
         (Site::Account, _, "/vault-login") => {
             VAULT_OPEN.store(true, Ordering::SeqCst);
-            ("200 OK", String::new(), page("Signed in", "<p>Signed in.</p>"))
+            (
+                "200 OK",
+                String::new(),
+                page("Signed in", "<p>Signed in.</p>"),
+            )
         }
         (Site::Account, _, "/vault") if !VAULT_OPEN.load(Ordering::SeqCst) => (
             "200 OK",
             String::new(),
-            page("Sign in", "<h1>Sign in to your vault</h1><form method=\"post\" action=\"/login\"><label>Email <input type=\"email\" name=\"email\" autocomplete=\"email\"></label><label>Password <input type=\"password\" name=\"password\"></label><button>Sign in</button></form>"),
+            page(
+                "Sign in",
+                "<h1>Sign in to your vault</h1><form method=\"post\" action=\"/login\"><label>Email <input type=\"email\" name=\"email\" autocomplete=\"email\"></label><label>Password <input type=\"password\" name=\"password\"></label><button>Sign in</button></form>",
+            ),
         ),
         (Site::Account, _, "/vault") => (
             "200 OK",
@@ -726,12 +759,19 @@ const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.
             } else {
                 "<p>No matches.</p>".to_owned()
             };
-            ("200 OK", String::new(), page("Results", &format!("<h1>Results</h1>{found}")))
+            (
+                "200 OK",
+                String::new(),
+                page("Results", &format!("<h1>Results</h1>{found}")),
+            )
         }
         (Site::Account, _, _) if !signed_in => (
             "200 OK",
             String::new(),
-            page("Sign in", "<h1>Sign in to your account</h1><form method=\"post\" action=\"/login\"><label>Email <input type=\"email\" name=\"email\" autocomplete=\"email\"></label><label>Password <input type=\"password\" name=\"password\"></label><button>Sign in</button></form>"),
+            page(
+                "Sign in",
+                "<h1>Sign in to your account</h1><form method=\"post\" action=\"/login\"><label>Email <input type=\"email\" name=\"email\" autocomplete=\"email\"></label><label>Password <input type=\"password\" name=\"password\"></label><button>Sign in</button></form>",
+            ),
         ),
         (Site::Account, _, path) if super::work_app_editors::editor(path).is_some() => (
             "200 OK",
@@ -748,14 +788,21 @@ const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.
         (Site::Account, _, "/inbox") => (
             "200 OK",
             String::new(),
-            page("Inbox", &format!("<h1>Inbox</h1><ul><li>{INBOX_FACT} is due Friday.</li><li>Team lunch moved to Thursday.</li></ul>")),
+            page(
+                "Inbox",
+                &format!(
+                    "<h1>Inbox</h1><ul><li>{INBOX_FACT} is due Friday.</li><li>Team lunch moved to Thursday.</li></ul>"
+                ),
+            ),
         ),
         // Slack-like: every click re-renders the sidebar's rows and replaces
         // the message pane, and the address follows the channel.
         (Site::Account, _, path) if path == "/spa" || path.starts_with("/spa/") => (
             "200 OK",
             String::new(),
-            format!("<!doctype html><html><head><title>Workspace</title></head><body><nav aria-label=\"Channels\"><div role=\"tree\" id=\"side\"></div></nav><main id=\"pane\"><h1>#general</h1><ul><li>Ola: coffee at ten?</li></ul></main><script>var chans=['general','design','random'];var msgs={{general:['Ola: coffee at ten?'],design:['Tom: can someone review the icons?','Ana: {DESIGN_FACT}.'],random:['Leo: new plant on the desk']}};function side(active){{var h='';for(var i=0;i<chans.length;i++){{var c=chans[i];h+='<div role=\"treeitem\" tabindex=\"0\" aria-selected=\"'+(c===active)+'\" data-c=\"'+c+'\">#'+c+'</div>';}}var el=document.getElementById('side');el.innerHTML=h;var rows=el.querySelectorAll('[data-c]');for(var j=0;j<rows.length;j++){{rows[j].addEventListener('click',function(){{var c=this.getAttribute('data-c');setTimeout(function(){{open(c);}},150);}});}}}}function open(c){{history.pushState({{}},'','/spa/'+c);document.title='#'+c+' - Workspace';side(c);var h='<h1>#'+c+'</h1><ul>';for(var k=0;k<msgs[c].length;k++){{h+='<li>'+msgs[c][k]+'</li>';}}document.getElementById('pane').innerHTML=h+'</ul>';}}side('general');</script></body></html>"),
+            format!(
+                "<!doctype html><html><head><title>Workspace</title></head><body><nav aria-label=\"Channels\"><div role=\"tree\" id=\"side\"></div></nav><main id=\"pane\"><h1>#general</h1><ul><li>Ola: coffee at ten?</li></ul></main><script>var chans=['general','design','random'];var msgs={{general:['Ola: coffee at ten?'],design:['Tom: can someone review the icons?','Ana: {DESIGN_FACT}.'],random:['Leo: new plant on the desk']}};function side(active){{var h='';for(var i=0;i<chans.length;i++){{var c=chans[i];h+='<div role=\"treeitem\" tabindex=\"0\" aria-selected=\"'+(c===active)+'\" data-c=\"'+c+'\">#'+c+'</div>';}}var el=document.getElementById('side');el.innerHTML=h;var rows=el.querySelectorAll('[data-c]');for(var j=0;j<rows.length;j++){{rows[j].addEventListener('click',function(){{var c=this.getAttribute('data-c');setTimeout(function(){{open(c);}},150);}});}}}}function open(c){{history.pushState({{}},'','/spa/'+c);document.title='#'+c+' - Workspace';side(c);var h='<h1>#'+c+'</h1><ul>';for(var k=0;k<msgs[c].length;k++){{h+='<li>'+msgs[c][k]+'</li>';}}document.getElementById('pane').innerHTML=h+'</ul>';}}side('general');</script></body></html>"
+            ),
         ),
         // A heavy day view: a large grid, and a script that holds the page
         // for eight seconds right after load before it draws the day.
@@ -769,28 +816,49 @@ const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.
             (
                 "200 OK",
                 String::new(),
-                format!("<!doctype html><html><head><title>Calendar</title></head><body><main><h1>Today</h1><ul id=\"day\"><li>Loading your day</li></ul><div role=\"grid\" aria-label=\"Week\" style=\"height:4000px;overflow:hidden\">{cells}</div></main><script>window.addEventListener('load',function(){{setTimeout(function(){{var t=Date.now();while(Date.now()-t<8000){{}}document.getElementById('day').innerHTML='<li>{DAY_FACT}</li><li>{AGENDA_FACT}</li><li>Gym at 18:00</li>';}},0);}});</script></body></html>"),
+                format!(
+                    "<!doctype html><html><head><title>Calendar</title></head><body><main><h1>Today</h1><ul id=\"day\"><li>Loading your day</li></ul><div role=\"grid\" aria-label=\"Week\" style=\"height:4000px;overflow:hidden\">{cells}</div></main><script>window.addEventListener('load',function(){{setTimeout(function(){{var t=Date.now();while(Date.now()-t<8000){{}}document.getElementById('day').innerHTML='<li>{DAY_FACT}</li><li>{AGENDA_FACT}</li><li>Gym at 18:00</li>';}},0);}});</script></body></html>"
+                ),
             )
         }
         (Site::Account, _, path) => (
             "200 OK",
             String::new(),
-            page("Account page", &format!("<h1>Account page</h1><p>This signed-in page is {}.</p>", path.trim_start_matches('/'))),
+            page(
+                "Account page",
+                &format!(
+                    "<h1>Account page</h1><p>This signed-in page is {}.</p>",
+                    path.trim_start_matches('/')
+                ),
+            ),
         ),
         (Site::Third | Site::Board, _, _) if !signed_in => (
             "200 OK",
             String::new(),
-            page("Sign in", "<h1>Sign in</h1><form method=\"post\" action=\"/login\"><label>Email <input type=\"email\" name=\"email\"></label><label>Password <input type=\"password\" name=\"password\"></label><button>Sign in</button></form>"),
+            page(
+                "Sign in",
+                "<h1>Sign in</h1><form method=\"post\" action=\"/login\"><label>Email <input type=\"email\" name=\"email\"></label><label>Password <input type=\"password\" name=\"password\"></label><button>Sign in</button></form>",
+            ),
         ),
         (Site::Board, _, _) => (
             "200 OK",
             String::new(),
-            page("Board", &format!("<h1>My issues</h1><ul><li>{BOARD_FACT}.</li><li>ZP-17 is in review.</li></ul>")),
+            page(
+                "Board",
+                &format!(
+                    "<h1>My issues</h1><ul><li>{BOARD_FACT}.</li><li>ZP-17 is in review.</li></ul>"
+                ),
+            ),
         ),
         (Site::Third, _, _) => (
             "200 OK",
             String::new(),
-            page("Calendar", &format!("<h1>Today</h1><ul><li>{DAY_FACT}.</li><li>Lunch with Ana at 12:30.</li></ul>")),
+            page(
+                "Calendar",
+                &format!(
+                    "<h1>Today</h1><ul><li>{DAY_FACT}.</li><li>Lunch with Ana at 12:30.</li></ul>"
+                ),
+            ),
         ),
         (Site::Other, _, "/memory") if cookie.contains(MEMORY_COOKIE) => (
             "200 OK",
@@ -800,12 +868,17 @@ const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.
         (Site::Other, _, "/memory") => (
             "200 OK",
             String::new(),
-            String::from("<div role=\"dialog\" aria-modal=\"true\" aria-label=\"Before you continue\"><h2>Before you continue</h2><p>We use cookies and data to deliver and maintain our services.</p><form method=\"post\" action=\"/memory/save\"><button name=\"set\" value=\"reject\">Reject all</button><button name=\"set\" value=\"accept\">Accept all</button></form></div><main><p>Loading fares</p></main>"),
+            String::from(
+                "<div role=\"dialog\" aria-modal=\"true\" aria-label=\"Before you continue\"><h2>Before you continue</h2><p>We use cookies and data to deliver and maintain our services.</p><form method=\"post\" action=\"/memory/save\"><button name=\"set\" value=\"reject\">Reject all</button><button name=\"set\" value=\"accept\">Accept all</button></form></div><main><p>Loading fares</p></main>",
+            ),
         ),
         (Site::Other, _, _) => (
             "200 OK",
             String::new(),
-            page("Other", "<h1>Other site</h1><p>Opening hours: nine to five.</p>"),
+            page(
+                "Other",
+                "<h1>Other site</h1><p>Opening hours: nine to five.</p>",
+            ),
         ),
     };
     let _ = write!(
@@ -1685,7 +1758,11 @@ pub(super) async fn workflow(
                     .steps
                     .iter()
                     .any(|step| step.account.is_some());
-                line(format!("check=session asked={} yours={} session_cookie={cookie} content={content} badge={badge}", run.asked.len(), run.opened.iter().all(|p| p.yours)));
+                line(format!(
+                    "check=session asked={} yours={} session_cookie={cookie} content={content} badge={badge}",
+                    run.asked.len(),
+                    run.opened.iter().all(|p| p.yours)
+                ));
                 let passed = run.asked.len() == 1 && cookie && content && badge;
                 last = run.state;
                 passed
@@ -1846,7 +1923,9 @@ pub(super) async fn workflow(
                 let drafts_term = mentions(&run, &["draft"]);
                 let word_three = mentions(&run, &["three"]);
                 let numeric_three = mentions(&run, &["3"]);
-                line(format!("check=autopost content={content} drafts_term={drafts_term} word_three={word_three} numeric_three={numeric_three} posts={posts}"));
+                line(format!(
+                    "check=autopost content={content} drafts_term={drafts_term} word_three={word_three} numeric_three={numeric_three} posts={posts}"
+                ));
                 last = run.state;
                 content && posts == 0
             }
@@ -1905,7 +1984,10 @@ pub(super) async fn workflow(
                     run.asked.len(),
                     queried.len(),
                     filtered.len(),
-                    queried.iter().chain(&filtered).all(|(_, c)| c.contains(ACCOUNT_COOKIE)),
+                    queried
+                        .iter()
+                        .chain(&filtered)
+                        .all(|(_, c)| c.contains(ACCOUNT_COOKIE)),
                 ));
                 last = run.state;
                 run.asked.len() <= 1 && found && filters && !held && !queried.is_empty()
@@ -2554,7 +2636,12 @@ pub(super) async fn workflow(
                     "check=memory loads={loads:?} saves={saves} first_fresh={first_fresh} remembered_next_run={remembered} content={content} first_yours={} second_yours={} own_store(before,between,after)=({},{},{}) work_store(before,between,after)=({},{},{})",
                     first.opened.iter().any(|p| p.yours),
                     second.opened.iter().any(|p| p.yours),
-                    before.0, between.0, after.0, before.1, between.1, after.1,
+                    before.0,
+                    between.0,
+                    after.0,
+                    before.1,
+                    between.1,
+                    after.1,
                 ));
                 last = second.state;
                 first_fresh
