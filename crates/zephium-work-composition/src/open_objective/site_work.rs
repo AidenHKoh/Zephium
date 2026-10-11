@@ -999,13 +999,23 @@ pub(crate) fn preview(
     }
 }
 
-/// The exact step the person decides on: where it is, what it presses and
-/// what it types. Page node keys are left out; the page's structure is not.
+/// Content and proof promised by an approval. This does not bind native target
+/// identity; the separate native identity seal is not implemented here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Fingerprint {
+    structure: [u8; 32],
+    verification: SemanticVerification,
+    value: Option<SemanticValueSummary>,
+    nonfocus_states: [bool; 6],
+}
+
+/// Binds the full retained value without exposing it through the public,
+/// potentially truncated display preview. Focus changes are expected at handoff.
 pub(crate) fn fingerprint(
     action: &SemanticPreparedAction,
     node: &SemanticNode,
     snapshot: &SemanticSnapshot,
-) -> [u8; 32] {
+) -> Fingerprint {
     let mut hasher = Sha256::new();
     hasher.update(b"ZEPHIUM-SITE-STEP-1\0");
     let mut part = |bytes: &[u8]| {
@@ -1035,13 +1045,26 @@ pub(crate) fn fingerprint(
         part(format!("{:?}|{:?}", ancestor.role(), ancestor.landmark_kind()).as_bytes());
         part(ancestor.name().map_or("", |name| name.as_str()).as_bytes());
     }
-    hasher.finalize().into()
+    Fingerprint {
+        structure: hasher.finalize().into(),
+        verification: action.verification(),
+        value: node.value().cloned(),
+        nonfocus_states: [
+            SemanticState::Checked,
+            SemanticState::Selected,
+            SemanticState::Expanded,
+            SemanticState::Disabled,
+            SemanticState::Required,
+            SemanticState::Invalid,
+        ]
+        .map(|state| node.states().contains(state)),
+    }
 }
 
 /// A held step waiting for the person.
 #[derive(Clone, Debug)]
 pub(crate) struct Pending {
-    pub(crate) fingerprint: [u8; 32],
+    pub(crate) fingerprint: Fingerprint,
     pub(crate) digest: [u8; 32],
     pub(crate) preview: Preview,
 }
@@ -1228,7 +1251,7 @@ impl SiteGate {
     pub(crate) fn decline(&self) -> Option<Preview> {
         let mut state = self.state();
         let pending = state.pending.take()?;
-        state.declined.push(pending.fingerprint);
+        state.declined.push(pending.fingerprint.structure);
         state.receipt = Some(Receipt::Declined);
         Some(pending.preview)
     }
@@ -1646,7 +1669,7 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             state.status_before = status_lines(observation);
             return accept();
         }
-        if state.declined.contains(&fingerprint) {
+        if state.declined.contains(&fingerprint.structure) {
             return Err(AgentWorkFailure::ActionDenied);
         }
         state.held = true;
@@ -2996,5 +3019,129 @@ mod tests {
         assert!(policy
             .assess(&click(&look, 2, SemanticEffectClass::Read), &look)
             .is_ok());
+    }
+
+    fn approval_audit_checkbox(checked: bool) -> SemanticObservation {
+        page(vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"checkbox","n":"Share publicly","o":9,"s":if checked {1}else{0},"fc":true,"v":{"k":"boolean","value":checked},"b":{"x":1,"y":1,"w":200,"h":30}}),
+        ])
+    }
+
+    fn approval_audit_space(
+        look: &SemanticObservation,
+        verification: SemanticVerification,
+    ) -> SemanticPreparedAction {
+        let snapshot = &look.frames()[0];
+        let proposal = SemanticActionProposal::try_new(
+            SemanticActionIntent::Press {
+                target: snapshot.nodes()[1].reference(),
+                key: SemanticPressKey::Space,
+            },
+            SemanticEffectClass::Communication,
+            SemanticWaitCondition::Immediate,
+            verification,
+            SemanticSettleBudget::try_new(2000).unwrap(),
+        )
+        .unwrap();
+        SemanticActionBatch::bind(
+            SemanticActionBatchId::new(1).unwrap(),
+            look,
+            &[snapshot.frame().clone()],
+            vec![proposal],
+        )
+        .unwrap()
+        .actions()[0]
+            .prepare(snapshot)
+            .unwrap()
+    }
+
+    #[test]
+    fn exact_approval_cannot_weaken_verification_for_the_same_physical_key() {
+        let look = approval_audit_checkbox(false);
+        let exact = approval_audit_space(
+            &look,
+            SemanticVerification::TargetState {
+                state: SemanticState::Checked,
+                present: true,
+            },
+        );
+        let weaker = approval_audit_space(&look, SemanticVerification::PageChanged);
+        let gate = Arc::new(SiteGate::default());
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        assert!(matches!(
+            policy.assess(&exact, &look),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        gate.approve(false).unwrap();
+        assert!(
+            matches!(
+                policy.assess(&weaker, &look),
+                Err(AgentWorkFailure::ActionDenied)
+            ),
+            "exact approval must bind its required verification"
+        );
+    }
+
+    #[test]
+    fn exact_approval_cannot_reverse_a_checkbox_edit_after_its_value_changes() {
+        let before = approval_audit_checkbox(true);
+        let after = approval_audit_checkbox(false);
+        let first = approval_audit_space(&before, SemanticVerification::PageChanged);
+        let changed = approval_audit_space(&after, SemanticVerification::PageChanged);
+        let gate = Arc::new(SiteGate::default());
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        assert!(matches!(
+            policy.assess(&first, &before),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        gate.approve(false).unwrap();
+        assert!(
+            matches!(
+                policy.assess(&changed, &after),
+                Err(AgentWorkFailure::ActionDenied)
+            ),
+            "approval to toggle checked off cannot authorize toggling unchecked on"
+        );
+    }
+
+    #[test]
+    fn approval_content_binds_hidden_value_suffix_but_allows_focus_change() {
+        let look = |value: String, states: u8| {
+            page(vec![
+                json!({"k":1,"r":"document","o":16,"fc":true}),
+                json!({"k":2,"p":0,"r":"textbox","n":"Message to design","o":10,"s":states,"fc":true,"v":{"k":"text","value":value},"b":{"x":1,"y":1,"w":200,"h":30}}),
+            ])
+        };
+        let prefix = "x".repeat(zephium_agentic::MAX_SEMANTIC_VALUE_PREVIEW_BYTES + 100);
+        let before = look(format!("{prefix}A"), 0);
+        let changed = look(format!("{prefix}B"), 0);
+        let focused = look(format!("{prefix}A"), 64);
+        let a = keyboard_audit_action(
+            &before,
+            SemanticPressKey::Enter,
+            SemanticEffectClass::Communication,
+        );
+        let snapshot = &before.frames()[0];
+        let source = &snapshot.nodes()[1];
+        assert_eq!(
+            value_text(source),
+            value_text(&changed.frames()[0].nodes()[1]),
+            "public previews intentionally omit the distinct tail"
+        );
+        assert_ne!(
+            fingerprint(&a, source, snapshot),
+            fingerprint(&a, &changed.frames()[0].nodes()[1], &changed.frames()[0])
+        );
+        assert_eq!(
+            fingerprint(&a, source, snapshot),
+            fingerprint(&a, &focused.frames()[0].nodes()[1], &focused.frames()[0])
+        );
     }
 }
