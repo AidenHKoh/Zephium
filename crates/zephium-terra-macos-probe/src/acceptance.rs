@@ -376,8 +376,122 @@ mod read_decision_tests {
 struct EvalDiagnostics {
     calls: Vec<serde_json::Value>,
     pages: Vec<serde_json::Value>,
+    images: Vec<EvalInputImage>,
+    image_bytes: usize,
+    images_limited: bool,
     truncated: bool,
 }
+struct EvalInputImage {
+    hash: String,
+    extension: &'static str,
+    bytes: Vec<u8>,
+}
+
+fn remember_eval_images(
+    local: &mut EvalDiagnostics,
+    request: &zephium_core::work::model::WorkModelRequest,
+) -> Vec<String> {
+    use sha2::{Digest, Sha256};
+    use zephium_core::work::model::{WorkModelMessage as M, WorkModelPart as P};
+    if request
+        .image_fence
+        .as_ref()
+        .is_none_or(|fence| !fence.while_current(&mut || {}))
+    {
+        return Vec::new();
+    }
+    let mut hashes = Vec::new();
+    for message in &request.messages {
+        let parts = match message {
+            M::User(parts) => parts,
+            _ => continue,
+        };
+        for part in parts {
+            let P::Image { media_type, bytes } = part else {
+                continue;
+            };
+            let extension = match media_type.as_str() {
+                "image/png" => "png",
+                "image/jpeg" => "jpg",
+                "image/webp" => "webp",
+                _ => {
+                    local.images_limited = true;
+                    continue;
+                }
+            };
+            let hash = format!("{:x}", Sha256::digest(bytes));
+            if !local.images.iter().any(|image| image.hash == hash) {
+                if bytes.len() > 1024 * 1024
+                    || local.image_bytes.saturating_add(bytes.len()) > 8 * 1024 * 1024
+                    || local.images.len() >= 16
+                {
+                    local.images_limited = true;
+                    continue;
+                }
+                local.image_bytes += bytes.len();
+                local.images.push(EvalInputImage {
+                    hash: hash.clone(),
+                    extension,
+                    bytes: bytes.clone(),
+                });
+            }
+            if !hashes.contains(&hash) {
+                hashes.push(hash);
+            }
+        }
+    }
+    hashes
+}
+
+fn export_eval_images(
+    path: &Path,
+    public: bool,
+    local: &EvalDiagnostics,
+) -> Result<serde_json::Value, &'static str> {
+    if !public {
+        return Ok(serde_json::json!({"state":"withheld_private_provenance","images":[]}));
+    }
+    let mut exported = Vec::new();
+    for image in &local.images {
+        let calls: Vec<_> = local
+            .calls
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| {
+                call["state"] == "settled"
+                    && call["input_image_hashes"]
+                        .as_array()
+                        .is_some_and(|hashes| hashes.iter().any(|hash| hash == &image.hash))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if calls.is_empty() {
+            continue;
+        }
+        let name = format!("model-input-{}.{}", image.hash, image.extension);
+        let destination = path.parent().ok_or("eval_image_parent")?.join(&name);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(destination)
+                .map_err(|_| "eval_image_open")?;
+            file.write_all(&image.bytes)
+                .map_err(|_| "eval_image_write")?;
+        }
+        #[cfg(not(unix))]
+        return Err("eval_image_permissions_unqualified");
+        exported.push(serde_json::json!({"file":name,"sha256":image.hash,"bytes":image.bytes.len(),"calls":calls}));
+    }
+    Ok(
+        serde_json::json!({"state":"exported","images":exported,"limited":local.images_limited,
+        "scope":"Copies of fenced images already supplied to successful public page-model calls. No new captures and no canvas record-crop collection."}),
+    )
+}
+
 struct EvalModelClient {
     inner: Arc<dyn zephium_core::work::model::WorkModelClient>,
     role: &'static str,
@@ -426,6 +540,10 @@ impl zephium_core::work::model::WorkModelClient for EvalModelClient {
                         let (parts, bytes) = eval_image_inputs(&request.messages);
                         local.calls[index]["input_image_parts"] = serde_json::json!(parts);
                         local.calls[index]["input_image_bytes"] = serde_json::json!(bytes);
+                        if self.role == "page" {
+                            let hashes = remember_eval_images(&mut local, &request);
+                            local.calls[index]["input_image_hashes"] = serde_json::json!(hashes);
+                        }
                     }
                     Some(index)
                 }
@@ -754,6 +872,7 @@ fn export_eval(
         })
     }).collect();
     let local = diagnostics.lock().unwrap_or_else(|e| e.into_inner());
+    let model_input_images = export_eval_images(path, public, &local)?;
     write_eval_file(
         path,
         &serde_json::json!({
@@ -763,6 +882,7 @@ fn export_eval(
             "models": models, "model_calls": local.calls, "model_calls_truncated": local.truncated,
             "page_intervals": local.pages,
             "source_evidence": source_evidence,
+            "model_input_images": model_input_images,
             "page_diagnostics_version": if public { Some(1) } else { None },
             "timeline": {"started_ms": finished_ms.saturating_sub(wall_ms), "finished_ms": finished_ms},
             "model_call_scope": "selected Work model clients; direct public-search transport is not included; do not add page diagnostics to this count",
@@ -2078,6 +2198,41 @@ mod tests {
         .await;
         assert_eq!(result["limited"], true);
         assert!(result["previews"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn image_evidence_is_local_public_only_and_requires_a_settled_call() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("evidence.json");
+        let mut diagnostics = EvalDiagnostics::default();
+        diagnostics.images.push(EvalInputImage {
+            hash: "fixture".into(),
+            extension: "png",
+            bytes: vec![1, 2, 3],
+        });
+        diagnostics
+            .calls
+            .push(serde_json::json!({"state":"settled","input_image_hashes":["fixture"]}));
+        assert_eq!(
+            export_eval_images(&path, false, &diagnostics).unwrap()["state"],
+            "withheld_private_provenance"
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        diagnostics.calls[0]["state"] = serde_json::json!("refused");
+        assert!(
+            export_eval_images(&path, true, &diagnostics).unwrap()["images"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        diagnostics.calls[0]["state"] = serde_json::json!("settled");
+        let value = export_eval_images(&path, true, &diagnostics).unwrap();
+        assert_eq!(value["images"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            std::fs::read(directory.path().join("model-input-fixture.png")).unwrap(),
+            [1, 2, 3]
+        );
     }
 
     #[test]
