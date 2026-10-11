@@ -80,6 +80,8 @@ pub(super) fn known_check(observation: &SemanticObservation) -> Option<KnownChec
     }
     let mut automatic = false;
     let mut person = false;
+    let mut client_challenge_title = false;
+    let mut browser_verification = false;
     for node in nodes() {
         if node.role() == SemanticRole::FrameBoundary {
             let Some(name) = node.name() else {
@@ -105,6 +107,12 @@ pub(super) fn known_check(observation: &SemanticObservation) -> Option<KnownChec
             if text.trim().len() > MAX_PHRASE_TEXT {
                 continue;
             }
+            let lower = text.trim().to_lowercase();
+            client_challenge_title |=
+                matches!(node.role(), SemanticRole::Document | SemanticRole::Heading)
+                    && lower == "client challenge";
+            browser_verification |= lower.starts_with("verifying your browser")
+                || lower.contains(" is verifying your browser");
             if starts_with_any(text, &PERSON_PHRASES) {
                 person = true;
             } else if starts_with_any(text, &AUTOMATIC_PHRASES) {
@@ -115,7 +123,7 @@ pub(super) fn known_check(observation: &SemanticObservation) -> Option<KnownChec
     if person {
         return Some(KnownCheck::Person);
     }
-    if automatic || frame_only(observation) {
+    if automatic || (client_challenge_title && browser_verification) || frame_only(observation) {
         return Some(KnownCheck::Automatic);
     }
     None
@@ -315,6 +323,40 @@ mod tests {
             r#"{"k":1,"r":"document","o":16},{"k":2,"p":0,"r":"frame_boundary","n":"DataDome CAPTCHA","b":{"x":0,"y":0,"w":1280,"h":800}}"#,
         );
         assert_eq!(known_check(&captcha), Some(KnownCheck::Person));
+    }
+
+    #[test]
+    fn client_challenge_requires_both_wall_title_and_browser_verification() {
+        let page = |role: &str, title: &str, text: &str| {
+            let level = if role == "heading" { r#", "l":1"# } else { "" };
+            look(&format!(
+                r#"{{"k":1,"r":"document","o":16}},{{"k":2,"p":0,"r":"{role}","n":"{title}"{level}}},{{"k":3,"p":0,"r":"paragraph","t":"{text}"}}"#
+            ))
+        };
+        for text in [
+            "Verifying your browser...",
+            "example.test is verifying your browser...",
+        ] {
+            assert_eq!(
+                known_check(&page("heading", "Client Challenge", text)),
+                Some(KnownCheck::Automatic)
+            );
+        }
+        for (role, title, text) in [
+            ("heading", "Client Challenge", "How browser checks work"),
+            (
+                "heading",
+                "Troubleshooting",
+                "example.test is verifying your browser...",
+            ),
+            (
+                "paragraph",
+                "Client Challenge",
+                "example.test is verifying your browser...",
+            ),
+        ] {
+            assert_eq!(known_check(&page(role, title, text)), None);
+        }
     }
 
     #[test]
