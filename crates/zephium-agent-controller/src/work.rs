@@ -581,6 +581,7 @@ pub struct AgentWorkRunInput {
     objective: Option<AgentProviderObjective>,
     settings: AgentWorkRunSettings,
     durable_result: bool,
+    original_anonymous_read: Option<zephium_agentic::WorkBrowserAnonymousReadAuthority>,
     isolated_store: bool,
     work_store: bool,
 }
@@ -619,6 +620,15 @@ impl AgentWorkRunInput {
     pub const fn uses_work_website_data(&self) -> bool {
         self.work_store
     }
+    /// Marks trusted original read-only intent before resource construction.
+    /// Exact anonymous manifest/node/profile/run scope is independently checked;
+    /// this flag is neither cookie absence nor screenshot permission.
+    pub fn mark_original_anonymous_read(&mut self) {
+        if self.original_anonymous_read.is_none() && self.isolated_store {
+            self.original_anonymous_read=self.settings.clock.now().ok().and_then(|now|
+                zephium_agentic::WorkBrowserAnonymousReadAuthority::from_original_read(&self.manifest,self.lease,self.context.identity,&self.context.target,now,self.settings.deadline));
+        }
+    }
     /// Descriptive original resource construction operands for the trusted
     /// application. These do not mint a browser, account or execution lease.
     pub fn retained_resource_spec(
@@ -636,6 +646,7 @@ impl AgentWorkRunInput {
                             .is_some_and(|scope| scope.is_public_web())
                     }),
             work_website_data: self.work_store,
+            anonymous_read_authority: self.original_anonymous_read.clone(),
             target: self.context.target.clone(),
             document_policy: self.context.document_policy,
             clock: self.settings.clock.clone(),
@@ -733,6 +744,7 @@ impl AgentWorkRunInput {
             objective: Some(objective),
             settings,
             durable_result: false,
+            original_anonymous_read: None,
             isolated_store: false,
             work_store: false,
         })
@@ -773,6 +785,8 @@ pub struct AgentWorkRetainedResourceSpec {
     pub isolated_public: bool,
     /// Work's own persistent store for the profile, set only with isolation.
     pub work_website_data: bool,
+    /// Original anonymous task proof, never signed-out storage/pixel authority.
+    pub anonymous_read_authority: Option<zephium_agentic::WorkBrowserAnonymousReadAuthority>,
     /// Exact approved initial document, not navigation authority.
     pub target: ContextNavigationTarget,
     /// Trusted initial-document construction policy, frozen before native work.

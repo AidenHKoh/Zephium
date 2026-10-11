@@ -21,6 +21,8 @@ pub fn record(arguments: std::fmt::Arguments<'_>) {
 /// account identity, source references, or pixel bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecordMediaTrace {
+    /// Closed original read authority status, never signed-out or pixel proof.
+    OriginalRead { status: zephium_agentic::WorkBrowserAnonymousReadStatus },
     /// The retained app owner refused the queued request before native dispatch.
     OwnerRefused,
     /// Exact native source-stage counts before any retrieval attempt.

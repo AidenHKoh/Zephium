@@ -59,7 +59,7 @@ pub use work_browser_document::{
 };
 pub use work_browser_resource::WorkBrowserConstructionAttempt;
 pub use work_browser_resource::{
-    brand_family, same_work_human_site, WorkBrowserActionCompletion,
+    brand_family, same_work_human_site, WorkBrowserAnonymousReadAuthority, WorkBrowserAnonymousReadStatus, WorkBrowserActionCompletion,
     WorkBrowserActionCompletionCallback, WorkBrowserActionCompletionOwner,
     WorkBrowserActionDeliveryCompletion, WorkBrowserActionDeliveryTicket,
     WorkBrowserActionDispatch, WorkBrowserActionEvent, WorkBrowserActionRefusal,

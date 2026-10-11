@@ -600,6 +600,8 @@ struct Resource {
     join: WorkBrowserResourceJoin,
     storage: ContextProfileStorageClass,
     isolated_public: bool,
+    anonymous_read_authority: Option<WorkBrowserAnonymousReadAuthority>,
+    anonymous_read_generation: Option<u64>,
     phase: WorkBrowserResourcePhase,
     pending: Option<OperationJoin>,
     destruction: Option<OperationJoin>,
@@ -623,8 +625,14 @@ struct Resource {
     observation: Option<observation::ObservationJoin>,
     human: Option<Box<human::HumanWindow>>,
 }
+impl Drop for Resource {
+    fn drop(&mut self) {
+        if let Some(proof) = &self.anonymous_read_authority { proof.revoke(WorkBrowserAnonymousReadStatus::Closed); }
+    }
+}
 impl Resource {
     fn quarantine(&mut self, failure: WorkBrowserResourceFailure) {
+        if let Some(proof) = &self.anonymous_read_authority { proof.revoke(WorkBrowserAnonymousReadStatus::Closed); }
         self.failure.get_or_insert(failure);
         self.phase = WorkBrowserResourcePhase::Quarantined;
         // Keep both callback and execution-capacity debt. Quarantine is not
@@ -704,6 +712,7 @@ impl WorkBrowserResources {
             crate::WorkBrowserDocumentPolicy::Exact,
             now,
             false,
+            None,
         )
     }
     /// Reserve one exact initial document at the trusted application edge.
@@ -767,7 +776,32 @@ impl WorkBrowserResources {
             policy,
             now,
             isolated_public,
+            None,
         )
+    }
+    /// Freezes an original anonymous read proof exactly once, before native
+    /// construction. This does not attest signed-out storage or pixel authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn construct_document_with_original_read(
+        &mut self, resource: WorkBrowserResourceId, context: ContextId,
+        storage: ContextProfileStorageClass, document: ContextNavigationTarget,
+        policy: crate::WorkBrowserDocumentPolicy, isolated_public: bool,
+        authority: WorkBrowserAnonymousReadAuthority, now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
+        crate::SemanticOrigin::parse(document.as_url().as_str())
+            .map_err(|_| WorkBrowserResourceError::Source)?;
+        if !isolated_public || !policy.admits_request(&document) {
+            return Err(WorkBrowserResourceError::Source);
+        }
+        self.construct_source(resource,context,storage,Some(Arc::new(document)),policy,now,isolated_public,Some(authority))
+    }
+    /// Closed current status of the original resource proof. This is not
+    /// account state, a screenshot grant, or permission to replace the proof.
+    pub fn anonymous_read_status(&self, resource: &WorkBrowserResourceJoin, now: AgentPolicyInstant)
+        -> Result<WorkBrowserAnonymousReadStatus, WorkBrowserResourceError> {
+        let row=self.rows.get(&resource.identity.resource).filter(|row|row.join==*resource)
+            .ok_or(WorkBrowserResourceError::Stale)?;
+        Ok(row.anonymous_read_authority.as_ref().map_or(WorkBrowserAnonymousReadStatus::Absent,|proof|proof.status(now)))
     }
     #[allow(clippy::too_many_arguments)]
     fn construct_source(
@@ -779,6 +813,7 @@ impl WorkBrowserResources {
         document_policy: crate::WorkBrowserDocumentPolicy,
         now: AgentPolicyInstant,
         isolated_public: bool,
+        anonymous_read_authority: Option<WorkBrowserAnonymousReadAuthority>,
     ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
         if self.sealed {
             return Err(WorkBrowserResourceError::Sealed);
@@ -795,6 +830,9 @@ impl WorkBrowserResources {
             return Err(WorkBrowserResourceError::Capacity);
         }
         let sequence = self.next()?;
+        if let Some(proof) = &anonymous_read_authority {
+            if !document.as_ref().is_some_and(|document| proof.claim_resource(context,self.profile,document,now)) { return Err(WorkBrowserResourceError::Source); }
+        }
         let join = WorkBrowserResourceJoin {
             identity: WorkBrowserResourceIdentity {
                 work: self.work,
@@ -817,6 +855,8 @@ impl WorkBrowserResources {
                 join,
                 storage,
                 isolated_public,
+                anonymous_read_authority,
+                anonymous_read_generation: None,
                 phase: WorkBrowserResourcePhase::Constructing,
                 pending: Some(operation.clone()),
                 destruction: None,
@@ -899,6 +939,9 @@ impl WorkBrowserResources {
             kind: WorkBrowserResourceOperation::Acquire,
             lease: Some(lease.clone()),
         };
+        if let Some(proof) = &row.anonymous_read_authority {
+            row.anonymous_read_generation = proof.acquire(run,now).then_some(sequence);
+        }
         row.lease = Some(lease);
         row.observed = false;
         row.phase = WorkBrowserResourcePhase::Acquiring;
@@ -1036,6 +1079,7 @@ impl WorkBrowserResources {
             kind: WorkBrowserResourceOperation::Destroy,
             lease: row.lease.clone(),
         };
+        if let Some(proof) = &row.anonymous_read_authority { proof.revoke(WorkBrowserAnonymousReadStatus::Closed); }
         row.phase = WorkBrowserResourcePhase::Destroying;
         row.destruction_attempted = true;
         row.destruction = Some(operation.clone());
@@ -1226,6 +1270,7 @@ impl WorkBrowserResources {
             ) {
                 // Cleanup already owns/retired the resource; settle only debt.
             } else if operation == WorkBrowserResourceOperation::Construct {
+                if let Some(proof) = &row.anonymous_read_authority { proof.revoke(WorkBrowserAnonymousReadStatus::Closed); }
                 // Exact non-admission proves absence without pretending the
                 // prior clock/control ambiguity or task failure disappeared.
                 row.phase = WorkBrowserResourcePhase::Destroyed;
@@ -1269,6 +1314,9 @@ impl WorkBrowserResources {
     /// Permanently forbid new construction/acquisition. Existing native leases
     /// still require explicit revocation/drain and every resource destruction.
     pub fn seal(&mut self) {
+        for row in self.rows.values() {
+            if let Some(proof) = &row.anonymous_read_authority { proof.revoke(WorkBrowserAnonymousReadStatus::Closed); }
+        }
         self.sealed = true;
     }
     /// True only after sealing and exact destruction of every retained resource.
@@ -1413,3 +1461,7 @@ pub use media::{
     WorkBrowserCropGeometry, WorkBrowserMediaFetchMode, WorkBrowserMediaProgress, WorkBrowserRecordImage,
     WorkBrowserRecordImageOrigin,
 };
+
+#[path = "work_browser_anonymous.rs"]
+mod anonymous;
+pub use anonymous::{WorkBrowserAnonymousReadAuthority, WorkBrowserAnonymousReadStatus};

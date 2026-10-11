@@ -247,10 +247,15 @@ impl WorkBrowserResources {
         {
             return Err(WorkBrowserResourceError::Phase);
         }
-        if fetch_mode == WorkBrowserMediaFetchMode::PublicAssetRetry
-            && (!row.isolated_public || !row.document_policy.is_public()) {
-            return Err(WorkBrowserResourceError::Source);
-        }
+        let deadline = if fetch_mode == WorkBrowserMediaFetchMode::PublicAssetRetry {
+            let proof=row.anonymous_read_authority.as_ref().ok_or(WorkBrowserResourceError::Source)?;
+            if !row.isolated_public || !plans.iter().all(|plan|
+                proof.matches(plan.frame().context().identity(),now)
+                    && row.anonymous_read_generation==Some(plan.frame().context().context_generation().get())) {
+                return Err(WorkBrowserResourceError::Source);
+            }
+            proof.bound_deadline(now,deadline).ok_or(WorkBrowserResourceError::Expired)?
+        } else { deadline };
         row.tick(now)?;
         let operation = OperationJoin {
             resource: resource.clone(),

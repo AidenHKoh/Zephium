@@ -493,6 +493,9 @@ impl WorkBrowserResources {
         {
             return Err(WorkBrowserResourceError::Phase);
         }
+        // Any human interaction can change account state, including a check
+        // or an approval. Original anonymous intent never revives on return.
+        if let Some(proof) = &row.anonymous_read_authority { proof.revoke(WorkBrowserAnonymousReadStatus::HumanHandoff); }
         row.human = Some(Box::new(HumanWindow {
             progress: WorkBrowserHumanProgress::default(),
             region,

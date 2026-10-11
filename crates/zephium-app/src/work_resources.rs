@@ -352,7 +352,7 @@ impl WorkResourceOwner {
         now: AgentPolicyInstant,
     ) -> Result<PendingLifecycle, Refusal> {
         self.construct_isolated(
-            id, context, storage, target, policy, false, false, None, None, None, now,
+            id, context, storage, target, policy, false, false, None, None, None, None, now,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -365,6 +365,7 @@ impl WorkResourceOwner {
         policy: zephium_agentic::WorkBrowserDocumentPolicy,
         isolated_public: bool,
         work_website_data: bool,
+        anonymous_read_authority: Option<zephium_agentic::WorkBrowserAnonymousReadAuthority>,
         anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
         redirect: Option<zephium_agentic::WorkBrowserRedirect>,
         construction_window: Option<(
@@ -376,15 +377,11 @@ impl WorkResourceOwner {
         if !self.shared.global_current() {
             return Err(Refusal::Uncertain);
         }
-        let request = self.shared.lock_rows()?.construct_document_with_isolation(
-            id,
-            context,
-            storage,
-            target,
-            policy,
-            isolated_public,
-            now,
-        )?;
+        let request = if let Some(proof) = anonymous_read_authority {
+            self.shared.lock_rows()?.construct_document_with_original_read(id,context,storage,target,policy,isolated_public,proof,now)?
+        } else {
+            self.shared.lock_rows()?.construct_document_with_isolation(id,context,storage,target,policy,isolated_public,now)?
+        };
         let request = if work_website_data {
             request
                 .with_work_website_data()

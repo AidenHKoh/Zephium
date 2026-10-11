@@ -1017,6 +1017,7 @@ impl ProductWork {
             prepared.spec.document_policy,
             prepared.spec.isolated_public,
             prepared.spec.work_website_data,
+            prepared.spec.anonymous_read_authority.clone(),
             prepared.anonymous_session,
             prepared.redirect.clone(),
             Some((prepared.construction_attempt, prepared.spec.deadline)),
