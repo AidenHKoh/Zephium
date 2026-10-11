@@ -9,6 +9,7 @@ type Node = {
   k: number;
   r: string;
   n?: string;
+  t?: string;
   m?: string;
   b?: { x: number; y: number; w: number; h: number };
 };
@@ -16,14 +17,18 @@ type Media = { k: number; t: string; r: number[]; l: boolean };
 type Snapshot = { n: Node[]; m?: Media[] };
 const pixel = (color: string) =>
   `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="160" height="110"><rect width="160" height="110" fill="${color}"/></svg>`)}`;
-async function capture(body: string, nodes = 128): Promise<Snapshot> {
+async function capture(
+  body: string,
+  nodes = 128,
+  source = inject("semanticMediaRuntime"),
+): Promise<Snapshot> {
   const frame = document.createElement("iframe");
   frame.width = "800";
   frame.height = "600";
   const loaded = new Promise<void>((done) =>
     frame.addEventListener("load", () => done(), { once: true }),
   );
-  frame.srcdoc = `<style>body{margin:8px}main{display:flex;gap:16px}article{width:200px}img,video,canvas,.photo{display:block;width:160px;height:110px}h2{font:16px sans-serif}</style>${body}<script>${inject("semanticMediaRuntime")}
+  frame.srcdoc = `<style>body{margin:8px}main{display:flex;gap:16px}article{width:200px}img,video,canvas,.photo{display:block;width:160px;height:110px}h2{font:16px sans-serif}</style>${body}<script>${source}
   addEventListener("load", () => {
     const api=globalThis.__zephiumSemanticRuntimeV1;
     const b={n:${nodes},t:${nodes > 128 ? 32768 : 16384},w:${nodes > 128 ? 131072 : 65536},x:${nodes > 128 ? 16384 : 4096},geo:true};
@@ -226,8 +231,134 @@ test("record labels stop child iteration at the existing stack bound", async () 
   try {
     await loaded;
     const result = JSON.parse(frame.contentDocument!.documentElement.dataset.result!);
-    expect(result).toEqual({ accepted: true, refused: true, threw: false, iterated: 65 });
+    expect(result).toEqual({
+      accepted: true,
+      refused: true,
+      threw: false,
+      iterated: 65,
+    });
   } finally {
     frame.remove();
+  }
+});
+
+test("paragraph inheritance needs its own proven single-image link and keeps all fences", async () => {
+  const image = `<img alt="" src="${pixel("red")}">`;
+  const fields = "<div><div><p>Alpha record</p></div><div><p>Price 20</p></div></div>";
+  const link = (body: string) => `<a href="https://example.test/alpha">${body}</a>`;
+  const fixtures: [string, string, boolean][] = [
+    [
+      "nested fields",
+      `<article>${link(image + fields)}</article><article><p>Beta record</p><p>Missing photo</p></article>`,
+      true,
+    ],
+    [
+      "no link proof",
+      `<article>${image + fields}</article><article><p>Beta record</p></article>`,
+      false,
+    ],
+    [
+      "explicit nested records",
+      link(`<article>${image}<p>Other record</p></article><article>${fields}</article>`),
+      false,
+    ],
+    [
+      "generic peer with image",
+      link(
+        `<div style="display:flex"><div>${image}<p>Other record</p></div><div>${fields}</div></div>`,
+      ),
+      false,
+    ],
+    [
+      "unproved link boundary",
+      `<article>${link(image + '<div role="link">' + fields + "</div>")}</article>`,
+      false,
+    ],
+    ["multiple native images", `<article>${link(image + image + fields)}</article>`, false],
+    [
+      "own image outside, peer inside",
+      `<article>${link(image.replace("<img ", '<img style="position:absolute;left:500px" ') + fields)}${image}</article>`,
+      false,
+    ],
+    [
+      "outside proven geometry",
+      `<article>${link(image + '<div><div style="position:absolute;left:480px"><p>Alpha record</p></div><div><p>Price 20</p></div></div>')}</article>`,
+      false,
+    ],
+    [
+      "low node budget",
+      `<article>${link(image + fields + Array.from({ length: 20 }, () => '<p style="display:inline">x</p>').join("") + image).replace("<a ", '<a style="display:block" ')}</article>`,
+      false,
+    ],
+    [
+      "open shadow",
+      `<article>${link(image + fields + '<div id="shadowhost"></div>')}</article><script>document.getElementById("shadowhost").attachShadow({mode:"open"}).textContent="fixture";</script>`,
+      false,
+    ],
+    [
+      "foreign subtree",
+      `<article>${link(image + fields + '<iframe srcdoc="" width="1" height="1"></iframe>')}</article>`,
+      false,
+    ],
+    [
+      "opaque custom host",
+      `<article>${link(image + fields + "<fixture-opaque></fixture-opaque>")}</article>`,
+      false,
+    ],
+    [
+      "subtree exhausted",
+      `<article>${link(image + fields + Array.from({ length: 80 }, () => "<span hidden></span>").join("")).replace("<a ", '<a aria-label="Alpha record" ')}</article>`,
+      false,
+    ],
+    [
+      "pseudo visual",
+      `<style>a::before{content:"";display:block;width:80px;height:80px;background-image:url("data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")}</style><article>${link(image + fields)}</article>`,
+      false,
+    ],
+    ["work exhausted", `<article>${link(image + fields)}</article>`, false],
+    [
+      "reference cap",
+      `<article>${link(image + fields + Array.from({ length: 7 }, (_, i) => `<p>Existing ${i}</p>`).join(""))}</article>`,
+      false,
+    ],
+    [
+      "photo-less linked peer",
+      `<div style="display:flex"><div style="width:200px">${link(image + fields)}</div><div style="width:200px"><a href="https://example.test/beta"><div><p>Beta record</p></div><div><p>No image</p></div></a></div></div>`,
+      true,
+    ],
+  ];
+  for (const [name, body, expected] of fixtures) {
+    let source = inject("semanticMediaRuntime");
+    if (name === "work exhausted") {
+      const anchor = "    inheritance: for";
+      expect(source.split(anchor), name).toHaveLength(2);
+      source = source.replace(anchor, "    work=16384;\n    inheritance: for");
+    }
+    const snapshot = await capture(body, name === "low node budget" ? 8 : 128, source);
+    const alpha = snapshot.n.find((node) => node.r === "paragraph" && node.t === "Alpha record");
+    const beta = snapshot.n.find((node) => node.r === "paragraph" && node.t === "Beta record");
+    const images = snapshot.m?.filter((item) => item.t === "image") ?? [];
+    if (name === "low node budget") {
+      expect(images, name).toHaveLength(1);
+      const links = snapshot.n.filter((node) => node.r === "link");
+      expect(
+        images.some((item) => links.some((node) => item.r.includes(node.k))),
+        name,
+      ).toBe(true);
+    }
+    expect(alpha, name).toBeDefined();
+    expect(
+      images.some((item) => item.r.includes(alpha!.k)),
+      name,
+    ).toBe(expected);
+    if (beta)
+      expect(
+        images.some((item) => item.r.includes(beta.k)),
+        name,
+      ).toBe(false);
+    expect(
+      images.every((item) => item.r.length <= 8),
+      name,
+    ).toBe(true);
   }
 });

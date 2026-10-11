@@ -76,6 +76,8 @@
     const candidates=records.filter(record=>record.media!==null && record.sensitivity!=="secret" &&
       (record.media==="page_image" || record.wire.b && record.wire.b.w>=64 && record.wire.b.h>=48));
     let work=0;
+    const linkProofs=new WeakMap(),provenNames=new Set();
+    const links=new WeakSet(records.filter(r=>r.wire.r==="link").map(r=>r.element));
     const counts=new WeakMap(),textOwners=new WeakSet(),imageOwners=new WeakMap(),boundaries=new WeakMap();
     const indexAncestors=(items,visit)=>{
       for(let index=0;index<items.length;index++) {
@@ -93,6 +95,23 @@
       record.wire.r==="link" && label(record.element)?.split("|")[0].trim());
     if(!indexAncestors(titles,node=>counts.set(node,Math.min(2,(counts.get(node)||0)+1))) ||
        !indexAncestors(identities,node=>textOwners.add(node)))return [];
+    // Same64-node/stack bound as labels; no text or field values are read.
+    const uniqueImage=(root,wanted)=>{
+      const stack=[root];let visited=0,found=false;
+      while(stack.length) {
+        const node=stack.pop();if(++visited>64 || ++work>16384)return false;
+        if(nodeType(node)!==1)continue;
+        const tag=tagName(node);
+        if(node.shadowRoot || tag.includes("-") || ["iframe","frame","object","embed"].includes(tag))return false;
+        if(node===wanted)found=true;
+        else if(["img","video","canvas","svg"].includes(tag) || style(node).backgroundImage!=="none")return false;
+        for(const part of ["::before","::after"]) {
+          const css=style(node,part);if(css.backgroundImage!=="none" || css.content.includes("url("))return false;
+        }
+        for(const child of node.childNodes){if(stack.length>=64)return false;stack.push(child);}
+      }
+      return found;
+    };
     const cardBoundary=element=>{
       const tag=tagName(element),role=element.getAttribute("role");
       if(tag==="article" || tag==="li" || role==="listitem")return true;
@@ -138,14 +157,20 @@
         if(++work>16384)break association;
         if(nodeType(parent)!==1 || ["html","body","main","nav","header","footer","aside"].includes(tagName(parent)))break;
         if((counts.get(parent)||0)>1)break;
-        const box=elementRect(parent),related=[];
+        const box=elementRect(parent),related=[];let visual=-1,visuals=0;
         for(const index of imageOwners.get(parent)||[]) {
           if(++work>16384)break association;
           const image=images[index];
-          if(image.media!=="page_image" && inside(box,image.wire.b) && inside(box,record.wire.b))related.push(index);
+          if(image.media!=="page_image" && inside(box,image.wire.b) && inside(box,record.wire.b)) {
+            related.push(index);if(image.media!=="record"){visual=index;visuals++;}
+          }
         }
         if(related.length) {
           for(const index of related)if(rows[index].r.length<8)rows[index].r.push(record.wire.k);
+          if(visuals)provenNames.add(record.wire.k);
+          const owned=imageOwners.get(record.element);
+          if(visuals===1 && record.wire.u && owned?.length===1 && owned[0]===visual && links.has(record.element) && rows[visual].r.includes(record.wire.k) && uniqueImage(record.element,images[visual].element))
+            linkProofs.set(record.element,{index:visual,parent});
           break;
         }
         if(cardBoundary(parent))break;
@@ -156,6 +181,33 @@
         for(let index=0;index<images.length;index++) {
           if(++work>16384)break association;
           if(images[index].media==="page_image" && rows[index].r.length<4)rows[index].r.push(record.wire.k);
+        }
+      }
+    }
+    // A captured paragraph may inherit only its own enclosing link's already
+    // proven single-image association. No labels, URL equality, or new card rule.
+    inheritance: for(const record of records) {
+      if(record.wire.r!=="paragraph" || record.sensitivity==="secret" || provenNames.has(record.wire.k))continue;
+      let parent=read(nodeParentGetter,record.element);
+      for(let depth=0;depth<8 && parent;depth++,parent=read(nodeParentGetter,parent)) {
+        if(++work>16384)break inheritance;
+        if(nodeType(parent)!==1 || ["html","body","main","nav","header","footer","aside","article","li"].includes(tagName(parent)) || parent.getAttribute("role")==="listitem" || (counts.get(parent)||0)>1)break;
+        if(links.has(parent)) {
+          const proof=linkProofs.get(parent);
+          if(proof) {
+            const row=rows[proof.index],box=elementRect(proof.parent);
+            if(row.r.length<8 && inside(box,record.wire.b) && inside(box,images[proof.index].wire.b))row.r.push(record.wire.k);
+          }
+          break;
+        }
+        if(cardBoundary(parent)) {
+          const siblings=parent.parentElement;if(work>16384 || !siblings || siblings.children.length>64)break;
+          let separate=false;
+          for(const peer of siblings.children) {
+            if(++work>16384)break inheritance;
+            if(peer!==parent && imageOwners.has(peer)){separate=true;break;}
+          }
+          if(separate)break;
         }
       }
     }
