@@ -1195,3 +1195,36 @@ fn work_website_data_is_isolated_construction_only_and_excludes_run_storage() {
     let refused = sessioned.with_work_website_data().unwrap_err();
     assert!(!refused.work_website_data());
 }
+
+
+#[test]
+fn public_asset_retry_needs_frozen_public_isolation_not_a_cookie_free_claim() {
+    use crate::{ContextCapabilities, ContextCapability, ContextIdentity, ContextKind, ContextRegistry, ContextRunId, ContextOperationId, ContextSettlement, SemanticFrameJoin, SemanticOrigin, SemanticFrameTrust, SemanticInvocationId, SemanticSnapshotGeneration, FrameId, FrameGeneration};
+    use crate::WorkBrowserMediaFetchMode as Mode;
+    for storage in [ContextProfileStorageClass::Durable, ContextProfileStorageClass::Ephemeral] {
+        for isolated in [false,true] {
+            for policy in [crate::WorkBrowserDocumentPolicy::PublicQueryFinalization, crate::WorkBrowserDocumentPolicy::SiteSession] {
+                for mode in [Mode::SessionOnly,Mode::PublicAssetRetry] {
+                    let mut rows=registry();
+                    let target=ContextNavigationTarget::parse("https://example.test/catalog").unwrap();
+                    let request=rows.construct_document_with_isolation(WorkBrowserResourceId::from_raw(901),ContextId::from_raw(1001),storage,target.clone(),policy,isolated,tick(0)).unwrap();
+                    let WorkBrowserResourceEvent::Retained(resource)=rows.settle(request.complete_document(target)).unwrap() else {panic!()};
+                    let identity=ContextIdentity::new(ContextId::from_raw(1001),ContextRunId::from_raw(2),ProfileId::from(2),ContextKind::Owned);
+                    let mut contexts=ContextRegistry::new();
+                    contexts.reserve(identity,ContextCapabilities::try_new(ContextKind::Owned,&[ContextCapability::Observe]).unwrap()).unwrap();
+                    let construction=contexts.begin_context(identity.id(),ContextOperationId::new(1).unwrap()).unwrap();
+                    contexts.settle_construction(identity.id(),construction,ContextSettlement::Applied).unwrap();
+                    let plan=crate::SemanticRecordMediaPlan {
+                        crop:None,record:0,source:[1;32],
+                        frame:SemanticFrameJoin::try_new(contexts.join(identity.id()).unwrap(),FrameId::MAIN,FrameGeneration::INITIAL,SemanticOrigin::parse("https://example.test").unwrap(),SemanticFrameTrust::SameOrigin).unwrap(),
+                        invocation:SemanticInvocationId::new(1).unwrap(),snapshot:SemanticSnapshotGeneration::new(1).unwrap(),key:1,name_key:2,
+                    };
+                    let result=rows.read_record_media(&resource,vec![plan],mode,tick(1),tick(1000));
+                    let allowed=mode==Mode::SessionOnly || isolated && policy.is_public();
+                    assert_eq!(result.is_ok(),allowed,"storage={storage:?} isolated={isolated} policy={policy:?} mode={mode:?}");
+                    if let Ok((request,_))=result {assert_eq!(request.media_fetch_mode(),mode);}
+                }
+            }
+        }
+    }
+}

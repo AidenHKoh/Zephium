@@ -1766,7 +1766,7 @@ mod tests {
         assert!(source.len() <= 16 * 1024);
         assert_eq!(
             format!("{:x}", Sha256::digest(source.as_bytes())),
-            "9575d20bc520d9c4b67a4b8ed1963f699df1aa11793d200d65897c122e61feca"
+            "41c06e306dd19de290fdd1d07f5aac90687e4ba339eb7a3dc3a8d9b376d79320"
         );
         assert!(source.contains("new AbortController()"));
         assert!(source.contains("redirect:\"error\""));

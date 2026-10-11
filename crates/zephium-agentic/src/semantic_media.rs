@@ -296,6 +296,14 @@ pub struct SemanticRecordMediaDiagnostics {
     pub eligible_image_geometry: usize,
     /// Structural candidates retained across admitted source observations.
     pub structural_candidates: usize,
+    /// Candidates whose bounded native relation list is full.
+    pub saturated_candidates: usize,
+    /// Name source roles: heading, link, paragraph, document, list item, image, other.
+    pub identity_roles: [usize; 7],
+    /// Name source fields: accessible name, visible text, image source, other.
+    pub identity_fields: [usize; 4],
+    /// Exact image-node self provenance, independently of labels or URLs.
+    pub self_image_pairs: usize,
     /// Admitted source rows considered for optional enrichment.
     pub records: usize,
     /// Name provenance fragments considered across those rows.

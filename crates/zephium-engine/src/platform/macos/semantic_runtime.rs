@@ -25,6 +25,10 @@ use block2::RcBlock;
 #[path = "agentic_semantic_program_probe.rs"]
 mod program_probe;
 #[cfg(feature = "native-agentic-semantic-probe")]
+pub(super) fn media_diagnostics_enabled() -> bool {
+    program_probe::media_diagnostics_enabled()
+}
+#[cfg(feature = "native-agentic-semantic-probe")]
 pub(super) fn configure_media_diagnostic(public: bool, account: bool) {
     program_probe::configure_media_diagnostic(public, account);
 }
@@ -799,7 +803,11 @@ impl SemanticRuntimeChannelState {
                 CompletionAction::Media {
                     completion,
                     outcome: (self.phase == DocumentPhase::Ready)
-                        .then(|| invocation.decode(bytes))
+                        .then(|| {
+                            #[cfg(feature = "native-agentic-semantic-probe")]
+                            let bytes = program_probe::normalize_media_result_diagnostic(bytes);
+                            invocation.decode(bytes)
+                        })
                         .flatten(),
                 },
                 true,
@@ -1081,10 +1089,11 @@ impl AgentSemanticRuntimeController {
         &self,
         plan: &zephium_agentic::SemanticRecordMediaPlan,
         validate: bool,
+        fetch: crate::platform::record_media::MediaFetchAttempt,
         completion: MediaCompletion,
     ) {
         let dispatched = match self.state.try_borrow_mut() {
-            Ok(mut state) => state.dispatch_media(MediaInvocation::new(plan, validate), completion),
+            Ok(mut state) => state.dispatch_media(MediaInvocation::new(plan, validate, fetch), completion),
             Err(_) => Err(completion),
         };
         match dispatched {

@@ -750,6 +750,13 @@ impl<'a> SemanticReadResult<'a> {
             observed_images: self.observed_images,
             eligible_image_geometry: self.eligible_image_geometry,
             structural_candidates: self.media.len(),
+            saturated_candidates: self
+                .media
+                .iter()
+                .filter(|candidate| {
+                    candidate.media.related().len() == crate::MAX_SEMANTIC_MEDIA_RELATIONS
+                })
+                .count(),
             ..Default::default()
         }
     }
@@ -760,10 +767,31 @@ impl<'a> SemanticReadResult<'a> {
     ) {
         counts.records += 1;
         counts.identity_sources += identity.len();
+        for source in identity.iter().filter_map(|id| self.fragment(*id)) {
+            counts.identity_roles[match source.role() {
+                SemanticRole::Heading => 0,
+                SemanticRole::Link => 1,
+                SemanticRole::Paragraph => 2,
+                SemanticRole::Document => 3,
+                SemanticRole::ListItem => 4,
+                SemanticRole::Image => 5,
+                _ => 6,
+            }] += 1;
+            counts.identity_fields[match source.field() {
+                SemanticReadField::AccessibleName => 0,
+                SemanticReadField::VisibleText => 1,
+                SemanticReadField::ImageSource => 2,
+                _ => 3,
+            }] += 1;
+        }
         for association in &self.media {
             for source in identity.iter().filter_map(|id| self.fragment(*id)) {
                 if association.same_capture(source.provenance()) {
                     counts.same_capture_pairs += 1;
+                    counts.self_image_pairs += usize::from(
+                        source.role() == SemanticRole::Image
+                            && association.media.reference() == source.provenance().reference(),
+                    );
                     if association
                         .media
                         .related()

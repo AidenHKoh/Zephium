@@ -13,6 +13,7 @@ pub(crate) struct Crop {
     pub(crate) proof: PixelPrivacyProof,
 }
 pub(crate) enum NativeMediaResult {
+    RetryableNetwork,
     Unavailable,
     Fetched(Vec<u8>),
     Crop(Crop),
@@ -20,14 +21,23 @@ pub(crate) enum NativeMediaResult {
 pub(crate) type MediaCompletion = Box<dyn FnOnce(Option<NativeMediaResult>)>;
 pub(crate) struct MediaInvocation {
     wire: String,
+    retry_report: bool,
 }
 impl MediaInvocation {
-    pub(crate) fn new(plan: &SemanticRecordMediaPlan, validate: bool) -> Self {
+    pub(crate) fn new(plan: &SemanticRecordMediaPlan, validate: bool, fetch: MediaFetchAttempt) -> Self {
         let mut wire = plan.native_invocation();
         if validate {
             wire.replace_range(..1, "V");
         }
-        Self { wire }
+        let retry_report = !validate && fetch.mode == 1;
+        if !validate {
+            use std::fmt::Write as _;
+            wire.pop();
+            let _ = write!(wire, ",\"q\":{}", fetch.timeout_millis);
+            if fetch.mode != 0 { let _ = write!(wire, ",\"p\":{}", fetch.mode); }
+            wire.push('}');
+        }
+        Self { wire, retry_report }
     }
     pub(crate) fn as_str(&self) -> &str {
         &self.wire
@@ -52,6 +62,7 @@ impl MediaInvocation {
             }
         }
         match status {
+            "retry" if object.len() == 6 && self.retry_report => Some(NativeMediaResult::RetryableNetwork),
             "fetch" if object.len() == 7 && self.wire.starts_with("M1:") => {
                 let bytes = object.get("bytes")?.as_str()?;
                 if bytes.len() > 87384 {
@@ -177,7 +188,7 @@ pub(crate) type FrameCompletion = Box<dyn FnOnce(Option<RecordFrame>)>;
 pub(crate) type FrameCapture = std::rc::Rc<dyn Fn(Crop, FrameCompletion) -> bool>;
 
 pub(crate) type MediaDispatch =
-    std::rc::Rc<dyn Fn(&SemanticRecordMediaPlan, bool, MediaCompletion)>;
+    std::rc::Rc<dyn Fn(&SemanticRecordMediaPlan, bool, MediaFetchAttempt, MediaCompletion)>;
 
 pub(crate) type PrivacyDispatch =
     std::rc::Rc<dyn Fn(super::semantic_pixel_privacy::PrivacyCompletion)>;
@@ -196,5 +207,120 @@ mod size_tests {
         let wide = image::DynamicImage::new_rgba8(800, 400);
         let preview = record_thumbnail(&wide, 320, 240);
         assert_eq!((preview.width(), preview.height()), (320, 160));
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[derive(Debug)]
+pub(crate) enum ProbeStage {
+    OwnerNotReady,
+    InvalidPlanCount,
+    SourceNotCurrent,
+    AdmissionRefused,
+    PresentationRefused,
+    Admitted,
+    Dispatched,
+    CurrentLost,
+    Fetched,
+    Crop,
+    Unavailable,
+    TransportUnknown,
+    CropPermissionMissing,
+}
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[allow(clippy::print_stderr)]
+pub(crate) fn probe_stage(stage: ProbeStage) {
+    if crate::platform::macos::media_diagnostics_enabled() {
+        eprintln!("record-media-stage: {stage:?} content=redacted");
+    }
+}
+
+
+/// Engine-private attempt operands; model/protocol callers cannot mint retry state.
+#[derive(Clone, Copy)]
+pub(crate) struct MediaFetchAttempt { mode: u8, timeout_millis: u16 }
+impl MediaFetchAttempt {
+    pub(crate) const fn validation() -> Self { Self { mode: 0, timeout_millis: 1500 } }
+}
+pub(crate) struct MediaRetryWindow {
+    deadline: std::time::Instant,
+    eligible: bool,
+    initial_sent: bool,
+    retry_decided: bool,
+}
+impl MediaRetryWindow {
+    pub(crate) fn new(now: std::time::Instant, remaining: std::time::Duration, eligible: bool) -> Self {
+        Self { deadline: now + remaining.min(std::time::Duration::from_millis(1500)), eligible, initial_sent: false, retry_decided: false }
+    }
+    pub(crate) fn active(&self, now: std::time::Instant) -> bool { now < self.deadline }
+    fn remaining(&self, now: std::time::Instant) -> Option<u16> {
+        let millis = self.deadline.saturating_duration_since(now).as_millis();
+        (millis > 0).then_some(millis.min(1500) as u16)
+    }
+    pub(crate) fn initial(&mut self, now: std::time::Instant) -> Option<MediaFetchAttempt> {
+        if self.initial_sent { return None; }
+        self.initial_sent = true;
+        Some(MediaFetchAttempt { mode: u8::from(self.eligible), timeout_millis: self.remaining(now)? })
+    }
+    pub(crate) fn retry(&mut self, now: std::time::Instant, current: bool) -> Option<MediaFetchAttempt> {
+        if self.retry_decided { return None; }
+        self.retry_decided = true;
+        if !self.initial_sent || !self.eligible || !current { return None; }
+        Some(MediaFetchAttempt { mode: 2, timeout_millis: self.remaining(now)? })
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    #[test]
+    fn public_asset_retry_spends_only_original_remaining_time_once() {
+        let start=Instant::now();
+        let mut window=MediaRetryWindow::new(start,Duration::from_secs(8),true);
+        let first=window.initial(start).unwrap();
+        assert_eq!((first.mode,first.timeout_millis),(1,1500));
+        assert!(window.initial(start).is_none());
+        let retry=window.retry(start+Duration::from_millis(400),true).unwrap();
+        assert_eq!((retry.mode,retry.timeout_millis),(2,1100));
+        assert!(window.retry(start+Duration::from_millis(500),true).is_none());
+        assert!(window.active(start+Duration::from_millis(1499)));
+        assert!(!window.active(start+Duration::from_millis(1500)));
+    }
+    #[test]
+    fn stop_or_source_loss_between_callbacks_cannot_dispatch_a_retry() {
+        let start=Instant::now();
+        for eligible in [false,true] {
+            let mut window=MediaRetryWindow::new(start,Duration::from_millis(900),eligible);
+            assert!(window.initial(start).is_some());
+            let mut dispatched=0;
+            if window.retry(start+Duration::from_millis(10),false).is_some(){dispatched+=1;}
+            assert_eq!(dispatched,0);
+            // Admission cannot heal after its one decision has been refused.
+            assert!(window.retry(start+Duration::from_millis(11),true).is_none());
+        }
+    }
+    #[test]
+    fn private_expired_and_shorter_resource_deadlines_never_gain_retry_time() {
+        let start=Instant::now();
+        let mut private=MediaRetryWindow::new(start,Duration::from_secs(8),false);
+        assert_eq!(private.initial(start).unwrap().mode,0);
+        assert!(private.retry(start,true).is_none());
+        for millis in [0,1,700,1500] {
+            let mut window=MediaRetryWindow::new(start,Duration::from_millis(millis),true);
+            let first=window.initial(start);
+            assert_eq!(first.is_some(),millis>0);
+            if let Some(first)=first {assert_eq!(first.timeout_millis,u16::try_from(millis).unwrap());}
+            assert!(window.retry(start+Duration::from_millis(millis),true).is_none());
+        }
+    }
+    #[test]
+    fn only_original_eligible_fetch_accepts_exact_retryable_network_ack() {
+        let response=br#"{"v":1,"s":"retry","i":1,"g":2,"k":3,"n":4}"#;
+        for report in [false,true] {
+            let invocation=MediaInvocation {wire:"M1:{\"i\":1,\"g\":2,\"k\":3,\"n\":4,\"q\":1000}".into(),retry_report:report};
+            assert_eq!(matches!(invocation.decode(response),Some(NativeMediaResult::RetryableNetwork)),report);
+            assert!(invocation.decode(br#"{"v":1,"s":"retry","i":1,"g":2,"k":3,"n":99}"#).is_none());
+        }
     }
 }

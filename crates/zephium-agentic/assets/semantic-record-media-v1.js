@@ -1,4 +1,3 @@
-// Native record media; URLs and cookies stay in the native world.
 (() => {
   "use strict";
   const NAME="__zephiumRecordMediaV1";
@@ -20,8 +19,6 @@
     return "";
   }
   function observedImageSources(node) {
-    // Only literal sources observed on this exact element/picture are retained.
-    // They never cause a request until the browser itself decodes currentSrc.
     const out=new Set();let work=0;
     const add=value=>{if(!value || value.length>4096 || ++work>32)return;try{out.add(new URL(value,document.baseURI).href);}catch(_){}};
     const sources=element=>{
@@ -39,7 +36,6 @@
     return out;
   }
   function label(node) {
-    // Bound traversal without reading a container's unbounded textContent.
     const stack=[node];let text="",visited=0;
     while(stack.length) {
       const current=stack.pop();if(++visited>64)return null;
@@ -193,7 +189,6 @@
     const word=(at,value)=>at+value.length<=n && [...value].every((c,i)=>bytes[at+i]===c.charCodeAt(0));
     let size=null;
     if(type==="image/png" && n>=33 && u32(0)===0x89504e47 && u32(4)===0x0d0a1a0a && word(12,"IHDR") && u32(8)===13) {
-      // Refuse animated encodings before the native decoder allocates frame state.
       for(let at=8;at+12<=n;){const length=u32(at);if(length>n-at-12 || word(at+4,"acTL"))return null;at+=length+12;}
       size=[u32(16),u32(20)];
     } else if(type==="image/jpeg" && n>=4 && u16(0)===0xffd8) {
@@ -215,8 +210,6 @@
   async function sanitize(parts,total,type,signal) {
     const bytes=new Uint8Array(total);let offset=0;for(const part of parts){bytes.set(part,offset);offset+=part.length;}
     const size=dimensions(bytes,type);if(!size || signal.aborted)throw new Error();
-    // These browser callbacks remain owned and awaited after abort. A timeout
-    // revokes publication; it never fabricates native callback completion.
     const bitmap=await createImageBitmap(new Blob([bytes],{type}));
     try {
       if(signal.aborted || bitmap.width!==size[0] || bitmap.height!==size[1])throw new Error();
@@ -240,19 +233,19 @@
     if(pending || typeof encoded!=="string" || encoded.length>256)return stringify({v:1,s:"unavailable"});
     let request;
     try {request=parse(encoded.slice(3));}catch(_){return stringify({v:1,s:"unavailable"});}
-    if(Object.keys(request).sort().join(",")!=="g,i,k,n" || !Object.values(request).every(value=>Number.isSafeInteger(value)&&value>0))return stringify({v:1,s:"unavailable"});
+    if(!["g,i,k,n","g,i,k,n,q","g,i,k,n,p,q"].includes(Object.keys(request).sort().join(",")) || !Object.values(request).every(value=>Number.isSafeInteger(value)&&value>0) || request.q>1500 || request.p && request.p!==1 && request.p!==2 || encoded.startsWith("V1:") && (request.p||request.q))return stringify({v:1,s:"unavailable"});
     const current=target(request);if(!current)return stringify({v:1,s:"unavailable"});
     if(encoded.startsWith("V1:"))return stringify(crop(request,privacy));
-    // Native-selected currentSrc/poster/background only. Never data-src guesses.
     const url=current.url;
     if(!url || url.length>4096)return stringify(crop(request,privacy));
     let parsed;try {parsed=new URL(url,document.baseURI);}catch(_){return stringify(crop(request,privacy));}
     if(!["https:","http:","blob:","data:"].includes(parsed.protocol))return stringify(crop(request,privacy));
-    const abort=new AbortController();pending=abort;
-    const timer=setTimeout(()=>abort.abort(),1500);
+    if(request.p===2 && (!["https:","http:"].includes(parsed.protocol) || parsed.origin===location.origin))return stringify({v:1,s:"unavailable"});
+    const abort=new AbortController();pending=abort;let headers=false;
+    const timer=setTimeout(()=>abort.abort(),request.q||1500);
     try {
-      const response=await fetchAsset(url,{signal:abort.signal,credentials:current.node.crossOrigin==="anonymous"?"same-origin":"include",mode:"cors",redirect:"error",cache:"force-cache"});
-      const type=(response.headers.get("content-type")||"").split(";")[0].trim().toLowerCase();
+      const response=await fetchAsset(url,{signal:abort.signal,credentials:request.p===2?"omit":current.node.crossOrigin==="anonymous"?"same-origin":"include",mode:"cors",redirect:"error",cache:"force-cache"});
+      headers=true;const type=(response.headers.get("content-type")||"").split(";")[0].trim().toLowerCase();
       if(!response.ok || !["image/png","image/jpeg","image/webp"].includes(type) ||
          Number(response.headers.get("content-length")||0)>MAX_RAW || !response.body)throw new Error();
       const reader=response.body.getReader(),parts=[];let total=0;
@@ -262,7 +255,10 @@
       if(!target(request) || abort.signal.aborted)throw new Error();
       let binary="";for(const value of output)binary+=String.fromCharCode(value);
       return stringify({v:1,s:"fetch",i:request.i,g:request.g,k:request.k,n:request.n,bytes:encode(binary)});
-    } catch(_) {return stringify(crop(request,privacy));}
+    } catch(_) {
+      if(request.p===1 && !headers && !abort.signal.aborted && ["https:","http:"].includes(parsed.protocol) && parsed.origin!==location.origin && target(request))return stringify({v:1,s:"retry",i:request.i,g:request.g,k:request.k,n:request.n});
+      return stringify(crop(request,privacy));
+    }
     finally {clearTimeout(timer);pending=null;}
   }
   Object.defineProperty(globalThis,NAME,{value:Object.freeze({evidence,invoke}),writable:false,configurable:false});

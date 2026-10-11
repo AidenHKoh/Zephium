@@ -21,11 +21,17 @@ pub fn record(arguments: std::fmt::Arguments<'_>) {
 /// account identity, source references, or pixel bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecordMediaTrace {
+    /// The retained app owner refused the queued request before native dispatch.
+    OwnerRefused,
     /// Exact native source-stage counts before any retrieval attempt.
     Source {
         observed_images: usize,
         eligible_image_geometry: usize,
         structural_candidates: usize,
+        saturated_candidates: usize,
+        identity_roles: [usize; 7],
+        identity_fields: [usize; 4],
+        self_image_pairs: usize,
         records: usize,
         identity_sources: usize,
         same_capture_pairs: usize,
@@ -36,6 +42,8 @@ pub enum RecordMediaTrace {
         plans: usize,
         original_crop_permits: usize,
         native_started: bool,
+        public_asset_retry: bool,
+        work_memory: bool,
     },
     /// Native terminal output and immutable Store acknowledgement counts.
     Settled {

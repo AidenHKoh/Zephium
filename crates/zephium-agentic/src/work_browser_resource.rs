@@ -1410,6 +1410,6 @@ mod tests;
 #[path = "work_browser_media.rs"]
 mod media;
 pub use media::{
-    WorkBrowserCropGeometry, WorkBrowserMediaProgress, WorkBrowserRecordImage,
+    WorkBrowserCropGeometry, WorkBrowserMediaFetchMode, WorkBrowserMediaProgress, WorkBrowserRecordImage,
     WorkBrowserRecordImageOrigin,
 };

@@ -71,7 +71,7 @@ pub use work_browser_resource::{
     WorkBrowserLeaseDeliveryPollError, WorkBrowserLeaseDeliveryProof,
     WorkBrowserLeaseDeliveryReceipt, WorkBrowserLeaseDeliveryRefusal,
     WorkBrowserLeaseDeliveryTicket, WorkBrowserLeaseEnded, WorkBrowserLeaseNativeDebt,
-    WorkBrowserMediaProgress, WorkBrowserNavigationCompletion,
+    WorkBrowserMediaFetchMode, WorkBrowserMediaProgress, WorkBrowserNavigationCompletion,
     WorkBrowserNavigationCompletionCallback, WorkBrowserNavigationDispatch,
     WorkBrowserNavigationEvent, WorkBrowserNavigationPreparation, WorkBrowserNavigationRequest,
     WorkBrowserObservationCapability, WorkBrowserObservationCompletion,

@@ -441,10 +441,11 @@ impl AgentSemanticRuntimeController {
         &self,
         plan: &zephium_agentic::SemanticRecordMediaPlan,
         validate: bool,
+        fetch: crate::platform::record_media::MediaFetchAttempt,
         completion: MediaCompletion,
     ) {
         let _ = self.native.dispatch(
-            ReadInvocation::Media(MediaInvocation::new(plan, validate)),
+            ReadInvocation::Media(MediaInvocation::new(plan, validate, fetch)),
             Box::new(move |result| {
                 completion(match result {
                     Ok(ReadResult::Media(value)) => Some(value),

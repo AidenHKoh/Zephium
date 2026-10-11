@@ -1,4 +1,3 @@
-
 (() => {
 "use strict";
 const NAME="__zephiumRecordMediaV1";
@@ -233,18 +232,19 @@ async function invoke(encoded,privacy) {
 if(pending || typeof encoded!=="string" || encoded.length>256)return stringify({v:1,s:"unavailable"});
 let request;
 try {request=parse(encoded.slice(3));}catch(_){return stringify({v:1,s:"unavailable"});}
-if(Object.keys(request).sort().join(",")!=="g,i,k,n" || !Object.values(request).every(value=>Number.isSafeInteger(value)&&value>0))return stringify({v:1,s:"unavailable"});
+if(!["g,i,k,n","g,i,k,n,q","g,i,k,n,p,q"].includes(Object.keys(request).sort().join(",")) || !Object.values(request).every(value=>Number.isSafeInteger(value)&&value>0) || request.q>1500 || request.p && request.p!==1 && request.p!==2 || encoded.startsWith("V1:") && (request.p||request.q))return stringify({v:1,s:"unavailable"});
 const current=target(request);if(!current)return stringify({v:1,s:"unavailable"});
 if(encoded.startsWith("V1:"))return stringify(crop(request,privacy));
 const url=current.url;
 if(!url || url.length>4096)return stringify(crop(request,privacy));
 let parsed;try {parsed=new URL(url,document.baseURI);}catch(_){return stringify(crop(request,privacy));}
 if(!["https:","http:","blob:","data:"].includes(parsed.protocol))return stringify(crop(request,privacy));
-const abort=new AbortController();pending=abort;
-const timer=setTimeout(()=>abort.abort(),1500);
+if(request.p===2 && (!["https:","http:"].includes(parsed.protocol) || parsed.origin===location.origin))return stringify({v:1,s:"unavailable"});
+const abort=new AbortController();pending=abort;let headers=false;
+const timer=setTimeout(()=>abort.abort(),request.q||1500);
 try {
-const response=await fetchAsset(url,{signal:abort.signal,credentials:current.node.crossOrigin==="anonymous"?"same-origin":"include",mode:"cors",redirect:"error",cache:"force-cache"});
-const type=(response.headers.get("content-type")||"").split(";")[0].trim().toLowerCase();
+const response=await fetchAsset(url,{signal:abort.signal,credentials:request.p===2?"omit":current.node.crossOrigin==="anonymous"?"same-origin":"include",mode:"cors",redirect:"error",cache:"force-cache"});
+headers=true;const type=(response.headers.get("content-type")||"").split(";")[0].trim().toLowerCase();
 if(!response.ok || !["image/png","image/jpeg","image/webp"].includes(type) ||
 Number(response.headers.get("content-length")||0)>MAX_RAW || !response.body)throw new Error();
 const reader=response.body.getReader(),parts=[];let total=0;
@@ -254,7 +254,10 @@ const output=await sanitize(parts,total,type,abort.signal);
 if(!target(request) || abort.signal.aborted)throw new Error();
 let binary="";for(const value of output)binary+=String.fromCharCode(value);
 return stringify({v:1,s:"fetch",i:request.i,g:request.g,k:request.k,n:request.n,bytes:encode(binary)});
-} catch(_) {return stringify(crop(request,privacy));}
+} catch(_) {
+if(request.p===1 && !headers && !abort.signal.aborted && ["https:","http:"].includes(parsed.protocol) && parsed.origin!==location.origin && target(request))return stringify({v:1,s:"retry",i:request.i,g:request.g,k:request.k,n:request.n});
+return stringify(crop(request,privacy));
+}
 finally {clearTimeout(timer);pending=null;}
 }
 Object.defineProperty(globalThis,NAME,{value:Object.freeze({evidence,invoke}),writable:false,configurable:false});

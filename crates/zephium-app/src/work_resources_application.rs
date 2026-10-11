@@ -1954,6 +1954,7 @@ impl RetainedWork {
     pub(super) fn read_media(
         &mut self,
         plans: Vec<zephium_agentic::SemanticRecordMediaPlan>,
+        fetch_mode: zephium_agentic::WorkBrowserMediaFetchMode,
         now: AgentPolicyInstant,
         deadline: AgentPolicyInstant,
     ) -> bool {
@@ -1969,7 +1970,7 @@ impl RetainedWork {
         }
         let Ok((pending, progress)) =
             self.owner
-                .media_lifecycle(&self.resource, plans, now, deadline)
+                .media_lifecycle(&self.resource, plans, fetch_mode, now, deadline)
         else {
             return false;
         };

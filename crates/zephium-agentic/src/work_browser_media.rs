@@ -5,10 +5,23 @@ use std::sync::{
     Mutex,
 };
 
+/// Trusted original task authority for optional asset retrieval. This does not
+/// assert that a Work-memory jar has no cookies or that public bytes equal an
+/// authenticated representation. It never grants screenshot/account authority.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WorkBrowserMediaFetchMode {
+    /// Keep the native session behavior; never remove credentials and retry.
+    #[default]
+    SessionOnly,
+    /// One host-admitted cross-origin credential-removing retry after an opaque
+    /// network/CORS failure. Original public task authority must still hold.
+    PublicAssetRetry,
+}
+
 /// Whether an admitted asset came from the page's own session or exact pixels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkBrowserRecordImageOrigin {
-    /// Retrieved with the native page session from the exact observed source.
+    /// Retrieved in the native browser context from the exact observed source.
     NativeFetch,
     /// Cropped from a fresh privacy-fenced native frame of that exact element.
     NativeCrop,
@@ -174,11 +187,17 @@ impl WorkBrowserMediaProgress {
 }
 #[derive(Clone, Debug)]
 pub(super) struct MediaRead {
+    pub(super) fetch_mode: WorkBrowserMediaFetchMode,
     pub(super) plans: Vec<crate::SemanticRecordMediaPlan>,
     pub(super) progress: WorkBrowserMediaProgress,
     pub(super) deadline: AgentPolicyInstant,
 }
 impl WorkBrowserResourceRequest {
+    /// Host-admitted original task class, independent of cookie-jar contents.
+    pub fn media_fetch_mode(&self) -> WorkBrowserMediaFetchMode {
+        self.media.as_ref().map_or(WorkBrowserMediaFetchMode::SessionOnly, |media| media.fetch_mode)
+    }
+
     /// Exact private source-record candidates of this admitted optional read.
     pub fn media_plans(&self) -> Option<&[crate::SemanticRecordMediaPlan]> {
         self.media.as_ref().map(|media| media.plans.as_slice())
@@ -199,6 +218,7 @@ impl WorkBrowserResources {
         &mut self,
         resource: &WorkBrowserResourceJoin,
         plans: Vec<crate::SemanticRecordMediaPlan>,
+        fetch_mode: WorkBrowserMediaFetchMode,
         now: AgentPolicyInstant,
         deadline: AgentPolicyInstant,
     ) -> Result<(WorkBrowserResourceRequest, WorkBrowserMediaProgress), WorkBrowserResourceError>
@@ -227,6 +247,10 @@ impl WorkBrowserResources {
         {
             return Err(WorkBrowserResourceError::Phase);
         }
+        if fetch_mode == WorkBrowserMediaFetchMode::PublicAssetRetry
+            && (!row.isolated_public || !row.document_policy.is_public()) {
+            return Err(WorkBrowserResourceError::Source);
+        }
         row.tick(now)?;
         let operation = OperationJoin {
             resource: resource.clone(),
@@ -248,6 +272,7 @@ impl WorkBrowserResources {
                 health: None,
                 human: None,
                 media: Some(Box::new(MediaRead {
+                    fetch_mode,
                     plans,
                     progress: progress.clone(),
                     deadline,

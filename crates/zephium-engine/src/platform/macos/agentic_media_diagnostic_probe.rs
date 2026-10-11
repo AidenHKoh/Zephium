@@ -10,7 +10,7 @@ pub(super) fn enabled() -> bool {
 
 pub(super) fn source(original: &str) -> Option<String> {
     let replacements = [
-        ("const snapshots=new Map(), style=", "let md=[0,0,0,0];const snapshots=new Map(), style="),
+        ("const snapshots=new Map(), style=", "let md=[0,0,0,0],mr=[0,0,0,0];const snapshots=new Map(), style="),
         ("function evidence(records, invocation, generation, helpers) {", "function evidence(records, invocation, generation, helpers) {md=[0,0,0,0];"),
         ("    let work=0;", "    let work=0;md[1]=candidates.length;"),
         ("if(work>16384 || !images.length)return [];", "if(work>16384)return (md[0]=2,md[2]=Math.min(work,16385),[]);if(!images.length)return (md[0]=1,[]);"),
@@ -21,6 +21,16 @@ pub(super) fn source(original: &str) -> Option<String> {
         ("imageNaturalWidthGetter,pageTitleText}); } catch (_) { return []; }", "imageNaturalWidthGetter,pageTitleText});mediaDiagnostic=globalThis.__zephiumRecordMediaV1.diagnostic();return result; } catch (_) {mediaDiagnostic=[3,0,0,0]; return []; }"),
         ("if (utf8Length(enriched,request.b.w+1) <= request.b.w) value = enriched;", "if (utf8Length(enriched,request.b.w+1) <= request.b.w) value = enriched;else mediaDiagnostic[0]=4;"),
         ("    return encoded.value;", "    return 'MD1:'+mediaDiagnostic.join(',')+'\\n'+encoded.value;"),
+        ("  async function invoke(encoded,privacy) {", "  async function invoke(encoded,privacy){mr=[0,0,0,0];const result=await runMedia(encoded,privacy);return 'MR1:'+mr.join(',')+'\\n'+result;}\n  async function runMedia(encoded,privacy) {"),
+        ("    const current=target(request);if(!current)return stringify({v:1,s:\"unavailable\"});", "    const current=target(request);if(!current)return stringify({v:1,s:\"unavailable\"});mr[0]=[\"image\",\"background\",\"poster\",\"svg\",\"canvas\",\"page_image\",\"graphic\",\"record\"].indexOf(current.entry.kind)+1;"),
+        ("    const url=current.url;", "    mr[1]=1;const url=current.url;"),
+        ("    let parsed;try {parsed=new URL(url,document.baseURI);}", "    mr[1]=2;let parsed;try {parsed=new URL(url,document.baseURI);}"),
+        ("    const abort=new AbortController();pending=abort;", "    mr[1]=3;const abort=new AbortController();pending=abort;"),
+        ("      if(!response.ok || ![\"image/png\",\"image/jpeg\",\"image/webp\"].includes(type) ||", "      mr[1]=4;mr[2]=([\"image/png\",\"image/jpeg\",\"image/webp\"].indexOf(type)+1)||4;\n      if(!response.ok || ![\"image/png\",\"image/jpeg\",\"image/webp\"].includes(type) ||"),
+        ("      const reader=response.body.getReader(),parts=[];let total=0;", "      mr[1]=5;const reader=response.body.getReader(),parts=[];let total=0;"),
+        ("      const output=await sanitize(parts,total,type,abort.signal);", "      mr[1]=6;const output=await sanitize(parts,total,type,abort.signal);mr[1]=7;"),
+        ("      return stringify({v:1,s:\"fetch\",i:request.i,g:request.g,k:request.k,n:request.n,bytes:encode(binary)});", "      mr[1]=8;return stringify({v:1,s:\"fetch\",i:request.i,g:request.g,k:request.k,n:request.n,bytes:encode(binary)});"),
+        ("    } catch(_) {\n      if(request.p===1", "    } catch(_) {mr[3]=Number(abort.signal.aborted);\n      if(request.p===1"),
     ];
     let mut source = original.to_owned();
     for (from, to) in replacements {
@@ -114,9 +124,18 @@ mod tests {
     #[test]
     fn account_activity_disables_activation_and_normalization() {
         let bytes = b"MD1:0,1,2,3\n{}";
+        let media = b"MR1:1,8,1,0\n{\"s\":\"fetch\",\"bytes\":\"SYNTHETIC_PIXEL_SENTINEL\"}";
         for (public, account) in [(false, false), (true, false), (false, true), (true, true)] {
             configure(public, account);
             assert_eq!(enabled(), public && !account);
+            assert_eq!(
+                normalize_media(media),
+                if public && !account {
+                    &media[12..]
+                } else {
+                    media.as_slice()
+                }
+            );
             assert_eq!(
                 normalize(bytes),
                 if public && !account {
@@ -140,5 +159,81 @@ mod tests {
         ))
         .is_none());
         assert!(!instrumented.contains("console.log"));
+    }
+}
+
+/// Pixel-bearing result normalization is local only. The original payload is
+/// borrowed intact; only four bounded integers can enter the probe log.
+fn split_media(bytes: &[u8]) -> Option<([u32; 4], &[u8])> {
+    let rest = bytes.strip_prefix(b"MR1:")?;
+    let end = rest.iter().take(32).position(|b| *b == b'\n')?;
+    let header = std::str::from_utf8(&rest[..end]).ok()?;
+    let mut values = header.split(',');
+    let mut counts = [0; 4];
+    for (out, limit) in counts.iter_mut().zip([8, 8, 4, 1]) {
+        let value = values.next()?;
+        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        *out = value.parse().ok()?;
+        if *out > limit {
+            return None;
+        }
+    }
+    if values.next().is_some() {
+        return None;
+    }
+    let payload = &rest[end + 1..];
+    payload.starts_with(b"{").then_some((counts, payload))
+}
+#[allow(clippy::print_stderr)]
+pub(super) fn normalize_media(bytes: &[u8]) -> &[u8] {
+    if enabled() {
+        if let Some((counts, payload)) = split_media(bytes) {
+            let stage = [
+                "TargetOrInput",
+                "MissingSource",
+                "UnsupportedSource",
+                "NetworkOrCors",
+                "ResponseAdmission",
+                "BodyRead",
+                "Decode",
+                "SourceCheck",
+                "Fetched",
+            ][counts[1] as usize];
+            eprintln!(
+                "record-media-result: kind={} stage={stage} format={} aborted={} content=redacted",
+                counts[0], counts[2], counts[3]
+            );
+            return payload;
+        }
+    }
+    bytes
+}
+#[cfg(test)]
+mod media_result_tests {
+    use super::*;
+    #[test]
+    fn media_envelope_is_bounded_and_retains_exact_local_payload() {
+        let payload = b"{\"v\":1,\"s\":\"fetch\",\"bytes\":\"SYNTHETIC_PIXEL_SENTINEL\"}";
+        let mut wrapped = b"MR1:1,8,1,0\n".to_vec();
+        wrapped.extend_from_slice(payload);
+        let (counts, original) = split_media(&wrapped).unwrap();
+        assert_eq!(counts, [1, 8, 1, 0]);
+        assert_eq!(original, payload);
+        assert!(std::ptr::eq(
+            original.as_ptr(),
+            wrapped[wrapped.len() - payload.len()..].as_ptr()
+        ));
+        for bad in [
+            "MR1:9,0,0,0\n{}",
+            "MR1:0,9,0,0\n{}",
+            "MR1:0,0,5,0\n{}",
+            "MR1:0,0,0,2\n{}",
+            "MR1:0,0,0,0,1\n{}",
+            "MR1:secret,0,0,0\n{}",
+        ] {
+            assert!(split_media(bad.as_bytes()).is_none());
+        }
     }
 }

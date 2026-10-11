@@ -502,6 +502,7 @@ impl WorkResourceOwner {
         &self,
         join: &WorkBrowserResourceJoin,
         plans: Vec<zephium_agentic::SemanticRecordMediaPlan>,
+        fetch_mode: zephium_agentic::WorkBrowserMediaFetchMode,
         now: AgentPolicyInstant,
         deadline: AgentPolicyInstant,
     ) -> Result<(PendingLifecycle, zephium_agentic::WorkBrowserMediaProgress), Refusal> {
@@ -516,7 +517,7 @@ impl WorkResourceOwner {
         let (request, progress) = self
             .shared
             .lock_rows()?
-            .read_record_media(join, plans, now, deadline)?;
+            .read_record_media(join, plans, fetch_mode, now, deadline)?;
         resource.reusable.store(false, Ordering::Release);
         PendingLifecycle::dispatch(self.shared.clone(), resource, request, None, None)
             .map(|pending| (pending, progress))

@@ -8,8 +8,14 @@ pub(super) fn normalize_form_result(bytes: &[u8]) -> (Option<u16>, &[u8]) {
 }
 #[path = "agentic_media_diagnostic_probe.rs"]
 mod media_diagnostic;
+pub(super) fn media_diagnostics_enabled() -> bool {
+    media_diagnostic::enabled()
+}
 pub(super) fn configure_media_diagnostic(public: bool, account: bool) {
     media_diagnostic::configure(public, account);
+}
+pub(super) fn normalize_media_result_diagnostic(bytes: &[u8]) -> &[u8] {
+    media_diagnostic::normalize_media(bytes)
 }
 pub(super) fn normalize_media_diagnostic(bytes: &[u8]) -> &[u8] {
     media_diagnostic::normalize(bytes)

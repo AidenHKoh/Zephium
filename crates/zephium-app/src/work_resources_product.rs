@@ -364,7 +364,7 @@ pub struct RetainedWorkSnapshot {
     pub refusal: Option<(RetainedRefusal, RetainedLaneFacts)>,
 }
 struct Projection {
-    media_command: Option<Vec<zephium_agentic::SemanticRecordMediaPlan>>,
+    media_command: Option<(Vec<zephium_agentic::SemanticRecordMediaPlan>, zephium_agentic::WorkBrowserMediaFetchMode)>,
     media_result: Option<Vec<zephium_agentic::WorkBrowserRecordImage>>,
     media_requested: bool,
 
@@ -592,7 +592,7 @@ impl RetainedWorkHandle {
     /// requires atomic artifact publication; the archived result remains in Store.
     /// One optional same-page media batch after durable text success. Numeric
     /// native source plans cannot add account, navigation, or action authority.
-    pub fn read_record_media(&self, plans: Vec<zephium_agentic::SemanticRecordMediaPlan>) -> bool {
+    pub fn read_record_media(&self, plans: Vec<zephium_agentic::SemanticRecordMediaPlan>, fetch_mode: zephium_agentic::WorkBrowserMediaFetchMode) -> bool {
         if self.signal.close.load(Ordering::Acquire)
             || self.signal.stop.load(Ordering::Acquire)
             || plans.is_empty()
@@ -614,7 +614,7 @@ impl RetainedWorkHandle {
             return false;
         }
         projection.media_requested = true;
-        projection.media_command = Some(plans);
+        projection.media_command = Some((plans, fetch_mode));
         drop(projection);
         self.callback.dispatch(Command::WorkWake)
     }
@@ -1127,9 +1127,9 @@ impl ProductWork {
                 projection
                     .media_command
                     .take()
-                    .map(|plans| (plans, projection.active_deadline))
+                    .map(|(plans, fetch_mode)| (plans, fetch_mode, projection.active_deadline))
             });
-        if let Some((plans, deadline)) = media {
+        if let Some((plans, fetch_mode, deadline)) = media {
             let remaining = deadline
                 .saturating_duration_since(Instant::now())
                 .min(std::time::Duration::from_secs(8));
@@ -1139,8 +1139,9 @@ impl ProductWork {
                 .map(AgentPolicyInstant::from_millis);
             let accepted = !self.signal.close.load(Ordering::Acquire)
                 && !self.signal.stop.load(Ordering::Acquire)
-                && expires.is_some_and(|expires| work.read_media(plans, now, expires));
+                && expires.is_some_and(|expires| work.read_media(plans, fetch_mode, now, expires));
             if !accepted {
+                crate::work_trace::record_media(crate::work_trace::RecordMediaTrace::OwnerRefused);
                 if let Ok(mut projection) = self.signal.projection.lock() {
                     projection.media_result = Some(Vec::new());
                 }

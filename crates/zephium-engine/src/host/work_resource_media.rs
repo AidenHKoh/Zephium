@@ -10,6 +10,13 @@ use std::{
 };
 use zephium_agentic::{SemanticRecordMediaPlan, WorkBrowserMediaProgress, WorkBrowserRecordImage};
 
+macro_rules! media_stage {
+    ($stage:ident) => {
+        #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+        record_media::probe_stage(record_media::ProbeStage::$stage);
+    };
+}
+
 pub(super) struct Batch {
     presentation: RefCell<crate::platform::imp::WorkObservationPresentation>,
     presented: Cell<bool>,
@@ -23,6 +30,7 @@ pub(super) struct Batch {
     progress: WorkBrowserMediaProgress,
     deadline: zephium_agentic::AgentPolicyInstant,
     plans: Vec<SemanticRecordMediaPlan>,
+    fetch_mode: zephium_agentic::WorkBrowserMediaFetchMode,
     cursor: Cell<usize>,
     images: RefCell<Vec<WorkBrowserRecordImage>>,
     semantic: record_media::MediaDispatch,
@@ -62,17 +70,45 @@ impl Batch {
             return;
         }
         self.cursor.set(self.cursor.get() + 1);
+        let Some(now) = work_browser_monotonic_now() else { self.finish(false); return; };
+        let started = Instant::now();
+        let window = Rc::new(RefCell::new(record_media::MediaRetryWindow::new(
+            started,
+            Duration::from_millis(self.deadline.millis().saturating_sub(now.millis())),
+            self.fetch_mode == zephium_agentic::WorkBrowserMediaFetchMode::PublicAssetRetry,
+        )));
+        let initial = window.borrow_mut().initial(started);
+        let Some(fetch) = initial else { self.next(); return; };
+        self.fetch(plan, fetch, window);
+    }
+    fn fetch(self: Rc<Self>, plan: SemanticRecordMediaPlan, fetch: record_media::MediaFetchAttempt, window: Rc<RefCell<record_media::MediaRetryWindow>>) {
+        if !self.current(&plan) { self.finish(true); return; }
+        media_stage!(Dispatched);
         let batch = self.clone();
         (self.semantic)(
             &plan.clone(),
             false,
+            fetch,
             Box::new(move |outcome| {
                 if !batch.current(&plan) {
+                    media_stage!(CurrentLost);
                     batch.finish(outcome.is_some());
                     return;
                 }
+                // Renderer dispatch/callback delay never extends the original
+                // public-asset window. Its callback still drains before discard.
+                if batch.fetch_mode == zephium_agentic::WorkBrowserMediaFetchMode::PublicAssetRetry
+                    && !window.borrow().active(Instant::now()) {
+                    batch.next();
+                    return;
+                }
                 match outcome {
+                    Some(NativeMediaResult::RetryableNetwork) => {
+                        let retry = window.borrow_mut().retry(Instant::now(), batch.current(&plan));
+                        if let Some(retry) = retry { batch.fetch(plan, retry, window); } else { batch.next(); }
+                    }
                     Some(NativeMediaResult::Fetched(bytes)) => {
+                        media_stage!(Fetched);
                         if let Some(image) = record_media::raster(&plan, bytes, None) {
                             batch.images.borrow_mut().push(image);
                             batch.next();
@@ -80,9 +116,18 @@ impl Batch {
                             batch.validate_for_crop(plan);
                         }
                     }
-                    Some(NativeMediaResult::Crop(crop)) => batch.capture_crop(plan, crop),
-                    Some(NativeMediaResult::Unavailable) => batch.next(),
-                    None => batch.finish(false),
+                    Some(NativeMediaResult::Crop(crop)) => {
+                        media_stage!(Crop);
+                        batch.capture_crop(plan, crop)
+                    }
+                    Some(NativeMediaResult::Unavailable) => {
+                        media_stage!(Unavailable);
+                        batch.next()
+                    }
+                    None => {
+                        media_stage!(TransportUnknown);
+                        batch.finish(false)
+                    }
                 }
             }),
         );
@@ -96,6 +141,7 @@ impl Batch {
         (self.semantic)(
             &plan.clone(),
             true,
+            record_media::MediaFetchAttempt::validation(),
             Box::new(move |outcome| match outcome {
                 Some(NativeMediaResult::Crop(crop)) if batch.current(&plan) => {
                     batch.capture_crop(plan, crop)
@@ -107,6 +153,7 @@ impl Batch {
     }
     fn capture_crop(self: Rc<Self>, plan: SemanticRecordMediaPlan, crop: Crop) {
         if !plan.local_crop_permitted(Instant::now()) {
+            media_stage!(CropPermissionMissing);
             self.next();
             return;
         }
@@ -191,6 +238,7 @@ impl Batch {
                 (after.semantic)(
                     &plan.clone(),
                     true,
+                    record_media::MediaFetchAttempt::validation(),
                     Box::new(move |outcome| {
                         if let Some(NativeMediaResult::Crop(current)) = outcome {
                             if final_owner.crop_current(&plan)
@@ -243,12 +291,16 @@ impl WorkNativeResource {
         };
         let admitted = || {
             if !self.guard.media_current() || !self.ready() || self.pending() {
+                media_stage!(OwnerNotReady);
                 return None;
             }
             let plans = request.media_plans()?.to_vec();
+            if request.media_fetch_mode() == zephium_agentic::WorkBrowserMediaFetchMode::PublicAssetRetry
+                && (!request.isolated_public() || !request.document_policy().is_public()) { return None; }
             let progress = request.media_progress()?;
             let deadline = request.media_deadline()?;
             if plans.is_empty() || plans.len() > 12 {
+                media_stage!(InvalidPlanCount);
                 return None;
             }
             let view = self.view.as_ref()?;
@@ -258,14 +310,17 @@ impl WorkNativeResource {
                 .iter()
                 .any(|plan| gate.observation_stamp(plan.frame().context()).is_none())
             {
+                media_stage!(SourceNotCurrent);
                 return None;
             }
             Some((plans, progress, deadline, semantic, capture, gate, privacy))
         };
         let Some((plans, progress, deadline, semantic, capture, gate, privacy)) = admitted() else {
+            media_stage!(AdmissionRefused);
             task.complete(Outcome::Refused);
             return;
         };
+        let fetch_mode = request.media_fetch_mode();
         let Some(view) = self.view.as_ref() else {
             task.complete(Outcome::Refused);
             return;
@@ -293,9 +348,11 @@ impl WorkNativeResource {
         let prepared =
             crate::platform::imp::WorkObservationPresentation::prepare(view.view(), expires);
         let Ok(presentation) = prepared else {
+            media_stage!(PresentationRefused);
             task.complete(Outcome::Refused);
             return;
         };
+        media_stage!(Admitted);
         self.media_pending = true;
         let batch = Rc::new(Batch {
             presentation: RefCell::new(presentation),
@@ -310,6 +367,7 @@ impl WorkNativeResource {
             progress,
             deadline,
             plans,
+            fetch_mode,
             cursor: Cell::new(0),
             images: RefCell::new(Vec::new()),
             semantic,
@@ -335,6 +393,9 @@ impl EngineHost {
             return;
         };
         if !batch.started.get() && batch.plans.first().is_none_or(|plan| !batch.current(plan)) {
+            if batch.finished.get().is_none() {
+                media_stage!(CurrentLost);
+            }
             batch.finished.set(Some(true));
         }
         if batch.finished.get().is_none() && !batch.started.get() {

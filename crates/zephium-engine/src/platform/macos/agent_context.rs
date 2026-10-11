@@ -443,8 +443,9 @@ impl AgentOwnedView {
         let dispatch = Rc::new(
             move |plan: &zephium_agentic::SemanticRecordMediaPlan,
                   validate: bool,
+                  fetch: crate::platform::record_media::MediaFetchAttempt,
                   completion: crate::platform::record_media::MediaCompletion| {
-                semantic.dispatch_media(plan, validate, completion)
+                semantic.dispatch_media(plan, validate, fetch, completion)
             },
         );
         Some((dispatch, capture, privacy))

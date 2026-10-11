@@ -853,6 +853,12 @@ impl NativeWorkComposition {
             .input
             .retained_resource_spec()
             .map_err(|_| WorkError::Invalid)?;
+        let public_asset_task = public_asset_task_authorized(
+            resume_plan.as_ref().map(|plan| &plan.request),
+            original_spec.isolated_public,
+            original_spec.document_policy,
+            intervention_origin.is_some(),
+        );
         let original_deadline = original_spec.deadline;
         let construction_attempt = invocation.construction_attempt;
         let mut ready_deadline = original_deadline
@@ -1714,6 +1720,10 @@ impl NativeWorkComposition {
                                         observed_images: counts.observed_images,
                                         eligible_image_geometry: counts.eligible_image_geometry,
                                         structural_candidates: counts.structural_candidates,
+                                        saturated_candidates: counts.saturated_candidates,
+                                        identity_roles: counts.identity_roles,
+                                        identity_fields: counts.identity_fields,
+                                        self_image_pairs: counts.self_image_pairs,
                                         records: counts.records,
                                         identity_sources: counts.identity_sources,
                                         same_capture_pairs: counts.same_capture_pairs,
@@ -1727,14 +1737,17 @@ impl NativeWorkComposition {
                             .iter()
                             .filter(|plan| plan.local_crop_permitted(Instant::now()))
                             .count();
+                        let fetch_mode = public_asset_fetch_mode(public_asset_task, measure.resolved_handoff);
                         let native_started = !media_plans.is_empty()
-                            && guard.0.read_record_media(media_plans.clone());
+                            && guard.0.read_record_media(media_plans.clone(), fetch_mode);
                         media_complete = !native_started;
                         zephium_app::work_trace::record_media(
                             zephium_app::work_trace::RecordMediaTrace::Admitted {
                                 plans: media_plans.len(),
                                 original_crop_permits: crop_permits,
                                 native_started,
+                                public_asset_retry: fetch_mode == zephium_agentic::WorkBrowserMediaFetchMode::PublicAssetRetry,
+                                work_memory,
                             },
                         );
                         zephium_app::work_trace::record(format_args!(
@@ -4252,15 +4265,185 @@ mod human_budget_tests {
             reserved.model_tokens,
             limits.model_tokens - first.model_tokens
         );
-        assert!(
-            add_usage(
-                first,
-                WorkUsage {
-                    model_tokens: u32::MAX,
-                    ..second
+        assert!(add_usage(
+            first,
+            WorkUsage {
+                model_tokens: u32::MAX,
+                ..second
+            }
+        )
+        .is_none());
+    }
+}
+
+
+// Original authority, never a claim about which cookies Work's persistent jar
+// contains. Cookie choices/checks may persist; they grant no account authority.
+// `private_run` selects an empty run-local store; storage isolation proves
+// neither public task authority nor account authority.
+// The original public document/read/session and identity gates still all apply.
+fn public_asset_task_authorized(
+    request: Option<&WorkAgentBrowseRequest>,
+    isolated_public: bool,
+    policy: WorkBrowserDocumentPolicy,
+    identified_account: bool,
+) -> bool {
+    isolated_public
+        && policy.is_public()
+        && !identified_account
+        && request.is_some_and(|request| {
+            matches!(
+                request.session,
+                zephium_app::work_sites::SiteSession::Private
+            ) && matches!(request.step, WorkStepKindV1::Read { goal: None, .. })
+                && !request.entry
+                && !request.view
+                && !request.allow_edits
+                && !request.hold_typing
+        })
+}
+fn public_asset_fetch_mode(
+    original_public: bool,
+    resolved: Option<zephium_core::work::runtime::WorkPageHandoffKindV1>,
+) -> zephium_agentic::WorkBrowserMediaFetchMode {
+    if original_public
+        && !resolved.is_some_and(|kind| {
+            kind.includes(zephium_core::work::runtime::WorkPageHandoffKindV1::SignIn)
+        })
+    {
+        zephium_agentic::WorkBrowserMediaFetchMode::PublicAssetRetry
+    } else {
+        zephium_agentic::WorkBrowserMediaFetchMode::SessionOnly
+    }
+}
+
+#[cfg(test)]
+mod public_asset_retry_tests {
+    use super::*;
+    fn request() -> WorkAgentBrowseRequest {
+        WorkAgentBrowseRequest {
+            construction_attempt: WorkBrowserConstructionAttempt::default(),
+            id: WorkStepId::from(1),
+            step: WorkStepKindV1::Read {
+                url: "https://example.test/catalog".into(),
+                collection: None,
+                goal: None,
+            },
+            hops: 0,
+            objective: "Compare public records".into(),
+            output: "records".into(),
+            limits: WorkExecutionLimits {
+                model_tokens: 1000,
+                cost_micro_usd: 1000,
+                operations: 10,
+                timeout_seconds: 30,
+                max_workers: 1,
+            },
+            session: zephium_app::work_sites::SiteSession::Private,
+            confirm: None,
+            allow_edits: false,
+            hold_typing: false,
+            entry: false,
+            view: false,
+            results: None,
+            redirected_from: None,
+            private_run: false,
+        }
+    }
+    #[test]
+    fn only_explicit_original_public_read_authority_allows_credential_removal() {
+        for private_storage in [false, true] {
+            let mut original = request();
+            original.private_run = private_storage;
+            let allowed = |r: &WorkAgentBrowseRequest| {
+                public_asset_task_authorized(
+                    Some(r),
+                    true,
+                    WorkBrowserDocumentPolicy::PublicQueryFinalization,
+                    false,
+                )
+            };
+            assert!(allowed(&original));
+            assert!(!public_asset_task_authorized(
+                None,
+                true,
+                WorkBrowserDocumentPolicy::PublicQueryFinalization,
+                false
+            ));
+            assert!(!public_asset_task_authorized(
+                Some(&original),
+                false,
+                WorkBrowserDocumentPolicy::PublicQueryFinalization,
+                false
+            ));
+            assert!(!public_asset_task_authorized(
+                Some(&original),
+                true,
+                WorkBrowserDocumentPolicy::SiteSession,
+                false
+            ));
+            assert!(!public_asset_task_authorized(
+                Some(&original),
+                true,
+                WorkBrowserDocumentPolicy::Exact,
+                false
+            ));
+            assert!(!public_asset_task_authorized(
+                Some(&original),
+                true,
+                WorkBrowserDocumentPolicy::PublicQueryFinalization,
+                true
+            ));
+            for changed in 0..7 {
+                let mut r = original.clone();
+                match changed {
+                    0 => {
+                        r.session = zephium_app::work_sites::SiteSession::Yours {
+                            site: "example.test".into(),
+                            account: "fixture".into(),
+                        }
+                    }
+                    1 => r.entry = true,
+                    2 => r.view = true,
+                    3 => r.allow_edits = true,
+                    4 => r.hold_typing = true,
+                    5 => {
+                        r.step = WorkStepKindV1::Read {
+                            url: "https://example.test".into(),
+                            collection: None,
+                            goal: Some("Account task".into()),
+                        }
+                    }
+                    _ => {
+                        r.step = WorkStepKindV1::Discover {
+                            query: "Public records".into(),
+                            collection: None,
+                        }
+                    }
                 }
-            )
-            .is_none()
+                assert!(!allowed(&r), "changed={changed}");
+            }
+        }
+    }
+    #[test]
+    fn sign_in_resume_cannot_keep_a_public_asset_retry_grant() {
+        use zephium_agentic::WorkBrowserMediaFetchMode as M;
+        use zephium_core::work::runtime::WorkPageHandoffKindV1 as H;
+        assert_eq!(public_asset_fetch_mode(true, None), M::PublicAssetRetry);
+        assert_eq!(
+            public_asset_fetch_mode(true, Some(H::Check)),
+            M::PublicAssetRetry
         );
+        for handoff in [
+            None,
+            Some(H::Check),
+            Some(H::SignIn),
+            Some(H::SignInAndCheck),
+        ] {
+            assert_eq!(public_asset_fetch_mode(false, handoff), M::SessionOnly);
+        }
+        for handoff in [H::SignIn, H::SignInAndCheck] {
+            assert_eq!(public_asset_fetch_mode(true, Some(handoff)), M::SessionOnly);
+        }
     }
 }
