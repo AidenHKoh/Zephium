@@ -98,7 +98,7 @@ pub(crate) fn data(kind: &str) -> Option<Value> {
                     "url": string(),
                     "price": object(json!({"display": text(L::PICK_PRICE), "amount": decimal(), "currency": string(), "was": text(L::PICK_PRICE)}), &["display"]),
                     "facts": list(object(json!({
-                        "label": text(L::FACT_LABEL), "value": text(L::FACT_VALUE),
+                        "label": text(L::FACT_LABEL), "value": text(L::PICK_FACT_VALUE),
                         "kind": one_of(&["text", "yes", "no", "partial", "rating"])
                     }), &["label", "value", "kind"]), 0, L::PICK_FACTS),
                     "rating": object(json!({"value": decimal(), "max": {"type": "integer", "enum": [5, 10]}, "count": {"type": "integer", "minimum": 0}}), &["value", "max"]),
@@ -301,6 +301,7 @@ pub(crate) fn data(kind: &str) -> Option<Value> {
 pub(crate) fn any(kinds: &[&str]) -> Value {
     let options: Vec<Value> = kinds
         .iter()
+        .filter(|kind| **kind != "picks")
         .filter_map(|kind| {
             data(kind).map(|mut schema| {
                 schema["title"] = json!(kind);
@@ -308,7 +309,17 @@ pub(crate) fn any(kinds: &[&str]) -> Value {
             })
         })
         .collect();
-    json!({"anyOf": options, "description": "The kind's data: the schema whose title is the kind."})
+    let mut options = options;
+    if kinds.iter().any(|kind| matches!(*kind, "picks" | "sheet")) {
+        options.push(serde_json::json!({
+            "title":"native_records", "type":"object", "additionalProperties":false,
+            "properties":{"records":{"type":"array", "minItems":1, "maxItems":12, "items":{
+                "type":"object", "additionalProperties":false,
+                "properties":{"source":{"type":"string"},"annotation":{"type":"string","maxLength":160},"recommended":{"type":"boolean"}},
+                "required":["source"]}}}, "required":["records"]
+        }));
+    }
+    json!({"anyOf": options, "description": "For extracted records, picks/sheet data is records in desired order: source is the r key returned by a read, annotation is optional. Rust copies values, links and images. Other objects use their kind schema."})
 }
 
 /// Where the model's data leaves its kind's shape, in closed words.

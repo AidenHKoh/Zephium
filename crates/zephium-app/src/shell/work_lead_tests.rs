@@ -2862,3 +2862,98 @@ async fn stop_during_early_reply_publication_drops_generation_and_refuses_late_c
     );
     assert_ne!(state.executions[0].status, WorkExecutionStatus::Running);
 }
+
+#[tokio::test]
+async fn native_records_publish_with_reply_and_finish_in_one_final_model_turn() {
+    fn turns(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        match turn {
+            0 => vec![call(
+                "read",
+                "web_fetch",
+                json!({"url":"https://records.example.com/one"}),
+            )],
+            1 => {
+                assert!(seen.contains("record r1:"), "{seen}");
+                vec![
+                    call(
+                        "reply",
+                        "create",
+                        json!({"kind":"reply","title":"Offers","data":{"headline":"Two offers found","text":"The table carries the original prices and availability."}}),
+                    ),
+                    call(
+                        "records",
+                        "create",
+                        json!({"kind":"picks","title":"Offers","data":{"records":[{"source":"r2"},{"source":"r1"}]}}),
+                    ),
+                    call(
+                        "finish",
+                        "finish",
+                        json!({"say":"Both original records are available.","title":"Original offers"}),
+                    ),
+                ]
+            }
+            _ => panic!("native projection must not require another model call: {turn}: {seen}"),
+        }
+    }
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Read https://records.example.com/one and compare the two offers".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let lead = LeadModel {
+        client: Arc::new(Turns(turns)),
+        ..model(Arc::new(Script {
+            calls: Mutex::new(vec![]),
+        }))
+    };
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let done = drive(&mut shell,&queue,WorkLeadService::new(handle).run(profile,command(work,WorkRevision::INITIAL),None,models,&Search,|_,request|async move {
+        let source = WorkEvidenceLink { extraction_id:WorkArtifactId::from(940),source_id:1 };
+        Ok(outcome(None,vec![WorkArtifactDraft {
+            output:request.output,title:"Original records".into(), evidence:vec![source],
+            data:serde_json::from_value(json!({"kind":"comparison_matrix",
+                "subjects":[{"name":"First offer","homepage":"https://records.example.com/item?id=1&variant=blue"},{"name":"Second offer","homepage":"https://records.example.com/item?id=2&variant=red"}],
+                "criteria":[{"name":"Price","kind":{"kind":"text"}},{"name":"Stock","kind":{"kind":"text"}}],
+                "cells":[[{"value":{"kind":"text","text":"129,99 zł"},"evidence":[0]},{"value":{"kind":"text","text":"In stock"},"evidence":[0]}],
+                         [{"value":{"kind":"text","text":"€32.50 / item"},"evidence":[0]},{"value":{"kind":"text","text":"Out of stock"},"evidence":[0]}]]
+            })).unwrap()
+        }]))
+    },|_|{})).await.unwrap();
+    let execution = &done.executions[0];
+    assert!(matches!(
+        execution.status,
+        WorkExecutionStatus::NeedsReview | WorkExecutionStatus::Completed
+    ));
+    let picks: Vec<_> = execution
+        .artifacts
+        .iter()
+        .filter_map(|artifact| match &artifact.data {
+            WorkArtifactDataV1::Picks { items, .. } => Some(items),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(picks.len(), 1);
+    assert_eq!(picks[0][0].name, "Second offer");
+    assert_eq!(picks[0][0].price.as_ref().unwrap().display, "€32.50 / item");
+    assert_eq!(
+        picks[0][1].url.as_deref(),
+        Some("https://records.example.com/item?id=1&variant=blue")
+    );
+    assert_eq!(picks[0][1].facts[0].value, "In stock");
+    assert_eq!(
+        execution
+            .artifacts
+            .iter()
+            .filter(|a| matches!(a.data, WorkArtifactDataV1::Reply { .. }))
+            .count(),
+        1
+    );
+}

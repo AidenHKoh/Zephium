@@ -372,6 +372,11 @@ pub struct WorkSheetRowV1 {
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkSheetEntityV1 {
+    /// Exact native row image, copied only by the host from admitted records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_media: Option<super::media::WorkRecordMediaRefV1>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub media_attempted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logo_host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -537,13 +542,14 @@ pub mod limit {
     pub const FIGURE_NOTE: usize = 40;
     pub const REPLY_POINTS: usize = 5;
     pub const REPLY_POINT: usize = 140;
-    pub const PICK_NAME: usize = 60;
+    pub const PICK_NAME: usize = 200;
     pub const PICK_SUBTITLE: usize = 80;
     pub const PICK_IMAGES: usize = 3;
-    pub const PICK_PRICE: usize = 24;
+    pub const PICK_PRICE: usize = 64;
     pub const PICK_FACTS: usize = 4;
     pub const FACT_LABEL: usize = 20;
     pub const FACT_VALUE: usize = 40;
+    pub const PICK_FACT_VALUE: usize = 120;
     pub const PICK_WHY: usize = 160;
     pub const PICK_TAGS: usize = 3;
     pub const PICK_TAG: usize = 16;
@@ -569,7 +575,7 @@ pub mod limit {
     pub const FROM_QUOTE: usize = 200;
     pub const COLUMN_LABEL: usize = 24;
     pub const COLUMN_UNIT: usize = 12;
-    pub const CELL_TEXT: usize = 60;
+    pub const CELL_TEXT: usize = 200;
     pub const CELL_DATE: usize = 32;
     pub const CELL_DURATION: usize = 16;
     pub const CELL_ENTITY: usize = 40;
@@ -1100,7 +1106,7 @@ pub(super) fn check_picks(budget: &mut Budget, evidence: usize, items: &[WorkPic
             droppable(
                 budget,
                 &fact.value,
-                L::FACT_VALUE,
+                L::PICK_FACT_VALUE,
                 F::PickFacts,
                 inner("items[].facts[].value", index, sub),
                 whole,
@@ -1528,7 +1534,13 @@ pub(super) fn check_sheet(
             budget.add(cell)?;
         }
         if let Some(entity) = &row.entity {
-            if !host(&entity.logo_host) || entity.image.as_deref().is_some_and(|u| !https(u)) {
+            if !host(&entity.logo_host)
+                || entity.image.as_deref().is_some_and(|u| !https(u))
+                || entity
+                    .record_media
+                    .as_ref()
+                    .is_some_and(|media| media.validate().is_err() || !entity.media_attempted)
+            {
                 return Err(place("rows[].entity", Some(index))
                     .dropping(F::SheetEntity, Remove("rows[].entity")));
             }

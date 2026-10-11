@@ -603,6 +603,18 @@ where
                     .collect::<Vec<_>>(),
             ));
         }
+        let catalog = self
+            .run
+            .records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .catalog(fact.id);
+        if !catalog.is_empty() {
+            out.push_str(
+                "Native records (select r keys with data.records; values remain native):\n",
+            );
+            out.push_str(&catalog);
+        }
         out.push_str(&report.digest);
         (out, report.state != WorkPartStateV1::Done)
     }
@@ -615,6 +627,16 @@ where
         spec: &PartSpec,
     ) -> Option<(WorkArtifactId, usize)> {
         use super::found;
+        if !self
+            .run
+            .records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .catalog(part)
+            .is_empty()
+        {
+            return None;
+        }
         let execution = self.run.execution().await.ok()?;
         let rows = found::rows(&execution, part);
         if rows.is_empty() {
@@ -1850,9 +1872,23 @@ pub(crate) fn redirected_read(
 
 fn admit_kind(
     name: &str,
-    kind: WorkStepKindV1,
+    mut kind: WorkStepKindV1,
     run: &super::run::LeadRun,
 ) -> Result<WorkStepKindV1, String> {
+    if let WorkStepKindV1::Read {
+        url,
+        collection,
+        goal: None,
+    } = &mut kind
+    {
+        if collection.is_none() {
+            *collection = run
+                .records
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .collection_for_document(url);
+        }
+    }
     if let WorkStepKindV1::Search { query } = &kind {
         zephium_core::work::search::validate_public_search_query(query)
             .map_err(|_| "query is one line of at most 512 characters".to_owned())?;

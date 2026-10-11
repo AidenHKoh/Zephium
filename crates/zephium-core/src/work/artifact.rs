@@ -899,13 +899,13 @@ impl WorkArtifactField {
             Self::ReplyFigure => "each reply figure has a label of at most 24 characters, a value of at most 20 and an optional note of at most 40",
             Self::ReplyPoints => "reply has at most 5 points of one line and at most 140 characters each",
             Self::PicksItems => "picks has 1 to 12 items",
-            Self::PickName => "each pick's name is one line of 1 to 60 characters",
+            Self::PickName => "each pick's name is one line of 1 to 200 characters",
             Self::PickSubtitle => "a pick's subtitle is one line of at most 80 characters",
             Self::PickImages => "a pick has at most 3 image_candidates, each a public https URL of a picture of that subject from its sources",
             Self::PickLogo => "a pick's logo_host is a bare lowercase host such as airbnb.com",
             Self::PickUrl => "a pick's url is a public https URL",
-            Self::PickPrice => "a pick's price has a display of at most 24 characters, an optional plain decimal amount, an optional three-letter currency code and an optional was of at most 24 characters: the price before a reduction the source shows",
-            Self::PickFacts => "a pick has at most 4 facts, each a label of at most 20 characters and a value of at most 40",
+            Self::PickPrice => "a pick's price has a display of at most 64 characters, an optional plain decimal amount, an optional three-letter currency code and an optional was of at most 64 characters: the price before a reduction the source shows",
+            Self::PickFacts => "a pick has at most 4 facts, each a label of at most 20 characters and a value of at most 120",
             Self::PickRating => "a pick's rating is a plain decimal value between 0 and max, with max 5 or 10",
             Self::PickWhy => "a pick's why is one line of at most 160 characters",
             Self::PickTags => "a pick has at most 3 tags of at most 16 characters",
@@ -930,7 +930,7 @@ impl WorkArtifactField {
             Self::SheetColumns => "sheet has 1 to 10 columns",
             Self::SheetColumn => "each sheet column has a unique label of at most 24 characters, a unit of at most 12, a three-letter currency (required for money) and best only on number, money, percent, rating, yes_no, duration or date columns",
             Self::SheetRows => "sheet has 1 to 200 rows, each with exactly one cell per column",
-            Self::SheetCell => "a sheet cell matches its column: text at most 60 characters, number, money and percent plain decimals, yes_no one of yes, no, partial or unknown, rating like 4/5, link a public https URL, entity at most 40 characters, tag at most 16, date at most 32, duration at most 16, or empty when unknown; never sentences",
+            Self::SheetCell => "a sheet cell matches its column: text at most 200 characters, number, money and percent plain decimals, yes_no one of yes, no, partial or unknown, rating like 4/5, link a public https URL, entity at most 40 characters, tag at most 16, date at most 32, duration at most 16, or empty when unknown; never sentences",
             Self::SheetEntity => "a sheet row's entity has logo_host a bare host and image a public https URL",
             Self::SheetNote => "sheet note is one line of at most 200 characters",
             Self::PlotAxis => "plot axis labels are at most 24 characters, the y unit at most 12, and money needs a three-letter currency",
@@ -2748,6 +2748,12 @@ impl WorkArtifactDataV1 {
                 for item in items {
                     item.record_media = None;
                     item.media_attempted = false;
+                }
+            }
+            Self::Sheet { rows, .. } => {
+                for entity in rows.iter_mut().filter_map(|row| row.entity.as_mut()) {
+                    entity.record_media = None;
+                    entity.media_attempted = false;
                 }
             }
             Self::List { items, .. } => {

@@ -77,7 +77,7 @@ fn every_kind_round_trips_its_wire_shape() {
 
 #[test]
 fn limits_come_back_as_the_field_and_the_item() {
-    let long = "x".repeat(61);
+    let long = "界".repeat(limit::PICK_NAME + 1);
     let picks = fault(
         json!({"kind":"picks","facet":"stay","items":[{"name":"Loft"},{"name":long}]}),
         0,
@@ -88,7 +88,7 @@ fn limits_come_back_as_the_field_and_the_item() {
     assert!(
         picks
             .describe()
-            .starts_with("items[1].name is 61 characters; the limit is 60. Rule: "),
+            .starts_with("items[1].name is 201 characters; the limit is 200. Rule: "),
         "{}",
         picks.describe()
     );
@@ -109,20 +109,20 @@ fn limits_come_back_as_the_field_and_the_item() {
     assert_eq!(detail.drop, Some(WorkFaultDrop::Remove("steps[].detail")));
     let fact = fault(
         json!({"kind":"picks","facet":"stay","items":[{"name":"Loft","facts":[
-            {"label":"Beds","value":"2","kind":"text"},{"label":"Walk","value":"x".repeat(41),"kind":"text"}]}]}),
+            {"label":"Beds","value":"2","kind":"text"},{"label":"Walk","value":"x".repeat(limit::PICK_FACT_VALUE + 1),"kind":"text"}]}]}),
         0,
     )
     .unwrap();
     assert_eq!(fact.fill(fact.path.unwrap()), "items[0].facts[1].value");
     let was = fault(
         json!({"kind":"picks","facet":"product","items":[{"name":"Falcon",
-            "price":{"display":"$79.99","was":"x".repeat(25)}}]}),
+            "price":{"display":"$79.99","was":"x".repeat(limit::PICK_PRICE + 1)}}]}),
         0,
     )
     .unwrap();
     assert!(was
         .describe()
-        .starts_with("items[0].price.was is 25 characters; the limit is 24."));
+        .starts_with("items[0].price.was is 65 characters; the limit is 64."));
     assert_eq!(was.drop, Some(WorkFaultDrop::Remove("items[].price.was")));
     assert_eq!(fact.drop, Some(WorkFaultDrop::Remove("items[].facts[]")));
     let cells = |first: &str, second: &str| {
@@ -134,10 +134,10 @@ fn limits_come_back_as_the_field_and_the_item() {
         .unwrap()
     };
     assert_eq!(
-        cells("Hetzner", &"x".repeat(61)).drop,
+        cells("Hetzner", &"x".repeat(limit::CELL_TEXT + 1)).drop,
         Some(WorkFaultDrop::Empty("rows[].cells[]"))
     );
-    assert_eq!(cells(&"x".repeat(61), "ok").drop, None);
+    assert_eq!(cells(&"x".repeat(limit::CELL_TEXT + 1), "ok").drop, None);
     let points = fault(
         json!({"kind":"reply","headline":"H","text":"T","points":["a","b","c","d","e","f"]}),
         0,
@@ -168,7 +168,7 @@ fn limits_come_back_as_the_field_and_the_item() {
     assert_eq!(
         field(
             json!({"kind":"sheet","columns":[{"label":"Note","kind":"text"}],
-            "rows":[{"cells":["A sentence that goes on well past the sixty character limit of a cell"]}]})
+            "rows":[{"cells":["界".repeat(limit::CELL_TEXT + 1)]}]})
         ),
         Some(F::SheetCell)
     );
@@ -843,5 +843,27 @@ fn the_persons_own_table_list_or_plan_may_stand_empty() {
         let data = data(shape);
         assert!(data.validate(0).is_err(), "{}", data.kind_name());
         assert!(data.validate_owned(0).is_ok(), "{}", data.kind_name());
+    }
+}
+
+#[test]
+fn extracted_record_limits_count_unicode_characters_without_changing_values() {
+    let shape = json!({"kind":"picks","facet":"product","items":[{
+        "name":"界".repeat(200),"price":{"display":"界".repeat(64)},
+        "facts":[{"label":"Stock","value":"界".repeat(120),"kind":"text"}]
+    }]});
+    let parsed = data(shape.clone());
+    assert!(parsed.validate(0).is_ok());
+    assert_eq!(serde_json::to_value(parsed).unwrap(), shape);
+    let sheet = json!({"kind":"sheet","columns":[{"label":"Value","kind":"text"}],"rows":[{"cells":["界".repeat(200)]}]});
+    assert!(data(sheet).validate(0).is_ok());
+    for (path, size) in [
+        ("/items/0/name", 201),
+        ("/items/0/price/display", 65),
+        ("/items/0/facts/0/value", 121),
+    ] {
+        let mut too_long = shape.clone();
+        *too_long.pointer_mut(path).unwrap() = json!("界".repeat(size));
+        assert!(data(too_long).validate(0).is_err());
     }
 }

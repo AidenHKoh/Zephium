@@ -324,6 +324,30 @@ pub(crate) fn propose(
     inherited: &[WorkEvidenceLink],
     lenient: bool,
 ) -> Result<Proposed, (String, ObjectRefusal)> {
+    if matches!(kind, "picks" | "sheet") && data.get("records").is_some() {
+        let request = serde_json::from_value::<super::records::Presentation>(serde_json::json!({
+            "title": title, "layout": if kind == "picks" { "picks" } else { "table" },
+            "records": data["records"],
+        }))
+        .map_err(|_| {
+            (
+                "records needs source, optional annotation and recommended".into(),
+                ObjectRefusal::Shape,
+            )
+        })?;
+        if data.as_object().is_none_or(|fields| fields.len() != 1) {
+            return Err((
+                "records cannot be combined with rewritten item values".into(),
+                ObjectRefusal::Shape,
+            ));
+        }
+        return run
+            .records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .present(&request)
+            .map_err(|message| (message, ObjectRefusal::Source));
+    }
     let title = super::call::plain(title);
     let title = title.trim();
     if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS || title.contains('\n') {

@@ -5930,11 +5930,17 @@ export type WorkSheetColumnV1_Serialize = {
 export type WorkSheetEntityV1 = WorkSheetEntityV1_Serialize | WorkSheetEntityV1_Deserialize;
 
 export type WorkSheetEntityV1_Deserialize = {
+	/**  Exact native row image, copied only by the host from admitted records. */
+	record_media?: WorkRecordMediaRefV1 | null,
+	media_attempted?: boolean,
 	logo_host?: string | null,
 	image?: string | null,
 };
 
 export type WorkSheetEntityV1_Serialize = {
+	/**  Exact native row image, copied only by the host from admitted records. */
+	record_media?: WorkRecordMediaRefV1 | null,
+	media_attempted?: boolean,
 	logo_host?: string | null,
 	image?: string | null,
 };

@@ -837,7 +837,11 @@ where
                     }
                 }
             }
-            WorkStepKindV1::Read { url, goal, .. } => {
+            WorkStepKindV1::Read {
+                url,
+                goal,
+                collection,
+            } => {
                 let measured = step.measurements.as_ref();
                 crate::work_trace::record(format_args!(
                     "work: phase=page site={} task={} status={:?} wall_ms={} calls={} actions={} tokens={} records={} outcome={:?}",
@@ -858,7 +862,13 @@ where
                     .unwrap_or_else(|| host(url));
                 for id in &step.artifacts {
                     if let Some(artifact) = execution.artifacts.iter().find(|a| a.id == *id) {
-                        out.push_str(&self.records(artifact, &title, url, driver));
+                        out.push_str(&self.records(
+                            artifact,
+                            &title,
+                            url,
+                            driver,
+                            collection.as_ref(),
+                        ));
                     }
                 }
                 if step.artifacts.is_empty() && !failed {
@@ -968,7 +978,14 @@ where
         title: &str,
         url: &str,
         driver: &WorkPartDriver,
+        collection: Option<&WorkBrowseCollection>,
     ) -> String {
+        let record_keys = self
+            .run
+            .records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(artifact, collection);
         let keys: Vec<String> = artifact
             .evidence
             .iter()
@@ -1043,8 +1060,14 @@ where
                 cells,
                 notes,
             } => {
-                for (row, item) in subjects.iter().zip(cells).take(RECORD_LINES) {
-                    let mut line = format!("- {}", subject(row));
+                for (index, (row, item)) in
+                    subjects.iter().zip(cells).take(RECORD_LINES).enumerate()
+                {
+                    let key = record_keys
+                        .get(index)
+                        .map(String::as_str)
+                        .unwrap_or("unregistered");
+                    let mut line = format!("- record {key}: {}", subject(row));
                     for (criterion, cell) in criteria.iter().zip(item) {
                         let value = match &cell.value {
                             WorkCellValue::Text { text } => text.clone(),

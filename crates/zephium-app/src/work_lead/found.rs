@@ -31,7 +31,7 @@ pub(crate) struct Row {
 
 /// How surely a column holds the price to show, lower first: a nightly
 /// rate, then a price, then a total or a bare amount. None for no price.
-fn price_rank(name: &str) -> Option<u8> {
+pub(super) fn price_rank(name: &str) -> Option<u8> {
     let has = |words: &[&str]| words.iter().any(|w| name.contains(w));
     if has(&["night", "per_day", "daily"]) {
         Some(0)
@@ -396,7 +396,7 @@ fn fact(label: &str, value: &str) -> Value {
     };
     json!({
         "label": short(&label, limit::FACT_LABEL),
-        "value": short(value, limit::FACT_VALUE),
+        "value": short(value, limit::PICK_FACT_VALUE),
         "kind": "text",
     })
 }
