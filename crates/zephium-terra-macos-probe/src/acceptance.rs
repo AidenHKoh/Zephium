@@ -381,6 +381,20 @@ struct EvalModelClient {
     inner: Arc<dyn zephium_core::work::model::WorkModelClient>,
     role: &'static str,
     diagnostics: Arc<Mutex<EvalDiagnostics>>,
+    visual_diagnostics: bool,
+}
+fn eval_image_inputs(messages: &[zephium_core::work::model::WorkModelMessage]) -> (usize, usize) {
+    use zephium_core::work::model::{WorkModelMessage as M, WorkModelPart as P};
+    messages.iter().fold((0usize, 0usize), |total, message| {
+        let parts = match message {
+            M::User(parts) | M::Assistant(parts) => parts,
+            M::ToolResults(_) => return total,
+        };
+        parts.iter().fold(total, |(count, size), part| match part {
+            P::Image { bytes, .. } => (count.saturating_add(1), size.saturating_add(bytes.len())),
+            _ => (count, size),
+        })
+    })
 }
 impl zephium_core::work::model::WorkModelClient for EvalModelClient {
     fn call<'a>(
@@ -402,6 +416,11 @@ impl zephium_core::work::model::WorkModelClient for EvalModelClient {
                         "max_output_tokens": request.max_output_tokens, "native_search": request.native_search,
                         "parallel_tools": request.parallel_tools, "state": "unsettled",
                     }));
+                    if self.visual_diagnostics {
+                        let (parts, bytes) = eval_image_inputs(&request.messages);
+                        local.calls[index]["input_image_parts"] = serde_json::json!(parts);
+                        local.calls[index]["input_image_bytes"] = serde_json::json!(bytes);
+                    }
                     Some(index)
                 }
             };
@@ -413,6 +432,12 @@ impl zephium_core::work::model::WorkModelClient for EvalModelClient {
                 match &result {
                     Ok(outcome) => {
                         let usage = outcome.usage;
+                        if self.visual_diagnostics {
+                            use zephium_core::work::model::WorkModelPart;
+                            row["screenshot_tool_requests"] = serde_json::json!(outcome.assistant.iter().filter(|part|
+                                matches!(part, WorkModelPart::ToolCall(call) if call.name == "screenshot")
+                            ).count());
+                        }
                         row["state"] = serde_json::json!("settled");
                         row["input_tokens"] = serde_json::json!(usage.input_tokens);
                         row["cached_input_tokens"] = serde_json::json!(usage.cached_input_tokens);
@@ -435,6 +460,107 @@ impl zephium_core::work::model::WorkModelClient for EvalModelClient {
             }
             result
         })
+    }
+}
+
+#[cfg(test)]
+mod visual_diagnostic_tests {
+    use super::*;
+    use zephium_core::work::model::*;
+    struct Echo;
+    impl WorkModelClient for Echo {
+        fn call<'a>(
+            &'a self,
+            request: WorkModelRequest,
+            _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+        ) -> WorkModelFuture<'a> {
+            Box::pin(async move {
+                assert!(matches!(&request.messages[0], WorkModelMessage::User(parts)
+                    if matches!(&parts[1], WorkModelPart::Image { media_type, bytes }
+                        if media_type == "image/png" && bytes == b"synthetic-pixels")));
+                Ok(WorkModelOutcome {
+                    stop: WorkModelStop::ToolUse,
+                    usage: WorkModelUsage::default(),
+                    assistant: vec![WorkModelPart::ToolCall(WorkModelToolCall {
+                        id: "private-call".into(),
+                        name: "screenshot".into(),
+                        arguments: serde_json::json!({"private": "synthetic-secret"}),
+                    })],
+                })
+            })
+        }
+    }
+    #[tokio::test]
+    async fn visual_counts_preserve_model_inputs_and_export_no_content_or_private_mode_counts() {
+        for public in [false, true] {
+            let diagnostics = Arc::new(Mutex::new(EvalDiagnostics::default()));
+            let client = EvalModelClient {
+                inner: Arc::new(Echo),
+                role: "page",
+                diagnostics: diagnostics.clone(),
+                visual_diagnostics: public,
+            };
+            let request = WorkModelRequest {
+                model: WorkModelRef {
+                    provider: WorkModelProvider::OpenAi,
+                    wire: WorkModelWire::OpenAiResponses,
+                    model: "fixture".into(),
+                },
+                system: vec![],
+                tools: vec![],
+                messages: vec![
+                    WorkModelMessage::User(vec![
+                        WorkModelPart::Text("synthetic-secret".into()),
+                        WorkModelPart::Image {
+                            media_type: "image/png".into(),
+                            bytes: b"synthetic-pixels".to_vec(),
+                        },
+                    ]),
+                    WorkModelMessage::Assistant(vec![WorkModelPart::Image {
+                        media_type: "image/png".into(),
+                        bytes: vec![0; 3],
+                    }]),
+                    WorkModelMessage::ToolResults(vec![WorkModelToolResult {
+                        call: "private-call".into(),
+                        content: "synthetic-secret".into(),
+                        is_error: false,
+                    }]),
+                ],
+                max_output_tokens: 1,
+                reasoning: None,
+                native_search: false,
+                parallel_tools: false,
+                tool_choice: WorkModelToolChoice::Auto,
+                volatile_tail: 0,
+                cache_key: None,
+            };
+            let outcome = client.call(request, &|_| {}).await.unwrap();
+            assert_eq!(outcome.assistant.len(), 1);
+            let local = diagnostics.lock().unwrap();
+            let row = &local.calls[0];
+            if public {
+                assert_eq!(row["input_image_parts"], 2);
+                assert_eq!(row["input_image_bytes"], b"synthetic-pixels".len() + 3);
+                assert_eq!(row["screenshot_tool_requests"], 1);
+            } else {
+                for key in [
+                    "input_image_parts",
+                    "input_image_bytes",
+                    "screenshot_tool_requests",
+                ] {
+                    assert!(row.get(key).is_none());
+                }
+            }
+            let exported = row.to_string();
+            for private in [
+                "synthetic-secret",
+                "synthetic-pixels",
+                "private-call",
+                "image/png",
+            ] {
+                assert!(!exported.contains(private));
+            }
+        }
     }
 }
 
@@ -1303,6 +1429,7 @@ pub(super) async fn lead_workflow(
                 inner: model.client.clone(),
                 role,
                 diagnostics: local_diagnostics.clone(),
+                visual_diagnostics: public_eval,
             });
         }
     }
