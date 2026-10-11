@@ -657,7 +657,18 @@ pub(crate) fn sign_in_wall(observation: &SemanticObservation) -> bool {
         && nodes.iter().any(|node| {
             node.role() == SemanticRole::Textbox
                 && (node.sensitivity() != SemanticSensitivity::Public
-                    || names_any(&label(node), &["email", "username", "phone", "e-mail"]))
+                    || names_any(
+                        &label(node),
+                        &[
+                            "email",
+                            "username",
+                            "phone",
+                            "e-mail",
+                            "workspace",
+                            "organization",
+                            "tenant",
+                        ],
+                    ))
         })
 }
 
@@ -2663,6 +2674,22 @@ mod tests {
                 .find(|node| node.role() == SemanticRole::Password)
                 .unwrap();
             assert_eq!(password.sensitivity(), SemanticSensitivity::Secret);
+        }
+    }
+
+    #[test]
+    fn workspace_identity_entry_with_sign_in_intent_is_a_wall() {
+        for name in ["Workspace URL", "Organization name", "Tenant ID"] {
+            let nodes = vec![
+                json!({"k":1,"r":"document","o":16}),
+                json!({"k":2,"p":0,"r":"heading","n":"Sign in to your workspace","l":1}),
+                json!({"k":3,"p":0,"r":"textbox","n":name,"o":2}),
+                json!({"k":4,"p":0,"r":"button","n":"Continue","o":1,"ak":1}),
+            ];
+            assert!(sign_in_wall(&page(nodes.clone())), "{name}");
+            let mut search = nodes;
+            search[2]["r"] = json!("searchbox");
+            assert!(!sign_in_wall(&page(search)), "search is not identity entry");
         }
     }
 
