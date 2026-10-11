@@ -635,5 +635,25 @@ class SourceAuditBindingTests(unittest.TestCase):
         self.assertEqual(summary["source_audit_root_causes"], {"cleanup_unproven": 1})
 
 
+class FinalizationProfileTests(unittest.TestCase):
+    def test_inline_read_after_a_browser_part_is_the_last_browser_work(self):
+        evidence = {"timeline": {"started_ms": 0, "finished_ms": 20}, "wall_ms": 20,
+                    "page_intervals": [{"started_ms": 6, "finished_ms": 10}],
+                    "model_calls": [{"started_ms": 9, "finished_ms": 13}, {"started_ms": 12, "finished_ms": 17}]}
+        log = "[ 5ms] lead-run: event=PartEnded { helper: Browser }\n[ 14ms] lead-run: event=ReplyPublished {}\n[ 20ms] lead-run: event=Ended {}"
+        value = eval.timing(evidence, log)
+        self.assertEqual(value["post_browser_finalization_gaps_ms"], [10])
+        self.assertEqual(value["finalization_windows"], [{"last_browser_ms": 10, "ended_ms": 20, "first_reply_ms": 14,
+                         "first_reply_relative_to_last_browser_ms": 4, "model_busy_ms": 7, "non_model_ms": 3}])
+
+    def test_early_reply_is_not_reused_for_a_followup_or_claimed_as_final_answer(self):
+        evidence = {"page_intervals": [{"started_ms": 3, "finished_ms": 5}, {"started_ms": 12, "finished_ms": 15}]}
+        log = "[ 2ms] lead-run: event=ReplyPublished {}\n[ 9ms] lead-run: event=Ended {}\n[ 19ms] lead-run: event=Ended {}"
+        windows = eval.timing(evidence, log)["finalization_windows"]
+        self.assertEqual(windows[0]["first_reply_relative_to_last_browser_ms"], -3)
+        self.assertIsNone(windows[1]["first_reply_ms"])
+        self.assertIsNone(windows[0]["model_busy_ms"], "missing timing remains unknown")
+
+
 if __name__ == '__main__':
     unittest.main()

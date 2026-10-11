@@ -436,9 +436,10 @@ def interval_union(intervals):
 def timing(evidence, log):
     timeline = evidence.get("timeline") or {}
     start, end = timeline.get("started_ms"), timeline.get("finished_ms")
-    result = {"model_busy_ms": None, "page_without_model_ms": None, "other_ms": None, "post_browser_finalization_gaps_ms": []}
+    result = {"model_busy_ms": None, "page_without_model_ms": None, "other_ms": None, "post_browser_finalization_gaps_ms": [], "finalization_windows": []}
     # A finalization gap is per execution; follow-ups must not share its last part.
     last = None
+    first_reply = None
     previous_end = -1
     for line in log.splitlines():
         match = re.match(r"\[\s*(\d+)ms\] lead-run: event=(.*)", line)
@@ -447,13 +448,21 @@ def timing(evidence, log):
         at, event = int(match[1]), match[2]
         if event.startswith("PartEnded { helper: Browser"):
             last = at
+        elif event.startswith("ReplyPublished {") and first_reply is None:
+            first_reply = at
         elif event.startswith("Ended {"):
-            if last is None:
-                finished_pages = [page["finished_ms"] for page in evidence.get("page_intervals", []) if isinstance(page.get("finished_ms"), int) and previous_end < page["finished_ms"] <= at]
-                last = max(finished_pages) if finished_pages else None
+            finished_pages = [page["finished_ms"] for page in evidence.get("page_intervals", []) if isinstance(page.get("finished_ms"), int) and previous_end < page["finished_ms"] <= at]
+            candidates = finished_pages + ([last] if last is not None else [])
+            last = max(candidates) if candidates else None
             if last is not None:
                 result["post_browser_finalization_gaps_ms"].append(max(0, at-last))
+                result["finalization_windows"].append({
+                    "last_browser_ms": last, "ended_ms": at, "first_reply_ms": first_reply,
+                    "first_reply_relative_to_last_browser_ms": first_reply-last if first_reply is not None else None,
+                    "model_busy_ms": None, "non_model_ms": None,
+                })
             last = None
+            first_reply = None
             previous_end = at
     rows = evidence.get("model_calls", []) + evidence.get("page_intervals", [])
     valid = isinstance(start, int) and isinstance(end, int) and end >= start and not evidence.get("model_calls_truncated") and all(isinstance(row.get("started_ms"), int) and isinstance(row.get("finished_ms"), int) and row["finished_ms"] >= row["started_ms"] for row in rows)
@@ -467,6 +476,12 @@ def timing(evidence, log):
     pages = interval_union(spans(evidence.get("page_intervals", [])))
     duration = lambda intervals: sum(end-start for start,end in intervals)
     together = duration(interval_union(models+pages))
+    for window in result["finalization_windows"]:
+        left, right = window["last_browser_ms"], window["ended_ms"]
+        if not start <= left <= right <= end:
+            continue
+        busy = sum(max(0, min(right, finish)-max(left, begin)) for begin, finish in models)
+        window.update(model_busy_ms=busy, non_model_ms=right-left-busy)
     result.update(model_busy_ms=duration(models), page_without_model_ms=together-duration(models), other_ms=end-start-together,
                   qualification="Disjoint wall intervals, model first then page. Other includes orchestration, storage, and uninstrumented search-provider I/O; it is not a pure CPU-overhead measurement.")
     return result
