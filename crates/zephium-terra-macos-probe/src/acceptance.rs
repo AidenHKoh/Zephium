@@ -506,6 +506,7 @@ mod visual_diagnostic_tests {
                 reject_images: false,
             };
             let request = WorkModelRequest {
+                image_fence: None,
                 model: WorkModelRef {
                     provider: WorkModelProvider::OpenAi,
                     wire: WorkModelWire::OpenAiResponses,

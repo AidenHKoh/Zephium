@@ -40,6 +40,7 @@ fn sse(events: &[(&str, Value)]) -> String {
 
 pub(super) fn request(wire: WorkModelWire, model: &str) -> WorkModelRequest {
     WorkModelRequest {
+        image_fence: ModelImageGate::new(Some(true)).fence(),
         model: WorkModelRef {
             provider: WorkModelProvider::OpenAi,
             wire,

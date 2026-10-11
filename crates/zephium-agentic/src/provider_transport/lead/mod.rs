@@ -9,6 +9,8 @@ mod anthropic;
 mod chat;
 mod cloud;
 mod gemini;
+pub(super) mod image_fence;
+pub use image_fence::ModelImageGate;
 pub mod keys;
 mod listing;
 pub mod models;
@@ -398,6 +400,16 @@ impl LeadClient {
         }
         let origin = self.target.origin();
         strip_foreign_replays(&mut request, &origin);
+        if image_fence::request_has_image(&request) && request.image_fence.is_none() {
+            return Err(WorkModelError::BadRequest);
+        }
+        let image_fence = request.image_fence.clone();
+        if image_fence
+            .as_ref()
+            .is_some_and(|fence| !fence.while_current(&mut || {}))
+        {
+            return Err(WorkModelError::Cancelled);
+        }
         let mut total = Decoded::default();
         for continuation in 0..=MAX_PAUSE_CONTINUATIONS {
             let body = self.body(&request)?;
@@ -408,9 +420,22 @@ impl LeadClient {
                 return Err(WorkModelError::ContextTooLong);
             }
             let strict = self.target.strict_tools(&request);
-            let decoded = self
-                .attempt(&request.model.model, &body, strict, events)
-                .await?;
+            let generation = self.attempt(
+                &request.model.model,
+                &body,
+                strict,
+                events,
+                image_fence.as_ref(),
+            );
+            let decoded = if let Some(fence) = &image_fence {
+                tokio::select! {
+                    biased;
+                    () = fence.revoked() => return Err(WorkModelError::Cancelled),
+                    result = generation => result?,
+                }
+            } else {
+                generation.await?
+            };
             total.absorb(decoded);
             if total.stop != DecodedStop::Paused || continuation == MAX_PAUSE_CONTINUATIONS {
                 break;
@@ -477,6 +502,7 @@ impl LeadClient {
         body: &[u8],
         strict: bool,
         events: &(dyn Fn(WorkModelEvent) + Send + Sync),
+        image_fence: Option<&Arc<dyn WorkModelImageFence>>,
     ) -> Result<Decoded, WorkModelError> {
         let url = self.target.call_url(model, strict)?;
         let client = http(url.scheme() == "http")?;
@@ -495,13 +521,15 @@ impl LeadClient {
             if self.target.cloud {
                 headers.insert("idempotency-key", key.clone());
             }
-            let failure = match client
+            let send = client
                 .post(url.clone())
                 .headers(headers)
                 .body(body.to_vec())
-                .send()
+                .send();
+            let sent = image_fence::fenced(image_fence, send)
                 .await
-            {
+                .map_err(|()| WorkModelError::Cancelled)?;
+            let failure = match sent {
                 // Sent, maybe received: a Cloud call is never sent again blind.
                 Err(error) if self.target.cloud && !error.is_connect() => {
                     let answered = cloud::Answered::default();

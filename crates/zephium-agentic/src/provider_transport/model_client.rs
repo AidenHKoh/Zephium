@@ -381,8 +381,16 @@ impl AgentProviderAttempt {
             Ok(translated) => translated,
             Err(error) => return self.finish_terminal(protocol_decoder_failure(error, None)),
         };
+        request.image_fence = self.image_fence.clone();
+        let image_fence = self.image_fence.clone();
         drop(body);
         if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
+            return self.finish_terminal(cancelled_failure());
+        }
+        if image_fence
+            .as_ref()
+            .is_some_and(|fence| !fence.while_current(&mut || {}))
+        {
             return self.finish_terminal(cancelled_failure());
         }
         // This is immediately before the client can first send anything.
@@ -412,6 +420,7 @@ impl AgentProviderAttempt {
                 biased;
                 () = self.cancellation.cancelled() => return self.finish_terminal(cancelled_failure()),
                 () = self.shutdown.cancelled() => return self.finish_terminal(cancelled_failure()),
+                () = lead::image_fence::revoked(image_fence.as_ref()) => return self.finish_terminal(cancelled_failure()),
                 () = &mut deadline => return self.finish_terminal(timeout_failure()),
                 outcome = model.client.call(request.clone(), &events) => outcome,
             };

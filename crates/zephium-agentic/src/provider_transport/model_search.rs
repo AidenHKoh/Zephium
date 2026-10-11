@@ -83,6 +83,7 @@ impl ModelNativeSearch {
 
     fn request(&self, input: String) -> WorkModelRequest {
         WorkModelRequest {
+            image_fence: None,
             model: self.entry.model.clone(),
             system: vec![WorkModelSystemBlock {
                 text: INSTRUCTIONS.to_owned(),

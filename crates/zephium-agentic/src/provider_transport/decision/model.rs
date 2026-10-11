@@ -62,6 +62,7 @@ impl<'a> ModelDecisionCall<'a> {
             return Err(AgentPolicyError::Budget);
         }
         Ok(WorkModelRequest {
+            image_fence: None,
             model: self.model.model().clone(),
             system: vec![WorkModelSystemBlock {
                 text: EMULATION_INSTRUCTIONS.to_owned(),

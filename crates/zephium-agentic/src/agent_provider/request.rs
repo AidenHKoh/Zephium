@@ -1450,6 +1450,7 @@ impl AgentProviderInputCommitment {
 /// retaining the exact active policy authority.
 #[must_use]
 pub struct AgentProviderTransportInput {
+    image_fence: Option<std::sync::Arc<dyn zephium_core::work::model::WorkModelImageFence>>,
     request: AgentProviderRequest,
     commitment: AgentProviderInputCommitment,
     input_metrics: AgentProviderInputMetrics,
@@ -1458,6 +1459,16 @@ pub struct AgentProviderTransportInput {
 }
 
 impl AgentProviderTransportInput {
+    /// Adds only a live revocation fence; existing native image/source and
+    /// policy admission remain mandatory. Never serialized to the provider.
+    pub fn with_image_fence(mut self, fence: std::sync::Arc<dyn zephium_core::work::model::WorkModelImageFence>) -> Self {
+        self.image_fence = Some(fence);
+        self
+    }
+    #[cfg(feature = "provider-transport")]
+    pub(crate) fn image_fence(&self) -> Option<std::sync::Arc<dyn zephium_core::work::model::WorkModelImageFence>> {
+        self.image_fence.clone()
+    }
     /// Exact immutable request available for bounded transport admission.
     pub const fn request(&self) -> &AgentProviderRequest {
         &self.request
@@ -1482,6 +1493,7 @@ impl AgentProviderTransportInput {
             input_metrics,
             continuation_transcript,
             continuation_baseline,
+            image_fence: _,
         } = self;
         let input = commitment.commit(policy, input_metrics)?;
         let continuation = AgentProviderContinuationSeed::from_committed(
@@ -2317,6 +2329,7 @@ impl AgentPreparedObservationRequest {
             self.structured_input_tokens,
         );
         AgentProviderTransportInput {
+            image_fence: None,
             request: self.request,
             commitment: AgentProviderInputCommitment::Observation {
                 admission: self.admission,
@@ -2461,6 +2474,7 @@ impl AgentPreparedReadRequest {
             None,
         );
         AgentProviderTransportInput {
+            image_fence: None,
             request: self.request,
             commitment: AgentProviderInputCommitment::Read {
                 admission: self.admission,
@@ -2718,6 +2732,7 @@ impl AgentPreparedDiffRequest {
             )),
         );
         AgentProviderTransportInput {
+            image_fence: None,
             request: self.request,
             commitment: AgentProviderInputCommitment::Diff {
                 admission: self.admission,
@@ -2980,6 +2995,7 @@ impl AgentPreparedReadContinuationRequest {
             )),
         );
         AgentProviderTransportInput {
+            image_fence: None,
             request: self.request,
             commitment: AgentProviderInputCommitment::Read {
                 admission: self.admission,
@@ -3462,6 +3478,7 @@ impl AgentPreparedExtractionRequest {
         );
         (
             AgentProviderTransportInput {
+                image_fence: None,
                 request: self.request,
                 commitment: AgentProviderInputCommitment::Extraction {
                     admission: self.admission,
@@ -3721,6 +3738,7 @@ impl AgentPreparedLocateRequest {
             )),
         );
         AgentProviderTransportInput {
+            image_fence: None,
             request: self.request,
             commitment: AgentProviderInputCommitment::Locate {
                 admission: self.admission,
@@ -3992,6 +4010,7 @@ impl AgentPreparedScreenshotRequest {
             )),
         );
         AgentProviderTransportInput {
+            image_fence: None,
             request: self.request,
             commitment: AgentProviderInputCommitment::Screenshot {
                 admission: self.admission,

@@ -293,6 +293,7 @@ pub(crate) fn translate(
     let cache_key = Some(work_model_cache_key(&system, &tools));
     Ok((
         WorkModelRequest {
+            image_fence: None,
             model: model.clone(),
             system,
             tools,

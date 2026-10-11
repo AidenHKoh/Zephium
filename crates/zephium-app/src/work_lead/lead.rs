@@ -272,6 +272,7 @@ where
             let sizes = Sections::of(&system, &tools, &messages);
             let model = &self.models.lead;
             let request = WorkModelRequest {
+                image_fence: None,
                 model: model.entry.model.clone(),
                 system: system.clone(),
                 tools: tools.clone(),

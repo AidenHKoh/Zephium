@@ -60,6 +60,7 @@ async fn round_trip(
         price,
     );
     let mut request = WorkModelRequest {
+        image_fence: None,
         model: WorkModelRef {
             provider,
             wire: target.wire(),

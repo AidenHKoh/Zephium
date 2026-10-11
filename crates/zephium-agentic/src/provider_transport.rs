@@ -1187,6 +1187,13 @@ impl AgentProviderTransport {
         credential: Option<AgentProviderAttemptCredential>,
         model: Option<model_client::AgentProviderModelClient>,
     ) -> Result<AgentProviderAttempt, AgentProviderAdmissionError> {
+        let image_fence = input.image_fence();
+        if (lead::image_fence::provider_body_has_image(input.request().body()) && image_fence.is_none())
+            || image_fence.as_ref().is_some_and(|fence| !fence.while_current(&mut || {}))
+        {
+            let _ = input.cancel(policy).map_err(AgentProviderAdmissionError::Settlement)?;
+            return Err(AgentProviderAdmissionError::Cancelled);
+        }
         let call = input.request().call();
         let provider = input.request().config().provider();
         let endpoint = input.request().endpoint();
@@ -1237,7 +1244,21 @@ impl AgentProviderTransport {
             drop(slot);
             return Err(AgentProviderAdmissionError::Cancelled);
         }
-        let committed = match input.commit(policy) {
+        let committed = if let Some(fence) = &image_fence {
+            let mut owned = Some(input);
+            let mut committed = None;
+            let current = fence.while_current(&mut || {
+                if let Some(input) = owned.take() { committed = Some(input.commit(policy)); }
+            });
+            if !current || committed.is_none() {
+                if let Some(input) = owned.take() {
+                    let _ = input.cancel(policy).map_err(AgentProviderAdmissionError::Settlement)?;
+                }
+                return Err(AgentProviderAdmissionError::Cancelled);
+            }
+            committed.ok_or(AgentProviderAdmissionError::Cancelled)?
+        } else { input.commit(policy) };
+        let committed = match committed {
             Ok(committed) => committed,
             Err(error) => {
                 drop(shutdown_gate);
@@ -1250,6 +1271,7 @@ impl AgentProviderTransport {
         drop(shutdown_gate);
         drop(cancellation_gate);
         Ok(AgentProviderAttempt {
+            image_fence,
             client: self.client.clone(),
             endpoint: self.endpoints.endpoint(endpoint).clone(),
             input_token_endpoint: (provider == AgentProviderKind::OpenAiResponses)
@@ -1851,6 +1873,7 @@ impl AgentProviderImmediateSettlementError {
 /// still let the borrowed drive finish and return its normal terminal.
 #[must_use]
 pub struct AgentProviderAttempt {
+    image_fence: Option<Arc<dyn zephium_core::work::model::WorkModelImageFence>>,
     client: Client,
     endpoint: Url,
     input_token_endpoint: Option<Url>,
@@ -2362,6 +2385,10 @@ impl AgentProviderAttempt {
         if self.mark_count_drive_started().is_err() {
             return AgentProviderExactCountOutcome::Unavailable(self.state_error());
         }
+        let image_fence = self.image_fence.clone();
+        if image_fence.as_ref().is_some_and(|fence| !fence.while_current(&mut || {})) {
+            return self.counted_failure(cancelled_failure());
+        }
         // This is immediately before the first possible request.send() poll.
         // Count disclosure is monotonic but still proves zero model dispatch.
         self.mark_input_count_disclosed();
@@ -2376,8 +2403,9 @@ impl AgentProviderAttempt {
                 biased;
                 () = self.cancellation.cancelled() => return self.counted_failure(cancelled_failure()),
                 () = self.shutdown.cancelled() => return self.counted_failure(cancelled_failure()),
+                () = lead::image_fence::revoked(image_fence.as_ref()) => return self.counted_failure(cancelled_failure()),
                 () = &mut deadline => return self.counted_failure(timeout_failure()),
-                response = send.send() => response,
+                response = lead::image_fence::fenced(image_fence.as_ref(), send.send()) => match response { Ok(response) => response, Err(()) => return self.counted_failure(cancelled_failure()) },
             };
             let response = match response {
                 Ok(response) => response,
@@ -2426,6 +2454,7 @@ impl AgentProviderAttempt {
                 biased;
                 () = self.cancellation.cancelled() => return self.counted_failure(cancelled_failure()),
                 () = self.shutdown.cancelled() => return self.counted_failure(cancelled_failure()),
+                () = lead::image_fence::revoked(image_fence.as_ref()) => return self.counted_failure(cancelled_failure()),
                 () = &mut deadline => return self.counted_failure(timeout_failure()),
                 () = tokio::time::sleep(delay) => {},
             }
@@ -2446,6 +2475,7 @@ impl AgentProviderAttempt {
                 biased;
                 () = self.cancellation.cancelled() => return self.counted_failure(cancelled_failure()),
                 () = self.shutdown.cancelled() => return self.counted_failure(cancelled_failure()),
+                () = lead::image_fence::revoked(image_fence.as_ref()) => return self.counted_failure(cancelled_failure()),
                 () = &mut deadline => return self.counted_failure(timeout_failure()),
                 next = stream.try_next() => next,
             };
@@ -2633,6 +2663,10 @@ impl AgentProviderAttempt {
         if Instant::now() >= self.deadline {
             return self.finish_terminal(timeout_failure());
         }
+        let image_fence = self.image_fence.clone();
+        if image_fence.as_ref().is_some_and(|fence| !fence.while_current(&mut || {})) {
+            return self.finish_terminal(cancelled_failure());
+        }
         // This is immediately before the first possible generation send poll.
         self.mark_model_may_have_dispatched();
         let deadline = tokio::time::sleep_until(tokio::time::Instant::from_std(self.deadline));
@@ -2641,8 +2675,9 @@ impl AgentProviderAttempt {
             biased;
             () = self.cancellation.cancelled() => return self.finish_terminal(cancelled_failure()),
             () = self.shutdown.cancelled() => return self.finish_terminal(cancelled_failure()),
+            () = lead::image_fence::revoked(image_fence.as_ref()) => return self.finish_terminal(cancelled_failure()),
             () = &mut deadline => return self.finish_terminal(timeout_failure()),
-            response = request.send() => response,
+            response = lead::image_fence::fenced(image_fence.as_ref(), request.send()) => match response { Ok(response) => response, Err(()) => return self.finish_terminal(cancelled_failure()) },
         };
         let response = match response {
             Ok(response) => response,
@@ -2669,6 +2704,7 @@ impl AgentProviderAttempt {
                 biased;
                 () = self.cancellation.cancelled() => return self.finish_terminal(cancelled_failure()),
                 () = self.shutdown.cancelled() => return self.finish_terminal(cancelled_failure()),
+            () = lead::image_fence::revoked(image_fence.as_ref()) => return self.finish_terminal(cancelled_failure()),
                 () = &mut deadline => return self.finish_terminal(timeout_failure()),
                 next = stream.try_next() => next,
             };
@@ -4907,6 +4943,46 @@ mod tests {
                 .unwrap()
                 .starts_with("POST /v1/responses/input_tokens "));
         }
+    }
+
+    #[test]
+    fn image_fence_revoked_before_admission_never_commits_or_reserves_a_transport_slot() {
+        let transport = AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD).unwrap();
+        let credential = AgentProviderCredential::try_new(AgentProviderKind::OpenAiResponses, "synthetic-openai-key".into()).unwrap();
+        let (mut policy, input) = provider_exact_fixture();
+        let gate = lead::ModelImageGate::new(Some(true));
+        let input = input.with_image_fence(gate.fence().unwrap());
+        gate.begin_change().unwrap();
+        assert!(matches!(transport.try_admit(input, &mut policy, &credential, AgentProviderCancellation::new()), Err(AgentProviderAdmissionError::Cancelled)));
+        assert_eq!(policy.pending_model_calls(), 0);
+        assert!(policy.taints().is_empty());
+        assert!(transport.snapshot().unwrap().is_idle());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn image_fence_revocation_stops_exact_count_backoff_without_retry_or_generation() {
+        let server = OneShotServer::spawn("503 Service Unavailable", &[("Retry-After", "1")], vec![b"{}".to_vec()]);
+        let transport = test_transport(&server);
+        let credential = AgentProviderCredential::try_new(AgentProviderKind::OpenAiResponses, "synthetic-openai-key".into()).unwrap();
+        let (mut policy, input) = provider_exact_fixture();
+        let gate = lead::ModelImageGate::new(Some(true));
+        // A retained visual-history fence remains mandatory even when this
+        // particular fixture's current continuation body contains only text.
+        let input = input.with_image_fence(gate.fence().unwrap());
+        let mut attempt = transport.try_admit(input, &mut policy, &credential, AgentProviderCancellation::new()).unwrap();
+        let revoke = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let epoch = gate.begin_change().unwrap();
+            assert!(gate.confirm(epoch, true)); // Re-enable cannot revive it.
+        });
+        let AgentProviderExactCountOutcome::Failed(result) = attempt.count_openai_input_tokens().await else { panic!("revoked image count must stop"); };
+        assert_eq!(result.usage_knowledge(), AgentProviderUsageKnowledge::ExactZeroBeforeModelDispatch);
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement() else { panic!("no generation"); };
+        settlement.settle(&mut policy).unwrap();
+        revoke.await.unwrap();
+        let request = server.finish();
+        assert!(std::str::from_utf8(&request.head).unwrap().starts_with("POST /v1/responses/input_tokens "));
+        assert!(transport.snapshot().unwrap().is_idle());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

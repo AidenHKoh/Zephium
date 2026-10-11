@@ -137,8 +137,24 @@ pub enum WorkModelToolChoice {
     Named(String),
 }
 
+/// Additional process-local revocation fence for model-bound page images.
+/// This does not authorize pixels: native source and consent admission remain
+/// separate. It is never serialized into provider requests, IPC or artifacts.
+pub trait WorkModelImageFence: Send + Sync {
+    /// Runs one synchronous future poll only while the original permission is
+    /// current. Revocation must serialize with this callback; no await occurs
+    /// inside it. False means the callback was not run.
+    fn while_current(&self, operation: &mut dyn FnMut()) -> bool;
+    /// Wakes when this original permission is permanently invalid. Enabling a
+    /// setting again must never revive a fence created before revocation.
+    fn revoked(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+}
+
 #[derive(Clone)]
 pub struct WorkModelRequest {
+    /// Native-validated image history's additional live permission fence.
+    /// Image requests without one fail closed at transport dispatch.
+    pub image_fence: Option<std::sync::Arc<dyn WorkModelImageFence>>,
     pub model: WorkModelRef,
     pub system: Vec<WorkModelSystemBlock>,
     pub tools: Vec<WorkModelTool>,

@@ -941,6 +941,7 @@ where
                 super::lead::conversation_budget(&model.entry),
             );
             let request = WorkModelRequest {
+                image_fence: None,
                 model: model.entry.model.clone(),
                 system: system.clone(),
                 tools: tools.clone(),
