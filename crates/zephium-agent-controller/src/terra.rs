@@ -3863,6 +3863,11 @@ impl AgentBrowserSession {
                     self.rejected_refusal = Some(refusal);
                     return Err(AgentBrowserProviderError::ActionRejected(error));
                 }
+                if crate::action::refused_before_acting(failure) {
+                    // Code-owned reads have no provider continuation. Their exact
+                    // accounted refusal still needs journaling before failed closure.
+                    self.close_failed_owned_read()?;
+                }
                 Err(AgentBrowserProviderError::Action(error))
             }
             result => result.map_err(AgentBrowserProviderError::Action),

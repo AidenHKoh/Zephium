@@ -851,6 +851,8 @@ enum Fault {
     #[cfg(feature = "probe-harness")]
     DecisionClick(bool),
     #[cfg(feature = "probe-harness")]
+    DecisionTargetChanged,
+    #[cfg(feature = "probe-harness")]
     Navigation(NavigationFault),
     #[cfg(feature = "probe-harness")]
     Scoped(ScopedFault),
@@ -1151,7 +1153,11 @@ impl AgentBrowserPort for Port {
             wire
         };
         #[cfg(feature = "probe-harness")]
-        let wire = if let Fault::DecisionClick(applied) = self.fault {
+        let wire = if matches!(
+            self.fault,
+            Fault::DecisionClick(_) | Fault::DecisionTargetChanged
+        ) {
+            let applied = matches!(self.fault, Fault::DecisionClick(true));
             format!(
                 r#"{{"v":1,"i":{},"g":{},"c":"complete","n":[{{"k":1,"r":"document"}},{{"k":2,"p":0,"r":"button","n":"Details","o":1,"s":{},"ak":6,"fc":true,"b":{{"x":10,"y":20,"w":120,"h":30}}}}]}}"#,
                 correlation.invocation().get(),
@@ -1327,6 +1333,11 @@ impl AgentBrowserPort for Port {
     ) -> ContextDispatch {
         lock(&self.calls).push(7);
         match self.fault {
+            Fault::DecisionTargetChanged => {
+                let now = request.requested_at();
+                completion(request.fail(SemanticActionNativeFailure::TargetChanged, now));
+                return ContextDispatch::Scheduled;
+            }
             Fault::DecisionClick(_) => {
                 let now = request.requested_at();
                 let geometry = request.expected_geometry();

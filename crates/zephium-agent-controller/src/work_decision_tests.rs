@@ -238,7 +238,12 @@ fn typed_copy_finishes_after_one_decision_without_a_page_model_or_native_action(
 #[test]
 fn typed_native_read_verifies_or_closes_without_retry_and_keeps_accounting() {
     let _serial = lock(&SERIAL);
-    for (scroll, applied) in [(false, false), (false, true), (true, false)] {
+    for (scroll, applied, refused) in [
+        (false, false, false),
+        (false, true, false),
+        (true, false, false),
+        (false, false, true),
+    ] {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
@@ -330,7 +335,9 @@ fn typed_native_read_verifies_or_closes_without_retry_and_keeps_accounting() {
         let (outcome, shutdown, calls, events) = drive(
             controller,
             handle,
-            if scroll {
+            if refused {
+                Fault::DecisionTargetChanged
+            } else if scroll {
                 Fault::ScrollVerification
             } else {
                 Fault::DecisionClick(applied)
@@ -340,7 +347,14 @@ fn typed_native_read_verifies_or_closes_without_retry_and_keeps_accounting() {
             panic!("{outcome:?}");
         };
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
-        assert_eq!(calls, [1, 2, 3, 7, 3, 4, 5, 6]);
+        assert_eq!(
+            calls,
+            if refused {
+                vec![1, 2, 3, 7, 4, 5, 6]
+            } else {
+                vec![1, 2, 3, 7, 3, 4, 5, 6]
+            }
+        );
         assert_eq!(closed.policy_settlement().closure().effects(), 1);
         assert_eq!(
             closed.policy_settlement().closure().model_calls(),
