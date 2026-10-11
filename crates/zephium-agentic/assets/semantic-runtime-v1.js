@@ -157,6 +157,8 @@
   const nativePerformanceObserver = globalThis.PerformanceObserver;
   const fixedDispatchEvent = EventTarget.prototype.dispatchEvent;
   const inputValueSetter = setter(HTMLInputElement.prototype, "value");
+  const inputStepUp = HTMLInputElement.prototype.stepUp;
+  const inputStepDown = HTMLInputElement.prototype.stepDown;
   const textareaValueSetter = setter(HTMLTextAreaElement.prototype, "value");
   const nodeTextSetter = setter(Node.prototype, "textContent");
   const nodeTextGetter = getter(Node.prototype, "textContent");
@@ -4067,8 +4069,32 @@
       if (key === undefined || typeof nativeKeyboardEvent !== "function" || typeof htmlElementFocus !== "function") {
         return actionFault("unsupported_interaction");
       }
+      const numericDefault = !cdpPreparing && descriptor.tag === "input" &&
+        read(inputTypeGetter, target) === "number" && (key[0] === "ArrowUp" || key[0] === "ArrowDown");
+      const stepNumber = key[0] === "ArrowUp" ? inputStepUp : inputStepDown;
+      // Native stepping owns number parsing, alignment, bounds and empty values.
+      // This recipe grants no new target or operation; only the admitted Press reaches it.
+      if (numericDefault && (readonly || typeof stepNumber !== "function")) {
+        return actionFault(readonly ? "target_disabled" : "unsupported_interaction");
+      }
+      const numberConstraints = numericDefault ? ["min", "max", "step"].map(name => apply(getAttribute, target, [name])) : null;
+      if (numericDefault && numberConstraints.some(value => value !== null && value.length > 128)) return actionFault("unsupported_interaction");
+      const numberValue = numericDefault ? read(inputValueGetter, target) : null;
+      const sameNumber = (value) => {
+        if (!numericDefault || lastObservationInvocation !== request.i || lastObservationGeneration !== request.g ||
+            resolveKeyAtGeneration(request.t, request.g) !== target || read(nodeConnectedGetter, target) !== true ||
+            apply(nodeGetRoot, target, []) !== document || read(inputTypeGetter, target) !== "number" ||
+            disabledState(target, false) || has(target, "readonly") ||
+            lower(attribute(target, "aria-readonly", 16) || "") === "true" || read(inputValueGetter, target) !== value ||
+            ["min", "max", "step"].some((name, index) => apply(getAttribute, target, [name]) !== numberConstraints[index])) return false;
+        const current = runtimeDescriptor(target, request.g);
+        // Focusing is expected; every other descriptor field must still match.
+        return current !== null && descriptorMatches({ ...request.f, s: request.f.s & ~64, vt: value },
+          { ...current, s: current.s & ~64 });
+      };
       try {
         if (target !== document) apply(htmlElementFocus, target, []);
+        if (numericDefault && !sameNumber(numberValue)) return actionFault("applied_unverified_postcondition");
         if (cdpPreparing) {
           const validate = cdpTargetGuard(target,request,point,true);
           return guardedCdpInputs(request,target,[cdpKey(key,false),cdpKey(key,true)],validate,() => finishActionRendering(encodeActionEvidence(request,"engine_native_input",readiness,geometry,viewport,point,delta)));
@@ -4079,7 +4105,25 @@
         if (key[0] === "Enter" || key[0] === " ") {
           apply(fixedDispatchEvent, target, [new nativeKeyboardEvent("keypress", init)]);
         }
+        let numberAfter = numberValue;
+        let numberUnverified = false;
+        if (numericDefault && !handled) {
+          try {
+            if (!sameNumber(numberValue)) numberUnverified = true;
+            else {
+              apply(stepNumber, target, []);
+              numberAfter = read(inputValueGetter, target);
+              if (!sameNumber(numberAfter)) numberUnverified = true;
+              else if (numberAfter !== numberValue) {
+                apply(fixedDispatchEvent, target, [new nativeEvent("input", { bubbles: true, composed: true })]);
+                if (!sameNumber(numberAfter)) numberUnverified = true;
+                else apply(fixedDispatchEvent, target, [new nativeEvent("change", { bubbles: true })]);
+              }
+            }
+          } catch (_) { numberUnverified = true; }
+        }
         apply(fixedDispatchEvent, target, [new nativeKeyboardEvent("keyup", init)]);
+        if (numericDefault && !handled && (numberUnverified || !sameNumber(numberAfter))) return actionFault("applied_unverified_postcondition");
         // A key the page did not handle does what the browser would.
         if (!handled && key[0] === "Enter" && descriptor.tag === "input") {
           const form = read(inputFormGetter, target);
