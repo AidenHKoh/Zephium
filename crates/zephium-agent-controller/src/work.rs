@@ -4913,6 +4913,8 @@ impl AgentWorkController {
                 .as_ref()
                 .is_some_and(|browser| !browser.supports_screenshots())
         {
+            #[cfg(feature = "probe-harness")]
+            eprintln!("browser-screenshot: stage=preflight capability_or_busy=true enabled={} pending={} content=redacted", state.viewport_screenshot, state.native.screenshot_pending.is_some());
             return Ok(false);
         }
         let now = state
@@ -4927,15 +4929,19 @@ impl AgentWorkController {
                 .checked_add(MAX_SEMANTIC_SCREENSHOT_CAPTURE_MILLIS)
                 .ok_or(AgentWorkFailure::Contract)?,
         );
-        Ok(prepare_semantic_screenshot(
+        let prepared = prepare_semantic_screenshot(
             SemanticScreenshotRequestId::new(u64::MAX).ok_or(AgentWorkFailure::Contract)?,
             observation,
             turn.turn.continuation().baseline(),
             requested_at,
             deadline,
             SemanticScreenshotBudget::STANDARD,
-        )
-        .is_ok())
+        );
+        #[cfg(feature = "probe-harness")]
+        if let Err(error) = &prepared {
+            eprintln!("browser-screenshot: stage=preflight reason={error:?} content=redacted");
+        }
+        Ok(prepared.is_ok())
     }
 
     async fn screenshot_current(
