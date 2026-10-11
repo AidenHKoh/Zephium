@@ -4,9 +4,8 @@ mod approval;
 use std::{
     io::{Read, Write},
     sync::{
-        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
-        mpsc,
+        mpsc, Arc, Mutex, OnceLock,
     },
     time::Duration,
 };
@@ -213,15 +212,19 @@ fn configure_mode(url: &str, send: bool) -> Result<String, &'static str> {
         })
         .map_err(|_| "account_duplicate")?;
     if send {
-        return Ok(format!(
-            "Open my disposable Slack test channel at {url} with the Browser helper. Read the currently visible messages. If sign-in or MFA is needed, hand the live page to me and resume after native verification. Do not search or use Computer.\nIn the same disposable test channel at {url}, compose exactly this message: {} Wait for the normal explicit confirmation before sending it once. After sending, read the channel to verify it appears, and report the result honestly. Never resend after uncertain verification or extraction failure. Do not edit, delete, invite, or change any other account data.\nExplain from recorded state whether the approved message was sent and what verification was obtained. Do not send or retry any action to explain the previous result.",
-            approval::MESSAGE
-        ));
+        return Ok(slack_send_request(url));
     }
     Ok(format!(
         "Open my test account at {url} with the Browser helper and read only the currently visible channel, inbox or issue list. If sign-in or MFA is needed, hand the live page to me and resume after native verification. Summarize at most three visible items with sources, or report honestly what blocks access. Do not search, substitute documentation, use Computer, type into account content, send, create, edit or delete anything.\nExplain the previous result from recorded state and evidence. If access was blocked, say exactly what is needed; do not retry or open a new page just to explain."
     ))
 }
+fn slack_send_request(url: &str) -> String {
+    format!(
+        "Open my disposable Slack test channel at {url} with the Browser helper. If sign-in or MFA is needed, hand the live page to me and resume after native verification. Stay in the browser through any app-launch page. Send exactly this message once: {} Prepare it and wait for the normal explicit confirmation before sending. Then read the channel to verify it appears and report the result honestly. Never resend after uncertain verification or extraction failure. Do not search, substitute help pages, use Computer, edit, delete, invite, or change other account data.\nExplain from recorded state whether the approved message was sent and what verification was obtained. Do not send or retry any action to explain the previous result.",
+        approval::MESSAGE
+    )
+}
+
 impl Account {
     pub(super) fn report(&self, execution: &WorkExecutionFact) {
         let confirmations = execution
@@ -635,6 +638,18 @@ mod tests {
         .await;
         assert!(matches!(result, Ok(None)));
     }
+    #[test]
+    fn sending_and_sign_in_share_one_execution_without_a_preliminary_read_run() {
+        let request = slack_send_request("https://app.slack.com/client/TTEST/CCHANNEL");
+        let runs = request.lines().collect::<Vec<_>>();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].matches(approval::MESSAGE).count(), 1);
+        assert!(runs[0].contains("wait for the normal explicit confirmation"));
+        assert!(runs[0].contains("Never resend"));
+        assert!(!runs[1].contains(approval::MESSAGE));
+        assert!(runs[1].contains("Do not send or retry"));
+    }
+
     #[test]
     fn send_fixture_is_a_named_channel_and_stdin_cannot_approve() {
         assert!(slack_channel("https://app.slack.com/client/T0/C0"));
