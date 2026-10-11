@@ -494,9 +494,9 @@ const HOST_LABELS: [&str; 10] = [
     "www", "com", "org", "edu", "gov", "net", "io", "co", "uk", "html",
 ];
 
-/// A public query reduced to what it asks for: its lowercase subject words
-/// and the hosts it restricts to with `site:`. Queries with the same terms
-/// ask the same thing in other words or another order.
+/// Similarity hints from a public query's subject words and `site:` hosts.
+/// Equal word sets do not prove equivalent requests: order and numeric
+/// bindings can change their meaning. They only select candidates for a check.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SearchQueryTerms {
     words: std::collections::BTreeSet<String>,
