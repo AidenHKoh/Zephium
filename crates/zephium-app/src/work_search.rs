@@ -496,11 +496,56 @@ mod shared {
     static WORK_SEARCHES: Mutex<Vec<(Key, Vec<Entry>)>> = Mutex::new(Vec::new());
     static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+    fn same_request(first: &str, second: &str) -> bool {
+        let tokens = |query: &str| {
+            query
+                .split_whitespace()
+                .map(str::to_lowercase)
+                .collect::<Vec<_>>()
+        };
+        let first = tokens(first);
+        let mut second = tokens(second);
+        if first == second {
+            return true;
+        }
+        // Numeric bindings, search operators, phrases and relational queries
+        // keep their order. Bare keyword order and case carry no extra scope.
+        const RELATIONS: &[&str] = &[
+            "to", "from", "for", "before", "after", "between", "under", "over", "above", "below",
+            "without", "not", "except", "until", "since", "vs", "versus", "than", "into", "by",
+            "with", "or", "and", "do", "z", "od", "bez", "przed", "po", "poniżej", "powyżej",
+            "między",
+        ];
+        if first.len() != second.len()
+            || first.iter().chain(&second).any(|token| {
+                !token.chars().all(char::is_alphabetic) || RELATIONS.contains(&token.as_str())
+            })
+        {
+            return false;
+        }
+        first.iter().all(|token| {
+            let terms = SearchQueryTerms::of(token);
+            let found = second.iter().position(|other| {
+                if terms.words() == 0 {
+                    token == other
+                } else {
+                    terms == SearchQueryTerms::of(other)
+                }
+            });
+            if let Some(index) = found {
+                second.swap_remove(index);
+                true
+            } else {
+                false
+            }
+        })
+    }
+
     pub(super) enum Next {
-        /// A search with the identical query is running: wait for its answer.
+        /// An equivalent keyword query is running: wait for its answer.
         /// Similar ones run side by side; only settled answers are checked.
         Wait(tokio::sync::watch::Receiver<bool>),
-        /// A search with the identical query answered.
+        /// An equivalent keyword query answered.
         Same(WorkProviderSearchEvidenceV1),
         /// An earlier search, its query and answer, worth checking.
         Check(u64, String, WorkProviderSearchEvidenceV1),
@@ -545,6 +590,37 @@ mod shared {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn equivalent_keywords_reuse_without_erasing_request_constraints() {
+            for (first, second) in [
+                (
+                    "Hetzner cloud prices load balancer",
+                    "load balancer price HETZNER cloud",
+                ),
+                ("tanie laptopy Warszawa", "WARSZAWA   tanie laptopy"),
+                ("flights Warsaw to Paris", "FLIGHTS Warsaw TO Paris"),
+                ("library 1.2 compatibility", "LIBRARY 1.2 compatibility"),
+            ] {
+                assert!(same_request(first, second), "{first} / {second}");
+            }
+            for (first, second) in [
+                ("flights Warsaw to Paris", "flights Paris to Warsaw"),
+                ("library 1.2 compatibility", "library 2.1 compatibility"),
+                ("hotel 2 adults 3 nights", "hotel 3 adults 2 nights"),
+                ("cloud prices", "latest cloud prices"),
+                ("latest cloud prices", "best cloud prices"),
+                ("python python rust", "python rust rust"),
+                (
+                    "site:example.com cloud price",
+                    "site:other.test cloud price",
+                ),
+                ("\"Warsaw Paris\" flights", "\"Paris Warsaw\" flights"),
+                ("loty Warszawa do Paryż", "loty Paryż do Warszawa"),
+            ] {
+                assert!(!same_request(first, second), "{first} / {second}");
+            }
+        }
 
         #[test]
         fn reordered_terms_and_versions_do_not_bypass_semantic_reuse_checks() {
@@ -631,7 +707,7 @@ mod shared {
         if let Some(State::Known { evidence, .. }) = entries
             .iter()
             .filter(comparable)
-            .find(|entry| entry.query == scope.query)
+            .find(|entry| same_request(&entry.query, &scope.query))
             .map(|entry| &entry.state)
         {
             return Next::Same(evidence.clone());
@@ -639,7 +715,9 @@ mod shared {
         if let Some(State::Running(done)) = entries
             .iter()
             .filter(comparable)
-            .find(|entry| matches!(entry.state, State::Running(_)) && entry.query == scope.query)
+            .find(|entry| {
+                matches!(entry.state, State::Running(_)) && same_request(&entry.query, &scope.query)
+            })
             .map(|entry| &entry.state)
         {
             return Next::Wait(done.clone());
