@@ -147,3 +147,42 @@ test("an inbox of sibling card buttons clears without main or list landmarks", a
     ),
   ).toBe(false);
 });
+
+test("conversation search is not an identity entry field", async () => {
+  for (const field of [
+    "<input type='search' aria-label='Channel or user name'>",
+    "<input role='searchbox' aria-label='Workspace search'>",
+  ])
+    expect(await survey(`${content}${field}`)).toBe(true);
+  expect(await survey(`${content}<input type='text' aria-label='User name'>`)).toBe(false);
+  for (const field of [
+    "<input role='searchbox' type='email'>",
+    "<input role='searchbox' type='password'>",
+    "<input role='searchbox' autocomplete='one-time-code'>",
+    "<form><input type='search' aria-label='User name'></form>",
+  ])
+    expect(await survey(`${content}${field}`)).toBe(false);
+});
+
+test("a multiline composer beside loaded conversation content can resume", async () => {
+  const conversation =
+    "<div><h1>Project channel</h1><div role='list'><div>Welcome to the project channel and its recent discussion.</div><button>Start from a template</button><button>Review channel details</button><button>Browse conversation history</button></div><div role='textbox' aria-multiline='true' contenteditable='true' aria-label='Message to project channel'></div></div>";
+  expect(await survey(conversation)).toBe(true);
+  for (const wall of [
+    "<input type='password'>",
+    "<input type='email'>",
+    "<input autocomplete='one-time-code'>",
+    "<div role='dialog'><h2>Continue</h2><input name='code'></div>",
+  ])
+    expect(await survey(conversation + wall)).toBe(false);
+  expect(
+    await survey(
+      "<h1>Continue</h1><p>Enter the requested code to continue to your account.</p><textarea></textarea>",
+    ),
+  ).toBe(false);
+  expect(
+    await survey(
+      "<h1>Continue</h1><form><div role='list'><button>Continue with Google</button><button>Continue with Microsoft</button><button>Continue with Apple</button></div><textarea></textarea></form>",
+    ),
+  ).toBe(false);
+});

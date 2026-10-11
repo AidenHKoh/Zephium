@@ -11,12 +11,15 @@
       return box.width > 0 && box.height > 0 && style.display !== "none" &&
         style.visibility !== "hidden" && style.opacity !== "0";
     };
+    const searchEntry = (node) => node.matches("input[type='search'],[role='searchbox']") &&
+      (node.getAttribute("type") || "").toLowerCase() !== "email" &&
+      !node.closest("form:not([role='search']),dialog,[role='dialog'],[aria-modal='true']");
     const active = document.activeElement;
-    if (visible(active) && active.matches("input,textarea")) {
+    if (visible(active) && active.matches("input,textarea") && !searchEntry(active)) {
       const hint = ["type", "autocomplete", "name", "id", "aria-label", "placeholder"].map((name) => active.getAttribute(name) || "").join(" ");
       if (/(?:password|one-time-code|totp|otp|authentication.?code|verification.?code|confirmation.?code|email|user.?name|workspace)/i.test(hint)) return 2;
     }
-    const nodes = document.querySelectorAll("input,textarea,select,iframe,h1,h2,h3,h4,h5,h6,p,button,a,main,article,li,tr,[role='heading'],[role='alert'],[role='main'],[role='dialog'],[role='row'],[role='listitem'],[role='option'],[role='link'],[role='button'],[role='grid'],[role='status'],[role='progressbar'],[role='textbox'],[contenteditable='true'],[aria-busy='true']");
+    const nodes = document.querySelectorAll("input,textarea,select,iframe,ul,ol,[role='list'],h1,h2,h3,h4,h5,h6,p,button,a,main,article,li,tr,[role='heading'],[role='alert'],[role='main'],[role='dialog'],[role='row'],[role='listitem'],[role='option'],[role='link'],[role='button'],[role='grid'],[role='status'],[role='progressbar'],[role='textbox'],[contenteditable='true'],[aria-busy='true']");
     if (nodes.length > 4096) return 3;
     const challenge = /^(?:just a moment|checking (?:your browser|if the site connection)|verifying you are human|verify you are human|please verify|confirm you are human|are you (?:a human|a robot)|prove you are human|press (?:&|and) hold|human verification|security (?:check|verification)|complete the security check|pardon our interruption|access denied|unusual traffic|something went wrong|please wait)/i;
     const signIn = /(?:sign[ -]?in|log[ -]?in|zaloguj|two[ -]?factor|verification code|confirmation code|authentication code|one[ -]?time code|choose (?:an? |your )?(?:account|workspace|organization)|select (?:an? |your )?(?:account|workspace|organization)|find your workspace|workspace url|enter your workspace|continue (?:with|to) (?:google|microsoft|apple|slack|sso)|single sign[ -]?on)/i;
@@ -37,6 +40,7 @@
       return text.trim();
     };
     const publicEntry = (node) => {
+      if (searchEntry(node)) return true;
       const form = node.closest("form,[role='search']");
       if (form?.getAttribute("role") === "search") return true;
       if (!form) return false;
@@ -47,7 +51,7 @@
     let heading = false, paragraph = false, links = 0, main = false, rows = 0;
     let authHeading = false, authControls = 0, editable = 0, unknownEntry = 0, busy = false;
     const cardGroups = new Map();
-    let cards = 0;
+    let cards = 0, lists = 0, composers = 0;
     for (const node of nodes) {
       if (!visible(node)) continue;
       const tag = node.tagName.toLowerCase();
@@ -66,6 +70,8 @@
         editable++;
         if (!publicEntry(node) && type !== "search") {
           unknownEntry++;
+          if ((tag === "textarea" || (node.isContentEditable && node.getAttribute("aria-multiline") === "true")) &&
+              !node.closest("form,dialog,[role='dialog'],[aria-modal='true']")) composers++;
           if (node.closest("dialog,[role='dialog'],[aria-modal='true']")) return 14;
         }
         if ((/(?:email|user.?name|workspace|organization|tenant)/i.test(hint) || type === "email") && !publicEntry(node)) return 7;
@@ -96,6 +102,7 @@
       if ((tag === "button" || tag === "a" || role === "button" || role === "link") && signIn.test(short)) authControls++;
       // Legal/help chrome is not evidence that the requested app loaded.
       if (node.closest("nav,footer,aside,[role='navigation'],[role='contentinfo'],[role='complementary']")) continue;
+      if ((["ul", "ol"].includes(tag) || role === "list") && short.length >= 24) lists++;
       // Custom app lists often expose each item as a button rather than li/row.
       // Require repeated local siblings; never count global or auth chrome.
       if ((tag === "button" || role === "button") && short.length >= 12 && !signIn.test(short) &&
@@ -122,8 +129,12 @@
     if (authHeading) return 13;
     // A heading and explanatory paragraph also describe most code-entry
     // screens. Unclassified editable controls require actual app structure.
-    if (unknownEntry > 0 && !(main && rows >= 3)) return 14;
-    if (busy && !(main && (links >= 3 || rows >= 3))) return 15;
+    // A message composer is not an unknown identity field when a populated
+    // conversation and repeated local app controls are already visible.
+    const conversation = heading && lists > 0 && cards >= 3;
+    if (unknownEntry > 0 && !(main && rows >= 3) &&
+        !(conversation && composers > 0 && unknownEntry === composers)) return 14;
+    if (busy && !(main && (links >= 3 || rows >= 3)) && !conversation) return 15;
     if (authControls > 0 && editable > 0 && !(heading && paragraph) && rows < 3) return 16;
     // A settled URL and the absence of a field are insufficient: require
     // visible page content, so an empty SPA shell/spinner cannot resume it.
