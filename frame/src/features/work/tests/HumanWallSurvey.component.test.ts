@@ -23,7 +23,7 @@ async function survey(html: string): Promise<boolean> {
   try {
     await loaded;
     const result = frame.contentDocument?.documentElement.dataset.wallClear;
-    expect(Array.from({ length: 19 }, (_, code) => String(code))).toContain(result);
+    expect(Array.from({ length: 24 }, (_, code) => String(code))).toContain(result);
     return result === "0";
   } finally {
     frame.remove();
@@ -228,4 +228,18 @@ test("a short accessible list name does not hide its populated conversation", as
       ),
     ),
   ).toBe(false);
+});
+
+test("non-text input controls do not impersonate credential entry", async () => {
+  for (const type of ["range", "checkbox", "radio", "button", "submit", "reset", "image"]) {
+    expect(
+      await survey(`${content}<input type='${type}' aria-label='Sidebar control'>`),
+      type,
+    ).toBe(true);
+  }
+  for (const type of ["text", "number", "tel", "email", "password", "file", "date"]) {
+    expect(await survey(`${content}<input type='${type}' aria-label='Required entry'>`), type).toBe(
+      false,
+    );
+  }
 });

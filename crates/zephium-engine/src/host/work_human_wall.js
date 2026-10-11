@@ -1,6 +1,6 @@
 // A fixed, read-only, content-free survey while the person owns this page.
 // Never read input values, follow frames, click, fill, or return page text.
-// Closed result: 0 is clear; 1..18 name only a structural reason to keep holding.
+// Closed result: 0 is clear; 1..23 name only a structural reason to keep holding.
 (() => {
   try {
     if (!document.body || !["interactive", "complete"].includes(document.readyState)) return 1;
@@ -71,6 +71,9 @@
         // Segmented OTP widgets often expose only ordinary one-character
         // text inputs, without an accessible code label or autocomplete hint.
         if (node.getAttribute("maxlength") === "1" && /^(?:text|tel|number|)$/.test(type)) return 6;
+        // Sliders and toggles are controls, not identity/text entry. Credential
+        // hints above still win, including on unexpectedly labelled controls.
+        if (tag === "input" && ["range", "checkbox", "radio", "button", "submit", "reset", "image"].includes(type)) continue;
         if (node.disabled || node.readOnly) continue;
         editable++;
         if (!publicEntry(node) && type !== "search") {
@@ -139,7 +142,14 @@
     // conversation and repeated local app controls are already visible.
     const conversation = heading && lists > 0 && cards >= 3;
     if (unknownEntry > 0 && !(main && rows >= 3) &&
-        !(conversation && composers > 0 && unknownEntry === composers)) return 14;
+        !(conversation && composers > 0 && unknownEntry === composers)) {
+      // Closed diagnostics distinguish a field from missing app structure.
+      if (composers === 0) return 19;
+      if (unknownEntry !== composers) return 20;
+      if (lists === 0) return 21;
+      if (cards < 3) return 22;
+      return 23;
+    }
     if (busy && !(main && (links >= 3 || rows >= 3)) && !conversation) return 15;
     if (authControls > 0 && editable > 0 && !(heading && paragraph) && rows < 3) return 16;
     // A settled URL and the absence of a field are insufficient: require
