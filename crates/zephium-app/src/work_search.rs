@@ -497,10 +497,10 @@ mod shared {
     static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
     pub(super) enum Next {
-        /// A search with the same terms is running: wait for its answer.
+        /// A search with the identical query is running: wait for its answer.
         /// Similar ones run side by side; only settled answers are checked.
         Wait(tokio::sync::watch::Receiver<bool>),
-        /// A search with the same terms answered.
+        /// A search with the identical query answered.
         Same(WorkProviderSearchEvidenceV1),
         /// An earlier search, its query and answer, worth checking.
         Check(u64, String, WorkProviderSearchEvidenceV1),
@@ -542,6 +542,67 @@ mod shared {
         }
     }
 
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn reordered_terms_and_versions_do_not_bypass_semantic_reuse_checks() {
+            let _serial = crate::WORK_RUNTIME_TEST_SERIAL.lock().unwrap();
+            for (first, changed) in [
+                ("flights Warsaw to Paris", "flights Paris to Warsaw"),
+                ("library 1.2 compatibility", "library 2.1 compatibility"),
+                ("hotel 2 adults 3 nights", "hotel 3 adults 2 nights"),
+            ] {
+                let key = (ProfileId::generate(), WorkId::generate());
+                let mut scope = WorkPublicSearchScope {
+                    provider: WorkSearchProvider::OpenAi,
+                    model: "fixture".into(),
+                    query: first.into(),
+                };
+                let terms = SearchQueryTerms::of(first);
+                assert_eq!(terms, SearchQueryTerms::of(changed));
+                let Next::Run(slot) = next(key, &scope, &terms, &[], true) else {
+                    panic!("first run")
+                };
+                assert!(matches!(
+                    next(key, &scope, &terms, &[], true),
+                    Next::Wait(_)
+                ));
+                scope.query = changed.into();
+                let Next::Run(other) = next(key, &scope, &terms, &[], true) else {
+                    panic!("different request must run while first is pending")
+                };
+                drop(other);
+                slot.known(WorkProviderSearchEvidenceV1 {
+                    version: 1,
+                    provider: scope.provider,
+                    model: scope.model.clone(),
+                    response_model: scope.model.clone(),
+                    response_id: "fixture".into(),
+                    search_call_id: "fixture".into(),
+                    answer: "Public evidence".into(),
+                    citations: vec![],
+                    actual_input_tokens: 0,
+                    actual_output_tokens: 0,
+                });
+                assert!(matches!(
+                    next(key, &scope, &terms, &[], true),
+                    Next::Check(..)
+                ));
+                scope.query = first.into();
+                assert!(matches!(
+                    next(key, &scope, &terms, &[], true),
+                    Next::Same(_)
+                ));
+                WORK_SEARCHES
+                    .lock()
+                    .unwrap()
+                    .retain(|(known, _)| *known != key);
+            }
+        }
+    }
+
     pub(super) fn next(
         key: Key,
         scope: &WorkPublicSearchScope,
@@ -570,7 +631,7 @@ mod shared {
         if let Some(State::Known { evidence, .. }) = entries
             .iter()
             .filter(comparable)
-            .find(|entry| entry.terms == *terms)
+            .find(|entry| entry.query == scope.query)
             .map(|entry| &entry.state)
         {
             return Next::Same(evidence.clone());
@@ -578,7 +639,7 @@ mod shared {
         if let Some(State::Running(done)) = entries
             .iter()
             .filter(comparable)
-            .find(|entry| matches!(entry.state, State::Running(_)) && entry.terms == *terms)
+            .find(|entry| matches!(entry.state, State::Running(_)) && entry.query == scope.query)
             .map(|entry| &entry.state)
         {
             return Next::Wait(done.clone());

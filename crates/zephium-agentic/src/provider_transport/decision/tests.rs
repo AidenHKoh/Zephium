@@ -2848,6 +2848,47 @@ async fn search_reuse_needs_the_same_request_and_a_found_answer() {
     assert!(super::search::search_reuse_projection(&scope, "query", &secret).is_err());
 }
 
+#[tokio::test]
+async fn changed_numeric_search_constraints_never_dispatch_a_reuse_decision() {
+    let (mut scope, evidence) = search_ranking_fixture(2);
+    let transport = AgentProviderTransport::try_new_loopback(
+        AgentProviderTransportConfig::STANDARD,
+        "http://127.0.0.1:9/v1/responses",
+        "http://127.0.0.1:9/v1/messages",
+    )
+    .unwrap();
+    let credential =
+        AgentProviderCredential::try_new(AgentProviderKind::OpenAiResponses, "fixture-key".into())
+            .unwrap();
+    let ranking = super::search::SearchDecisionRanking::new(None, emulation_config(), None);
+    for (new, earlier) in [
+        ("batch dates 2027", "batch dates 2026"),
+        ("library 1.2 compatibility", "library 2.1 compatibility"),
+        ("hotel 2 adults 3 nights", "hotel 2 adults 4 nights"),
+        ("laptops under $500", "laptops under $800"),
+        ("device X100 specifications", "device X200 specifications"),
+        ("conference 2027", "conference"),
+    ] {
+        scope.query = new.into();
+        let result = ranking
+            .reuse(
+                &transport,
+                &credential,
+                &scope,
+                earlier,
+                &evidence,
+                limits(),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        assert!(!result.answers);
+        assert_eq!(result.usage.operations, 0);
+        assert_eq!(result.usage.model_tokens, 0);
+    }
+    assert!(transport.snapshot().unwrap().is_idle());
+}
+
 #[test]
 fn recorded_search_reuse_eval_requests_match_the_shipping_projection() {
     use sha2::Digest as _;
