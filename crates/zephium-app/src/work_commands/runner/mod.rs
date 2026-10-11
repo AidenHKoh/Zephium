@@ -4,6 +4,8 @@ pub(crate) mod github;
 #[cfg(target_os = "macos")]
 pub(crate) mod guard;
 #[cfg(target_os = "macos")]
+mod guard_git;
+#[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
 mod macos_github;
@@ -122,6 +124,7 @@ where
     review::run(grant, root, changes, operation, cancelled).await
 }
 
+#[cfg(not(target_os = "macos"))]
 fn prepare_baseline_checked(
     snapshot: &Snapshot,
     changes: &[ApprovedChange],
@@ -166,6 +169,9 @@ pub(crate) fn native_recovery_qualified() -> bool {
 pub(crate) fn ensure_available() -> Result<(), Failure> {
     #[cfg(target_os = "macos")]
     if macos::qualified() {
+        if guard::git_installed() {
+            return Ok(());
+        }
         // Preserve the typed implementation, but do not advertise a host-owned
         // timer as surviving host death. Reopen only after guard qualification.
         return Err(Failure::CustodyUnavailable);
@@ -264,6 +270,7 @@ impl GitOperation {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 async fn execute<C, CF>(
     snapshot: &Snapshot,
     operation: GitOperation,

@@ -19,6 +19,8 @@ const ARGUMENT: &str = "--zephium-private-unittest-guard-v1";
 const REQUEST_LIMIT: usize = 64 * 1024 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const DEADLINE: Duration = Duration::from_secs(35);
+const GIT_DEADLINE: Duration = Duration::from_secs(90);
+const GIT_QUALIFIED: bool = true; // Native7 and connected tool9 checks on25G83.
 const QUALIFIED: bool = true; // Copied v19: attested child/host-death/Stop/cleanup matrix on25G83.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
@@ -38,6 +40,13 @@ enum Operation {
         #[serde(deserialize_with = "bounded_files")]
         files: BTreeMap<String, String>,
     },
+    GitComparison {
+        #[serde(deserialize_with = "bounded_files")]
+        before: BTreeMap<String, String>,
+        #[serde(deserialize_with = "bounded_files")]
+        after: BTreeMap<String, String>,
+        operation: super::guard_git::Read,
+    },
 }
 #[derive(Serialize)]
 struct RequestRef<'a> {
@@ -51,6 +60,11 @@ enum OperationRef<'a> {
     SelectedUnittest {
         modules: &'a [String],
         files: BTreeMap<&'a str, &'a str>,
+    },
+    GitComparison {
+        before: BTreeMap<&'a str, &'a str>,
+        after: BTreeMap<&'a str, &'a str>,
+        operation: super::guard_git::Read,
     },
 }
 
@@ -67,6 +81,12 @@ enum Reply {
     Started {
         id: [u8; 16],
         pid: u32,
+    },
+    GitChildSpawned {
+        id: [u8; 16],
+        ordinal: u8,
+        pid: u32,
+        instance: Option<u64>,
     },
     Completed {
         id: [u8; 16],
@@ -85,6 +105,8 @@ struct Value {
 enum Error {
     Input,
     Unavailable,
+    ToolUnavailable,
+    CustodyUnavailable,
     Limit,
     Stopped,
     Unconfirmed,
@@ -97,6 +119,8 @@ impl From<Failure> for Error {
         match error {
             Failure::Input => Self::Input,
             Failure::PythonUnavailable | Failure::Unavailable => Self::Unavailable,
+            Failure::ToolUnavailable => Self::ToolUnavailable,
+            Failure::CustodyUnavailable => Self::CustodyUnavailable,
             Failure::Limit => Self::Limit,
             Failure::Stopped => Self::Stopped,
             Failure::CleanupPending | Failure::StopUnconfirmed => Self::Unconfirmed,
@@ -111,6 +135,8 @@ impl From<Error> for Failure {
         match error {
             Error::Input => Self::Input,
             Error::Unavailable => Self::PythonUnavailable,
+            Error::ToolUnavailable => Self::ToolUnavailable,
+            Error::CustodyUnavailable => Self::CustodyUnavailable,
             Error::Limit => Self::Limit,
             Error::Stopped => Self::Stopped,
             Error::Unconfirmed => Self::CleanupPending,
@@ -122,6 +148,9 @@ impl From<Error> for Failure {
 }
 pub(super) fn installed() -> bool {
     QUALIFIED && INSTALLED.load(Ordering::Acquire)
+}
+pub(super) fn git_installed() -> bool {
+    GIT_QUALIFIED && INSTALLED.load(Ordering::Acquire)
 }
 
 /// Call before app initialization. No other command-line or environment input
@@ -204,13 +233,17 @@ struct Control {
     go: AtomicBool,
     challenge: std::sync::Mutex<Option<[u8; 16]>>,
     started: Instant,
+    budget_secs: std::sync::atomic::AtomicU64,
 }
 impl Control {
+    fn expires(&self) -> Instant {
+        self.started + Duration::from_secs(self.budget_secs.load(Ordering::Acquire))
+    }
     fn check(&self) -> Result<(), Failure> {
         if self.stopped.load(Ordering::Acquire) {
             return Err(Failure::Stopped);
         }
-        if self.started.elapsed() >= DEADLINE {
+        if Instant::now() >= self.expires() {
             return Err(Failure::Limit);
         }
         Ok(())
@@ -232,7 +265,9 @@ fn request(input: &mut impl Read) -> Result<Request, Failure> {
     Ok(value)
 }
 fn validate(operation: Operation) -> Result<(Vec<String>, BTreeMap<PathBuf, Vec<u8>>), Failure> {
-    let Operation::SelectedUnittest { modules, files } = operation;
+    let Operation::SelectedUnittest { modules, files } = operation else {
+        return Err(Failure::Input);
+    };
     if modules.is_empty() || modules.len() > 64 || files.len() > 2_000 {
         return Err(Failure::Input);
     }
@@ -249,6 +284,9 @@ fn validate(operation: Operation) -> Result<(Vec<String>, BTreeMap<PathBuf, Vec<
             return Err(Failure::Input);
         }
     }
+    Ok((modules, file_map(files)?))
+}
+fn file_map(files: BTreeMap<String, String>) -> Result<BTreeMap<PathBuf, Vec<u8>>, Failure> {
     let mut total = 0usize;
     let mut result = BTreeMap::new();
     for (name, text) in files {
@@ -263,9 +301,97 @@ fn validate(operation: Operation) -> Result<(Vec<String>, BTreeMap<PathBuf, Vec<
         // Snapshot repeats component, protected-name, alias and secret checks.
         result.insert(PathBuf::from(name), text.into_bytes());
     }
-    Ok((modules, result))
+    Ok(result)
 }
-fn send(reply: &Reply, started: Instant) -> Result<(), Failure> {
+
+enum Prepared {
+    Python {
+        snapshot: Snapshot,
+        runtime: super::macos_python::Runtime,
+        modules: Vec<String>,
+    },
+    Git(super::guard_git::Prepared),
+}
+impl Prepared {
+    fn new(operation: Operation, check: &dyn Fn() -> Result<(), Failure>) -> Result<Self, Failure> {
+        if let Operation::GitComparison {
+            before,
+            after,
+            operation,
+        } = operation
+        {
+            if !super::macos::qualified() {
+                return Err(Failure::Unavailable);
+            }
+            if !GIT_QUALIFIED && !cfg!(debug_assertions) {
+                return Err(Failure::CustodyUnavailable);
+            }
+            return super::guard_git::Prepared::new(
+                file_map(before)?,
+                file_map(after)?,
+                operation,
+                check,
+            )
+            .map(Self::Git);
+        }
+        let (modules, files) = validate(operation)?;
+        let runtime = super::macos_python::Runtime::qualified_checked(check)?;
+        let snapshot = Snapshot::read_only_checked(files, check)?;
+        Ok(Self::Python {
+            snapshot,
+            runtime,
+            modules,
+        })
+    }
+    fn snapshot(&self) -> &Snapshot {
+        match self {
+            Self::Python { snapshot, .. } => snapshot,
+            Self::Git(git) => &git.snapshot,
+        }
+    }
+    async fn run(&self, control: &Control, id: [u8; 16]) -> Result<Output, Failure> {
+        let cancelled = || async { control.check().is_err() };
+        match self {
+            Self::Python {
+                snapshot,
+                runtime,
+                modules,
+            } => {
+                super::macos_python::run_custodied(snapshot, runtime, modules, &cancelled, |pid| {
+                    if send(&Reply::Started { id, pid }, control).is_err() {
+                        control.stopped.store(true, Ordering::Release);
+                    }
+                })
+                .await
+            }
+            Self::Git(git) => {
+                git.run(&|| control.check(), &cancelled, |ordinal, pid, instance| {
+                    if send(
+                        &Reply::GitChildSpawned {
+                            id,
+                            ordinal,
+                            pid,
+                            instance,
+                        },
+                        control,
+                    )
+                    .is_err()
+                    {
+                        control.stopped.store(true, Ordering::Release);
+                    }
+                })
+                .await
+            }
+        }
+    }
+    fn close(self) -> Result<(), Failure> {
+        match self {
+            Self::Python { snapshot, .. } => snapshot.close(),
+            Self::Git(git) => git.snapshot.close(),
+        }
+    }
+}
+fn send(reply: &Reply, control: &Control) -> Result<(), Failure> {
     let bytes = serde_json::to_vec(reply).map_err(|_| Failure::Failed)?;
     if bytes.len() > RESPONSE_LIMIT {
         return Err(Failure::Limit);
@@ -278,7 +404,7 @@ fn send(reply: &Reply, started: Instant) -> Result<(), Failure> {
     let deadline = if matches!(reply, Reply::Completed { .. }) {
         write_deadline
     } else {
-        (started + DEADLINE).min(write_deadline)
+        control.expires().min(write_deadline)
     };
     let fd = libc::STDOUT_FILENO;
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
@@ -317,6 +443,7 @@ fn serve(started: Instant) -> Result<(), Failure> {
         go: AtomicBool::new(false),
         challenge: std::sync::Mutex::new(None),
         started,
+        budget_secs: std::sync::atomic::AtomicU64::new(DEADLINE.as_secs()),
     });
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let input_control = control.clone();
@@ -349,12 +476,23 @@ fn serve(started: Instant) -> Result<(), Failure> {
         .recv_timeout(Duration::from_secs(10))
         .map_err(|_| Failure::Limit)??;
     let id = request.id;
+    if matches!(&request.operation, Operation::GitComparison { .. }) {
+        control
+            .budget_secs
+            .store(GIT_DEADLINE.as_secs(), Ordering::Release);
+    }
     let outcome = (|| -> Result<(Output, bool), Failure> {
         control.check()?;
-        let (modules, files) = validate(request.operation)?;
-        let runtime = super::macos_python::Runtime::qualified_checked(&|| control.check())?;
-        control.check()?;
-        let snapshot = Snapshot::read_only_checked(files, &|| control.check())?;
+        let preparation_deadline = Instant::now() + Duration::from_secs(10);
+        let prepared = Prepared::new(request.operation, &|| {
+            control.check()?;
+            if Instant::now() >= preparation_deadline {
+                Err(Failure::Limit)
+            } else {
+                Ok(())
+            }
+        })?;
+        let snapshot = prepared.snapshot();
         let result = (|| -> Result<Output, Failure> {
             let meta = std::fs::symlink_metadata(&snapshot.root).map_err(|_| Failure::Storage)?;
             let mut challenge = [0u8; 16];
@@ -375,7 +513,7 @@ fn serve(started: Instant) -> Result<(), Failure> {
                     device: meta.dev(),
                     inode: meta.ino(),
                 },
-                started,
+                &control,
             )?;
             while !control.go.load(Ordering::Acquire) {
                 control.check()?;
@@ -386,20 +524,10 @@ fn serve(started: Instant) -> Result<(), Failure> {
                 .enable_all()
                 .build()
                 .map_err(|_| Failure::Launch)?;
-            executor.block_on(super::macos_python::run_custodied(
-                &snapshot,
-                &runtime,
-                &modules,
-                &|| async { control.check().is_err() },
-                |pid| {
-                    if send(&Reply::Started { id, pid }, started).is_err() {
-                        control.stopped.store(true, Ordering::Release);
-                    }
-                },
-            ))
+            executor.block_on(prepared.run(&control, id))
         })();
         // Custodied native execution never returns while its child is unsettled.
-        let closed = snapshot.close();
+        let closed = prepared.close();
         super::worker::closed(result, closed).map(|output| (output, true))
     })();
     let cleanup = !matches!(
@@ -419,7 +547,7 @@ fn serve(started: Instant) -> Result<(), Failure> {
             result,
             cleanup,
         },
-        started,
+        &control,
     )
 }
 
@@ -499,8 +627,40 @@ where
     if !installed() {
         return Err(Failure::PythonUnavailable);
     }
-    let id = zephium_core::work::WorkArtifactId::generate().bytes();
-    let files = files
+    transact(
+        OperationRef::SelectedUnittest {
+            modules,
+            files: borrowed_files(files)?,
+        },
+        cancelled,
+    )
+    .await
+}
+pub(super) async fn git<C, CF>(
+    before: &BTreeMap<PathBuf, Vec<u8>>,
+    after: &BTreeMap<PathBuf, Vec<u8>>,
+    operation: super::ReadOperation,
+    cancelled: &C,
+) -> Result<Output, Failure>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+{
+    if !git_installed() {
+        return Err(Failure::CustodyUnavailable);
+    }
+    transact(
+        OperationRef::GitComparison {
+            before: borrowed_files(before)?,
+            after: borrowed_files(after)?,
+            operation: operation.try_into()?,
+        },
+        cancelled,
+    )
+    .await
+}
+fn borrowed_files(files: &BTreeMap<PathBuf, Vec<u8>>) -> Result<BTreeMap<&str, &str>, Failure> {
+    files
         .iter()
         .map(|(path, bytes)| {
             Ok((
@@ -508,14 +668,22 @@ where
                 std::str::from_utf8(bytes).map_err(|_| Failure::Input)?,
             ))
         })
-        .collect::<Result<_, Failure>>()?;
+        .collect()
+}
+async fn transact<C, CF>(operation: OperationRef<'_>, cancelled: &C) -> Result<Output, Failure>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+{
+    let is_git = matches!(&operation, OperationRef::GitComparison { .. });
+    let id = zephium_core::work::WorkArtifactId::generate().bytes();
     let mut encoded = BoundedRequest(Vec::new());
     serde_json::to_writer(
         &mut encoded,
         &RequestRef {
             version: 1,
             id,
-            operation: OperationRef::SelectedUnittest { modules, files },
+            operation,
         },
     )
     .map_err(|_| Failure::Limit)?;
@@ -544,6 +712,7 @@ where
     let mut tick = tokio::time::interval(Duration::from_millis(25));
     let mut prepared = false;
     let mut started_child = false;
+    let mut git_ordinal = 0u8;
     let mut completion = None;
     let mut protocol = true;
     let mut diagnostic = [0; 1024];
@@ -570,9 +739,11 @@ where
                             if let Some(input)=owner.input.as_mut() { let mut go=vec![1];go.extend_from_slice(&challenge);if write_control(input,&go).await.is_err() { owner.input.take(); } }
                         } else { owner.input.take(); }
                     },
-                    Ok(Reply::Started { id: seen, pid }) if seen == id && prepared && !started_child && pid > 0 => { started_child = true; },
+                    Ok(Reply::Started { id: seen, pid }) if seen == id && prepared && !is_git && !started_child && pid > 0 => { started_child = true; },
+                    Ok(Reply::GitChildSpawned { id: seen, ordinal, pid, .. }) if seen == id && prepared && is_git && ordinal == git_ordinal && ordinal < 5 && pid > 0 => { started_child = true; git_ordinal += 1; },
                     Ok(Reply::Completed { id: seen, result, cleanup }) if seen == id => {
-                        completion = Some(if cleanup { result.map(|value| Output { text: value.text, success: value.success, exit: value.exit }).map_err(Failure::from) } else { Err(Failure::CleanupPending) });
+                        let phase_valid = result.is_err() || completion_phase(is_git, prepared, started_child, git_ordinal);
+                        completion = Some(if !phase_valid { Err(Failure::StopUnconfirmed) } else if cleanup { result.map(|value| Output { text: value.text, success: value.success, exit: value.exit }).map_err(|error| if is_git && matches!(error, Error::Unavailable) { Failure::Unavailable } else { error.into() }) } else { Err(Failure::CleanupPending) });
                         owner.input.take(); protocol = false;
                     },
                     _ => { owner.input.take(); protocol = false; },
@@ -602,6 +773,16 @@ where
             }
         }
     }
+}
+
+fn completion_phase(is_git: bool, prepared: bool, started_child: bool, git_ordinal: u8) -> bool {
+    prepared
+        && started_child
+        && if is_git {
+            git_ordinal == 5
+        } else {
+            git_ordinal == 0
+        }
 }
 
 #[cfg(test)]
@@ -670,9 +851,38 @@ mod tests {
             go: AtomicBool::new(false),
             challenge: std::sync::Mutex::new(None),
             started: Instant::now() - DEADLINE,
+            budget_secs: std::sync::atomic::AtomicU64::new(DEADLINE.as_secs()),
         };
         assert_eq!(control.check(), Err(Failure::Limit));
         control.stopped.store(true, Ordering::Release);
         assert_eq!(control.check(), Err(Failure::Stopped));
+    }
+    #[test]
+    fn git_protocol_is_closed_and_completion_requires_every_native_stage() {
+        let body = serde_json::json!({"version":1,"id":vec![0;16],"operation":{
+            "kind":"GitComparison","before":{"note.txt":"before"},"after":{"note.txt":"after"},"operation":"diff"}});
+        assert!(request(&mut framed(&serde_json::to_vec(&body).unwrap()).as_slice()).is_ok());
+        for bad in [
+            {
+                let mut value = body.clone();
+                value["operation"]["operation"] = serde_json::json!("shell");
+                value
+            },
+            {
+                let mut value = body.clone();
+                value["operation"]["source_root"] = serde_json::json!("/unavailable");
+                value
+            },
+        ] {
+            assert!(request(&mut framed(&serde_json::to_vec(&bad).unwrap()).as_slice()).is_err());
+        }
+        assert!(completion_phase(true, true, true, 5));
+        assert!(completion_phase(false, true, true, 0));
+        for ordinal in 0..5 {
+            assert!(!completion_phase(true, true, true, ordinal));
+        }
+        assert!(!completion_phase(true, false, true, 5));
+        assert!(!completion_phase(false, true, false, 0));
+        assert!(!completion_phase(false, true, true, 1));
     }
 }

@@ -5,7 +5,11 @@ use super::worker::{self, Control, Limits};
 #[cfg(test)]
 use super::worker_slots::Permit;
 use super::worker_slots::Slots;
-use super::{ApprovedChange, Failure, GitOperation, Output, ReadOperation, Snapshot};
+#[cfg(not(target_os = "macos"))]
+use super::GitOperation;
+#[cfg(any(test, not(target_os = "macos")))]
+use super::Snapshot;
+use super::{ApprovedChange, Failure, Output, ReadOperation};
 use crate::work_files::WorkFileGrant;
 use std::{
     future::Future,
@@ -57,6 +61,64 @@ where
     .await
 }
 
+#[cfg(target_os = "macos")]
+async fn owned(
+    grant: WorkFileGrant,
+    root: PathBuf,
+    changes: Vec<ApprovedChange>,
+    operation: ReadOperation,
+    control: &Control,
+) -> Result<Output, Failure> {
+    control.check()?;
+    if grant
+        .resolve(root.to_str().ok_or(Failure::Input)?, false)
+        .map_err(|_| Failure::Input)?
+        != root
+    {
+        return Err(Failure::Input);
+    }
+    let selected: Vec<_> = changes.iter().map(|change| change.path.clone()).collect();
+    // Only bytes cross to the guard. No copied directory exists in the host,
+    // so a host crash before handoff cannot orphan a prepared workspace.
+    let after = super::snapshot::collect_checked(&root, &selected, &|| control.check())?;
+    let mut before = after.clone();
+    let mut seen = std::collections::BTreeSet::new();
+    for change in &changes {
+        control.check()?;
+        if !seen.insert(&change.path) || after.get(&change.path) != Some(&change.after) {
+            return Err(Failure::Changed);
+        }
+        match &change.before {
+            Some(bytes) => {
+                before.insert(change.path.clone(), bytes.clone());
+            }
+            None => {
+                before.remove(&change.path);
+            }
+        }
+    }
+    super::snapshot::Snapshot::validate_files(&before, &|| control.check())?;
+    control.native();
+    let output = super::guard::git(&before, &after, operation, &|| async {
+        control.cancelled.load(Ordering::Acquire)
+    })
+    .await?;
+    control.filesystem();
+    for change in &changes {
+        control.check()?;
+        if crate::work_files::snapshot_bytes(&root.join(&change.path), 1024 * 1024)
+            .ok()
+            .as_ref()
+            != Some(&change.after)
+        {
+            return Err(Failure::Changed);
+        }
+    }
+    control.check()?;
+    Ok(output)
+}
+
+#[cfg(not(target_os = "macos"))]
 async fn owned(
     grant: WorkFileGrant,
     root: PathBuf,
@@ -74,6 +136,7 @@ async fn owned(
     let closed = snapshot.close();
     worker::closed(result, closed)
 }
+#[cfg(not(target_os = "macos"))]
 async fn inspect(
     snapshot: &Snapshot,
     root: &Path,

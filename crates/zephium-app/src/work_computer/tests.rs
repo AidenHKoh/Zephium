@@ -453,7 +453,6 @@ fn reviews_only_actual_approved_before_after_edits() {
                 .await
                 .is_error
         );
-        assert!(!tools.call(&host, "write", &json!({"path":".gitattributes", "text":"* -diff -whitespace filter=untrusted working-tree-encoding=UTF-16\n"})).await.is_error);
         let before = std::fs::read(root.join("src/lib.rs")).unwrap();
         let patch = tools
             .call(&host, "review_changes", &json!({"operation":"diff"}))
@@ -476,7 +475,7 @@ fn reviews_only_actual_approved_before_after_edits() {
         assert_eq!(std::fs::read(root.join("src/lib.rs")).unwrap(), before);
         assert_eq!(
             *host.asked.lock().unwrap(),
-            3,
+            2,
             "read-only review adds no mutation approval"
         );
         std::fs::write(root.join("src/lib.rs"), "later external edit\n").unwrap();
@@ -506,6 +505,14 @@ fn reviews_only_actual_approved_before_after_edits() {
             std::fs::read_to_string(root.join("src/lib.rs")).unwrap(),
             "concurrent external edit\n"
         );
+        *host.on_cancel_check.lock().unwrap() = None;
+        std::fs::write(root.join("src/lib.rs"), &before).unwrap();
+        assert!(!tools.call(&host, "write", &json!({"path":".gitattributes", "text":"* -diff -whitespace filter=untrusted working-tree-encoding=UTF-16\n"})).await.is_error);
+        let attributes = tools
+            .call(&host, "review_changes", &json!({"operation":"diff"}))
+            .await;
+        assert!(attributes.is_error && attributes.content.contains("copied safely"));
+        assert_eq!(*host.asked.lock().unwrap(), 3);
     });
 }
 

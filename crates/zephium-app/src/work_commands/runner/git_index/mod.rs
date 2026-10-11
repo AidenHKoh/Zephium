@@ -4,7 +4,9 @@ mod index;
 mod pack;
 #[cfg(test)]
 mod tests;
-use super::{Failure, GitOperation, Output, ReadOperation, Snapshot};
+use super::{Failure, Output, ReadOperation};
+#[cfg(not(target_os = "macos"))]
+use super::{GitOperation, Snapshot};
 use crate::work_files::{
     git_metadata::{GitMetadata, GitMetadataBytes, GitMetadataPath},
     WorkFileError, WorkFileGrant,
@@ -430,64 +432,89 @@ where
         &cancelled,
         super::worker::Limits::standard(Duration::from_secs(100)),
         move |control| async move {
-            let mut captured = capture(&grant, &root, &paths, control.cancelled.clone())?;
+            let captured = capture(&grant, &root, &paths, control.cancelled.clone())?;
             control.check().map_err(Error::from)?;
-            let snapshot =
-                Snapshot::from_files_checked(std::mem::take(&mut captured.before), &|| {
-                    control.check()
+            #[cfg(target_os = "macos")]
+            {
+                let after = captured
+                    .after
+                    .iter()
+                    .filter_map(|(path, bytes)| {
+                        bytes.as_ref().map(|bytes| (path.clone(), bytes.clone()))
+                    })
+                    .collect();
+                control.native();
+                let output = super::guard::git(&captured.before, &after, operation, &|| async {
+                    control.cancelled.load(Ordering::Acquire)
                 })
+                .await
                 .map_err(Error::from)?;
-            let result = async {
-                let cancelled = || async { control.cancelled.load(Ordering::Acquire) };
-                for operation in [
-                    GitOperation::Initialize,
-                    GitOperation::CaptureIndex,
-                    GitOperation::CommitBaseline,
-                ] {
+                control.filesystem();
+                captured.unchanged(&control.cancelled)?;
+                control.check().map_err(Error::from)?;
+                Ok(output)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let mut captured = captured;
+                let snapshot =
+                    Snapshot::from_files_checked(std::mem::take(&mut captured.before), &|| {
+                        control.check()
+                    })
+                    .map_err(Error::from)?;
+                let result = async {
+                    let cancelled = || async { control.cancelled.load(Ordering::Acquire) };
+                    for operation in [
+                        GitOperation::Initialize,
+                        GitOperation::CaptureIndex,
+                        GitOperation::CommitBaseline,
+                    ] {
+                        control.check().map_err(Error::from)?;
+                        control.native();
+                        if !super::execute(&snapshot, operation, &cancelled)
+                            .await
+                            .map_err(Error::from)?
+                            .success
+                        {
+                            return Err(Error::Invalid);
+                        }
+                    }
+                    control.filesystem();
+                    for (path, bytes) in &captured.after {
+                        control.check().map_err(Error::from)?;
+                        match bytes {
+                            Some(bytes) => snapshot.write(path, bytes).map_err(Error::from)?,
+                            None => {
+                                let target = snapshot.work.join(path);
+                                if target.exists() {
+                                    std::fs::remove_file(target).map_err(|_| Error::Invalid)?;
+                                }
+                            }
+                        }
+                    }
                     control.check().map_err(Error::from)?;
                     control.native();
-                    if !super::execute(&snapshot, operation, &cancelled)
+                    if !super::execute(&snapshot, GitOperation::IntentToAdd, &cancelled)
                         .await
                         .map_err(Error::from)?
                         .success
                     {
                         return Err(Error::Invalid);
                     }
-                }
-                control.filesystem();
-                for (path, bytes) in &captured.after {
                     control.check().map_err(Error::from)?;
-                    match bytes {
-                        Some(bytes) => snapshot.write(path, bytes).map_err(Error::from)?,
-                        None => {
-                            let target = snapshot.work.join(path);
-                            if target.exists() {
-                                std::fs::remove_file(target).map_err(|_| Error::Invalid)?;
-                            }
-                        }
-                    }
+                    let output =
+                        super::execute(&snapshot, GitOperation::Read(operation), &cancelled)
+                            .await
+                            .map_err(Error::from)?;
+                    control.filesystem();
+                    captured.unchanged(&control.cancelled)?;
+                    control.check().map_err(Error::from)?;
+                    Ok(output)
                 }
-                control.check().map_err(Error::from)?;
-                control.native();
-                if !super::execute(&snapshot, GitOperation::IntentToAdd, &cancelled)
-                    .await
-                    .map_err(Error::from)?
-                    .success
-                {
-                    return Err(Error::Invalid);
-                }
-                control.check().map_err(Error::from)?;
-                let output = super::execute(&snapshot, GitOperation::Read(operation), &cancelled)
-                    .await
-                    .map_err(Error::from)?;
+                .await;
                 control.filesystem();
-                captured.unchanged(&control.cancelled)?;
-                control.check().map_err(Error::from)?;
-                Ok(output)
+                super::worker::closed(result, snapshot.close())
             }
-            .await;
-            control.filesystem();
-            super::worker::closed(result, snapshot.close())
         },
     )
     .await

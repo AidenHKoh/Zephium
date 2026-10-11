@@ -70,6 +70,7 @@ fn git_binary() -> Result<PathBuf, Failure> {
     Err(Failure::ToolUnavailable)
 }
 
+#[cfg(test)]
 pub(super) async fn git<C, CF>(
     snapshot: &Snapshot,
     operation: GitOperation,
@@ -143,6 +144,30 @@ fn process(
     super::macos_spawn::spawn(&snapshot.work, &arguments, &environment)
 }
 
+pub(super) async fn git_custodied<C, CF, S>(
+    snapshot: &Snapshot,
+    operation: GitOperation,
+    cancelled: &C,
+    spawned: S,
+) -> Result<Output, Failure>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+    S: FnOnce(u32, Option<u64>),
+{
+    let program = git_binary()?;
+    let arguments = operation.arguments(snapshot);
+    // The monitor's15-second clock starts before this spawn/status callback.
+    // It retains exact child ownership through reap, even after parent EOF.
+    monitor_mode(cancelled, false, true, None::<fn(u32)>, || {
+        let child = process(snapshot, &program, &arguments)?;
+        spawned(child.id(), child.instance());
+        Ok(child)
+    })
+    .await
+}
+
+#[cfg(test)]
 async fn run<C, CF>(
     snapshot: &Snapshot,
     program: &Path,

@@ -1,6 +1,8 @@
 //! The child never receives a source grant. It sees only bounded checked copies.
 use super::Failure;
-use crate::work_files::{protected_path, snapshot_bytes, WorkFileGrant};
+#[cfg(not(target_os = "macos"))]
+use crate::work_files::WorkFileGrant;
+use crate::work_files::{protected_path, snapshot_bytes};
 use std::{
     collections::BTreeMap,
     fs,
@@ -25,6 +27,7 @@ pub(super) struct Snapshot {
     pub files: BTreeMap<PathBuf, Vec<u8>>,
 }
 impl Snapshot {
+    #[cfg(not(target_os = "macos"))]
     pub fn capture_checked(
         grant: &WorkFileGrant,
         requested: &Path,
@@ -69,17 +72,16 @@ impl Snapshot {
     fn prepare(files: BTreeMap<PathBuf, Vec<u8>>, git_metadata: bool) -> Result<Self, Failure> {
         Self::prepare_checked(files, git_metadata, &|| Ok(()))
     }
-    fn prepare_checked(
-        files: BTreeMap<PathBuf, Vec<u8>>,
-        git_metadata: bool,
+    pub(super) fn validate_files(
+        files: &BTreeMap<PathBuf, Vec<u8>>,
         check: &dyn Fn() -> Result<(), Failure>,
-    ) -> Result<Self, Failure> {
+    ) -> Result<(), Failure> {
         check()?;
         if files.len() > MAX_FILES {
             return Err(Failure::Limit);
         }
         let mut total = 0usize;
-        for (path, bytes) in &files {
+        for (path, bytes) in files {
             check()?;
             if path.as_os_str().is_empty()
                 || path.is_absolute()
@@ -99,6 +101,36 @@ impl Snapshot {
         for bytes in files.values() {
             check()?;
             reject_recognized_secret(bytes)?;
+        }
+        Ok(())
+    }
+    pub(super) fn validate_git_files(
+        files: &BTreeMap<PathBuf, Vec<u8>>,
+        check: &dyn Fn() -> Result<(), Failure>,
+    ) -> Result<(), Failure> {
+        Self::validate_files(files, check)?;
+        if files.keys().any(|path| {
+            path.components().any(|part| {
+                part.as_os_str()
+                    .to_str()
+                    .is_none_or(|name| name.to_uppercase().to_lowercase() == ".gitattributes")
+            })
+        }) {
+            // Project attributes can change diff/encoding semantics. Ordinary
+            // read-only copies remain available; Git copies never interpret them.
+            return Err(Failure::Input);
+        }
+        Ok(())
+    }
+    fn prepare_checked(
+        files: BTreeMap<PathBuf, Vec<u8>>,
+        git_metadata: bool,
+        check: &dyn Fn() -> Result<(), Failure>,
+    ) -> Result<Self, Failure> {
+        if git_metadata {
+            Self::validate_git_files(&files, check)?;
+        } else {
+            Self::validate_files(&files, check)?;
         }
         let mut builder = tempfile::Builder::new();
         builder.prefix("zephium-work-copy-");
@@ -196,7 +228,15 @@ impl Snapshot {
         .unwrap()
     }
 
+    #[cfg(any(test, not(target_os = "macos")))]
     pub fn write(&self, relative: &Path, bytes: &[u8]) -> Result<(), Failure> {
+        self.write_mode(relative, bytes, false)
+    }
+    #[cfg(target_os = "macos")]
+    pub(super) fn write_new(&self, relative: &Path, bytes: &[u8]) -> Result<(), Failure> {
+        self.write_mode(relative, bytes, true)
+    }
+    fn write_mode(&self, relative: &Path, bytes: &[u8], exclusive: bool) -> Result<(), Failure> {
         if relative.is_absolute()
             || protected_path(relative)
             || !relative
@@ -219,7 +259,8 @@ impl Snapshot {
             // if an earlier copied entry carried broader mode bits.
             let mut file = fs::OpenOptions::new()
                 .write(true)
-                .create(true)
+                .create(!exclusive)
+                .create_new(exclusive)
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
                 .open(path)
@@ -234,7 +275,19 @@ impl Snapshot {
             file.write_all(bytes).map_err(|_| Failure::Storage)
         }
         #[cfg(not(unix))]
-        fs::write(path, bytes).map_err(|_| Failure::Storage)
+        {
+            if exclusive {
+                use std::io::Write;
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .and_then(|mut file| file.write_all(bytes))
+                    .map_err(|_| Failure::Storage)
+            } else {
+                fs::write(path, bytes).map_err(|_| Failure::Storage)
+            }
+        }
     }
 }
 
@@ -242,7 +295,7 @@ impl Snapshot {
 fn collect(root: &Path, selected: &[PathBuf]) -> Result<BTreeMap<PathBuf, Vec<u8>>, Failure> {
     collect_checked(root, selected, &|| Ok(()))
 }
-fn collect_checked(
+pub(super) fn collect_checked(
     root: &Path,
     selected: &[PathBuf],
     check: &dyn Fn() -> Result<(), Failure>,
@@ -282,6 +335,22 @@ fn collect_checked(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn git_copies_refuse_attributes_without_restricting_plain_read_only_copies() {
+        let files: BTreeMap<_, _> = [(PathBuf::from(".gitattributes"), b"* -diff\n".to_vec())]
+            .into_iter()
+            .collect();
+        assert!(matches!(
+            Snapshot::from_files(files.clone()),
+            Err(Failure::Input)
+        ));
+        let plain = Snapshot::read_only(files).unwrap();
+        assert_eq!(
+            fs::read(plain.work.join(".gitattributes")).unwrap(),
+            b"* -diff\n"
+        );
+        plain.close().unwrap();
+    }
     #[cfg(unix)]
     fn assert_private_permissions() {
         use std::os::unix::fs::PermissionsExt;

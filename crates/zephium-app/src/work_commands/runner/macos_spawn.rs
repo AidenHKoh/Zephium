@@ -73,6 +73,34 @@ impl Child {
     pub fn id(&self) -> u32 {
         self.pid.expect("owned spawned process") as u32
     }
+    /// Descriptive native identity while this owner still holds the unreaped
+    /// child. Signaling never depends on a later PID lookup or this metadata.
+    pub(super) fn instance(&self) -> Option<u64> {
+        #[repr(C)]
+        #[derive(Default)]
+        struct Info {
+            _uuid: [u8; 16],
+            unique: u64,
+            _parent: u64,
+            _version: i32,
+            _parent_version: i32,
+            _reserved: [u64; 2],
+        }
+        const _: () = assert!(std::mem::size_of::<Info>() == 56);
+        let mut info = Info::default();
+        // PROC_PIDUNIQIDENTIFIERINFO from Apple's proc_info_private.h. The
+        // measured OS gate controls use; absence remains explicitly unknown.
+        let size = unsafe {
+            libc::proc_pidinfo(
+                self.pid?,
+                17,
+                0,
+                (&mut info as *mut Info).cast(),
+                std::mem::size_of::<Info>() as i32,
+            )
+        };
+        (size == std::mem::size_of::<Info>() as i32 && info.unique != 0).then_some(info.unique)
+    }
     pub fn poll(&mut self) -> io::Result<Option<ExitStatus>> {
         if let Some(status) = self.status {
             return Ok(Some(status));
