@@ -132,7 +132,9 @@ fn valid_flags(value: u32) -> bool {
 fn valid_ancestor(value: u32) -> bool {
     let images = (value >> 3) & 63;
     let geometry = (value >> 13) & 63;
-    value < (1 << 21)
+    value < (1 << 30)
+        && ((value >> 21) & 31) <= 26
+        && (((value >> 26) & 15) <= 8 || ((value >> 26) & 15) == 15)
         && (images <= 48 || images == 63)
         && (geometry <= 48 || geometry == 63)
         && ((value >> 19) & 3) <= 2
@@ -230,6 +232,9 @@ fn report(sources: &[SemanticMediaNameProbe], incomplete: bool) {
                         (v >> 11) & 3,
                         (v >> 13) & 63,
                         (v >> 19) & 3,
+                        (v >> 21) & 31,
+                        (v >> 26) & 15,
+                        label_reason((v >> 21) & 31),
                     )
                 })
                 .collect();
@@ -239,6 +244,24 @@ fn report(sources: &[SemanticMediaNameProbe], incomplete: bool) {
         }
     }
 }
+fn label_reason(value: u32) -> &'static str {
+    match value {
+        0..=15 => "Relation",
+        16 => "NoUniqueCapturedLink",
+        17 => "AttributeBound",
+        18 => "ReferenceCountBound",
+        19 => "MissingTarget",
+        20 => "RepeatedReference",
+        21 => "AncestryBound",
+        22 => "TotalWorkBound",
+        23 => "LabelNodeBound",
+        24 => "Exception",
+        25 => "DuplicateTarget",
+        26 => "UnknownTreeScope",
+        _ => "Invalid",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +308,40 @@ mod tests {
         assert!(cache.lookup(&64, 1, 1, 1).is_some());
     }
     #[test]
+    fn maximum_name_envelope_and_default_work_wire_fit_unchanged_channel_bound() {
+        use zephium_agentic::{
+            SemanticRuntimeBudget, MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES,
+            SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX,
+        };
+        let flags = 8 | (15 << 4) | (10 << 8) | (15 << 12) | (13 << 16);
+        let ancestor =
+            7 | (48 << 3) | (3 << 9) | (2 << 11) | (63 << 13) | (2 << 19) | (26 << 21) | (15 << 26);
+        let rows: Vec<_> = (0..32u64)
+            .map(|i| serde_json::json!([9_007_199_254_740_991u64 - i, flags, vec![ancestor; 8]]))
+            .collect();
+        let header = format!(
+            "MN1:{}\nMD1:4,1536,16385,48\n",
+            serde_json::to_string(&rows).unwrap()
+        );
+        assert!(header.len() < 4096);
+        let mut original = b"{}".to_vec();
+        original.resize(
+            SemanticRuntimeBudget::WHOLE_PAGE.max_wire_bytes() as usize,
+            b' ',
+        );
+        let mut wire = header.into_bytes();
+        wire.extend_from_slice(&original);
+        assert!(
+            wire.len() + SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX.len()
+                < MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES
+        );
+        let (rows, md_body) = split(&wire).unwrap();
+        let (_, body) = super::super::split(md_body).unwrap();
+        assert_eq!(rows.0.len(), 32);
+        assert_eq!(body, original);
+    }
+
+    #[test]
     fn envelope_is_numeric_bounded_and_original_body_is_borrowed_exactly() {
         let bytes = b"MN1:[[4,0,[0]]]\nMD1:0,1,2,3\n{\"v\":1}";
         let (rows, body) = split(bytes).unwrap();
@@ -297,7 +354,9 @@ mod tests {
         for bad in [
             "MN1:[[0,0,[]]]\nMD1:",
             "MN1:[[1,1048576,[]]]\nMD1:",
-            "MN1:[[1,0,[2097152]]]\nMD1:",
+            "MN1:[[1,0,[1073741824]]]\nMD1:",
+            "MN1:[[1,0,[65011712]]]\nMD1:",
+            "MN1:[[1,0,[603979776]]]\nMD1:",
             "MN1:[[1,0,[]],[1,0,[]]]\nMD1:",
             "MN1:[[1,\"secret\",[]]]\nMD1:",
         ] {
@@ -408,19 +467,64 @@ pub(super) fn instrument(source: &str) -> Option<String> {
         (
             r###"    md[2]=Math.min(work,16385);md[3]=rows.length;remember(invocation,generation,records,rows);"###,
             r###"    // Independent diagnostic work is bounded and never debits or resets producer work.
-    const lc=new WeakMap();let lw=0,lcComplete=true;
+    const lc=new WeakMap(),lr=new WeakMap();let lw=0,lcComplete=true;
     linkIndex:for(const r of records)if(r.wire.r==="link"){
       let n=r.element,d=0;for(;d<64 && n && nodeType(n)===1;d++,n=read(nodeParentGetter,n)){
-        if(++lw>2048){lcComplete=false;break linkIndex;}lc.set(n,Math.min(2,(lc.get(n)||0)+1));
+        if(++lw>2048){lcComplete=false;break linkIndex;}lc.set(n,Math.min(2,(lc.get(n)||0)+1));if(lc.get(n)===1)lr.set(n,r);else lr.delete(n);
       }
       if(d===64 && n){lcComplete=false;break linkIndex;}
     }
+    const labels=new WeakMap(),targetCounts=new WeakMap();let labelWork=0;
+    const labelRelation=(r,n)=>{try{
+      const link=lcComplete?lr.get(n):null;if(!link?.wire.u)return [16,15];
+      let memo=labels.get(r.element);if(!memo)labels.set(r.element,memo=new WeakMap());
+      if(memo.has(link.element))return memo.get(link.element);
+      const value=link.element.getAttribute("aria-labelledby")||"";
+      if(value.length>256)return [17,15];const ids=value.trim()?value.trim().split(/\s+/):[];
+      if(ids.length>8)return [18,15];if(new Set(ids).size!==ids.length)return [20,ids.length];
+      const scope=link.element.getRootNode();
+      if(scope!==document && !(scope.nodeType===11 && scope.host?.ownerDocument===document) || typeof scope.getElementById!=="function")return [26,ids.length];
+      let mask=0,simple=true;
+      const up=(node,wanted)=>{for(let i=0;i<8 && node;i++,node=read(nodeParentGetter,node)){if(++labelWork>4096)return -2;if(node===wanted)return 1;}return node?-1:0;};
+      for(const id of ids){
+        if(++labelWork>4096){mask=22;break;}const target=scope.getElementById(id);if(!target){mask=19;break;}
+        let relation=target===r.element?1:0;
+        if(!relation){
+          const ancestor=up(r.element,target);if(ancestor===-2){mask=22;break;}
+          if(ancestor===1)relation=2;
+          else {const descendant=up(target,r.element);if(descendant===-2){mask=22;break;}
+            if(descendant===1)relation=4;else if(ancestor===-1 || descendant===-1){mask=21;break;}}
+        }
+        if(!relation)continue;
+        // Count duplicate DOM targets only under the same remaining diagnostic
+        // work bound. Never infer uniqueness from a truncated observation.
+        let unique=targetCounts.get(target);
+        if(unique===undefined){
+          const walker=document.createTreeWalker(scope,1);let node,count=0;unique=0;
+          while((node=walker.nextNode())){
+            if(++labelWork>4096){unique=22;break;}
+            if(node.getAttribute("id")===id && ++count>1){unique=25;break;}
+          }
+          if(!unique && count!==1)unique=19;targetCounts.set(target,unique);
+        }
+        if(unique){mask=unique;break;}mask|=relation;
+        const stack=[target];let visits=0;
+        while(stack.length){
+          const node=stack.pop();if(++labelWork>4096){mask=22;break;}if(++visits>64){mask=23;break;}
+          if(nodeType(node)===3)continue;if(nodeType(node)!==1){simple=false;break;}
+          if(node.shadowRoot || node.getAttribute("contenteditable")!==null || node!==target && !["span","b","strong","em","i","small","s","u","abbr","mark","wbr"].includes(tagName(node))){simple=false;break;}
+          for(const child of node.childNodes){if(stack.length>=64){mask=23;break;}stack.push(child);}if(mask>=16)break;
+        }
+        if(mask>=16)break;
+      }
+      if(mask && mask<16 && simple)mask|=8;const result=[mask,ids.length];memo.set(link.element,result);return result;
+    }catch(_){return [24,15];}};
     for(const r of records){const d=pd.get(r.wire.k);if(!d)continue;const a=[];let n=r.element;
       for(let depth=0;depth<8 && n && nodeType(n)===1;depth++,n=read(nodeParentGetter,n)){
         const tag=tagName(n),role=n.getAttribute("role");
         const kind=["html","body","main","nav","header","footer","aside"].includes(tag)?1:tag==="article"?2:tag==="li"||role==="listitem"?3:links.has(n)?4:["div","section","figure"].includes(tag)?5:tag.includes("-")?6:["iframe","frame","object","embed"].includes(tag)?7:0;
         const owned=Math.min(48,(imageOwners.get(n)||[]).length),geo=pg.get(r.wire.k)?.get(n)??63;
-        a.push(kind|(owned<<3)|((lcComplete?(lc.get(n)||0):3)<<9)|((counts.get(n)||0)<<11)|(geo<<13)|((pb.has(n)?pb.get(n)?2:1:0)<<19));
+        const relation=labelRelation(r,n);a.push(kind|(owned<<3)|((lcComplete?(lc.get(n)||0):3)<<9)|((counts.get(n)||0)<<11)|(geo<<13)|((pb.has(n)?pb.get(n)?2:1:0)<<19)|(relation[0]<<21)|(relation[1]<<26));
       }
       if(work>16384){if(d[0]===6)d[0]=7;if(d[2]===9)d[2]=10;}
       mn.push([r.wire.k,d[0]|d[1]<<4|d[2]<<8|d[3]<<12|d[4]<<16,a]);

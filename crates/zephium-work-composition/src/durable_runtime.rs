@@ -859,6 +859,12 @@ impl NativeWorkComposition {
             original_spec.document_policy,
             intervention_origin.is_some(),
         );
+        let public_asset_facts = public_asset_task_facts(
+            resume_plan.as_ref().map(|plan| &plan.request),
+            original_spec.isolated_public,
+            original_spec.document_policy,
+            intervention_origin.is_some(),
+        );
         let original_deadline = original_spec.deadline;
         let construction_attempt = invocation.construction_attempt;
         let mut ready_deadline = original_deadline
@@ -1737,6 +1743,17 @@ impl NativeWorkComposition {
                             .iter()
                             .filter(|plan| plan.local_crop_permitted(Instant::now()))
                             .count();
+                        zephium_app::work_trace::record_media(public_asset_facts);
+                        zephium_app::work_trace::record_media(
+                            zephium_app::work_trace::RecordMediaTrace::PublicAssetResolution {
+                                original_public: public_asset_task,
+                                sign_in_resumed: measure.resolved_handoff.is_some_and(|kind| {
+                                    kind.includes(
+                                        zephium_core::work::runtime::WorkPageHandoffKindV1::SignIn,
+                                    )
+                                }),
+                            },
+                        );
                         let fetch_mode =
                             public_asset_fetch_mode(public_asset_task, measure.resolved_handoff);
                         let native_started = !media_plans.is_empty()
@@ -4281,6 +4298,34 @@ mod human_budget_tests {
 // `private_run` selects an empty run-local store; storage isolation proves
 // neither public task authority nor account authority.
 // The original public document/read/session and identity gates still all apply.
+// Diagnostic projection only. The authorization predicate below is unchanged.
+fn public_asset_task_facts(
+    request: Option<&WorkAgentBrowseRequest>,
+    isolated_public: bool,
+    policy: WorkBrowserDocumentPolicy,
+    identified_account: bool,
+) -> zephium_app::work_trace::RecordMediaTrace {
+    zephium_app::work_trace::RecordMediaTrace::PublicAssetAuthority {
+        isolated_public,
+        public_policy: policy.is_public(),
+        identified_account,
+        request_present: request.is_some(),
+        private_session: request.is_some_and(|request| {
+            matches!(
+                request.session,
+                zephium_app::work_sites::SiteSession::Private
+            )
+        }),
+        read: request.is_some_and(|request| matches!(request.step, WorkStepKindV1::Read { .. })),
+        has_goal: request.is_some_and(|request| {
+            matches!(request.step, WorkStepKindV1::Read { goal: Some(_), .. })
+        }),
+        entry: request.is_some_and(|request| request.entry),
+        view: request.is_some_and(|request| request.view),
+        allow_edits: request.is_some_and(|request| request.allow_edits),
+        hold_typing: request.is_some_and(|request| request.hold_typing),
+    }
+}
 fn public_asset_task_authorized(
     request: Option<&WorkAgentBrowseRequest>,
     isolated_public: bool,
@@ -4423,6 +4468,71 @@ mod public_asset_retry_tests {
                 assert!(!allowed(&r), "changed={changed}");
             }
         }
+    }
+    #[test]
+    fn retry_diagnostic_carries_only_closed_original_facts() {
+        use zephium_app::work_trace::RecordMediaTrace as T;
+        let mut original = request();
+        let trace = |request: Option<&WorkAgentBrowseRequest>| {
+            public_asset_task_facts(
+                request,
+                true,
+                WorkBrowserDocumentPolicy::PublicQueryFinalization,
+                false,
+            )
+        };
+        let expected = T::PublicAssetAuthority {
+            isolated_public: true,
+            public_policy: true,
+            identified_account: false,
+            request_present: true,
+            private_session: true,
+            read: true,
+            has_goal: false,
+            entry: false,
+            view: false,
+            allow_edits: false,
+            hold_typing: false,
+        };
+        for private_storage in [false, true] {
+            original.private_run = private_storage;
+            assert_eq!(trace(Some(&original)), expected);
+        }
+        original.session = zephium_app::work_sites::SiteSession::Yours {
+            site: "SECRET_HOST".into(),
+            account: "SECRET_ACCOUNT".into(),
+        };
+        original.step = WorkStepKindV1::Read {
+            url: "https://SECRET_URL".into(),
+            collection: None,
+            goal: Some("SECRET_GOAL".into()),
+        };
+        let facts = trace(Some(&original));
+        assert!(matches!(
+            facts,
+            T::PublicAssetAuthority {
+                private_session: false,
+                has_goal: true,
+                ..
+            }
+        ));
+        assert!(!format!("{facts:?}").contains("SECRET"));
+        assert!(matches!(
+            trace(None),
+            T::PublicAssetAuthority {
+                request_present: false,
+                private_session: false,
+                read: false,
+                has_goal: false,
+                ..
+            }
+        ));
+        assert!(!public_asset_task_authorized(
+            Some(&original),
+            true,
+            WorkBrowserDocumentPolicy::PublicQueryFinalization,
+            false
+        ));
     }
     #[test]
     fn sign_in_resume_cannot_keep_a_public_asset_retry_grant() {

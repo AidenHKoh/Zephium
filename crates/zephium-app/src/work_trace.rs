@@ -37,6 +37,25 @@ pub enum RecordMediaTrace {
         same_capture_pairs: usize,
         related_pairs: usize,
     },
+    /// Original immutable authority facts, never origin/account or task text.
+    PublicAssetAuthority {
+        isolated_public: bool,
+        public_policy: bool,
+        identified_account: bool,
+        request_present: bool,
+        private_session: bool,
+        read: bool,
+        has_goal: bool,
+        entry: bool,
+        view: bool,
+        allow_edits: bool,
+        hold_typing: bool,
+    },
+    /// Later sign-in clearance can only remove the original public retry mode.
+    PublicAssetResolution {
+        original_public: bool,
+        sign_in_resumed: bool,
+    },
     /// Native source association and retained-owner admission.
     Admitted {
         plans: usize,

@@ -682,6 +682,11 @@ impl SemanticRuntimeChannelState {
     }
 
     fn on_message(&mut self, body: &str, reply: ReplyBlock) -> ChannelActions {
+        // The native NSString gate rejects before allocating this UTF-8 copy.
+        // Keep the same bound here, before any probe-envelope normalization.
+        if body.len() > MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES {
+            return self.fail_transport(Some(reply));
+        }
         #[cfg(feature = "native-agentic-semantic-probe")]
         if body == program_probe::PREPARE_MESSAGE && program_probe::preparation_selected() {
             return self.on_fill_preparation(reply);
@@ -2572,6 +2577,38 @@ mod tests {
             ReplyValue::Success(value) => value,
             ReplyValue::Error => panic!("unexpected reply error"),
         }
+    }
+
+    #[test]
+    fn oversized_diagnostic_result_refuses_pending_owner_before_decode_once() {
+        let mut state = SemanticRuntimeChannelState {
+            phase: DocumentPhase::Ready,
+            awaiting_result: true,
+            pending: Some(PendingInvocation::Observation {
+                invocation: invocation(1, SemanticSnapshotGeneration::INITIAL),
+                completion: Box::new(|_| {}),
+            }),
+            ..SemanticRuntimeChannelState::default()
+        };
+        let mut raw = format!(
+            "{}MN1:[]\nMD1:0,0,0,0\n{{}}",
+            SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX
+        );
+        raw.extend(std::iter::repeat_n(
+            ' ',
+            zephium_agentic::MAX_SEMANTIC_WIRE_BYTES - 2,
+        ));
+        assert!(raw.len() > MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES);
+        let actions = state.on_message(&raw, reply());
+        assert!(matches!(
+            actions.completion.unwrap().observation_outcome(),
+            Err(AgentSemanticRuntimeFailure::Transport)
+        ));
+        assert_eq!(state.phase, DocumentPhase::Failed);
+        assert_eq!(state.completed_invocations, 0);
+        assert!(!state.awaiting_result);
+        assert!(state.pending.is_none());
+        assert!(state.on_message(&raw, reply()).completion.is_none());
     }
 
     #[test]
