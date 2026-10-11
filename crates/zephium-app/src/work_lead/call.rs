@@ -92,8 +92,25 @@ pub(crate) async fn call(
     run: &LeadRun,
     model: &LeadModel,
     request: WorkModelRequest,
+    role: WorkModelRole,
+    completed_tool: Option<&(dyn Fn(WorkModelToolCall) + Send + Sync)>,
 ) -> Result<(WorkModelOutcome, WorkUsage), CallFailure> {
+    let started = std::time::Instant::now();
+    let first_event = std::sync::atomic::AtomicU64::new(0);
+    let completed = std::sync::atomic::AtomicBool::new(false);
     let events = |event: WorkModelEvent| {
+        let _ = first_event.compare_exchange(
+            0,
+            (started.elapsed().as_millis() as u64).max(1),
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        if let WorkModelEvent::ToolCall(tool) = &event {
+            completed.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(completed_tool) = completed_tool {
+                completed_tool(tool.clone());
+            }
+        }
         if let WorkModelEvent::Search { .. } = event {
             run.activity(WorkActivityV1::Searching);
         }
@@ -128,6 +145,15 @@ pub(crate) async fn call(
         };
         let error = match result {
             Ok(Ok(outcome)) => {
+                let first = first_event.load(std::sync::atomic::Ordering::Relaxed);
+                run.report(super::WorkLeadDiagnostic::ModelSettled {
+                    role,
+                    stop: outcome.stop,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                    first_event_ms: (first != 0).then_some(first),
+                    output_tokens: outcome.usage.output_tokens,
+                    reasoning_tokens: outcome.usage.reasoning_tokens,
+                });
                 let charged = usage(&model.entry, outcome.usage);
                 run.charge(charged);
                 return Ok((outcome, charged));
@@ -142,6 +168,11 @@ pub(crate) async fn call(
             }
         };
         run.report(super::WorkLeadDiagnostic::ModelRefused { error });
+        if completed.load(std::sync::atomic::Ordering::Relaxed)
+            && error != WorkModelError::Cancelled
+        {
+            return Err(CallFailure::Lost);
+        }
         let wait = match error {
             WorkModelError::RateLimited { retry_after_ms } => Some(Duration::from_millis(
                 retry_after_ms.unwrap_or(4_000).clamp(1_000, 30_000),

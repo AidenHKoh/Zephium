@@ -63,6 +63,19 @@ pub enum WorkLeadDiagnostic {
         context_chars: u32,
         conversation_chars: u32,
     },
+    /// Logical call duration includes retries; the first text/tool/search
+    /// event is not network time to first byte.
+    ModelSettled {
+        role: zephium_core::work::model::WorkModelRole,
+        stop: zephium_core::work::model::WorkModelStop,
+        elapsed_ms: u64,
+        first_event_ms: Option<u64>,
+        output_tokens: u64,
+        reasoning_tokens: u64,
+    },
+    ReplyPublished {
+        generation_pending: bool,
+    },
     ModelRefused {
         error: zephium_core::work::model::WorkModelError,
     },

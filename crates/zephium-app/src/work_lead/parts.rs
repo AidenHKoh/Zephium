@@ -958,7 +958,7 @@ where
                 volatile_tail: 0,
                 cache_key: Some(work_model_cache_key(&system, &tools)),
             };
-            let (outcome, usage) = match call::call(self.run, model, request).await {
+            let (outcome, usage) = match call::call(self.run, model, request, role, None).await {
                 Ok(done) => done,
                 Err(CallFailure::Stopped) => {
                     return PartReport::ended(
@@ -2556,7 +2556,9 @@ mod tests {
         assert!(!public_goal(&part("What is assigned to me in Linear")));
         assert!(!public_goal(&part("Read my Linear inbox")));
         assert!(public_source_retry(&part("Read Linear's documentation")));
-        assert!(!public_source_retry(&part("What is assigned to me in Linear")));
+        assert!(!public_source_retry(&part(
+            "What is assigned to me in Linear"
+        )));
         assert!(!public_source_retry(&part("Read my Linear inbox")));
     }
 

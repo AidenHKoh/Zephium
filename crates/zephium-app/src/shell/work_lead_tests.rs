@@ -1796,9 +1796,12 @@ async fn a_public_cross_site_redirect_is_isolated_and_chains_stop_at_their_bound
                 assert!(request.private_run);
                 assert_eq!(request.session, crate::work_sites::SiteSession::Private);
                 assert!(!request.allow_edits);
-                assert!(matches!(request.step, WorkStepKindV1::Read { goal: None, .. }));
+                assert!(matches!(
+                    request.step,
+                    WorkStepKindV1::Read { goal: None, .. }
+                ));
                 notes(request, "The destination lists its plans")
-            },
+            }
             "https://loop.example.org/a" => redirected("https://loop.example.org/b"),
             "https://loop.example.org/b" => redirected("https://loop.example.org/c"),
             "https://loop.example.org/c" => redirected("https://loop.example.org/d"),
@@ -1812,7 +1815,12 @@ async fn a_public_cross_site_redirect_is_isolated_and_chains_stop_at_their_bound
     // Each address is read once: the bound ends one chain, the loop another.
     assert_eq!(urls.len(), 8, "{urls:?}");
     assert!(urls.iter().any(|url| url == "https://example.com/"));
-    assert_eq!(urls.iter().filter(|url| url.contains("other.example.net")).count(), 1);
+    assert_eq!(
+        urls.iter()
+            .filter(|url| url.contains("other.example.net"))
+            .count(),
+        1
+    );
     assert!(!urls.iter().any(|url| url.ends_with("/d")));
 }
 
@@ -1922,9 +1930,11 @@ async fn zero_folder_computer_parts_share_picker_and_only_accept_real_choice() {
             light: lead,
         };
         let answered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let blocked_at_stop = Arc::new(Mutex::new(Vec::new()));
         let answering = {
             let handle = handle.clone();
             let answered = answered.clone();
+            let blocked_at_stop = blocked_at_stop.clone();
             let root = root.clone();
             tokio::spawn(async move {
                 loop {
@@ -1967,6 +1977,15 @@ async fn zero_folder_computer_parts_share_picker_and_only_accept_real_choice() {
                         "a declined or granted shared picker is not asked again"
                     );
                     let intent = if mode == "stopped" {
+                        *blocked_at_stop.lock().unwrap() = execution
+                            .parts
+                            .iter()
+                            .filter(|part| {
+                                part.state == WorkPartStateV1::Waiting
+                                    && part.need == Some(WorkPartNeedV1::ChooseFolder)
+                            })
+                            .map(|part| part.id)
+                            .collect::<Vec<_>>();
                         WorkRuntimeIntent::Cancel {
                             execution: execution.id,
                             intervention: None,
@@ -2046,13 +2065,32 @@ async fn zero_folder_computer_parts_share_picker_and_only_accept_real_choice() {
                     .load(std::sync::atomic::Ordering::SeqCst),
                 0
             );
-            assert!(
-                execution
+            if mode == "stopped" {
+                let blocked = blocked_at_stop.lock().unwrap();
+                assert!(!blocked.is_empty());
+                assert!(execution
                     .parts
                     .iter()
-                    .all(|part| part.need == Some(WorkPartNeedV1::ChooseFolder)),
-                "{mode}"
-            );
+                    .all(|part| part.state == WorkPartStateV1::Stopped));
+                assert!(execution
+                    .parts
+                    .iter()
+                    .filter(|part| blocked.contains(&part.id))
+                    .all(|part| part.need == Some(WorkPartNeedV1::ChooseFolder)));
+                assert!(execution
+                    .parts
+                    .iter()
+                    .all(|part| part.need.is_none()
+                        || part.need == Some(WorkPartNeedV1::ChooseFolder)));
+            } else {
+                assert!(
+                    execution
+                        .parts
+                        .iter()
+                        .all(|part| part.need == Some(WorkPartNeedV1::ChooseFolder)),
+                    "{mode}"
+                );
+            }
         }
         assert!(!execution.steps.iter().any(|step| step.kind.files()));
     }
@@ -2322,4 +2360,505 @@ async fn failed_account_parts_never_suggest_public_source_substitution() {
             .iter()
             .any(|step| step.status == WorkStepStatus::Running));
     }
+}
+
+static MODEL_TIMING_EVENTS: Mutex<Vec<crate::work_lead::WorkLeadDiagnostic>> =
+    Mutex::new(Vec::new());
+struct TruncatedLeadCall(std::sync::atomic::AtomicUsize);
+impl WorkModelClient for TruncatedLeadCall {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        events: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let turn = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if turn == 0 {
+                assert_eq!(request.reasoning, Some(WorkModelReasoning::Medium));
+                events(WorkModelEvent::Text(
+                    "private fixture content must not enter timing diagnostics".into(),
+                ));
+                tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+                return Ok(WorkModelOutcome {
+                    stop: WorkModelStop::MaxTokens,
+                    assistant: vec![call(
+                        "discarded",
+                        "create",
+                        json!({"kind":"reply","title":"Must never run","data":{"headline":"Discarded generation","text":"This tool call must not execute."}}),
+                    )],
+                    usage: WorkModelUsage {
+                        input_tokens: 100,
+                        output_tokens: 8_000,
+                        reasoning_tokens: 7_900,
+                        ..WorkModelUsage::default()
+                    },
+                });
+            }
+            assert_eq!(request.reasoning, Some(WorkModelReasoning::Low));
+            assert!(!results(&request).contains("Must never run"));
+            assert_eq!(request.max_output_tokens, 2_048);
+            assert_eq!(turn, 1, "compact recovery gets only one further call");
+            assert!(request.messages.iter().any(|message| matches!(message,
+                WorkModelMessage::User(parts) if parts.iter().any(|part| matches!(part,
+                    WorkModelPart::Text(text) if text.contains("hit the output limit")
+                        && text.contains("fewer optional items") && text.contains("same turn"))))));
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                assistant: vec![
+                    call(
+                        "reply",
+                        "create",
+                        json!({"kind":"reply","title":"Recovered answer","data":{"headline":"Recovered","text":"The bounded retry finished."}}),
+                    ),
+                    call(
+                        "finish",
+                        "finish",
+                        json!({"say":"The bounded retry finished.","title":"Model recovery"}),
+                    ),
+                ],
+                usage: WorkModelUsage {
+                    input_tokens: 100,
+                    output_tokens: 30,
+                    ..WorkModelUsage::default()
+                },
+            })
+        })
+    }
+}
+#[tokio::test]
+async fn an_output_limited_lead_call_is_measured_without_replaying_its_partial_tools() {
+    MODEL_TIMING_EVENTS.lock().unwrap().clear();
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Return a short confirmation".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let client = Arc::new(TruncatedLeadCall(std::sync::atomic::AtomicUsize::new(0)));
+    let mut lead = model(client.clone());
+    lead.entry.supports.reasoning = true;
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let state = drive(
+        &mut shell,
+        &queue,
+        WorkLeadService::new(handle)
+            .with_diagnostic(|event| MODEL_TIMING_EVENTS.lock().unwrap().push(event))
+            .run(
+                profile,
+                command(work, WorkRevision::INITIAL),
+                None,
+                models,
+                &Search,
+                |_, _| async { panic!("model recovery must not browse") },
+                |_| {},
+            ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(client.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let execution = &state.executions[0];
+    assert_eq!(execution.artifacts.len(), 1);
+    assert_eq!(execution.artifacts[0].title, "Recovered answer");
+    let events = MODEL_TIMING_EVENTS.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                crate::work_lead::WorkLeadDiagnostic::ModelSettled {
+                    role: WorkModelRole::Lead,
+                    ..
+                }
+            ))
+            .count(),
+        2
+    );
+    assert!(events.iter().any(|event|matches!(event,crate::work_lead::WorkLeadDiagnostic::ModelSettled {
+        role:WorkModelRole::Lead,stop:WorkModelStop::MaxTokens,elapsed_ms,first_event_ms:Some(first),output_tokens:8_000,reasoning_tokens:7_900
+    } if *elapsed_ms>=10 && first<=elapsed_ms)));
+    assert!(!format!("{events:?}").contains("private fixture content"));
+}
+
+struct EarlyReplyModel {
+    handle: crate::Handle,
+    profile: zephium_core::ids::ProfileId,
+    work: WorkId,
+    truncations: usize,
+    calls: std::sync::atomic::AtomicUsize,
+    observed: std::sync::atomic::AtomicBool,
+}
+impl WorkModelClient for EarlyReplyModel {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        events: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let turn = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let reply = call(
+                "early-reply",
+                "create",
+                json!({"kind":"reply","title":"First answer","data":{"headline":"A short result","text":"The result is available; supporting details may follow."}}),
+            );
+            let finish = call(
+                "finish",
+                "finish",
+                json!({"say":"The result is ready.","title":"Early reply"}),
+            );
+            if turn == 0 {
+                let WorkModelPart::ToolCall(tool) = &reply else {
+                    unreachable!()
+                };
+                events(WorkModelEvent::ToolCall(tool.clone()));
+                if self.truncations == 6 {
+                    return Ok(WorkModelOutcome {
+                        stop: WorkModelStop::MaxTokens,
+                        assistant: vec![reply],
+                        usage: WorkModelUsage::default(),
+                    });
+                }
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        let port::WorkReply::Runtime(state) = self
+                            .handle
+                            .work_projection(self.profile, self.work)
+                            .unwrap()
+                            .await
+                            .unwrap()
+                            .reply
+                        else {
+                            panic!()
+                        };
+                        if let Some(execution) = state.executions.last() {
+                            if execution
+                                .artifacts
+                                .iter()
+                                .any(|artifact| artifact.title == "First answer")
+                            {
+                                assert_eq!(
+                                    execution.artifacts.len(),
+                                    1,
+                                    "supporting object has not been generated yet"
+                                );
+                                self.observed
+                                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                                break;
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("reply must be durable before generation completes");
+            } else {
+                assert_eq!(turn, 1, "one compact recovery only");
+                assert_eq!(request.max_output_tokens, 2_048);
+                assert!(results(&request).contains("Placed reply"));
+                if self.truncations == 6 {
+                    self.observed
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            if self.truncations == 3 {
+                return Err(WorkModelError::Network);
+            }
+            if matches!(self.truncations, 4 | 5 | 7 | 8) {
+                let mut assistant = vec![
+                    call(
+                        "must-not-run",
+                        "create",
+                        json!({"kind":"list","title":"Forbidden later object","data":{"style":"todo","items":[{"title":"Unexpected"}]}}),
+                    ),
+                    finish,
+                ];
+                if self.truncations == 5 {
+                    let WorkModelPart::ToolCall(mut changed) = reply.clone() else {
+                        unreachable!()
+                    };
+                    changed.id = "changed-reply-id".into();
+                    assistant.insert(0, WorkModelPart::ToolCall(changed));
+                }
+                if self.truncations == 7 {
+                    let WorkModelPart::ToolCall(mut changed) = reply.clone() else {
+                        unreachable!()
+                    };
+                    changed.arguments["data"]["headline"] = json!("Changed after publication");
+                    assistant.insert(0, WorkModelPart::ToolCall(changed));
+                }
+                if self.truncations == 8 {
+                    assistant.insert(0, reply.clone());
+                    assistant.insert(0, reply);
+                }
+                return Ok(WorkModelOutcome {
+                    stop: WorkModelStop::ToolUse,
+                    assistant,
+                    usage: WorkModelUsage::default(),
+                });
+            }
+            let truncated = self.truncations != 6 && turn < self.truncations;
+            let assistant = if truncated {
+                vec![reply]
+            } else if turn == 0 {
+                vec![
+                    reply,
+                    call(
+                        "details",
+                        "create",
+                        json!({"kind":"list","title":"Optional details","data":{"style":"todo","items":[{"title":"A supporting detail"}]}}),
+                    ),
+                    finish,
+                ]
+            } else {
+                vec![finish]
+            };
+            Ok(WorkModelOutcome {
+                stop: if truncated {
+                    WorkModelStop::MaxTokens
+                } else {
+                    WorkModelStop::ToolUse
+                },
+                assistant,
+                usage: WorkModelUsage {
+                    input_tokens: 100,
+                    output_tokens: if truncated { 2_048 } else { 100 },
+                    ..WorkModelUsage::default()
+                },
+            })
+        })
+    }
+}
+#[tokio::test]
+async fn a_completed_reply_is_visible_before_generation_finishes_and_survives_compact_recovery() {
+    for truncations in 0..=8 {
+        let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+        let (mut shell, queue, handle, profile) = fixture(store);
+        let create = handle
+            .work_document(WorkIntent::Create {
+                objective: "Return a short result with optional supporting details".into(),
+            })
+            .unwrap();
+        let work = create.work_id().unwrap();
+        drive(&mut shell, &queue, create).await.unwrap();
+        let client = Arc::new(EarlyReplyModel {
+            handle: handle.clone(),
+            profile,
+            work,
+            truncations,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            observed: std::sync::atomic::AtomicBool::new(false),
+        });
+        let lead = model(client.clone());
+        let models = WorkLeadModels {
+            lead: lead.clone(),
+            page: lead.clone(),
+            light: lead,
+        };
+        let state = drive(
+            &mut shell,
+            &queue,
+            WorkLeadService::new(handle).run(
+                profile,
+                command(work, WorkRevision::INITIAL),
+                None,
+                models,
+                &Search,
+                |_, _| async { panic!("reply publication must not browse") },
+                |_| {},
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(client.observed.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            client.calls.load(std::sync::atomic::Ordering::SeqCst),
+            if truncations == 1 || truncations == 2 || truncations == 6 {
+                2
+            } else {
+                1
+            }
+        );
+        let execution = &state.executions[0];
+        assert_eq!(
+            execution
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.title == "First answer")
+                .count(),
+            1
+        );
+        assert_eq!(
+            execution.artifacts.len(),
+            if truncations == 0 { 2 } else { 1 }
+        );
+        if truncations <= 2 || truncations == 6 {
+            assert!(execution.steps.iter().any(|step| matches!(
+                step.kind,
+                WorkStepKindV1::Finish { .. }
+            ) && step.status
+                == WorkStepStatus::Succeeded));
+        } else {
+            assert!(execution
+                .steps
+                .iter()
+                .any(|step| matches!(step.kind, WorkStepKindV1::Turn)
+                    && step.status == WorkStepStatus::OutcomeUnknown));
+            assert!(!execution
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.title == "Forbidden later object"));
+        }
+        assert!(execution
+            .steps
+            .iter()
+            .all(|step| step.status != WorkStepStatus::Running));
+    }
+}
+
+struct StalledAfterReply {
+    dropped: std::sync::atomic::AtomicBool,
+    calls: std::sync::atomic::AtomicUsize,
+}
+impl WorkModelClient for StalledAfterReply {
+    fn call<'a>(
+        &'a self,
+        _: WorkModelRequest,
+        events: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            struct Dropped<'a>(&'a std::sync::atomic::AtomicBool);
+            impl Drop for Dropped<'_> {
+                fn drop(&mut self) {
+                    self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _guard = Dropped(&self.dropped);
+            let WorkModelPart::ToolCall(tool) = call(
+                "early",
+                "create",
+                json!({"kind":"reply","title":"Held reply","data":{"headline":"Held","text":"This publication has not committed yet."}}),
+            ) else {
+                unreachable!()
+            };
+            events(WorkModelEvent::ToolCall(tool));
+            std::future::pending().await
+        })
+    }
+}
+#[tokio::test]
+async fn stop_during_early_reply_publication_drops_generation_and_refuses_late_commit() {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Return a short result".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let client = Arc::new(StalledAfterReply {
+        dropped: std::sync::atomic::AtomicBool::new(false),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let lead = model(client.clone());
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let service = WorkLeadService::new(handle.clone());
+    let held = Arc::new(tokio::sync::Notify::new());
+    let stopping = async {
+        held.notified().await;
+        let port::WorkReply::Runtime(state) = handle
+            .work_projection(profile, work)
+            .unwrap()
+            .await
+            .unwrap()
+            .reply
+        else {
+            panic!()
+        };
+        let started = std::time::Instant::now();
+        handle
+            .work_command(
+                profile,
+                WorkCommandV1 {
+                    version: 1,
+                    work,
+                    expected_revision: state.work.revision,
+                    command: WorkCommandId::generate(),
+                    intent: WorkRuntimeIntent::Cancel {
+                        execution: state.executions[0].id,
+                        intervention: None,
+                    },
+                },
+            )
+            .unwrap()
+            .await
+            .unwrap();
+        started
+    };
+    let running = service.run(
+        profile,
+        command(work, WorkRevision::INITIAL),
+        None,
+        models,
+        &Search,
+        |_, _| async { panic!("no browser") },
+        |_| {},
+    );
+    let all = async { tokio::join!(running, stopping) };
+    tokio::pin!(all);
+    let mut delayed = None;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    let (result, stopped_at) = loop {
+        while let Some(command) = queue.try_recv() {
+            let command = match command {
+                crate::Command::WorkDocument(submission) => {
+                    let payload = submission.take().unwrap();
+                    let publication = matches!(&payload.request,port::WorkRequest::RuntimeUpdate {update:WorkRuntimeUpdate::BeginStep {step,..},..} if matches!(step.kind,WorkStepKindV1::Publish));
+                    let resumed = crate::WorkDocumentSubmission::resume(payload);
+                    if publication && delayed.is_none() {
+                        delayed = Some(resumed);
+                        held.notify_one();
+                        continue;
+                    }
+                    crate::Command::WorkDocument(resumed)
+                }
+                command => command,
+            };
+            shell.handle(command);
+        }
+        tokio::select! {result=&mut all=>break result,_=tokio::time::sleep_until(deadline)=>panic!("Stop waited for publication"),_=tokio::time::sleep(std::time::Duration::from_millis(1))=>{}}
+    };
+    result.unwrap();
+    assert!(stopped_at.elapsed() < std::time::Duration::from_secs(1));
+    assert!(client.dropped.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    shell.handle(crate::Command::WorkDocument(
+        delayed.expect("publication was held"),
+    ));
+    let result = drive(
+        &mut shell,
+        &queue,
+        handle.work_projection(profile, work).unwrap(),
+    )
+    .await
+    .unwrap();
+    let port::WorkReply::Runtime(state) = result.reply else {
+        panic!()
+    };
+    assert!(
+        state.executions[0].artifacts.is_empty(),
+        "cancelled publication cannot arrive late"
+    );
+    assert_ne!(state.executions[0].status, WorkExecutionStatus::Running);
 }

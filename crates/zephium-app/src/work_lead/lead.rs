@@ -31,7 +31,7 @@ use crate::work_runtime::{WorkAttemptProbe, WorkNodeAttempt};
 /// Output one lead turn may produce: tool calls and a reply, never an essay.
 const LEAD_TURN_OUTPUT: u32 = 8_000;
 /// Said to the lead after a turn ran past its output limit.
-const RAN_LONG: &str = "Your last turn ran past its length limit and was discarded. Act now: call the tools you need, with short arguments, and keep any reply brief.";
+const RAN_LONG: &str = "Your previous turn hit the output limit. Do not repeat that response. Reuse the evidence and objects already available. You have 2048 output tokens for a compact recovery: at most three short reply sentences, fewer optional items, and details under 120 characters. Preserve required facts and explicitly requested counts by shortening details first. Keep any reply already published; never recreate it. If the work is complete, create the reply first if missing and call finish in this same turn; omit optional objects instead of delaying completion. If required work remains, call only its next necessary tools.";
 const FLOOR_COST: u32 = 40_000;
 const FLOOR_TOKENS: u32 = 24_000;
 /// Consecutive turns that call no tool before the run closes with what it
@@ -88,6 +88,11 @@ pub(crate) struct Lead<'a, B> {
     pub name_work: bool,
     pub slots: tokio::sync::Semaphore,
     state: Mutex<LeadState>,
+}
+
+struct EarlyReply {
+    call: WorkModelToolCall,
+    answer: (String, bool),
 }
 
 type Answer = (usize, String, bool);
@@ -277,7 +282,11 @@ where
                 system: system.clone(),
                 tools: tools.clone(),
                 messages: messages.clone(),
-                max_output_tokens: model.entry.max_output.clamp(4_096, LEAD_TURN_OUTPUT),
+                max_output_tokens: if ran_long {
+                    model.entry.max_output.min(2_048)
+                } else {
+                    model.entry.max_output.clamp(4_096, LEAD_TURN_OUTPUT)
+                },
                 reasoning: model.entry.supports.reasoning.then_some(if ran_long {
                     WorkModelReasoning::Low
                 } else {
@@ -289,7 +298,8 @@ where
                 volatile_tail: 0,
                 cache_key: Some(work_model_cache_key(&system, &tools)),
             };
-            let (outcome, usage) = match call::call(self.run, model, request).await {
+            let (called, early_reply) = self.call_with_early_reply(model, request).await;
+            let (outcome, usage) = match called {
                 Ok(done) => done,
                 Err(CallFailure::Stopped) => return Ok(WorkAttemptStatus::Cancelled),
                 Err(CallFailure::Lost) => {
@@ -327,9 +337,22 @@ where
                 }
             };
             failed_calls = 0;
-            if outcome.stop == WorkModelStop::MaxTokens && !ran_long {
-                ran_long = true;
+            if outcome.stop == WorkModelStop::MaxTokens {
                 self.turn_step(None, usage, None).await;
+                if ran_long {
+                    return self.close(Stall::OutputLimit).await;
+                }
+                ran_long = true;
+                if let Some(reply) = early_reply {
+                    messages.push(WorkModelMessage::Assistant(vec![WorkModelPart::ToolCall(
+                        reply.call.clone(),
+                    )]));
+                    messages.push(WorkModelMessage::ToolResults(vec![WorkModelToolResult {
+                        call: reply.call.id,
+                        content: reply.answer.0,
+                        is_error: reply.answer.1,
+                    }]));
+                }
                 messages.push(WorkModelMessage::User(vec![WorkModelPart::Text(
                     RAN_LONG.into(),
                 )]));
@@ -353,6 +376,9 @@ where
             });
             messages.push(WorkModelMessage::Assistant(outcome.assistant));
             if calls.is_empty() {
+                if ran_long {
+                    return self.close(Stall::OutputLimit).await;
+                }
                 idle += 1;
                 if idle >= MAX_IDLE {
                     return self.close(Stall::NoProgress).await;
@@ -367,13 +393,24 @@ where
                 )]));
                 continue;
             }
-            let (results, progress, finished) = match self.execute(&calls).await {
-                Ok(done) => done,
-                Err(status) => return Ok(status),
-            };
+            let (results, progress, finished) =
+                match self.execute(&calls, early_reply.as_ref()).await {
+                    Ok(done) => done,
+                    Err(status) => return Ok(status),
+                };
             messages.push(WorkModelMessage::ToolResults(results));
             if finished {
                 return Ok(WorkAttemptStatus::Succeeded);
+            }
+            if ran_long
+                && calls.iter().all(|call| {
+                    matches!(
+                        call.name.as_str(),
+                        "create" | "revise" | "read_canvas" | "finish"
+                    )
+                })
+            {
+                return self.close(Stall::OutputLimit).await;
             }
             idle = 0;
             if progress {
@@ -387,10 +424,101 @@ where
         }
     }
 
+    async fn call_with_early_reply(
+        &self,
+        model: &call::LeadModel,
+        request: WorkModelRequest,
+    ) -> (
+        Result<(WorkModelOutcome, WorkUsage), CallFailure>,
+        Option<EarlyReply>,
+    ) {
+        let (send, mut receive) = tokio::sync::mpsc::channel(1);
+        let offered = std::sync::atomic::AtomicBool::new(false);
+        let completed = |tool: WorkModelToolCall| {
+            if tool.name == "create"
+                && tool.arguments.get("kind").and_then(Value::as_str) == Some("reply")
+                && tool.arguments.get("part").is_none_or(Value::is_null)
+                && !offered.swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                let _ = send.try_send(tool);
+            }
+        };
+        let generation = call::call(
+            self.run,
+            model,
+            request,
+            WorkModelRole::Lead,
+            Some(&completed),
+        );
+        tokio::pin!(generation);
+        let mut reply = None;
+        let mut publication: Option<Pin<Box<dyn Future<Output = EarlyReply> + Send + '_>>> = None;
+        let mut outcome = None;
+        loop {
+            tokio::select! {
+                result = &mut generation, if outcome.is_none() => { outcome = Some(result); }
+                Some(tool) = receive.recv(), if reply.is_none() && publication.is_none() && outcome.is_none() => {
+                    publication = Some(Box::pin(async move {
+                        // Only a complete reply uses this path, through the same
+                        // schema, source, honesty and durable publication checks.
+                        let answer = self.create(&tool.arguments, None, false).await;
+                        EarlyReply { call: tool, answer }
+                    }));
+                }
+                published = async { publication.as_mut().expect("guarded publication").await }, if publication.is_some() => {
+                    if !published.answer.1 {
+                        self.run.report(super::WorkLeadDiagnostic::ReplyPublished { generation_pending: outcome.is_none() });
+                    }
+                    reply = Some(published);
+                    publication = None;
+                }
+                _ = self.run.probe.wait_cancelled(), if outcome.is_some() => {
+                    self.run.cancelled().await;
+                    return (Err(CallFailure::Stopped), reply);
+                }
+            }
+            if matches!(outcome, Some(Err(CallFailure::Stopped))) {
+                return (Err(CallFailure::Stopped), reply);
+            }
+            if publication.is_none()
+                && reply.is_none()
+                && matches!(&outcome, Some(Ok((result, _))) if result.stop == WorkModelStop::MaxTokens)
+            {
+                if let Ok(tool) = receive.try_recv() {
+                    publication = Some(Box::pin(async move {
+                        let answer = self.create(&tool.arguments, None, false).await;
+                        EarlyReply { call: tool, answer }
+                    }));
+                    continue;
+                }
+            }
+            if publication.is_none() {
+                if let Some(mut result) = outcome.take() {
+                    if let (Some(reply), Ok((finished, _))) = (&reply, &result) {
+                        if finished.stop != WorkModelStop::MaxTokens {
+                            let calls = call::tool_calls(&finished.assistant);
+                            if calls.iter().filter(|call| call.id == reply.call.id).count() != 1
+                                || !calls.iter().any(|call| {
+                                    call.id == reply.call.id
+                                        && call.name == reply.call.name
+                                        && call.arguments == reply.call.arguments
+                                })
+                            {
+                                result = Err(CallFailure::Lost);
+                            }
+                        }
+                    }
+                    return (result, reply);
+                }
+            }
+        }
+    }
+
     /// The tool calls of one turn, run together; `finish` last.
     async fn execute(
         &self,
         calls: &[WorkModelToolCall],
+        early_reply: Option<&EarlyReply>,
     ) -> Result<(Vec<WorkModelToolResult>, bool, bool), WorkAttemptStatus> {
         let mut terminal = None;
         let mut answers: Vec<Option<(String, bool)>> = vec![None; calls.len()];
@@ -399,6 +527,18 @@ where
         let mut finish_at = None;
         let mut ran = vec![false; calls.len()];
         for (index, tool_call) in calls.iter().enumerate() {
+            if let Some(reply) = early_reply.filter(|reply| reply.call.id == tool_call.id) {
+                answers[index] = Some(
+                    if reply.call.name == tool_call.name
+                        && reply.call.arguments == tool_call.arguments
+                    {
+                        reply.answer.clone()
+                    } else {
+                        ("The completed reply changed in the final response. Keep the published reply and revise it explicitly if needed.".into(), true)
+                    },
+                );
+                continue;
+            }
             let args = &tool_call.arguments;
             match tool_call.name.as_str() {
                 "web_search" => {
@@ -1262,7 +1402,8 @@ where
             .find(|e| e.id == execution)
             .map(|e| e.parts.clone())
             .unwrap_or_default();
-        if self.state().reply.is_none() {
+        let reply_stood = self.state().reply.is_some();
+        if !reply_stood {
             let (headline, text) = closing(&placed, &parts, stall);
             let data = zephium_core::work::artifact::WorkArtifactDataV1::Reply {
                 headline,
@@ -1292,7 +1433,9 @@ where
             None,
         );
         step.note = Some(
-            if placed.is_empty() {
+            if stall == Stall::OutputLimit && reply_stood {
+                "The reply is ready; further details could not be completed."
+            } else if placed.is_empty() {
                 "I couldn't finish this; the reply says why."
             } else {
                 "I stopped here; what I found is on the canvas."
@@ -1315,6 +1458,8 @@ pub enum Stall {
     Turns,
     /// The model stopped answering.
     Model,
+    /// The compact recovery could not finish within one further call.
+    OutputLimit,
 }
 
 /// The reply a closed run leaves: what it placed, what each part that could
@@ -1355,6 +1500,9 @@ fn closing(
         match stall {
             Stall::Budget => "I reached this run's budget before I could finish.",
             Stall::Model => "The model stopped answering before I could finish.",
+            Stall::OutputLimit => {
+                "I could not finish the remaining details within the result's size limit."
+            }
             Stall::NoProgress | Stall::Turns => "I stopped before I could put the rest together.",
         }
         .into(),
