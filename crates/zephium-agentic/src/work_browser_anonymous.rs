@@ -1,7 +1,16 @@
 //! Original anonymous read intent; never a signed-out storage or pixel grant.
-use crate::{AgentAccountScope, AgentPlanLeaseBinding, AgentPolicyInstant, AgentRunManifest,
-    ContextIdentity, ContextKind, ContextRunId, ContextNavigationTarget, SemanticOrigin};
-use std::{fmt, sync::{Arc, atomic::{AtomicU8, Ordering}}};
+use crate::{
+    AgentAccountScope, AgentPlanLeaseBinding, AgentPolicyInstant, AgentRunManifest,
+    ContextIdentity, ContextKind, ContextNavigationTarget, ContextRunId, SemanticOrigin,
+};
+use std::{
+    fmt,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc, Mutex, Weak,
+    },
+    task::{Context, Poll, Waker},
+};
 
 /// Closed status of the original task proof. No account/page data is exposed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,6 +27,8 @@ pub enum WorkBrowserAnonymousReadStatus {
     Expired,
     /// The owning resource was cancelled, quarantined, destroyed or dropped.
     Closed,
+    /// Site-consented model images were disclosed; public retry stays revoked.
+    PrivateDisclosure,
 }
 
 /// Opaque one-resource original anonymous read proof. Clones share revocation.
@@ -30,6 +41,7 @@ struct OriginalRead {
     expires: AgentPolicyInstant,
     deadline: std::time::Instant,
     status: AtomicU8,
+    listeners: Mutex<Vec<Weak<LossSignal>>>,
 }
 impl fmt::Debug for WorkBrowserAnonymousReadAuthority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -62,8 +74,12 @@ impl WorkBrowserAnonymousReadAuthority {
             || now >= node.expires_at() || deadline <= std::time::Instant::now()
         { return None; }
         Some(Self(Arc::new(OriginalRead {
-            identity, document: document.clone(), expires: node.expires_at().min(manifest.expires_at()), deadline,
+            identity,
+            document: document.clone(),
+            expires: node.expires_at().min(manifest.expires_at()),
+            deadline,
             status: AtomicU8::new(0),
+            listeners: Mutex::new(Vec::new()),
         })))
     }
     /// Read-only current status. It is only a prerequisite for separately
@@ -78,8 +94,38 @@ impl WorkBrowserAnonymousReadAuthority {
             3 => WorkBrowserAnonymousReadStatus::SuccessorRun,
             4 => WorkBrowserAnonymousReadStatus::Expired,
             5 => WorkBrowserAnonymousReadStatus::Closed,
+            6 => WorkBrowserAnonymousReadStatus::PrivateDisclosure,
             _ => WorkBrowserAnonymousReadStatus::Absent,
         }
+    }
+    /// Registers a bounded, revocation-only listener. It does not retain a native
+    /// resource or grant a screenshot. Overflow closes the original proof.
+    pub fn watch_loss(&self, now: AgentPolicyInstant) -> Option<WorkBrowserAnonymousReadLoss> {
+        if self.status(now) != WorkBrowserAnonymousReadStatus::Current {
+            return None;
+        }
+        let signal = Arc::new(LossSignal(Mutex::new(None)));
+        let registered = self.0.listeners.lock().is_ok_and(|mut listeners| {
+            listeners.retain(|listener| listener.strong_count() != 0);
+            if listeners.len() >= 32 {
+                return false;
+            }
+            listeners.push(Arc::downgrade(&signal));
+            true
+        });
+        if !registered {
+            self.revoke(WorkBrowserAnonymousReadStatus::Closed);
+            return None;
+        }
+        Some(WorkBrowserAnonymousReadLoss {
+            authority: self.clone(),
+            signal,
+        })
+    }
+    /// Removes original public-read authority before any optional media retry
+    /// after a site-consented visual disclosure. This cannot grant account access.
+    pub fn revoke_private_disclosure(&self) {
+        self.revoke(WorkBrowserAnonymousReadStatus::PrivateDisclosure);
     }
     pub(crate) fn claim(&self, identity: ContextIdentity, now: AgentPolicyInstant) -> bool {
         self.0.identity == identity && self.status(now) == WorkBrowserAnonymousReadStatus::Absent
@@ -112,11 +158,83 @@ impl WorkBrowserAnonymousReadAuthority {
             WorkBrowserAnonymousReadStatus::HumanHandoff => 2,
             WorkBrowserAnonymousReadStatus::SuccessorRun => 3,
             WorkBrowserAnonymousReadStatus::Expired => 4,
+            WorkBrowserAnonymousReadStatus::PrivateDisclosure => 6,
             _ => 5,
         };
         // Preserve the first closed loss reason, including after expiry/cleanup.
-        let _ = self.0.status.fetch_update(Ordering::AcqRel, Ordering::Acquire,
-            |current| (current <= 1).then_some(value));
+        if self
+            .0
+            .status
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current <= 1).then_some(value)
+            })
+            .is_err()
+        {
+            return;
+        }
+        // Move callbacks out of both listener locks before waking them.
+        let signals = self
+            .0
+            .listeners
+            .lock()
+            .map(|mut listeners| {
+                std::mem::take(&mut *listeners)
+                    .into_iter()
+                    .filter_map(|listener| listener.upgrade())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for signal in signals {
+            let wake = signal.0.lock().ok().and_then(|mut wake| wake.take());
+            if let Some(wake) = wake {
+                wake.wake();
+            }
+        }
+    }
+}
+
+struct LossSignal(Mutex<Option<Waker>>);
+/// One bounded listener for original-read loss, never native/image authority.
+/// The owner must also poll at its original policy/wall deadline; no timer or
+/// unbounded background task is installed by this proof.
+pub struct WorkBrowserAnonymousReadLoss {
+    authority: WorkBrowserAnonymousReadAuthority,
+    signal: Arc<LossSignal>,
+}
+impl WorkBrowserAnonymousReadLoss {
+    pub(crate) fn is_current(&self, now: AgentPolicyInstant) -> bool {
+        self.authority.status(now) == WorkBrowserAnonymousReadStatus::Current
+    }
+    /// Rearms the listener and closes the registration/revocation race.
+    pub fn poll_loss(&self, now: AgentPolicyInstant, cx: &mut Context<'_>) -> Poll<()> {
+        if self.authority.status(now) != WorkBrowserAnonymousReadStatus::Current {
+            return Poll::Ready(());
+        }
+        let Ok(mut slot) = self.signal.0.lock() else {
+            self.authority
+                .revoke(WorkBrowserAnonymousReadStatus::Closed);
+            return Poll::Ready(());
+        };
+        let old = if slot
+            .as_ref()
+            .is_none_or(|waker| !waker.will_wake(cx.waker()))
+        {
+            slot.replace(cx.waker().clone())
+        } else {
+            None
+        };
+        drop(slot);
+        drop(old);
+        if self.authority.status(now) != WorkBrowserAnonymousReadStatus::Current {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+impl fmt::Debug for WorkBrowserAnonymousReadLoss {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("WorkBrowserAnonymousReadLoss([redacted])")
     }
 }
 
@@ -224,4 +342,58 @@ pub(crate) mod tests {
         assert_eq!(p.bound_deadline_at(now(3),now(80),one_millisecond_before),None);
     }
 
+    #[test]
+    fn private_disclosure_wakes_every_listener_and_never_revives_original_read() {
+        struct WakeCount(std::sync::atomic::AtomicUsize);
+        impl std::task::Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let p = proof();
+        assert!(p.claim(identity(), now(2)));
+        let first = p.watch_loss(now(3)).unwrap();
+        let second = p.watch_loss(now(3)).unwrap();
+        let count = Arc::new(WakeCount(std::sync::atomic::AtomicUsize::new(0)));
+        let waker = Waker::from(count.clone());
+        let mut cx = Context::from_waker(&waker);
+        assert!(first.poll_loss(now(3), &mut cx).is_pending());
+        assert!(second.poll_loss(now(3), &mut cx).is_pending());
+        p.revoke_private_disclosure();
+        assert_eq!(count.0.load(Ordering::SeqCst), 2);
+        assert!(first.poll_loss(now(3), &mut cx).is_ready());
+        assert_eq!(
+            p.status(now(100)),
+            WorkBrowserAnonymousReadStatus::PrivateDisclosure
+        );
+        assert!(!p.acquire(identity().owner(), now(3)));
+        assert!(!p.claim(identity(), now(3)));
+    }
+    #[test]
+    fn loss_before_registration_poll_and_listener_overflow_fail_closed() {
+        let p = proof();
+        assert!(p.claim(identity(), now(2)));
+        let pending = p.watch_loss(now(3)).unwrap();
+        p.revoke(WorkBrowserAnonymousReadStatus::HumanHandoff);
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(pending.poll_loss(now(3), &mut cx).is_ready());
+        p.revoke_private_disclosure();
+        assert_eq!(
+            p.status(now(3)),
+            WorkBrowserAnonymousReadStatus::HumanHandoff
+        );
+        let p = proof();
+        assert!(p.claim(identity(), now(2)));
+        for _ in 0..100 {
+            drop(p.watch_loss(now(3)).unwrap());
+        }
+        let listeners = (0..32)
+            .map(|_| p.watch_loss(now(3)).unwrap())
+            .collect::<Vec<_>>();
+        assert!(p.watch_loss(now(3)).is_none());
+        assert_eq!(p.status(now(3)), WorkBrowserAnonymousReadStatus::Closed);
+        assert!(listeners
+            .iter()
+            .all(|listener| listener.poll_loss(now(3), &mut cx).is_ready()));
+    }
 }

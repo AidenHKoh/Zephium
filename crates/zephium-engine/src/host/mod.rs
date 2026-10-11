@@ -52,6 +52,8 @@ pub(crate) mod work_frames;
     any(target_os = "macos", target_os = "windows")
 ))]
 mod work_resource;
+#[cfg(feature = "agentic-browser")]
+pub(crate) use work_resource::visual_store::{FreshNativeStore, FreshStoreLoss};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod work_session_presence;
 #[cfg(all(feature = "agentic-browser", target_os = "windows"))]

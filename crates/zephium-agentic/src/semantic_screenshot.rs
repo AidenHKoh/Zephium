@@ -48,6 +48,102 @@ const PNG_SRGB: [u8; 4] = *b"sRGB";
 const PNG_GAMA: [u8; 4] = *b"gAMA";
 const PNG_CHRM: [u8; 4] = *b"cHRM";
 
+/// Host choice of the next fixed capture path. These are requests, not native
+/// proof or provider authority; every returned image still needs its own claim.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticModelImagePlan {
+    /// No image request may proceed; text-only work remains available.
+    Unavailable,
+    /// A bounded host-owned origin question is still unresolved.
+    Waiting,
+    /// Attempt the additional public-page survey in fresh native storage.
+    Public,
+    /// The separate screenshot consent is current; use ordinary privacy checks.
+    Consented,
+}
+/// Host-owned consent and durable privacy acknowledgement for one exact Read.
+/// This is installed with the original native broker before provider admission.
+/// It cannot substitute a native source claim or approve effects/account entry.
+pub trait SemanticModelImageHost: Send + Sync {
+    /// Joins the original native broker to this sealed durable Read owner.
+    fn admits_source(&self, source: &crate::WorkBrowserExecutionLease) -> bool;
+    /// Sticky conservative private-image ACK, including ACK followed by revocation.
+    /// This can only remove original anonymous authority.
+    fn private_disclosure_recorded(&self) -> bool;
+    /// Global preference/capability availability, never pixel permission.
+    fn enabled(&self) -> bool;
+    /// Reserves the current permission epochs BEFORE this exact capture request.
+    /// The public candidate comes from the original native broker and task scope.
+    fn prepare(
+        &self,
+        id: SemanticScreenshotRequestId,
+        context: ContextJoin,
+        origin: &str,
+        public_candidate: bool,
+    ) -> SemanticModelImagePlan;
+    /// Requests separate origin consent after an account-negative public survey.
+    /// No pixels were returned from that refused survey.
+    fn require_consent(&self, context: ContextJoin, origin: &str) -> SemanticModelImagePlan;
+    /// State of this page's screenshot handoff, separate from account/action asks.
+    fn handoff(&self) -> Option<SemanticModelImagePlan>;
+    /// Acknowledges only this original screenshot handoff's native continuation.
+    fn finish_handoff(&self);
+    /// Revalidates the original prepared epochs and persists conservative possible
+    /// disclosure before any image/count request. A failed or late ACK returns
+    /// None. The returned fence contains only additional host revocation checks.
+    fn before_disclosure<'a>(
+        &'a self,
+        id: SemanticScreenshotRequestId,
+        context: ContextJoin,
+        origin: &'a str,
+        public: bool,
+        deadline: std::time::Instant,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Option<
+                        std::sync::Arc<dyn zephium_core::work::model::WorkModelImageFence>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    >;
+}
+
+/// Narrow source broker made by the original retained adapter. It exposes no
+/// native browser port, action dispatch, registry, or screenshot permission.
+/// The immutable execution lease cannot be rebound after construction.
+pub trait SemanticScreenshotSourcePort: Send + Sync {
+    /// Original native execution lease for this broker.
+    fn lease(&self) -> &crate::WorkBrowserExecutionLease;
+    /// Negative-only choice of the fixed public survey. True is not sign-out
+    /// proof and never grants capture or provider disclosure.
+    fn public_candidate(&self, context: ContextJoin) -> bool;
+    /// Consumes the original exact capture receipt once. A missing, expired,
+    /// changed or repeated receipt returns no source evidence.
+    fn claim(
+        &self,
+        image: &SemanticScreenshot,
+    ) -> Option<std::sync::Arc<dyn SemanticScreenshotSource>>;
+}
+
+/// One-use original native-owner source claim, obtained only through the
+/// registered native port for an admitted image. This provides no user consent,
+/// original task scope, or provider disclosure permission. It is never wire data.
+pub trait SemanticScreenshotSource: Send + Sync {
+    /// Matches only the exact admitted image whose original native receipt
+    /// created this source. A source for one image cannot authorize another.
+    fn authenticates(&self, image: &SemanticScreenshot) -> bool;
+    /// Polls a synchronous dispatch operation only while this exact native
+    /// source remains current. Implementations must never hold a lock over await.
+    fn while_current(&self, operation: &mut dyn FnMut()) -> bool;
+    /// Wakes on native source loss. The consumer must also bound its wait by
+    /// `deadline`; native owners do not create timer threads for image claims.
+    fn poll_lost(&self, context: &mut std::task::Context<'_>) -> std::task::Poll<()>;
+    /// Original native execution deadline, never extended by this source claim.
+    fn deadline(&self) -> std::time::Instant;
+}
+
 /// Nonzero identity for one screenshot attempt.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SemanticScreenshotRequestId(NonZeroU64);
@@ -194,6 +290,7 @@ pub enum SemanticScreenshotRequestError {
 pub struct SemanticScreenshotRequest {
     id: SemanticScreenshotRequestId,
     scope: SemanticScreenshotScope,
+    public_page: bool,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
     snapshot_generation: SemanticSnapshotGeneration,
@@ -206,6 +303,21 @@ pub struct SemanticScreenshotRequest {
 }
 
 impl SemanticScreenshotRequest {
+    /// Requires an additional native non-account-workflow survey before and
+    /// after pixels. This narrows capture and grants no disclosure permission.
+    pub fn require_public_page(mut self) -> Self {
+        self.public_page = true;
+        self.guard = screenshot_request_guard(
+            self.id,
+            self.scope,
+            self.source_guard,
+            self.requested_at,
+            self.deadline,
+            self.budget,
+            true,
+        );
+        self
+    }
     /// Request identity.
     pub const fn id(&self) -> SemanticScreenshotRequestId {
         self.id
@@ -255,6 +367,7 @@ impl SemanticScreenshotRequest {
         let pending = SemanticScreenshotPending {
             id: self.id,
             scope: self.scope,
+            public_page: self.public_page,
             observation: self.observation,
             observation_generation: self.observation_generation,
             snapshot_generation: self.snapshot_generation,
@@ -268,6 +381,7 @@ impl SemanticScreenshotRequest {
         let native = SemanticScreenshotNativeRequest {
             id: self.id,
             scope: self.scope,
+            public_page: self.public_page,
             context: self.context,
             requested_at: self.requested_at,
             deadline: self.deadline,
@@ -372,10 +486,12 @@ pub fn prepare_semantic_screenshot(
         requested_at,
         deadline,
         budget,
+        false,
     );
     Ok(SemanticScreenshotRequest {
         id,
         scope,
+        public_page: false,
         observation: observation.request().id(),
         observation_generation: observation.request().generation(),
         snapshot_generation,
@@ -395,6 +511,7 @@ fn screenshot_request_guard(
     requested_at: SemanticCaptureInstant,
     deadline: SemanticCaptureInstant,
     budget: SemanticScreenshotBudget,
+    public_page: bool,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"zephium.semantic-screenshot-request.v1\0");
@@ -402,6 +519,7 @@ fn screenshot_request_guard(
     hasher.update([match scope {
         SemanticScreenshotScope::Viewport => 0,
     }]);
+    hasher.update([u8::from(public_page)]);
     hasher.update(observation_digest);
     hasher.update(requested_at.millis().to_be_bytes());
     hasher.update(deadline.millis().to_be_bytes());
@@ -417,6 +535,7 @@ fn screenshot_request_guard(
 pub struct SemanticScreenshotPending {
     id: SemanticScreenshotRequestId,
     scope: SemanticScreenshotScope,
+    public_page: bool,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
     snapshot_generation: SemanticSnapshotGeneration,
@@ -631,6 +750,7 @@ pub enum SemanticScreenshotCoordinatorError {
 pub struct SemanticScreenshotNativeRequest {
     id: SemanticScreenshotRequestId,
     scope: SemanticScreenshotScope,
+    public_page: bool,
     context: ContextJoin,
     requested_at: SemanticCaptureInstant,
     deadline: SemanticCaptureInstant,
@@ -640,6 +760,10 @@ pub struct SemanticScreenshotNativeRequest {
 }
 
 impl SemanticScreenshotNativeRequest {
+    /// Whether this request requires the extra account-workflow exclusion.
+    pub const fn requires_public_page(&self) -> bool {
+        self.public_page
+    }
     /// Exact native request identity.
     pub const fn id(&self) -> SemanticScreenshotRequestId {
         self.id
@@ -692,6 +816,7 @@ impl SemanticScreenshotNativeRequest {
         SemanticScreenshotNativeCapture {
             id: self.id,
             scope: self.scope,
+            public_page: self.public_page,
             context: self.context,
             requested_at: self.requested_at,
             deadline: self.deadline,
@@ -734,6 +859,10 @@ pub enum SemanticScreenshotPaintEvidence {
 /// Closed native screenshot refusal emitted after successful port admission.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum SemanticScreenshotNativeFailure {
+    /// The additional public-workflow survey needs separate screenshot consent.
+    /// No pixels were captured by this refusal.
+    #[error("native page screenshot requires separate consent")]
+    ConsentRequired,
     /// The pinned platform cannot implement the required capture invariants.
     #[error("native semantic screenshot is unsupported")]
     Unsupported,
@@ -768,6 +897,7 @@ pub enum SemanticScreenshotNativeFailure {
 pub struct SemanticScreenshotNativeCapture {
     id: SemanticScreenshotRequestId,
     scope: SemanticScreenshotScope,
+    public_page: bool,
     context: ContextJoin,
     requested_at: SemanticCaptureInstant,
     deadline: SemanticCaptureInstant,
@@ -780,6 +910,30 @@ pub struct SemanticScreenshotNativeCapture {
     width: u32,
     height: u32,
     png: Vec<u8>,
+}
+
+impl SemanticScreenshotNativeCapture {
+    /// Exact original request digest for its private native owner receipt.
+    pub const fn native_request_guard(&self) -> [u8; 32] {
+        self.guard
+    }
+    /// Original request identity; descriptive, not a public-page attestation.
+    pub const fn id(&self) -> SemanticScreenshotRequestId {
+        self.id
+    }
+    /// Original context for the trusted native owner's receipt correlation.
+    pub const fn context(&self) -> ContextJoin {
+        self.context
+    }
+    /// Required capture recipe, never a claim that the survey completed.
+    pub const fn requires_public_page(&self) -> bool {
+        self.public_page
+    }
+    /// Bounded native-byte identity; no pixels or a disclosure grant are returned.
+    pub fn native_image_digest(&self) -> Option<[u8; 32]> {
+        (self.png.len() <= self.budget.max_png_bytes() as usize)
+            .then(|| Sha256::digest(&self.png).into())
+    }
 }
 
 impl fmt::Debug for SemanticScreenshotNativeCapture {
@@ -925,6 +1079,9 @@ impl SemanticScreenshotStats {
 pub struct SemanticScreenshot {
     id: SemanticScreenshotRequestId,
     scope: SemanticScreenshotScope,
+    public_page: bool,
+    native_image_digest: [u8; 32],
+    native_request_guard: [u8; 32],
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
     context: ContextJoin,
@@ -935,6 +1092,19 @@ pub struct SemanticScreenshot {
 }
 
 impl SemanticScreenshot {
+    /// The original request required the stricter survey. This descriptive
+    /// field proves no native survey; the original owner must supply its receipt.
+    pub const fn requires_public_page(&self) -> bool {
+        self.public_page
+    }
+    /// Native byte identity for an original-owner receipt lookup. Not authority.
+    pub const fn native_image_digest(&self) -> [u8; 32] {
+        self.native_image_digest
+    }
+    /// Exact original capture-request identity for the native owner lookup.
+    pub const fn native_request_guard(&self) -> [u8; 32] {
+        self.native_request_guard
+    }
     pub(crate) fn matches_baseline(&self, baseline: &SemanticObservationAcknowledgement) -> bool {
         self.observation == baseline.observation()
             && self.observation_generation == baseline.generation()
@@ -997,6 +1167,16 @@ impl SemanticScreenshot {
         self.png
     }
 
+    pub(crate) fn delivery_guard(&self) -> [u8; 32] {
+        screenshot_delivery_guard(self)
+    }
+    pub(crate) fn matches_observation(&self, observation: &SemanticObservation) -> bool {
+        self.observation == observation.request().id()
+            && self.observation_generation == observation.request().generation()
+            && self.context == observation.request().context()
+            && self.source_guard
+                == SemanticObservationFingerprint::from_observation(observation).digest()
+    }
     pub(crate) fn into_provider_parts(
         self,
     ) -> (
@@ -1185,6 +1365,7 @@ fn screenshot_delivery_guard(screenshot: &SemanticScreenshot) -> [u8; 32] {
     hasher.update([match screenshot.scope {
         SemanticScreenshotScope::Viewport => 0,
     }]);
+    hasher.update([u8::from(screenshot.public_page)]);
     hasher.update(screenshot.observation.get().to_be_bytes());
     hasher.update(screenshot.observation_generation.get().to_be_bytes());
     hash_context(&mut hasher, screenshot.context);
@@ -1223,6 +1404,16 @@ pub(crate) fn admitted_test_screenshot(
     id: u64,
     pixel: u8,
 ) -> SemanticScreenshot {
+    admitted_test_screenshot_mode(observation, acknowledgement, id, pixel, false)
+}
+#[cfg(test)]
+pub(crate) fn admitted_test_screenshot_mode(
+    observation: &SemanticObservation,
+    acknowledgement: &SemanticObservationAcknowledgement,
+    id: u64,
+    pixel: u8,
+    public: bool,
+) -> SemanticScreenshot {
     let request = prepare_semantic_screenshot(
         SemanticScreenshotRequestId::new(id).expect("test screenshot id"),
         observation,
@@ -1232,6 +1423,11 @@ pub(crate) fn admitted_test_screenshot(
         SemanticScreenshotBudget::STANDARD,
     )
     .expect("test screenshot request");
+    let request = if public {
+        request.require_public_page()
+    } else {
+        request
+    };
     let context = request.context();
     let mut coordinator = SemanticScreenshotCoordinator::new();
     let (pending, native) = coordinator.begin(request).expect("test screenshot begin");
@@ -1335,6 +1531,7 @@ fn admit_semantic_screenshot(
     if pending.guard != capture.guard
         || pending.id != capture.id
         || pending.scope != capture.scope
+        || pending.public_page != capture.public_page
         || pending.context != capture.context
         || pending.requested_at != capture.requested_at
         || pending.deadline != capture.deadline
@@ -1355,10 +1552,16 @@ fn admit_semantic_screenshot(
     match capture.paint {
         SemanticScreenshotPaintEvidence::ExactDocumentContentAvailable => {}
     }
+    let native_image_digest = capture
+        .native_image_digest()
+        .ok_or(SemanticScreenshotError::ImageLimit)?;
     let (png, stats) = admit_png(capture.png, capture.width, capture.height, pending.budget)?;
     Ok(SemanticScreenshot {
         id: pending.id,
         scope: pending.scope,
+        public_page: pending.public_page,
+        native_image_digest,
+        native_request_guard: pending.guard,
         observation: pending.observation,
         observation_generation: pending.observation_generation,
         context: pending.context,
@@ -1882,6 +2085,67 @@ mod tests {
         }
         append_chunk(&mut png, PNG_IEND, &[]);
         png
+    }
+
+    #[test]
+    fn public_survey_mode_is_bound_to_request_but_is_not_a_disclosure_attestation() {
+        let observation = observation(100);
+        let mut coordinator = SemanticScreenshotCoordinator::new();
+        let requested = request(
+            1,
+            &observation,
+            1000,
+            2000,
+            SemanticScreenshotBudget::STANDARD,
+        )
+        .require_public_page();
+        let (pending, native) = coordinator.begin(requested).unwrap();
+        assert!(native.requires_public_page());
+        let capture = native.complete(
+            SemanticScreenshotPaintEvidence::ExactDocumentContentAvailable,
+            SemanticCaptureInstant::from_millis(1001),
+            SemanticCaptureInstant::from_millis(1002),
+            1,
+            1,
+            test_rgba_png(7),
+        );
+        let digest = capture.native_image_digest().unwrap();
+        let admitted = coordinator
+            .admit(pending, observation.request().context(), capture)
+            .unwrap();
+        assert!(admitted.requires_public_page());
+        assert_eq!(admitted.native_image_digest(), digest);
+        assert_eq!(admitted.sensitivity(), SemanticSensitivity::Sensitive);
+        // No public/consented flag or attestation setter exists on the image.
+        let standard = request(
+            2,
+            &observation,
+            1000,
+            2000,
+            SemanticScreenshotBudget::STANDARD,
+        );
+        let public = request(
+            2,
+            &observation,
+            1000,
+            2000,
+            SemanticScreenshotBudget::STANDARD,
+        )
+        .require_public_page();
+        let (pending, _) = standard.begin_native();
+        let (_, native) = public.begin_native();
+        let capture = native.complete(
+            SemanticScreenshotPaintEvidence::ExactDocumentContentAvailable,
+            SemanticCaptureInstant::from_millis(1001),
+            SemanticCaptureInstant::from_millis(1002),
+            1,
+            1,
+            test_rgba_png(7),
+        );
+        assert!(matches!(
+            admit_semantic_screenshot(pending, observation.request().context(), capture),
+            Err(SemanticScreenshotError::RequestMismatch)
+        ));
     }
 
     fn admission_error(

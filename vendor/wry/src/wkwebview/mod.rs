@@ -849,6 +849,8 @@ impl InnerWebView {
           attributes.download_completed_handler,
           #[cfg(target_os = "macos")]
           pl_attrs.native_download_handler,
+          #[cfg(target_os = "macos")]
+          attributes.credential_challenge_denied_handler.clone(),
           mtm,
         );
         Some(delegate)
@@ -869,6 +871,8 @@ impl InnerWebView {
         attributes.apple_navigation_action_handler,
         #[cfg(target_os = "macos")]
         attributes.main_frame_navigation_attempt_handler,
+        #[cfg(target_os = "macos")]
+        attributes.credential_challenge_denied_handler,
         download_delegate.clone(),
         attributes.on_page_load_handler,
         attributes.navigation_event_handler,

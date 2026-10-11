@@ -128,6 +128,7 @@ pub(crate) struct AgentOwnedViewCallbacks<
     invariant: Invariant,
     panic: Panic,
     redirect: Option<Rc<dyn Fn(zephium_agentic::ContextNavigationTarget)>>,
+    credential_denied: Option<Rc<dyn Fn()>>,
 }
 
 impl<Navigation, Location, RendererLost, BrowserLost, Invariant, Panic>
@@ -149,7 +150,13 @@ impl<Navigation, Location, RendererLost, BrowserLost, Invariant, Panic>
             invariant,
             panic,
             redirect: None,
+            credential_denied: None,
         }
+    }
+    /// Removal-only native signal, bound to this exact owned view cohort.
+    pub(crate) fn with_credential_denied(mut self, callback: impl Fn() + 'static) -> Self {
+        self.credential_denied = Some(Rc::new(callback));
+        self
     }
     /// Ends a public document whose first load the Work gate refused as a
     /// redirect. Without it, that refusal is an invariant failure.
@@ -887,8 +894,14 @@ impl AgentOwnedView {
         request: SemanticScreenshotNativeRequest,
         admitted_at: Instant,
         cancelled: Arc<AtomicBool>,
-        completion: impl FnOnce(Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>)
-            + 'static,
+        completion: impl FnOnce(
+                Result<
+                    crate::platform::semantic_pixel_privacy::ModelCapture<
+                        SemanticScreenshotNativeCapture,
+                    >,
+                    SemanticScreenshotNativeFailure,
+                >,
+            ) + 'static,
         callback_panicked: impl Fn() + 'static,
     ) -> Result<(), SemanticScreenshotNativeFailure> {
         if self
@@ -904,8 +917,16 @@ impl AgentOwnedView {
         };
         let native = self.view.webview();
         let capture_cancelled = cancelled.clone();
-        crate::platform::semantic_pixel_privacy::guarded_capture(
-            Rc::new(move |completion| semantic.dispatch_privacy(completion)),
+        let public = request.requires_public_page();
+        crate::platform::semantic_pixel_privacy::guarded_model_capture(
+            public,
+            Rc::new(move |completion| {
+                if public {
+                    semantic.dispatch_public_privacy(completion)
+                } else {
+                    semantic.dispatch_privacy(completion)
+                }
+            }),
             move |completion| {
                 super::semantic_screenshot::capture_viewport(
                     &native,
@@ -1518,6 +1539,7 @@ where
         invariant: on_invariant_failure,
         panic: on_callback_panic,
         redirect: on_redirect,
+        credential_denied: on_credential_denied,
     } = callbacks;
     let navigation = AgentNavigationController::default();
     let navigation_policy = navigation.clone();
@@ -1736,11 +1758,17 @@ where
     if !semantic.controller().attest(&view.webview()) {
         return Err(AgentOwnedViewConstructionError::ExtensionIsolation);
     }
-    let security_policy = super::configure(
+    let credential_panic = panic_callback.clone();
+    let credential_denied = on_credential_denied.map(|notify| {
+        Rc::new(move || invoke_unit_callback(notify.as_ref(), credential_panic.as_ref()))
+            as Rc<dyn Fn()>
+    });
+    let security_policy = super::configure_with_credential_denied(
         &view,
         0.0,
         storage_class == ContextProfileStorageClass::Ephemeral,
         expected_user_data_folder,
+        credential_denied,
     )
     .map_err(|_| AgentOwnedViewConstructionError::Native)?;
     attest_hidden_owner(&view, expected_parent, viewport)?;

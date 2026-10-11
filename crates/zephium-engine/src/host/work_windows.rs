@@ -550,6 +550,7 @@ impl EngineHost {
         } else {
             None
         };
+        let credential_denied = guard.clone();
         let built = crate::platform::windows::build_owned_work_view(
             &ParentHandle(self.parent.0),
             ContextOwnedViewport::STANDARD,
@@ -585,6 +586,7 @@ impl EngineHost {
                     super::notify_work_resource(panic.clone());
                 },
             )
+            .with_credential_denied(move || credential_denied.revoke_public_visual_lineage())
             .with_redirect(move |destination| {
                 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                 redirected.record_failure_cause(

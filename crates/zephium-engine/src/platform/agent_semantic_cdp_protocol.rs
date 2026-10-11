@@ -562,11 +562,22 @@ pub(crate) fn decode_human_wall_response(
 pub(crate) fn invoke_privacy_command(
     context: &SemanticExecutionContext,
 ) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    invoke_privacy_command_mode(context, false)
+}
+pub(crate) fn invoke_privacy_command_mode(
+    context: &SemanticExecutionContext,
+    public: bool,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    let invocation = if public {
+        crate::platform::semantic_pixel_privacy::PUBLIC_INVOCATION
+    } else {
+        crate::platform::semantic_pixel_privacy::INVOCATION
+    };
     command(
         FixedSemanticCdpMethod::CallFunctionOn,
         json!({
             "functionDeclaration":INVOKE_FUNCTION,
-            "arguments":[{"value":crate::platform::semantic_pixel_privacy::INVOCATION}],
+            "arguments":[{"value":invocation}],
             "silent":true,"returnByValue":true,"generatePreview":false,"userGesture":false,"awaitPromise":false,
             "uniqueContextId":context.unique_id(),
         }),
@@ -577,6 +588,13 @@ pub(crate) fn invoke_privacy_command(
 
 pub(crate) fn decode_privacy_response(
     response: &str,
+) -> Result<crate::platform::semantic_pixel_privacy::PixelPrivacyProof, SemanticCdpInvocationError>
+{
+    decode_privacy_response_mode(response, false)
+}
+pub(crate) fn decode_privacy_response_mode(
+    response: &str,
+    public: bool,
 ) -> Result<crate::platform::semantic_pixel_privacy::PixelPrivacyProof, SemanticCdpInvocationError>
 {
     let object =
@@ -591,7 +609,13 @@ pub(crate) fn decode_privacy_response(
         .and_then(|result| result.get("value"))
         .and_then(Value::as_str)
         .and_then(|value| {
-            crate::platform::semantic_pixel_privacy::PixelPrivacyProof::decode(value.as_bytes())
+            if public {
+                crate::platform::semantic_pixel_privacy::PixelPrivacyProof::decode_public(
+                    value.as_bytes(),
+                )
+            } else {
+                crate::platform::semantic_pixel_privacy::PixelPrivacyProof::decode(value.as_bytes())
+            }
         });
     value.ok_or(SemanticCdpInvocationError::Protocol(
         SemanticCdpProtocolError::InvalidResponse,

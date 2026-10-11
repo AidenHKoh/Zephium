@@ -114,6 +114,8 @@ pub(crate) struct WorkResourceGuard {
     construction_window: Option<(zephium_agentic::WorkBrowserConstructionAttempt, Instant)>,
     redirect: Option<zephium_agentic::WorkBrowserRedirect>,
     state: Mutex<State>,
+    image_receipt: Mutex<image_receipt::NativeImageSlot>,
+    fresh_native_store: Mutex<Option<crate::host::FreshNativeStore>>,
     // Drop order is deliberate: the original native reporting owner retires
     // before its counted delivery lane. No audit may overlook a live reporter.
     health: Option<WorkBrowserResourceHealthReporter>,
@@ -171,6 +173,8 @@ impl WorkResourceGuard {
             health_permit: None,
             #[cfg(test)]
             notification_dispatch: Mutex::new(None),
+            image_receipt: Mutex::new(image_receipt::NativeImageSlot::default()),
+            fresh_native_store: Mutex::new(None),
             state: Mutex::new(State {
                 phase: Phase::Constructing,
                 construction_pending: true,
@@ -405,6 +409,8 @@ impl WorkResourceGuard {
         if !matches!(state.phase, Phase::Destroying | Phase::Destroyed) {
             state.phase = Phase::Quarantined;
         }
+        drop(state);
+        self.invalidate_image_sources();
     }
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     #[track_caller]
@@ -417,6 +423,37 @@ impl WorkResourceGuard {
             source: WorkNativeGuardFailureSource::of(caller.file()),
             line: caller.line(),
         });
+    }
+    pub(crate) fn bind_fresh_native_store(
+        &self,
+        proof: crate::host::FreshNativeStore,
+    ) -> Result<(), ContextPortFailure> {
+        if !self.construction_current()
+            || self.work_website_data
+            || !self.isolated_public
+            || self.anonymous_session.is_none()
+        {
+            return Err(ContextPortFailure::Stale);
+        }
+        let mut slot = self
+            .fresh_native_store
+            .lock()
+            .map_err(|_| ContextPortFailure::NativeRefused)?;
+        if slot.is_some() {
+            return Err(ContextPortFailure::Stale);
+        }
+        *slot = Some(proof);
+        Ok(())
+    }
+    pub(crate) fn revoke_public_visual_lineage(&self) {
+        let proof = self
+            .fresh_native_store
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone());
+        if let Some(proof) = proof {
+            proof.revoke();
+        }
     }
     fn admit_lifecycle(
         &self,
@@ -545,6 +582,11 @@ impl WorkResourceGuard {
                 state.phase = Phase::Destroying;
             }
             _ => return Err(ContextPortFailure::Stale),
+        }
+        drop(state);
+        self.invalidate_image_sources();
+        if request.operation() == Operation::PresentHuman {
+            self.revoke_public_visual_lineage();
         }
         Ok(())
     }
@@ -1344,6 +1386,39 @@ impl Drop for WorkObservationTask {
 }
 
 impl EngineAgentBrowserPort {
+    pub(super) fn native_image_public_candidate(
+        &self,
+        lease: &WorkBrowserExecutionLease,
+        context: zephium_agentic::ContextJoin,
+    ) -> bool {
+        let guard = self
+            .admission
+            .work
+            .lock()
+            .ok()
+            .and_then(|ingress| ingress.rows.get(&context.identity().id()).cloned());
+        guard.is_some_and(|guard| guard.public_image_candidate(lease, context))
+    }
+
+    pub(super) fn claim_native_image_source(
+        &self,
+        lease: &WorkBrowserExecutionLease,
+        image: &zephium_agentic::SemanticScreenshot,
+    ) -> Option<Arc<dyn zephium_agentic::SemanticScreenshotSource>> {
+        let guard = self
+            .admission
+            .work
+            .lock()
+            .ok()?
+            .rows
+            .get(&image.context().identity().id())?
+            .clone();
+        if guard.resource() != lease.resource() {
+            return None;
+        }
+        guard.claim_image_source(lease, image)
+    }
+
     pub(super) fn schedule_work_lifecycle(
         &self,
         mut request: WorkBrowserResourceRequest,
@@ -1602,3 +1677,6 @@ pub(crate) use navigation::{WorkHistoryBackTask, WorkNavigationTask};
 #[path = "work_resource_action_port.rs"]
 mod action;
 pub(crate) use action::WorkActionTask;
+
+#[path = "work_resource_image_receipt.rs"]
+mod image_receipt;

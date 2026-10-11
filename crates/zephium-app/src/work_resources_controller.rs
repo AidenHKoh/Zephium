@@ -141,7 +141,39 @@ impl RetainedBrowser {
         }
     }
 }
+// The constructor is private to the original retained adapter. Callers get
+// only this narrow broker, never the underlying native port or registry.
+struct RetainedImageSource {
+    port: Arc<dyn AgentBrowserPort>,
+    lease: WorkBrowserExecutionLease,
+}
+impl zephium_agentic::SemanticScreenshotSourcePort for RetainedImageSource {
+    fn lease(&self) -> &WorkBrowserExecutionLease {
+        &self.lease
+    }
+    fn public_candidate(&self, context: zephium_agentic::ContextJoin) -> bool {
+        self.port
+            .work_screenshot_public_candidate(&self.lease, context)
+    }
+    fn claim(
+        &self,
+        image: &zephium_agentic::SemanticScreenshot,
+    ) -> Option<Arc<dyn zephium_agentic::SemanticScreenshotSource>> {
+        self.port.claim_work_screenshot_source(&self.lease, image)
+    }
+}
 impl AgentWorkRetainedBrowser for RetainedBrowser {
+    fn screenshot_source_port(
+        &self,
+    ) -> Option<Arc<dyn zephium_agentic::SemanticScreenshotSourcePort>> {
+        if self.revoke.is_some() || self.delivered || self.listener().is_err() {
+            return None;
+        }
+        Some(Arc::new(RetainedImageSource {
+            port: self.browser.shared.port.clone(),
+            lease: self.browser.lease.clone(),
+        }))
+    }
     fn supports_screenshots(&self) -> bool {
         cfg!(any(target_os = "macos", target_os = "windows"))
     }

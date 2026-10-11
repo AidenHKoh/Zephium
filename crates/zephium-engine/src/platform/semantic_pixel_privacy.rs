@@ -10,11 +10,13 @@ use std::{
 use zephium_agentic::SemanticScreenshotNativeFailure;
 
 pub(crate) const INVOCATION: &str = "P1:privacy";
+pub(crate) const PUBLIC_INVOCATION: &str = "P1:public";
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PixelPrivacyProof {
     v: u8,
     r: u64,
     c: bool,
+    public_page: Option<bool>,
     w: f64,
     h: f64,
     x: f64,
@@ -22,18 +24,30 @@ pub(crate) struct PixelPrivacyProof {
 }
 impl PixelPrivacyProof {
     pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
+        Self::decode_mode(bytes, false)
+    }
+    /// Additional account-workflow exclusion only. Never storage/consent proof.
+    pub(crate) fn decode_public(bytes: &[u8]) -> Option<Self> {
+        Self::decode_mode(bytes, true)
+    }
+    fn decode_mode(bytes: &[u8], public: bool) -> Option<Self> {
         if bytes.len() > 512 {
             return None;
         }
         let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
         let object = value.as_object()?;
-        if object.len() != 7 {
+        if object.len() != if public { 8 } else { 7 } {
             return None;
         }
         let proof = Self {
             v: object.get("v")?.as_u64()?.try_into().ok()?,
             r: object.get("r")?.as_u64()?,
             c: object.get("c")?.as_bool()?,
+            public_page: if public {
+                Some(object.get("a")?.as_bool()?)
+            } else {
+                None
+            },
             w: object.get("w")?.as_f64()?,
             h: object.get("h")?.as_f64()?,
             x: object.get("x")?.as_f64()?,
@@ -70,7 +84,7 @@ pub(crate) fn guarded_capture<T: 'static>(
     cancelled: Arc<AtomicBool>,
     completion: impl FnOnce(CaptureResult<T>) + 'static,
 ) {
-    guarded_capture_inner(None, probe, capture, cancelled, completion)
+    guarded_capture_inner(None, false, probe, capture, cancelled, completion)
 }
 /// Crops additionally require the fresh pre-capture survey to match the exact
 /// native element/rectangle admission proof, before any pixels are captured.
@@ -81,10 +95,71 @@ pub(crate) fn guarded_capture_at<T: 'static>(
     cancelled: Arc<AtomicBool>,
     completion: impl FnOnce(CaptureResult<T>) + 'static,
 ) {
-    guarded_capture_inner(Some(expected), probe, capture, cancelled, completion)
+    guarded_capture_inner(Some(expected), false, probe, capture, cancelled, completion)
+}
+/// Native-only linear proof: constructed exclusively after matching public
+/// privacy samples bracketed this exact capture value. No public attestation
+/// setter or constructor is exposed outside this private engine module.
+pub(crate) struct ModelCapture<T> {
+    capture: T,
+    public: bool,
+}
+impl<T> ModelCapture<T> {
+    pub(crate) fn capture(&self) -> &T {
+        &self.capture
+    }
+    pub(crate) fn public_survey(&self) -> bool {
+        self.public
+    }
+    pub(crate) fn into_capture(self) -> T {
+        self.capture
+    }
+}
+impl<T> std::fmt::Debug for ModelCapture<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ModelCapture([private native receipt])")
+    }
+}
+
+/// Model viewport proof with the same common privacy checks. This private
+/// wrapper is distinct from local crop outputs and carries no consent grant.
+pub(crate) fn guarded_model_capture<T: 'static>(
+    public: bool,
+    probe: Rc<dyn Fn(PrivacyCompletion)>,
+    capture: impl FnOnce(CaptureCompletion<T>) -> Result<(), SemanticScreenshotNativeFailure> + 'static,
+    cancelled: Arc<AtomicBool>,
+    completion: impl FnOnce(CaptureResult<ModelCapture<T>>) + 'static,
+) {
+    if public {
+        guarded_public_capture(probe, capture, cancelled, completion);
+    } else {
+        guarded_capture(probe, capture, cancelled, move |result| {
+            completion(result.map(|capture| ModelCapture {
+                capture,
+                public: false,
+            }))
+        });
+    }
+}
+
+/// Additional public-workflow survey, only after native storage/task admission.
+/// A missing public bit cannot fall back to ordinary privacy clearance.
+pub(crate) fn guarded_public_capture<T: 'static>(
+    probe: Rc<dyn Fn(PrivacyCompletion)>,
+    capture: impl FnOnce(CaptureCompletion<T>) -> Result<(), SemanticScreenshotNativeFailure> + 'static,
+    cancelled: Arc<AtomicBool>,
+    completion: impl FnOnce(CaptureResult<ModelCapture<T>>) + 'static,
+) {
+    guarded_capture_inner(None, true, probe, capture, cancelled, move |result| {
+        completion(result.map(|capture| ModelCapture {
+            capture,
+            public: true,
+        }))
+    })
 }
 fn guarded_capture_inner<T: 'static>(
     expected: Option<PixelPrivacyProof>,
+    public: bool,
     probe: Rc<dyn Fn(PrivacyCompletion)>,
     capture: impl FnOnce(CaptureCompletion<T>) -> Result<(), SemanticScreenshotNativeFailure> + 'static,
     cancelled: Arc<AtomicBool>,
@@ -101,6 +176,13 @@ fn guarded_capture_inner<T: 'static>(
             complete(&finish, Err(SemanticScreenshotNativeFailure::Stale));
             return;
         };
+        if public && before.public_page != Some(true) {
+            complete(
+                &finish,
+                Err(SemanticScreenshotNativeFailure::ConsentRequired),
+            );
+            return;
+        }
         if cancelled.load(Ordering::Acquire) {
             complete(&finish, Err(SemanticScreenshotNativeFailure::Cancelled));
             return;
@@ -349,5 +431,73 @@ mod record_cancellation_tests {
                 Some(Err(SemanticScreenshotNativeFailure::Stale))
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod public_page_tests {
+    use super::*;
+    fn proof(public: bool) -> PixelPrivacyProof {
+        PixelPrivacyProof::decode_public(
+            format!(r#"{{"v":1,"r":1,"c":true,"a":{public},"w":1280,"h":800,"x":0,"y":0}}"#)
+                .as_bytes(),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn public_decoder_requires_exact_boolean_and_legacy_decoder_remains_closed() {
+        let public = br#"{"v":1,"r":1,"c":true,"a":true,"w":1280,"h":800,"x":0,"y":0}"#;
+        assert!(PixelPrivacyProof::decode(public).is_none());
+        assert!(PixelPrivacyProof::decode_public(public).is_some());
+        for bytes in [
+            br#"{"v":1,"r":1,"c":true,"w":1280,"h":800,"x":0,"y":0}"#.as_slice(),
+            br#"{"v":1,"r":1,"c":true,"a":1,"w":1280,"h":800,"x":0,"y":0}"#,
+            br#"{"v":1,"r":1,"c":true,"a":true,"w":1280,"h":800,"x":0,"y":0,"url":"private"}"#,
+        ] {
+            assert!(PixelPrivacyProof::decode_public(bytes).is_none());
+        }
+    }
+    #[test]
+    fn public_capture_refuses_account_or_legacy_proof_before_pixels() {
+        let mut legacy = proof(true);
+        legacy.public_page = None;
+        for before in [proof(false), legacy] {
+            let output = Rc::new(RefCell::new(None));
+            let result = output.clone();
+            guarded_public_capture::<()>(
+                Rc::new(move |reply| reply(Some(before))),
+                |_| panic!("account or unknown page must not capture"),
+                Arc::new(AtomicBool::new(false)),
+                move |value| *result.borrow_mut() = Some(value),
+            );
+            assert!(matches!(
+                &*output.borrow(),
+                Some(Err(SemanticScreenshotNativeFailure::ConsentRequired))
+            ));
+        }
+    }
+    #[test]
+    fn account_transition_during_public_capture_discards_the_pixels() {
+        let count = Rc::new(RefCell::new(0));
+        let calls = count.clone();
+        let output = Rc::new(RefCell::new(None));
+        let result = output.clone();
+        guarded_public_capture(
+            Rc::new(move |reply| {
+                let first = *calls.borrow() == 0;
+                *calls.borrow_mut() += 1;
+                reply(Some(proof(first)));
+            }),
+            |reply| {
+                reply(Ok(7));
+                Ok(())
+            },
+            Arc::new(AtomicBool::new(false)),
+            move |value| *result.borrow_mut() = Some(value),
+        );
+        assert!(matches!(
+            &*output.borrow(),
+            Some(Err(SemanticScreenshotNativeFailure::Stale))
+        ));
     }
 }

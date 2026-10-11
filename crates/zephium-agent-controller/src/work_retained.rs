@@ -14,6 +14,13 @@ const NAVIGATION_STALL: Duration = Duration::from_secs(90);
 /// operation slots outside the worker; no native port or registry is exposed.
 /// Registration is immutable, bounded and precedes every native dispatch.
 pub trait AgentWorkRetainedBrowser: Send {
+    /// Returns only the original lease-bound image source broker. Registration
+    /// precedes the first provider call and cannot select another native owner.
+    fn screenshot_source_port(
+        &self,
+    ) -> Option<std::sync::Arc<dyn zephium_agentic::SemanticScreenshotSourcePort>> {
+        None
+    }
     /// Whether this exact retained backing can own a bounded native viewport
     /// capture callback for its leased document.
     fn supports_screenshots(&self) -> bool {

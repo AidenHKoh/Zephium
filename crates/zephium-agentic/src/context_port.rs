@@ -1015,6 +1015,27 @@ pub type SemanticActionNativeCompletion =
 /// never project owned contexts into tab/session/extension inventories and
 /// must retain no queue, worker, timer, or page when no contexts exist.
 pub trait AgentBrowserPort: Send + Sync {
+    /// Negative-only routing check: whether the original owner can attempt a
+    /// public survey in fresh native storage. True never authorizes pixels.
+    fn work_screenshot_public_candidate(
+        &self,
+        _lease: &crate::WorkBrowserExecutionLease,
+        _context: crate::ContextJoin,
+    ) -> bool {
+        false
+    }
+
+    /// Claims the original native capture once, under this exact resource lease.
+    /// Public mode additionally requires actual fresh-store lineage. This does
+    /// not grant consent or disclose pixels, and never uses another native port.
+    fn claim_work_screenshot_source(
+        &self,
+        _lease: &crate::WorkBrowserExecutionLease,
+        _image: &crate::SemanticScreenshot,
+    ) -> Option<std::sync::Arc<dyn crate::SemanticScreenshotSource>> {
+        None
+    }
+
     /// Whether this bound native adapter implements the production history
     /// retention/reactivation contract on the running platform version.
     fn supports_work_resource_history_back(&self) -> bool {

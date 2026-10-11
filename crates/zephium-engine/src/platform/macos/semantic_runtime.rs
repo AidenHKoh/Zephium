@@ -158,6 +158,7 @@ enum PendingInvocation {
     },
     Privacy {
         completion: PrivacyCompletion,
+        public: bool,
     },
     Observation {
         invocation: SemanticRuntimeInvocation,
@@ -173,7 +174,13 @@ enum PendingInvocation {
 impl PendingInvocation {
     fn as_str(&self) -> &str {
         match self {
-            Self::Privacy { .. } => crate::platform::semantic_pixel_privacy::INVOCATION,
+            Self::Privacy { public, .. } => {
+                if *public {
+                    crate::platform::semantic_pixel_privacy::PUBLIC_INVOCATION
+                } else {
+                    crate::platform::semantic_pixel_privacy::INVOCATION
+                }
+            }
             Self::Media { invocation, .. } => invocation.as_str(),
             Self::Observation { invocation, .. } => invocation.as_str(),
             Self::Action { invocation, .. } => invocation.as_str(),
@@ -360,14 +367,22 @@ impl SemanticRuntimeChannelState {
         });
         Ok(self.prepare_pump())
     }
+    #[cfg(test)]
     fn dispatch_privacy(
         &mut self,
+        completion: PrivacyCompletion,
+    ) -> Result<ChannelActions, PrivacyCompletion> {
+        self.dispatch_privacy_mode(false, completion)
+    }
+    fn dispatch_privacy_mode(
+        &mut self,
+        public: bool,
         completion: PrivacyCompletion,
     ) -> Result<ChannelActions, PrivacyCompletion> {
         if self.admission_failure().is_some() {
             return Err(completion);
         }
-        self.pending = Some(PendingInvocation::Privacy { completion });
+        self.pending = Some(PendingInvocation::Privacy { completion, public });
         Ok(self.prepare_pump())
     }
 
@@ -664,7 +679,7 @@ impl SemanticRuntimeChannelState {
                     completion,
                     outcome: None,
                 },
-                PendingInvocation::Privacy { completion } => CompletionAction::Privacy {
+                PendingInvocation::Privacy { completion, .. } => CompletionAction::Privacy {
                     completion,
                     outcome: None,
                 },
@@ -778,7 +793,7 @@ impl SemanticRuntimeChannelState {
                     completion,
                     outcome: None,
                 },
-                PendingInvocation::Privacy { completion } => CompletionAction::Privacy {
+                PendingInvocation::Privacy { completion, .. } => CompletionAction::Privacy {
                     completion,
                     outcome: None,
                 },
@@ -819,11 +834,17 @@ impl SemanticRuntimeChannelState {
                 },
                 true,
             ),
-            PendingInvocation::Privacy { completion } => (
+            PendingInvocation::Privacy { completion, public } => (
                 CompletionAction::Privacy {
                     completion,
                     outcome: (self.phase == DocumentPhase::Ready)
-                        .then(|| PixelPrivacyProof::decode(bytes))
+                        .then(|| {
+                            if public {
+                                PixelPrivacyProof::decode_public(bytes)
+                            } else {
+                                PixelPrivacyProof::decode(bytes)
+                            }
+                        })
                         .flatten(),
                 },
                 true,
@@ -1121,8 +1142,14 @@ impl AgentSemanticRuntimeController {
         }
     }
     pub(crate) fn dispatch_privacy(&self, completion: PrivacyCompletion) {
+        self.dispatch_privacy_mode(false, completion);
+    }
+    pub(crate) fn dispatch_public_privacy(&self, completion: PrivacyCompletion) {
+        self.dispatch_privacy_mode(true, completion);
+    }
+    fn dispatch_privacy_mode(&self, public: bool, completion: PrivacyCompletion) {
         let dispatched = match self.state.try_borrow_mut() {
-            Ok(mut state) => state.dispatch_privacy(completion),
+            Ok(mut state) => state.dispatch_privacy_mode(public, completion),
             Err(_) => Err(completion),
         };
         match dispatched {

@@ -73,9 +73,13 @@ mod navigation;
 #[path = "work_resource_observation.rs"]
 mod observation;
 
+#[path = "work_visual_store.rs"]
+pub(crate) mod visual_store;
+
 #[cfg(target_os = "macos")]
 pub(super) struct AnonymousWorkStore {
     session: zephium_agentic::WeakWorkBrowserSession,
+    visual: Option<visual_store::FreshNativeStore>,
     pub(super) profile: zephium_core::ids::ProfileId,
     pub(super) store: crate::platform::imp::WebsiteDataStore,
 }
@@ -122,10 +126,12 @@ impl EngineHost {
         })) {
             return Err(ContextPortFailure::Stale);
         }
+        let visual = visual_store::FreshNativeStore::after_native_allocation(session);
         self.anonymous_work_stores.insert(
             id,
             AnonymousWorkStore {
                 session: session.downgrade(),
+                visual,
                 profile: session.profile(),
                 store: store.clone(),
             },
@@ -1322,7 +1328,15 @@ impl EngineHost {
         } else if guard.isolated_public() {
             Some(match guard.anonymous_session() {
                 Some(session) if session.admits(profile, guard.resource().identity().work()) => {
-                    self.anonymous_work_store(session)?
+                    let store = self.anonymous_work_store(session)?;
+                    if let Some(visual) = self
+                        .anonymous_work_stores
+                        .get(&session.id())
+                        .and_then(|entry| entry.visual.clone())
+                    {
+                        guard.bind_fresh_native_store(visual)?;
+                    }
+                    store
                 }
                 Some(_) => return Err(ContextPortFailure::Stale),
                 None => crate::platform::imp::new_ephemeral_data_store()
@@ -1431,6 +1445,8 @@ impl EngineHost {
             presentation_observations: 0,
         };
         #[cfg(target_os = "macos")]
+        let credential_denied = guard.clone();
+        #[cfg(target_os = "macos")]
         let callbacks = crate::platform::imp::AgentOwnedViewCallbacks::new(
             move |_| {
                 legacy.fail();
@@ -1456,6 +1472,7 @@ impl EngineHost {
                 resource_callback(panic.clone());
             },
         )
+        .with_credential_denied(move || credential_denied.revoke_public_visual_lineage())
         .with_redirect(move |destination| {
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             redirected.record_failure_cause(ResourceFailureCause::Redirected);

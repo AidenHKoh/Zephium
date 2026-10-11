@@ -66,7 +66,7 @@ enum ReadResult {
 enum ReadInvocation {
     HumanWall,
     Observation(SemanticRuntimeInvocation),
-    Privacy,
+    Privacy(bool),
     Media(MediaInvocation),
 }
 impl ReadInvocation {
@@ -83,8 +83,11 @@ impl ReadInvocation {
                     .ok()
             }
             Self::Observation(value) => invoke_runtime_command(context, value).ok(),
-            Self::Privacy => {
-                crate::platform::agent_semantic_cdp_protocol::invoke_privacy_command(context).ok()
+            Self::Privacy(public) => {
+                crate::platform::agent_semantic_cdp_protocol::invoke_privacy_command_mode(
+                    context, *public,
+                )
+                .ok()
             }
             Self::Media(value) => {
                 crate::platform::agent_semantic_cdp_protocol::invoke_media_command(context, value)
@@ -101,9 +104,11 @@ impl ReadInvocation {
             Self::Observation(value) => {
                 decode_invocation_response(value, response).map(ReadResult::Observation)
             }
-            Self::Privacy => {
-                crate::platform::agent_semantic_cdp_protocol::decode_privacy_response(response)
-                    .map(ReadResult::Privacy)
+            Self::Privacy(public) => {
+                crate::platform::agent_semantic_cdp_protocol::decode_privacy_response_mode(
+                    response, *public,
+                )
+                .map(ReadResult::Privacy)
             }
             Self::Media(value) => {
                 crate::platform::agent_semantic_cdp_protocol::decode_media_response(value, response)
@@ -476,8 +481,14 @@ impl AgentSemanticRuntimeController {
         );
     }
     pub(crate) fn dispatch_privacy(&self, completion: PrivacyCompletion) {
+        self.dispatch_privacy_mode(false, completion);
+    }
+    pub(crate) fn dispatch_public_privacy(&self, completion: PrivacyCompletion) {
+        self.dispatch_privacy_mode(true, completion);
+    }
+    fn dispatch_privacy_mode(&self, public: bool, completion: PrivacyCompletion) {
         let _ = self.native.dispatch(
-            ReadInvocation::Privacy,
+            ReadInvocation::Privacy(public),
             Box::new(move |result| {
                 completion(match result {
                     Ok(ReadResult::Privacy(proof)) => Some(proof),

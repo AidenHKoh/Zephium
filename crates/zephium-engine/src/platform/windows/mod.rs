@@ -247,7 +247,19 @@ pub fn configure(
     webview: &wry::WebView,
     _radius: f64,
     expected_in_private: bool,
+    expected_user_data_folder: &Path,
+) -> windows_core::Result<SecurityPolicy> {
+    configure_with_credential_denied(webview, _radius, expected_in_private, expected_user_data_folder, None)
+}
+
+/// Owned Work views can remove public lineage when credential UI is cancelled.
+/// The optional callback carries no native challenge or credential data.
+fn configure_with_credential_denied(
+    webview: &wry::WebView,
+    _radius: f64,
+    expected_in_private: bool,
     _expected_user_data_folder: &Path,
+    credential_denied: Option<Rc<dyn Fn()>>,
 ) -> windows_core::Result<SecurityPolicy> {
     let controller = webview.controller();
     let core = unsafe { controller.CoreWebView2()? };
@@ -291,7 +303,11 @@ pub fn configure(
     // do not cover them. Until Zephium has an origin-labelled broker, cancel
     // both surfaces and mark certificate requests handled so WebView2 cannot
     // fall back to ambient OS credentials/UI.
-    let basic_auth = BasicAuthenticationRequestedEventHandler::create(Box::new(|_, args| {
+    let basic_credential_denied = credential_denied.clone();
+    let basic_auth = BasicAuthenticationRequestedEventHandler::create(Box::new(move |_, args| {
+        if let Some(notify) = basic_credential_denied.as_ref() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify()));
+        }
         if let Some(args) = args {
             unsafe { args.SetCancel(true)? };
         }
@@ -301,7 +317,10 @@ pub fn configure(
     unsafe { core10.add_BasicAuthenticationRequested(&basic_auth, &mut basic_auth_token)? };
     policy.basic_auth_token = Some(basic_auth_token);
 
-    let client_certificate = ClientCertificateRequestedEventHandler::create(Box::new(|_, args| {
+    let client_certificate = ClientCertificateRequestedEventHandler::create(Box::new(move |_, args| {
+        if let Some(notify) = credential_denied.as_ref() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify()));
+        }
         if let Some(args) = args {
             unsafe {
                 args.SetCancel(true)?;

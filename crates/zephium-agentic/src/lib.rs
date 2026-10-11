@@ -59,7 +59,7 @@ pub use work_browser_document::{
 };
 pub use work_browser_resource::WorkBrowserConstructionAttempt;
 pub use work_browser_resource::{
-    brand_family, same_work_human_site, WorkBrowserAnonymousReadAuthority, WorkBrowserAnonymousReadStatus, WorkBrowserActionCompletion,
+    brand_family, same_work_human_site, WorkBrowserAnonymousReadAuthority, WorkBrowserAnonymousReadLoss, WorkBrowserAnonymousReadStatus, WorkBrowserActionCompletion,
     WorkBrowserActionCompletionCallback, WorkBrowserActionCompletionOwner,
     WorkBrowserActionDeliveryCompletion, WorkBrowserActionDeliveryTicket,
     WorkBrowserActionDispatch, WorkBrowserActionEvent, WorkBrowserActionRefusal,
@@ -635,14 +635,14 @@ pub use semantic_runtime::{
     SEMANTIC_RUNTIME_GLOBAL_NAME, SEMANTIC_RUNTIME_PROGRAM, SEMANTIC_RUNTIME_PROTOCOL_VERSION,
 };
 pub use semantic_screenshot::{
-    prepare_semantic_screenshot, SemanticScreenshot, SemanticScreenshotBudget,
+    prepare_semantic_screenshot, SemanticModelImageHost, SemanticModelImagePlan, SemanticScreenshot, SemanticScreenshotBudget,
     SemanticScreenshotBudgetError, SemanticScreenshotCoordinator,
     SemanticScreenshotCoordinatorError, SemanticScreenshotCoordinatorStatus,
     SemanticScreenshotDeliveryReceipt, SemanticScreenshotError, SemanticScreenshotNativeCapture,
     SemanticScreenshotNativeFailure, SemanticScreenshotNativeRequest,
     SemanticScreenshotPaintEvidence, SemanticScreenshotPending, SemanticScreenshotPixelLayout,
     SemanticScreenshotRequest, SemanticScreenshotRequestError, SemanticScreenshotRequestId,
-    SemanticScreenshotScope, SemanticScreenshotStats, SemanticScreenshotTrust,
+    SemanticScreenshotScope, SemanticScreenshotSource, SemanticScreenshotSourcePort, SemanticScreenshotStats, SemanticScreenshotTrust,
     MAX_PENDING_SEMANTIC_SCREENSHOTS, MAX_SEMANTIC_SCREENSHOT_CAPTURE_MILLIS,
     MAX_SEMANTIC_SCREENSHOT_HEIGHT, MAX_SEMANTIC_SCREENSHOT_PIXELS,
     MAX_SEMANTIC_SCREENSHOT_PNG_BYTES, MAX_SEMANTIC_SCREENSHOT_PNG_CHUNKS,

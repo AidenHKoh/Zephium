@@ -1464,4 +1464,6 @@ pub use media::{
 
 #[path = "work_browser_anonymous.rs"]
 mod anonymous;
-pub use anonymous::{WorkBrowserAnonymousReadAuthority, WorkBrowserAnonymousReadStatus};
+pub use anonymous::{
+    WorkBrowserAnonymousReadAuthority, WorkBrowserAnonymousReadLoss, WorkBrowserAnonymousReadStatus,
+};

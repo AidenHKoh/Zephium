@@ -478,8 +478,14 @@ impl AgentOwnedView {
         request: SemanticScreenshotNativeRequest,
         admitted_at: Instant,
         cancelled: Arc<AtomicBool>,
-        completion: impl FnOnce(Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>)
-            + 'static,
+        completion: impl FnOnce(
+                Result<
+                    crate::platform::semantic_pixel_privacy::ModelCapture<
+                        SemanticScreenshotNativeCapture,
+                    >,
+                    SemanticScreenshotNativeFailure,
+                >,
+            ) + 'static,
         callback_panicked: impl Fn() + 'static,
     ) -> Result<(), SemanticScreenshotNativeFailure> {
         let Some(semantic) = self.semantic().cloned() else {
@@ -487,8 +493,16 @@ impl AgentOwnedView {
         };
         let native = self.view.webview();
         let capture_cancelled = cancelled.clone();
-        crate::platform::semantic_pixel_privacy::guarded_capture(
-            Rc::new(move |completion| semantic.dispatch_privacy(completion)),
+        let public = request.requires_public_page();
+        crate::platform::semantic_pixel_privacy::guarded_model_capture(
+            public,
+            Rc::new(move |completion| {
+                if public {
+                    semantic.dispatch_public_privacy(completion)
+                } else {
+                    semantic.dispatch_privacy(completion)
+                }
+            }),
             move |completion| {
                 super::semantic_screenshot::capture_viewport(
                     &native,
@@ -599,6 +613,7 @@ pub(crate) struct AgentOwnedViewCallbacks<Navigation, Location, RendererLost, In
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     failure_diagnostic: Option<Rc<dyn Fn(crate::WorkResourceFailureCause)>>,
     redirect: Option<Rc<dyn Fn(zephium_agentic::ContextNavigationTarget)>>,
+    credential_denied: Option<Rc<dyn Fn()>>,
     navigation: Navigation,
     location: Location,
     renderer_lost: RendererLost,
@@ -620,12 +635,18 @@ impl<Navigation, Location, RendererLost, Invariant, Panic>
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             failure_diagnostic: None,
             redirect: None,
+            credential_denied: None,
             navigation,
             location,
             renderer_lost,
             invariant,
             panic,
         }
+    }
+    /// Removal-only native signal, bound to this exact owned view cohort.
+    pub(crate) fn with_credential_denied(mut self, callback: impl Fn() + 'static) -> Self {
+        self.credential_denied = Some(Rc::new(callback));
+        self
     }
     /// Ends a public document whose first load the Work gate refused as a
     /// redirect. Without it, that refusal is an invariant failure.
@@ -725,6 +746,7 @@ where
         #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
         failure_diagnostic,
         redirect: on_redirect,
+        credential_denied: on_credential_denied,
         navigation: on_navigation,
         location: on_location,
         renderer_lost: on_renderer_lost,
@@ -771,6 +793,7 @@ where
     let navigation_callback_panicked = on_callback_panic.clone();
     let location_callback_panicked = on_callback_panic.clone();
     let renderer_callback_panicked = on_callback_panic.clone();
+    let credential_callback_panicked = on_callback_panic.clone();
     let configuration = new_owned_agent_configuration(profile, storage_class, ephemeral_store)?;
     let semantic = AgentSemanticRuntimeRegistration::install(
         &configuration,
@@ -803,6 +826,11 @@ where
         .with_fullscreen_enabled(false)
         .with_picture_in_picture_enabled(false)
         .with_general_autofill_enabled(false)
+        .with_credential_challenge_denied_handler(move || {
+            if let Some(notify) = on_credential_denied.as_ref() {
+                invoke_owned_unit_callback(notify.as_ref(), credential_callback_panicked.as_ref());
+            }
+        })
         .with_apple_navigation_action_handler(move |target, action| {
             let prepare_human = work_policy.as_ref().is_some_and(|gate| {
                 gate.human_load_preparation_needed(action.target_is_main_frame)

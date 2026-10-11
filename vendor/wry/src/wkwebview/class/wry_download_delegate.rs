@@ -4,6 +4,8 @@
 
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
+#[cfg(target_os = "macos")]
+use objc2::DefinedClass;
 use objc2::{define_class, msg_send, rc::Retained, runtime::NSObject, MainThreadOnly};
 use objc2_foundation::{
   MainThreadMarker, NSData, NSError, NSObjectProtocol, NSString, NSURLAuthenticationChallenge,
@@ -17,6 +19,8 @@ use crate::wkwebview::download::{download_did_fail, download_did_finish, downloa
 pub struct WryDownloadDelegateIvars {
   #[cfg(target_os = "macos")]
   pub native: Option<Box<dyn Fn(&WKDownload)>>,
+  #[cfg(target_os = "macos")]
+  pub credential_challenge_denied_handler: Option<Rc<dyn Fn()>>,
   pub started: Option<RefCell<Box<dyn FnMut(String, &mut PathBuf) -> bool + 'static>>>,
   pub completed: Option<Rc<dyn Fn(String, Option<PathBuf>, bool) + 'static>>,
 }
@@ -70,6 +74,10 @@ define_class!(
       let disposition = if method.isEqualToString(NSURLAuthenticationMethodServerTrust) {
         NSURLSessionAuthChallengeDisposition::PerformDefaultHandling
       } else {
+        #[cfg(target_os = "macos")]
+        if let Some(notify) = &self.ivars().credential_challenge_denied_handler {
+          let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify()));
+        }
         NSURLSessionAuthChallengeDisposition::CancelAuthenticationChallenge
       };
       completion_handler.call((disposition, std::ptr::null_mut()));
@@ -82,6 +90,7 @@ impl WryDownloadDelegate {
     download_started_handler: Option<Box<dyn FnMut(String, &mut PathBuf) -> bool + 'static>>,
     download_completed_handler: Option<Rc<dyn Fn(String, Option<PathBuf>, bool) + 'static>>,
     #[cfg(target_os = "macos")] native: Option<Box<dyn Fn(&WKDownload)>>,
+    #[cfg(target_os = "macos")] credential_challenge_denied_handler: Option<Rc<dyn Fn()>>,
     mtm: MainThreadMarker,
   ) -> Retained<Self> {
     let delegate = mtm
@@ -89,6 +98,8 @@ impl WryDownloadDelegate {
       .set_ivars(WryDownloadDelegateIvars {
         #[cfg(target_os = "macos")]
         native,
+        #[cfg(target_os = "macos")]
+        credential_challenge_denied_handler,
         started: download_started_handler.map(|handler| RefCell::new(handler)),
         completed: download_completed_handler,
       });
