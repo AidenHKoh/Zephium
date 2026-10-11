@@ -787,6 +787,7 @@ pub enum WorkArtifactField {
     ListItemDetail,
     ListItemDue,
     ListItemFrom,
+    ListItemMedia,
     SheetColumns,
     SheetColumn,
     SheetRows,
@@ -924,6 +925,7 @@ impl WorkArtifactField {
             Self::ListItemTitle => "each list item's title is one line of 1 to 90 characters",
             Self::ListItemDetail => "a list item's detail is one line of at most 280 characters",
             Self::ListItemDue => "a list item's due is at most 32 characters",
+            Self::ListItemMedia => "a list item's native picture needs its exact record source and immutable custody",
             Self::ListItemFrom => "a list item's from has app of at most 24 characters, who of at most 40, when of at most 32, a quote of at most 200, host a bare host and url a public https URL",
             Self::SheetColumns => "sheet has 1 to 10 columns",
             Self::SheetColumn => "each sheet column has a unique label of at most 24 characters, a unit of at most 12, a three-letter currency (required for money) and best only on number, money, percent, rating, yes_no, duration or date columns",
@@ -2743,6 +2745,12 @@ impl WorkArtifactDataV1 {
     pub fn clear_record_media(&mut self) {
         match self {
             Self::Picks { items, .. } => {
+                for item in items {
+                    item.record_media = None;
+                    item.media_attempted = false;
+                }
+            }
+            Self::List { items, .. } => {
                 for item in items {
                     item.record_media = None;
                     item.media_attempted = false;

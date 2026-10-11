@@ -4367,6 +4367,12 @@ export type WorkListItemV1_Deserialize = {
 	done?: boolean,
 	from?: WorkListFromV1_Deserialize | null,
 	source?: number | null,
+	/**  Exact native collection-row evidence, independent of the prose citation. */
+	record_source?: number | null,
+	/**  Host-only immutable native image; never accepted from model tools. */
+	record_media?: WorkRecordMediaRefV1 | null,
+	/**  The selected native row attempted media; no URL fallback is implied. */
+	media_attempted?: boolean,
 };
 
 export type WorkListItemV1_Serialize = {
@@ -4377,6 +4383,12 @@ export type WorkListItemV1_Serialize = {
 	done?: boolean,
 	from?: WorkListFromV1_Serialize | null,
 	source?: number | null,
+	/**  Exact native collection-row evidence, independent of the prose citation. */
+	record_source?: number | null,
+	/**  Host-only immutable native image; never accepted from model tools. */
+	record_media?: WorkRecordMediaRefV1 | null,
+	/**  The selected native row attempted media; no URL fallback is implied. */
+	media_attempted?: boolean,
 };
 
 export type WorkListPriorityV1 = "high";

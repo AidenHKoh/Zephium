@@ -315,6 +315,15 @@ pub struct WorkListItemV1 {
     pub from: Option<WorkListFromV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<u16>,
+    /// Exact native collection-row evidence, independent of the prose citation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_source: Option<u16>,
+    /// Host-only immutable native image; never accepted from model tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_media: Option<super::media::WorkRecordMediaRefV1>,
+    /// The selected native row attempted media; no URL fallback is implied.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub media_attempted: bool,
 }
 /// Where an item came from: the app or site, who, when, their words.
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -1405,9 +1414,21 @@ pub(super) fn check_list(
             }
         }
         source(item.source, evidence, place("items[].source", i))?;
+        source(
+            item.record_source,
+            evidence,
+            place("items[].record_source", i),
+        )?;
+        if item.record_media.as_ref().is_some_and(|media| {
+            media.validate().is_err() || !item.media_attempted || item.record_source.is_none()
+        }) {
+            return Err(place("items[].record_media", i)
+                .dropping(F::ListItemMedia, Remove("items[].record_media")));
+        }
     }
     Ok(())
 }
+
 pub(super) fn list_links(items: &[WorkListItemV1]) -> bool {
     items
         .iter()

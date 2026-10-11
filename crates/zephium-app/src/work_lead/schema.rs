@@ -151,7 +151,8 @@ pub(crate) fn data(kind: &str) -> Option<Value> {
                         "host": string(), "app": text(L::FROM_APP), "who": text(L::FROM_WHO),
                         "when": text(L::FROM_WHEN), "quote": text(L::FROM_QUOTE), "url": string()
                     }), &[]),
-                    "source": string()
+                    "source": string(),
+                    "record_source": {"type":"string","description":"Existing source key identifying the exact native collection row for this item's picture, independently of its prose citation. Omit if no such row is evidenced."}
                 }), &["title"]), 1, MAX_LIST_ITEMS)
             }),
             &["style", "items"],

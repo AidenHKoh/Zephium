@@ -2057,3 +2057,151 @@ async fn zero_folder_computer_parts_share_picker_and_only_accept_real_choice() {
         assert!(!execution.steps.iter().any(|step| step.kind.files()));
     }
 }
+
+#[tokio::test]
+async fn list_record_source_survives_real_propose_and_read_canvas_without_private_pixels() {
+    const PRIVATE: &str = "Confidential synthetic invoice total is 47219 euros";
+    fn turns(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        match turn {
+            0 => vec![call(
+                "read",
+                "web_fetch",
+                json!({"url":"https://records.example.com/one"}),
+            )],
+            1 => {
+                assert!(
+                    seen.contains("[s"),
+                    "synthetic fetch returned no source key: {seen}"
+                );
+                let key = first_key(seen);
+                assert!(!seen.contains("native_crop"));
+                vec![call(
+                    "make",
+                    "create",
+                    json!({"kind":"list","title":"Reading records","data":{"style":"reading","items":[
+                        {"title":"Keep exact row","detail":"Kept detail","source":key,"record_source":key,
+                         "record_media":{"origin":"native_crop","digest":"MODEL_FORGED_REFERENCE"},"media_attempted":true},
+                        {"title":"Keep unknown row text","detail":"Still available","source":key,"record_source":"missing-source-key"}
+                    ]}}),
+                )]
+            }
+            2 => {
+                assert!(seen.contains("Placed list"), "{seen}");
+                assert!(
+                    seen.contains("record_source"),
+                    "optional unknown source should be reported"
+                );
+                let id = seen
+                    .split("Placed list ")
+                    .nth(1)
+                    .unwrap()
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .trim_end_matches('.');
+                assert!(
+                    WorkArtifactId::parse(id).is_some(),
+                    "valid object id from create result"
+                );
+                vec![call("canvas", "read_canvas", json!({"ids":[id]}))]
+            }
+            3 => {
+                let line = seen
+                    .lines()
+                    .find(|line| line.starts_with("[{") && line.contains("Reading records"))
+                    .unwrap_or_else(|| panic!("synthetic canvas returned: {seen}"));
+                let read: Value = serde_json::from_str(line).unwrap();
+                let data = &read[0]["data"];
+                assert!(data["items"][0]["record_source"]
+                    .as_str()
+                    .is_some_and(|key| key.starts_with('s')));
+                assert!(data["items"][1].get("record_source").is_none());
+                assert_eq!(data["items"][1]["detail"], "Still available");
+                assert!(!line.contains("record_media"));
+                assert!(!line.contains("media_attempted"));
+                assert!(!line.contains("native_crop"));
+                assert!(!line.contains("MODEL_FORGED_REFERENCE"));
+                vec![call(
+                    "private-search",
+                    "web_search",
+                    json!({"query":PRIVATE}),
+                )]
+            }
+            4 => {
+                assert!(
+                    seen.contains("private") || seen.contains("person's"),
+                    "private disclosure must be refused before public search: {seen}"
+                );
+                vec![
+                    call(
+                        "reply",
+                        "create",
+                        json!({"kind":"reply","title":"Records ready","data":{"headline":"Records ready","text":"Both list texts stay available."}}),
+                    ),
+                    call(
+                        "finish",
+                        "finish",
+                        json!({"say":"The text remains available.","title":"Reading records"}),
+                    ),
+                ]
+            }
+            _ => panic!("unexpected extra turn {turn}"),
+        }
+    }
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Read the record at https://records.example.com/one and keep a list".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let lead = LeadModel {
+        client: Arc::new(Turns(turns)),
+        ..model(Arc::new(Script {
+            calls: Mutex::new(Vec::new()),
+        }))
+    };
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let done=drive(&mut shell,&queue,WorkLeadService::new(handle).run(profile,command(work,WorkRevision::INITIAL),None,models,&Search,|owner,request|async move{
+        assert!(request.results.is_none(),"private query must never reach a results page");
+        let source=WorkEvidenceLink{extraction_id:WorkArtifactId::from(910),source_id: 1};
+        let media=zephium_core::work::media::WorkRecordMediaRefV1{profile:owner.profile(),work:owner.work(),execution:owner.execution(),attempt:owner.attempt(),step:request.id,extraction:source.extraction_id,record:0,source:"a".repeat(64),digest:"b".repeat(64),width:128,height:96,origin:zephium_core::work::media::WorkRecordMediaOriginV1::NativeCrop};
+        let mut result=outcome(None,vec![WorkArtifactDraft{output:request.output,title:"Native records".into(),evidence:vec![source],data:serde_json::from_value(json!({"kind":"comparison_matrix","subjects":[{"name":PRIVATE,"record_media":media,"media_attempted":true}],"criteria":[{"name":"Title","kind":{"kind":"text"}}],"cells":[[{"value":{"kind":"text","text":PRIVATE},"evidence":[0]}]]})).unwrap()}]);
+        // Metadata-only fixture: no PNG or Store image asset is created.
+        let draft=&result.artifacts[0];
+        WorkArtifactV1{version:1,id:WorkArtifactId::generate(),execution:owner.execution(),node:owner.node(),attempt:owner.attempt(),output:draft.output.clone(),title:draft.title.clone(),data:draft.data.clone(),evidence:draft.evidence.clone(),review:WorkOutputReview::SourceMappedNeedsReview,presentation:WorkArtifactPresentationV1::Automatic,general_knowledge:false,revises:None,part:None}.validate().expect("valid synthetic source before browser result");
+        result.measurements=Some(WorkStepMeasurementsV1{resolved_handoff:Some(WorkPageHandoffKindV1::SignIn),..Default::default()});Ok(result)
+    },|_|{})).await.unwrap();
+    let execution = &done.executions[0];
+    let list = execution
+        .artifacts
+        .iter()
+        .find(|artifact| matches!(artifact.data, WorkArtifactDataV1::List { .. }))
+        .unwrap();
+    let WorkArtifactDataV1::List { items, .. } = &list.data else {
+        panic!()
+    };
+    assert_eq!(items.len(), 2);
+    assert!(items[0].record_source.is_some());
+    assert!(items[0].record_media.is_some());
+    assert!(items[1].record_source.is_none());
+    assert!(items[1].record_media.is_none());
+    assert_eq!(items[1].title, "Keep unknown row text");
+    assert!(crate::work_agent::private_artifact_texts([(
+        &execution.steps[..],
+        &execution.artifacts[..]
+    )])
+    .iter()
+    .any(|text| text.contains("Keep exact row")));
+    assert!(execution
+        .steps
+        .iter()
+        .filter(|step| matches!(step.kind, WorkStepKindV1::Search { .. }))
+        .all(|step| step.status != WorkStepStatus::Succeeded));
+}

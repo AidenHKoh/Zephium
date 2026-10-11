@@ -732,7 +732,12 @@ where
                 Ok(proposed) => proposed,
                 Err((fault, reason)) => return self.refuse(&key, reason, fault),
             };
-        objects::hydrate_record_media(&mut proposed, &projection.executions);
+        objects::hydrate_record_media(
+            &mut proposed,
+            &projection.executions,
+            self.run.profile,
+            self.run.probe.work(),
+        );
         if helper {
             if let zephium_core::work::artifact::WorkArtifactDataV1::Sheet {
                 columns, rows, ..
@@ -844,7 +849,12 @@ where
             Ok(proposed) => proposed,
             Err((fault, reason)) => return self.refuse(&key, reason, fault),
         };
-        objects::hydrate_record_media(&mut proposed, &projection.executions);
+        objects::hydrate_record_media(
+            &mut proposed,
+            &projection.executions,
+            self.run.profile,
+            self.run.probe.work(),
+        );
         if let Err(fault) = objects::honest(
             &proposed.data,
             &honesty(&projection, self.run.probe.execution(), &proposed),

@@ -152,9 +152,11 @@ pub(crate) fn read(run: &LeadRun, objects: &[CanvasObject], ids: &[String]) -> S
         let mut data = serde_json::to_value(&artifact.data).unwrap_or(Value::Null);
         strip_native_media(&mut data);
         items_mut(&mut data, |item| {
-            if let Some(index) = item.get("source").and_then(Value::as_u64) {
-                if let Some(key) = keys.get(index as usize) {
-                    item.insert("source".into(), Value::String(key.clone()));
+            for field in ["source", "record_source"] {
+                if let Some(index) = item.get(field).and_then(Value::as_u64) {
+                    if let Some(key) = keys.get(index as usize) {
+                        item.insert(field.into(), Value::String(key.clone()));
+                    }
                 }
             }
         });
@@ -344,6 +346,18 @@ pub(crate) fn propose(
     strip_native_media(&mut data);
     super::schema::strip_schema_words(kind, &mut data);
     let mut left_out: Vec<String> = Vec::new();
+    if kind == "list" {
+        items_mut(&mut data, |item| {
+            if item.get("record_source").is_some_and(|value| {
+                !value
+                    .as_str()
+                    .is_some_and(|key| run.source(key.trim()).is_some())
+            }) {
+                item.remove("record_source");
+                left_out.push("items[].record_source (no source of this request)".into());
+            }
+        });
+    }
     if lenient {
         for path in super::schema::prune(kind, &mut data) {
             left_out.push(format!("{path} (not a field of {kind})"));
@@ -371,6 +385,29 @@ pub(crate) fn propose(
         } else if item.get("source").is_some_and(|v| !v.is_number()) {
             item.remove("source");
         }
+    });
+    // Optional picture provenance cannot discard otherwise valid text.
+    items_mut(&mut data, |item| {
+        let Some(value) = item.remove("record_source") else {
+            return;
+        };
+        let Some(key) = value
+            .as_str()
+            .map(str::trim)
+            .filter(|key| run.source(key).is_some())
+        else {
+            left_out.push("items[].record_source (no source of this request)".into());
+            return;
+        };
+        if !keys.iter().any(|candidate| candidate == key) {
+            if keys.len() >= MAX_ARTIFACT_EVIDENCE {
+                left_out.push("items[].record_source (source limit)".into());
+                return;
+            }
+            keys.push(key.to_owned());
+        }
+        let index = keys.iter().position(|candidate| candidate == key).unwrap();
+        item.insert("record_source".into(), Value::from(index as u64));
     });
     let mut evidence = Vec::new();
     let mut unknown = None;
@@ -898,7 +935,12 @@ pub(crate) fn strip_native_media(value: &mut Value) {
 }
 /// Hydrates only exact archived evidence identities. Labels and URLs cannot
 /// borrow another record's pixels. Ambiguous source membership yields no image.
-pub(crate) fn hydrate_record_media(proposed: &mut Proposed, executions: &[WorkExecutionFact]) {
+pub(crate) fn hydrate_record_media(
+    proposed: &mut Proposed,
+    executions: &[WorkExecutionFact],
+    profile: zephium_core::ids::ProfileId,
+    work: WorkId,
+) {
     let lookup = |wanted: &WorkEvidenceLink| {
         let mut matched = false;
         let mut image = None;
@@ -931,6 +973,21 @@ pub(crate) fn hydrate_record_media(proposed: &mut Proposed, executions: &[WorkEx
         }
         matched.then_some(if ambiguous { None } else { image })
     };
+    if let WorkArtifactDataV1::List { items, .. } = &mut proposed.data {
+        for item in items {
+            item.record_media = None;
+            item.media_attempted = false;
+            let index = item.record_source;
+            let source = index.and_then(|index| proposed.evidence.get(usize::from(index)));
+            if let Some(image) =
+                source.and_then(|source| list_record_media(source, executions, profile, work))
+            {
+                item.media_attempted = true;
+                item.record_source = index;
+                item.record_media = image;
+            }
+        }
+    }
     if let WorkArtifactDataV1::Picks { items, .. } = &mut proposed.data {
         for item in items {
             item.record_media = None;
@@ -945,6 +1002,58 @@ pub(crate) fn hydrate_record_media(proposed: &mut Proposed, executions: &[WorkEx
             }
         }
     }
+}
+
+/// Only an authenticated immutable collection row may supply a List picture.
+/// Every matching row participates, including failed enrichment, so a shared
+/// source cannot silently borrow the one row that happened to have an image.
+fn list_record_media(
+    wanted: &WorkEvidenceLink,
+    executions: &[WorkExecutionFact],
+    profile: zephium_core::ids::ProfileId,
+    work: WorkId,
+) -> Option<Option<zephium_core::work::media::WorkRecordMediaRefV1>> {
+    let mut matched = false;
+    let mut refused = false;
+    let mut selected = None;
+    for execution in executions {
+        for artifact in &execution.artifacts {
+            let WorkArtifactDataV1::ComparisonMatrix {
+                subjects, cells, ..
+            } = &artifact.data
+            else {
+                continue;
+            };
+            for (index, subject) in subjects.iter().enumerate() {
+                if !cells.get(index).is_some_and(|row| {
+                    row.iter()
+                        .flat_map(|cell| &cell.evidence)
+                        .any(|index| artifact.evidence.get(usize::from(*index)) == Some(wanted))
+                }) {
+                    continue;
+                }
+                matched = true;
+                let Some(media) = subject.record_media.as_ref().filter(|media| {
+                    subject.media_attempted
+                        && media.validate().is_ok()
+                        && media.profile == profile
+                        && media.work == work
+                        && media.execution == execution.id
+                        && media.execution == artifact.execution
+                        && media.attempt == artifact.attempt
+                        && media.extraction == wanted.extraction_id
+                }) else {
+                    refused = true;
+                    continue;
+                };
+                if selected.as_ref().is_some_and(|old| old != media) {
+                    refused = true;
+                }
+                selected = Some(media.clone());
+            }
+        }
+    }
+    matched.then_some(if refused { None } else { selected })
 }
 
 /// Removes picture addresses `shown` does not know from the pictures the
@@ -1155,5 +1264,186 @@ mod tests {
         }))
         .unwrap();
         assert!(honest(&tagged, &honest_run).is_err());
+    }
+}
+
+#[cfg(test)]
+mod list_record_media_tests {
+    use super::*;
+    use serde_json::json;
+    use zephium_core::{ids::ProfileId, work::media::*};
+
+    fn fixture() -> (
+        ProfileId,
+        WorkId,
+        WorkExecutionFact,
+        WorkEvidenceLink,
+        WorkRecordMediaRefV1,
+    ) {
+        let profile = ProfileId::generate();
+        let work = WorkId::generate();
+        let execution = WorkExecutionId::generate();
+        let attempt = WorkAttemptId::generate();
+        let source = WorkEvidenceLink {
+            extraction_id: WorkArtifactId::generate(),
+            source_id: 1,
+        };
+        let media = WorkRecordMediaRefV1 {
+            profile,
+            work,
+            execution,
+            attempt,
+            step: WorkStepId::generate(),
+            extraction: source.extraction_id,
+            record: 0,
+            source: "a".repeat(64),
+            digest: "b".repeat(64),
+            width: 128,
+            height: 96,
+            origin: WorkRecordMediaOriginV1::NativeCrop,
+        };
+        let limits = json!({"model_tokens":1000,"cost_micro_usd":1000,"operations":8,"timeout_seconds":60,"max_workers":1});
+        let mut fact: WorkExecutionFact = serde_json::from_value(json!({
+            "authorization":"user_directed_agent","id":execution,"approved_revision":"3",
+            "spec":{"plan_revision":"2","limits":limits,"nodes":[]},
+            "status":"needs_review","attempts":[],"artifacts":[]
+        }))
+        .unwrap();
+        fact.artifacts.push(serde_json::from_value(json!({
+            "version":1,"id":WorkArtifactId::generate(),"execution":execution,"node":WorkPlanNodeId::generate(),"attempt":attempt,
+            "output":"result","title":"Native rows","review":"source_mapped_needs_review","presentation":"automatic","general_knowledge":false,
+            "evidence":[source],"data":{"kind":"comparison_matrix","subjects":[{"name":"Native row","media_attempted":true,"record_media":media}],"criteria":[{"name":"Title","kind":{"kind":"text"}}],"cells":[[{"value":{"kind":"text","text":"Native row"},"evidence":[0]}]]}
+        })).unwrap());
+        fact.artifacts[0].validate().expect("valid synthetic source artifact");
+        (profile, work, fact, source, media)
+    }
+    fn proposed(source: WorkEvidenceLink, record: Option<u16>) -> Proposed {
+        Proposed{title:"Reading".into(),data:serde_json::from_value(json!({"kind":"list","style":"reading","items":[{"title":"Kept source-backed title","detail":"Kept detail","source":1,"record_source":record}]})).unwrap(),evidence:vec![source,WorkEvidenceLink{extraction_id:WorkArtifactId::generate(),source_id:0}],left_out:vec![]}
+    }
+    fn item(proposed: &Proposed) -> &zephium_core::work::objects::WorkListItemV1 {
+        let WorkArtifactDataV1::List { items, .. } = &proposed.data else {
+            panic!("list")
+        };
+        &items[0]
+    }
+    #[test]
+    fn list_exact_record_source_is_independent_of_prose_and_keeps_crop_local() {
+        let (profile, work, fact, source, media) = fixture();
+        let mut value = proposed(source, Some(0));
+        hydrate_record_media(&mut value, &[fact], profile, work);
+        assert_eq!(item(&value).record_media.as_ref(), Some(&media));
+        assert_eq!(item(&value).source, Some(1));
+        assert!(item(&value).media_attempted);
+        assert!(value.data.lead_fault(2).is_none());
+        let mut model = serde_json::to_value(&value.data).unwrap();
+        strip_native_media(&mut model);
+        assert!(!model.to_string().contains("native_crop"));
+        assert!(!model.to_string().contains("record_media"));
+        assert_eq!(model["items"][0]["record_source"], 0);
+        let mut context = value.data.clone();
+        context.clear_record_media();
+        assert!(!serde_json::to_string(&context)
+            .unwrap()
+            .contains("record_media"));
+    }
+    #[test]
+    fn list_missing_or_stale_record_source_never_falls_back_to_text_source() {
+        let (profile, work, fact, source, _) = fixture();
+        for index in [None, Some(1), Some(99)] {
+            let mut value = proposed(source.clone(), index);
+            let WorkArtifactDataV1::List { items, .. } = &mut value.data else {
+                panic!()
+            };
+            items[0].source = Some(0);
+            hydrate_record_media(&mut value, std::slice::from_ref(&fact), profile, work);
+            assert!(item(&value).record_media.is_none());
+            assert_eq!(item(&value).title, "Kept source-backed title");
+            assert_eq!(item(&value).detail.as_deref(), Some("Kept detail"));
+        }
+    }
+    #[test]
+    fn list_foreign_custody_and_cross_extraction_refuse_picture_only() {
+        let (profile, work, fact, source, _) = fixture();
+        for kind in 0..5 {
+            let mut bad = fact.clone();
+            let WorkArtifactDataV1::ComparisonMatrix { subjects, .. } = &mut bad.artifacts[0].data
+            else {
+                panic!()
+            };
+            let media = subjects[0].record_media.as_mut().unwrap();
+            match kind {
+                0 => media.profile = ProfileId::generate(),
+                1 => media.work = WorkId::generate(),
+                2 => media.execution = WorkExecutionId::generate(),
+                3 => media.attempt = WorkAttemptId::generate(),
+                _ => media.extraction = WorkArtifactId::generate(),
+            }
+            let mut value = proposed(source.clone(), Some(0));
+            hydrate_record_media(&mut value, &[bad], profile, work);
+            assert!(item(&value).record_media.is_none());
+            assert!(item(&value).media_attempted);
+            assert_eq!(item(&value).title, "Kept source-backed title");
+        }
+    }
+    #[test]
+    fn list_ambiguous_and_failed_native_rows_cannot_borrow_successful_pixels() {
+        let (profile, work, fact, source, _) = fixture();
+        for missing in [false, true] {
+            let mut duplicate = fact.artifacts[0].clone();
+            duplicate.id = WorkArtifactId::generate();
+            let WorkArtifactDataV1::ComparisonMatrix { subjects, .. } = &mut duplicate.data else {
+                panic!()
+            };
+            if missing {
+                subjects[0].record_media = None;
+                subjects[0].media_attempted = false;
+            } else {
+                subjects[0].record_media.as_mut().unwrap().record = 1;
+            }
+            let mut rows = fact.clone();
+            rows.artifacts.push(duplicate);
+            let mut value = proposed(source.clone(), Some(0));
+            hydrate_record_media(&mut value, &[rows], profile, work);
+            assert!(item(&value).record_media.is_none());
+            assert_eq!(item(&value).title, "Kept source-backed title");
+        }
+    }
+    #[test]
+    fn list_identical_immutable_row_copies_remain_one_identity() {
+        let (profile, work, mut fact, source, media) = fixture();
+        let mut duplicate = fact.artifacts[0].clone();
+        duplicate.id = WorkArtifactId::generate();
+        fact.artifacts.push(duplicate);
+        let mut value = proposed(source, Some(0));
+        hydrate_record_media(&mut value, &[fact], profile, work);
+        assert_eq!(item(&value).record_media.as_ref(), Some(&media));
+    }
+    #[test]
+    fn list_additive_defaults_and_record_custody_validation_remain_closed() {
+        let mut plain: WorkArtifactDataV1 = serde_json::from_value(
+            json!({"kind":"list","style":"reading","items":[{"title":"Old object"}]}),
+        )
+        .unwrap();
+        assert!(!serde_json::to_string(&plain)
+            .unwrap()
+            .contains("record_source"));
+        let (_, _, _, _, media) = fixture();
+        let WorkArtifactDataV1::List { items, .. } = &mut plain else {
+            panic!()
+        };
+        items[0].record_media = Some(media);
+        items[0].media_attempted = true;
+        assert_eq!(
+            plain.lead_fault(1).unwrap().field,
+            WorkArtifactField::ListItemMedia
+        );
+        let WorkArtifactDataV1::List { items, .. } = &mut plain else {
+            panic!()
+        };
+        items[0].record_source = Some(1);
+        assert_eq!(
+            plain.lead_fault(1).unwrap().field,
+            WorkArtifactField::ItemSource
+        );
     }
 }

@@ -641,7 +641,12 @@ where
         let title = found::title(facet, site.as_deref(), &spec.title);
         let mut proposed =
             objects::propose(self.run, &[], "picks", &title, data, &sources, &[], true).ok()?;
-        objects::hydrate_record_media(&mut proposed, std::slice::from_ref(&execution));
+        objects::hydrate_record_media(
+            &mut proposed,
+            std::slice::from_ref(&execution),
+            self.run.profile,
+            self.run.probe.work(),
+        );
         let honesty = objects::Honesty {
             sourced: !proposed.evidence.is_empty(),
             failed: Vec::new(),

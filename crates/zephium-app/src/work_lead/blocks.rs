@@ -475,6 +475,7 @@ fn proposal(base: &ResourceRecord, args: &ReviseArgs) -> Result<ResourceDraft, S
         }
         if let Some(row) = row.as_object_mut() {
             row.remove("source");
+            row.remove("record_source");
             row.remove("pick");
             row.remove("from");
         }
@@ -902,6 +903,62 @@ mod tests {
         )
         .is_err());
     }
+    #[test]
+    fn edited_list_rows_drop_record_provenance_and_all_model_pixel_refs() {
+        use zephium_core::{
+            ids::ProfileId,
+            work::{media::*, *},
+        };
+        let link = WorkEvidenceLink {
+            extraction_id: WorkArtifactId::generate(),
+            source_id: 1,
+        };
+        let media = WorkRecordMediaRefV1 {
+            profile: ProfileId::generate(),
+            work: WorkId::generate(),
+            execution: WorkExecutionId::generate(),
+            attempt: WorkAttemptId::generate(),
+            step: WorkStepId::generate(),
+            extraction: link.extraction_id,
+            record: 0,
+            source: "a".repeat(64),
+            digest: "b".repeat(64),
+            width: 128,
+            height: 96,
+            origin: WorkRecordMediaOriginV1::NativeCrop,
+        };
+        let mut base = record(json!({"kind":"list","style":"todo","items":[
+            {"title":"Original row","source":0,"record_source":0,"record_media":media,"media_attempted":true},
+            {"title":"Untouched row","source":0,"record_source":0,"record_media":media,"media_attempted":true}
+        ]}));
+        let ResourceContent::Object { object } = &mut base.draft.content else {
+            panic!()
+        };
+        object.evidence.push(link);
+        assert!(base.draft.validate());
+        let changed = proposal(
+            &base,
+            &args(
+                json!([{"index":0,"field":"title","value":"Changed row"}]),
+                json!([]),
+            ),
+        )
+        .unwrap();
+        let out = value(&changed);
+        assert_eq!(out["items"][0]["title"], "Changed row");
+        assert!(out["items"][0].get("source").is_none());
+        assert!(out["items"][0].get("record_source").is_none());
+        assert_eq!(out["items"][1]["record_source"], 0);
+        assert!(!out.to_string().contains("record_media"));
+        assert!(!out.to_string().contains("media_attempted"));
+        assert!(!out.to_string().contains("native_crop"));
+        assert!(proposal(
+            &base,
+            &args(json!([]), json!([{"title":"Forged row","record_source":0}]))
+        )
+        .is_err());
+    }
+
     #[test]
     fn table_rebase_keeps_other_cells_columns_and_concurrent_appends() {
         let base = record(
