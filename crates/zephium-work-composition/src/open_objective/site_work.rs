@@ -999,10 +999,14 @@ pub(crate) fn preview(
     }
 }
 
-/// Content and proof promised by an approval. This does not bind native target
-/// identity; the separate native identity seal is not implemented here.
+/// Content, required proof and opaque native element identity promised by an approval.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Fingerprint {
+    approval: Option<zephium_agentic::SemanticApprovalBinding>,
+    context: zephium_agentic::ContextId,
+    profile: zephium_core::ids::ProfileId,
+    frame: zephium_agentic::FrameId,
+    option: Option<(Option<SemanticValueSummary>, [bool; 6], [u8; 32])>,
     structure: [u8; 32],
     verification: SemanticVerification,
     value: Option<SemanticValueSummary>,
@@ -1045,7 +1049,29 @@ pub(crate) fn fingerprint(
         part(format!("{:?}|{:?}", ancestor.role(), ancestor.landmark_kind()).as_bytes());
         part(ancestor.name().map_or("", |name| name.as_str()).as_bytes());
     }
+    let states = |node: &SemanticNode| {
+        [
+            SemanticState::Checked,
+            SemanticState::Selected,
+            SemanticState::Expanded,
+            SemanticState::Disabled,
+            SemanticState::Required,
+            SemanticState::Invalid,
+        ]
+        .map(|state| node.states().contains(state))
+    };
     Fingerprint {
+        approval: action.approval_binding(),
+        context: snapshot.frame().context().identity().id(),
+        profile: snapshot.frame().context().identity().profile(),
+        frame: snapshot.frame().frame(),
+        option: action.option_node(snapshot).map(|option| {
+            (
+                option.value().cloned(),
+                states(option),
+                Sha256::digest(label(option).as_bytes()).into(),
+            )
+        }),
         structure: hasher.finalize().into(),
         verification: action.verification(),
         value: node.value().cloned(),
@@ -1508,11 +1534,7 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
         let Some(snapshot) = observation.frames().first() else {
             return false;
         };
-        let Some(node) = snapshot
-            .nodes()
-            .iter()
-            .find(|node| node.reference() == action.target_reference())
-        else {
+        let Some(node) = action.target_node(snapshot) else {
             return false;
         };
         matches!(
@@ -1531,10 +1553,8 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             .frames()
             .first()
             .ok_or(AgentWorkFailure::Contract)?;
-        let node = snapshot
-            .nodes()
-            .iter()
-            .find(|node| node.reference() == action.target_reference())
+        let node = action
+            .target_node(snapshot)
             .ok_or(AgentWorkFailure::Contract)?;
         if credential(node)
             && matches!(
@@ -1620,6 +1640,19 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             }
         };
         let mut state = self.gate.state();
+        let Some(current_binding) = action.approval_binding() else {
+            state.held = true;
+            return Err(AgentWorkFailure::ActionDenied);
+        };
+        let accept_approved = |binding| {
+            AgentEffectAssessment::with_approval(
+                action,
+                action.frame().origin().clone(),
+                declared,
+                binding,
+            )
+            .ok_or(AgentWorkFailure::ActionDenied)
+        };
         let fingerprint = fingerprint(action, node, snapshot);
         let site = state.site.clone();
         let preview = preview(consequence, action, node, snapshot, &site);
@@ -1638,9 +1671,13 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
                     state.confirmed = Some(confirmed);
                     return Err(AgentWorkFailure::EffectRequired(consequence.class()));
                 }
+                let original = confirmed
+                    .fingerprint
+                    .approval
+                    .ok_or(AgentWorkFailure::ActionDenied)?;
                 state.dispatched = Some(consequence);
                 state.status_before = status_lines(observation);
-                return accept();
+                return accept_approved(original);
             }
             // Edits allowed for the run: the approval covers this edit too.
             if consequence == Consequence::Edit
@@ -1655,7 +1692,7 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
                 }
                 state.dispatched = Some(consequence);
                 state.status_before = status_lines(observation);
-                return accept();
+                return accept_approved(current_binding);
             }
             // The page changed since the person decided: that approval is spent.
             state.receipt = Some(Receipt::NotSent);
@@ -1667,7 +1704,7 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
                 ));
             }
             state.status_before = status_lines(observation);
-            return accept();
+            return accept_approved(current_binding);
         }
         if state.declined.contains(&fingerprint.structure) {
             return Err(AgentWorkFailure::ActionDenied);
@@ -1721,8 +1758,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn page(nodes: Vec<serde_json::Value>) -> SemanticObservation {
-        super::super::tests::reading_observation(json!(nodes), "complete")
+    fn page(mut nodes: Vec<serde_json::Value>) -> SemanticObservation {
+        for node in &mut nodes {
+            if node
+                .get("o")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|ops| ops & 15 != 0)
+            {
+                node["ai"] = node["k"].clone();
+            }
+        }
+        super::super::tests::reading_observation_with_approval(
+            json!(nodes),
+            "complete",
+            Some("000102030405060708090a0b0c0d0e0f"),
+        )
     }
 
     #[test]
@@ -3019,6 +3069,85 @@ mod tests {
         assert!(policy
             .assess(&click(&look, 2, SemanticEffectClass::Read), &look)
             .is_ok());
+    }
+
+    #[test]
+    fn exact_approval_cannot_swap_to_an_identically_named_native_control() {
+        let look = page(vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"button","n":"Save changes","o":9,"ak":1,"fc":true,"b":{"x":1,"y":1,"w":100,"h":30}}),
+            json!({"k":3,"p":0,"r":"button","n":"Save changes","o":9,"ak":1,"fc":true,"b":{"x":120,"y":1,"w":100,"h":30}}),
+        ]);
+        let first = click(&look, 2, SemanticEffectClass::ExternalWrite);
+        let other = click(&look, 3, SemanticEffectClass::ExternalWrite);
+        assert_ne!(first.target_reference(), other.target_reference());
+        let gate = Arc::new(SiteGate::default());
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        assert!(matches!(
+            policy.assess(&first, &look),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        gate.approve(false).unwrap();
+        assert!(
+            matches!(
+                policy.assess(&other, &look),
+                Err(AgentWorkFailure::ActionDenied)
+            ),
+            "approval of one control cannot authorize its identical-label sibling"
+        );
+    }
+
+    #[test]
+    fn exact_approval_requires_proof_and_cannot_cross_keyspace_reset() {
+        let nodes = json!([
+            {"k":1,"r":"document","o":16,"fc":true},
+            {"k":2,"ai":1,"p":0,"r":"button","n":"Save changes","o":9,"ak":1,"fc":true,"b":{"x":1,"y":1,"w":100,"h":30}}
+        ]);
+        let capture = |nonce| {
+            super::super::tests::reading_observation_with_approval(
+                nodes.clone(),
+                "complete",
+                Some(nonce),
+            )
+        };
+        let before = capture("000102030405060708090a0b0c0d0e0f");
+        let reset = capture("100102030405060708090a0b0c0d0e0f");
+        let gate = Arc::new(SiteGate::default());
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        let first = click(&before, 2, SemanticEffectClass::ExternalWrite);
+        assert!(matches!(
+            policy.assess(&first, &before),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        gate.approve(false).unwrap();
+        let second = click(&reset, 2, SemanticEffectClass::ExternalWrite);
+        assert!(matches!(
+            policy.assess(&second, &reset),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+
+        let mut legacy = nodes;
+        legacy[1].as_object_mut().unwrap().remove("ai");
+        let look = super::super::tests::reading_observation_with_approval(legacy, "complete", None);
+        let gate = Arc::new(SiteGate::default());
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        assert!(matches!(
+            policy.assess(&click(&look, 2, SemanticEffectClass::ExternalWrite), &look),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        assert!(
+            gate.approve(false).is_none(),
+            "missing native proof cannot offer an exact approval"
+        );
     }
 
     fn approval_audit_checkbox(checked: bool) -> SemanticObservation {

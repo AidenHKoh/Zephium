@@ -1574,6 +1574,16 @@ mod tests {
         gate
     }
     #[test]
+    fn hidden_approval_handback_keeps_native_document_but_changes_virtual_stamp() {
+        let gate = ready_gate();
+        let before = gate.document_stamp().unwrap();
+        assert_eq!(gate.hand_back(URL).unwrap().as_url().as_str(), URL);
+        let after = gate.document_stamp().unwrap();
+        assert_eq!(before.native_id, after.native_id);
+        assert_ne!(before.epoch, after.epoch);
+    }
+
+    #[test]
     fn preview_stamp_requires_committed_identity_without_authorizing_semantics() {
         let gate = armed();
         assert!(gate.preview_document_stamp().is_none());

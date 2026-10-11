@@ -1016,6 +1016,18 @@ mod tests {
     }
 
     #[test]
+    fn sealed_runtime_installation_fits_unchanged_cap_at_maximum_escaped_context() {
+        for character in ['\\', '"'] {
+            let identifier = character.to_string().repeat(MAX_BROWSER_IDENTIFIER_BYTES);
+            let context = SemanticExecutionContext::new(19, &identifier).unwrap();
+            let command = install_runtime_in_context_command(&context).expect("fixed source fits");
+            assert!(command.parameters().len() <= 192 * 1024);
+            let parameters: Value = serde_json::from_str(command.parameters()).unwrap();
+            assert_eq!(parameters["uniqueContextId"], identifier);
+        }
+    }
+
+    #[test]
     fn invocation_is_fixed_unique_context_non_gesture_call_by_value() {
         let context = SemanticExecutionContext::new(19, "unique-context-19").expect("context");
         let invocation = invocation();

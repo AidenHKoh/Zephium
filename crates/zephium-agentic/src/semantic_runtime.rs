@@ -89,8 +89,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0x60, 0x92, 0x3a, 0x85, 0xcb, 0x2f, 0x88, 0x96, 0x72, 0xa7, 0xcb, 0x0b, 0xc7, 0xcb, 0xf5, 0xde,
-    0x90, 0x17, 0x62, 0xec, 0xd9, 0x8e, 0x88, 0x6e, 0x4a, 0xca, 0x9f, 0xaf, 0x27, 0xae, 0x7c, 0x6c,
+    0xe7, 0xab, 0x04, 0xb8, 0xfc, 0xa6, 0x03, 0x6a, 0x72, 0x99, 0x48, 0x1c, 0xd8, 0xf9, 0x79, 0x36,
+    0x49, 0x73, 0xc8, 0xb7, 0x6b, 0x2e, 0x25, 0x06, 0xba, 0x72, 0xec, 0xb0, 0xba, 0x72, 0x97, 0x8d,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -705,6 +705,9 @@ pub fn encode_semantic_action_runtime_invocation(
         request.scroll_recipe()
     ));
     let wire = SemanticActionRuntimeInvocationWire {
+        approval: request
+            .approval_binding()
+            .map(crate::SemanticApprovalBinding::wire),
         version: SEMANTIC_RUNTIME_PROTOCOL_VERSION,
         operation: "action_execute",
         attempt: attempt.get(),
@@ -746,11 +749,7 @@ pub fn encode_semantic_action_runtime_invocation(
             })
             .transpose()?,
     };
-    let encoded =
-        serde_json::to_string(&wire).map_err(|_| SemanticActionRuntimeInvocationError::Encoding)?;
-    if encoded.len() > MAX_SEMANTIC_ACTION_RUNTIME_REQUEST_BYTES {
-        return Err(SemanticActionRuntimeInvocationError::Encoding);
-    }
+    let encoded = encode_action_wire(&wire)?;
     Ok(SemanticActionRuntimeInvocation {
         attempt,
         checkpoint_invocation,
@@ -758,6 +757,17 @@ pub fn encode_semantic_action_runtime_invocation(
         frame: request.frame().clone(),
         encoded,
     })
+}
+
+fn encode_action_wire(
+    wire: &SemanticActionRuntimeInvocationWire<'_>,
+) -> Result<String, SemanticActionRuntimeInvocationError> {
+    let encoded =
+        serde_json::to_string(wire).map_err(|_| SemanticActionRuntimeInvocationError::Encoding)?;
+    if encoded.len() > MAX_SEMANTIC_ACTION_RUNTIME_REQUEST_BYTES {
+        return Err(SemanticActionRuntimeInvocationError::Encoding);
+    }
+    Ok(encoded)
 }
 
 pub(crate) const fn semantic_role_wire(role: SemanticRole) -> &'static str {
@@ -1300,6 +1310,8 @@ struct RuntimeBudgetWire {
 
 #[derive(Serialize)]
 struct SemanticActionRuntimeInvocationWire<'a> {
+    #[serde(rename = "ap", skip_serializing_if = "Option::is_none")]
+    approval: Option<(String, u16, Option<u16>)>,
     #[serde(rename = "sc", skip_serializing_if = "Option::is_none")]
     scroll: Option<[&'static str; 2]>,
     #[serde(rename = "pk", skip_serializing_if = "Option::is_none")]
@@ -2167,6 +2179,7 @@ mod tests {
         let descriptor =
             crate::SemanticActionRuntimeDescriptor::maximum_text_wire_witness(name, prior_value);
         let wire = SemanticActionRuntimeInvocationWire {
+            approval: None,
             press: None,
             version: SEMANTIC_RUNTIME_PROTOCOL_VERSION,
             operation: "action_execute",
@@ -2193,6 +2206,14 @@ mod tests {
         let encoded = serde_json::to_string(&wire).expect("maximum legal fill wire");
         assert_eq!(encoded.len(), 17_707);
         assert_eq!(encoded.len(), MAX_SEMANTIC_ACTION_RUNTIME_REQUEST_BYTES);
+        assert!(encode_action_wire(&wire).is_ok());
+        let mut sealed = wire;
+        sealed.approval = Some(("01010101010101010101010101010101".into(), 2048, None));
+        assert_eq!(
+            encode_action_wire(&sealed),
+            Err(SemanticActionRuntimeInvocationError::Encoding),
+            "the exact same ceiling applies; never discard the approval seal to fit"
+        );
 
         for value in [
             "\\".repeat(MAX_SEMANTIC_ACTION_TEXT_BYTES),
@@ -2217,6 +2238,7 @@ mod tests {
                             name, prior,
                         );
                     let wire = SemanticActionRuntimeInvocationWire {
+                        approval: None,
                         press: None,
                         version: SEMANTIC_RUNTIME_PROTOCOL_VERSION,
                         operation: "action_execute",

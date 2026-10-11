@@ -1351,6 +1351,51 @@ mod tests {
             .expect("observation")
     }
 
+    #[test]
+    fn approval_seals_never_enter_model_projection_or_debug_output() {
+        let source = observation();
+        let nonce = "102132435465768798a9bacbdcedfe0f";
+        let make = |sealed: bool| {
+            let mut wire = json!({"v":1,"i":12,"g":12,"c":"complete","n":[{"k":1,"r":"button","n":"Save","o":9}]});
+            if sealed {
+                wire["ap"] = nonce.into();
+                wire["n"][0]["ai"] = 1.into();
+            }
+            let snapshot = decode_semantic_snapshot(
+                SemanticDecodeContext::new(
+                    SemanticInvocationId::new(12).unwrap(),
+                    source.frames()[0].frame().clone(),
+                    SemanticSnapshotGeneration::new(12).unwrap(),
+                ),
+                &serde_json::to_vec(&wire).unwrap(),
+            )
+            .unwrap();
+            assert!(!format!("{snapshot:?}").contains(nonce));
+            let request = SemanticObservationRequest::initial(
+                SemanticObservationId::new(2).unwrap(),
+                source.request().context(),
+                SemanticObservationBudget::try_new(8, 4096, 1).unwrap(),
+            );
+            SemanticObservationAssembler::new(request, snapshot)
+                .unwrap()
+                .finish()
+                .unwrap()
+        };
+        let plain = encode_semantic_observation(
+            &make(false),
+            SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
+        )
+        .unwrap();
+        let sealed = encode_semantic_observation(
+            &make(true),
+            SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
+        )
+        .unwrap();
+        assert_eq!(plain.content, sealed.content);
+        assert!(!sealed.content.contains(nonce));
+        assert!(!sealed.content.contains("approval"));
+    }
+
     fn observation_with_text_value(value: &str) -> SemanticObservation {
         observation_with_fill_support(value, None)
     }

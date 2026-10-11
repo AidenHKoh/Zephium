@@ -3448,14 +3448,22 @@ mod tests {
         )
         .expect("frame");
         let invocation = observation_id + 10;
-        let bytes = serde_json::to_vec(&json!({
+        let mut wire = json!({
             "v": SEMANTIC_WIRE_VERSION,
             "i": invocation,
             "g": invocation,
             "c": "complete",
             "n": nodes,
-        }))
-        .expect("wire");
+        });
+        if wire["n"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node.get("ai").is_some())
+        {
+            wire["ap"] = json!("01010101010101010101010101010101");
+        }
+        let bytes = serde_json::to_vec(&wire).expect("wire");
         let snapshot = decode_semantic_snapshot(
             SemanticDecodeContext::new(
                 SemanticInvocationId::new(invocation).expect("invocation"),
@@ -9269,6 +9277,99 @@ mod tests {
         assert_eq!(exhausted.policy.pending_effects(), 0);
         assert_eq!(exhausted.policy.accounting().consumed_operations(), 1);
         assert_eq!(exhausted.policy.accounting().reserved_operations(), 0);
+    }
+
+    #[test]
+    fn original_approval_seal_survives_read_declared_permit_and_native_dispatch() {
+        let source = origin("private-approval");
+        let (mut registry, context) = make_context_registry(445, 446, 447);
+        let make = |identity| {
+            observation(
+                context,
+                source.clone(),
+                1,
+                vec![
+                    json!({"k": 1, "r": "document", "o": 16}),
+                    json!({"k": 2, "ai": identity, "p": 0, "r": "button", "n": "Save draft", "o": 9,
+                   "b": {"x": 10, "y": 10, "w": 100, "h": 30}}),
+                ],
+            )
+        };
+        let observation = make(1);
+        let changed = make(2);
+        let action = prepared_click(&observation, 2, SemanticEffectClass::Read);
+        let replacement = prepared_click(&changed, 2, SemanticEffectClass::Read);
+        let approved = action.approval_binding().expect("native seal");
+        let assessment = AgentEffectAssessment::with_approval(
+            &action,
+            source.clone(),
+            SemanticEffectClass::Read,
+            approved,
+        )
+        .expect("original reviewed seal");
+        assert!(AgentEffectAssessment::with_approval(
+            &replacement,
+            source.clone(),
+            SemanticEffectClass::Read,
+            approved,
+        )
+        .is_none());
+        assert!(!assessment.matches_action(&replacement));
+        registry
+            .acknowledge_observation(context.identity().id(), context)
+            .unwrap();
+        let automation = registry.automation_state(context.identity().id()).unwrap();
+        let binding = account(context, NOW - 1);
+        let mut fixture = policy_fixture(
+            445,
+            446,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 1_000, 10_000),
+        );
+        commit_observation_to_model(&mut fixture.policy, fixture.lease, 1, binding, &observation);
+        let permit = match fixture
+            .policy
+            .authorize_semantic_effect(
+                effect_request(1, fixture.lease, binding, automation),
+                &action,
+                &assessment,
+            )
+            .expect("policy authorization")
+        {
+            AgentEffectAuthorization::Permit(permit) => permit,
+            AgentEffectAuthorization::NeedsHuman(_) => panic!("already-reviewed same-origin read"),
+        };
+        let active = fixture
+            .policy
+            .dispatch_semantic_effect(
+                permit,
+                &action,
+                effect_dispatch_request(1, binding, automation),
+            )
+            .expect("dispatch exact permit");
+        let mut coordinator = crate::SemanticActionExecutionCoordinator::new();
+        let (_, native) = coordinator
+            .begin(
+                active,
+                &action,
+                crate::SemanticActionExecutionInstant::from_millis(NOW),
+            )
+            .expect("native reservation");
+        let invocation = crate::encode_semantic_action_runtime_invocation(&native).unwrap();
+        let encoded: Value = serde_json::from_str(invocation.as_str()).unwrap();
+        assert_eq!(
+            encoded["ap"],
+            json!(["01010101010101010101010101010101", 1, null])
+        );
+        for debug in [
+            format!("{assessment:?}"),
+            format!("{native:?}"),
+            format!("{invocation:?}"),
+        ] {
+            assert!(!debug.contains("0101010101"));
+        }
     }
 
     #[test]

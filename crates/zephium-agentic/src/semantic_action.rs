@@ -967,7 +967,7 @@ impl SemanticBoundAction {
         };
         let checkpoint_invocation = current.invocation();
         let checkpoint_snapshot = current.generation();
-        let guard = prepared_guard(
+        let mut guard = prepared_guard(
             self,
             checkpoint_invocation,
             checkpoint_snapshot,
@@ -975,8 +975,29 @@ impl SemanticBoundAction {
             target_states,
             option_states,
         );
+        let option_identity = match &self.intent {
+            BoundActionIntent::Select { option, .. } => current
+                .nodes()
+                .iter()
+                .find(|node| node.key() == option.node_key)
+                .and_then(|node| node.approval_identity()),
+            _ => None,
+        };
+        let approval_binding = crate::SemanticApprovalBinding::new(
+            target.approval_identity(),
+            option_identity,
+            self.kind() == SemanticActionKind::Select,
+        );
+        if let Some(binding) = approval_binding {
+            let mut sealed = Sha256::new();
+            sealed.update(b"ZEPHIUM-PREPARED-APPROVAL-1\0");
+            sealed.update(guard);
+            sealed.update(binding.guard_bytes());
+            guard = sealed.finalize().into();
+        }
         Ok(SemanticPreparedAction {
             action: self.clone(),
+            approval_binding,
             checkpoint_invocation,
             checkpoint_snapshot,
             target_value,
@@ -1039,6 +1060,7 @@ impl SemanticBoundAction {
 #[derive(Eq, PartialEq)]
 pub struct SemanticPreparedAction {
     action: SemanticBoundAction,
+    approval_binding: Option<crate::SemanticApprovalBinding>,
     checkpoint_invocation: SemanticInvocationId,
     checkpoint_snapshot: SemanticSnapshotGeneration,
     target_value: Option<SemanticValueSummary>,
@@ -1052,6 +1074,39 @@ pub struct SemanticPreparedAction {
 }
 
 impl SemanticPreparedAction {
+    /// Private native target/option continuity at the exact prepared checkpoint.
+    /// This is identity evidence, never an authorization by itself.
+    pub const fn approval_binding(&self) -> Option<crate::SemanticApprovalBinding> {
+        self.approval_binding
+    }
+
+    /// Resolves the private native target in the exact prepared checkpoint,
+    /// independently of model-facing reference rebasing.
+    pub fn target_node<'a>(
+        &self,
+        snapshot: &'a SemanticSnapshot,
+    ) -> Option<&'a crate::SemanticNode> {
+        (snapshot.frame() == self.frame()
+            && snapshot.invocation() == self.checkpoint_invocation
+            && snapshot.generation() == self.checkpoint_snapshot)
+            .then(|| {
+                snapshot
+                    .nodes()
+                    .iter()
+                    .find(|node| node.key() == self.target_key())
+            })
+            .flatten()
+    }
+    /// Resolves the bound selected option in that same exact checkpoint.
+    pub fn option_node<'a>(
+        &self,
+        snapshot: &'a SemanticSnapshot,
+    ) -> Option<&'a crate::SemanticNode> {
+        self.target_node(snapshot)?;
+        let key = self.option_key()?;
+        snapshot.nodes().iter().find(|node| node.key() == key)
+    }
+
     /// Content digest of the frame this action was prepared on.
     pub(crate) const fn page_digest(&self) -> [u8; 32] {
         self.page_digest

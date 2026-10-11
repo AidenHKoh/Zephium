@@ -132,6 +132,8 @@ pub use semantic_media_probe::{
     set_semantic_media_name_probe, SemanticMediaNameObserver, SemanticMediaNameProbe,
 };
 mod secret_shapes;
+mod semantic_approval;
+pub use semantic_approval::SemanticApprovalBinding;
 mod semantic_action;
 mod semantic_action_batch_result;
 mod semantic_action_result;

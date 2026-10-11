@@ -155,6 +155,14 @@ pub fn decode_semantic_snapshot(
         return Err(SemanticDecodeError::NodeLimit);
     }
 
+    let approval_nonce = match raw.approval_nonce.as_deref() {
+        Some(value) => Some(
+            crate::semantic_approval::SemanticApprovalIdentity::nonce(value)
+                .ok_or(SemanticDecodeError::NodeIdentity)?,
+        ),
+        None => None,
+    };
+    let mut approval_keys = BTreeSet::new();
     let mut keys = BTreeSet::new();
     let mut depths = Vec::<u8>::with_capacity(raw.nodes.len());
     let mut nodes = Vec::with_capacity(raw.nodes.len());
@@ -367,8 +375,20 @@ pub fn decode_semantic_snapshot(
             .map(|rect| SemanticRect::try_new(rect.x, rect.y, rect.width, rect.height))
             .transpose()
             .map_err(|_| SemanticDecodeError::NodeContract)?;
+        let approval_identity = match raw_node.approval_identity {
+            Some(id) if approval_keys.insert(id) => Some(
+                crate::semantic_approval::SemanticApprovalIdentity::new(
+                    approval_nonce.ok_or(SemanticDecodeError::NodeIdentity)?,
+                    id,
+                )
+                .ok_or(SemanticDecodeError::NodeIdentity)?,
+            ),
+            Some(_) => return Err(SemanticDecodeError::NodeIdentity),
+            None => None,
+        };
         nodes.push(SemanticNodeInput {
             key,
+            approval_identity,
             parent,
             depth,
             role,
@@ -783,6 +803,8 @@ pub(crate) fn looks_like_secret_value(value: &str) -> bool {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSnapshot {
+    #[serde(rename = "ap", default)]
+    approval_nonce: Option<String>,
     #[serde(rename = "m", default)]
     media: Vec<crate::semantic_media::RawMedia>,
     #[serde(rename = "j", default)]
@@ -903,6 +925,8 @@ impl From<RawCompleteness> for SemanticCompleteness {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawNode {
+    #[serde(rename = "ai", default)]
+    approval_identity: Option<u16>,
     #[serde(rename = "k")]
     key: u64,
     #[serde(rename = "p", default)]
@@ -1167,6 +1191,52 @@ mod tests {
             "n": nodes,
         }))
         .expect("encode")
+    }
+
+    #[test]
+    fn approval_wire_rejects_malformed_zero_duplicate_or_unjoined_identity() {
+        let base = json!({"v":1,"i":7,"g":9,"c":"complete","ap":"000102030405060708090a0b0c0d0e0f","n":[
+            {"k":1,"r":"button","n":"Save","o":9,"ai":1},
+            {"k":2,"r":"button","n":"Save","o":9,"ai":2}
+        ]});
+        let decode = |value: &serde_json::Value| {
+            decode_semantic_snapshot(decode_context(), &serde_json::to_vec(value).unwrap())
+        };
+        assert!(decode(&base).unwrap().nodes()[0]
+            .approval_identity()
+            .is_some());
+        for nonce in [
+            "",
+            "00000000000000000000000000000000",
+            "000102030405060708090A0B0C0D0E0F",
+            "000102030405060708090a0b0c0d0e0f00",
+        ] {
+            let mut bad = base.clone();
+            bad["ap"] = nonce.into();
+            assert!(decode(&bad).is_err());
+        }
+        for id in [0, 2049] {
+            let mut bad = base.clone();
+            bad["n"][0]["ai"] = id.into();
+            assert!(decode(&bad).is_err());
+        }
+        let mut duplicate = base.clone();
+        duplicate["n"][1]["ai"] = 1.into();
+        assert!(decode(&duplicate).is_err());
+        let mut missing = base.clone();
+        missing.as_object_mut().unwrap().remove("ap");
+        assert!(decode(&missing).is_err());
+        for node in missing["n"].as_array_mut().unwrap() {
+            node.as_object_mut().unwrap().remove("ai");
+        }
+        assert!(
+            decode(&missing)
+                .unwrap()
+                .nodes()
+                .iter()
+                .all(|node| node.approval_identity().is_none()),
+            "legacy observations have no approval proof"
+        );
     }
 
     #[test]

@@ -347,6 +347,7 @@ impl SemanticActionFollow {
 /// Non-cloneable closed recipe for one trusted native adapter.
 #[must_use]
 pub struct SemanticActionNativeRequest {
+    approval_binding: Option<crate::SemanticApprovalBinding>,
     page_dialog_opened: bool,
     settle_quiet: bool,
     effect: crate::SemanticEffectClass,
@@ -361,6 +362,9 @@ pub struct SemanticActionNativeRequest {
 }
 
 impl SemanticActionNativeRequest {
+    pub(crate) const fn approval_binding(&self) -> Option<crate::SemanticApprovalBinding> {
+        self.approval_binding
+    }
     pub(crate) const fn page_dialog_opened(&self) -> bool {
         self.page_dialog_opened
     }
@@ -1172,6 +1176,7 @@ pub(crate) fn prepare_semantic_action_execution(
         deadline,
     );
     let effect = active.effect();
+    let approval_binding = active.approval_binding();
     let correlation = NativeCorrelation {
         effect: active.id(),
         attempt: active.attempt(),
@@ -1191,6 +1196,7 @@ pub(crate) fn prepare_semantic_action_execution(
             active,
         },
         SemanticActionNativeRequest {
+            approval_binding,
             page_dialog_opened: matches!(
                 action.verification(),
                 crate::SemanticVerification::PageDialogOpened

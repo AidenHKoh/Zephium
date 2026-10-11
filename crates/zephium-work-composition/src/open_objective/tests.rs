@@ -417,7 +417,21 @@ pub(super) fn reading_observation(
     nodes: serde_json::Value,
     completeness: &str,
 ) -> SemanticObservation {
-    let context = join(identity());
+    reading_observation_with_approval(nodes, completeness, None)
+}
+
+#[cfg(feature = "durable-runtime")]
+pub(super) fn reading_observation_with_approval(
+    nodes: serde_json::Value,
+    completeness: &str,
+    approval: Option<&str>,
+) -> SemanticObservation {
+    static APPROVAL_CONTEXT: std::sync::OnceLock<ContextIdentity> = std::sync::OnceLock::new();
+    let context = join(if approval.is_some() {
+        *APPROVAL_CONTEXT.get_or_init(identity)
+    } else {
+        identity()
+    });
     let frame = SemanticFrameJoin::try_new(
         context,
         FrameId::MAIN,
@@ -426,7 +440,10 @@ pub(super) fn reading_observation(
         SemanticFrameTrust::SameOrigin,
     )
     .unwrap();
-    let wire = serde_json::json!({"v":1,"i":1,"g":1,"c":completeness,"n":nodes});
+    let mut wire = serde_json::json!({"v":1,"i":1,"g":1,"c":completeness,"n":nodes});
+    if let Some(nonce) = approval {
+        wire["ap"] = nonce.into();
+    }
     let snapshot = decode_semantic_snapshot(
         SemanticDecodeContext::new(
             SemanticInvocationId::new(1).unwrap(),

@@ -867,6 +867,85 @@ mod tests {
     }
 
     #[test]
+    fn hidden_approval_handoff_preserves_resource_but_changes_execution_join() {
+        let (mut rows, resource) = fixture();
+        let request = acquire(&mut rows, &resource, 2).unwrap();
+        let original = request.lease().unwrap().clone();
+        let _ = rows
+            .settle_at(
+                request.complete(WorkBrowserResourceNativeOutcome::Acquired),
+                now(3),
+            )
+            .unwrap();
+        let before = rows
+            .read_binding(&original, now(4))
+            .unwrap()
+            .frame()
+            .clone();
+        let revoke = rows.revoke(&original).unwrap();
+        let _ = rows
+            .settle_at(
+                revoke.complete(WorkBrowserResourceNativeOutcome::Revoked {
+                    debt: WorkBrowserLeaseNativeDebt::default(),
+                    resource_retained: true,
+                }),
+                now(5),
+            )
+            .unwrap();
+        let handoff = rows
+            .hand_over_unpresented(&resource, now(6), now(900))
+            .unwrap();
+        assert!(handoff.human_region().is_none());
+        let _ = rows
+            .settle_at(
+                handoff.complete(WorkBrowserResourceNativeOutcome::HumanPresented),
+                now(7),
+            )
+            .unwrap();
+        let resume = rows.continue_after_human(&resource, now(8)).unwrap();
+        let document = resume.document().unwrap().clone();
+        let _ = rows
+            .settle_at(resume.complete_human_document(document), now(9))
+            .unwrap();
+        let request = acquire(&mut rows, &resource, 10).unwrap();
+        let successor = request.lease().unwrap().clone();
+        let _ = rows
+            .settle_at(
+                request.complete(WorkBrowserResourceNativeOutcome::Acquired),
+                now(11),
+            )
+            .unwrap();
+        let after = rows
+            .read_binding(&successor, now(12))
+            .unwrap()
+            .frame()
+            .clone();
+        assert_eq!(original.resource(), successor.resource());
+        assert_eq!(
+            before.context().identity().id(),
+            after.context().identity().id()
+        );
+        assert_eq!(
+            before.context().identity().profile(),
+            after.context().identity().profile()
+        );
+        assert_eq!(before.origin(), after.origin());
+        assert_ne!(
+            before.context().identity().owner(),
+            after.context().identity().owner()
+        );
+        assert_ne!(
+            before.context().context_generation(),
+            after.context().context_generation()
+        );
+        assert_ne!(
+            before.context().navigation_epoch(),
+            after.context().navigation_epoch()
+        );
+        assert_ne!(before.frame_generation(), after.frame_generation());
+    }
+
+    #[test]
     fn human_and_actor_authority_never_overlap_and_continue_requires_fresh_observation() {
         let (mut rows, resource) = fixture();
         let request = acquire(&mut rows, &resource, 2).unwrap();

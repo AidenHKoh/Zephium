@@ -1081,6 +1081,7 @@ impl SemanticFormFacts {
 #[derive(Clone, Eq, PartialEq)]
 pub struct SemanticNode {
     key: SemanticNodeKey,
+    approval_identity: Option<crate::semantic_approval::SemanticApprovalIdentity>,
     parent: Option<u16>,
     depth: u8,
     role: SemanticRole,
@@ -1212,6 +1213,12 @@ impl SemanticNode {
         self.reference
     }
 
+    pub(crate) const fn approval_identity(
+        &self,
+    ) -> Option<crate::semantic_approval::SemanticApprovalIdentity> {
+        self.approval_identity
+    }
+
     pub(crate) const fn key(&self) -> SemanticNodeKey {
         self.key
     }
@@ -1244,6 +1251,7 @@ impl fmt::Debug for SemanticNode {
 
 pub(crate) struct SemanticNodeInput {
     pub(crate) key: SemanticNodeKey,
+    pub(crate) approval_identity: Option<crate::semantic_approval::SemanticApprovalIdentity>,
     pub(crate) parent: Option<u16>,
     pub(crate) depth: u8,
     pub(crate) role: SemanticRole,
@@ -1483,6 +1491,7 @@ impl SemanticSnapshot {
             });
             nodes.push(SemanticNode {
                 key: input.key,
+                approval_identity: input.approval_identity,
                 parent: input.parent,
                 depth: input.depth,
                 role: input.role,
@@ -1637,6 +1646,7 @@ mod tests {
 
     fn node(operations: SemanticOperations) -> SemanticNodeInput {
         SemanticNodeInput {
+            approval_identity: None,
             key: SemanticNodeKey::new(10).expect("key"),
             parent: None,
             depth: 0,

@@ -230,6 +230,40 @@
   const shadowHostGetter =
     typeof ShadowRoot === "function" ? getter(ShadowRoot.prototype, "host") : null;
 
+  const approvalCrypto = globalThis.crypto;
+  const approvalRandom = approvalCrypto && approvalCrypto.getRandomValues;
+  const approvalBytes = globalThis.Uint8Array;
+  function freshApprovalNonce() {
+    try {
+      if (typeof approvalRandom !== "function" || typeof approvalBytes !== "function") return null;
+      const bytes = new approvalBytes(16);
+      apply(approvalRandom, approvalCrypto, [bytes]);
+      const hex = "0123456789abcdef";
+      let value = "";
+      for (const byte of bytes) value += hex[byte >> 4] + hex[byte & 15];
+      return value === "00000000000000000000000000000000" ? null : value;
+    } catch (_) { return null; }
+  }
+  let approvalNonce = freshApprovalNonce();
+  let approvalUnavailable = approvalNonce === null;
+  const approvalNonces = new Set(approvalNonce === null ? [] : [approvalNonce]);
+  let approvalKeys = new WeakMap();
+  let nextApprovalKey = 1;
+  function approvalKey(element) {
+    if (approvalNonce === null) return null;
+    let key = apply(weakMapGet, approvalKeys, [element]);
+    if (key === undefined) {
+      if (nextApprovalKey > MAX_TRACKED_IDENTITIES) return null;
+      key = nextApprovalKey++;
+      apply(weakMapSet, approvalKeys, [element, key]);
+    }
+    return key;
+  }
+  function approvalMatches(proof, target, option = false) {
+    return proof[0] === approvalNonce && belongsToCurrentDocument(target) &&
+      apply(weakMapGet, approvalKeys, [target]) === proof[option ? 2 : 1];
+  }
+
   let nodeKeys = new WeakMap();
   const keyNodes = new Map();
   let nextNodeKey = 1;
@@ -245,6 +279,14 @@
   let transportActive = false;
 
   function clearDocumentState() {
+    approvalNonce = null;
+    approvalKeys = new WeakMap();
+    nextApprovalKey = 1;
+    if (!approvalUnavailable) {
+      const next = freshApprovalNonce();
+      if (next === null || approvalNonces.has(next) || approvalNonces.size >= MAX_TRACKED_IDENTITIES) approvalUnavailable = true;
+      else { approvalNonces.add(next); approvalNonce = next; }
+    }
     nodeKeys = new WeakMap();
     keyNodes.clear();
     nextNodeKey = 1;
@@ -365,6 +407,13 @@
 
   function parseActionRequest(request) {
     const actionKeys = ["v", "o", "a", "i", "g", "t", "r", "k", "e", "p", "z", "f", "of"];
+    if (objectHasOwn(request, "ap")) {
+      const proof = request.ap;
+      if (!arrayIsArray(proof) || proof.length !== 3 || typeof proof[0] !== "string" ||
+          !/^[0-9a-f]{32}$/.test(proof[0]) || !isPositiveSafeInteger(proof[1]) || proof[1] > MAX_TRACKED_IDENTITIES ||
+          (request.k === "select" ? !isPositiveSafeInteger(proof[2]) || proof[2] > MAX_TRACKED_IDENTITIES || proof[2] === proof[1] : proof[2] !== null)) return null;
+      actionKeys.push("ap");
+    }
     if (objectHasOwn(request, "sc")) actionKeys.push("sc");
     if (request.k === "scroll") {
       if (!arrayIsArray(request.sc) || request.sc.length !== 2 ||
@@ -2094,6 +2143,10 @@
     if (form !== null) wire.ff = form;
     if (states !== 0) wire.s = states;
     if (operations !== 0) wire.o = operations;
+    if ((operations & 15) !== 0) {
+      const identity = approvalKey(element);
+      if (identity !== null) wire.ai = identity;
+    }
     if (rect !== null && state.request.b.geo) wire.b = wireRect(rect);
 
     const record = { wire, sink: null, sinkBytes: 0, sensitivity: "public", element,
@@ -2902,7 +2955,7 @@
     for (const record of records) encodedNodes.push(apply(jsonStringify, JSON, [record.wire]));
 
     const compose = (status) => {
-      const header = `{"v":${WIRE_VERSION},"i":${request.i},"g":${request.g},"c":"${status}"${dialogSample}${scrollSample},"n":[`;
+      const header = `{"v":${WIRE_VERSION},"i":${request.i},"g":${request.g},"c":"${status}"${dialogSample}${scrollSample}${approvalNonce === null ? "" : `,"ap":"${approvalNonce}"`},"n":[`;
       const parts = [];
       let bytes = utf8Length(header, request.b.w + 1) + 2;
       let truncated = false;
@@ -3445,7 +3498,7 @@
   function cdpTargetGuard(target,request,point,keyboard) {
     const ancestry=cdpAncestry(target);
     return started => {
-      if (resolveKeyAtGeneration(request.t,request.g)!==target) return false;
+      if (resolveKeyAtGeneration(request.t,request.g)!==target || (request.ap !== undefined && !approvalMatches(request.ap,target))) return false;
       if (ancestry===null || !ancestry()) return false;
       const current=runtimeDescriptor(target,request.g);
       if (current===null) return false;
@@ -3835,9 +3888,11 @@
       return actionFault("target_changed");
     }
     sweepIdentities(request.g);
+    if (request.ap !== undefined && request.ap[0] !== approvalNonce) return actionFault("target_changed");
     const target = resolveKeyAtGeneration(request.t, request.g) ||
-      (request.k === "scroll" ? null : rebindReplaced(request));
+      (request.k === "scroll" || request.ap !== undefined ? null : rebindReplaced(request));
     if (target === null || (nodeType(target) !== 1 && !(request.k === "scroll" && target === document))) return actionFault("stale_reference");
+    if (request.ap !== undefined && !approvalMatches(request.ap, target)) return actionFault("target_changed");
     const descriptor = classify(target);
     if (descriptor === null) return actionFault("target_changed");
     const credential = target === document ? 0 : credentialField(target, descriptor, attribute(target, "aria-label", 512) || "");
@@ -3864,6 +3919,7 @@
     if (request.k === "select") {
       const option = resolveKeyAtGeneration(request.p, request.g);
       if (option === null) return actionFault("stale_reference");
+      if (request.ap !== undefined && !approvalMatches(request.ap, option, true)) return actionFault("target_changed");
       selectedOption = option;
       const optionDescriptor = runtimeDescriptor(option, request.g);
       if (!descriptorMatches(request.of, optionDescriptor)) {
@@ -3967,6 +4023,7 @@
       }
       try {
         pointerDown(target, point);
+        if (request.ap !== undefined && !approvalMatches(request.ap,target)) return actionFault("applied_unverified_postcondition");
         apply(htmlElementClick, target, []);
       } catch (_) {
         pendingDialogSample = null;
@@ -4030,6 +4087,7 @@
         if (optionPoint === null) return actionFault("target_occluded");
         try {
           pointerDown(selectedOption, optionPoint);
+          if (request.ap !== undefined && (!approvalMatches(request.ap,target) || !approvalMatches(request.ap,selectedOption,true) || !composedContains(target,selectedOption))) return actionFault("applied_unverified_postcondition");
           apply(htmlElementClick, selectedOption, []);
         } catch (_) {
           return actionFault("applied_unverified");
@@ -4094,6 +4152,7 @@
       };
       try {
         if (target !== document) apply(htmlElementFocus, target, []);
+        if (request.ap !== undefined && !approvalMatches(request.ap,target)) return actionFault("applied_unverified_postcondition");
         if (numericDefault && !sameNumber(numberValue)) return actionFault("applied_unverified_postcondition");
         if (cdpPreparing) {
           const validate = cdpTargetGuard(target,request,point,true);
@@ -4126,6 +4185,7 @@
         if (numericDefault && !handled && (numberUnverified || !sameNumber(numberAfter))) return actionFault("applied_unverified_postcondition");
         // A key the page did not handle does what the browser would.
         if (!handled && key[0] === "Enter" && descriptor.tag === "input") {
+          if (request.ap !== undefined && !approvalMatches(request.ap,target)) return actionFault("applied_unverified_postcondition");
           const form = read(inputFormGetter, target);
           if (form !== null && form !== undefined && typeof formRequestSubmit === "function") {
             apply(formRequestSubmit, form, []);
