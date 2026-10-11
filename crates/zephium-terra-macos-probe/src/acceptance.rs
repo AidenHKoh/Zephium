@@ -1711,6 +1711,7 @@ pub(super) async fn lead_workflow(
                     }
                     if account_probe {
                         settings.stage_diagnostic = Some(super::work_account::stage);
+                        settings.model_diagnostic = Some(super::work_account::model_event);
                     }
                     if public_page_diagnostic_enabled(
                         public_eval,

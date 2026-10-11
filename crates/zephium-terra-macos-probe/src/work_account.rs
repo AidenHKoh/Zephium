@@ -71,6 +71,44 @@ pub(super) fn stage(line: &str) {
     );
 }
 
+fn model_event_label(event: zephium_agent_controller::AgentWorkEventKind) -> Option<String> {
+    use zephium_agent_controller::AgentWorkEventKind as Event;
+    Some(match event {
+        Event::ToolProposed(kind) => format!("tool:{kind:?}"),
+        Event::NavigationRefused(reason) => format!("navigation_refused:{reason:?}"),
+        Event::ModelRequestedHuman(reason) => format!("human_requested:{reason:?}"),
+        Event::ActionProposalRefused(error) => {
+            use zephium_agentic::SemanticActionBindingError as Error;
+            let kind = match error {
+                Error::CredentialBoundary => "credential_boundary",
+                Error::AssignmentDenied => "assignment_denied",
+                Error::TaskEffectMismatch(_) => "effect_mismatch",
+                Error::Reference(_) => "reference",
+                Error::TargetIncomplete => "target_incomplete",
+                Error::ValueUnobserved => "value_unobserved",
+                Error::OutcomeContract => "outcome_contract",
+                Error::BudgetExhausted => "budget",
+                _ => "other",
+            };
+            format!("action_refused:{kind}")
+        }
+        Event::InspectionRefused => "inspection_refused".into(),
+        Event::ExtractionCorrected => "extraction_corrected".into(),
+        Event::ExtractionDropped { values } => format!("extraction_dropped:{values}"),
+        Event::Verified => "verified".into(),
+        _ => return None,
+    })
+}
+
+pub(super) fn model_event(event: zephium_agent_controller::AgentWorkEventKind) {
+    if let Some(label) = model_event_label(event) {
+        let _ = writeln!(
+            std::io::stdout().lock(),
+            "account-probe: event={label}; content=redacted"
+        );
+    }
+}
+
 pub(super) struct Account {
     origin: &'static str,
     start: String,
@@ -545,6 +583,32 @@ mod tests {
             None
         );
     }
+    #[test]
+    fn account_events_export_only_closed_operations_and_refusal_classes() {
+        use zephium_agent_controller::AgentWorkEventKind as Event;
+        use zephium_agentic::{AgentBrowserToolKind, SemanticActionBindingError};
+        assert_eq!(
+            model_event_label(Event::ToolProposed(AgentBrowserToolKind::ShowForHuman)).as_deref(),
+            Some("tool:ShowForHuman")
+        );
+        assert_eq!(
+            model_event_label(Event::ActionProposalRefused(
+                SemanticActionBindingError::CredentialBoundary
+            ))
+            .as_deref(),
+            Some("action_refused:credential_boundary")
+        );
+        assert_eq!(
+            model_event_label(Event::ObservationFacts {
+                nodes: 123,
+                text_bytes: 456,
+                dialogs: 1,
+                complete: true
+            }),
+            None
+        );
+    }
+
     #[test]
     fn native_presentation_never_advances_a_hidden_approval_handoff() {
         assert!(presentable_reason(WorkHumanReasonV1::SignIn));
