@@ -321,3 +321,75 @@ test("an exhausted visibility ancestry check cannot clear a wall", async () => {
     await survey(content + "<div>".repeat(66) + "<input type='password'>" + "</div>".repeat(66)),
   ).toBe(false);
 });
+
+test("a Fastmail-like inbox uses populated message cards rather than site-specific markup", async () => {
+  const messages = [
+    ["Avery", "Quarterly planning notes are ready"],
+    ["Morgan", "Updated schedule for the design review"],
+    ["Casey", "Research questions for the next meeting"],
+  ]
+    .map(
+      ([sender, subject]) =>
+        `<div><button><span>${sender}</span><span>${subject}</span></button></div>`,
+    )
+    .join("");
+  const inbox = (items: string) => `<main aria-label="Mail">
+    <h1>Inbox</h1><form role="search"><input type="search" aria-label="Search mail"></form>
+    <section aria-label="Messages">${items}</section>
+  </main>`;
+  expect(await survey(inbox(messages))).toBe(true);
+  expect(await survey(inbox("<div><button>Open</button></div>".repeat(3)))).toBe(false);
+  expect(await survey(inbox(`<div style="opacity:0">${messages}</div>`))).toBe(false);
+  expect(
+    await survey(
+      inbox(messages) +
+        '<dialog open aria-modal="true"><h2>Enter your verification code</h2><input autocomplete="one-time-code"></dialog>',
+    ),
+  ).toBe(false);
+});
+
+test("a Discord-like conversation resolves deeply nested log and feed messages", async () => {
+  const message =
+    "<div>".repeat(40) +
+    '<article><div role="listitem"><span>Jordan shared the release checklist with the room.</span></div></article>' +
+    "</div>".repeat(40);
+  for (const role of ["log", "feed"]) {
+    const conversation = (history: string) => `<section role="main">
+      <h1>Release room</h1><div role="${role}" aria-label="Messages" aria-live="polite">${history}</div>
+      <div role="toolbar"><button>Browse pinned messages</button><button>Show room participants</button><button>Manage notifications</button></div>
+      <div role="textbox" aria-label="Message the room" aria-multiline="true" contenteditable="true"><p><br></p></div>
+      <aside><div role="status">Loading older messages</div></aside>
+    </section>`;
+    expect(await survey(conversation(message)), role).toBe(true);
+    expect(await survey(conversation("<div></div>")), role).toBe(false);
+    expect(await survey(conversation(`<div hidden>${message}</div>`)), role).toBe(false);
+    expect(await survey(conversation(message) + '<input type="password">'), role).toBe(false);
+  }
+});
+
+test("a Discord-like portal history requires valid external ARIA ownership", async () => {
+  const shell = `<main><h1>Planning room</h1>
+    <div id="chat-history" role="log" aria-label="Messages" aria-live="polite" aria-owns="portal-post" style="min-height:20px"></div>
+    <div role="toolbar"><button>Browse pinned messages</button><button>Show room participants</button><button>Manage notifications</button></div>
+    <div role="textbox" aria-label="Message the room" aria-multiline="true" contenteditable="true"><p><br></p></div>
+  </main>`;
+  const post =
+    '<section id="portal-post"><article><div role="listitem"><span>Sam shared the agenda for the planning meeting.</span></div></article></section>';
+  expect(await survey(shell + post)).toBe(true);
+  expect(
+    await survey(
+      shell.replace('aria-owns="portal-post"', 'aria-owns="portal-group"') +
+        '<section id="portal-group" aria-owns="portal-post" style="min-height:20px"></section>' +
+        post,
+    ),
+  ).toBe(true);
+  for (const page of [
+    shell,
+    shell.replace('aria-owns="portal-post"', "") + post,
+    shell + post + '<div id="portal-post"></div>',
+    shell + `<section aria-hidden="true">${post}</section>`,
+    shell + post.replace('id="portal-post"', 'id="portal-post" aria-owns="chat-history"'),
+    shell + post + '<input autocomplete="one-time-code">',
+  ])
+    expect(await survey(page)).toBe(false);
+});
