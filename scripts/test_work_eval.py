@@ -167,6 +167,36 @@ class ReferenceAndFreezeTests(unittest.TestCase):
         self.assertEqual(summary['process_completions'], 1)
 
 
+    def test_matrix_parser_preserves_exact_pairs_and_refuses_omissions(self):
+        manifest = eval.load_manifest(eval.DEFAULT_MANIFEST)
+        lines = ['url[' + row['id'] + ']="' + row['url'] + '"; goal[' + row['id'] + ']="' + row['goal'] + '"' for row in manifest['tuned_cases']]
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'matrix.sh'
+            path.write_text('\n'.join(lines) + '\n# This source is never executed.\n')
+            self.assertEqual(eval.matrix_pairs(path), manifest['tuned_cases'])
+            path.write_text('\n'.join(lines[:-1]))
+            with self.assertRaises(ValueError): eval.matrix_pairs(path)
+            path.write_text('\n'.join(lines + [lines[0]]))
+            with self.assertRaises(ValueError): eval.matrix_pairs(path)
+
+    def test_tuned_matrix_is_explicit_exact_and_never_automatic_pass(self):
+        manifest = eval.load_manifest(eval.DEFAULT_MANIFEST)
+        self.assertIs(eval.evaluation_manifest(manifest, {}), manifest)
+        derived = eval.evaluation_manifest(manifest, {'evaluation_lane': 'tuned_matrix_v1'})
+        self.assertEqual(len(derived['tasks']), 23)
+        self.assertIn('unsplash', {task['id'] for task in derived['tasks']})
+        self.assertTrue(manifest['excluded_domains'])
+        for case, task in zip(manifest['tuned_cases'], derived['tasks']):
+            self.assertEqual(task['urls'], [case['url']])
+            self.assertEqual(task['original_goal'], case['goal'])
+            self.assertTrue(task['prompt'].endswith(case['goal']))
+            self.assertEqual(task['grading'], 'source_audit')
+        _, evidence, _, _ = fixture()
+        task = derived['tasks'][0]
+        evidence['case_id'] = task['id']
+        self.assertEqual(eval.grade(task, evidence, None, derived)['task_outcome'], 'unknown')
+        self.assertEqual(len(manifest['tasks']), 100)
+
     def test_summary_distributions_keep_unknowns_basis_and_censored_time_explicit(self):
         _, evidence, _, _ = fixture()
         rows = []

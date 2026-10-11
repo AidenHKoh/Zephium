@@ -229,6 +229,14 @@ def freeze(args):
     forms = getattr(args, "form_oracle", False)
     locals_enabled = getattr(args, "local_fixtures", False)
     allowed = INSTRUMENTATION | (FORM_INSTRUMENTATION if forms else set()) | (LOCAL_INSTRUMENTATION if locals_enabled else set())
+    tuned = getattr(args, "tuned_matrix", False)
+    if tuned:
+        if not args.matrix_source or args.timeout != 480:
+            raise ValueError("tuned matrix requires original matrix source and historical 480-second cap")
+        if matrix_pairs(args.matrix_source) != manifest["tuned_cases"]:
+            raise ValueError("matrix source/manifest URL-goal pairs differ")
+    if tuned and (args.label != "candidate" or forms or locals_enabled):
+        raise ValueError("tuned matrix requires its own candidate freeze without form/local modes")
     if args.label == "baseline" and not changed <= allowed:
         raise ValueError("baseline source includes production changes after base revision")
     if forms:
@@ -260,6 +268,13 @@ def freeze(args):
               "model_setup": "Luna lead/page/light; shipped recommended Jev read triage when eligible; actual primary/emulation counters are reported separately",
               "platform": list(os.uname()), "python": sys.version, "timeout_seconds": args.timeout,
               "oracle_scope": "deterministic predicates and separately identified human or agent source audits; form task effects use bounded native action/navigation and DOM submit receipts, not universal HTTP observation"}
+    if tuned:
+        write_private(out / "matrix.sh", Path(args.matrix_source).read_bytes())
+        write_private(out / "matrix-pairs.json", matrix_pairs(args.matrix_source))
+        record["matrix_source_sha256"] = digest(out / "matrix.sh")
+        record["matrix_pairs_sha256"] = digest(out / "matrix-pairs.json")
+        record["evaluation_lane"] = "tuned_matrix_v1"
+        record["tuned_matrix_qualification"] = "Exact original 23 URL/goal pairs, including Unsplash. Modern public-only lead path declines all consequential confirmations. Historical live-site terminal-status scores are not matched semantic grades. No automatic pass without a separately recorded source audit."
     if forms:
         directory = out / "form-observer"
         directory.mkdir(mode=0o700)
@@ -287,6 +302,31 @@ def freeze(args):
     print(out / "freeze.json")
 
 
+
+def matrix_pairs(path):
+    source = Path(path).read_text()
+    pattern = re.compile(r'^url\[([a-z0-9-]+)\]="([^"\n]+)";[ \t]*goal\[\1\]="([^"\n]+)"$', re.MULTILINE)
+    pairs = [{"id": name, "url": url, "goal": goal} for name, url, goal in pattern.findall(source)]
+    if len(pairs) != 23 or len({row["id"] for row in pairs}) != 23 or "unsplash" not in {row["id"] for row in pairs}:
+        raise ValueError("expected exactly 23 literal URL/goal pairs including Unsplash")
+    return pairs
+
+
+def evaluation_manifest(manifest, frozen):
+    if frozen.get("evaluation_lane") != "tuned_matrix_v1":
+        return manifest
+    # This is a separately labelled tuned set, never held-out contamination relief.
+    result = dict(manifest, excluded_domains=[])
+    result["tasks"] = [{"id": case["id"], "urls": [case["url"]],
+                        "prompt": "Open " + case["url"] + ". " + case["goal"],
+                        "original_goal": case["goal"], "category": "tuned_matrix",
+                        "eligibility": "eligible_public", "grading": "source_audit",
+                        "predicates": [{"id": "goal_correctness", "description": case["goal"]},
+                                       {"id": "source_support", "description": "Returned claims and record associations are supported by observed primary sources; unavailable or time-sensitive proof remains unknown."}]}
+                       for case in manifest["tuned_cases"]]
+    return result
+
+
 def verify_freeze(path):
     root = Path(path).resolve().parent
     record = read_json(path)
@@ -300,6 +340,11 @@ def verify_freeze(path):
     for name, expected in record.get("local_fixtures", {}).get("files", {}).items():
         if not name.startswith("local-fixtures/") or Path(name).name != name.split("/", 1)[1] or digest(root / name) != expected:
             raise ValueError("frozen local fixture changed")
+    if record.get("evaluation_lane") == "tuned_matrix_v1":
+        if digest(root / "matrix.sh") != record["matrix_source_sha256"] or digest(root / "matrix-pairs.json") != record["matrix_pairs_sha256"]:
+            raise ValueError("frozen tuned matrix provenance changed")
+        if matrix_pairs(root / "matrix.sh") != read_json(root / "matrix-pairs.json") or read_json(root / "matrix-pairs.json") != read_json(root / "manifest.json")["tuned_cases"]:
+            raise ValueError("frozen tuned matrix pairs differ")
     if digest(__file__) != record["runner_sha256"]:
         raise ValueError("invoke the frozen work-eval.py to preserve grading behavior")
     return root, record
@@ -917,7 +962,7 @@ def summarize(rows):
 
 def run(args):
     root, frozen = verify_freeze(args.freeze)
-    manifest = load_manifest(root / "manifest.json")
+    manifest = evaluation_manifest(load_manifest(root / "manifest.json"), frozen)
     references = read_json(root / "references.json")["tasks"]
     requested = set(args.tasks or [])
     if requested - {task["id"] for task in manifest["tasks"]}:
@@ -959,7 +1004,7 @@ def review(args):
         raise ValueError("audit must identify its exact run and source-audit reviewer type")
     if not audit.get("reviewer"):
         raise ValueError("audit reviewer is required")
-    manifest = load_manifest(Path(run["freeze"]).parent / "manifest.json")
+    manifest = evaluation_manifest(load_manifest(Path(run["freeze"]).parent / "manifest.json"), read_json(run["freeze"]))
     tasks = {task["id"]: task for task in manifest["tasks"]}
     rows = {row["id"]: row for row in run["rows"]}
     for entry in audit["tasks"]:
@@ -985,7 +1030,7 @@ def compare(args):
     a, b = read_json(args.before), read_json(args.after)
     freezes = [read_json(run["freeze"]) for run in (a, b)]
     matching = all(freezes[0].get(key) == freezes[1].get(key) for key in
-                   ("manifest_sha256", "references_sha256", "runner_sha256", "model", "platform", "python", "timeout_seconds"))
+                   ("manifest_sha256", "references_sha256", "runner_sha256", "model", "platform", "python", "timeout_seconds", "evaluation_lane"))
     form_versions = [record.get("form_oracle", {}).get("version") for record in freezes]
     if any(form_versions):
         matching = matching and form_versions == [2, 2] and bool(freezes[0]["form_oracle"].get("predicate_files")) and freezes[0]["form_oracle"].get("predicate_files") == freezes[1]["form_oracle"].get("predicate_files")
@@ -1019,6 +1064,8 @@ def main():
     freezing.add_argument("--label", choices=["baseline", "candidate"], required=True)
     freezing.add_argument("--form-oracle", action="store_true", help="freeze exact probe-only final-form, action, navigation and submit-event observers")
     freezing.add_argument("--local-fixtures", action="store_true", help="freeze exact synthetic files/Blocks fixtures and independent predicates")
+    freezing.add_argument("--tuned-matrix", action="store_true", help="separate candidate lane for exact 23 tuned goals; source audits required")
+    freezing.add_argument("--matrix-source", type=Path, help="original matrix.sh literal-pair provenance; never executed")
     freezing.add_argument("--timeout", type=int, default=300)
     freezing.add_argument("--out", required=True)
     running = commands.add_parser("run")
