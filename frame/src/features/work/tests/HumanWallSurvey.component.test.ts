@@ -91,3 +91,12 @@ test("a verification screen clears only after it is replaced by account content"
   expect(await survey(waiting)).toBe(false);
   expect(await survey(content)).toBe(true);
 });
+
+test("unlabelled segmented verification controls and lower-level headings remain held", async () => {
+  for (const html of [
+    `<main><h4>Check your email</h4><p>Use the code we sent to continue.</p>${"<input type='text' maxlength='1' inputmode='numeric'>".repeat(6)}</main>`,
+    `<main><h1>Continue to your workspace</h1><p>Complete the next step to open your account.</p><input type='text' name='code'><button>Continue</button></main>`,
+    `<main><h5>Check your inbox</h5><p>Follow the link to continue to your workspace.</p></main>`,
+  ])
+    expect(await survey(html), html).toBe(false);
+});

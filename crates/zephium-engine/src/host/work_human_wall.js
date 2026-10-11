@@ -15,7 +15,7 @@
       const hint = ["type", "autocomplete", "name", "id", "aria-label", "placeholder"].map((name) => active.getAttribute(name) || "").join(" ");
       if (/(?:password|one-time-code|totp|otp|authentication.?code|verification.?code|confirmation.?code|email|user.?name|workspace)/i.test(hint)) return false;
     }
-    const nodes = document.querySelectorAll("input,textarea,select,iframe,h1,h2,h3,p,button,a,main,article,[role='heading'],[role='alert'],[role='main'],[role='dialog'],[role='row'],[role='listitem'],[role='option'],[role='link'],[role='button'],[role='grid'],[role='status'],[role='progressbar'],[role='textbox'],[contenteditable='true'],[aria-busy='true']");
+    const nodes = document.querySelectorAll("input,textarea,select,iframe,h1,h2,h3,h4,h5,h6,p,button,a,main,article,[role='heading'],[role='alert'],[role='main'],[role='dialog'],[role='row'],[role='listitem'],[role='option'],[role='link'],[role='button'],[role='grid'],[role='status'],[role='progressbar'],[role='textbox'],[contenteditable='true'],[aria-busy='true']");
     if (nodes.length > 4096) return false;
     const challenge = /^(?:just a moment|checking (?:your browser|if the site connection)|verifying you are human|verify you are human|please verify|confirm you are human|are you (?:a human|a robot)|prove you are human|press (?:&|and) hold|human verification|security (?:check|verification)|complete the security check|pardon our interruption|access denied|unusual traffic|something went wrong|please wait)/i;
     const signIn = /(?:sign[ -]?in|log[ -]?in|zaloguj|two[ -]?factor|verification code|confirmation code|authentication code|one[ -]?time code|choose (?:an? |your )?(?:account|workspace|organization)|select (?:an? |your )?(?:account|workspace|organization)|find your workspace|workspace url|enter your workspace|continue (?:with|to) (?:google|microsoft|apple|slack|sso)|single sign[ -]?on)/i;
@@ -44,7 +44,7 @@
         .some((button) => /^(?:subscribe|sign up for (?:our |the )?newsletter|join (?:our |the )?mailing list)\b/i.test(label(button)));
     };
     let heading = false, paragraph = false, links = 0, main = false, rows = 0;
-    let authHeading = false, authControls = 0, editable = 0, busy = false;
+    let authHeading = false, authControls = 0, editable = 0, unknownEntry = 0, busy = false;
     for (const node of nodes) {
       if (!visible(node)) continue;
       const tag = node.tagName.toLowerCase();
@@ -56,8 +56,12 @@
         if (hints.some((hint) => hint.length > 256)) return false;
         const hint = hints.join(" ");
         if (type === "password" || /(?:password|one-time-code|totp|otp|authentication.?code|verification.?code|confirmation.?code)/i.test(hint)) return false;
+        // Segmented OTP widgets often expose only ordinary one-character
+        // text inputs, without an accessible code label or autocomplete hint.
+        if (node.getAttribute("maxlength") === "1" && /^(?:text|tel|number|)$/.test(type)) return false;
         if (node.disabled || node.readOnly) continue;
         editable++;
+        if (!publicEntry(node) && type !== "search") unknownEntry++;
         if ((/(?:email|user.?name|workspace|organization|tenant)/i.test(hint) || type === "email") && !publicEntry(node)) return false;
         continue;
       }
@@ -77,7 +81,7 @@
       }
       // Bounded labels only; structural containers never expand their text.
       const short = label(node);
-      const isHeading = /^h[1-3]$/.test(tag) || role === "heading";
+      const isHeading = /^h[1-6]$/.test(tag) || role === "heading";
       if ((isHeading || role === "alert" || tag === "p") && challenge.test(short)) return false;
       if ((isHeading || role === "alert" || role === "status" || role === "dialog") && authStatus.test(short)) return false;
       if (role === "status" && /^(?:loading|please wait|just a moment)\b/i.test(short)) busy = true;
@@ -94,6 +98,9 @@
     // Authentication forms may arrive after their heading, and email/MFA
     // waiting screens may have no editable controls at all.
     if (authHeading) return false;
+    // A heading and explanatory paragraph also describe most code-entry
+    // screens. Unclassified editable controls require actual app structure.
+    if (unknownEntry > 0 && !(main && rows >= 3)) return false;
     if (busy && !(main && (links >= 3 || rows >= 3))) return false;
     if (authControls > 0 && editable > 0 && !(heading && paragraph) && rows < 3) return false;
     // A settled URL and the absence of a field are insufficient: require

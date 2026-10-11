@@ -40,6 +40,10 @@ impl HumanNavigation {
     fn back_on_site(&self) -> bool {
         self.finished
             && self.loading.is_none()
+            // A human may navigate through credential-bearing callback URLs,
+            // but the retained actor must never resume on one of those URLs.
+            && zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+                .admits_request(&self.current)
             && zephium_agentic::same_work_human_site(&self.source, &self.current)
             && !self.current.as_url().host_str().is_some_and(|host| {
                 [
@@ -407,7 +411,7 @@ impl WorkDocumentNavigation {
 
 #[cfg(all(test, target_os = "windows"))]
 mod windows_tests {
-    use super::super::tests::{event, ready_gate, URL};
+    use super::super::tests::{URL, event, ready_gate};
     use super::*;
     use wry::NavigationEventPhase as E;
 
@@ -526,7 +530,7 @@ mod windows_tests {
 
 #[cfg(all(test, any(target_os = "macos", target_os = "ios")))]
 mod tests {
-    use super::super::tests::{apple_action, event, ready_gate, URL};
+    use super::super::tests::{URL, apple_action, event, ready_gate};
     use super::*;
     use wry::{AppleNavigationType as T, NavigationEventPhase as E};
 
@@ -662,7 +666,7 @@ mod tests {
 
 #[cfg(test)]
 mod wall_proof_tests {
-    use super::super::tests::{ready_gate, URL};
+    use super::super::tests::{URL, ready_gate};
     use super::*;
 
     fn human() -> (
@@ -761,6 +765,45 @@ mod wall_proof_tests {
             "identity hosts/outside sites are not task content even without a login path"
         );
         assert!(!progress.verified_wall_clear());
+    }
+
+    #[test]
+    fn authentication_callback_state_stays_with_the_person_until_an_admissible_document() {
+        for suffix in [
+            "?code=fixture",
+            "?state=fixture",
+            "?token=fixture",
+            "#verification",
+        ] {
+            let (gate, progress) = human();
+            let stamp = gate.human_wall_probe().unwrap();
+            assert!(gate.record_human_wall_clear(stamp, true));
+            assert!(gate.record_human_wall_clear(stamp, true));
+            {
+                let mut state = gate.0.lock().unwrap();
+                let human = state.human.as_mut().unwrap();
+                human
+                    .location_changed(Some(&format!("https://example.test/verify{suffix}")))
+                    .unwrap();
+                assert!(human.target("https://example.test/workspace").is_some());
+            }
+            assert!(!progress.verified_wall_clear());
+            assert!(gate.human_wall_probe().is_none());
+            assert!(!gate.record_human_wall_clear(stamp, true));
+            {
+                let mut state = gate.0.lock().unwrap();
+                state
+                    .human
+                    .as_mut()
+                    .unwrap()
+                    .location_changed(Some("https://example.test/workspace"))
+                    .unwrap();
+            }
+            let clean = gate.human_wall_probe().unwrap();
+            assert!(gate.record_human_wall_clear(clean, true));
+            assert!(gate.record_human_wall_clear(clean, true));
+            assert!(progress.verified_wall_clear());
+        }
     }
 
     #[test]
