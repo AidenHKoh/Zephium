@@ -1341,6 +1341,7 @@ where
                 _ => None,
             }))
             .collect();
+        ground_handoff_report(report, &steps);
         let helper_reason = match &report.need {
             Some(
                 WorkPartNeedV1::Retry { reason, .. } | WorkPartNeedV1::UseConnection { reason, .. },
@@ -2044,6 +2045,58 @@ fn page_handoff(step: &WorkStepFact) -> Option<WorkPageHandoffKindV1> {
     }
 }
 
+fn ground_handoff_report(report: &mut PartReport, steps: &[&WorkStepFact]) {
+    let (host, kind) = match &report.need {
+        Some(WorkPartNeedV1::SignIn { host }) => (host, WorkPageHandoffKindV1::SignIn),
+        Some(WorkPartNeedV1::Check { host }) => (host, WorkPageHandoffKindV1::Check),
+        _ => return,
+    };
+    if handoff_resolved(steps, host, kind) {
+        report.need = None;
+        return;
+    }
+    let site = crate::work_sites::site_of(&format!("https://{host}/"));
+    let matching: Vec<_> = steps
+        .iter()
+        .copied()
+        .filter(|step| {
+            matches!(&step.kind, WorkStepKindV1::Read { url, .. }
+            if site.is_some() && crate::work_sites::site_of(url) == site)
+        })
+        .collect();
+    if matching.iter().any(|step| page_handoff(step) == Some(kind)) {
+        return;
+    }
+    // A helper's explanation cannot turn an interaction or engine failure
+    // into a sign-in/check wall. Native waits were preserved above this seam.
+    let manual = matching
+        .iter()
+        .filter(|step| {
+            matches!(
+                step.status,
+                WorkStepStatus::Failed | WorkStepStatus::OutcomeUnknown | WorkStepStatus::Cancelled
+            )
+        })
+        .max_by_key(|step| crate::work_agent::read_settlement_order(step))
+        .is_some_and(|step| {
+            step.measurements.and_then(|m| m.outcome) == Some(WorkPageOutcomeV1::NeedsInteraction)
+        });
+    report.need = None;
+    report.summary = Some(
+        if manual {
+            "Needs manual interaction"
+        } else {
+            "Page task unfinished"
+        }
+        .into(),
+    );
+    report.digest = if manual {
+        "The page task needs manual interaction. Work could not complete the requested interaction automatically."
+    } else {
+        "Work could not verify completion of this page task. No sign-in or human-check handoff was recorded."
+    }.into();
+}
+
 fn handoff_resolved(steps: &[&WorkStepFact], host: &str, kind: WorkPageHandoffKindV1) -> bool {
     let site = crate::work_sites::site_of(&format!("https://{host}/"));
     steps.iter().any(|prior| {
@@ -2463,6 +2516,88 @@ mod tests {
         assert!(zephium_core::search::SearchEngine::DuckDuckGo
             .search(&operator_last("site:x-kom.pl LEGO 42115"))
             .is_some());
+    }
+
+    #[test]
+    fn helper_wall_claims_require_matching_native_outcomes() {
+        let read = |url: &str, outcome| WorkStepFact {
+            id: WorkStepId::generate(),
+            turn: 1,
+            kind: WorkStepKindV1::Read {
+                url: url.into(),
+                goal: None,
+                collection: None,
+            },
+            status: WorkStepStatus::Failed,
+            usage: Some(WorkUsage::default()),
+            artifacts: vec![],
+            evidence: None,
+            note: Some(SIGN_IN_NOTE.into()),
+            measurements: Some(WorkStepMeasurementsV1 {
+                outcome: Some(outcome),
+                ..Default::default()
+            }),
+            local: None,
+            account: None,
+            part: None,
+            model_fault: None,
+        };
+        for (kind, native) in [
+            (WorkPageHandoffKindV1::Check, WorkPageOutcomeV1::NeedsCheck),
+            (
+                WorkPageHandoffKindV1::SignIn,
+                WorkPageOutcomeV1::NeedsSignIn,
+            ),
+        ] {
+            let report = || {
+                let mut report =
+                    PartReport::ended(WorkPartStateV1::Failed, "A helper claimed a wall", vec![]);
+                report.need = Some(if kind == WorkPageHandoffKindV1::Check {
+                    WorkPartNeedV1::Check {
+                        host: "example.com".into(),
+                    }
+                } else {
+                    WorkPartNeedV1::SignIn {
+                        host: "example.com".into(),
+                    }
+                });
+                report
+            };
+            let mut valid = report();
+            ground_handoff_report(&mut valid, &[&read("https://example.com/", native)]);
+            assert!(valid.need.is_some());
+            assert_eq!(valid.digest, "A helper claimed a wall");
+            let mut unrelated = report();
+            ground_handoff_report(&mut unrelated, &[&read("https://other.test/", native)]);
+            assert!(unrelated.need.is_none());
+            for outcome in [
+                WorkPageOutcomeV1::NeedsInteraction,
+                WorkPageOutcomeV1::TooManySteps,
+                WorkPageOutcomeV1::Refused {
+                    stage: WorkPageFailureStageV1::Action,
+                },
+                WorkPageOutcomeV1::Completed,
+            ] {
+                let mut unsupported = report();
+                ground_handoff_report(&mut unsupported, &[&read("https://example.com/", outcome)]);
+                assert!(unsupported.need.is_none());
+                assert_ne!(unsupported.digest, "A helper claimed a wall");
+                if outcome == WorkPageOutcomeV1::NeedsInteraction {
+                    assert_eq!(
+                        unsupported.summary.as_deref(),
+                        Some("Needs manual interaction")
+                    );
+                    assert_eq!(unsupported.digest, "The page task needs manual interaction. Work could not complete the requested interaction automatically.");
+                }
+            }
+            let mut legacy = read("https://example.com/", native);
+            legacy.measurements = None;
+            if kind == WorkPageHandoffKindV1::SignIn {
+                let mut known = report();
+                ground_handoff_report(&mut known, &[&legacy]);
+                assert!(known.need.is_some());
+            }
+        }
     }
 
     #[test]

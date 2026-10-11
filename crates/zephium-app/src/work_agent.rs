@@ -2879,6 +2879,7 @@ fn page_failure_notice(note: &str, outcome: Option<WorkPageOutcomeV1>) -> String
     let recovery = match outcome {
         Some(WorkPageOutcomeV1::NeedsSignIn) => "The person needs to sign in on the requested site. Keep the sign-in need visible and wait for that handoff; do not retry blindly.",
         Some(WorkPageOutcomeV1::NeedsCheck) => "The person needs to pass the check on the requested site. Keep that need visible and wait for the handoff; do not try other URLs on the site.",
+        Some(WorkPageOutcomeV1::NeedsInteraction) => "The page task needs manual interaction. State what could not be completed automatically; this outcome does not establish a sign-in or human-check wall.",
         Some(WorkPageOutcomeV1::Refused { .. }) => "Work could not execute this page step. Report the recorded failure accurately; do not blame the site or claim the task completed.",
         _ => "Keep the unfinished assignment explicit. Continue independent work where possible, without claiming this task completed.",
     };
