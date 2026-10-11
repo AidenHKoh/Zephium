@@ -1173,9 +1173,13 @@ fn action_problem(kind: AgentBrowserToolKind, arguments: &str) -> Option<String>
                 "settle_millis must be between 1 and 30000".to_owned(),
             AgentBrowserToolContractError::Action if fields["value"].as_str().is_some_and(|value| SemanticActionText::try_new(value.to_owned()).is_err()) =>
                 "value exceeds the text limit or contains forbidden control characters".to_owned(),
+            AgentBrowserToolContractError::Action if matches!(fields["verification"]["kind"].as_str(), Some("page_dialog_opened" | "page_dialog_closed")) && !matches!(fields["effect"].as_str(), Some("read" | "local_write")) =>
+                "page_dialog_opened/page_dialog_closed can verify only read or local_write. A native approval prompt is not a page dialog. Keep the consequential effect and choose page_changed or another supported outcome of the actual action; native approval is still required".to_owned(),
+            AgentBrowserToolContractError::Action if fields["wait"]["kind"] == "mutation_quiet" && fields["wait"]["millis"].as_u64()? > fields["settle_millis"].as_u64()? =>
+                "wait.millis must not exceed settle_millis".to_owned(),
             AgentBrowserToolContractError::Action => format!(
-                "kind={} is incompatible with wait={} and verification={}; choose the outcome that this action can independently verify",
-                fields["kind"].as_str()?, fields["wait"]["kind"].as_str()?, fields["verification"]["kind"].as_str()?),
+                "kind={} effect={} is incompatible with wait={} and verification={}; choose the outcome that this action can independently verify",
+                fields["kind"].as_str()?, fields["effect"].as_str()?, fields["wait"]["kind"].as_str()?, fields["verification"]["kind"].as_str()?),
             AgentBrowserToolContractError::Reference => "target or option must be a canonical ref from the latest look, such as @a12".to_owned(),
             AgentBrowserToolContractError::Wait => "wait.millis is outside the permitted mutation_quiet interval".to_owned(),
             _ => return None,
@@ -1183,6 +1187,19 @@ fn action_problem(kind: AgentBrowserToolKind, arguments: &str) -> Option<String>
         return Some(format!("actions[{index}]: {detail}"));
     }
     None
+}
+
+#[cfg(test)]
+mod action_problem_tests {
+    use super::*;
+    #[test]
+    fn communication_dialog_error_names_the_effect_instead_of_blame_on_wait() {
+        let message = browser_call_problem("act", r#"{"actions":[{"kind":"click","target":"@a1","effect":"communication","wait":{"kind":"immediate"},"verification":{"kind":"page_dialog_opened"},"settle_millis":2000}]}"#, None).unwrap();
+        assert!(message.contains("actions[0]"));
+        assert!(message.contains("only read or local_write"));
+        assert!(message.contains("native approval prompt is not a page dialog"));
+        assert!(message.contains("Keep the consequential effect"));
+    }
 }
 
 fn serde_problem<'a, T: Deserialize<'a>>(arguments: &'a str) -> Option<String> {

@@ -502,6 +502,8 @@ impl SemanticActionProposal {
                     if quiet.millis() > settle_budget.millis()
             )
         {
+            #[cfg(feature = "probe-harness")]
+            crate::probe_evidence_path::trace(format_args!("action-contract: kind={:?} effect={effect:?} wait={wait:?} verification={verification:?} settle_ms={}", intent.kind(), settle_budget.millis()));
             return Err(SemanticActionContractError::OutcomeContract);
         }
         Ok(Self {

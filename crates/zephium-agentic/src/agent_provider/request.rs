@@ -6069,27 +6069,26 @@ static NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolD
             })
             .collect();
         let mut action = tool_parameters(AgentBrowserToolKind::Act, true);
-        for variant in action["properties"]["actions"]["items"]["anyOf"]
+        action["properties"]["actions"]["items"]["anyOf"]
             .as_array_mut()
             .expect("fixed action schema")
-        {
-            // Editing a value or selection changes local control state, even
-            // for a search-only objective. The host must still independently
-            // assess the actual effect: an auto-saving control may exceed this
-            // profile's authority despite the model's declaration.
-            variant["properties"]["effect"] = match variant["properties"]["kind"]["enum"][0]
-                .as_str()
-                .expect("fixed action kind")
-            {
-                "click" => string_enum(&["read", "local_write"]),
-                "fill" | "select" => string_enum(&["local_write"]),
-                "press" => string_enum(&["read", "local_write"]),
-                "scroll" => string_enum(&["read"]),
-                // Refuse the whole tool profile if a future schema adds an
-                // action whose effect contract has not been reviewed here.
-                _ => return Vec::new(),
-            };
-        }
+            .retain_mut(|variant| {
+                let allowed: &[&str] = match variant["properties"]["kind"]["enum"][0].as_str() {
+                    Some("click" | "press") => &["read", "local_write"],
+                    Some("fill" | "select") => &["local_write"],
+                    Some("scroll") => &["read"],
+                    _ => return false,
+                };
+                let effects = variant["properties"]["effect"]["enum"]
+                    .as_array_mut()
+                    .expect("fixed effect enum");
+                effects.retain(|effect| {
+                    effect
+                        .as_str()
+                        .is_some_and(|effect| allowed.contains(&effect))
+                });
+                !effects.is_empty()
+            });
         tools.push(BrowserToolDefinition {
             kind: AgentBrowserToolKind::Act,
             description: "Propose one current-ref Click, Fill, Select, Press or Scroll with verification of its intended outcome. Fill and Select require local_write, including editing a search field. Click uses read for exploration or opening a dialog, local_write for reversible local changes. Only these effects are available; autosaved external changes are outside this profile. Trusted host assessment still decides permission. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Opening a page dialog requires page_dialog_opened; choosing an item that dismisses it requires page_dialog_closed. Both are followed by fresh inspection. Scroll uses read and immediate settlement with scroll_position_changed verification. Use amount=into_view on an observed disclosure with ops=scroll to bring it into view (direction is ignored for this amount); this never clicks or expands it. Inspect fresh state before clicking. Other amounts move a scroll container by line, half_page or page. Prefer page for exploring a long document; use line for fine adjustments. To move through the page use its document ref; snapshot(initial) restores that ref when a scoped view omits it. Scroll a nested list or region only when its own contents are the intended destination. Press sends one key to a control, with read for Enter in a search field or Escape on a popup and local_write for keys that edit. Native dialogs and navigation are unavailable through act. Navigate through the separate navigate tool when authorized.",
@@ -6147,6 +6146,11 @@ static SITE_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinit
                 };
                 variant["properties"]["effect"] = string_enum(effects);
             }
+            separate_click_effects(
+                tool.parameters["properties"]["actions"]["items"]["anyOf"]
+                    .as_array_mut()
+                    .expect("fixed action schema"),
+            );
             tool.description = "Propose one current-ref Click, Fill, Select, Press or Scroll on this site with verification of its intended outcome. Fill and Select use local_write for drafts and search fields; typing into a document that saves as you type is external_write. Click uses read for exploring, opening, searching and filtering: a search or filter button may load a results page, which then opens for you. local_write is for reversible local changes. A click that sends, posts, publishes, pays, books, deletes, shares or saves declares its true effect (communication, purchase, destructive or external_write) and must be the batch's only action; the app asks the person before it runs. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Verify an effect that lands elsewhere on the page with page_changed. Opening a page dialog requires page_dialog_opened; choosing an item that dismisses it requires page_dialog_closed. Scroll uses read and immediate settlement with scroll_position_changed verification; amount=into_view brings a disclosure listed for scroll into view, never the document; a click, fill or press brings its own control into view, so after a fill act on the next control directly. A native select is chosen with select, never clicked. Press sends one key to a control: Enter in a message box sends what it holds (communication; fill the box first, and never type the key into the text), Enter in a search field searches (read), Escape closes a popup or menu (read), arrow keys move in a list or picker. Rich editors (a message composer, an issue description, a page's blocks) are filled like any text box: fill replaces their text. Typed fields take their own format: a number field a plain number such as 12.5, a date field YYYY-MM-DD, a time field HH:MM, an email or web address with no surrounding spaces. A custom dropdown (a combobox that is not a native select) opens with a click; then choose with select on its listbox, or click the option with page_changed verification when the list closes as you choose. Follow shown links with the navigate tool.";
         }
         tools
@@ -6240,8 +6244,14 @@ fn constrained_browser_tool_definitions(
         }
         variant["properties"]["target"] = json!({"type":"string", "enum":references});
         if let Some(effect) = targets.required_effect() {
-            variant["properties"]["effect"] =
-                json!({"type":"string", "enum":[super::continuation::effect_label(effect)]});
+            let label = super::continuation::effect_label(effect);
+            if !variant["properties"]["effect"]["enum"]
+                .as_array()
+                .is_some_and(|effects| effects.iter().any(|effect| effect == label))
+            {
+                return false;
+            }
+            variant["properties"]["effect"] = json!({"type":"string", "enum":[label]});
         }
         true
     });
@@ -6858,7 +6868,46 @@ fn action_schema(snapshot_only: bool) -> Value {
             .map(|(_, variant)| variant)
             .collect();
     }
+    separate_click_effects(&mut variants);
     any_of(variants)
+}
+
+// A DOM dialog transition cannot verify a consequential commit. Preserve
+// this dependency through both static profiles and request-local narrowing.
+fn separate_click_effects(variants: &mut Vec<Value>) {
+    let mut result = Vec::new();
+    for mut variant in variants.drain(..) {
+        if variant["properties"]["kind"]["enum"][0] != "click" {
+            result.push(variant);
+            continue;
+        }
+        let effects = variant["properties"]["effect"]["enum"]
+            .as_array()
+            .expect("fixed effect enum");
+        let (local, commit): (Vec<_>, Vec<_>) = effects
+            .iter()
+            .cloned()
+            .partition(|effect| effect == "read" || effect == "local_write");
+        if !local.is_empty() {
+            let mut local_variant = variant.clone();
+            local_variant["properties"]["effect"]["enum"] = json!(local);
+            result.push(local_variant);
+        }
+        if !commit.is_empty() {
+            variant["properties"]["effect"]["enum"] = json!(commit);
+            variant["properties"]["verification"]["anyOf"]
+                .as_array_mut()
+                .expect("click verification variants")
+                .retain(|verification| {
+                    !matches!(
+                        verification["properties"]["kind"]["enum"][0].as_str(),
+                        Some("page_dialog_opened" | "page_dialog_closed")
+                    )
+                });
+            result.push(variant);
+        }
+    }
+    *variants = result;
 }
 
 fn action_variant(
@@ -8405,7 +8454,11 @@ mod tests {
             let actions = &act.parameters["properties"]["actions"];
             assert_eq!(actions["maxItems"], 1);
             let variants = actions["items"]["anyOf"].as_array().expect("actions");
-            assert_eq!(variants.len(), 5);
+            assert_eq!(
+                variants.len(),
+                6,
+                "click separates local dialog transitions from commits"
+            );
             for action in variants {
                 assert_eq!(
                     action["properties"]["settle_millis"]["minimum"],
@@ -8472,6 +8525,68 @@ mod tests {
             if provider == AgentProviderKind::OpenAiResponses {
                 assert_eq!(wire["store"], false);
             }
+        }
+    }
+
+    #[test]
+    fn click_schemas_cannot_offer_dialog_verification_for_consequential_effects() {
+        for snapshot_only in [false, true] {
+            let schema = action_schema(snapshot_only);
+            validate_strict_schema(&schema);
+            for variant in schema["anyOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|v| v["properties"]["kind"]["enum"][0] == "click")
+            {
+                let properties = &variant["properties"];
+                for effect in properties["effect"]["enum"].as_array().unwrap() {
+                    let local = effect == "read" || effect == "local_write";
+                    let verifications = properties["verification"]["anyOf"].as_array().unwrap();
+                    let has_dialog = verifications
+                        .iter()
+                        .any(|v| v["properties"]["kind"]["enum"][0] == "page_dialog_opened");
+                    assert_eq!(has_dialog, local, "{effect}");
+                    assert!(verifications
+                        .iter()
+                        .any(|v| v["properties"]["kind"]["enum"][0] == "page_changed"));
+                }
+            }
+        }
+        let config =
+            provider_config(AgentProviderKind::OpenAiResponses).restrict_to_locate_and_act();
+        for effect in [
+            crate::SemanticEffectClass::Read,
+            crate::SemanticEffectClass::Communication,
+            crate::SemanticEffectClass::Purchase,
+        ] {
+            let mut targets = AgentProviderActionTargets::for_test(
+                1,
+                1,
+                &[(1, &[crate::SemanticOperationClass::Click])],
+            );
+            targets.set_required_effect_for_test(effect);
+            let tools = constrained_browser_tool_definitions(&config, Some(&targets))
+                .unwrap()
+                .unwrap();
+            let act = tools
+                .iter()
+                .find(|tool| tool.kind == AgentBrowserToolKind::Act)
+                .unwrap();
+            let variants = act.parameters["properties"]["actions"]["items"]["anyOf"]
+                .as_array()
+                .unwrap();
+            assert_eq!(
+                variants.len(),
+                1,
+                "effect projection must not reintroduce the other branch"
+            );
+            let has_dialog = variants[0]["properties"]["verification"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["properties"]["kind"]["enum"][0] == "page_dialog_opened");
+            assert_eq!(has_dialog, effect == crate::SemanticEffectClass::Read);
         }
     }
 
@@ -8659,7 +8774,11 @@ mod tests {
             };
             assert_eq!(refs("click"), vec![json!("@a1"), json!("@a3")]);
             assert_eq!(refs("fill"), vec![json!("@a2"), json!("@a3")]);
-            assert_eq!(variants.len(), 2, "unadvertised action kinds are absent");
+            assert_eq!(
+                variants.len(),
+                3,
+                "two effect-scoped click variants and one fill; unadvertised kinds stay absent"
+            );
 
             let empty = AgentProviderActionTargets::for_test(7, 9, &[]);
             let body = match provider {
@@ -9448,7 +9567,7 @@ mod tests {
                 (AgentBrowserToolKind::Reload, 201),
                 (AgentBrowserToolKind::Snapshot, 1_682),
                 (AgentBrowserToolKind::Locate, 2_373),
-                (AgentBrowserToolKind::Act, 11_507),
+                (AgentBrowserToolKind::Act, 14_301),
                 (AgentBrowserToolKind::Wait, 2_152),
                 (AgentBrowserToolKind::Read, 1_510),
                 (AgentBrowserToolKind::Extract, 1_602),
@@ -9457,7 +9576,7 @@ mod tests {
                 (AgentBrowserToolKind::ResumeAfterHuman, 204),
             ]
         );
-        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 23_008);
+        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 25_802);
     }
 
     #[test]
@@ -9674,7 +9793,7 @@ mod tests {
             .iter()
             .map(|tool| count_schema_unions(&tool["input_schema"]))
             .sum::<usize>();
-        assert_eq!(schema_unions, 13);
+        assert_eq!(schema_unions, 15);
         assert!(schema_unions <= MAX_ANTHROPIC_SCHEMA_UNIONS);
         let schemas = serde_json::to_string(tools).expect("schema JSON");
         for unsupported in [

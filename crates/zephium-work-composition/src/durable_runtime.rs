@@ -1038,6 +1038,7 @@ impl NativeWorkComposition {
                     event.kind(),
                     AgentWorkEventKind::ModelSettled { .. }
                         | AgentWorkEventKind::ToolProposed(_)
+                        | AgentWorkEventKind::ModelActionRejected(_)
                         | AgentWorkEventKind::InspectionRefused
                         | AgentWorkEventKind::NavigationRefused(_)
                         | AgentWorkEventKind::ActionProposalRefused(_)
