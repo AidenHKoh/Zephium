@@ -443,6 +443,13 @@ impl zephium_core::work::model::WorkModelClient for EvalModelClient {
                             ).count());
                         }
                         row["state"] = serde_json::json!("settled");
+                        use zephium_core::work::model::WorkModelStop;
+                        row["stop"] = serde_json::json!(match outcome.stop {
+                            WorkModelStop::EndTurn => "end_turn",
+                            WorkModelStop::ToolUse => "tool_use",
+                            WorkModelStop::MaxTokens => "max_tokens",
+                            WorkModelStop::Refused => "refused",
+                        });
                         row["input_tokens"] = serde_json::json!(usage.input_tokens);
                         row["cached_input_tokens"] = serde_json::json!(usage.cached_input_tokens);
                         row["cache_write_input_tokens"] =
@@ -548,6 +555,7 @@ mod visual_diagnostic_tests {
             let outcome = client.call(request, &|_| {}).await.unwrap();
             assert_eq!(outcome.assistant.len(), 1);
             let local = diagnostics.lock().unwrap();
+            assert_eq!(local.calls[0]["stop"], "tool_use");
             let row = &local.calls[0];
             if public {
                 assert_eq!(row["input_image_parts"], 2);
@@ -575,6 +583,12 @@ mod visual_diagnostic_tests {
     }
 }
 
+fn public_image_provenance(
+    disclosure: Option<zephium_core::work::runtime::WorkPageImageDisclosureV1>,
+) -> bool {
+    disclosure != Some(zephium_core::work::runtime::WorkPageImageDisclosureV1::SiteConsent)
+}
+
 fn public_export_allowed(state: &zephium_core::work::runtime::WorkRuntimeProjection) -> bool {
     use zephium_core::work::{parts::WorkInputKindV1, runtime::*};
     state.executions.iter().all(|execution| {
@@ -591,6 +605,7 @@ fn public_export_allowed(state: &zephium_core::work::runtime::WorkRuntimeProject
                 .all(|input| input.kind == WorkInputKindV1::Skill)
             && execution.steps.iter().all(|step| {
                 step.account.is_none()
+                    && public_image_provenance(step.measurements.and_then(|m| m.image_disclosure))
                     && !step
                         .measurements
                         .and_then(|m| m.resolved_handoff)
@@ -1876,6 +1891,17 @@ pub(super) async fn lead_workflow(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_export_refuses_site_consented_possible_image_disclosure() {
+        use zephium_core::work::runtime::WorkPageImageDisclosureV1;
+        assert!(public_image_provenance(None));
+        assert!(public_image_provenance(Some(
+            WorkPageImageDisclosureV1::PublicIsolated
+        )));
+        assert!(!public_image_provenance(Some(
+            WorkPageImageDisclosureV1::SiteConsent
+        )));
+    }
 
     #[tokio::test]
     async fn local_and_account_modes_never_invoke_media_candidate_fetch() {

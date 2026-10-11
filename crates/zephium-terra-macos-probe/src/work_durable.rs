@@ -572,6 +572,13 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         .map_err(|_| Error::Runtime)?;
     let store =
         Arc::new(zephium_store::SqliteStore::open(data.path()).map_err(|_| Error::Runtime)?);
+    // Match desktop initialization from this probe's actual private Store.
+    // Account qualification remains hard text-only and keeps this switch closed.
+    initialize_probe_screenshots(
+        super::work_account::active().is_some(),
+        || store.app_setting_readback("work.screenshots"),
+        zephium_app::work_screenshots::initialize,
+    );
     // A named profile lets two probe processes share Work's memory.
     let profile = std::env::var("ZEPHIUM_PROBE_PROFILE")
         .ok()
@@ -3078,4 +3085,39 @@ mod airbnb_page_tests {
         );
         assert_eq!(airbnb_page("https://example.com/rooms/49597911"), None);
     }
+}
+
+// This qualification adapter does not expose an account-mode image opt-in.
+fn initialize_probe_screenshots(
+    account: bool,
+    readback: impl FnOnce() -> zephium_core::ports::store::AppSettingReadback,
+    initialize: impl FnOnce(zephium_core::ports::store::AppSettingReadback),
+) {
+    if !account {
+        initialize(readback());
+    }
+}
+#[cfg(test)]
+#[test]
+fn account_qualification_never_reads_or_enables_model_screenshot_preference() {
+    use zephium_core::ports::store::AppSettingReadback;
+    initialize_probe_screenshots(
+        true,
+        || panic!("account readback forbidden"),
+        |_| panic!("account image initialization forbidden"),
+    );
+    let read = std::cell::Cell::new(false);
+    let enabled = std::cell::Cell::new(false);
+    initialize_probe_screenshots(
+        false,
+        || {
+            read.set(true);
+            AppSettingReadback::Missing
+        },
+        |value| {
+            assert!(matches!(value, AppSettingReadback::Missing));
+            enabled.set(true);
+        },
+    );
+    assert!(read.get() && enabled.get());
 }
