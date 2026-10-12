@@ -1735,13 +1735,11 @@ impl<'a> SemanticReadBuilder<'a> {
             states: node.states(),
             provenance,
             region: page_region(node, snapshot),
-            // A link's address is the record itself when the schema asks
-            // for links: shed with the record's text, not before it (an
-            // Airbnb listing kept every price and lost every address, so a
-            // required link column mapped no record at all).
-            rank: if field == SemanticReadField::LinkDestination
-                && self.url_sources & 1 != 0
-                && !self.facts_priority
+            // Requested addresses and pictures are record values too. Keeping
+            // every prose fragment first erased all images on long product pages.
+            rank: if !self.facts_priority
+                && ((field == SemanticReadField::LinkDestination && self.url_sources & 1 != 0)
+                    || (field == SemanticReadField::ImageSource && self.url_sources & 2 != 0))
             {
                 0
             } else {
@@ -2876,6 +2874,64 @@ mod tests {
             SemanticReadBudget::STANDARD
         )
         .is_err());
+    }
+
+    #[test]
+    fn requested_record_images_survive_text_pressure_without_disclosing_secret_images() {
+        let mut nodes = vec![
+            json!({"k":1,"r":"document"}),
+            json!({"k":2,"p":0,"r":"landmark","lm":"main"}),
+        ];
+        for i in 0..3 {
+            nodes.push(json!({"k":3+i,"p":1,"r":"image","n":format!("Product photo {i}"),"m":format!("https://example.test/photo/{i}.webp")}));
+        }
+        nodes.push(
+            json!({"k":6,"p":1,"r":"image","m":"https://example.test/private.webp","q":"secret"}),
+        );
+        for i in 7..307 {
+            nodes.push(json!({"k":i,"p":1,"r":"paragraph","t":format!("Other observed product detail {i}")}));
+        }
+        let observation = retained_observation(1, Value::Array(nodes));
+        let schema = crate::SemanticExtractionSchema::try_new(
+            crate::SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![crate::SemanticExtractionFieldSchema::try_rows(
+                "records".into(),
+                true,
+                vec![
+                    crate::SemanticExtractionFieldSchema::try_text("name".into(), true, 128)
+                        .unwrap(),
+                    crate::SemanticExtractionFieldSchema::try_image_url(
+                        "image".into(),
+                        false,
+                        2048,
+                    )
+                    .unwrap(),
+                ],
+                3,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let ack = acknowledgement(&observation);
+        let read = read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+            &schema,
+        )
+        .unwrap();
+        let images: Vec<_> = read
+            .fragments()
+            .iter()
+            .filter(|f| f.field() == SemanticReadField::ImageSource)
+            .map(|f| f.content().value_preview().unwrap().text())
+            .collect();
+        assert_eq!(images.len(), 3);
+        assert!(images.iter().all(|url| !url.contains("private")));
+        assert!(read.stats().omitted_items() > 0);
+        assert!(read.stats().items() <= SemanticReadBudget::EXTRACTION.max_items());
     }
 
     #[test]
