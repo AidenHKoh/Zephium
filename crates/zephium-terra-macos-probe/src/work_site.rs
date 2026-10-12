@@ -1337,6 +1337,10 @@ impl Context<'_> {
                         let opened = &opened;
                         async move {
                             let (request, yours) = self.local(request)?;
+                            let _ = writeln!(std::io::stdout().lock(),
+                                "loopback-site: request_scope entry={} view={} hold_typing={} own_session={} page_task={}; content=redacted",
+                                request.entry, request.view, request.hold_typing, yours,
+                                matches!(&request.step, WorkStepKindV1::Read { goal: Some(_), .. }));
                             let key = match key {
                                 Some(key) => key,
                                 None => tokio::task::spawn_blocking(
@@ -1755,9 +1759,18 @@ pub(super) async fn workflow(
         seed.asked.len(),
         seed.opened.iter().all(|page| page.yours)
     ));
-    if !seeded || !seed.asked.is_empty() {
+    if !seeded
+        || seed.opened.len() != 1
+        || seed.opened.iter().any(|page| {
+            page.status != Some(WorkStepStatus::Succeeded) || page.not_ready || page.held_back
+        })
+        || context.sites.posts() != 0
+    {
         return Err("seed");
     }
+    // An extra setup question still fails the whole qualification, but a
+    // completed read should not hide the independent action/approval checks.
+    let seed_failure = (!seed.asked.is_empty()).then_some("seed_question");
     if checks.iter().any(|check| {
         matches!(
             check,
@@ -1771,7 +1784,7 @@ pub(super) async fn workflow(
     }) {
         media_fixture::seed_session(&context).await?;
     }
-    let mut failure = None;
+    let mut failure = seed_failure;
     let mut last = seed.state;
     let goal = "Report what the page shows";
     for check in checks {
