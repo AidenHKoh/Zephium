@@ -58,6 +58,7 @@ struct LeadState {
     parts_running: usize,
     reply: Option<WorkArtifactId>,
     reply_input: Option<Value>,
+    reply_sources: Vec<String>,
     finish_refusals: u8,
     final_records: Option<Value>,
     title_refused: bool,
@@ -104,12 +105,17 @@ fn early_reply_args(tool: &WorkModelToolCall) -> Option<Value> {
     {
         Some(tool.arguments.clone())
     } else if tool.name == "finish" {
-        tool.arguments.get("reply").filter(|reply| reply.is_object()).map(|reply| serde_json::json!({
-            "kind":"reply", "title":tool.arguments.get("title").and_then(Value::as_str).unwrap_or("Answer"), "data":reply
-        }))
+        finish_reply_args(&tool.arguments)
     } else {
         None
     }
+}
+
+fn finish_reply_args(args: &Value) -> Option<Value> {
+    args.get("reply").filter(|reply| reply.is_object()).map(|reply| serde_json::json!({
+        "kind":"reply", "title":args.get("title").and_then(Value::as_str).unwrap_or("Answer"),
+        "data":reply, "sources":args.get("reply_sources").cloned().unwrap_or_else(|| serde_json::json!([]))
+    }))
 }
 
 type Answer = (usize, String, bool);
@@ -212,7 +218,8 @@ where
     }
 
     fn system(&self) -> Vec<WorkModelSystemBlock> {
-        let mut index = String::from("Skills (load the one that fits before you start):\n");
+        let mut index =
+            String::from("Skills for workflows (plain fact reads use web_fetch directly):\n");
         for skill in &self.skills {
             index.push_str(&format!("- {}: {}\n", skill.name, skill.description));
         }
@@ -390,6 +397,22 @@ where
             self.run.report(super::WorkLeadDiagnostic::Turn {
                 turn: self.run.turn(),
                 calls: calls.len(),
+                tool_kinds: std::array::from_fn(|index| {
+                    calls.get(index).map(|call| match call.name.as_str() {
+                        "web_fetch" => "web_fetch",
+                        "web_search" => "web_search",
+                        "start_part" => "start_part",
+                        "create" => "create",
+                        "revise" => "revise",
+                        "read_canvas" => "read_canvas",
+                        "ask" => "ask",
+                        "ask_folder" => "ask_folder",
+                        "load_skill" => "load_skill",
+                        "finish" => "finish",
+                        "revise_block" => "revise_block",
+                        _ => "other",
+                    })
+                }),
                 tokens: usage.model_tokens,
                 cost_micro_usd: usage.cost_micro_usd,
                 input: u32::try_from(outcome.usage.input_tokens).unwrap_or(u32::MAX),
@@ -548,10 +571,41 @@ where
         if fields.keys().any(|key| {
             !matches!(
                 key.as_str(),
-                "reply" | "records" | "layout" | "records_title" | "say" | "followups" | "title"
+                "reply"
+                    | "reply_sources"
+                    | "records"
+                    | "layout"
+                    | "records_title"
+                    | "say"
+                    | "followups"
+                    | "title"
             )
         }) {
-            return Err(("finish accepts only reply, records, layout, records_title, say, followups and title; nothing was published. Select native records by r key, or create other objects separately.".into(), ObjectRefusal::Shape));
+            return Err(("finish accepts only reply, reply_sources, records, layout, records_title, say, followups and title; nothing was published. Select native records by r key, or create other objects separately.".into(), ObjectRefusal::Shape));
+        }
+        if let Some(keys) = args.get("reply_sources") {
+            if args.get("reply").is_none()
+                || !keys.as_array().is_some_and(|keys| {
+                    keys.len() <= 16
+                        && keys
+                            .iter()
+                            .all(|key| key.as_str().is_some_and(|key| !key.is_empty()))
+                })
+            {
+                return Err(("reply_sources requires a reply and at most 16 source keys; nothing was published".into(), ObjectRefusal::Source));
+            }
+            let request = finish_reply_args(args)
+                .ok_or_else(|| ("reply must be an object".into(), ObjectRefusal::Shape))?;
+            objects::propose(
+                self.run,
+                &[],
+                "reply",
+                request["title"].as_str().unwrap_or("Answer"),
+                request["data"].clone(),
+                &strings(Some(keys)),
+                &[],
+                false,
+            )?;
         }
         if args.get("records").is_none()
             && (args.get("layout").is_some() || args.get("records_title").is_some())
@@ -594,7 +648,9 @@ where
             }
             let state = self.state();
             if state.reply.is_some() {
-                return if state.reply_input.as_ref() == tool.arguments.get("reply") {
+                return if state.reply_input.as_ref() == tool.arguments.get("reply")
+                    && state.reply_sources == strings(tool.arguments.get("reply_sources"))
+                {
                     ("Reply already published".into(), false)
                 } else {
                     ("A different reply is already published; revise it explicitly, then finish without reply.".into(), true)
@@ -1021,6 +1077,7 @@ where
                 if kind == "reply" {
                     self.state().reply = Some(id);
                     self.state().reply_input = args.get("data").cloned();
+                    self.state().reply_sources = strings(args.get("sources"));
                 }
                 self.run.activity(WorkActivityV1::ProducingArtifact);
                 (
@@ -1137,6 +1194,7 @@ where
                 if kind == "reply" {
                     self.state().reply = Some(new);
                     self.state().reply_input = args.get("data").cloned();
+                    self.state().reply_sources = strings(args.get("sources"));
                 }
                 let forwarded = if target.artifact.id == id {
                     String::new()
@@ -1279,7 +1337,10 @@ where
         }
         if let Some(reply) = args.get("reply") {
             let state = self.state();
-            if state.reply.is_some() && state.reply_input.as_ref() != Some(reply) {
+            if state.reply.is_some()
+                && (state.reply_input.as_ref() != Some(reply)
+                    || state.reply_sources != strings(args.get("reply_sources")))
+            {
                 return ("A different reply is already published; revise it explicitly, then finish without reply.".into(), true);
             }
         }
@@ -1292,8 +1353,7 @@ where
             None
         };
         if self.state().reply.is_none() {
-            if let Some(reply) = args.get("reply") {
-                let request = serde_json::json!({"kind":"reply", "title":args.get("title").and_then(Value::as_str).unwrap_or("Answer"), "data":reply});
+            if let Some(request) = finish_reply_args(args) {
                 let result = self.create(&request, None, false).await;
                 if result.1 {
                     return result;

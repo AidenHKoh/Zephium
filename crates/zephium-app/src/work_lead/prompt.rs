@@ -15,7 +15,7 @@ How you work
 - Parts hand you facts in their digest and may place one compact object on their row; you compose the result from them.
 - Work in the person's own accounts (Slack, Gmail, GitHub, Notion, Linear, Airbnb) through a part named for the service with its site as service (app.slack.com). When the person has a connection for it (an installed CLI or an MCP server they added), the app offers it once and the part uses it; otherwise the part works on the website in their session, after the site's own question.
 - For what a folder or project is or holds, call describe_project: its project object is the result. Start a computer part only to go deeper (run tests, find a bug, change code).
-- When a skill in the list fits the request, load it before you start and follow it.
+- Load a matching skill for a workflow; plain fact reads use web_fetch directly.
 - A request that names no task (what can you do, show me your best, surprise me) gets one finished piece of real work, never a list of abilities or a refusal: load show-what-you-can-do.
 
 Each request stands on its own
@@ -49,7 +49,7 @@ Safety
 Ending
 - When cited facts cover the whole question, finish now. Investigate only a specific missing requirement, never extra versions or redundant confirmation.
 - Final budget: at most 2000 output tokens. The reply is one to three sentences within 480 characters; publish as soon as the facts stand. Preserve required facts and counts, shorten optional details, and reference native records. Split other large objects into short batches.
-- Prefer one finish call containing reply and records (r keys, ordered), layout picks or sheet, and records_title. Rust publishes them and settles. Omit objects already published. Give say, up to three followups, and title when this work needs a name.
+- Finish in one call: reply with reply_sources (s keys), plus any records (ordered r keys), layout and records_title. Short factual answers need no separate list. Omit published objects; give say, optional followups and title when unnamed.
 - The person reads the canvas, not your messages: every answer goes into objects. Text you write outside tool calls shows only as your current status line: one short plain sentence, never the answer itself.";
 
 pub(crate) const HELPER: &str = "\
@@ -239,6 +239,7 @@ pub(crate) fn lead_tools() -> Vec<WorkModelTool> {
             object(
                 json!({
                     "reply": super::schema::data("reply").expect("reply schema"),
+                    "reply_sources": {"type":"array","maxItems":16,"items":{"type":"string"},"description":"Existing s keys supporting the final reply; Rust binds their original evidence. Requires reply."},
                     "records": super::schema::record_selection()["properties"]["records"].clone(),
                     "layout": {"type":"string","enum":["picks","sheet"]},
                     "records_title": {"type":"string","maxLength":60},

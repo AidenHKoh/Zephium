@@ -2921,7 +2921,7 @@ impl WorkModelClient for NativeRecordFinish {
                 "only source-backed creation narrows after the read"
             );
             let final_call = || {
-                call(
+                let mut output = call(
                     "finish",
                     "finish",
                     json!({
@@ -2929,7 +2929,14 @@ impl WorkModelClient for NativeRecordFinish {
                         "records":[{"source":"r2"},{"source":"r1"}],"layout":"picks","records_title":"Offers",
                         "say":"Both original records are available.","title":"Original offers"
                     }),
-                )
+                );
+                if self.0 >= 3 {
+                    let WorkModelPart::ToolCall(tool) = &mut output else {
+                        unreachable!()
+                    };
+                    tool.arguments["reply_sources"] = json!(["s1"]);
+                }
+                output
             };
             let output = match turn {
                 0 => call(
@@ -2944,7 +2951,7 @@ impl WorkModelClient for NativeRecordFinish {
                 1 => {
                     assert!(seen.contains("record r1:"), "{seen}");
                     match self.0 {
-                        0 => final_call(),
+                        0 | 3 => final_call(),
                         1 => call(
                             "rewrite",
                             "create",
@@ -2958,6 +2965,14 @@ impl WorkModelClient for NativeRecordFinish {
                             json!({"reply":{"headline":"Lost table","text":"The table is complete."},
                             "sheet":{"rows":["silently lost"]},"say":"Done","title":"Wrong result"}),
                         ),
+                        4 => call(
+                            "unknown-source",
+                            "finish",
+                            json!({
+                                "reply":{"headline":"Lost table","text":"Unsupported evidence."},
+                                "reply_sources":["s999"],"say":"Done","title":"Wrong result"
+                            }),
+                        ),
                         _ => unreachable!(),
                     }
                 }
@@ -2965,6 +2980,8 @@ impl WorkModelClient for NativeRecordFinish {
                     assert!(
                         seen.contains(if self.0 == 1 {
                             "use data.records"
+                        } else if self.0 == 4 {
+                            "is not a source of this run"
                         } else {
                             "finish accepts only"
                         }),
@@ -3004,6 +3021,14 @@ async fn native_records_refuse_rewritten_values_and_repair_in_one_call() {
 #[tokio::test]
 async fn native_records_reject_lost_finish_objects_before_early_reply_and_repair_once() {
     native_record_finish_fixture(2).await;
+}
+#[tokio::test]
+async fn cited_reply_and_records_finish_in_one_call_with_original_evidence() {
+    native_record_finish_fixture(3).await;
+}
+#[tokio::test]
+async fn unknown_finish_reply_source_refuses_before_early_publication() {
+    native_record_finish_fixture(4).await;
 }
 async fn native_record_finish_fixture(mode: u8) {
     let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
@@ -3079,6 +3104,21 @@ async fn native_record_finish_fixture(mode: u8) {
             .count(),
         1
     );
+    if mode >= 3 {
+        let reply = execution
+            .artifacts
+            .iter()
+            .find(|a| matches!(a.data, WorkArtifactDataV1::Reply { .. }))
+            .unwrap();
+        assert_eq!(
+            reply.evidence,
+            vec![WorkEvidenceLink {
+                extraction_id: WorkArtifactId::from(940),
+                source_id: 1
+            }]
+        );
+        assert!(!reply.general_knowledge);
+    }
 }
 
 struct FailedCatalogThenDetail;

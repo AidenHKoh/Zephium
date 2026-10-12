@@ -15,13 +15,13 @@ mod project;
 mod prompt;
 mod recipes;
 mod records;
-mod value_sources;
 pub mod registry;
 pub(crate) mod route;
 mod run;
 mod schema;
 pub mod skills;
 pub mod tools;
+mod value_sources;
 
 use std::future::Future;
 use std::time::Duration;
@@ -55,6 +55,7 @@ pub enum WorkLeadDiagnostic {
     Turn {
         turn: u8,
         calls: usize,
+        tool_kinds: [Option<&'static str>; 16],
         tokens: u32,
         cost_micro_usd: u32,
         input: u32,
