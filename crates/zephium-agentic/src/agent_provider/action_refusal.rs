@@ -581,10 +581,15 @@ impl AgentProviderActionRefusal {
         // already-satisfied outcome is parameter-specific (for example Fill
         // with one value) and must not suppress a different proposal using the
         // same operation/ref; Work's exact refusal key still stops repetition.
-        let exclusion = matches!(
+        // A scroll streak is target-wide on this view. Keeping it in the next
+        // strict schema let small models resume the same scroll loop at once.
+        let exclusion = (matches!(
             self.error,
             SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied)
-        )
+        ) || (self.scrolled_enough
+            && self
+                .context
+                .is_some_and(|context| context.kind == SemanticActionKind::Scroll)))
         .then(|| self.context.map(|context| context.key(self.error)))
         .flatten();
         let (call, _, _, correlation, mut transcript) = self.continuation.into_parts();

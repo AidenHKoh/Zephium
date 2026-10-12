@@ -3267,6 +3267,79 @@ mod tests {
     }
 
     #[test]
+    fn refused_scroll_streak_removes_scroll_but_keeps_form_actions_on_that_observation() {
+        let observed = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"combobox","n":"Destination","o":11,"v":{"k":"text","value":""}},
+                {"k":3,"p":0,"r":"button","n":"Open dates","o":1}
+            ]),
+        );
+        let cfg = config(AgentProviderKind::OpenAiResponses);
+        let targets = AgentProviderActionTargets::try_from_observation(&observed).unwrap();
+        let turn = action_turn_with_targets(
+            &observed,
+            cfg.clone(),
+            targets,
+            json!({"actions":[{
+                "kind":"scroll","target":"@a1","direction":"down","amount":"page","effect":"read",
+                "wait":{"kind":"immediate"},"verification":{"kind":"scroll_position_changed"},"settle_millis":2000
+            }]}),
+        );
+        let resolution = turn
+            .resolve_action(
+                crate::SemanticActionBatchId::new(1).unwrap(),
+                &observed,
+                &[observed.frames()[0].frame().clone()],
+                &cfg,
+            )
+            .unwrap();
+        let AgentProviderActionResolution::Bound(_, continuation, context) = resolution else {
+            panic!("scroll did not bind");
+        };
+        let refusal = AgentProviderActionRefusal::unissued(
+            continuation,
+            crate::SemanticActionBindingError::AssignmentDenied,
+            context,
+        )
+        .scrolled_enough();
+        let (_, bound) = refusal
+            .bind(&observed, &cfg, "same observed form".into())
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_str(bound.latest().tool_result()).unwrap();
+        assert_eq!(result["code"], "scrolled_enough");
+        assert_eq!(result["executed"], false);
+        let targets = bound.action_targets().unwrap();
+        assert_eq!(
+            targets
+                .permitted_references(crate::SemanticActionKind::Scroll)
+                .count(),
+            0
+        );
+        assert_eq!(
+            targets
+                .permitted_references(crate::SemanticActionKind::Fill)
+                .map(SemanticReferenceId::get)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert!(targets
+            .permitted_references(crate::SemanticActionKind::Click)
+            .any(|reference| reference.get() == 3));
+        assert_eq!(
+            AgentProviderActionTargets::try_from_observation(&observed)
+                .unwrap()
+                .permitted_references(crate::SemanticActionKind::Scroll)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn reading_dialog_effect_mismatch_preserves_target_for_corrected_proposal() {
         use crate::{SemanticEffectClass, SemanticOperationClass, SemanticOperations};
         let observed = observation_with_nodes(
