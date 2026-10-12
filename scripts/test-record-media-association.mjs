@@ -8,6 +8,7 @@ class Element {
     this.parentNode=null;this.currentSrc=attrs.src||'';this.complete=true;this.naturalWidth=400;
   }
   append(child){child.parentNode=this;this.childNodes.push(child);return child;}
+  get id(){return this.attrs.id||'';}
   get children(){return this.childNodes.filter(node=>node.nodeType===1);}
   get parentElement(){return this.parentNode?.nodeType===1?this.parentNode:null;}
   get isConnected(){return this.getRootNode().nodeType===9;}
@@ -16,17 +17,17 @@ class Element {
   hasAttribute(key){return Object.hasOwn(this.attrs,key);}
   get content(){return this.attrs.content||'';}
   get textContent(){return this.childNodes.map(node=>node.nodeType===3?node.nodeValue:node.textContent).join('');}
-  set textContent(text){this.childNodes=[{nodeType:3,nodeValue:text,parentNode:this}];}
+  set textContent(text){this.childNodes=[{nodeType:3,nodeValue:text,parentNode:this,childNodes:[]}];}
   contains(node){for(;node;node=node.parentNode)if(node===this)return true;return false;}
   getBoundingClientRect(){return {...this.box,right:this.box.x+this.box.width,bottom:this.box.y+this.box.height};}
   querySelector(){return null;}
 }
-const asset=readFileSync(new URL('../crates/zephium-agentic/assets/semantic-record-media-v1.js',import.meta.url),'utf8');
+const asset=readFileSync(process.argv[2]||new URL('../crates/zephium-agentic/assets/semantic-record-media-v1.js',import.meta.url),'utf8');
 assert.equal(asset.split('Object.freeze({evidence,invoke})').length,2);
 // Expose only the private revalidation predicate in this synthetic process.
 const program=asset.replace('Object.freeze({evidence,invoke})','Object.freeze({evidence,invoke,target})');
 const page='https://catalog.example.test/product?id=7&variant=blue';
-function fixture({other=false, metadata=true, duplicate=false, changedUrl=false, responsive=false, pageImage=false}={}) {
+function fixture({other=false, metadata=true, duplicate=false, changedUrl=false, responsive=false, pageImage=false, brand=null, declaredBrand=brand, largeDoc=false}={}) {
   const document={nodeType:9,baseURI:page,URL:page};
   const html=new Element('html');html.parentNode=document;document.documentElement=html;
   const head=html.append(new Element('head'));
@@ -34,22 +35,29 @@ function fixture({other=false, metadata=true, duplicate=false, changedUrl=false,
   const main=body.append(new Element('main'));
   const product=main.append(new Element('div'));
   const details=product.append(new Element('div',{}, {x:420,y:0,width:380,height:80}));
-  const heading=details.append(new Element('h1',{}, {x:430,y:10,width:350,height:30}));heading.textContent='Orbital telescope';
+  const heading=details.append(new Element('h1',{}, {x:430,y:10,width:350,height:30}));heading.textContent=(brand?brand+' ':'')+'Orbital telescope';
   const gallery=product.append(new Element('div',{}, {x:0,y:0,width:400,height:400}));
   const photo=gallery.append(new Element('img',{src:'https://images.example.test/orbital.webp',alt:''}, {x:0,y:0,width:400,height:350}));
   const counter=gallery.append(new Element('p',{}, {x:0,y:360,width:100,height:25}));counter.textContent=other?'Another product':'1 / 4';
   const script=head.append(new Element('script',{type:'application/ld+json'}));
   const item={'@type':'Product',name:other?'Another product':'Orbital telescope',url:changedUrl?'https://catalog.example.test/product?id=8':page,image:photo.currentSrc};
+  if(declaredBrand)item.brand={'@type':'Brand',name:declaredBrand};
   if(responsive){photo.currentSrc='https://images.example.test/orbital-small.webp';photo.attrs.src=photo.currentSrc;photo.attrs.srcset='https://images.example.test/orbital.webp 2x';}
   script.textContent=JSON.stringify(duplicate?[item,{...item,sku:'conflicting'}]:item);
   Object.defineProperty(document,'scripts',{get:()=>head.children.filter(node=>node.localName==='script')});
   if(pageImage){photo.localName='meta';photo.attrs={property:'og:image',content:'https://images.example.test/orbital-og.webp'};}
   const records=[
-    {element:heading,media:null,sensitivity:'public',wire:{k:1,r:'heading',l:1,n:'Orbital telescope',b:{x:430,y:10,w:350,h:30}}},
+    {element:heading,media:null,sensitivity:'public',wire:{k:1,r:'heading',l:1,n:(brand?brand+' ':'')+'Orbital telescope',b:{x:430,y:10,w:350,h:30}}},
     {element:photo,media:pageImage?'page_image':'image',sensitivity:'public',wire:{k:2,r:'image',b:{x:0,y:0,w:400,h:350}}},
     {element:counter,media:null,sensitivity:'public',wire:{k:3,r:'paragraph',t:counter.textContent,b:{x:0,y:360,w:100,h:25}}},
     ...(metadata?[{element:script,media:null,sensitivity:'public',wire:{k:4,r:'paragraph',n:'Page facts',t:'Product metadata'}}]:[])
   ];
+  if(largeDoc) {
+    const unrelated=main.append(new Element('p',{id:'unrelated-label'}));unrelated.textContent='Supplemental label';
+    records.push({element:unrelated,media:null,sensitivity:'public',wire:{k:5,r:'paragraph',t:'Supplemental label',b:{x:0,y:0,w:100,h:20}}});
+    const content=main.append(new Element('div'));
+    for(let i=0;i<300;i++){const group=content.append(new Element('div'));for(let j=0;j<60;j++)group.append(new Element('span'));}
+  }
   const context={Element,document,WeakRef,WeakMap,Map,Set,URL,JSON,AbortController,innerWidth:1000,innerHeight:800,
     location:{origin:new URL(page).origin},setTimeout,clearTimeout,addEventListener(){},fetch(){throw Error('no network in structural fixture');},btoa(){throw Error('no pixels in structural fixture');},
     getComputedStyle(){return {display:'block',visibility:'visible',backgroundImage:'none',content:''};}};
@@ -62,6 +70,16 @@ function fixture({other=false, metadata=true, duplicate=false, changedUrl=false,
   const rows=api.evidence(records,1,1,helpers);
   return {api,rows,heading,photo,script,document,head,item};
 }
+const large=fixture({brand:'Acme',pageImage:true,largeDoc:true});
+assert(large.rows.find(row=>row.k===2)?.r.includes(1),'an unrelated ARIA scan starved the declared page-entity image');
+assert(large.api.target({i:1,g:1,k:2,n:1}),'the bounded entity proof did not survive optional association exhaustion');
+const branded=fixture({brand:'Acme',pageImage:true});
+assert(branded.rows.find(row=>row.k===2)?.r.includes(1),'declared brand plus exact product name lost the page image');
+assert(branded.api.target({i:1,g:1,k:2,n:1}),'brand/name entity proof was not retained');
+branded.script.textContent=JSON.stringify({...branded.item,brand:{'@type':'Brand',name:'Other'}});
+assert.equal(branded.api.target({i:1,g:1,k:2,n:1}),null,'changed brand reused the prior entity proof');
+const wrongBrand=fixture({brand:'Acme',declaredBrand:'Other',pageImage:true});
+assert(!wrongBrand.rows.find(row=>row.k===2)?.r.includes(1),'unproven heading prefix acquired a page image');
 const good=fixture();
 assert(good.rows.find(row=>row.k===2)?.r.includes(1),'a title panel and gallery of the declared page entity lost their association');
 assert(good.api.target({i:1,g:1,k:2,n:1}),'fresh exact entity proof was not retained');

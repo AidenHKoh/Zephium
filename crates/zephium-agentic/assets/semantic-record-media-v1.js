@@ -62,7 +62,7 @@
         const name=normalized(item.name),rawImages=item.image || item.thumbnailUrl;
         const images=(Array.isArray(rawImages)?rawImages:[rawImages]);
         if(images.length>32 || out.length>=24)return null;
-        if(name && url)out.push({name,url,images:images.map(image=>address(typeof image==="string"?image:image?.url||image?.contentUrl)).filter(Boolean)});
+        if(name && url)out.push({name,url,brand:normalized(typeof item.brand==="string"?item.brand:item.brand?.name),images:images.map(image=>address(typeof image==="string"?image:image?.url||image?.contentUrl)).filter(Boolean)});
       }
       for(const key of ["@graph","itemListElement","item","mainEntity","hasVariant"])if(item[key]!==undefined){if(pending.length>=400)return null;pending.push(item[key]);}
     }
@@ -84,8 +84,8 @@
     }
     return parsed;
   }
-  // Exact page identity joins split panels through an observed entity image or
-  // the page's declared image. Never infer equality between resized image URLs.
+  const entityNameMatches=(item,title)=>item.name===title || !!item.brand && item.brand+" "+item.name===title;
+  // Exact page entity joins split panels; never infer resized-URL equality.
   function entityWitness(records,images,rows,charge) {
     const page=address(document.URL);if(!page)return;
     const observed=new Set(records.filter(r=>r.element.localName==="script" && r.sensitivity!=="secret").map(r=>r.element));
@@ -96,7 +96,7 @@
       if(record.wire.r!=="heading" || record.wire.l!==1 || record.sensitivity!=="public")continue;
       const title=normalized(record.wire.n);if(!title || pageEntityName(record.element)!==title)continue;
       const matches=parsed.flatMap(script=>script.items.filter(item=>item.url===page).map(item=>({script:script.node,item})));
-      if(matches.length!==1 || matches[0].item.name!==title || !observed.has(matches[0].script))continue;
+      if(matches.length!==1 || !entityNameMatches(matches[0].item,title) || !observed.has(matches[0].script))continue;
       for(let index=0;index<images.length;index++) {
         if(!charge())return;
         const image=images[index],row=rows[index];
@@ -381,6 +381,8 @@ function ariaRecordProof(records, nameRecord, charge, cache) {
         }
       }
     }
+    // Resolve explicit page identity before optional full-DOM ARIA scans.
+    entityWitness(records,images,rows,()=>++work<=16384);
     // An exact accessibility label still needs a unique local record proof.
     // First-pass and enclosing-link associations above remain unchanged.
     const ariaIndex={};
@@ -395,7 +397,6 @@ function ariaRecordProof(records, nameRecord, charge, cache) {
       let bound=relations.get(row);if(!bound){bound=new Map();relations.set(row,bound);}
       bound.set(record.wire.k,{link:new WeakRef(proof.link),root:new WeakRef(proof.root),id:proof.id,href:proof.href});
     }
-    entityWitness(records,images,rows,()=>++work<=16384);
     remember(invocation,generation,records,rows);
     return rows;
   }
@@ -409,7 +410,7 @@ function ariaRecordProof(records, nameRecord, charge, cache) {
       if(!script || address(document.URL)!==witness.page || pageEntityName(named)!==witness.title)return null;
       const catalog=entityCatalog(()=>++work<=16384),matches=catalog?.flatMap(part=>part.items.filter(item=>item.url===witness.page).map(item=>({script:part.node,item})));
       const declared=observedImageSources(node);declared.add(address(source(node,entry.kind)));
-      if(matches?.length!==1 || matches[0].script!==script || matches[0].item.name!==witness.title || (!witness.pageImage && !matches[0].item.images.includes(witness.identity)) || !declared.has(witness.identity))return null;
+      if(matches?.length!==1 || matches[0].script!==script || !entityNameMatches(matches[0].item,witness.title) || (!witness.pageImage && !matches[0].item.images.includes(witness.identity)) || !declared.has(witness.identity))return null;
     } else if(entry.kind!=="page_image" && (!card?.isConnected || !card.contains(node) || !card.contains(named)))return null;
     if(name.witness && name.witness.kind!=="entity") {
       const witness=name.witness,link=witness.link.deref(),root=witness.root.deref();
