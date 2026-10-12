@@ -3890,6 +3890,11 @@ impl AgentWorkController {
                     match admitted {
                         Ok(admitted) => admitted,
                         Err(refusal) => {
+                            if refusal.reason()
+                                == SemanticActionBindingError::OutcomeAlreadySatisfied
+                            {
+                                no_progress.remember(progress_key);
+                            }
                             state.native.check_control(worker, browser)?;
                             state.refresh_account(worker, browser)?;
                             state.journal_mut()?.emit(

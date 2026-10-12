@@ -6,6 +6,7 @@ pub(super) enum ReadFault {
     None,
     LocateMiss,
     NoProgress,
+    AlreadySatisfied,
     LocateMissCeiling,
     Extraction,
     LongExtraction,
@@ -50,6 +51,14 @@ impl ReadFault {
             )
     }
     pub(super) fn stream(self, turn: u8) -> String {
+        if self == Self::AlreadySatisfied {
+            let stream = tool_stream(turn, true);
+            return if turn <= 2 {
+                stream.replace("fixture value", "")
+            } else {
+                stream
+            };
+        }
         if self == Self::NoProgress {
             return match turn {
                 1 | 3 => named_tool_stream(
@@ -122,6 +131,29 @@ impl ReadFault {
         }
     }
     pub(super) fn check_request(self, body: &[u8], turns: u8) {
+        if self == Self::AlreadySatisfied {
+            if turns != 0 {
+                let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
+                let result = parsed["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .rfind(|item| item["type"] == "function_call_output")
+                    .unwrap();
+                let output: serde_json::Value =
+                    serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    output["code"],
+                    if turns == 1 {
+                        "outcome_already_satisfied"
+                    } else {
+                        "no_progress"
+                    }
+                );
+                assert_eq!(output["executed"], false);
+            }
+            return;
+        }
         if self == Self::NoProgress {
             let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
             if turns > 0 {
@@ -265,6 +297,12 @@ fn long_read_workflow_closes_original_accounting_after_mid_run_audit_delivery() 
 }
 
 #[test]
+fn satisfied_actions_cannot_repeat_but_a_new_value_can_still_be_filled() {
+    let _serial = lock(&SERIAL);
+    provider_fixture(ProviderFault::Read(ReadFault::AlreadySatisfied));
+}
+
+#[test]
 fn no_progress_feedback_survives_a_cached_read_and_allows_a_different_operation() {
     let _serial = lock(&SERIAL);
     provider_fixture(ProviderFault::Read(ReadFault::NoProgress));
@@ -300,11 +338,14 @@ pub(super) fn assert_outcome(
     calls: &[u8],
     events: &[AgentWorkEvent],
 ) {
-    if fault == ReadFault::NoProgress {
+    if matches!(fault, ReadFault::NoProgress | ReadFault::AlreadySatisfied) {
         let AgentWorkOutcome::Succeeded(success) = outcome else {
             panic!("{fault:?}: {outcome:?}")
         };
-        assert_eq!(success.closure().model_calls(), 5);
+        assert_eq!(
+            success.closure().model_calls(),
+            if fault == ReadFault::NoProgress { 5 } else { 3 }
+        );
         assert_eq!(success.closure().effects(), 1);
         assert_eq!(calls, [1, 2, 3, 7, 3, 4, 5, 6]);
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
