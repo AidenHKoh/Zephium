@@ -196,6 +196,7 @@ pub(super) struct AgentProviderActionTargets {
     exclusions: Vec<AgentProviderActionExclusion>,
     host_projected: bool,
     required_effect: Option<crate::SemanticEffectClass>,
+    pub(super) initial_snapshot_refused: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -238,6 +239,7 @@ impl AgentProviderActionTargets {
             guard,
             entries,
             exclusions: Vec::new(),
+            initial_snapshot_refused: false,
             host_projected: false,
             required_effect: None,
         })
@@ -253,6 +255,7 @@ impl AgentProviderActionTargets {
             guard: authority.guard,
             entries: authority.entries.clone(),
             exclusions: Vec::new(),
+            initial_snapshot_refused: false,
             host_projected: true,
             required_effect: authority.required_effect,
         })
@@ -340,6 +343,7 @@ impl AgentProviderActionTargets {
             guard: diff.current_guard(),
             entries,
             exclusions: Vec::new(),
+            initial_snapshot_refused: false,
             host_projected: false,
             required_effect: None,
         })
@@ -1490,6 +1494,7 @@ impl AgentProviderContinuation {
                     guard: authority.guard,
                     entries: authority.entries.clone(),
                     exclusions: Vec::new(),
+                    initial_snapshot_refused: false,
                     host_projected: true,
                     required_effect: authority.required_effect,
                 })
@@ -2500,6 +2505,7 @@ mod tests {
                     })
                     .collect(),
                 exclusions: Vec::new(),
+                initial_snapshot_refused: false,
                 host_projected: false,
                 required_effect: None,
             }
@@ -3352,7 +3358,11 @@ mod tests {
                 {"k":2,"p":0,"r":"checkbox","n":"32 GB","o":9},
                 {"k":3,"p":0,"r":"combobox","n":"From","o":11},
                 {"k":4,"p":0,"r":"option","n":"Krakow, Poland","o":9},
-                {"k":5,"p":0,"r":"paragraph","t":"Vienna, Austria"}
+                {"k":5,"p":0,"r":"paragraph","t":"Vienna, Austria"},
+                {"k":6,"p":0,"r":"listbox","n":"Departure choices","o":8},
+                {"k":7,"p":5,"r":"option","n":"Morning","o":9},
+                {"k":8,"p":0,"r":"listbox","n":"Native choices","o":12},
+                {"k":9,"p":7,"r":"option","n":"Native option","o":9}
             ]),
         );
         let config = config(AgentProviderKind::OpenAiResponses);
@@ -3364,7 +3374,7 @@ mod tests {
                 "verification":{"kind":"target_selection_matches_option"}
             }]})
         };
-        for (target, option, clicked) in [("@a2", "@a2", 2), ("@a3", "@a4", 4)] {
+        for (target, option, clicked) in [("@a2", "@a2", 2), ("@a3", "@a4", 4), ("@a6", "@a7", 7)] {
             let targets = AgentProviderActionTargets::try_from_observation(&observed).unwrap();
             let resolution = action_turn_with_targets(
                 &observed,
@@ -3394,6 +3404,44 @@ mod tests {
             );
             assert_eq!(action.effect(), crate::SemanticEffectClass::LocalWrite);
         }
+        let foreign = action_turn_with_targets(
+            &observed,
+            config.clone(),
+            AgentProviderActionTargets::try_from_observation(&observed).unwrap(),
+            select("@a6", "@a4"),
+        )
+        .resolve_action(
+            crate::SemanticActionBatchId::new(1).unwrap(),
+            &observed,
+            &frames,
+            &config,
+        )
+        .unwrap();
+        assert!(
+            matches!(foreign, AgentProviderActionResolution::Refused(_)),
+            "a foreign option cannot satisfy selection of this listbox"
+        );
+        let mut denied = AgentProviderActionTargets::try_from_observation(&observed).unwrap();
+        denied.exclude_for_test(
+            crate::SemanticActionKind::Select,
+            8,
+            crate::SemanticActionBindingError::Reference(
+                crate::SemanticReferenceError::OperationDenied,
+            ),
+        );
+        let resolution =
+            action_turn_with_targets(&observed, config.clone(), denied, select("@a8", "@a9"))
+                .resolve_action(
+                    crate::SemanticActionBatchId::new(1).unwrap(),
+                    &observed,
+                    &frames,
+                    &config,
+                )
+                .unwrap();
+        assert!(
+            matches!(resolution, AgentProviderActionResolution::Refused(_)),
+            "a host-refused native select cannot become an option click"
+        );
         // A suggestion the page made no clickable control stays refused.
         let targets = AgentProviderActionTargets::try_from_observation(&observed).unwrap();
         let resolution =
@@ -5206,10 +5254,9 @@ mod tests {
         let current = observation(context(), 2, 2, 2, "body");
         let history = AgentInspectionProgress::record(None, &previous, &current).unwrap();
         let config = config(AgentProviderKind::OpenAiResponses)
-            .restrict_to_navigation_and_extraction()
             .with_baseline_read()
             .with_progressive_observation();
-        let transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+        let mut transcript = AgentProviderTranscript::try_initial_with_checkpoints(
             Arc::from("Read the page"),
             "current observation".into(),
             None,
@@ -5219,6 +5266,9 @@ mod tests {
             }),
         )
         .unwrap();
+        transcript.set_action_targets(
+            AgentProviderActionTargets::try_from_observation(&current).unwrap(),
+        );
         let baseline = SemanticObservationAcknowledgement::from_fingerprint(
             SemanticObservationFingerprint::from_observation(&current),
         );
@@ -5229,10 +5279,45 @@ mod tests {
             json!({"kind":"initial"}),
             transcript,
         );
-        assert!(matches!(
-            continuation.resolve_observation(&current, &config),
-            Ok(AgentProviderObservationResolution::Refused(_))
-        ));
+        let AgentProviderObservationResolution::Refused(refusal) =
+            continuation.resolve_observation(&current, &config).unwrap()
+        else {
+            panic!("unchanged initial capture must be refused");
+        };
+        let (_, bound) = refusal
+            .bind(&current, &config, "same current observation".into())
+            .unwrap();
+        assert!(bound.action_targets().unwrap().initial_snapshot_refused);
+        let wire: serde_json::Value = serde_json::from_slice(
+            &super::super::request::encode_openai_continuation_body(&config, &bound).unwrap(),
+        )
+        .unwrap();
+        let snapshot = wire["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "snapshot")
+            .unwrap();
+        let scopes = snapshot["parameters"]["properties"]["scope"]["anyOf"]
+            .as_array()
+            .unwrap();
+        assert!(!scopes
+            .iter()
+            .any(|scope| scope["properties"]["kind"]["enum"][0] == "initial"));
+        assert!(scopes
+            .iter()
+            .any(|scope| scope["properties"]["kind"]["enum"][0] == "subtree"));
+        assert!(wire["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "extract"));
+        assert!(
+            !AgentProviderActionTargets::try_from_observation(&current)
+                .unwrap()
+                .initial_snapshot_refused,
+            "a fresh native observation restores its vocabulary"
+        );
     }
 
     #[test]

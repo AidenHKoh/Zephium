@@ -272,6 +272,44 @@ fn select_as_click(
     {
         return None;
     }
+    // A custom listbox may close on selection. Its named choice still has to
+    // belong to that list; a sibling picker is not an equivalent proposal.
+    for frame in observation.frames() {
+        let Some(target_node) = frame.nodes().iter().find(|node| node.reference() == target) else {
+            continue;
+        };
+        if target_node
+            .operations()
+            .contains(SemanticOperationClass::Select)
+        {
+            return None;
+        }
+        if target_node.role() == crate::SemanticRole::Listbox {
+            let option_node = frame
+                .nodes()
+                .iter()
+                .find(|node| node.reference() == option)?;
+            if option_node.role() != crate::SemanticRole::Option {
+                return None;
+            }
+            let mut parent = option_node.parent();
+            let mut belongs = false;
+            for _ in 0..frame.nodes().len() {
+                let Some(node) = parent.and_then(|index| frame.nodes().get(usize::from(index)))
+                else {
+                    break;
+                };
+                if node.reference() == target {
+                    belongs = true;
+                    break;
+                }
+                parent = node.parent();
+            }
+            if !belongs {
+                return None;
+            }
+        }
+    }
     crate::SemanticActionProposal::try_new(
         crate::SemanticActionIntent::Click { target: option },
         action.effect(),

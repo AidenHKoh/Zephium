@@ -537,7 +537,15 @@ impl AgentProviderObservationRefusal {
         })
         .to_string();
         let (call, _, _, correlation, mut transcript) = self.0.into_parts();
-        let action_targets = transcript.take_action_targets();
+        let mut action_targets = transcript.take_action_targets();
+        if matches!(
+            self.1,
+            InspectionRefusal::Unchanged | InspectionRefusal::Streak
+        ) {
+            if let Some(targets) = &mut action_targets {
+                targets.initial_snapshot_refused = true;
+            }
+        }
         // Match progressive capture checkpointing: keep current refs exactly
         // once, approved intent and policy-bound progress. Old tool replay is
         // unnecessary for reporting a rejected operation and may contain refs

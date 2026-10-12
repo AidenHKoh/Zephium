@@ -137,7 +137,7 @@ const AGENT_BROWSER_INSTRUCTIONS_V1: &str = concat!(
     "use fill directly; no preparatory click is needed. value=\"\" means observed empty text; ",
     "an absent value is unknown. Do not reuse a ",
     "different role's reference: select only a target ACT_TARGETS lists for select (a native select ",
-    "or listbox), and its option must be a descendant r=option; a combobox whose ops include fill is a text ",
+    "including a multiple-select listbox), and its option must be a descendant r=option; a combobox whose ops include fill is a text ",
     "field with suggestions: fill it, then click a suggestion. When a control says option_refs=locate, call locate ",
     "before select. Never invent or ",
     "request selectors, JavaScript, DOM, HTML, CDP, native handles, credentials, cookies, tokens, ",
@@ -6151,7 +6151,7 @@ static SITE_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinit
                     .as_array_mut()
                     .expect("fixed action schema"),
             );
-            tool.description = "Propose one current-ref Click, Fill, Select, Press or Scroll on this site with verification of its intended outcome. Fill and Select use local_write for drafts and search fields; typing into a document that saves as you type is external_write. Click uses read for exploring, opening, searching and filtering: a search or filter button may load a results page, which then opens for you. local_write is for reversible local changes. A click that sends, posts, publishes, pays, books, deletes, shares or saves declares its true effect (communication, purchase, destructive or external_write) and must be the batch's only action; the app asks the person before it runs. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Verify an effect that lands elsewhere on the page with page_changed. Opening a page dialog requires page_dialog_opened; choosing an item that dismisses it requires page_dialog_closed. Scroll uses read and immediate settlement with scroll_position_changed verification; amount=into_view brings a disclosure listed for scroll into view, never the document; a click, fill or press brings its own control into view, so after a fill act on the next control directly. A native select is chosen with select, never clicked. Press sends one key to a control: Enter in a message box sends what it holds (communication; fill the box first, and never type the key into the text), Enter in a search field searches (read), Escape closes a popup or menu (read), arrow keys move in a list or picker. Rich editors (a message composer, an issue description, a page's blocks) are filled like any text box: fill replaces their text. Typed fields take their own format: a number field a plain number such as 12.5, a date field YYYY-MM-DD, a time field HH:MM, an email or web address with no surrounding spaces. A custom dropdown (a combobox that is not a native select) opens with a click; then choose with select on its listbox, or click the option with page_changed verification when the list closes as you choose. Follow shown links with the navigate tool.";
+            tool.description = "Propose one current-ref Click, Fill, Select, Press or Scroll on this site with verification of its intended outcome. Fill and Select use local_write for drafts and search fields; typing into a document that saves as you type is external_write. Click uses read for exploring, opening, searching and filtering: a search or filter button may load a results page, which then opens for you. local_write is for reversible local changes. A click that sends, posts, publishes, pays, books, deletes, shares or saves declares its true effect (communication, purchase, destructive or external_write) and must be the batch's only action; the app asks the person before it runs. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Verify an effect that lands elsewhere on the page with page_changed. Opening a page dialog requires page_dialog_opened; choosing an item that dismisses it requires page_dialog_closed. Scroll uses read and immediate settlement with scroll_position_changed verification; amount=into_view brings a disclosure listed for scroll into view, never the document; a click, fill or press brings its own control into view, so after a fill act on the next control directly. A native select is chosen with select, never clicked. Press sends one key to a control: Enter in a message box sends what it holds (communication; fill the box first, and never type the key into the text), Enter in a search field searches (read), Escape closes a popup or menu (read), arrow keys move in a list or picker. Rich editors (a message composer, an issue description, a page's blocks) are filled like any text box: fill replaces their text. Typed fields take their own format: a number field a plain number such as 12.5, a date field YYYY-MM-DD, a time field HH:MM, an email or web address with no surrounding spaces. A custom dropdown opens with a click; choose its observed option by clicking it, with page_changed verification when the choice closes the list. Follow shown links with the navigate tool.";
         }
         tools
     });
@@ -6281,6 +6281,16 @@ fn constrained_browser_tool_definitions(
     }
     if variants.is_empty() {
         definitions.remove(index);
+    }
+    if targets.initial_snapshot_refused {
+        for tool in &mut definitions {
+            if tool.kind == AgentBrowserToolKind::Snapshot {
+                let scopes = tool.parameters["properties"]["scope"]["anyOf"]
+                    .as_array_mut()
+                    .ok_or(AgentProviderRequestError::Encoding)?;
+                scopes.retain(|scope| scope["properties"]["kind"]["enum"][0] != "initial");
+            }
+        }
     }
     Ok(Some(definitions))
 }
