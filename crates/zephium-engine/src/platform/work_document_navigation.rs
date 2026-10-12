@@ -313,6 +313,27 @@ impl State {
             self.write_navigation = None;
         }
     }
+    fn initial_public_reload(&self, raw: &str) -> bool {
+        use zephium_agentic::WorkBrowserDocumentPolicy as P;
+        matches!(
+            self.policy,
+            P::PublicSameDocumentQuery | P::PublicResultsPage
+        ) && self.first_document
+            && self.follow.is_none()
+            && self.human.is_none()
+            && self.site_loads < MAX_SITE_LOADS
+            && self
+                .committed_at
+                .is_some_and(|at| at.elapsed() <= SELF_LOAD_WINDOW)
+            && self.target.as_ref().is_some_and(|target| {
+                self.effective
+                    .as_ref()
+                    .is_none_or(|effective| effective == target)
+                    && self.policy.admits_request(target)
+                    && ContextNavigationTarget::parse(raw).as_ref() == Ok(target)
+            })
+    }
+
     /// A site-session GET the gate follows: the tracked load's own server
     /// redirect, a script redirect before the document settles, or a first
     /// page that reloads itself moments after it settled (a bot check that
@@ -377,7 +398,8 @@ impl State {
                 true
             }
             Phase::Ready
-                if policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+                if (policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+                    || self.initial_public_reload(raw))
                     && self.site_loads < MAX_SITE_LOADS
                     && self.first_document
                     && reloads(self.effective.as_ref(), raw)
@@ -912,7 +934,9 @@ impl WorkDocumentNavigation {
                 .is_some_and(|follow| follow.post || follow.consent);
             return state.follow_from_action(target, !confirmed);
         }
-        if state.policy.follows_site_loads() && state.site_follows(target) {
+        if (state.policy.follows_site_loads() || state.initial_public_reload(target))
+            && state.site_follows(target)
+        {
             return true;
         }
         // A refused unsolicited navigation grants no replacement document.
@@ -1037,7 +1061,15 @@ impl WorkDocumentNavigation {
         {
             return state.follow_from_action(target, action.is_get);
         }
-        if state.policy.follows_site_loads()
+        let site_load = state.policy.follows_site_loads()
+            && (state.phase != Phase::Ready
+                || state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession);
+        let public_reload = state.initial_public_reload(target)
+            && matches!(
+                action.navigation_type,
+                AppleNavigationType::Reload | AppleNavigationType::Other
+            );
+        if (site_load || public_reload)
             && action.target_is_main_frame == Some(true)
             && action.is_get
             && state.site_follows(target)
@@ -1168,10 +1200,14 @@ impl WorkDocumentNavigation {
             };
         }
         let site = state.policy.follows_site_loads();
+        let replaced = site
+            || (state.policy
+                == zephium_agentic::WorkBrowserDocumentPolicy::PublicSameDocumentQuery
+                && state.site_loads > 0);
         // Navigation IDs are WebKit object addresses, which a later load can
         // reuse: a superseded load has already started, so a start while the
         // gate waits for its armed load is that load, whatever its ID.
-        if site
+        if replaced
             && state.superseded == Some(event.id)
             && state.phase == Phase::Armed
             && state.requested
@@ -1180,10 +1216,10 @@ impl WorkDocumentNavigation {
         {
             state.superseded = None;
         }
-        if site && state.superseded == Some(event.id) {
+        if replaced && state.superseded == Some(event.id) {
             return Ok((false, false));
         }
-        if site
+        if replaced
             && state.phase == Phase::Ready
             && state.native_id != Some(event.id)
             && matches!(event.phase, E::Failed | E::Cancelled)
@@ -1223,7 +1259,7 @@ impl WorkDocumentNavigation {
             // A later request of the page's own replaced the load the gate
             // was following before it committed.
             (Phase::Loading, E::Started)
-                if site
+                if replaced
                     && exact
                     && state.page_loads_unstarted > 0
                     && state.native_id.is_some_and(|id| id != event.id) =>
@@ -1906,6 +1942,104 @@ mod tests {
             assert!(!gate.allows(start));
         }
     }
+    #[test]
+    fn a_public_first_document_can_finish_its_exact_address_self_reload() {
+        use zephium_agentic::WorkBrowserDocumentPolicy as P;
+        let start = "https://www.example.com/reference";
+        for ready in [false, true] {
+            let gate = public_gate(start, P::PublicSameDocumentQuery);
+            for phase in [E::Started, E::Committed, E::Finished] {
+                gate.observe(event(1, phase, start)).unwrap();
+            }
+            if ready {
+                settle(&gate, start);
+            }
+            assert!(
+                gate.allows(start),
+                "a first-page verification reload must not strand readiness"
+            );
+            assert!(gate.take_hand_on());
+            assert_eq!(gate.observe(event(1, E::Failed, start)), Ok((false, false)));
+            assert!(!gate.failed());
+            for phase in [E::Started, E::Committed, E::Finished] {
+                gate.observe(event(2, phase, start)).unwrap();
+            }
+            settle(&gate, start);
+            assert!(gate.ready(Some(start)));
+        }
+    }
+
+    #[test]
+    fn public_self_reload_does_not_authorize_new_destinations_or_post_action_replays() {
+        use zephium_agentic::WorkBrowserDocumentPolicy as P;
+        let start = "https://www.example.com/reference";
+        let ready = || {
+            let gate = public_gate(start, P::PublicSameDocumentQuery);
+            for phase in [E::Started, E::Committed, E::Finished] {
+                gate.observe(event(1, phase, start)).unwrap();
+            }
+            settle(&gate, start);
+            gate
+        };
+        for target in [
+            "https://www.example.com/reference?changed=1",
+            "https://www.example.com/other",
+            "https://elsewhere.example/reference",
+            "https://www.example.com/reference#fragment",
+        ] {
+            let gate = ready();
+            assert!(!gate.allows(target));
+            assert!(gate.ready(Some(start)));
+        }
+        for limit in 0..3 {
+            let gate = ready();
+            {
+                let mut state = gate.0.lock().unwrap();
+                match limit {
+                    0 => state.first_document = false,
+                    1 => state.site_loads = MAX_SITE_LOADS,
+                    _ => {
+                        state.committed_at = Some(
+                            Instant::now() - SELF_LOAD_WINDOW - std::time::Duration::from_secs(1),
+                        )
+                    }
+                }
+            }
+            assert!(!gate.allows(start));
+            assert!(gate.ready(Some(start)));
+        }
+        let gate = ready();
+        gate.retire();
+        assert!(!gate.allows(start));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn apple_public_self_reload_requires_a_main_frame_get() {
+        use wry::AppleNavigationType as T;
+        use zephium_agentic::WorkBrowserDocumentPolicy as P;
+        let start = "https://www.example.com/reference";
+        for (kind, get, expected) in [
+            (T::Reload, true, true),
+            (T::Other, true, true),
+            (T::FormSubmitted, true, false),
+            (T::FormSubmitted, false, false),
+            (T::LinkActivated, true, false),
+            (T::BackForward, true, false),
+            (T::FormResubmitted, false, false),
+        ] {
+            let gate = public_gate(start, P::PublicSameDocumentQuery);
+            for phase in [E::Started, E::Committed, E::Finished] {
+                gate.observe(event(1, phase, start)).unwrap();
+            }
+            settle(&gate, start);
+            assert_eq!(
+                gate.allows_apple_action(start, apple_action(kind, get)),
+                expected
+            );
+        }
+    }
+
     #[test]
     fn a_public_script_redirect_before_ready_is_kept_but_never_after() {
         use zephium_agentic::WorkBrowserDocumentPolicy as P;
@@ -2831,6 +2965,11 @@ mod tests {
             gate
         }
         let gate = ready();
+        gate.open_follow(
+            false,
+            false,
+            zephium_agentic::SemanticActionFollow::default(),
+        );
         for current in [
             "https://example.test/frozen?entry=adult",
             "https://example.test/frozen?sort=price",

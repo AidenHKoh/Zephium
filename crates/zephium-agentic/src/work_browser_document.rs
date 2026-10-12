@@ -22,7 +22,9 @@ pub enum WorkBrowserDocumentPolicy {
     /// public destination so the read's owner may admit a new read there.
     PublicQueryFinalization,
     /// Public interactions may update a safe query within the committed document.
-    /// The native gate still refuses every unapproved load, origin/path change,
+    /// A bounded first-page GET reload of the exact requested address may settle
+    /// automatic browser verification; no post-action replay is authorized.
+    /// The native gate still refuses every other unapproved load, origin/path change,
     /// fragment and credential-bearing location. The admitted URL remains the
     /// resource's stable citation address; query state grants no new destination.
     /// Redirects are refused and kept as for `PublicQueryFinalization`.
