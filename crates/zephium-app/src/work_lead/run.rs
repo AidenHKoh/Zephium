@@ -24,6 +24,7 @@ pub(crate) struct LeadSource {
     pub key: String,
     pub link: WorkEvidenceLink,
     pub url: Option<String>,
+    pub preview: Option<WorkEvidencePreviewV1>,
 }
 
 #[derive(Clone, Default)]
@@ -618,9 +619,29 @@ impl LeadRun {
             key: key.clone(),
             link,
             url: url.map(str::to_owned),
+            preview: None,
         });
         key
     }
+    pub(crate) fn cite_preview(&self, preview: &WorkEvidencePreviewV1, url: &str) -> String {
+        let key = self.cite(preview.link.clone(), "", Some(url));
+        if preview.text.len() <= 8192 && !preview.truncated {
+            if let Some(source) = self.state().sources.iter_mut().find(|s| s.key == key) {
+                source.preview = Some(preview.clone());
+            }
+        }
+        key
+    }
+
+    pub(crate) fn source_previews(&self) -> Vec<LeadSource> {
+        self.state()
+            .sources
+            .iter()
+            .filter(|s| s.preview.is_some())
+            .cloned()
+            .collect()
+    }
+
     pub(crate) fn source(&self, key: &str) -> Option<LeadSource> {
         self.state()
             .sources

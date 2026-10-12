@@ -15,6 +15,7 @@ mod project;
 mod prompt;
 mod recipes;
 mod records;
+mod value_sources;
 pub mod registry;
 pub(crate) mod route;
 mod run;

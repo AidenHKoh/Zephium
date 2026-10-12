@@ -995,7 +995,10 @@ where
                     .and_then(|p| p.link_destination.clone())
                     .unwrap_or_else(|| url.to_owned());
                 self.run.allow_url(&page);
-                self.run.cite(link.clone(), title, Some(&page))
+                match driver.preview(link) {
+                    Some(preview) => self.run.cite_preview(preview, &page),
+                    None => self.run.cite(link.clone(), title, Some(&page)),
+                }
             })
             .collect();
         let cite = |indices: &[u16]| -> String {
@@ -1349,7 +1352,9 @@ pub(crate) fn collection(value: Option<&Value>) -> Result<Option<WorkBrowseColle
     for column in &mut collection.columns {
         if matches!(column.value, WorkBrowseValue::Money { .. }) {
             column.value = WorkBrowseValue::Text;
-            column.extraction = WorkBrowseExtraction::Generate;
+        }
+        if column.value == WorkBrowseValue::Text {
+            column.extraction = WorkBrowseExtraction::Verbatim;
         }
         if column.value != WorkBrowseValue::Url {
             column.required = false;
@@ -1519,6 +1524,23 @@ mod tests {
     }
 
     #[test]
+    fn model_record_fields_cannot_request_generated_prices_dates_or_stock() {
+        use zephium_core::work::collection::WorkBrowseExtraction;
+        let records = serde_json::json!({"max_items":3,"columns":[
+            {"name":"price","value":{"kind":"text"},"required":true,"extraction":"generate"},
+            {"name":"date","value":{"kind":"text"},"required":true},
+            {"name":"stock","value":{"kind":"text"},"required":false,"extraction":"generate"},
+            {"name":"url","value":{"kind":"url"},"required":true}
+        ]});
+        let collection = collection(Some(&records)).unwrap().unwrap();
+        assert!(collection.columns[..3]
+            .iter()
+            .all(|column| column.extraction == WorkBrowseExtraction::Verbatim));
+        assert!(collection.columns[3].required);
+        assert_eq!(collection.max_items, 3);
+    }
+
+    #[test]
     fn a_price_column_keeps_the_price_as_the_page_shows_it() {
         use zephium_core::work::collection::{WorkBrowseExtraction, WorkBrowseValue};
         let records = serde_json::json!({
@@ -1533,7 +1555,7 @@ mod tests {
         assert_eq!(collection.columns[0].value, WorkBrowseValue::Text);
         assert_eq!(
             collection.columns[0].extraction,
-            WorkBrowseExtraction::Generate
+            WorkBrowseExtraction::Verbatim
         );
         assert!(!collection.columns[0].required && collection.columns[1].required);
     }

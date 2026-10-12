@@ -391,8 +391,14 @@ pub(crate) fn propose(
         return Err((format!("{kind}: {}", found.words), ObjectRefusal::Shape));
     }
     normalize(kind, &mut data);
+    let mut value_sources = Vec::new();
+    if kind == "sheet" {
+        value_sources =
+            super::value_sources::ground_sheet(&mut data, sources, &run.source_previews())
+                .map_err(|error| (error, ObjectRefusal::Source))?;
+    }
     let mut keys: Vec<String> = Vec::new();
-    for key in sources {
+    for key in sources.iter().chain(&value_sources) {
         let key = key.trim().to_owned();
         if !keys.contains(&key) {
             keys.push(key);

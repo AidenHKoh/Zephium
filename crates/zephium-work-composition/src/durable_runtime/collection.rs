@@ -19,16 +19,9 @@ impl TryFrom<&WorkBrowseCollection> for WorkBrowseCollectionSchema {
 
     fn try_from(request: &WorkBrowseCollection) -> Result<Self, Self::Error> {
         request.validate()?;
-        let mut name = SemanticExtractionFieldSchema::try_text("name".into(), true, 512)
+        let name = SemanticExtractionFieldSchema::try_text("name".into(), true, 512)
+            .and_then(SemanticExtractionFieldSchema::with_verbatim_text)
             .map_err(|_| WorkError::Invalid)?;
-        if request.max_items == 1
-            && request
-                .columns
-                .iter()
-                .any(|column| column.extraction == WorkBrowseExtraction::Verbatim)
-        {
-            name = name.with_verbatim_text().map_err(|_| WorkError::Invalid)?;
-        }
         let mut fields = vec![name];
         // A single-subject read is on that subject's own page: its subject URL
         // column is the page's own address, which the read itself can cite.
@@ -534,6 +527,24 @@ mod tests {
             currencies: vec!["USD".into(), "USD".into()],
         };
         assert!(WorkBrowseCollectionSchema::try_from(&invalid).is_err());
+    }
+
+    #[test]
+    fn multiple_records_copy_identity_as_well_as_requested_observed_fields() {
+        let request: WorkBrowseCollection = serde_json::from_value(serde_json::json!({
+            "title":"Dated events","max_items":3,"columns":[
+                {"name":"date","required":false,"value":{"kind":"text"},"extraction":"verbatim"},
+                {"name":"url","required":true,"value":{"kind":"url"}}
+            ]
+        }))
+        .unwrap();
+        let schema = WorkBrowseCollectionSchema::try_from(&request).unwrap();
+        assert!(
+            schema.fields[0].verbatim_text(),
+            "record names must retain an exact source fragment for every row"
+        );
+        assert!(schema.fields[1].verbatim_text());
+        assert_eq!(schema.fields[2].kind(), SemanticExtractionValueKind::Url);
     }
 
     #[test]
