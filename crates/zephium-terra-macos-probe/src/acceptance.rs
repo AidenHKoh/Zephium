@@ -547,7 +547,8 @@ fn remember_eval_page_trace(local: &mut EvalDiagnostics, trace: serde_json::Valu
         return;
     }
     if local.page_traces.len() == EVAL_PAGE_TRACE_CALLS {
-        local.page_traces.remove(0);
+        // Preserve the setup that caused a later recovery loop as well as its tail.
+        local.page_traces.remove(EVAL_PAGE_TRACE_CALLS / 2);
         local.page_traces_limited = true;
     }
     local.page_traces.push(trace);
@@ -725,13 +726,18 @@ mod page_trace_tests {
     }
 
     #[test]
-    fn trace_retains_only_bounded_recent_turns_without_clipping_quotes() {
+    fn trace_retains_bounded_setup_and_recent_turns_without_clipping_quotes() {
         let mut local = EvalDiagnostics::default();
         for index in 0..20 {
             remember_eval_page_trace(&mut local, serde_json::json!({"call_index":index}));
         }
         assert_eq!(local.page_traces.len(), EVAL_PAGE_TRACE_CALLS);
-        assert_eq!(local.page_traces[0]["call_index"], 8);
+        let indices: Vec<_> = local
+            .page_traces
+            .iter()
+            .map(|row| row["call_index"].as_u64().unwrap())
+            .collect();
+        assert_eq!(indices, [0, 1, 2, 3, 4, 5, 14, 15, 16, 17, 18, 19]);
         remember_eval_page_trace(
             &mut local,
             serde_json::json!({"text":"x".repeat(EVAL_PAGE_TRACE_BYTES)}),
@@ -1641,9 +1647,8 @@ fn page_rows(execution: &zephium_core::work::runtime::WorkExecutionFact) {
 
 /// One closed summary row for a lead run's execution.
 pub(super) use super::loopback_support::{part_rows, run_row};
-/// The published pictures fetched the way media admission fetches them:
-/// admitted when the bounded public fetch returns an image, refused with
-/// its closed cause otherwise.
+/// Probe-only public reachability check. These bytes are not stored or rendered;
+/// canvas image coverage requires an actual record-media reference.
 pub(super) async fn media_row(execution: &zephium_core::work::runtime::WorkExecutionFact) {
     use zephium_agentic::public_asset::{fetch_public_image, PublicAssetError};
     use zephium_core::work::artifact::WorkArtifactDataV1 as Data;
@@ -1689,7 +1694,7 @@ pub(super) async fn media_row(execution: &zephium_core::work::runtime::WorkExecu
         }
     }
     say(format_args!(
-        "lead-media: candidates={candidates} admitted={admitted} refused={} too_large={too_large} scaled={scaled}",
+        "lead-media: candidates={candidates} admitted={admitted} refused={} too_large={too_large} scaled={scaled} purpose=public_reachability_only",
         too_large + other
     ));
 }
