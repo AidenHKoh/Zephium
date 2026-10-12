@@ -1491,8 +1491,6 @@ impl AgentWorkController {
                     consent_press: false,
                     keep_follow: false,
                     covered_controls: Vec::new(),
-                    typed_unsent: false,
-                    typed_field: None,
                     scroll_streak: 0,
                     look_streak: 0,
                     sign_in_refusals: 0,
@@ -1524,12 +1522,6 @@ struct WorkState {
     /// Controls of this document a click found covered, by role and name
     /// digest: the model is offered them for a key press only.
     covered_controls: Vec<u64>,
-    /// The last verified step typed into a field that commits nothing (a
-    /// search or filter box) and nothing has run it since.
-    typed_unsent: bool,
-    /// That field, by role and name digest, once a scroll was refused for
-    /// it: a second scroll has the host run the search instead.
-    typed_field: Option<u64>,
     /// Verified scrolls in a row with nothing else done.
     scroll_streak: u8,
     /// Whole looks of this page in a row with nothing done between them.
@@ -3799,7 +3791,6 @@ impl AgentWorkController {
                 continue;
             }
             let navigation_incomplete = state.has_navigation() && !state.navigation_complete();
-            let typed_target = Self::typed_target(state, &observation);
             let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
             let (proposal, assessment) = match step.turn.proposal().kind() {
                 AgentBrowserToolKind::Extract => {
@@ -3851,18 +3842,6 @@ impl AgentWorkController {
                     // that cannot afford them, or an action the assignment
                     // does not permit, is refused to the model, not failed.
                     let admitted = match binding {
-                        // Planners typed a query and then scrolled instead of
-                        // running it: the first such scroll is refused, said so.
-                        crate::action::AgentBrowserActionBinding::Prepared(proposal)
-                            if state.typed_unsent
-                                && proposal.action().kind() == SemanticActionKind::Scroll =>
-                        {
-                            state.typed_unsent = false;
-                            Err(proposal
-                                .into_refusal(SemanticActionBindingError::AssignmentDenied)
-                                .ok_or(AgentWorkFailure::Contract)?
-                                .unsent_search())
-                        }
                         // Planners scrolled up and down for many calls instead
                         // of extracting: past three scrolls in a row the
                         // next is refused, said so, once per streak.
@@ -3875,47 +3854,6 @@ impl AgentWorkController {
                                 .into_refusal(SemanticActionBindingError::AssignmentDenied)
                                 .ok_or(AgentWorkFailure::Contract)?
                                 .scrolled_enough())
-                        }
-                        // A second scroll: the host runs the search itself
-                        // with Enter in the field, a read, and the planner
-                        // continues from what it produced.
-                        crate::action::AgentBrowserActionBinding::Prepared(proposal)
-                            if proposal.action().kind() == SemanticActionKind::Scroll
-                                && typed_target.is_some() =>
-                        {
-                            let target = typed_target.ok_or(AgentWorkFailure::Contract)?;
-                            state.typed_field = None;
-                            let continuation = proposal
-                                .into_refusal(SemanticActionBindingError::AssignmentDenied)
-                                .ok_or(AgentWorkFailure::Contract)?
-                                .into_continuation();
-                            let next = Box::pin(Self::run_typed_search(
-                                state,
-                                worker,
-                                browser,
-                                continuation,
-                                target,
-                                &observation,
-                                captured_at,
-                                progress,
-                            ))
-                            .await?;
-                            fruitless.progressed();
-                            let next_turn;
-                            (observation, captured_at, progress, next_turn) = next;
-                            let Some(next_turn) = next_turn else {
-                                state.observation = Some(observation);
-                                return Ok(());
-                            };
-                            turn = next_turn;
-                            frames.clear();
-                            frames.extend(
-                                observation
-                                    .frames()
-                                    .iter()
-                                    .map(|snapshot| snapshot.frame().clone()),
-                            );
-                            continue;
                         }
                         crate::action::AgentBrowserActionBinding::Prepared(proposal) => {
                             let starved = state.navigation_discovery.is_some()
@@ -4031,19 +3969,6 @@ impl AgentWorkController {
             no_progress.remember(progress_key);
             Self::retain_action_read_evidence(state, &proposal, &observation, captured_at)?;
             let link = Self::clicked_link(state, proposal.action(), &observation);
-            let typed = (proposal.action().kind() == SemanticActionKind::Fill
-                && state.task.rewritable_field(proposal.action(), &observation))
-            .then(|| {
-                observation
-                    .frames()
-                    .iter()
-                    .flat_map(SemanticSnapshot::nodes)
-                    .find(|node| node.reference() == proposal.action().target_reference())
-                    .map(control_digest)
-            })
-            .flatten();
-            state.typed_unsent = false;
-            state.typed_field = None;
             let scrolled = proposal.action().kind() == SemanticActionKind::Scroll;
             let (current, current_at, transition) = match Self::execute_prepared_action(
                 state,
@@ -4185,8 +4110,6 @@ impl AgentWorkController {
                     .ok_or(AgentWorkFailure::Contract)?,
                 &current,
             )?;
-            state.typed_unsent = typed.is_some();
-            state.typed_field = typed;
             state.look_streak = 0;
             state.scroll_streak = if scrolled {
                 state.scroll_streak.saturating_add(1)
@@ -4271,96 +4194,6 @@ impl AgentWorkController {
 
     /// The field the planner typed into and has been told to run, on this
     /// look, once a scroll was refused for it.
-    fn typed_target(
-        state: &WorkState,
-        observation: &SemanticObservation,
-    ) -> Option<SemanticReferenceId> {
-        if state.typed_unsent {
-            return None;
-        }
-        let digest = state.typed_field?;
-        observation
-            .frames()
-            .iter()
-            .flat_map(SemanticSnapshot::nodes)
-            .find(|node| {
-                control_digest(node) == digest
-                    && node.operations().contains(SemanticOperationClass::Press)
-            })
-            .map(SemanticNode::reference)
-    }
-
-    /// Runs the search the planner typed with Enter in its field as Rust's
-    /// own read, then hands the planner the page it produced: as a
-    /// navigation when the search loaded one, else as a fresh look.
-    #[allow(clippy::too_many_arguments)]
-    async fn run_typed_search(
-        state: &mut WorkState,
-        worker: &mut AgentRuntimeWorker,
-        browser: &WorkBrowser<'_>,
-        continuation: AgentProviderContinuation,
-        target: SemanticReferenceId,
-        observation: &SemanticObservation,
-        captured_at: SemanticCaptureInstant,
-        progress: AgentWorkTaskProgress,
-    ) -> Result<
-        (
-            SemanticObservation,
-            SemanticCaptureInstant,
-            AgentWorkTaskProgress,
-            Option<AgentBrowserProviderTurn>,
-        ),
-        AgentWorkFailure,
-    > {
-        let press = SemanticActionProposal::try_new(
-            SemanticActionIntent::Press {
-                target,
-                key: SemanticPressKey::Enter,
-            },
-            SemanticEffectClass::Read,
-            SemanticWaitCondition::MutationQuiet(
-                SemanticMutationQuietPeriod::try_new(100)
-                    .map_err(|_| AgentWorkFailure::Contract)?,
-            ),
-            SemanticVerification::PageChanged,
-            SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS)
-                .map_err(|_| AgentWorkFailure::Contract)?,
-        )
-        .map_err(|_| AgentWorkFailure::Contract)?;
-        state.keep_follow = true;
-        let ran = Box::pin(Self::code_owned_read(
-            state,
-            worker,
-            browser,
-            observation,
-            press,
-        ))
-        .await;
-        state.keep_follow = false;
-        let ran = ran?.is_some();
-        if let Some(target) = state
-            .follow
-            .take()
-            .and_then(|target| Self::followable(state, target))
-        {
-            return Self::navigate_current(
-                state,
-                worker,
-                browser,
-                navigation::NavigationStart::Follow(Box::new((continuation, target))),
-                observation,
-                captured_at,
-                progress,
-            )
-            .await;
-        }
-        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
-        let checkpoint = continuation
-            .into_search_refresh(observation, &session.config, ran)
-            .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation))?;
-        Self::inspect_current(state, worker, browser, checkpoint, observation).await
-    }
-
     /// Whether the model proposed this exact refused action for the third
     /// time in a row.
     fn refused_again(

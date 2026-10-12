@@ -1332,6 +1332,19 @@ impl AgentBrowserPort for Port {
         completion: SemanticActionNativeCompletion,
     ) -> ContextDispatch {
         lock(&self.calls).push(7);
+        if navigation_tests::FILL_THEN_SCROLL.load(Ordering::Relaxed)
+            && self.fault == Fault::Navigation(NavigationFault::DiscoveryAction(true))
+            && lock(&self.calls).iter().filter(|&&call| call == 7).count() > 1
+        {
+            assert_eq!(
+                request.kind(),
+                SemanticActionKind::Scroll,
+                "the controller invented an unrequested key press"
+            );
+            let now = request.requested_at();
+            completion(request.fail(SemanticActionNativeFailure::TargetOccluded, now));
+            return ContextDispatch::Scheduled;
+        }
         match self.fault {
             Fault::DecisionTargetChanged => {
                 let now = request.requested_at();

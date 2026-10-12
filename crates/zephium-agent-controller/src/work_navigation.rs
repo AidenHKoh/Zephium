@@ -562,8 +562,6 @@ impl AgentWorkController {
         }
         state.navigation_hops += 1;
         state.covered_controls.clear();
-        state.typed_unsent = false;
-        state.typed_field = None;
         state.scroll_streak = 0;
         state.look_streak = 0;
         let fresh = Self::fit_model_observation(

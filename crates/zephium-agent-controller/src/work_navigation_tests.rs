@@ -57,10 +57,28 @@ fn discovered_link_workflow_uses_original_controller_and_refuses_unobserved_urls
     }
 }
 
+pub(super) static FILL_THEN_SCROLL: AtomicBool = AtomicBool::new(false);
+
+#[test]
+fn scrolling_after_a_field_fill_never_submits_the_form_implicitly() {
+    let _serial = lock(&SERIAL);
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FILL_THEN_SCROLL.store(false, Ordering::Relaxed);
+        }
+    }
+    let _reset = Reset;
+    FILL_THEN_SCROLL.store(true, Ordering::Relaxed);
+    provider_fixture(ProviderFault::Navigation(NavigationFault::DiscoveryAction(
+        true,
+    )));
+}
+
 pub(super) struct LocalActionPolicy;
 impl crate::AgentWorkLocalActionPolicy for LocalActionPolicy {
     fn model_action_effect(&self) -> Option<SemanticEffectClass> {
-        Some(SemanticEffectClass::LocalWrite)
+        (!FILL_THEN_SCROLL.load(Ordering::Relaxed)).then_some(SemanticEffectClass::LocalWrite)
     }
     fn rewritable_field(&self, action: &SemanticPreparedAction, _: &SemanticObservation) -> bool {
         action.kind() == SemanticActionKind::Fill
@@ -70,6 +88,10 @@ impl crate::AgentWorkLocalActionPolicy for LocalActionPolicy {
         node: &SemanticNode,
         _: &SemanticObservation,
     ) -> Result<SemanticOperations, AgentWorkFailure> {
+        if FILL_THEN_SCROLL.load(Ordering::Relaxed) && node.role() == SemanticRole::Document {
+            return SemanticOperations::try_new(&[SemanticOperationClass::Scroll])
+                .map_err(|_| AgentWorkFailure::Contract);
+        }
         if node.name().is_some_and(|name| name.as_str() == "Field") {
             SemanticOperations::try_new(&[SemanticOperationClass::Fill])
                 .map_err(|_| AgentWorkFailure::Contract)
@@ -86,6 +108,18 @@ impl crate::AgentWorkLocalActionPolicy for LocalActionPolicy {
         // This adapter knows the synthetic field has no remote effects. Its
         // approved intent is one exact fill; the model selects the fresh ref.
         assert_eq!(action.source_observation(), observation.request().id());
+        if FILL_THEN_SCROLL.load(Ordering::Relaxed)
+            && matches!(
+                action.kind(),
+                SemanticActionKind::Scroll | SemanticActionKind::Press
+            )
+        {
+            return Ok(AgentEffectAssessment::new(
+                action,
+                action.frame().origin().clone(),
+                SemanticEffectClass::Read,
+            ));
+        }
         if action.kind() != SemanticActionKind::Fill
             || action.fill_text().map(SemanticActionText::as_str) != Some("fixture value")
             || action.verification() != SemanticVerification::TargetValueMatchesInput
@@ -399,6 +433,7 @@ impl NavigationFault {
                 }
             }
             Self::DiscoveryMissingLink => 6,
+            Self::DiscoveryAction(_) if FILL_THEN_SCROLL.load(Ordering::Relaxed) => 12,
             Self::DiscoveryAction(_) => 8,
             Self::DiscoveryActionRefusal(..) => 10,
             Self::DiscoveryScopeRefusal(_) => 10,
@@ -432,6 +467,26 @@ impl NavigationFault {
         self == Self::CancelMapCount && turns == 2 && count
     }
     pub(super) fn stream(self, turn: u8) -> String {
+        if self == Self::DiscoveryAction(true) && FILL_THEN_SCROLL.load(Ordering::Relaxed) {
+            if turn == 1 {
+                return tool_stream(turn, true).replace("@a2", "@a3");
+            }
+            if turn == 2 || turn == 3 {
+                return named_tool_stream(
+                    turn,
+                    "act",
+                    r#"{\"actions\":[{\"kind\":\"scroll\",\"target\":\"@a1\",\"direction\":\"down\",\"amount\":\"page\",\"effect\":\"read\",\"wait\":{\"kind\":\"immediate\"},\"verification\":{\"kind\":\"scroll_position_changed\"},\"settle_millis\":2000}]}"#,
+                );
+            }
+            let phase = turn - 3;
+            return Self::Discovery
+                .stream(phase)
+                .replace(&format!("resp_{phase}"), &format!("resp_{turn}"))
+                .replace(&format!("msg_{phase}"), &format!("msg_{turn}"))
+                .replace(&format!("fc_{phase}"), &format!("fc_{turn}"))
+                .replace(&format!("call_{phase}"), &format!("call_{turn}"));
+        }
+
         if self == Self::DiscoveryMissingLink || matches!(self, Self::DiscoveryNavigationRefusal(_))
         {
             let case = match self {
@@ -660,6 +715,10 @@ impl NavigationFault {
         }
     }
     pub(super) fn check_request(self, bytes: &[u8], turns: u8) {
+        if self == Self::DiscoveryAction(true) && FILL_THEN_SCROLL.load(Ordering::Relaxed) {
+            return;
+        }
+
         if self == Self::DiscoveryMissingLink || matches!(self, Self::DiscoveryNavigationRefusal(_))
         {
             let case = match self {
@@ -1231,6 +1290,15 @@ pub(super) fn capture(
     } else {
         wire
     };
+    let wire = if FILL_THEN_SCROLL.load(Ordering::Relaxed) {
+        wire.replace(
+            r#""r":"document","o":16"#,
+            r#""r":"document","o":16,"b":{"x":0,"y":0,"w":800,"h":600}"#,
+        )
+        .replace(r#""s":64,"o":3"#, r#""s":64,"o":11"#)
+    } else {
+        wire
+    };
     let wire = if !arrived
         && matches!(
             fault,
@@ -1494,6 +1562,21 @@ pub(super) fn assert_outcome(
                 (false, ActionRefusal::Rewritten) => 2,
                 (false, _) => 1,
             }
+        );
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        return;
+    }
+    if fault == NavigationFault::DiscoveryAction(true) && FILL_THEN_SCROLL.load(Ordering::Relaxed) {
+        let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(success.closure().model_calls(), 6);
+        assert!(success.take_extraction().is_some());
+        assert_eq!(
+            calls.iter().filter(|&&call| call == 7).count(),
+            2,
+            "one fill and one requested scroll must reach the native adapter; no implicit Enter: {:?}",
+            events.iter().map(|event| event.kind()).collect::<Vec<_>>()
         );
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
         return;
