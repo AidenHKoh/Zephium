@@ -1641,11 +1641,11 @@ impl AgentProviderContinuation {
         // Read(initial) formats the exact acknowledged baseline, whether that
         // baseline was initial or separately captured/delivered by Snapshot.
         // It never answers an expansion request or creates new references.
-        if !matches!(
-            self.correlation.read_scope.as_ref(),
-            Some(super::AgentBrowserScopeProposal::Initial)
-        ) {
-            return Err(AgentProviderContinuationError::Scope);
+        match (self.correlation.read_scope.as_ref(), read.selected_target()) {
+            (Some(super::AgentBrowserScopeProposal::Initial), None) => {}
+            (Some(super::AgentBrowserScopeProposal::Subtree(wanted)), Some(actual))
+                if *wanted == actual => {}
+            _ => return Err(AgentProviderContinuationError::Scope),
         }
         if !read.matches_acknowledgement(&self.baseline) {
             return Err(AgentProviderContinuationError::Baseline);
@@ -6396,6 +6396,64 @@ mod tests {
             wrong_continuation.bind_read(call(2), &config, &substituted_read, substituted_payload,),
             Err(AgentProviderContinuationError::Baseline)
         ));
+    }
+
+    #[test]
+    fn target_read_receipt_cannot_answer_another_target_or_whole_read() {
+        let observed = observation(context(), 1, 1, 1, "public detail");
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&observed),
+        );
+        let config = config(AgentProviderKind::OpenAiResponses)
+            .restrict_to_locate_and_act()
+            .with_baseline_read();
+        for scope in [
+            json!({"kind":"initial"}),
+            json!({"kind":"subtree","target":"@a1"}),
+            json!({"kind":"subtree","target":"@a2"}),
+        ] {
+            let arguments = json!({"scope":scope}).to_string();
+            let correlation = super::super::AgentBrowserToolCall::decode_openai(
+                call(1),
+                "fc_read".into(),
+                "call_read".into(),
+                "read",
+                arguments.clone(),
+            )
+            .unwrap()
+            .into_continuation_parts()
+            .0;
+            let continuation = AgentProviderContinuationSeed {
+                call: call(1),
+                config: config.clone(),
+                baseline: baseline.clone(),
+                transcript: transcript(),
+            }
+            .join_terminal_tool(completion(call(1), arguments.len() as u32), correlation)
+            .unwrap();
+            let read = crate::read_semantic_target(
+                &observed,
+                &baseline,
+                crate::SemanticReferenceId::new(2).unwrap(),
+                crate::SemanticCaptureInstant::from_millis(1),
+                crate::SemanticReadSensitivityLimit::PublicOnly,
+                crate::SemanticReadBudget::STANDARD,
+            )
+            .unwrap();
+            let payload = encode_semantic_read(
+                &read,
+                SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+            )
+            .unwrap()
+            .admit_conservative_utf8(config.tokenizer())
+            .unwrap();
+            let result = continuation.bind_read(call(2), &config, &read, payload);
+            if scope["target"] == "@a2" {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(result.unwrap_err(), AgentProviderContinuationError::Scope);
+            }
+        }
     }
 
     #[test]

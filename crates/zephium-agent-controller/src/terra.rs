@@ -2618,21 +2618,31 @@ impl AgentBrowserSession {
             return Err(AgentBrowserProviderError::TurnLimit);
         }
         let (proposal, continuation) = turn.into_parts();
-        if !self.config.permits_baseline_read()
-            || !matches!(
-                proposal,
-                AgentBrowserToolProposal::Read(AgentBrowserScopeProposal::Initial)
-            )
-        {
+        if !self.config.permits_baseline_read() {
             return Err(AgentBrowserProviderError::UnsupportedTool(proposal.kind()));
         }
-        let read = read_semantic_observation(
-            observation,
-            SemanticReadAuthority::Acknowledged(continuation.baseline()),
-            captured_at,
-            SemanticReadSensitivityLimit::PublicOnly,
-            SemanticReadBudget::STANDARD,
-        )
+        let read = match proposal {
+            AgentBrowserToolProposal::Read(AgentBrowserScopeProposal::Initial) => {
+                read_semantic_observation(
+                    observation,
+                    SemanticReadAuthority::Acknowledged(continuation.baseline()),
+                    captured_at,
+                    SemanticReadSensitivityLimit::PublicOnly,
+                    SemanticReadBudget::STANDARD,
+                )
+            }
+            AgentBrowserToolProposal::Read(AgentBrowserScopeProposal::Subtree(target)) => {
+                read_semantic_target(
+                    observation,
+                    continuation.baseline(),
+                    target,
+                    captured_at,
+                    SemanticReadSensitivityLimit::PublicOnly,
+                    SemanticReadBudget::STANDARD,
+                )
+            }
+            _ => return Err(AgentBrowserProviderError::UnsupportedTool(proposal.kind())),
+        }
         .map_err(AgentBrowserProviderError::Read)?;
         let payload = encode_semantic_read(
             &read,

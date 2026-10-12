@@ -5856,11 +5856,12 @@ static LOCATE_ACT_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> =
 static BASELINE_READ_TOOL: LazyLock<BrowserToolDefinition> = LazyLock::new(|| {
     BrowserToolDefinition {
         kind: AgentBrowserToolKind::Read,
-        description: "Read bounded public semantic detail from the current acknowledged observation, including collapsed option labels and their source refs. This only reformats captured evidence: it cannot reveal an omitted below-viewport section. It does not refresh, expand, verify an effect or create refs. Use snapshot when available to inspect missing content. Every read consumes the same turn budget.",
-        parameters: strict_object(vec![(
+        description: "Read bounded public text and captured attributes from the acknowledged observation. Use subtree(target) for one element and its same-frame descendants, including option labels and exact link addresses; use initial for the whole captured observation. This only reformats captured evidence: it cannot reveal an omitted below-viewport section. It does not refresh, expand, verify an effect or create refs. Use snapshot when available to inspect missing content. Every read consumes the same turn budget.",
+        parameters: with_reference_definition(strict_object(vec![(
             "scope",
-            strict_object(vec![("kind", string_enum(&["initial"]))]),
-        )]),
+            json!({"anyOf":[strict_object(vec![("kind", string_enum(&["initial"]))]),
+                tagged_object("subtree", vec![("target", reference_schema())])]}),
+        )])),
     }
 });
 
@@ -8387,11 +8388,13 @@ mod tests {
                 } else {
                     &reads[0]["input_schema"]
                 };
-                assert_eq!(
-                    schema["properties"]["scope"]["properties"]["kind"]["enum"],
-                    json!(["initial"])
-                );
-                assert_eq!(schema["properties"]["scope"]["additionalProperties"], false);
+                let scopes = schema["properties"]["scope"]["anyOf"].as_array().unwrap();
+                assert_eq!(scopes.len(), 2);
+                assert_eq!(scopes[0]["properties"]["kind"]["enum"], json!(["initial"]));
+                assert_eq!(scopes[1]["properties"]["kind"]["enum"], json!(["subtree"]));
+                for scope in scopes {
+                    assert_eq!(scope["additionalProperties"], false);
+                }
                 if provider == AgentProviderKind::OpenAiResponses {
                     assert_eq!(wire["store"], false);
                 }

@@ -711,6 +711,7 @@ pub struct SemanticReadResult<'a> {
     context: ContextJoin,
     observation_fingerprint: SemanticObservationFingerprint,
     subtree: Option<SemanticReadSubtreeProof>,
+    selected_target: Option<SemanticReferenceId>,
     captured_at: SemanticCaptureInstant,
     fragments: Vec<SemanticReadFragment<'a>>,
     omissions: SemanticReadOmissions,
@@ -990,6 +991,10 @@ impl<'a> SemanticReadResult<'a> {
         !self.historical.is_empty()
     }
 
+    pub(crate) fn selected_target(&self) -> Option<SemanticReferenceId> {
+        self.selected_target
+    }
+
     pub(crate) fn matches_subtree(
         &self,
         acknowledgement: &SemanticObservationAcknowledgement,
@@ -1075,6 +1080,60 @@ pub fn read_selected_semantic_observation<'a>(
         None,
         false,
     )
+}
+
+/// Reads one already-observed element and its same-frame descendants, including
+/// captured link/image attributes. No DOM capture, model call or new authority
+/// is performed; the target and selected result are bound into the read receipt.
+pub fn read_semantic_target<'a>(
+    observation: &'a SemanticObservation,
+    acknowledgement: &SemanticObservationAcknowledgement,
+    target: SemanticReferenceId,
+    captured_at: SemanticCaptureInstant,
+    sensitivity: SemanticReadSensitivityLimit,
+    budget: SemanticReadBudget,
+) -> Result<SemanticReadResult<'a>, SemanticReadError> {
+    let (snapshot, root) = observation
+        .frames()
+        .iter()
+        .find_map(|frame| {
+            frame
+                .nodes()
+                .iter()
+                .position(|node| node.reference() == target)
+                .map(|root| (frame, root))
+        })
+        .ok_or(SemanticReadError::AuthorityMismatch)?;
+    let mut indices = std::collections::BTreeSet::from([root]);
+    let mut references = std::collections::BTreeSet::from([target]);
+    for (index, node) in snapshot.nodes().iter().enumerate().skip(root + 1) {
+        if node
+            .parent()
+            .is_some_and(|parent| indices.contains(&usize::from(parent)))
+        {
+            indices.insert(index);
+            references.insert(node.reference());
+        }
+    }
+    let mut read = read_projection(
+        observation,
+        SemanticReadAuthority::Acknowledged(acknowledgement),
+        captured_at,
+        sensitivity,
+        budget,
+        SemanticReadRoleSelection::ALL,
+        3,
+        Some(&references),
+        None,
+        false,
+    )?;
+    read.selected_target = Some(target);
+    let mut guard = Sha256::new();
+    guard.update(b"ZEPHIUM-SEMANTIC-TARGET-READ-1\0");
+    guard.update(read.guard);
+    guard.update(target.get().to_be_bytes());
+    read.guard = guard.finalize().into();
+    Ok(read)
 }
 
 /// Uses the trusted schema to include URL evidence only when needed.
@@ -1851,6 +1910,7 @@ impl<'a> SemanticReadBuilder<'a> {
             context: self.observation.request().context(),
             observation_fingerprint: fingerprint,
             subtree,
+            selected_target: None,
             captured_at: self.captured_at,
             fragments: self.fragments,
             omissions: self.omissions,
@@ -2703,6 +2763,60 @@ mod tests {
             })
             .count();
         assert_eq!(laptops, 150);
+    }
+
+    #[test]
+    fn target_read_keeps_only_captured_subtree_and_public_attributes() {
+        let observation = retained_observation(
+            1,
+            json!([
+                {"k":1,"r":"document"},
+                {"k":2,"p":0,"r":"group","n":"Chosen item"},
+                {"k":3,"p":1,"r":"link","n":"Exact title","u":"https://example.test/item?variant=2"},
+                {"k":4,"p":1,"r":"textbox","q":"secret","v":{"k":"redacted"}},
+                {"k":5,"p":0,"r":"paragraph","t":"Unrelated sibling"}
+            ]),
+        );
+        let ack = acknowledgement(&observation);
+        let target = SemanticReferenceId::new(2).unwrap();
+        let read = read_semantic_target(
+            &observation,
+            &ack,
+            target,
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        assert_eq!(read.selected_target(), Some(target));
+        assert!(read.matches_acknowledgement(&ack));
+        let content: Vec<_> = read
+            .fragments()
+            .iter()
+            .filter_map(|f| {
+                f.content()
+                    .text()
+                    .map(SemanticText::as_str)
+                    .or_else(|| f.content().value_preview().map(|v| v.text()))
+            })
+            .collect();
+        assert!(content.contains(&"Chosen item"));
+        assert!(content.contains(&"Exact title"));
+        assert!(content.contains(&"https://example.test/item?variant=2"));
+        assert!(!content.contains(&"Unrelated sibling"));
+        assert!(read
+            .fragments()
+            .iter()
+            .all(|f| f.provenance().sensitivity() == SemanticSensitivity::Public));
+        assert!(read_semantic_target(
+            &observation,
+            &ack,
+            SemanticReferenceId::new(99).unwrap(),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD
+        )
+        .is_err());
     }
 
     #[test]
