@@ -652,9 +652,10 @@ const sourcePath = path.resolve(
   process.argv[2] || "crates/zephium-agentic/assets/semantic-runtime-v1.js"
 );
 const negativeControl = process.argv[3] === "--without-document-parent-brand";
+const readonlyViewerCase = process.argv[3] === "--readonly-viewer";
 const commandCase = process.argv[3]?.startsWith('--isolated-command=') ? process.argv[3].slice('--isolated-command='.length) : null;
 const preparationOnly = process.env.ZEPHIUM_LOCAL_ISOLATED_FILL_PREPARATION_ONLY_PROBE === '1';
-assert(process.argv.length <= 4 && (process.argv[3] === undefined || negativeControl || commandCase), "unknown smoke mode");
+assert(process.argv.length <= 4 && (process.argv[3] === undefined || negativeControl || commandCase || readonlyViewerCase), "unknown smoke mode");
 let source = fs.readFileSync(sourcePath, "utf8");
 if (commandCase) {
   const anchor = '  function runFixedFill(target, descriptor, request) {';
@@ -730,6 +731,42 @@ const invoke = (invocation, generation, scope, budget = {}) => runtime.invoke(JS
     ...(budget.lu === true ? { lu: true } : {})
   }
 }));
+
+if (readonlyViewerCase) {
+  main._children = new NodeList();
+  const publicText = "Apache License, Version 2.0. " + "Public legal reference text. ".repeat(400);
+  const cases = [
+    ["Public readonly viewer", {"aria-readonly":"true"}, publicText, false],
+    ["Long editable field", {}, publicText, true],
+    ["Secret beyond copied prefix", {"aria-readonly":"true"}, publicText + " sk-synthetic-test-secret-never-export", true],
+    ["Exhausted readonly survey", {"aria-readonly":"true"}, "x".repeat(65537), true],
+    ["Invalid readonly unicode", {"aria-readonly":"true"}, publicText + "\ud800", true],
+    ["API key", {"aria-readonly":"true"}, publicText, true],
+  ];
+  for (const [label, attributes, value] of cases) main.append(new HTMLTextAreaElement({"aria-label":label,...attributes},value));
+  const wire=invoke(7,1,{k:"initial"},{n:128,t:16384,w:65536,x:4096,geo:false});
+  const observed=JSON.parse(wire);
+  for (const [label,, , secret] of cases) {
+    const node=observed.n.find(node=>node.n===label);
+    assert(node, "readonly viewer fixture missing");
+    if (secret) assert(node.q==="secret" && node.v?.k==="redacted", "unclassified/credential content was exposed");
+    else {
+      assert(node.q!=="secret" && node.v?.value?.startsWith("Apache License, Version 2.0."), "public readonly text was hidden");
+      assert(node.v.value.length<=4096 && node.fc===false, "copy or completeness bound changed");
+      assert(((node.o||0)&2)===0, "readonly viewer gained fill authority");
+    }
+  }
+  assert(!wire.includes("sk-synthetic-test-secret-never-export"), "a late secret crossed the text boundary");
+  main._children = new NodeList();
+  for (let index=0;index<6;index++) main.append(new HTMLTextAreaElement({"aria-label":`Protected viewer ${index}`,"aria-readonly":"true"}, publicText + " sk-synthetic-test-secret-never-export"));
+  main.append(new HTMLTextAreaElement({"aria-label":"After aggregate limit","aria-readonly":"true"},publicText));
+  const exhausted=JSON.parse(invoke(8,2,{k:"initial"},{n:128,t:16384,w:65536,x:4096,geo:false}));
+  const last=exhausted.n.find(node=>node.n==="After aggregate limit");
+  assert(last?.q==="secret" && last.v?.k==="redacted", "aggregate readonly scan exhaustion did not refuse disclosure");
+
+  process.stdout.write("readonly viewer: public text retained; editable, secret, invalid and exhausted values refused\n");
+  process.exit(0);
+}
 
 const initialWire = invoke(7, 1, { k: "initial" });
 if (negativeControl) {

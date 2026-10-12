@@ -661,6 +661,7 @@ const CURRENCY_TEXT= /[$\u20ac\u00a3\u00a5\u20b9\u20a9\u20bd\u20ba\u20aa\u0e3f\u
 const MAX_NAME_BYTES=512;
 const MAX_NODE_TEXT_BYTES=4096;
 const MAX_VALUE_BYTES=4096;
+const MAX_READONLY_SCAN_UNITS=65536;
 const MAX_SURROUNDING_BYTES=8192;
 const MAX_TRACKED_IDENTITIES=2048;
 const MAX_DOCUMENT_INVOCATIONS=4096;
@@ -1330,7 +1331,7 @@ return true;
 }
 return false;
 }
-function classifyLiveValue(value){
+function classifyLiveValue(value,limit=MAX_VALUE_BYTES){
 let bytes=0;
 for(let index=0;index<value.length;index+=1){
 const first=apply(stringCharCodeAt,value,[index]);
@@ -1351,7 +1352,7 @@ point===0x0d
 return 0;
 }
 bytes+=point<=0x7f?1:point<=0x7ff?2:point<=0xffff?3:4;
-if(bytes>MAX_VALUE_BYTES)return 1;
+if(bytes>limit)return 1;
 }
 return 2;
 }
@@ -2392,9 +2393,17 @@ mark(state,aggregate?"text_limit":"field_limit",aggregate);
 }
 return{value,bytes,secret,truncated:normalized.truncated};
 }
-function consumeValueField(raw,state,fieldLimit=MAX_VALUE_BYTES){
+function consumeValueField(raw,state,fieldLimit=MAX_VALUE_BYTES,readonlyText=false){
 const remaining=mathMax(0,state.request.b.t-state.textBytes);
-const valueClass=classifyLiveValue(raw);
+let valueClass;
+if(readonlyText&&raw.length>MAX_VALUE_BYTES){
+const scanned=state.readonlyScanUnits||0;
+if(raw.length>MAX_READONLY_SCAN_UNITS-scanned)valueClass=1;
+else{
+state.readonlyScanUnits=scanned+raw.length;
+valueClass=classifyLiveValue(raw,MAX_READONLY_SCAN_UNITS);
+}
+}else valueClass=classifyLiveValue(raw);
 if(valueClass!==2||(raw!==""&&looksLikeSecret(raw))){
 const redactedBytes=10;
 if(redactedBytes>remaining){
@@ -2425,8 +2434,8 @@ if(field.value!=="")record.wire.n=field.value;
 record.sinkBytes=field.bytes;
 if(field.secret)setSensitivity(record,"secret");
 }
-function addValue(record,raw,state){
-const field=consumeValueField(raw,state);
+function addValue(record,raw,state,readonlyText=false){
+const field=consumeValueField(raw,state,MAX_VALUE_BYTES,readonlyText);
 const observedEmpty=raw===""&&record.sensitivity!=="secret"&&(record.wire.o&2)!==0;
 if(field.value!==""||observedEmpty)record.wire.v={k:field.secret?"redacted":"text",value:field.value};
 if(field.secret){
@@ -2711,7 +2720,7 @@ if(descriptor.tag==="textarea")value=read(textareaValueGetter,element);
 }catch(_){
 value=null;
 }
-if(typeof value==="string")addValue(record,value,state);
+if(typeof value==="string")addValue(record,value,state,readonly&&descriptor.tag==="textarea");
 }
 }
 }

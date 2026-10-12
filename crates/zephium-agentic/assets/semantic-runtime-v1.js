@@ -19,6 +19,7 @@
   const MAX_NAME_BYTES = 512;
   const MAX_NODE_TEXT_BYTES = 4096;
   const MAX_VALUE_BYTES = 4096;
+  const MAX_READONLY_SCAN_UNITS = 65536;
   const MAX_SURROUNDING_BYTES = 8192;
   const MAX_TRACKED_IDENTITIES = 2048;
   const MAX_DOCUMENT_INVOCATIONS = 4096;
@@ -717,7 +718,7 @@
     return false;
   }
 
-  function classifyLiveValue(value) {
+  function classifyLiveValue(value, limit = MAX_VALUE_BYTES) {
     let bytes = 0;
     for (let index = 0; index < value.length; index += 1) {
       const first = apply(stringCharCodeAt, value, [index]);
@@ -738,7 +739,7 @@
         return 0;
       }
       bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
-      if (bytes > MAX_VALUE_BYTES) return 1;
+      if (bytes > limit) return 1;
     }
     return 2;
   }
@@ -1891,10 +1892,19 @@
     return { value, bytes, secret, truncated: normalized.truncated };
   }
 
-  function consumeValueField(raw, state, fieldLimit = MAX_VALUE_BYTES) {
+  function consumeValueField(raw, state, fieldLimit = MAX_VALUE_BYTES, readonlyText = false) {
     const remaining = mathMax(0, state.request.b.t - state.textBytes);
-    // Bound allocation; only complete <=4-KiB values reach classification.
-    const valueClass = classifyLiveValue(raw);
+    // Read-only document viewers may hold a long file. Inspect its whole value
+    // before copying any prefix; cap aggregate work and refuse an exhausted scan.
+    let valueClass;
+    if (readonlyText && raw.length > MAX_VALUE_BYTES) {
+      const scanned = state.readonlyScanUnits || 0;
+      if (raw.length > MAX_READONLY_SCAN_UNITS - scanned) valueClass = 1;
+      else {
+        state.readonlyScanUnits = scanned + raw.length;
+        valueClass = classifyLiveValue(raw, MAX_READONLY_SCAN_UNITS);
+      }
+    } else valueClass = classifyLiveValue(raw);
     if (valueClass !== 2 || (raw !== "" && looksLikeSecret(raw))) {
       const redactedBytes = 10;
       if (redactedBytes > remaining) {
@@ -1928,8 +1938,8 @@
     if (field.secret) setSensitivity(record, "secret");
   }
 
-  function addValue(record, raw, state) {
-    const field = consumeValueField(raw, state);
+  function addValue(record, raw, state, readonlyText = false) {
+    const field = consumeValueField(raw, state, MAX_VALUE_BYTES, readonlyText);
     // Preserve proven public emptiness, never infer it from missing/clipped data.
     // Emptiness discloses nothing private, and a fill is verified against it.
     const observedEmpty = raw === "" && record.sensitivity !== "secret" && (record.wire.o & 2) !== 0;
@@ -2234,7 +2244,7 @@
           } catch (_) {
             value = null;
           }
-          if (typeof value === "string") addValue(record, value, state);
+          if (typeof value === "string") addValue(record, value, state, readonly && descriptor.tag === "textarea");
         }
       }
     }
