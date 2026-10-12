@@ -65,6 +65,7 @@ struct Fragment {
     node_key: crate::semantic::SemanticNodeKey,
     field: SemanticReadField,
     role: SemanticRole,
+    states: crate::SemanticStates,
     content: Content,
     frame: Arc<SemanticFrameJoin>,
     invocation: SemanticInvocationId,
@@ -249,6 +250,7 @@ impl SemanticRetainedReadEvidence {
                         node_key: source.node_key,
                         field: fragment.field(),
                         role: fragment.role(),
+                        states: fragment.states(),
                         content: Content::copy(fragment.content()),
                         frame,
                         invocation: source.invocation(),
@@ -352,6 +354,7 @@ impl SemanticRetainedReadEvidence {
         mut current: SemanticReadResult<'a>,
     ) -> Result<SemanticReadResult<'a>, SemanticReadError> {
         if current.has_retained_evidence()
+            || current.selected_target.is_some()
             || current.subtree.is_some()
             || self
                 .context
@@ -455,6 +458,7 @@ impl SemanticRetainedReadEvidence {
                         .expect("bounded nonzero fragment"),
                     field: source.field,
                     role: source.role,
+                    states: source.states,
                     content,
                     region: source.region,
                     rank: source.rank,

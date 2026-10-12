@@ -579,6 +579,17 @@ pub fn encode_semantic_read(
                 checked_write(&mut output, format_args!("{value}"))?;
             }
         }
+        for (state, label) in [
+            (crate::SemanticState::Selected, "selected"),
+            (crate::SemanticState::Checked, "checked"),
+        ] {
+            if fragment.provenance().observation() == read.observation()
+                && fragment.provenance().observation_generation() == read.observation_generation()
+                && fragment.states().contains(state)
+            {
+                checked_write(&mut output, format_args!(" {label}=true"))?;
+            }
+        }
         if !all_fields_unproven && !fragment.provenance().fields_complete() {
             checked_write(&mut output, format_args!(" fields_complete=unproven"))?;
         }

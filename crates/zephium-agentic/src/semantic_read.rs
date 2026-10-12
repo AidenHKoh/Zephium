@@ -548,6 +548,7 @@ pub struct SemanticReadFragment<'a> {
     field: SemanticReadField,
     role: SemanticRole,
     content: SemanticReadContent<'a>,
+    states: crate::SemanticStates,
     provenance: SemanticReadProvenance<'a>,
     /// Where on the page it sits, for shedding: 0 the main content, 1 beside
     /// it, 2 the page's chrome (header, navigation, footer, search).
@@ -570,6 +571,11 @@ impl<'a> SemanticReadFragment<'a> {
     /// Closed source-node role.
     pub const fn role(self) -> SemanticRole {
         self.role
+    }
+
+    /// Observed source-control states, never inferred from an option's label.
+    pub const fn states(self) -> crate::SemanticStates {
+        self.states
     }
 
     /// Borrowed safe primitive.
@@ -1726,6 +1732,7 @@ impl<'a> SemanticReadBuilder<'a> {
             field,
             role: node.role(),
             content,
+            states: node.states(),
             provenance,
             region: page_region(node, snapshot),
             // A link's address is the record itself when the schema asks
@@ -2071,6 +2078,10 @@ fn read_guard(
     for fragment in fragments {
         hasher.update(fragment.id.get().to_be_bytes());
         hasher.update([read_field_code(fragment.field), role_code(fragment.role)]);
+        hasher.update([
+            u8::from(fragment.states.contains(crate::SemanticState::Selected)),
+            u8::from(fragment.states.contains(crate::SemanticState::Checked)),
+        ]);
         let provenance = fragment.provenance;
         if !provenance.fields_complete {
             hasher.update(b"FIELDS-UNPROVEN-1\0");
@@ -2766,6 +2777,51 @@ mod tests {
     }
 
     #[test]
+    fn extraction_read_distinguishes_available_options_from_observed_selection() {
+        let observation = retained_observation(
+            1,
+            json!([
+                {"k":1,"r":"document"},
+                {"k":2,"p":0,"r":"combobox","n":"Sort"},
+                {"k":3,"p":1,"r":"option","n":"Newest first"},
+                {"k":4,"p":1,"r":"option","n":"Oldest first","s":2},
+                {"k":5,"p":0,"r":"checkbox","n":"Available today","s":1},
+                {"k":6,"p":0,"r":"checkbox","n":"Secret filter","s":1,"q":"secret"}
+            ]),
+        );
+        let ack = acknowledgement(&observation);
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        let encoded = crate::encode_semantic_read(
+            &read,
+            crate::SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap();
+        let encoded = encoded
+            .admit_conservative_utf8(
+                &crate::SemanticTokenizerRevision::try_new("selection-test".into()).unwrap(),
+            )
+            .unwrap();
+        let line = |label: &str| {
+            encoded
+                .as_str()
+                .lines()
+                .find(|line| line.contains(label))
+                .unwrap()
+        };
+        assert!(!line("Newest first").contains("selected=true"));
+        assert!(line("Oldest first").contains("selected=true"));
+        assert!(line("Available today").contains("checked=true"));
+        assert!(!encoded.as_str().contains("Secret filter"));
+    }
+
+    #[test]
     fn target_read_keeps_only_captured_subtree_and_public_attributes() {
         let observation = retained_observation(
             1,
@@ -2808,6 +2864,9 @@ mod tests {
             .fragments()
             .iter()
             .all(|f| f.provenance().sensitivity() == SemanticSensitivity::Public));
+        assert!(SemanticRetainedReadEvidence::default()
+            .merge_for_extraction(read)
+            .is_err());
         assert!(read_semantic_target(
             &observation,
             &ack,

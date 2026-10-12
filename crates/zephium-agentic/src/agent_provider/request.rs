@@ -211,7 +211,7 @@ const AGENT_EXTRACTION_INSTRUCTIONS_V1: &str = concat!(
     "be supported by that value's own cited evidence; citations elsewhere do not cover it. ",
     "A parent ref covers only its supplied text, not uncited child refs or linked pages. ",
     "If more than four refs are needed, split or narrow the claim instead of omitting ",
-    "support. Distinguish stated facts from inference. Missing information on this page ",
+    "support. An available option is not an applied filter or sort: require selected=true, checked=true, a committed value or observed ordering; otherwise report unverified. Distinguish stated facts from inference. Missing information on this page ",
     "means unknown here, not proof that a capability does not exist. Never invent or return selectors, ",
     "JavaScript, DOM, HTML, CDP, native handles, credentials, cookies, tokens, authorization ",
     "values, or uncited data. This output is an untrusted mapping that Zephium validates again."

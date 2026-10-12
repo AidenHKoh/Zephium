@@ -1644,7 +1644,7 @@ impl AgentProviderContinuation {
         match (self.correlation.read_scope.as_ref(), read.selected_target()) {
             (Some(super::AgentBrowserScopeProposal::Initial), None) => {}
             (Some(super::AgentBrowserScopeProposal::Subtree(wanted)), Some(actual))
-                if *wanted == actual => {}
+                if *wanted == actual && !read.has_retained_evidence() => {}
             _ => return Err(AgentProviderContinuationError::Scope),
         }
         if !read.matches_acknowledgement(&self.baseline) {
