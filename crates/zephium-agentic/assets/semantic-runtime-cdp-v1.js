@@ -687,6 +687,8 @@ const htmlElementClick=
 typeof HTMLElement==="function"?HTMLElement.prototype.click:null;
 const htmlElementFocus=
 typeof HTMLElement==="function"?HTMLElement.prototype.focus:null;
+const htmlElementBlur=
+typeof HTMLElement==="function"?HTMLElement.prototype.blur:null;
 const documentExecCommand=Document.prototype.execCommand;
 const documentGetSelection=Document.prototype.getSelection;
 const documentCreateRange=Document.prototype.createRange;
@@ -713,7 +715,6 @@ const fixedTimeout=globalThis.setTimeout;
 const fixedClearTimeout=globalThis.clearTimeout;
 const nativeInputEvent=globalThis.InputEvent;
 const nativeEvent=globalThis.Event;
-const nativeFocusEvent=globalThis.FocusEvent;
 const nativeMutationObserver=globalThis.MutationObserver;
 const dateNow=Date.now;
 const nativePerformanceObserver=globalThis.PerformanceObserver;
@@ -3545,12 +3546,22 @@ expected.s===actual.s&&expected.n===actual.n&&expected.vk===actual.vk&&
 expected.vt===actual.vt&&expected.vo===actual.vo&&expected.vb===actual.vb
 );
 }
+function editingStatesMatch(expected,actual){
+const transient=64|(expected.r===13?4:0);
+return(!(actual.s&32)||(expected.s&32)!==0)&&
+(expected.s&~(transient|32))===(actual.s&~(transient|32));
+}
+function descriptorMatchesFocusedField(expected,actual){
+if(!validRuntimeDescriptor(expected)|| !validRuntimeDescriptor(actual))return false;
+return editingStatesMatch(expected,actual)&&
+descriptorMatches({...expected,s:0},{...actual,s:0});
+}
 function descriptorMatchesFilledValue(expected,actual,value){
 if(!validRuntimeDescriptor(expected)|| !validRuntimeDescriptor(actual))return false;
 const valueMatches=actual.vo===0&& !actual.vb&&actual.vk===1&&actual.vt===value;
 return(
 expected.a===actual.a&&expected.r===actual.r&&expected.o===actual.o&&expected.q===actual.q&&
-expected.s===actual.s&&expected.n===actual.n&&valueMatches
+editingStatesMatch(expected,actual)&&expected.n===actual.n&&valueMatches
 );
 }
 function descriptorMatchesRichValue(expected,actual,value){
@@ -3565,7 +3576,7 @@ function descriptorMatchesSelectedValue(expected,actual,desired){
 if(!validRuntimeDescriptor(expected)|| !validRuntimeDescriptor(actual))return false;
 return(
 expected.a===actual.a&&expected.r===actual.r&&expected.o===actual.o&&expected.q===actual.q&&
-expected.s===actual.s&&expected.n===actual.n&&
+editingStatesMatch(expected,actual)&&expected.n===actual.n&&
 actual.vk===4&&actual.vt===null&&actual.vo===desired&& !actual.vb
 );
 }
@@ -3574,7 +3585,7 @@ if(!validRuntimeDescriptor(expected)|| !validRuntimeDescriptor(actual))return fa
 const selectedBit=2;
 return(
 expected.a===actual.a&&expected.r===actual.r&&expected.o===actual.o&&expected.q===actual.q&&
-(expected.s&~selectedBit)===(actual.s&~selectedBit)&&
+(expected.s&~(selectedBit|64))===(actual.s&~(selectedBit|64))&&
 (actual.s&selectedBit)!==0&&expected.n===actual.n&&
 expected.vk===actual.vk&&expected.vt===actual.vt&&
 expected.vo===actual.vo&&expected.vb===actual.vb
@@ -3953,7 +3964,11 @@ credentialField(target,current,attribute(target,"aria-label",512)||""))return fa
 if(kind===3)return editingContextMatches(target,request,current.editingContext);
 return kind!==4||read(nodeParentGetter,target)===parentAtAdmission;
 };
-const revalidate=()=>sameTarget()&&descriptorMatches(request.f,runtimeDescriptor(target,request.g));
+let focused=false;
+const revalidate=()=>sameTarget()&&(focused
+?read(documentActiveGetter,document)===target&&
+descriptorMatchesFocusedField(request.f,runtimeDescriptor(target,request.g))
+:descriptorMatches(request.f,runtimeDescriptor(target,request.g)));
 if(kind===3||kind===4){
 if(!validActionText(value))return"unsupported_interaction";
 const label=attribute(target,"aria-label",512)||"";
@@ -3964,6 +3979,8 @@ return runRichFill(target,value,()=>(checks++ <1?revalidate():sameLabeled()),sam
 const valueSetter=kind===1?inputValueSetter:
 kind===2?textareaValueSetter:kind===3?nodeTextSetter:null;
 if(valueSetter===null||typeof nativeInputEvent!=="function"||
+typeof htmlElementFocus!=="function"||
+(descriptor.role==="textbox"&&typeof htmlElementBlur!=="function")||
 typeof fixedDispatchEvent!=="function"|| !validActionText(value)){
 return"unsupported_interaction";
 }
@@ -3971,6 +3988,13 @@ let before;
 let input;
 try{
 if(!revalidate())return"target_changed";
+}catch(_){return"unsupported_interaction";}
+try{
+apply(htmlElementFocus,target,[{preventScroll:true}]);
+focused=true;
+if(!revalidate())return"applied_unverified_beforeinput_revalidation";
+}catch(_){return"applied_unverified_beforeinput_revalidation";}
+try{
 before=new nativeInputEvent("beforeinput",{
 bubbles:true,cancelable:true,composed:true,data:value,
 inputType:"insertReplacementText",isComposing:false
@@ -3990,10 +4014,8 @@ try{
 write(valueSetter,target,value);
 apply(fixedDispatchEvent,target,[input]);
 apply(fixedDispatchEvent,target,[new nativeEvent("change",{bubbles:true})]);
-if(descriptor.role==="textbox"&&typeof nativeFocusEvent==="function"&&
-read(documentActiveGetter,document)!==target){
-apply(fixedDispatchEvent,target,[new nativeFocusEvent("blur")]);
-apply(fixedDispatchEvent,target,[new nativeFocusEvent("focusout",{bubbles:true,composed:true})]);
+if(descriptor.role==="textbox"&&read(documentActiveGetter,document)===target){
+apply(htmlElementBlur,target,[]);
 }
 }catch(_){return"applied_unverified_mutation";}
 try{

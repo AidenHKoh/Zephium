@@ -125,6 +125,8 @@
     typeof HTMLElement === "function" ? HTMLElement.prototype.click : null;
   const htmlElementFocus =
     typeof HTMLElement === "function" ? HTMLElement.prototype.focus : null;
+  const htmlElementBlur =
+    typeof HTMLElement === "function" ? HTMLElement.prototype.blur : null;
   const documentExecCommand = Document.prototype.execCommand;
   const documentGetSelection = Document.prototype.getSelection;
   const documentCreateRange = Document.prototype.createRange;
@@ -151,7 +153,6 @@
   const fixedClearTimeout = globalThis.clearTimeout;
   const nativeInputEvent = globalThis.InputEvent;
   const nativeEvent = globalThis.Event;
-  const nativeFocusEvent = globalThis.FocusEvent;
   const nativeMutationObserver = globalThis.MutationObserver;
   const dateNow = Date.now;
   const nativePerformanceObserver = globalThis.PerformanceObserver;
@@ -3250,12 +3251,26 @@
     );
   }
 
+  function editingStatesMatch(expected, actual) {
+    // Focus and a combobox popup are normal consequences of typing. Clearing
+    // an existing invalid state is allowed; new invalidity and constraints are not.
+    const transient = 64 | (expected.r === 13 ? 4 : 0);
+    return (!(actual.s & 32) || (expected.s & 32) !== 0) &&
+      (expected.s & ~(transient | 32)) === (actual.s & ~(transient | 32));
+  }
+
+  function descriptorMatchesFocusedField(expected, actual) {
+    if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
+    return editingStatesMatch(expected, actual) &&
+      descriptorMatches({ ...expected, s: 0 }, { ...actual, s: 0 });
+  }
+
   function descriptorMatchesFilledValue(expected, actual, value) {
     if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
     const valueMatches = actual.vo === 0 && !actual.vb && actual.vk === 1 && actual.vt === value;
     return (
       expected.a === actual.a && expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
-      expected.s === actual.s && expected.n === actual.n && valueMatches
+      editingStatesMatch(expected, actual) && expected.n === actual.n && valueMatches
     );
   }
 
@@ -3272,7 +3287,7 @@
     if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
     return (
       expected.a === actual.a && expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
-      expected.s === actual.s && expected.n === actual.n &&
+      editingStatesMatch(expected, actual) && expected.n === actual.n &&
       actual.vk === 4 && actual.vt === null && actual.vo === desired && !actual.vb
     );
   }
@@ -3282,7 +3297,7 @@
     const selectedBit = 2;
     return (
       expected.a === actual.a && expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
-      (expected.s & ~selectedBit) === (actual.s & ~selectedBit) &&
+      (expected.s & ~(selectedBit | 64)) === (actual.s & ~(selectedBit | 64)) &&
       (actual.s & selectedBit) !== 0 && expected.n === actual.n &&
       expected.vk === actual.vk && expected.vt === actual.vt &&
       expected.vo === actual.vo && expected.vb === actual.vb
@@ -3707,10 +3722,12 @@
       if (kind === 3) return editingContextMatches(target, request, current.editingContext);
       return kind !== 4 || read(nodeParentGetter, target) === parentAtAdmission;
     };
-    const revalidate = () => sameTarget() && descriptorMatches(request.f, runtimeDescriptor(target, request.g));
-    // Every editable host is typed into through the browser's own editing, as
-    // a person types: editors that keep their own model (Notion's blocks,
-    // ProseMirror, Lexical) take it, where a raw text write is undone.
+    let focused = false;
+    const revalidate = () => sameTarget() && (focused
+      ? read(documentActiveGetter, document) === target &&
+        descriptorMatchesFocusedField(request.f, runtimeDescriptor(target, request.g))
+      : descriptorMatches(request.f, runtimeDescriptor(target, request.g)));
+    // Contenteditable hosts with an internal text model need native editing.
     if (kind === 3 || kind === 4) {
       if (!validActionText(value)) return "unsupported_interaction";
       // Before focusing, the whole descriptor must still match; from then on
@@ -3723,6 +3740,8 @@
     const valueSetter = kind === 1 ? inputValueSetter :
       kind === 2 ? textareaValueSetter : kind === 3 ? nodeTextSetter : null;
     if (valueSetter === null || typeof nativeInputEvent !== "function" ||
+        typeof htmlElementFocus !== "function" ||
+        (descriptor.role === "textbox" && typeof htmlElementBlur !== "function") ||
         typeof fixedDispatchEvent !== "function" || !validActionText(value)) {
       return "unsupported_interaction";
     }
@@ -3730,6 +3749,13 @@
     let input;
     try {
       if (!revalidate()) return "target_changed";
+    } catch (_) { return "unsupported_interaction"; }
+    try {
+      apply(htmlElementFocus, target, [{ preventScroll: true }]);
+      focused = true;
+      if (!revalidate()) return "applied_unverified_beforeinput_revalidation";
+    } catch (_) { return "applied_unverified_beforeinput_revalidation"; }
+    try {
       before = new nativeInputEvent("beforeinput", {
         bubbles: true, cancelable: true, composed: true, data: value,
         inputType: "insertReplacementText", isComposing: false
@@ -3751,10 +3777,8 @@
       // A person's edit ends in change and leaving the field: forms validate
       // and save on those. A combobox or search box keeps its suggestions.
       apply(fixedDispatchEvent, target, [new nativeEvent("change", { bubbles: true })]);
-      if (descriptor.role === "textbox" && typeof nativeFocusEvent === "function" &&
-          read(documentActiveGetter, document) !== target) {
-        apply(fixedDispatchEvent, target, [new nativeFocusEvent("blur")]);
-        apply(fixedDispatchEvent, target, [new nativeFocusEvent("focusout", { bubbles: true, composed: true })]);
+      if (descriptor.role === "textbox" && read(documentActiveGetter, document) === target) {
+        apply(htmlElementBlur, target, []);
       }
     } catch (_) { return "applied_unverified_mutation"; }
     try {

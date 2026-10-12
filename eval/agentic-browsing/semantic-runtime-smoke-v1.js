@@ -1163,7 +1163,14 @@ async function finish() {
     vb: false
   });
   const actionNode = (name) => transported.n.find((node) => node.n === name);
-  const fillRequest = (targetNode, value, attempt) => JSON.stringify({
+  const fillRequest = (targetNode, value, attempt) => {
+    // These independent fault cases reuse the initial snapshot and restore its
+    // field value between cases. Restore its unfocused state as well.
+    if (transported.n.includes(targetNode)) {
+      assert(!((targetNode.s || 0) & 64), "initial fill fixture unexpectedly focused");
+      document._active = null;
+    }
+    return JSON.stringify({
     v: 1,
     o: "action_execute",
     a: attempt,
@@ -1177,7 +1184,8 @@ async function finish() {
     z: value,
     f: descriptorFor(targetNode),
     of: null
-  });
+    });
+  };
   const selectRequest = (attempt) => JSON.stringify({
     v: 1,
     o: "action_execute",
@@ -2192,28 +2200,29 @@ async function finish() {
     "an acknowledged region bypassed its newly editable ancestor");
   delete body.attributes.contenteditable;
 
+  // Exceed the 128 KiB raw scan budget, not the old 32 KiB fragment limit.
   // A bounded raw-fragment scan is an omitted-content boundary, even when
   // normalization produced only a short prefix. Never join the next sibling
   // onto that prefix and silently remove a skipped negation from the quote.
   searchable._children.values = [];
   const scanInterrupted = searchable.append(new Element("p"));
-  scanInterrupted.append(new CharacterData(`width ${" ".repeat(40000)}not `));
+  scanInterrupted.append(new CharacterData(`width ${" ".repeat(131073)}not `));
   scanInterrupted.append(new CharacterData("supported"));
   setOwner(body, document);
   const scanInitial = JSON.parse(invoke(155, 155, { k: "initial" }));
   const scanAnchor = scanInitial.n.find(node => node.r === "landmark").k;
   const scanInterruptedResult = JSON.parse(invoke(156, 156, { k: "text_search", a: scanAnchor, q: "width supported" }));
-  assert(scanInterruptedResult.c === "scope_boundary" &&
+  assert(scanInterruptedResult.c === "inspection_limit" &&
     scanInterruptedResult.n.some(node => node.t === "width") &&
     !scanInterruptedResult.n.some(node => node.t === "width supported"),
     "raw scan truncation stitched a false quote across an omitted negation");
   scanInterrupted._children.values = [];
   scanInterrupted.append(new CharacterData("width"));
-  scanInterrupted.append(new CharacterData(`${" ".repeat(40000)}not `));
+  scanInterrupted.append(new CharacterData(`${" ".repeat(131073)}not `));
   scanInterrupted.append(new CharacterData("supported"));
   setOwner(body, document);
   const emptyScanPrefix = JSON.parse(invoke(157, 157, { k: "text_search", a: scanAnchor, q: "width supported" }));
-  assert(emptyScanPrefix.c === "scope_boundary" && !emptyScanPrefix.n.some(node => node.t === "width supported"),
+  assert(emptyScanPrefix.c === "inspection_limit" && !emptyScanPrefix.n.some(node => node.t === "width supported"),
     "an empty scan-truncated prefix failed to break the pending quote");
   scanInterrupted._children.values = [];
   for (const fragment of ["width", "not", "supported"]) scanInterrupted.append(new CharacterData(fragment));
@@ -2455,6 +2464,107 @@ async function finish() {
       assert(appeared === mode.endsWith("appears"), `false dialog appearance: ${mode}`);
       assert(!JSON.parse(invoke(next+1,next+1,{k:"initial"})).u, "dialog witness replayed");
     }
+  }
+
+  // The same native field keeps its identity while focus opens suggestions
+  // and typing clears validation. Repurposing and new constraints stay faults.
+  let formGeneration = 1500;
+  for (const mode of ["focus-suggestions", "input-suggestions", "clear-invalid", "focus-required",
+      "focus-secret", "focus-detached", "focus-readonly", "input-disabled", "input-required",
+      "input-invalid", "input-renamed", "beforeinput-secret", "date-value", "stale-focus", "focus-retarget"]) {
+    const root = new Element("main");
+    const combo = mode.includes("suggestions");
+    const field = root.append(new HTMLInputElement({
+      type: mode === "date-value" ? "date" : "text", "aria-label": "Departure",
+      ...(combo ? {role:"combobox", "aria-expanded":"false"} : {}),
+      ...(mode === "clear-invalid" ? {"aria-invalid":"true"} : {})
+    }, mode === "date-value" ? "2026-11-19" : "previous"));
+    document._root = root; root._parent = document; setOwner(root, document);
+    document._hit = field; document._active = null;
+    const observed = JSON.parse(invoke(++formGeneration, formGeneration, {k:"initial"}));
+    const node = observed.n.find(node => node.n === "Departure");
+    assert(node && (node.o & 2), `form fixture lost fill authority: ${mode}`);
+    let writes = 0;
+    let focusedAtInput = false;
+    field.addEventListener("focus", () => {
+      if (mode === "focus-suggestions") field.attributes["aria-expanded"] = "true";
+      if (mode === "focus-secret") field.attributes.type = "password";
+      if (mode === "focus-detached") { root._children = new NodeList(); field._parent = null; }
+      if (mode === "focus-readonly") field.attributes.readonly = "";
+      if (mode === "focus-retarget") document._active = root;
+    });
+    field.addEventListener("beforeinput", event => {
+      if (mode === "focus-required" && document._active !== field) event.preventDefault();
+      if (mode === "beforeinput-secret") field.attributes.type = "password";
+    });
+    field.addEventListener("input", () => {
+      writes++;
+      focusedAtInput = document._active === field;
+      if (mode === "input-suggestions") field.attributes["aria-expanded"] = "true";
+      if (mode === "clear-invalid") delete field.attributes["aria-invalid"];
+      if (mode === "input-disabled") field.attributes.disabled = "";
+      if (mode === "input-required") field.attributes["aria-required"] = "true";
+      if (mode === "input-invalid") field.attributes["aria-invalid"] = "true";
+      if (mode === "input-renamed") field.attributes["aria-label"] = "Destination";
+    });
+    const value = mode === "date-value" ? "2026-11-20" : "new station";
+    const request = JSON.parse(fillRequest(node, value, formGeneration));
+    request.i = observed.i; request.g = observed.g;
+    if (mode === "stale-focus") field.focus();
+    const result = await runtime.invoke(JSON.stringify(request));
+    const beforeFault = ["focus-secret","focus-detached","focus-readonly","beforeinput-secret","focus-retarget"].includes(mode);
+    const afterFault = ["input-disabled","input-required","input-invalid","input-renamed"].includes(mode);
+    if (mode === "stale-focus") {
+      assert(result === "E2:target_state_changed" && writes === 0,
+        "an unacknowledged focus change bypassed strict pre-dispatch validation");
+    } else if (beforeFault) {
+      assert(result === "E2:applied_unverified_beforeinput_revalidation", `form repurposing escaped: ${mode}: ${result}`);
+      assert(writes === 0 && field._value === "previous", `repurposed form received text: ${mode}`);
+    } else if (afterFault) {
+      assert(result === "E2:applied_unverified_postcondition", `changed form constraint accepted: ${mode}: ${result}`);
+      assert(writes === 1, `unexpected replay after form mutation: ${mode}`);
+    } else {
+      assert(!String(result).startsWith("E"), `normal form transition refused: ${mode}: ${result}`);
+      assert(JSON.parse(result).r === "form" && field._value === value && writes === 1,
+        `form did not receive exactly one verified write: ${mode}`);
+      assert(focusedAtInput, `form was not focused before typing: ${mode}`);
+      assert(combo ? document._active === field : document._active === null,
+        `form focus did not preserve suggestions or finish plain editing: ${mode}`);
+    }
+  }
+
+  for (const mode of ["popup-closes", "clear-invalid", "option-focus", "new-required", "new-invalid", "renamed"]) {
+    const root = new Element("main");
+    const select = root.append(new HTMLSelectElement({"aria-label":"Travel class", "aria-expanded":"true",
+      ...(mode === "clear-invalid" ? {"aria-invalid":"true"} : {})}));
+    select.append(new HTMLOptionElement({}, 0, true, "Choose a class"));
+    const option = select.append(new HTMLOptionElement({}, 1, false, "Standard"));
+    document._root = root; root._parent = document; setOwner(root, document);
+    document._active = null; document._hit = select;
+    const observed = JSON.parse(invoke(++formGeneration, formGeneration, {k:"initial"}));
+    const node = observed.n.find(node => node.n === "Travel class");
+    const chosen = observed.n.find(node => node.r === "option" && node.n === "Standard");
+    assert(node && chosen, `native select transition fixture absent: ${mode}`);
+    let writes = 0;
+    select.addEventListener("change", () => {
+      writes++;
+      select.attributes["aria-expanded"] = "false";
+      if (mode === "clear-invalid") delete select.attributes["aria-invalid"];
+      if (mode === "option-focus") document._active = option;
+      if (mode === "new-required") select.attributes["aria-required"] = "true";
+      if (mode === "new-invalid") select.attributes["aria-invalid"] = "true";
+      if (mode === "renamed") option.attributes.label = "Premium";
+    });
+    const request = {v:1,o:"action_execute",a:formGeneration,i:observed.i,g:observed.g,t:node.k,r:node.r,
+      k:"select",e:{x:10,y:10,w:160,h:32},p:chosen.k,z:null,f:descriptorFor(node),of:descriptorFor(chosen)};
+    const result = runtime.invoke(JSON.stringify(request));
+    if (["new-required","new-invalid","renamed"].includes(mode)) {
+      assert(result === "E2:applied_unverified", `changed select constraint or option accepted: ${mode}: ${result}`);
+    } else {
+      assert(!String(result).startsWith("E") && JSON.parse(result).d === 1,
+        `normal select transition refused: ${mode}: ${result}`);
+    }
+    assert(writes === 1, `native select replayed its change: ${mode}`);
   }
 
   const clippedFrame = new Element("iframe", {"aria-label":"f".repeat(513)});
@@ -2839,6 +2949,9 @@ async function finish() {
     no_webcrypto_required: true,
     fixed_action_execution: true,
     fixed_fill_execution: true,
+    form_focus_and_aria_transitions: true,
+    form_focus_repurposing_refused: true,
+    native_select_state_transitions: true,
     fixed_select_execution: true,
     select_change_events: true,
     clickable_items: true,
