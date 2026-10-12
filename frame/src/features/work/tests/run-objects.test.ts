@@ -5,7 +5,7 @@ import type {
   WorkExecutionFact,
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
-import { onCanvas, pickName } from "../lib/board/objects";
+import { onCanvas, pickName, ownedView } from "../lib/board/objects";
 import { environmentStages } from "../lib/project-environment-board";
 import { environmentRequests } from "../lib/project-environment-thread";
 import { projection, snapshot } from "./environment-fixtures";
@@ -219,4 +219,54 @@ test("a lead run shows what it published; what its reads made are source records
   expect(onCanvas(artifact("read"), run(true))).toBe(false);
   // The earlier runtime showed every result.
   expect(onCanvas(artifact("read"), run(false))).toBe(true);
+});
+
+test("stored record images reach Sheet's subject slot without fetching candidate URLs", async () => {
+  const { recordMediaUrl } = await import("$domain/resources");
+  const media = {
+    profile: "01K7SEEDEDPR0F1E0000000000",
+    work: "work",
+    execution: "execution",
+    attempt: "attempt",
+    step: "step",
+    extraction: "extraction",
+    record: 0,
+    source: "a".repeat(64),
+    digest: "b".repeat(64),
+    width: 240,
+    height: 180,
+    origin: "public_fetch" as const,
+  };
+  const view = ownedView("sheet", "Offers", {
+    kind: "sheet",
+    columns: [
+      { kind: "entity", label: "Product" },
+      { kind: "text", label: "Price" },
+    ],
+    rows: [
+      {
+        cells: ["Original product", "129,99 zł"],
+        entity: { record_media: media, media_attempted: true, logo_host: "example.com" },
+      },
+      {
+        cells: ["Withheld image", "€32.50 / item"],
+        entity: { media_attempted: true, image: "https://example.com/not-authorized.png" },
+      },
+      {
+        cells: ["Invalid stored image", "Unknown"],
+        entity: { record_media: { ...media, digest: "invalid" }, media_attempted: true },
+      },
+    ],
+  });
+  expect(view?.kind).toBe("sheet");
+  if (view?.kind !== "sheet") throw new Error("Sheet changed layout");
+  expect(view.rows[0]).toMatchObject({
+    cells: ["Original product", "129,99 zł"],
+    entity: {
+      picture: { src: recordMediaUrl(media), width: 240, height: 180 },
+      logo: "example.com",
+    },
+  });
+  expect(view.rows[1]?.entity?.picture).toBeUndefined();
+  expect(view.rows[2]?.entity?.picture).toBeUndefined();
 });

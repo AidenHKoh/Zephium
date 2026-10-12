@@ -503,7 +503,13 @@ function pictured(
   data: Extract<WorkArtifactV1["data"], { kind: "sheet" }>,
   named: ReadonlyMap<string, Picture>,
 ): PicksView | null {
-  if (!named.size || data.rows.length < 2 || data.rows.length > 8) return null;
+  if (
+    !named.size ||
+    data.rows.some((row) => row.entity?.media_attempted || row.entity?.record_media) ||
+    data.rows.length < 2 ||
+    data.rows.length > 8
+  )
+    return null;
   const name = data.columns.findIndex((column) => column.kind === "text");
   if (name < 0) return null;
   const pictures = data.rows.map((row) => named.get(nameKey(row.cells[name] ?? "")));
@@ -728,11 +734,21 @@ function leadView(
             ...(column.currency ? { currency: column.currency } : {}),
             ...(column.best ? { best: column.best } : {}),
           })),
-          rows: data.rows.map((row) => ({
-            cells: row.cells,
-            ...(row.entity?.logo_host ? { entity: { logo: row.entity.logo_host } } : {}),
-            ...cited(row.source),
-          })),
+          rows: data.rows.map((row) => {
+            const media = row.entity?.record_media;
+            const src = media ? recordMediaUrl(media) : null;
+            const entity = {
+              ...(row.entity?.logo_host ? { logo: row.entity.logo_host } : {}),
+              ...(src && media
+                ? { picture: { src, width: media.width, height: media.height } }
+                : {}),
+            };
+            return {
+              cells: row.cells,
+              ...(Object.keys(entity).length ? { entity } : {}),
+              ...cited(row.source),
+            };
+          }),
           ...(data.note ? { note: data.note } : {}),
         }
       );

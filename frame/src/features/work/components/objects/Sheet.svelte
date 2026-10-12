@@ -129,15 +129,16 @@
 
 {#snippet subject(index: number, size: number)}
   {@const row = object.rows[index]}
-  {#if row?.entity?.picture}<img
-      class="picture"
-      src={row.entity.picture.src}
-      alt=""
-      decoding="async"
-      loading="lazy"
-      width={size + 8}
-      height={size + 8}
-    />{:else if isZephium(row?.cells[0] ?? "")}<ZephiumMark {size} />{:else if logo(index)}<Mark
+  {#if row?.entity?.picture}<span class="picture"
+      ><img
+        src={row.entity.picture.src}
+        alt=""
+        decoding="async"
+        loading="lazy"
+        width={size + 8}
+        height={size + 8}
+      /></span
+    >{:else if isZephium(row?.cells[0] ?? "")}<ZephiumMark {size} />{:else if logo(index)}<Mark
       address={logo(index)!}
       {size}
     />{/if}
@@ -299,9 +300,17 @@
   }
 
   .picture {
+    display: inline-flex;
     flex: none;
+    overflow: hidden;
     border-radius: var(--radius-inset);
-    object-fit: cover;
+    background: var(--color-product-plate);
+  }
+
+  .picture img {
+    display: block;
+    object-fit: contain;
+    mix-blend-mode: multiply;
   }
 
   .text {
@@ -443,7 +452,6 @@
 
   .face :global(.picture) {
     border-radius: var(--radius-inset);
-    object-fit: cover;
   }
 
   .who {
