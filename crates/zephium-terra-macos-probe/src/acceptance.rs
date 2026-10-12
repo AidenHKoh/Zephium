@@ -543,6 +543,44 @@ fn eval_trace_messages(
     )
 }
 
+fn eval_action_targets(tools: &[zephium_core::work::model::WorkModelTool]) -> serde_json::Value {
+    let mut targets = serde_json::Map::new();
+    if let Some(variants) = tools
+        .iter()
+        .find(|tool| tool.name == "act")
+        .and_then(|tool| tool.schema["properties"]["actions"]["items"]["anyOf"].as_array())
+    {
+        for variant in variants.iter().take(32) {
+            let Some(kind @ ("click" | "fill" | "select" | "press" | "scroll")) =
+                variant["properties"]["kind"]["enum"][0].as_str()
+            else {
+                continue;
+            };
+            if let Some(references) = variant["properties"]["target"]["enum"].as_array() {
+                let refs = targets
+                    .entry(kind)
+                    .or_insert_with(|| serde_json::json!([]))
+                    .as_array_mut()
+                    .unwrap();
+                for reference in references.iter().take(128).filter(|value| {
+                    value.as_str().is_some_and(|text| {
+                        text.strip_prefix("@a").is_some_and(|digits| {
+                            !digits.is_empty()
+                                && digits.len() <= 10
+                                && digits.bytes().all(|b| b.is_ascii_digit())
+                        })
+                    })
+                }) {
+                    if !refs.contains(reference) && refs.len() < 128 {
+                        refs.push(reference.clone());
+                    }
+                }
+            }
+        }
+    }
+    serde_json::Value::Object(targets)
+}
+
 fn action_trace(trace: &serde_json::Value) -> Option<serde_json::Value> {
     let outputs = trace.get("output_tools")?.as_array()?;
     if !outputs.iter().any(|tool| tool["tool"] == "act") {
@@ -582,7 +620,7 @@ fn action_trace(trace: &serde_json::Value) -> Option<serde_json::Value> {
             }
         }
     }
-    let summary = serde_json::json!({"call_index":trace["call_index"],"base_observation":observation?,"updates":updates,"proposals":outputs});
+    let summary = serde_json::json!({"call_index":trace["call_index"],"base_observation":observation?,"updates":updates,"proposals":outputs,"allowed_targets":trace["allowed_targets"]});
     (summary.to_string().len() <= 24 * 1024).then_some(summary)
 }
 
@@ -676,8 +714,13 @@ impl zephium_core::work::model::WorkModelClient for EvalModelClient {
                     Some(index)
                 }
             };
-            let trace = (self.trace_pages && self.visual_diagnostics && self.role == "page")
-                .then(|| eval_trace_messages(&request.messages));
+            let trace =
+                (self.trace_pages && self.visual_diagnostics && self.role == "page").then(|| {
+                    (
+                        eval_trace_messages(&request.messages),
+                        eval_action_targets(&request.tools),
+                    )
+                });
             let result = self.inner.call(request, events).await;
             if let Some(index) = index {
                 let mut local = self.diagnostics.lock().unwrap_or_else(|e| e.into_inner());
@@ -720,7 +763,7 @@ impl zephium_core::work::model::WorkModelClient for EvalModelClient {
                         row["failure"] = serde_json::json!(format!("{error:?}"));
                     }
                 }
-                if let Some(messages) = trace {
+                if let Some((messages, allowed_targets)) = trace {
                     let output = match &result {
                         Ok(outcome) => eval_trace_parts(&outcome.assistant, false),
                         Err(_) => serde_json::Value::Null,
@@ -728,7 +771,7 @@ impl zephium_core::work::model::WorkModelClient for EvalModelClient {
                     remember_eval_page_trace(
                         &mut local,
                         serde_json::json!({
-                            "call_index":index,"messages":messages,"output_tools":output,
+                            "call_index":index,"messages":messages,"output_tools":output,"allowed_targets":allowed_targets,
                             "settled":result.is_ok(),
                         }),
                     );
@@ -743,6 +786,23 @@ impl zephium_core::work::model::WorkModelClient for EvalModelClient {
 mod page_trace_tests {
     use super::*;
     use zephium_core::work::model::*;
+
+    #[test]
+    fn action_targets_export_only_bounded_operation_refs() {
+        let tool = WorkModelTool {
+            name: "act".into(),
+            description: "omitted".into(),
+            strict: true,
+            schema: serde_json::json!({"properties":{"actions":{"items":{"anyOf":[
+                {"properties":{"kind":{"enum":["click"]},"target":{"enum":["@a1","@a2","private-sentinel"]}}},
+                {"properties":{"kind":{"enum":["unknown"]},"target":{"enum":["@a3"]}}}
+            ]}}}}),
+        };
+        assert_eq!(
+            eval_action_targets(&[tool]),
+            serde_json::json!({"click":["@a1","@a2"]})
+        );
+    }
 
     #[test]
     fn trace_omits_images_replay_and_assistant_prose_and_withholds_private_runs() {
