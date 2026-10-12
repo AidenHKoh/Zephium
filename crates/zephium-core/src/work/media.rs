@@ -11,6 +11,8 @@ pub const MAX_RECORD_MEDIA_HEIGHT: u16 = 240;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkRecordMediaOriginV1 {
+    /// Exact anonymous HTTPS source, retrieved under the original public-read grant.
+    PublicFetch,
     NativeFetch,
     NativeCrop,
 }

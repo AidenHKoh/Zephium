@@ -493,7 +493,9 @@ pub(super) async fn run(
             correct += 1;
         }
         match media.origin {
-            WorkRecordMediaOriginV1::NativeFetch => fetches += 1,
+            WorkRecordMediaOriginV1::NativeFetch | WorkRecordMediaOriginV1::PublicFetch => {
+                fetches += 1
+            }
             WorkRecordMediaOriginV1::NativeCrop => crops += 1,
         }
         let _ = writeln!(

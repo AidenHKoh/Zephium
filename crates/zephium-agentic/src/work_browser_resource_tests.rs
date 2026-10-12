@@ -1833,3 +1833,120 @@ fn native_media_session_mode_cannot_be_promoted_to_retry_without_original_proof(
     request.media.as_mut().unwrap().fetch_mode = Mode::PublicAssetRetry;
     assert!(!request.media_fetch_authority_current(&resource, tick(6)));
 }
+
+#[test]
+fn public_record_asset_exchange_is_single_use_bounded_and_original_grant_bound() {
+    use crate::WorkBrowserMediaFetchMode as Mode;
+    for mode in [Mode::SessionOnly, Mode::PublicAssetRetry] {
+        let (mut rows, resource, _proof, plan) = original_read_fixture();
+        let (_request, progress) = rows
+            .read_record_media(&resource, vec![plan.clone()], mode, tick(5), tick(80))
+            .unwrap();
+        for raw in [
+            "http://cdn.example.com/a.png",
+            "https://user:password@cdn.example.com/a.png",
+            "https://cdn.example.com/a.png?access_token=secret",
+        ] {
+            assert!(progress
+                .request_public_asset(&plan, raw, tick(6), tick(70))
+                .is_none());
+        }
+        let mut foreign = plan.clone();
+        foreign.name_key += 1;
+        assert!(progress
+            .request_public_asset(&foreign, "https://cdn.example.com/a.png", tick(6), tick(70))
+            .is_none());
+        assert!(progress
+            .request_public_asset(&plan, "https://cdn.example.com/a.png", tick(6), tick(81))
+            .is_none());
+        let reply = progress.request_public_asset(
+            &plan,
+            "https://cdn.example.com/a.png",
+            tick(6),
+            tick(70),
+        );
+        if mode == Mode::SessionOnly {
+            assert!(reply.is_none());
+            continue;
+        }
+        let reply = reply.unwrap();
+        let pending = progress.take_public_asset().unwrap();
+        assert_eq!(pending.url(), "https://cdn.example.com/a.png");
+        assert!(pending.current(tick(7)));
+        assert!(!format!("{pending:?}").contains("cdn.example.com"));
+        assert!(progress.take_public_asset().is_none());
+        assert!(progress
+            .request_public_asset(&plan, "https://cdn.example.com/b.png", tick(7), tick(70))
+            .is_none());
+        pending.complete(tick(8), Some(vec![1, 2, 3]));
+        assert_eq!(reply.poll(), Some(Some(vec![1, 2, 3])));
+    }
+}
+#[test]
+fn public_record_asset_exchange_discards_revoked_expired_cancelled_and_oversized_bytes() {
+    for fault in 0..6 {
+        let (mut rows, resource, proof, plan) = original_read_fixture();
+        let (_request, progress) = rows
+            .read_record_media(
+                &resource,
+                vec![plan.clone()],
+                crate::WorkBrowserMediaFetchMode::PublicAssetRetry,
+                tick(5),
+                tick(80),
+            )
+            .unwrap();
+        let reply = progress
+            .request_public_asset(&plan, "https://cdn.example.com/a.png", tick(6), tick(70))
+            .unwrap();
+        let pending = progress.take_public_asset().unwrap();
+        let mut at = tick(8);
+        let mut bytes = vec![1];
+        match fault {
+            0 => progress.cancel(),
+            1 => proof.revoke(WorkBrowserAnonymousReadStatus::HumanHandoff),
+            2 => at = tick(70),
+            3 => bytes = vec![1; crate::MAX_PUBLIC_RECORD_IMAGE_BYTES + 1],
+            4 => {
+                drop(pending);
+                assert_eq!(reply.poll(), Some(None));
+                continue;
+            }
+            _ => {
+                assert!(progress.finish(vec![]));
+            }
+        }
+        pending.complete(at, Some(bytes));
+        assert_eq!(reply.poll(), Some(None));
+    }
+}
+
+#[test]
+fn public_record_asset_publication_wakes_the_existing_owner_once() {
+    struct Counter(std::sync::atomic::AtomicUsize);
+    impl std::task::Wake for Counter {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let (mut rows, resource, _proof, plan) = original_read_fixture();
+    let (_request, progress) = rows
+        .read_record_media(
+            &resource,
+            vec![plan.clone()],
+            crate::WorkBrowserMediaFetchMode::PublicAssetRetry,
+            tick(5),
+            tick(80),
+        )
+        .unwrap();
+    let counter = std::sync::Arc::new(Counter(std::sync::atomic::AtomicUsize::new(0)));
+    progress.set_public_asset_waker(counter.clone().into());
+    let _reply = progress
+        .request_public_asset(&plan, "https://cdn.example.com/a.png", tick(6), tick(70))
+        .unwrap();
+    assert_eq!(counter.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(progress.take_public_asset().is_some());
+    assert!(progress
+        .request_public_asset(&plan, "https://cdn.example.com/a.png", tick(7), tick(70))
+        .is_none());
+    assert_eq!(counter.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

@@ -1499,7 +1499,8 @@ mod tests;
 mod media;
 pub use media::{
     WorkBrowserCropGeometry, WorkBrowserMediaFetchMode, WorkBrowserMediaProgress,
-    WorkBrowserRecordImage, WorkBrowserRecordImageOrigin,
+    WorkBrowserPublicAssetReply, WorkBrowserPublicAssetRequest, WorkBrowserRecordImage,
+    WorkBrowserRecordImageOrigin, MAX_PUBLIC_RECORD_IMAGE_BYTES,
 };
 
 #[path = "work_browser_anonymous.rs"]

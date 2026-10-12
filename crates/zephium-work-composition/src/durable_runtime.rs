@@ -1868,6 +1868,23 @@ impl NativeWorkComposition {
                             crop_permits,
                         ));
                     }
+                    if let Some(request) = guard.0.take_public_asset() {
+                        let bytes = bounded_public_record_fetch(
+                            zephium_agentic::public_asset::fetch_public_record_image(request.url()),
+                            || {
+                                original_spec
+                                    .clock
+                                    .now()
+                                    .ok()
+                                    .is_some_and(|now| request.current(now))
+                                    && attempt.cached_cancellation().is_none()
+                            },
+                        )
+                        .await;
+                        if let Ok(now) = original_spec.clock.now() {
+                            request.complete(now, bytes);
+                        }
+                    }
                     if media_started && !media_complete {
                         if let Some(images) = guard.0.take_record_media() {
                             media_complete = true;
@@ -1876,6 +1893,12 @@ impl NativeWorkComposition {
                                 .iter()
                                 .filter(|image| {
                                     image.origin() == WorkBrowserRecordImageOrigin::NativeCrop
+                                })
+                                .count();
+                            let public_count = images
+                                .iter()
+                                .filter(|image| {
+                                    image.origin() == WorkBrowserRecordImageOrigin::PublicFetch
                                 })
                                 .count();
                             let stored_before = record_media.len();
@@ -1920,6 +1943,7 @@ impl NativeWorkComposition {
                                         width,
                                         height,
                                         origin: match image.origin() {
+                                            WorkBrowserRecordImageOrigin::PublicFetch => zephium_core::work::media::WorkRecordMediaOriginV1::PublicFetch,
                                             WorkBrowserRecordImageOrigin::NativeFetch => zephium_core::work::media::WorkRecordMediaOriginV1::NativeFetch,
                                             WorkBrowserRecordImageOrigin::NativeCrop => zephium_core::work::media::WorkRecordMediaOriginV1::NativeCrop,
                                         },
@@ -1937,14 +1961,15 @@ impl NativeWorkComposition {
                             zephium_app::work_trace::record_media(
                                 zephium_app::work_trace::RecordMediaTrace::Settled {
                                     native_images: image_count,
-                                    native_fetch: image_count - crop_count,
+                                    native_fetch: image_count - crop_count - public_count,
+                                    public_fetch: public_count,
                                     native_crop: crop_count,
                                     stored: record_media.len() - stored_before,
                                 },
                             );
                             zephium_app::work_trace::record(format_args!(
-                                "work: phase=page event=record_media_settled native_images={image_count} native_fetch={} native_crop={crop_count} stored={}; content=redacted",
-                                image_count - crop_count,
+                                "work: phase=page event=record_media_settled native_images={image_count} native_fetch={} public_fetch={public_count} native_crop={crop_count} stored={}; content=redacted",
+                                image_count - crop_count - public_count,
                                 record_media.len() - stored_before,
                             ));
                         }
@@ -4601,5 +4626,83 @@ mod public_asset_retry_tests {
         for handoff in [H::Check, H::SignIn, H::SignInAndCheck] {
             assert_eq!(public_asset_fetch_mode(true, Some(handoff)), M::SessionOnly);
         }
+    }
+}
+
+async fn bounded_public_record_fetch(
+    fetch: impl std::future::Future<
+        Output = Result<Vec<u8>, zephium_agentic::public_asset::PublicAssetError>,
+    >,
+    current: impl Fn() -> bool,
+) -> Option<Vec<u8>> {
+    tokio::pin!(fetch);
+    loop {
+        if !current() {
+            return None;
+        }
+        tokio::select! {
+            result = &mut fetch => return current().then(|| result.ok()).flatten(),
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+        }
+    }
+}
+#[cfg(test)]
+mod public_record_fetch_stop_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    struct Dropped(Arc<AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    #[tokio::test]
+    async fn a_pending_public_record_fetch_is_dropped_promptly_on_revocation() {
+        let current = Arc::new(AtomicBool::new(true));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let ready = tokio::sync::Notify::new();
+        let fetch = async {
+            let _guard = Dropped(dropped.clone());
+            ready.notify_one();
+            std::future::pending().await
+        };
+        let stop = async {
+            ready.notified().await;
+            current.store(false, Ordering::SeqCst);
+            Instant::now()
+        };
+        let (result, stopped) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(
+                bounded_public_record_fetch(fetch, || current.load(Ordering::SeqCst)),
+                stop
+            )
+        })
+        .await
+        .expect("public image transport must not hold Stop");
+        assert!(result.is_none());
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(stopped.elapsed() < Duration::from_millis(250));
+    }
+    #[tokio::test]
+    async fn revoked_public_record_fetch_never_starts_and_late_bytes_are_discarded() {
+        assert!(bounded_public_record_fetch(
+            async { panic!("transport started without authority") },
+            || false
+        )
+        .await
+        .is_none());
+        let current = AtomicBool::new(true);
+        let fetch = async {
+            current.store(false, Ordering::SeqCst);
+            Ok(vec![1, 2, 3])
+        };
+        assert!(
+            bounded_public_record_fetch(fetch, || current.load(Ordering::SeqCst))
+                .await
+                .is_none()
+        );
     }
 }

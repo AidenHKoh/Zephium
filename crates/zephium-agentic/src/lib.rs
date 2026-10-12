@@ -77,14 +77,15 @@ pub use work_browser_resource::{
     WorkBrowserNavigationEvent, WorkBrowserNavigationPreparation, WorkBrowserNavigationRequest,
     WorkBrowserObservationCapability, WorkBrowserObservationCompletion,
     WorkBrowserObservationCompletionCallback, WorkBrowserObservationDispatch,
-    WorkBrowserObservationEvent, WorkBrowserObservationRequest, WorkBrowserReadBinding,
-    WorkBrowserRecordImage, WorkBrowserRecordImageOrigin, WorkBrowserResourceCompletion,
+    WorkBrowserObservationEvent, WorkBrowserObservationRequest, WorkBrowserPublicAssetReply,
+    WorkBrowserPublicAssetRequest, WorkBrowserReadBinding, WorkBrowserRecordImage,
+    WorkBrowserRecordImageOrigin, WorkBrowserResourceCompletion,
     WorkBrowserResourceCompletionCallback, WorkBrowserResourceDispatch, WorkBrowserResourceError,
     WorkBrowserResourceEvent, WorkBrowserResourceFailure, WorkBrowserResourceHealth,
     WorkBrowserResourceHealthReporter, WorkBrowserResourceHealthState, WorkBrowserResourceId,
     WorkBrowserResourceIdentity, WorkBrowserResourceJoin, WorkBrowserResourceNativeOutcome,
     WorkBrowserResourceOperation, WorkBrowserResourcePhase, WorkBrowserResourceRequest,
-    WorkBrowserResources, WorkId, MAX_WORK_HUMAN_WAIT_MILLIS,
+    WorkBrowserResources, WorkId, MAX_PUBLIC_RECORD_IMAGE_BYTES, MAX_WORK_HUMAN_WAIT_MILLIS,
 };
 pub use work_browser_session::{
     WeakWorkBrowserSession, WorkBrowserSession, WorkBrowserSessionHumanHold,

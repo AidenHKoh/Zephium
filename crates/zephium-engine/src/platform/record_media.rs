@@ -14,6 +14,7 @@ pub(crate) struct Crop {
 }
 pub(crate) enum NativeMediaResult {
     RetryableNetwork,
+    PublicAsset(String),
     Unavailable,
     Fetched(Vec<u8>),
     Crop(Crop),
@@ -22,6 +23,7 @@ pub(crate) type MediaCompletion = Box<dyn FnOnce(Option<NativeMediaResult>)>;
 pub(crate) struct MediaInvocation {
     wire: String,
     retry_report: bool,
+    public_asset: bool,
 }
 impl MediaInvocation {
     pub(crate) fn new(
@@ -33,6 +35,15 @@ impl MediaInvocation {
         if validate {
             wire.replace_range(..1, "V");
         }
+        if !validate && fetch.mode == 3 {
+            wire.replace_range(..1, "U");
+            return Self {
+                wire,
+                retry_report: false,
+                public_asset: true,
+            };
+        }
+        let public_asset = !validate && fetch.mode == 2;
         let retry_report = !validate && fetch.mode == 1;
         if !validate {
             use std::fmt::Write as _;
@@ -43,7 +54,11 @@ impl MediaInvocation {
             }
             wire.push('}');
         }
-        Self { wire, retry_report }
+        Self {
+            wire,
+            retry_report,
+            public_asset,
+        }
     }
     pub(crate) fn as_str(&self) -> &str {
         &self.wire
@@ -68,6 +83,18 @@ impl MediaInvocation {
             }
         }
         match status {
+            "public_asset" if object.len() == 7 && self.public_asset => {
+                let raw = object.get("u")?.as_str()?;
+                if raw.len() > 4096 {
+                    return None;
+                }
+                let url = url::Url::parse(raw).ok()?;
+                (url.scheme() == "https"
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.as_str() == raw)
+                    .then(|| NativeMediaResult::PublicAsset(raw.to_owned()))
+            }
             "retry" if object.len() == 6 && self.retry_report => {
                 Some(NativeMediaResult::RetryableNetwork)
             }
@@ -132,13 +159,25 @@ pub(crate) fn raster(
     bytes: Vec<u8>,
     geometry: Option<zephium_agentic::WorkBrowserCropGeometry>,
 ) -> Option<WorkBrowserRecordImage> {
-    if bytes.len()
-        > if geometry.is_some() {
-            1024 * 1024
-        } else {
-            65536
-        }
-    {
+    let origin = if geometry.is_some() {
+        WorkBrowserRecordImageOrigin::NativeCrop
+    } else {
+        WorkBrowserRecordImageOrigin::NativeFetch
+    };
+    raster_with_origin(plan, bytes, geometry, origin)
+}
+fn raster_with_origin(
+    plan: &SemanticRecordMediaPlan,
+    bytes: Vec<u8>,
+    geometry: Option<zephium_agentic::WorkBrowserCropGeometry>,
+    origin: WorkBrowserRecordImageOrigin,
+) -> Option<WorkBrowserRecordImage> {
+    let limit = match origin {
+        WorkBrowserRecordImageOrigin::NativeCrop => 1024 * 1024,
+        WorkBrowserRecordImageOrigin::NativeFetch => 65536,
+        WorkBrowserRecordImageOrigin::PublicFetch => zephium_agentic::MAX_PUBLIC_RECORD_IMAGE_BYTES,
+    };
+    if bytes.len() > limit {
         return None;
     }
     let mut reader = ImageReader::new(Cursor::new(bytes))
@@ -170,11 +209,7 @@ pub(crate) fn raster(
         {
             return WorkBrowserRecordImage::from_native(
                 plan,
-                if geometry.is_some() {
-                    WorkBrowserRecordImageOrigin::NativeCrop
-                } else {
-                    WorkBrowserRecordImageOrigin::NativeFetch
-                },
+                origin,
                 small.width().try_into().ok()?,
                 small.height().try_into().ok()?,
                 sink.0,
@@ -186,6 +221,13 @@ pub(crate) fn raster(
         }
     }
     None
+}
+
+pub(crate) fn raster_public(
+    plan: &SemanticRecordMediaPlan,
+    bytes: Vec<u8>,
+) -> Option<WorkBrowserRecordImage> {
+    raster_with_origin(plan, bytes, None, WorkBrowserRecordImageOrigin::PublicFetch)
 }
 
 pub(crate) struct RecordFrame {
@@ -221,6 +263,14 @@ mod size_tests {
 #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
 #[derive(Debug)]
 pub(crate) enum ProbeStage {
+    PublicAssetQueued,
+    PublicAssetDenied,
+    PublicAssetExpired,
+    PublicAssetBytes,
+    PublicAssetUnavailable,
+    PublicAssetVerified,
+    PublicAssetUnverified,
+    PublicAssetRasterRejected,
     OwnerNotReady,
     InvalidPlanCount,
     SourceNotCurrent,
@@ -250,6 +300,13 @@ pub(crate) struct MediaFetchAttempt {
     timeout_millis: u16,
 }
 impl MediaFetchAttempt {
+    pub(crate) fn public_validation() -> Self {
+        Self {
+            mode: 3,
+            timeout_millis: 1,
+        }
+    }
+
     pub(crate) const fn validation() -> Self {
         Self {
             mode: 0,
@@ -279,7 +336,7 @@ impl MediaRetryWindow {
     pub(crate) fn active(&self, now: std::time::Instant) -> bool {
         now < self.deadline
     }
-    fn remaining(&self, now: std::time::Instant) -> Option<u16> {
+    pub(crate) fn remaining(&self, now: std::time::Instant) -> Option<u16> {
         let millis = self.deadline.saturating_duration_since(now).as_millis();
         (millis > 0).then_some(millis.min(1500) as u16)
     }
@@ -316,6 +373,36 @@ impl MediaRetryWindow {
 mod retry_tests {
     use super::*;
     use std::time::{Duration, Instant};
+    #[test]
+    fn public_asset_wire_requires_original_source_coordinates_and_explicit_retry_mode() {
+        let body=br#"{"v":1,"s":"public_asset","i":1,"g":2,"k":3,"n":4,"u":"https://cdn.example.com/photo.png"}"#;
+        for allowed in [false, true] {
+            let request = MediaInvocation {
+                wire: "U1:{\"i\":1,\"g\":2,\"k\":3,\"n\":4}".into(),
+                retry_report: false,
+                public_asset: allowed,
+            };
+            assert_eq!(
+                matches!(
+                    request.decode(body),
+                    Some(NativeMediaResult::PublicAsset(_))
+                ),
+                allowed
+            );
+            for (from, to) in [
+                ("\"n\":4", "\"n\":5"),
+                ("https://cdn.example.com", "http://cdn.example.com"),
+                (
+                    "https://cdn.example.com",
+                    "https://user:secret@cdn.example.com",
+                ),
+            ] {
+                assert!(request
+                    .decode(String::from_utf8_lossy(body).replace(from, to).as_bytes())
+                    .is_none());
+            }
+        }
+    }
     #[test]
     fn public_asset_retry_spends_only_original_remaining_time_once() {
         let start = Instant::now();
@@ -378,6 +465,7 @@ mod retry_tests {
             let invocation = MediaInvocation {
                 wire: "M1:{\"i\":1,\"g\":2,\"k\":3,\"n\":4,\"q\":1000}".into(),
                 retry_report: report,
+                public_asset: false,
             };
             assert_eq!(
                 matches!(

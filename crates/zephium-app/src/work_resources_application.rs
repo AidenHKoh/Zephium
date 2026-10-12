@@ -1974,6 +1974,7 @@ impl RetainedWork {
         else {
             return false;
         };
+        progress.set_public_asset_waker(self.waker.clone());
         self.media = Some(MediaReadState {
             pending,
             progress,
@@ -2009,6 +2010,11 @@ impl RetainedWork {
                 }
             }
         }
+    }
+    pub(super) fn take_public_asset(
+        &self,
+    ) -> Option<zephium_agentic::WorkBrowserPublicAssetRequest> {
+        self.media.as_ref()?.progress.take_public_asset()
     }
     pub(super) fn take_media_result(
         &mut self,

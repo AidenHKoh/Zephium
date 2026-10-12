@@ -89,8 +89,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0x70, 0xa7, 0x42, 0xb1, 0x7d, 0x47, 0x42, 0x53, 0xde, 0x9a, 0x86, 0x5d, 0xc4, 0x9d, 0xc5, 0x7d,
-    0x16, 0xca, 0xb8, 0x63, 0xd0, 0xc1, 0xb8, 0x53, 0x7d, 0x6e, 0xeb, 0x37, 0xf2, 0x75, 0x86, 0x95,
+    0xa2, 0x4f, 0xfa, 0xce, 0xfb, 0x8c, 0xaf, 0xf3, 0x17, 0x8e, 0xfc, 0x6a, 0x73, 0x63, 0xdf, 0xb1,
+    0xb9, 0x36, 0x72, 0x8b, 0xdf, 0x73, 0x74, 0xce, 0x55, 0x69, 0x4c, 0x90, 0x58, 0x9d, 0x20, 0x58,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -1775,10 +1775,10 @@ mod tests {
     #[test]
     fn record_media_program_has_independent_pin_and_bound() {
         let source = include_str!("../assets/semantic-record-media-v1.js");
-        assert!(source.len() <= 26 * 1024);
+        assert!(source.len() <= 32 * 1024);
         assert_eq!(
             format!("{:x}", Sha256::digest(source.as_bytes())),
-            "1147b24552b74113069740245252d47b90834326a81effcc7c52ce8683d9e24e"
+            "5540b0dcc00856e78e9bb3e2e54cfca4f40b27e311e661e9698015ca79da7de7"
         );
         assert!(source.contains("new AbortController()"));
         assert!(source.contains("redirect:\"error\""));

@@ -1014,6 +1014,10 @@
 
     if (editable) return { role: "textbox", tag, inputType, contentEditable: true, plainTextEditable, richText, editableSupport, editableStructure, editableEmpty: editableWitness.empty, editingContext: editableWitness.context };
 
+    // Some focus-managed widgets omit a role but declare enabled/disabled state.
+    if (["div","span"].includes(tag) && ["0","-1"].includes(attribute(node,"tabindex",8)) &&
+        ["true","false"].includes(lower(attribute(node,"aria-disabled",16)||""))) return {role:"button",tag,inputType};
+
     if ((tag === "div" || tag === "span") && listLength(childNodes(node)) <= 1 && backgroundSource(node) !== null && isRenderedPhoto(node, tag)) {
       return { role: "image", tag, inputType, mediaKind: "background" };
     }
@@ -1025,7 +1029,7 @@
         ? { role: "group", tag, inputType }
         : genericTextDescriptor(node, tag, inputType);
     }
-    if (tag === "figure") return { role: "group", tag, inputType };
+    if (tag === "figure" || tag === "form" && !hasAuthorName(node)) return { role: "group", tag, inputType };
     if (tag === "article") return { role: "document", tag, inputType };
     if (tag === "main" || tag === "nav" || tag === "header" || tag === "footer" || tag === "aside") {
       const landmark = { main: "main", nav: "navigation", header: "banner", footer: "contentinfo", aside: "complementary" }[tag];
@@ -1510,7 +1514,7 @@
         return readonly ? 1 | 8 :
           fillControlKind(descriptor, "") !== 0 ? 1 | 2 | 8 : 1 | 8;
       case "listbox":
-        return 4 | 8 | (scrollElement(element) === null ? 0 : 16);
+        return (descriptor.tag === "select" ? 4 : 0) | 8 | (scrollElement(element) === null ? 0 : 16);
       case "row":
       case "cell":
       case "list_item":
@@ -2263,7 +2267,7 @@
     // before the headings: a listing page then shows its records in one
     // look instead of its header and filters, a reference page its text.
     const deferred = [];
-    // A page with no main landmark (x-kom's product grid is plain divs)
+    // Unmarked product grids still need a bounded scan
     // defers its content below the fold in document order instead.
     const loose = [];
     // Checkboxes and radios the pass met, to tell a filter panel by.
@@ -3106,7 +3110,7 @@
       let hit;
       try {
         hit = apply(documentElementFromPoint, document, [x, y]);
-        if (cdpPreparing && typeof shadowElementFromPoint === "function") {
+        if (typeof shadowElementFromPoint === "function") {
           for (let depth=0; hit!==null && depth<MAX_TREE_DEPTH; depth+=1) {
             const root=read(elementShadowGetter,hit);
             if (root===null || root===undefined) break;
@@ -3446,11 +3450,14 @@
   };
 
   function fillControlKind(descriptor, value) {
-    if (descriptor.tag === "input" && descriptor.role === "spinbutton" ? descriptor.inputType !== "number"
-      : !textFillRole(descriptor.role)) return 0;
+    if (descriptor.tag === "input" && descriptor.role === "spinbutton") {
+      // Segmented date/time widgets use text inputs with a numeric ARIA role.
+      return ["text", "number"].includes(descriptor.inputType) && FILL_FORMATS.number.test(value) ? 1 : 0;
+    }
+    if (!textFillRole(descriptor.role)) return 0;
     if (descriptor.tag === "input") {
-      const format = objectHasOwn(FILL_FORMATS, descriptor.inputType) &&
-        (descriptor.inputType === "number") === (descriptor.role === "spinbutton") ? FILL_FORMATS[descriptor.inputType] : null;
+      const format = descriptor.inputType !== "number" && objectHasOwn(FILL_FORMATS, descriptor.inputType)
+        ? FILL_FORMATS[descriptor.inputType] : null;
       return format !== null && format.test(value) ? 1 : 0;
     }
     if (descriptor.tag === "textarea" && descriptor.role !== "searchbox") return 2;
@@ -4102,25 +4109,6 @@
         return actionFault("applied_unverified_postcondition");
       }
     } else if (request.k === "select") {
-      if (tagName(target) !== "select") {
-        // A custom listbox chooses as a person does: by clicking the option,
-        // which must then read as selected. One that closes on choosing is
-        // clicked by the model as an option instead.
-        const optionRect = elementRect(selectedOption);
-        const optionPoint = optionRect === null ? null : actionPoint(selectedOption, optionRect, viewport);
-        if (optionPoint === null) return actionFault("target_occluded");
-        try {
-          pointerDown(selectedOption, optionPoint);
-          if (request.ap !== undefined && (!approvalMatches(request.ap,target) || !approvalMatches(request.ap,selectedOption,true) || !composedContains(target,selectedOption))) return actionFault("applied_unverified_postcondition");
-          apply(htmlElementClick, selectedOption, []);
-        } catch (_) {
-          return actionFault("applied_unverified");
-        }
-        const chosen = resolveKeyAtGeneration(request.p, request.g) === selectedOption
-          ? runtimeDescriptor(selectedOption, request.g) : null;
-        if (!descriptorMatchesSelectedOption(request.of, chosen)) return actionFault("applied_unverified");
-        return encodeActionEvidence(request, "fixed_semantic_recipe", readiness, geometry, viewport, point, delta);
-      }
       const desired = read(optionIndexGetter, selectedOption);
       const result = runFixedSelect(target, desired);
       if (result !== "ok") return actionFault(result);
@@ -4339,7 +4327,7 @@
   }
   function invoke(encoded) {
     if (busy) return fault("busy");
-    if (typeof encoded === "string" && (encoded.startsWith("M1:") || encoded.startsWith("V1:"))) return globalThis.__zephiumRecordMediaV1.invoke(encoded, pixelPrivacy);
+    if (typeof encoded === "string" && ["M1:","V1:","U1:"].includes(encoded.slice(0,3))) return globalThis.__zephiumRecordMediaV1.invoke(encoded, pixelPrivacy);
     if (encoded === "P1:privacy") return pixelPrivacy();
     if (encoded === "P1:public") return pixelPrivacy(true);
     const request = parseRequest(encoded);

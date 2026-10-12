@@ -370,6 +370,7 @@ struct Projection {
     )>,
     media_result: Option<Vec<zephium_agentic::WorkBrowserRecordImage>>,
     media_requested: bool,
+    public_asset: Option<zephium_agentic::WorkBrowserPublicAssetRequest>,
 
     active_deadline: Instant,
     human: Option<RetainedHumanSnapshot>,
@@ -626,6 +627,10 @@ impl RetainedWorkHandle {
         self.callback.dispatch(Command::WorkWake)
     }
     /// A terminal optional result; absence remains pending, an empty list is honest unavailability.
+    /// One source-bound anonymous request queued by the retained native media owner.
+    pub fn take_public_asset(&self) -> Option<zephium_agentic::WorkBrowserPublicAssetRequest> {
+        self.signal.projection.lock().ok()?.public_asset.take()
+    }
     pub fn take_record_media(&self) -> Option<Vec<zephium_agentic::WorkBrowserRecordImage>> {
         self.signal.projection.lock().ok()?.media_result.take()
     }
@@ -728,6 +733,7 @@ impl CallbackHandle {
                 media_command: None,
                 media_result: None,
                 media_requested: false,
+                public_asset: None,
                 active_deadline: prepared.spec.deadline,
                 human: None,
                 human_resume: None,
@@ -1320,6 +1326,9 @@ impl ProductWork {
             projection.snapshot.failure,
             projection.snapshot.persistence_failure,
         ) = work.failures();
+        if projection.public_asset.is_none() {
+            projection.public_asset = work.take_public_asset();
+        }
         if let Some(media) = work.take_media_result() {
             projection.media_result = Some(media);
         }

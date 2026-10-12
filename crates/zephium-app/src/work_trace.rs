@@ -72,6 +72,7 @@ pub enum RecordMediaTrace {
     Settled {
         native_images: usize,
         native_fetch: usize,
+        public_fetch: usize,
         native_crop: usize,
         stored: usize,
     },

@@ -5578,7 +5578,9 @@ export type WorkRatingV1_Serialize = {
 	count?: number | null,
 };
 
-export type WorkRecordMediaOriginV1 = "native_fetch" | "native_crop";
+export type WorkRecordMediaOriginV1 =
+/**  Exact anonymous HTTPS source, retrieved under the original public-read grant. */
+"public_fetch" | "native_fetch" | "native_crop";
 
 export type WorkRecordMediaRefV1 = {
 	profile: ProfileId,

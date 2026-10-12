@@ -41,9 +41,72 @@ const stack=[node];let text="",visited=0;
 while(stack.length){
 const current=stack.pop();if(++visited>64)return null;
 if(current.nodeType===3){const value=current.nodeValue;if(value.length+text.length>2048)return null;text+=value;}
-else if(current.nodeType===1){for(const child of current.childNodes){if(stack.length>=64)return null;stack.push(child);}}
+else if(current.nodeType===1){for(let i=current.childNodes.length-1;i>=0;i--){if(stack.length>=64)return null;stack.push(current.childNodes[i]);}}
 }
 const aria=node.getAttribute("aria-label")||"";return aria.length<=2048?text+"|"+aria:null;
+}
+const normalized=value=>typeof value==="string"&&value.length<=2048?value.normalize("NFC").replace(/\s+/gu," ").trim():null;
+const address=value=>{try{if(typeof value!=="string"||value.length>4096)return null;const u=new URL(value,document.baseURI);return["http:","https:"].includes(u.protocol)&&!u.username&&!u.password?u.href:null;}catch(_){return null;}};
+function entities(script,charge){
+if(!script.isConnected||script.localName!=="script"||script.getAttribute("type")!=="application/ld+json")return null;
+const raw=script.textContent;if(raw.length>262144)return null;
+let pending;try{pending=[parse(raw)];}catch(_){return null;}
+const out=[];let seen=0;
+while(pending.length){
+if(++seen>400|| !charge())return null;
+const item=pending.pop();if(item===null||typeof item!=="object")continue;
+if(Array.isArray(item)){if(item.length+pending.length>400)return null;pending.push(...item);continue;}
+const types=Array.isArray(item["@type"])?item["@type"]:[item["@type"]];
+if(types.some(type=>["Product","ProductGroup","Book","VideoObject"].includes(type))){
+const url=address(item.url||item.mainEntityOfPage?.["@id"]||item.mainEntityOfPage||(!Array.isArray(item.offers)&&item.offers?.url));
+const name=normalized(item.name),rawImages=item.image||item.thumbnailUrl;
+const images=(Array.isArray(rawImages)?rawImages:[rawImages]);
+if(images.length>32||out.length>=24)return null;
+if(name&&url)out.push({name,url,images:images.map(image=>address(typeof image==="string"?image:image?.url||image?.contentUrl)).filter(Boolean)});
+}
+for(const key of["@graph","itemListElement","item","mainEntity","hasVariant"])if(item[key]!==undefined){if(pending.length>=400)return null;pending.push(item[key]);}
+}
+return out;
+}
+function pageEntityName(node){
+if(node.getAttribute("aria-label")||node.getAttribute("aria-labelledby"))return null;
+const text=label(node);return text===null?null:normalized(text.slice(0,-1));
+}
+function entityCatalog(charge){
+const scripts=document.scripts;if(!scripts||scripts.length>128)return null;
+const parsed=[];
+for(let i=0;i<scripts.length;i++){
+if(!charge())return null;
+const node=scripts[i];if(node.getAttribute("type")!=="application/ld+json")continue;
+if(parsed.length===4)return null;
+const items=entities(node,charge);if(items===null)return null;
+parsed.push({node,items});
+}
+return parsed;
+}
+function entityWitness(records,images,rows,charge){
+const page=address(document.URL);if(!page)return;
+const observed=new Set(records.filter(r=>r.element.localName==="script"&&r.sensitivity!=="secret").map(r=>r.element));
+if(!observed.size)return;
+const parsed=entityCatalog(charge);if(parsed===null)return;
+for(const record of records){
+if(!charge())return;
+if(record.wire.r!=="heading"||record.wire.l!==1||record.sensitivity!=="public")continue;
+const title=normalized(record.wire.n);if(!title||pageEntityName(record.element)!==title)continue;
+const matches=parsed.flatMap(script=>script.items.filter(item=>item.url===page).map(item=>({script:script.node,item})));
+if(matches.length!==1||matches[0].item.name!==title|| !observed.has(matches[0].script))continue;
+for(let index=0;index<images.length;index++){
+if(!charge())return;
+const image=images[index],row=rows[index];
+if(!["image","page_image"].includes(image.media)||row.r.length>=8||row.r.includes(record.wire.k))continue;
+const declared=observedImageSources(image.element);declared.add(address(source(image.element,image.media)));
+const pageImage=image.media==="page_image"&&images.filter(image=>image.media==="page_image").length===1;
+const identity=pageImage?address(source(image.element,image.media)):matches[0].item.images.find(url=>declared.has(url));if(!identity)continue;
+row.r.push(record.wire.k);
+let bound=relations.get(row);if(!bound){bound=new Map();relations.set(row,bound);}
+bound.set(record.wire.k,{kind:"entity",script:new WeakRef(matches[0].script),title,page,identity,pageImage});
+}
+}
 }
 function sharedCard(a,b){
 let parent=b;
@@ -62,7 +125,8 @@ for(const key of row.r){
 const name=records.find(record=>record.wire.k===key);if(!name)continue;
 const card=sharedCard(record.element,name.element);
 const text=label(name.element);
-if(text!==null&&(card||row.t==="page_image"))names.set(key,{node:new WeakRef(name.element),card:card?new WeakRef(card):null,text,witness:relations.get(row)?.get(key)});
+const witness=relations.get(row)?.get(key);
+if(text!==null&&(card||row.t==="page_image"||witness?.kind==="entity"))names.set(key,{node:new WeakRef(name.element),card:card?new WeakRef(card):null,text,witness});
 }
 const url=source(record.element,row.t);if(url.length>4096)continue;
 const content=row.t==="record"?label(record.element):null;
@@ -319,15 +383,22 @@ row.r.push(record.wire.k);
 let bound=relations.get(row);if(!bound){bound=new Map();relations.set(row,bound);}
 bound.set(record.wire.k,{link:new WeakRef(proof.link),root:new WeakRef(proof.root),id:proof.id,href:proof.href});
 }
+entityWitness(records,images,rows,()=>++work<=16384);
 remember(invocation,generation,records,rows);
 return rows;
 }
 function target(request){
 const entry=snapshots.get(request.i+":"+request.g)?.get(request.k),name=entry?.names.get(request.n);
 const node=entry?.node.deref(),named=name?.node.deref(),card=name?.card?.deref();
-if(!node?.isConnected|| !named?.isConnected||label(named)!==name.text||
-(entry.kind!=="page_image"&&(!card?.isConnected|| !card.contains(node)|| !card.contains(named))))return null;
-if(name.witness){
+if(!node?.isConnected|| !named?.isConnected||label(named)!==name.text)return null;
+if(name.witness?.kind==="entity"){
+const witness=name.witness,script=witness.script.deref();let work=0;
+if(!script||address(document.URL)!==witness.page||pageEntityName(named)!==witness.title)return null;
+const catalog=entityCatalog(()=>++work<=16384),matches=catalog?.flatMap(part=>part.items.filter(item=>item.url===witness.page).map(item=>({script:part.node,item})));
+const declared=observedImageSources(node);declared.add(address(source(node,entry.kind)));
+if(matches?.length!==1||matches[0].script!==script||matches[0].item.name!==witness.title||(!witness.pageImage&& !matches[0].item.images.includes(witness.identity))|| !declared.has(witness.identity))return null;
+}else if(entry.kind!=="page_image"&&(!card?.isConnected|| !card.contains(node)|| !card.contains(named)))return null;
+if(name.witness&&name.witness.kind!=="entity"){
 const witness=name.witness,link=witness.link.deref(),root=witness.root.deref();
 if(!link?.isConnected|| !root?.isConnected)return null;
 const records=[{element:named,media:null,wire:{r:"paragraph"}},{element:node,media:entry.kind,wire:{r:"image"}},{element:link,media:null,wire:{r:"link",u:witness.href}}];
@@ -397,13 +468,17 @@ throw new Error();
 }finally{bitmap.close();}
 }
 async function invoke(encoded,privacy){
-if(pending||typeof encoded!=="string"||encoded.length>256)return stringify({v:1,s:"unavailable"});
+if(pending||typeof encoded!=="string"||encoded.length>256|| !["M1:","V1:","U1:"].includes(encoded.slice(0,3)))return stringify({v:1,s:"unavailable"});
 let request;
 try{request=parse(encoded.slice(3));}catch(_){return stringify({v:1,s:"unavailable"});}
-if(!["g,i,k,n","g,i,k,n,q","g,i,k,n,p,q"].includes(Object.keys(request).sort().join(","))|| !Object.values(request).every(value=>Number.isSafeInteger(value)&&value>0)||request.q>1500||request.p&&request.p!==1&&request.p!==2||encoded.startsWith("V1:")&&(request.p||request.q))return stringify({v:1,s:"unavailable"});
+if(!["g,i,k,n","g,i,k,n,q","g,i,k,n,p,q"].includes(Object.keys(request).sort().join(","))|| !Object.values(request).every(value=>Number.isSafeInteger(value)&&value>0)||request.q>1500||request.p&&request.p!==1&&request.p!==2||(encoded.startsWith("V1:")||encoded.startsWith("U1:"))&&(request.p||request.q))return stringify({v:1,s:"unavailable"});
 const current=target(request);if(!current)return stringify({v:1,s:"unavailable"});
 if(encoded.startsWith("V1:"))return stringify(crop(request,privacy));
 const url=current.url;
+if(encoded.startsWith("U1:")){
+let parsed;try{parsed=new URL(url,document.baseURI);}catch(_){return stringify({v:1,s:"unavailable"});}
+return stringify(parsed.protocol==="https:"&&parsed.origin!==location.origin?{v:1,s:"public_asset",i:request.i,g:request.g,k:request.k,n:request.n,u:url}:{v:1,s:"unavailable"});
+}
 if(!url||url.length>4096)return stringify(crop(request,privacy));
 let parsed;try{parsed=new URL(url,document.baseURI);}catch(_){return stringify(crop(request,privacy));}
 if(!["https:","http:","blob:","data:"].includes(parsed.protocol))return stringify(crop(request,privacy));
@@ -424,6 +499,7 @@ let binary="";for(const value of output)binary+=String.fromCharCode(value);
 return stringify({v:1,s:"fetch",i:request.i,g:request.g,k:request.k,n:request.n,bytes:encode(binary)});
 }catch(_){
 if(request.p===1&& !headers&& !abort.signal.aborted&&["https:","http:"].includes(parsed.protocol)&&parsed.origin!==location.origin&&target(request))return stringify({v:1,s:"retry",i:request.i,g:request.g,k:request.k,n:request.n});
+if(request.p===2&& !headers&& !abort.signal.aborted&&parsed.protocol==="https:"&&target(request))return stringify({v:1,s:"public_asset",i:request.i,g:request.g,k:request.k,n:request.n,u:url});
 return stringify(crop(request,privacy));
 }
 finally{clearTimeout(timer);pending=null;}
@@ -1519,6 +1595,8 @@ if(explicit.suppressed===true)return isRenderedPhoto(node,tag)?{role:"image",tag
 return{role:explicit.role,landmark:explicit.landmark,tag,inputType,contentEditable:editable,plainTextEditable,richText,editableSupport,editableStructure,editableEmpty:editableWitness&&editableWitness.empty,editingContext:editableWitness&&editableWitness.context};
 }
 if(editable)return{role:"textbox",tag,inputType,contentEditable:true,plainTextEditable,richText,editableSupport,editableStructure,editableEmpty:editableWitness.empty,editingContext:editableWitness.context};
+if(["div","span"].includes(tag)&&["0","-1"].includes(attribute(node,"tabindex",8))&&
+["true","false"].includes(lower(attribute(node,"aria-disabled",16)||"")))return{role:"button",tag,inputType};
 if((tag==="div"||tag==="span")&&listLength(childNodes(node))<=1&&backgroundSource(node)!==null&&isRenderedPhoto(node,tag)){
 return{role:"image",tag,inputType,mediaKind:"background"};
 }
@@ -1530,7 +1608,7 @@ return tag==="fieldset"||tag==="details"
 ?{role:"group",tag,inputType}
 :genericTextDescriptor(node,tag,inputType);
 }
-if(tag==="figure")return{role:"group",tag,inputType};
+if(tag==="figure"||tag==="form"&& !hasAuthorName(node))return{role:"group",tag,inputType};
 if(tag==="article")return{role:"document",tag,inputType};
 if(tag==="main"||tag==="nav"||tag==="header"||tag==="footer"||tag==="aside"){
 const landmark={main:"main",nav:"navigation",header:"banner",footer:"contentinfo",aside:"complementary"}[tag];
@@ -1961,7 +2039,7 @@ if(descriptor.tag==="select")return readonly?0:4;
 return readonly?1|8:
 fillControlKind(descriptor,"")!==0?1|2|8:1|8;
 case"listbox":
-return 4|8|(scrollElement(element)===null?0:16);
+return(descriptor.tag==="select"?4:0)|8|(scrollElement(element)===null?0:16);
 case"row":
 case"cell":
 case"list_item":
@@ -3409,7 +3487,7 @@ const y=mathMax(0,mathMin(viewport.height-1,mathRound(candidate[1])));
 let hit;
 try{
 hit=apply(documentElementFromPoint,document,[x,y]);
-if(cdpPreparing&&typeof shadowElementFromPoint==="function"){
+if(typeof shadowElementFromPoint==="function"){
 for(let depth=0;hit!==null&&depth<MAX_TREE_DEPTH;depth+=1){
 const root=read(elementShadowGetter,hit);
 if(root===null||root===undefined)break;
@@ -3718,11 +3796,13 @@ date:/^(\d{4}-\d{2}-\d{2})?$/u,month:/^(\d{4}-\d{2})?$/u,
 time:/^(\d{2}:\d{2})?$/u,"datetime-local":/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})?$/u
 };
 function fillControlKind(descriptor,value){
-if(descriptor.tag==="input"&&descriptor.role==="spinbutton"?descriptor.inputType!=="number"
-:!textFillRole(descriptor.role))return 0;
+if(descriptor.tag==="input"&&descriptor.role==="spinbutton"){
+return["text","number"].includes(descriptor.inputType)&&FILL_FORMATS.number.test(value)?1:0;
+}
+if(!textFillRole(descriptor.role))return 0;
 if(descriptor.tag==="input"){
-const format=objectHasOwn(FILL_FORMATS,descriptor.inputType)&&
-(descriptor.inputType==="number")===(descriptor.role==="spinbutton")?FILL_FORMATS[descriptor.inputType]:null;
+const format=descriptor.inputType!=="number"&&objectHasOwn(FILL_FORMATS,descriptor.inputType)
+?FILL_FORMATS[descriptor.inputType]:null;
 return format!==null&&format.test(value)?1:0;
 }
 if(descriptor.tag==="textarea"&&descriptor.role!=="searchbox")return 2;
@@ -4319,22 +4399,6 @@ return finishFill(result);
 return actionFault("applied_unverified_postcondition");
 }
 }else if(request.k==="select"){
-if(tagName(target)!=="select"){
-const optionRect=elementRect(selectedOption);
-const optionPoint=optionRect===null?null:actionPoint(selectedOption,optionRect,viewport);
-if(optionPoint===null)return actionFault("target_occluded");
-try{
-pointerDown(selectedOption,optionPoint);
-if(request.ap!==undefined&&(!approvalMatches(request.ap,target)|| !approvalMatches(request.ap,selectedOption,true)|| !composedContains(target,selectedOption)))return actionFault("applied_unverified_postcondition");
-apply(htmlElementClick,selectedOption,[]);
-}catch(_){
-return actionFault("applied_unverified");
-}
-const chosen=resolveKeyAtGeneration(request.p,request.g)===selectedOption
-?runtimeDescriptor(selectedOption,request.g):null;
-if(!descriptorMatchesSelectedOption(request.of,chosen))return actionFault("applied_unverified");
-return encodeActionEvidence(request,"fixed_semantic_recipe",readiness,geometry,viewport,point,delta);
-}
 const desired=read(optionIndexGetter,selectedOption);
 const result=runFixedSelect(target,desired);
 if(result!=="ok")return actionFault(result);
@@ -4537,7 +4601,7 @@ return attribute(element,"maxlength",4)==="1"|| /(?:^|[^a-z])(?:code|otp[0-9]*|p
 }
 function invoke(encoded){
 if(busy)return fault("busy");
-if(typeof encoded==="string"&&(encoded.startsWith("M1:")||encoded.startsWith("V1:")))return globalThis.__zephiumRecordMediaV1.invoke(encoded,pixelPrivacy);
+if(typeof encoded==="string"&&["M1:","V1:","U1:"].includes(encoded.slice(0,3)))return globalThis.__zephiumRecordMediaV1.invoke(encoded,pixelPrivacy);
 if(encoded==="P1:privacy")return pixelPrivacy();
 if(encoded==="P1:public")return pixelPrivacy(true);
 const request=parseRequest(encoded);

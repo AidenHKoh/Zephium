@@ -41,10 +41,76 @@
     while(stack.length) {
       const current=stack.pop();if(++visited>64)return null;
       if(current.nodeType===3){const value=current.nodeValue;if(value.length+text.length>2048)return null;text+=value;}
-      else if(current.nodeType===1) {for(const child of current.childNodes){if(stack.length>=64)return null;stack.push(child);}}
+      else if(current.nodeType===1) {for(let i=current.childNodes.length-1;i>=0;i--){if(stack.length>=64)return null;stack.push(current.childNodes[i]);}}
     }
     const aria=node.getAttribute("aria-label")||"";return aria.length<=2048?text+"|"+aria:null;
   }
+  const normalized=value=>typeof value==="string" && value.length<=2048?value.normalize("NFC").replace(/\s+/gu," ").trim():null;
+  const address=value=>{try{if(typeof value!=="string" || value.length>4096)return null;const u=new URL(value,document.baseURI);return ["http:","https:"].includes(u.protocol)&&!u.username&&!u.password?u.href:null;}catch(_){return null;}};
+  function entities(script,charge) {
+    if(!script.isConnected || script.localName!=="script" || script.getAttribute("type")!=="application/ld+json")return null;
+    const raw=script.textContent;if(raw.length>262144)return null;
+    let pending;try{pending=[parse(raw)];}catch(_){return null;}
+    const out=[];let seen=0;
+    while(pending.length) {
+      if(++seen>400 || !charge())return null;
+      const item=pending.pop();if(item===null || typeof item!=="object")continue;
+      if(Array.isArray(item)){if(item.length+pending.length>400)return null;pending.push(...item);continue;}
+      const types=Array.isArray(item["@type"])?item["@type"]:[item["@type"]];
+      if(types.some(type=>["Product","ProductGroup","Book","VideoObject"].includes(type))) {
+        const url=address(item.url || item.mainEntityOfPage?.["@id"] || item.mainEntityOfPage || (!Array.isArray(item.offers)&&item.offers?.url));
+        const name=normalized(item.name),rawImages=item.image || item.thumbnailUrl;
+        const images=(Array.isArray(rawImages)?rawImages:[rawImages]);
+        if(images.length>32 || out.length>=24)return null;
+        if(name && url)out.push({name,url,images:images.map(image=>address(typeof image==="string"?image:image?.url||image?.contentUrl)).filter(Boolean)});
+      }
+      for(const key of ["@graph","itemListElement","item","mainEntity","hasVariant"])if(item[key]!==undefined){if(pending.length>=400)return null;pending.push(item[key]);}
+    }
+    return out;
+  }
+  function pageEntityName(node) {
+    if(node.getAttribute("aria-label") || node.getAttribute("aria-labelledby"))return null;
+    const text=label(node);return text===null?null:normalized(text.slice(0,-1));
+  }
+  function entityCatalog(charge) {
+    const scripts=document.scripts;if(!scripts || scripts.length>128)return null;
+    const parsed=[];
+    for(let i=0;i<scripts.length;i++) {
+      if(!charge())return null;
+      const node=scripts[i];if(node.getAttribute("type")!=="application/ld+json")continue;
+      if(parsed.length===4)return null;
+      const items=entities(node,charge);if(items===null)return null;
+      parsed.push({node,items});
+    }
+    return parsed;
+  }
+  // Exact page identity joins split panels through an observed entity image or
+  // the page's declared image. Never infer equality between resized image URLs.
+  function entityWitness(records,images,rows,charge) {
+    const page=address(document.URL);if(!page)return;
+    const observed=new Set(records.filter(r=>r.element.localName==="script" && r.sensitivity!=="secret").map(r=>r.element));
+    if(!observed.size)return;
+    const parsed=entityCatalog(charge);if(parsed===null)return;
+    for(const record of records) {
+      if(!charge())return;
+      if(record.wire.r!=="heading" || record.wire.l!==1 || record.sensitivity!=="public")continue;
+      const title=normalized(record.wire.n);if(!title || pageEntityName(record.element)!==title)continue;
+      const matches=parsed.flatMap(script=>script.items.filter(item=>item.url===page).map(item=>({script:script.node,item})));
+      if(matches.length!==1 || matches[0].item.name!==title || !observed.has(matches[0].script))continue;
+      for(let index=0;index<images.length;index++) {
+        if(!charge())return;
+        const image=images[index],row=rows[index];
+        if(!["image","page_image"].includes(image.media) || row.r.length>=8 || row.r.includes(record.wire.k))continue;
+        const declared=observedImageSources(image.element);declared.add(address(source(image.element,image.media)));
+        const pageImage=image.media==="page_image" && images.filter(image=>image.media==="page_image").length===1;
+        const identity=pageImage?address(source(image.element,image.media)):matches[0].item.images.find(url=>declared.has(url));if(!identity)continue;
+        row.r.push(record.wire.k);
+        let bound=relations.get(row);if(!bound){bound=new Map();relations.set(row,bound);}
+        bound.set(record.wire.k,{kind:"entity",script:new WeakRef(matches[0].script),title,page,identity,pageImage});
+      }
+    }
+  }
+
   function sharedCard(a,b) {
     let parent=b;
     for(let depth=0;depth<8 && parent && parent.nodeType===1;depth++,parent=parent.parentNode) {
@@ -62,7 +128,8 @@
         const name=records.find(record=>record.wire.k===key);if(!name)continue;
         const card=sharedCard(record.element,name.element);
         const text=label(name.element);
-        if(text!==null && (card || row.t==="page_image")) names.set(key,{node:new WeakRef(name.element),card:card?new WeakRef(card):null,text,witness:relations.get(row)?.get(key)});
+        const witness=relations.get(row)?.get(key);
+        if(text!==null && (card || row.t==="page_image" || witness?.kind==="entity")) names.set(key,{node:new WeakRef(name.element),card:card?new WeakRef(card):null,text,witness});
       }
       const url=source(record.element,row.t);if(url.length>4096)continue;
       const content=row.t==="record"?label(record.element):null;
@@ -328,6 +395,7 @@ function ariaRecordProof(records, nameRecord, charge, cache) {
       let bound=relations.get(row);if(!bound){bound=new Map();relations.set(row,bound);}
       bound.set(record.wire.k,{link:new WeakRef(proof.link),root:new WeakRef(proof.root),id:proof.id,href:proof.href});
     }
+    entityWitness(records,images,rows,()=>++work<=16384);
     remember(invocation,generation,records,rows);
     return rows;
   }
@@ -335,9 +403,15 @@ function ariaRecordProof(records, nameRecord, charge, cache) {
   function target(request) {
     const entry=snapshots.get(request.i+":"+request.g)?.get(request.k),name=entry?.names.get(request.n);
     const node=entry?.node.deref(),named=name?.node.deref(),card=name?.card?.deref();
-    if(!node?.isConnected || !named?.isConnected || label(named)!==name.text ||
-       (entry.kind!=="page_image" && (!card?.isConnected || !card.contains(node) || !card.contains(named))))return null;
-    if(name.witness) {
+    if(!node?.isConnected || !named?.isConnected || label(named)!==name.text)return null;
+    if(name.witness?.kind==="entity") {
+      const witness=name.witness,script=witness.script.deref();let work=0;
+      if(!script || address(document.URL)!==witness.page || pageEntityName(named)!==witness.title)return null;
+      const catalog=entityCatalog(()=>++work<=16384),matches=catalog?.flatMap(part=>part.items.filter(item=>item.url===witness.page).map(item=>({script:part.node,item})));
+      const declared=observedImageSources(node);declared.add(address(source(node,entry.kind)));
+      if(matches?.length!==1 || matches[0].script!==script || matches[0].item.name!==witness.title || (!witness.pageImage && !matches[0].item.images.includes(witness.identity)) || !declared.has(witness.identity))return null;
+    } else if(entry.kind!=="page_image" && (!card?.isConnected || !card.contains(node) || !card.contains(named)))return null;
+    if(name.witness && name.witness.kind!=="entity") {
       const witness=name.witness,link=witness.link.deref(),root=witness.root.deref();
       if(!link?.isConnected || !root?.isConnected)return null;
       const records=[{element:named,media:null,wire:{r:"paragraph"}},{element:node,media:entry.kind,wire:{r:"image"}},{element:link,media:null,wire:{r:"link",u:witness.href}}];
@@ -407,13 +481,17 @@ function ariaRecordProof(records, nameRecord, charge, cache) {
     } finally {bitmap.close();}
   }
   async function invoke(encoded,privacy) {
-    if(pending || typeof encoded!=="string" || encoded.length>256)return stringify({v:1,s:"unavailable"});
+    if(pending || typeof encoded!=="string" || encoded.length>256 || !["M1:","V1:","U1:"].includes(encoded.slice(0,3)))return stringify({v:1,s:"unavailable"});
     let request;
     try {request=parse(encoded.slice(3));}catch(_){return stringify({v:1,s:"unavailable"});}
-    if(!["g,i,k,n","g,i,k,n,q","g,i,k,n,p,q"].includes(Object.keys(request).sort().join(",")) || !Object.values(request).every(value=>Number.isSafeInteger(value)&&value>0) || request.q>1500 || request.p && request.p!==1 && request.p!==2 || encoded.startsWith("V1:") && (request.p||request.q))return stringify({v:1,s:"unavailable"});
+    if(!["g,i,k,n","g,i,k,n,q","g,i,k,n,p,q"].includes(Object.keys(request).sort().join(",")) || !Object.values(request).every(value=>Number.isSafeInteger(value)&&value>0) || request.q>1500 || request.p && request.p!==1 && request.p!==2 || (encoded.startsWith("V1:") || encoded.startsWith("U1:")) && (request.p||request.q))return stringify({v:1,s:"unavailable"});
     const current=target(request);if(!current)return stringify({v:1,s:"unavailable"});
     if(encoded.startsWith("V1:"))return stringify(crop(request,privacy));
     const url=current.url;
+    if(encoded.startsWith("U1:")) {
+      let parsed;try{parsed=new URL(url,document.baseURI);}catch(_){return stringify({v:1,s:"unavailable"});}
+      return stringify(parsed.protocol==="https:" && parsed.origin!==location.origin?{v:1,s:"public_asset",i:request.i,g:request.g,k:request.k,n:request.n,u:url}:{v:1,s:"unavailable"});
+    }
     if(!url || url.length>4096)return stringify(crop(request,privacy));
     let parsed;try {parsed=new URL(url,document.baseURI);}catch(_){return stringify(crop(request,privacy));}
     if(!["https:","http:","blob:","data:"].includes(parsed.protocol))return stringify(crop(request,privacy));
@@ -434,6 +512,7 @@ function ariaRecordProof(records, nameRecord, charge, cache) {
       return stringify({v:1,s:"fetch",i:request.i,g:request.g,k:request.k,n:request.n,bytes:encode(binary)});
     } catch(_) {
       if(request.p===1 && !headers && !abort.signal.aborted && ["https:","http:"].includes(parsed.protocol) && parsed.origin!==location.origin && target(request))return stringify({v:1,s:"retry",i:request.i,g:request.g,k:request.k,n:request.n});
+      if(request.p===2 && !headers && !abort.signal.aborted && parsed.protocol==="https:" && target(request))return stringify({v:1,s:"public_asset",i:request.i,g:request.g,k:request.k,n:request.n,u:url});
       return stringify(crop(request,privacy));
     }
     finally {clearTimeout(timer);pending=null;}

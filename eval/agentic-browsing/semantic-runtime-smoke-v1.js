@@ -203,8 +203,10 @@ class Element extends Node {
 }
 
 class ShadowRoot extends Node {
-  constructor() { super(11); this._active = null; }
+  constructor(host = null) { super(11); this._active = null; this._host = host; this._hit = null; }
   get activeElement() { return this._active; }
+  get host() { return this._host; }
+  elementFromPoint() { return this._hit; }
 }
 
 class HTMLDetailsElement extends Element {
@@ -701,6 +703,19 @@ globalThis.InputEvent = function PoisonedInputEvent() {
 const runtime = globalThis.__zephiumSemanticRuntimeV1;
 assert(runtime && typeof runtime.invoke === "function", "runtime missing");
 
+let mediaDispatches = 0;
+Object.defineProperty(globalThis, "__zephiumRecordMediaV1", {configurable:true, value:{invoke(encoded,privacy){
+  assert(typeof privacy === "function", "media dispatch lost its native privacy provider");
+  mediaDispatches++;
+  return "fixture:" + encoded;
+}}});
+for (const prefix of ["M1:","V1:","U1:"]) {
+  const call=prefix+'{"i":1,"g":1,"k":2,"n":1}';
+  assert(runtime.invoke(call)==="fixture:"+call,"record-media protocol was not routed to its source owner: "+prefix);
+}
+assert(runtime.invoke('X1:{"i":1}')==="E1:invalid_request" && mediaDispatches===3,"unknown media protocol reached its owner");
+delete globalThis.__zephiumRecordMediaV1;
+
 const invoke = (invocation, generation, scope, budget = {}) => runtime.invoke(JSON.stringify({
   v: 1,
   i: invocation,
@@ -1149,8 +1164,9 @@ async function finish() {
   button._children = savedButtonChildren;
   assert(runtime.invoke(`{"padding":"${"x".repeat(17800)}"}`) === "E1:invalid_request", "oversize action request accepted");
 
-  const roleCodes = Object.freeze({textbox: 8, searchbox: 10, combobox: 13, listbox: 14, option: 15, spinbutton: 16});
+  const roleCodes = Object.freeze({button: 7, textbox: 8, searchbox: 10, combobox: 13, listbox: 14, option: 15, spinbutton: 16});
   const descriptorFor = (node) => ({
+    ...(node.ak === undefined ? {} : {a: node.ak}),
     r: roleCodes[node.r],
     o: node.o || 0,
     q: node.q === "sensitive" ? 2 : node.q === "secret" ? 3 : 1,
@@ -2328,16 +2344,17 @@ async function finish() {
     // Typed fields take a value the browser stores unchanged and verify it;
     // any other value is refused before anything is dispatched.
     let generation = 600;
-    for (const [type, role, good, bad] of [
+    for (const [type, role, good, bad, explicit] of [
       ["email", "textbox", "person@example.test", "person @example.test"],
       ["tel", "textbox", "+1 555 0100", "line\nbreak"],
       ["url", "textbox", "https://example.test/a", " https://example.test/a"],
       ["number", "spinbutton", "12.5", "1,000"],
+      ["text", "spinbutton", "18", "November", true],
       ["date", "textbox", "2026-10-07", "October 7"],
     ]) {
       generation += 2;
       main._children = new NodeList();
-      const field = main.append(new HTMLInputElement({ type, "aria-label": `Typed ${type}` }));
+      const field = main.append(new HTMLInputElement({ type, ...(explicit ? { role } : {}), "aria-label": `Typed ${type}` }));
       document._hit = field;
       const look = () => JSON.parse(invoke(generation, generation, { k: "initial" }))
         .n.find(node => node.n === `Typed ${type}`);
@@ -2468,6 +2485,27 @@ async function finish() {
 
   // The same native field keeps its identity while focus opens suggestions
   // and typing clears validation. Repurposing and new constraints stay faults.
+  // An unnamed native form must remain a scope, separate from site-wide search.
+  {
+    const root = new Element("main");
+    root.append(new HTMLInputElement({type:"search", "aria-label":"Unrelated site search"}, ""));
+    const form = root.append(new Element("form"));
+    form.append(new HTMLInputElement({role:"combobox", "aria-label":"Departure"}, ""));
+    form.append(new HTMLInputElement({role:"combobox", "aria-label":"Destination"}, ""));
+    form.append(new HTMLButtonElement({type:"submit", "aria-label":"Find departures"}));
+    document._root=root;root._parent=document;setOwner(root,document);document._active=null;
+    const initial=JSON.parse(invoke(1480,1480,{k:"initial"}));
+    const departure=initial.n.find(node=>node.n==="Departure");
+    const scope=initial.n[departure.p];
+    assert(scope && scope.r==="group", "unnamed form lost its structural inspection boundary");
+    const narrowed=JSON.parse(invoke(1481,1481,{k:"subtree",a:scope.k}));
+    assert(narrowed.n.some(node=>node.n==="Departure") && narrowed.n.some(node=>node.n==="Destination") && narrowed.n.some(node=>node.n==="Find departures"), "form scope lost its controls");
+    assert(!narrowed.n.some(node=>node.n==="Unrelated site search"), "form inspection included unrelated page controls");
+    form.attributes["aria-label"]="Journey options";
+    const named=JSON.parse(invoke(1482,1482,{k:"initial"}));
+    assert(named.n.some(node=>node.r==="landmark" && node.lm==="form" && node.n==="Journey options"), "named form lost its landmark meaning");
+  }
+
   let formGeneration = 1500;
   for (const mode of ["focus-suggestions", "input-suggestions", "clear-invalid", "focus-required",
       "focus-secret", "focus-detached", "focus-readonly", "input-disabled", "input-required",
@@ -2866,8 +2904,42 @@ async function finish() {
     assert(runtime.invoke(JSON.stringify(scroll)) === "E1:invalid_request", "a scroll accepted a settle ceiling");
   }
 
+  {
+    const root=new Element("main");
+    const choice=root.append(new Element("div",{tabindex:"-1","aria-disabled":"false"}));choice.append(new CharacterData("Station Gamma"));
+    const disabled=root.append(new Element("div",{tabindex:"0","aria-disabled":"true"}));disabled.append(new CharacterData("Unavailable station"));
+    root.append(new Element("div",{tabindex:"-1"})).append(new CharacterData("Focusable prose"));
+    root.append(new Element("div",{"aria-disabled":"false"})).append(new CharacterData("Status prose"));
+    document._root=root;root._parent=document;setOwner(root,document);document._hit=choice;document._active=null;
+    const look=JSON.parse(invoke(1790,1790,{k:"initial"}));
+    const control=look.n.find(node=>node.n==="Station Gamma");
+    assert(control?.r==="button" && (control.o&1),"a focusable enabled widget without a role was not actionable");
+    assert(look.n.find(node=>node.n==="Unavailable station")?.o===undefined,"disabled widget became actionable");
+    assert(!look.n.some(node=>(node.n==="Focusable prose" || node.t==="Focusable prose" || node.n==="Status prose" || node.t==="Status prose") && node.o),"one attribute promoted ordinary prose to a control");
+    const request={v:1,o:"action_execute",a:1790,i:1790,g:1790,t:control.k,r:"button",k:"click",e:control.b,p:0,z:null,f:descriptorFor(control),of:null};
+    assert(!runtime.invoke(JSON.stringify(request)).startsWith("E") && choice._fixedClickCount===1,"inferred widget click did not run exactly once");
+  }
+
+  for (const covered of [false, true]) {
+    const root=new Element("main");
+    const outer=root.append(new Element("div"));outer._shadow=new ShadowRoot(outer);
+    const inner=outer._shadow.append(new Element("div"));inner._shadow=new ShadowRoot(inner);
+    const choice=inner._shadow.append(new HTMLButtonElement({type:"button","aria-label":"Refuse optional cookies"}));
+    const overlay=root.append(new Element("div"));
+    document._root=root;root._parent=document;setOwner(root,document);document._active=null;
+    document._hit=covered?overlay:outer;outer._shadow._hit=inner;inner._shadow._hit=choice;
+    const generation=1800+Number(covered);
+    const look=JSON.parse(invoke(generation,generation,{k:"initial"}));
+    const node=look.n.find(node=>node.n==="Refuse optional cookies");
+    assert(node && (node.o&1),"open-shadow control lost its observed click capability");
+    const call={v:1,o:"action_execute",a:generation,i:generation,g:generation,t:node.k,r:"button",k:"click",e:node.b,p:0,z:null,f:descriptorFor(node),of:null};
+    const result=runtime.invoke(JSON.stringify(call));
+    if (covered) assert(result==="E2:target_occluded" && !choice._fixedClickCount,"shadow traversal bypassed a real overlay");
+    else assert(!result.startsWith("E") && choice._fixedClickCount===1,`open-shadow hit test refused an uncovered control: ${result}: ${JSON.stringify(call)}`);
+  }
+
   for (const mode of ["stays", "closes"]) {
-    // A custom listbox is chosen by its option, which must read as selected.
+    // Custom choices are clicks: selecting may remove the popup and its option.
     const root = new Element("main");
     const list = root.append(new Element("div", { role: "listbox", "aria-label": "Sort by" }));
     const options = ["Relevance", "Price"].map((name, index) => {
@@ -2886,19 +2958,15 @@ async function finish() {
     const look = JSON.parse(invoke(generation, generation, { k: "initial" }));
     const listNode = look.n.find(node => node.r === "listbox");
     const priceNode = look.n.find(node => node.r === "option" && (node.n === "Price" || node.t === "Price"));
-    assert(listNode && (listNode.o & 4) && priceNode, "custom listbox or its option missing");
+    assert(listNode && (listNode.o & 4) === 0 && priceNode && (priceNode.o & 1), "custom listbox advertised a native Select instead of clickable choices");
     document._hit = options[1];
     const request = JSON.stringify({ v: 1, o: "action_execute", a: generation, i: generation, g: generation,
-      t: listNode.k, r: "listbox", k: "select", e: { x: 10, y: 10, w: 160, h: 72 }, p: priceNode.k, z: null,
-      f: descriptorFor(listNode), of: descriptorFor(priceNode) });
+      t: priceNode.k, r: "option", k: "click", e: { x: 10, y: 50, w: 160, h: 32 }, p: 0, z: null,
+      f: descriptorFor(priceNode), of: null });
     const result = runtime.invoke(request);
-    if (mode === "stays") {
-      assert(!result.startsWith("E") && options[1]._fixedClickCount === 1 &&
-        options[1].attributes["aria-selected"] === "true", `custom listbox choice failed: ${result}`);
-    } else {
-      assert(result === "E2:applied_unverified" && options[1]._fixedClickCount === 1,
-        `a closing listbox claimed a verified choice: ${result}`);
-    }
+    assert(!result.startsWith("E") && options[1]._fixedClickCount === 1, `custom choice did not click exactly once: ${mode}: ${result}`);
+    if (mode === "stays") assert(options[1].attributes["aria-selected"] === "true", "persistent choice did not select");
+    else assert(!root.contains(list), "closing choice stayed in the document");
   }
 
   {

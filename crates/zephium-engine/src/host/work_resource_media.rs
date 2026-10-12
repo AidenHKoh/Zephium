@@ -33,10 +33,17 @@ pub(super) struct Batch {
     fetch_mode: zephium_agentic::WorkBrowserMediaFetchMode,
     cursor: Cell<usize>,
     images: RefCell<Vec<WorkBrowserRecordImage>>,
+    public_asset: RefCell<Option<PendingPublicAsset>>,
     semantic: record_media::MediaDispatch,
     capture: FrameCapture,
     privacy: record_media::PrivacyDispatch,
     gate: WorkDocumentNavigation,
+}
+struct PendingPublicAsset {
+    plan: SemanticRecordMediaPlan,
+    url: String,
+    reply: zephium_agentic::WorkBrowserPublicAssetReply,
+    window: Rc<RefCell<record_media::MediaRetryWindow>>,
 }
 impl Batch {
     fn current(&self, plan: &SemanticRecordMediaPlan) -> bool {
@@ -137,6 +144,31 @@ impl Batch {
                             batch.next();
                         }
                     }
+                    Some(NativeMediaResult::PublicAsset(url)) => {
+                        let now = work_browser_monotonic_now();
+                        let remaining = window.borrow().remaining(Instant::now());
+                        let reply = now.zip(remaining).and_then(|(now, remaining)| {
+                            let deadline = zephium_agentic::AgentPolicyInstant::from_millis(
+                                now.millis().checked_add(u64::from(remaining))?,
+                            );
+                            batch
+                                .progress
+                                .request_public_asset(&plan, &url, now, deadline)
+                        });
+                        if let Some(reply) = reply {
+                            media_stage!(PublicAssetQueued);
+                            *batch.public_asset.borrow_mut() = Some(PendingPublicAsset {
+                                plan,
+                                url,
+                                reply,
+                                window,
+                            });
+                            crate::host::notify_work_resource(batch.guard.clone());
+                        } else {
+                            media_stage!(PublicAssetDenied);
+                            batch.next();
+                        }
+                    }
                     Some(NativeMediaResult::Fetched(bytes)) => {
                         media_stage!(Fetched);
                         if let Some(image) = record_media::raster(&plan, bytes, None) {
@@ -159,6 +191,52 @@ impl Batch {
                         batch.finish(false)
                     }
                 }
+            }),
+        );
+    }
+    fn poll_public_asset(self: Rc<Self>) {
+        let Some(pending) = self.public_asset.borrow_mut().take() else {
+            return;
+        };
+        if !self.current(&pending.plan) || !pending.window.borrow().active(Instant::now()) {
+            media_stage!(PublicAssetExpired);
+            self.next();
+            return;
+        }
+        let Some(result) = pending.reply.poll() else {
+            *self.public_asset.borrow_mut() = Some(pending);
+            return;
+        };
+        let Some(bytes) = result else {
+            media_stage!(PublicAssetUnavailable);
+            self.next();
+            return;
+        };
+        media_stage!(PublicAssetBytes);
+        let batch = self.clone();
+        (self.semantic)(
+            &pending.plan.clone(),
+            false,
+            record_media::MediaFetchAttempt::public_validation(),
+            Box::new(move |outcome| match outcome {
+                Some(NativeMediaResult::PublicAsset(url))
+                    if url == pending.url
+                        && batch.current(&pending.plan)
+                        && pending.window.borrow().active(Instant::now()) =>
+                {
+                    media_stage!(PublicAssetVerified);
+                    if let Some(image) = record_media::raster_public(&pending.plan, bytes) {
+                        batch.images.borrow_mut().push(image);
+                    } else {
+                        media_stage!(PublicAssetRasterRejected);
+                    }
+                    batch.next();
+                }
+                Some(_) => {
+                    media_stage!(PublicAssetUnverified);
+                    batch.next()
+                }
+                None => batch.finish(false),
             }),
         );
     }
@@ -402,6 +480,7 @@ impl WorkNativeResource {
             fetch_mode,
             cursor: Cell::new(0),
             images: RefCell::new(Vec::new()),
+            public_asset: RefCell::new(None),
             semantic,
             capture,
             privacy,
@@ -453,6 +532,7 @@ impl EngineHost {
                 _ => batch.finished.set(Some(false)),
             }
         }
+        batch.clone().poll_public_asset();
         if let Some(clean) = batch.finished.get() {
             let retired = batch.presentation.borrow_mut().retire() == PresentationState::Retired;
             let Some(resource) = self.work_resources.get_mut(&id) else {

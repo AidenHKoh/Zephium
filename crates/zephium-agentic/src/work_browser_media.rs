@@ -13,14 +13,16 @@ pub enum WorkBrowserMediaFetchMode {
     /// Keep the native session behavior; never remove credentials and retry.
     #[default]
     SessionOnly,
-    /// One host-admitted cross-origin credential-removing retry after an opaque
-    /// network/CORS failure. Original public task authority must still hold.
+    /// Bounded cross-origin anonymous retries after opaque network/CORS failure.
+    /// Native HTTPS fallback retains the original window and public task grant.
     PublicAssetRetry,
 }
 
 /// Whether an admitted asset came from the page's own session or exact pixels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkBrowserRecordImageOrigin {
+    /// Exact anonymous HTTPS source, retrieved under the original public-read grant.
+    PublicFetch,
     /// Retrieved in the native browser context from the exact observed source.
     NativeFetch,
     /// Cropped from a fresh privacy-fenced native frame of that exact element.
@@ -132,6 +134,8 @@ struct Progress {
     cancelled: AtomicBool,
     completed: AtomicBool,
     result: Mutex<Option<Vec<WorkBrowserRecordImage>>>,
+    public_asset: Mutex<public_asset::Exchange>,
+    waker: Mutex<Option<std::task::Waker>>,
 }
 /// Bounded result projection; cancellation revokes publication, never native debt.
 #[derive(Clone)]
@@ -148,11 +152,16 @@ impl WorkBrowserMediaProgress {
             cancelled: AtomicBool::new(false),
             completed: AtomicBool::new(false),
             result: Mutex::new(None),
+            public_asset: Mutex::new(public_asset::Exchange::default()),
+            waker: Mutex::new(None),
         }))
     }
     /// Revokes result publication immediately. The original native owner must drain.
     pub fn cancel(&self) {
         self.0.cancelled.store(true, Ordering::Release);
+        if let Ok(mut exchange) = self.0.public_asset.lock() {
+            exchange.pending.take();
+        }
         if let Ok(mut result) = self.0.result.lock() {
             let completed = self.0.completed.swap(true, Ordering::AcqRel);
             if !completed || result.is_some() {
@@ -347,6 +356,10 @@ impl WorkBrowserResources {
         };
         row.pending = Some(operation.clone());
         let progress = WorkBrowserMediaProgress::new();
+        if let Ok(mut exchange) = progress.0.public_asset.lock() {
+            exchange.authority = retry_authority.clone();
+            exchange.plans = plans.clone();
+        }
         Ok((
             WorkBrowserResourceRequest {
                 construction: None,
@@ -402,3 +415,9 @@ mod tests {
         }
     }
 }
+
+#[path = "work_browser_public_asset.rs"]
+mod public_asset;
+pub use public_asset::{
+    WorkBrowserPublicAssetReply, WorkBrowserPublicAssetRequest, MAX_PUBLIC_RECORD_IMAGE_BYTES,
+};

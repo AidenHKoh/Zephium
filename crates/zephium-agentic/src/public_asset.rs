@@ -302,7 +302,32 @@ pub async fn fetch_public_image(url: &str) -> Result<Vec<u8>, PublicAssetError> 
     fetch_with(&client, parsed).await
 }
 
+/// Exact anonymous record-source retrieval: no URL variants, credentials or redirects.
+/// The caller owns the original short deadline and must drop this future on cancellation.
+pub async fn fetch_public_record_image(raw: &str) -> Result<Vec<u8>, PublicAssetError> {
+    let target =
+        crate::ContextNavigationTarget::parse(raw).map_err(|_| PublicAssetError::InvalidUrl)?;
+    if !public_https(target.as_url()) || !crate::semantic_wire::model_safe_public_url(&target) {
+        return Err(PublicAssetError::InvalidUrl);
+    }
+    let client = public_client_builder(Arc::new(PublicResolver))
+        .redirect(Policy::none())
+        .build()
+        .map_err(|_| PublicAssetError::Unavailable)?;
+    fetch_bounded(
+        &client,
+        target.as_url().clone(),
+        crate::MAX_PUBLIC_RECORD_IMAGE_BYTES,
+    )
+    .await
+}
+
 fn public_client(resolver: Arc<dyn reqwest::dns::Resolve>) -> Result<Client, PublicAssetError> {
+    public_client_builder(resolver)
+        .build()
+        .map_err(|_| PublicAssetError::Unavailable)
+}
+fn public_client_builder(resolver: Arc<dyn reqwest::dns::Resolve>) -> reqwest::ClientBuilder {
     Client::builder()
         .no_proxy()
         .dns_resolver(resolver)
@@ -320,11 +345,16 @@ fn public_client(resolver: Arc<dyn reqwest::dns::Resolve>) -> Result<Client, Pub
         .connect_timeout(Duration::from_secs(8))
         .pool_max_idle_per_host(0)
         .user_agent(crate::provider_transport::PRODUCT_USER_AGENT)
-        .build()
-        .map_err(|_| PublicAssetError::Unavailable)
 }
 
 async fn fetch_with(client: &Client, url: url::Url) -> Result<Vec<u8>, PublicAssetError> {
+    fetch_bounded(client, url, MAX_PUBLIC_IMAGE_BYTES).await
+}
+async fn fetch_bounded(
+    client: &Client,
+    url: url::Url,
+    limit: usize,
+) -> Result<Vec<u8>, PublicAssetError> {
     let response = client
         .get(url)
         .header(
@@ -348,7 +378,7 @@ async fn fetch_with(client: &Client, url: url::Url) -> Result<Vec<u8>, PublicAss
     }
     if response
         .content_length()
-        .is_some_and(|length| length > MAX_PUBLIC_IMAGE_BYTES as u64)
+        .is_some_and(|length| length > limit as u64)
     {
         return Err(PublicAssetError::TooLarge);
     }
@@ -359,7 +389,7 @@ async fn fetch_with(client: &Client, url: url::Url) -> Result<Vec<u8>, PublicAss
         .await
         .map_err(|_| PublicAssetError::Unavailable)?
     {
-        if bytes.len() + chunk.len() > MAX_PUBLIC_IMAGE_BYTES {
+        if bytes.len() + chunk.len() > limit {
             return Err(PublicAssetError::TooLarge);
         }
         bytes.extend_from_slice(&chunk);
@@ -372,6 +402,23 @@ async fn fetch_with(client: &Client, url: url::Url) -> Result<Vec<u8>, PublicAss
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn exact_record_fetch_refuses_private_and_secret_destinations_before_transport() {
+        for url in [
+            "http://images.example.com/a.png",
+            "https://localhost/a.png",
+            "https://127.0.0.1/a.png",
+            "https://[::1]/a.png",
+            "https://user:secret@images.example.com/a.png",
+            "https://images.example.com/a.png?access_token=secret",
+        ] {
+            assert_eq!(
+                fetch_public_record_image(url).await,
+                Err(PublicAssetError::InvalidUrl)
+            );
+        }
+    }
+
     use super::*;
 
     #[tokio::test]
