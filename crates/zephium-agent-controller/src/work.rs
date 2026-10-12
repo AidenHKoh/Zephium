@@ -3035,7 +3035,13 @@ impl AgentWorkController {
             .is_some_and(SemanticExtractionSchema::reads_whole_page);
         let observation = Self::observe_initial_ready(state, worker, browser).await?;
         let first_look = state.task.whole_first_look();
-        let observation = if whole_page || first_look {
+        let single_record = state
+            .extraction_schema
+            .as_ref()
+            .is_some_and(SemanticExtractionSchema::is_single_record);
+        // A single product needs the document budget, but recursive gallery
+        // expansion can crowd its later identity metadata out of that budget.
+        let observation = if (whole_page && !single_record) || first_look {
             // Boxed: the read loop's future must stay well inside the
             // runtime worker's stack.
             // A first look reads the whole document, landmarks and all.
@@ -3094,8 +3100,7 @@ impl AgentWorkController {
             && state
                 .extraction_schema
                 .as_ref()
-                .is_some_and(|schema| schema.is_whole_page_findings() || matches!(schema.fields(), [field]
-                    if field.kind() == SemanticExtractionValueKind::Rows && field.max_list_items() == Some(1)))
+                .is_some_and(|schema| schema.is_whole_page_findings() || schema.is_single_record())
             && !zephium_agentic::semantic_observation_reads_sparse(&observation)
             && observation
                 .frames()

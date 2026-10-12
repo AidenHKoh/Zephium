@@ -533,8 +533,14 @@ impl SemanticExtractionSchema {
                 && field.max_list_items().is_some_and(|items| items > 1))
     }
 
-    /// Facts and records need a whole-document capture, including single
-    /// products whose identity or image metadata lies beyond the viewport.
+    /// One record on an already identified page; not a listing-loading request.
+    pub fn is_single_record(&self) -> bool {
+        matches!(self.fields.as_slice(), [field]
+            if field.kind() == SemanticExtractionValueKind::Rows && field.max_list_items() == Some(1))
+    }
+
+    /// Facts and records use the larger document budget, including single
+    /// products whose identity metadata lies beyond the first viewport.
     pub fn reads_whole_page(&self) -> bool {
         self.is_whole_page_findings()
             || matches!(self.fields.as_slice(), [field]
@@ -2827,7 +2833,6 @@ mod tests {
     use serde_json::{json, Value};
     use zephium_core::ids::ProfileId;
 
-    #[cfg(feature = "probe-harness")]
     #[test]
     fn a_single_record_keeps_whole_page_evidence_without_enabling_listing_loading() {
         let schema = SemanticExtractionSchema::try_new(
@@ -2842,9 +2847,11 @@ mod tests {
         )
         .unwrap();
         assert!(schema.reads_whole_page());
+        assert!(schema.is_single_record());
         assert!(!schema.is_row_collection());
     }
 
+    #[cfg(feature = "probe-harness")]
     #[test]
     fn native_name_probe_uses_only_exact_validated_public_name_sources() {
         use std::sync::{Arc, Mutex};
