@@ -577,7 +577,7 @@ impl NavigationFault {
                 return named_tool_stream(
                     turn,
                     "locate",
-                    r#"{\"semantic_query\":\"missing specifications\",\"scope\":{\"kind\":\"initial\"}}"#,
+                    &r#"{\"semantic_query\":\"missing specifications\",\"scope\":{\"kind\":\"initial\"}}"#.replace("missing specifications", &format!("missing specifications {turn}")),
                 );
             }
             if turn == limit - 1 {
@@ -586,7 +586,7 @@ impl NavigationFault {
                         named_tool_stream(
                             turn,
                             "locate",
-                            r#"{\"semantic_query\":\"missing specifications\",\"scope\":{\"kind\":\"initial\"}}"#,
+                            &r#"{\"semantic_query\":\"missing specifications\",\"scope\":{\"kind\":\"initial\"}}"#.replace("missing specifications", &format!("missing specifications {turn}")),
                         )
                     } else {
                         named_tool_stream(turn, "snapshot", r#"{\"scope\":{\"kind\":\"initial\"}}"#)

@@ -5,6 +5,7 @@ use super::*;
 pub(super) enum ReadFault {
     None,
     LocateMiss,
+    NoProgress,
     LocateMissCeiling,
     Extraction,
     LongExtraction,
@@ -23,6 +24,7 @@ pub(super) enum ReadFault {
 impl ReadFault {
     pub(super) fn requests(self) -> u8 {
         match self {
+            Self::NoProgress => 10,
             Self::LongExtraction => 48,
             Self::AfterActionExtraction => 8,
             Self::Disabled | Self::Subtree => 2,
@@ -48,6 +50,22 @@ impl ReadFault {
             )
     }
     pub(super) fn stream(self, turn: u8) -> String {
+        if self == Self::NoProgress {
+            return match turn {
+                1 | 3 => named_tool_stream(
+                    turn,
+                    "locate",
+                    r#"{\"semantic_query\":\"missing specifications\",\"scope\":{\"kind\":\"initial\"}}"#,
+                ),
+                2 => named_tool_stream(turn, "read", r#"{\"scope\":{\"kind\":\"initial\"}}"#),
+                4 => named_tool_stream(
+                    turn,
+                    "locate",
+                    r#"{\"semantic_query\":\"Field\",\"scope\":{\"kind\":\"initial\"}}"#,
+                ),
+                _ => tool_stream(turn, true),
+            };
+        }
         if self == Self::LongExtraction {
             return if turn < 23 {
                 named_tool_stream(turn, "read", r#"{\"scope\":{\"kind\":\"initial\"}}"#)
@@ -67,7 +85,7 @@ impl ReadFault {
             return named_tool_stream(
                 turn,
                 "locate",
-                r#"{\"semantic_query\":\"missing specifications\",\"scope\":{\"kind\":\"initial\"}}"#,
+                &r#"{\"semantic_query\":\"missing specifications\",\"scope\":{\"kind\":\"initial\"}}"#.replace("missing specifications", &format!("missing specifications {turn}")),
             );
         }
         if matches!(self, Self::Extraction | Self::AfterActionExtraction) {
@@ -104,6 +122,31 @@ impl ReadFault {
         }
     }
     pub(super) fn check_request(self, body: &[u8], turns: u8) {
+        if self == Self::NoProgress {
+            let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
+            if turns > 0 {
+                let result = parsed["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .rfind(|item| item["type"] == "function_call_output")
+                    .unwrap();
+                assert_eq!(result["call_id"], format!("call_{turns}"));
+                let output = result["output"].as_str().unwrap();
+                match turns {
+                    1 | 4 => assert!(output.contains("ZLOC1 content=untrusted")),
+                    2 => assert!(output.contains("ZREAD3 content=untrusted")),
+                    3 => {
+                        let refused: serde_json::Value = serde_json::from_str(output).unwrap();
+                        assert_eq!(refused["code"], "no_progress");
+                        assert_eq!(refused["executed"], false);
+                        assert_eq!(refused["observation_unchanged"], true);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            return;
+        }
         let body = std::str::from_utf8(body).unwrap();
         if turns == 0 {
             assert_eq!(body.contains("\"name\":\"read\""), self != Self::Disabled);
@@ -222,6 +265,12 @@ fn long_read_workflow_closes_original_accounting_after_mid_run_audit_delivery() 
 }
 
 #[test]
+fn no_progress_feedback_survives_a_cached_read_and_allows_a_different_operation() {
+    let _serial = lock(&SERIAL);
+    provider_fixture(ProviderFault::Read(ReadFault::NoProgress));
+}
+
+#[test]
 fn read_continuations_preserve_baseline_budget_stop_and_cleanup_ownership() {
     let _serial = lock(&SERIAL);
     for fault in [
@@ -251,6 +300,23 @@ pub(super) fn assert_outcome(
     calls: &[u8],
     events: &[AgentWorkEvent],
 ) {
+    if fault == ReadFault::NoProgress {
+        let AgentWorkOutcome::Succeeded(success) = outcome else {
+            panic!("{fault:?}: {outcome:?}")
+        };
+        assert_eq!(success.closure().model_calls(), 5);
+        assert_eq!(success.closure().effects(), 1);
+        assert_eq!(calls, [1, 2, 3, 7, 3, 4, 5, 6]);
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind() == AgentWorkEventKind::InspectionRefused)
+                .count(),
+            1
+        );
+        return;
+    }
     if matches!(
         fault,
         ReadFault::Extraction | ReadFault::AfterActionExtraction | ReadFault::LongExtraction

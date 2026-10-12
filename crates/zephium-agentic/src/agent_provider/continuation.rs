@@ -3412,6 +3412,100 @@ mod tests {
     }
 
     #[test]
+    fn no_progress_fingerprints_ignore_capture_ids_but_keep_values_targets_and_geometry() {
+        use crate::{AgentBrowserScopeProposal, AgentBrowserToolProposal};
+        let nodes = |key, value: &str, y| {
+            json!([
+                {"k":key,"r":"document","o":16},
+                {"k":key+1,"p":0,"r":"textbox","n":"Station","v":{"k":"text","value":value},"o":11,"b":{"x":0,"y":y,"w":200,"h":30}},
+                {"k":key+2,"p":0,"r":"button","n":"Refresh","o":1,"b":{"x":0,"y":100,"w":100,"h":30}}
+            ])
+        };
+        let a = observation_with_nodes(context(), 1, 1, 1, nodes(1, "old", 50));
+        let b = observation_with_nodes(context(), 2, 2, 2, nodes(91, "old", 50));
+        let changed = observation_with_nodes(context(), 3, 3, 3, nodes(1, "new", 50));
+        let scrolled = observation_with_nodes(context(), 4, 4, 4, nodes(1, "old", -50));
+        let proposal = |value: &str, millis| {
+            super::super::AgentBrowserToolCall::decode(call(1),"call_progress".into(),"act",json!({"actions":[{
+            "kind":"fill","target":"@a2","value":value,"effect":"local_write","wait":{"kind":"immediate"},"verification":{"kind":"target_value_matches_input"},"settle_millis":millis
+        }]}).to_string()).unwrap()
+        };
+        let original = proposal("new", 1000);
+        let key = original.proposal().progress_fingerprint(&a).unwrap();
+        assert_eq!(key, original.proposal().progress_fingerprint(&b).unwrap());
+        assert_eq!(
+            key,
+            proposal("new", 2000)
+                .proposal()
+                .progress_fingerprint(&a)
+                .unwrap()
+        );
+        assert_ne!(
+            key,
+            proposal("different", 1000)
+                .proposal()
+                .progress_fingerprint(&a)
+                .unwrap()
+        );
+        assert_ne!(
+            key,
+            original.proposal().progress_fingerprint(&changed).unwrap()
+        );
+        assert_ne!(
+            key,
+            original.proposal().progress_fingerprint(&scrolled).unwrap()
+        );
+        let snapshot = AgentBrowserToolProposal::Snapshot(AgentBrowserScopeProposal::Initial);
+        assert_eq!(
+            snapshot.progress_fingerprint(&a),
+            snapshot.progress_fingerprint(&b)
+        );
+        assert!(AgentBrowserToolProposal::Screenshot
+            .progress_fingerprint(&a)
+            .is_none());
+        assert!(AgentBrowserToolProposal::Extract {
+            scope: AgentBrowserScopeProposal::Initial,
+            schema: crate::SemanticExtractionSchemaId::new(1).unwrap()
+        }
+        .progress_fingerprint(&a)
+        .is_none());
+    }
+
+    #[test]
+    fn no_progress_refusal_preserves_the_exact_action_correlation_and_baseline() {
+        let observed = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document"},{"k":2,"p":0,"r":"textbox","n":"Query","v":{"k":"text","value":"old"},"o":11}
+            ]),
+        );
+        let cfg = config(AgentProviderKind::OpenAiResponses);
+        let turn = action_refusal_turn(&observed, cfg.clone(), "@a2");
+        let refusal = turn
+            .into_parts()
+            .1
+            .refuse_no_progress(&observed, &cfg)
+            .unwrap_or_else(|_| panic!("current owned proposal"));
+        let (_, transcript) = refusal
+            .bind(&observed, &cfg, "fresh bounded observation".into())
+            .unwrap();
+        let result: serde_json::Value =
+            serde_json::from_str(transcript.latest.tool_result()).unwrap();
+        assert_eq!(result["code"], "no_progress");
+        assert_eq!(result["executed"], false);
+        assert_eq!(result["observation_unchanged"], true);
+        let other = observation(context(), 2, 2, 2, "changed");
+        assert!(action_refusal_turn(&observed, cfg.clone(), "@a2")
+            .into_parts()
+            .1
+            .refuse_no_progress(&other, &cfg)
+            .is_err());
+    }
+
+    #[test]
     fn incompatible_click_outcome_returns_unissued_recovery_without_losing_target() {
         let observed = observation_with_nodes(
             context(),

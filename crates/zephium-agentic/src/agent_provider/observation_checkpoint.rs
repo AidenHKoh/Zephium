@@ -369,6 +369,29 @@ impl AgentProviderContinuation {
         ))
     }
 
+    /// Refuses an unchanged-page repetition before any native operation.
+    pub fn refuse_no_progress(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderObservationRefusal, Box<Self>> {
+        if config != &self.config
+            || !self.baseline.matches(observation)
+            || !matches!(
+                self.correlation.kind(),
+                AgentBrowserToolKind::Snapshot
+                    | AgentBrowserToolKind::Locate
+                    | AgentBrowserToolKind::Act
+            )
+        {
+            return Err(Box::new(self));
+        }
+        Ok(AgentProviderObservationRefusal(
+            self,
+            InspectionRefusal::NoProgress,
+        ))
+    }
+
     /// Retires the exact acknowledged Snapshot turn before native dispatch.
     pub fn retire_for_observation(
         self,
@@ -394,7 +417,7 @@ pub enum AgentProviderObservationResolution {
     Refused(Box<AgentProviderObservationRefusal>),
 }
 
-/// Move-only proof that one exact Snapshot proposal was refused before dispatch.
+/// Move-only proof that one exact semantic proposal was refused before dispatch.
 /// The provider call, correlation, configuration and baseline cannot be replaced.
 #[must_use]
 pub struct AgentProviderObservationRefusal(AgentProviderContinuation, InspectionRefusal);
@@ -405,6 +428,7 @@ enum InspectionRefusal {
     Limit,
     Unchanged,
     Streak,
+    NoProgress,
 }
 
 /// The scope a proposal can actually be captured with on this observation.
@@ -499,6 +523,7 @@ impl AgentProviderObservationRefusal {
             return Err(AgentProviderContinuationError::Baseline);
         }
         let (code, guidance) = match self.1 {
+            InspectionRefusal::NoProgress => ("no_progress", "Nothing executed. This same operation left the observed page unchanged and is barred on this state. Choose a different action, target or query; wait for a real change if still loading, or extract the evidence already available. Changing only verification or timeout does not make a different action."),
             InspectionRefusal::Limit => ("inspection_budget_exhausted", "The inspection budget for this document is exhausted. No capture occurred; current refs and retained evidence remain available. Read or extract available evidence, or navigate through an admitted observed link when the remaining navigation budget allows. Do not request another snapshot of this document."),
             InspectionRefusal::Repeated => ("repeated_snapshot_scope", "This scope and query were already inspected. No capture occurred and current refs remain valid. Inspect a different region, use text_search within a current eligible boundary, or follow an observed detail link when allowed. Extract only the evidence actually available; repeating this subtree does not advance truncated content."),
             InspectionRefusal::Unchanged => ("page_unchanged", "No capture occurred: you already took a whole look at this page and nothing was done since, so another initial snapshot shows the same page. Every look you took on this page stays evidence for extract, so you never need one back in view: if the requested values appeared in any of them, extract now. If the look shows a dialog or banner over the page (a sign-in offer, a cookie notice, a promotion), close it with its close, dismiss or reject control first. If the look shows next to nothing (a blank, blocked or rate-limited page), another look will not fill it: go back, open another address of the site, or extract what earlier pages showed. To see more of the page, scroll the document (act scroll on the document ref, direction down, amount page) or a list region, then look at what it shows; inspect a landmark or list with snapshot(subtree); or wait for a semantic change when the page is still loading."),

@@ -2068,7 +2068,7 @@ impl SemanticActionRuntimeDescriptor {
     }
 }
 
-fn hash_frame(hasher: &mut Sha256, frame: &SemanticFrameJoin) {
+pub(crate) fn hash_frame(hasher: &mut Sha256, frame: &SemanticFrameJoin) {
     let context = frame.context();
     let identity = context.identity();
     hasher.update(identity.id().bytes());

@@ -3150,6 +3150,7 @@ impl AgentWorkController {
         // fill value enters controller state. A repeat is told to change
         // approach; it is not the end of the page by itself.
         let mut action_refusals = Vec::<AgentProviderActionRefusalKey>::new();
+        let mut no_progress = NoProgress::default();
         // A control a single-page app re-renders comes back under a new
         // reference: counted by a digest of its role and name, a second
         // refusal tells the model to change approach.
@@ -3232,6 +3233,33 @@ impl AgentWorkController {
                     );
                     continue;
                 }
+            }
+            let progress_key = turn.turn.proposal().progress_fingerprint(&observation);
+            if no_progress.refuses(progress_key) {
+                state.native.check_control(worker, browser)?;
+                state.refresh_account(worker, browser)?;
+                state
+                    .journal_mut()?
+                    .emit(AgentWorkEventKind::InspectionRefused)?;
+                fruitless.refused(state)?;
+                let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                let refusal = turn
+                    .into_tool_turn()
+                    .into_parts()
+                    .1
+                    .refuse_no_progress(&observation, &session.config)
+                    .map_err(|_| {
+                        AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
+                    })?;
+                turn = Self::provider(
+                    &mut state.native,
+                    worker,
+                    browser,
+                    session.cancellation.clone(),
+                    session.continue_after_scope_refusal(refusal, &observation),
+                )
+                .await?;
+                continue;
             }
             let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
             if turn.turn.proposal().kind() == AgentBrowserToolKind::Snapshot {
@@ -3399,6 +3427,7 @@ impl AgentWorkController {
                 } else {
                     0
                 };
+                no_progress.remember(progress_key);
                 let next =
                     Self::inspect_current(state, worker, browser, checkpoint, &observation).await?;
                 observation = next.0;
@@ -3428,6 +3457,7 @@ impl AgentWorkController {
                 }
                 state.refresh_account(worker, browser)?;
                 let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                no_progress.remember(progress_key);
                 turn = Self::provider(
                     &mut state.native,
                     worker,
@@ -3448,7 +3478,10 @@ impl AgentWorkController {
                     match Self::screenshot_current(state, worker, browser, turn, &observation)
                         .await?
                     {
-                        Some(next) => turn = next,
+                        Some(next) => {
+                            no_progress.pending = None;
+                            turn = next;
+                        }
                         None => {
                             state.observation = Some(observation);
                             return Ok(());
@@ -3995,6 +4028,7 @@ impl AgentWorkController {
                     ))
                 }
             };
+            no_progress.remember(progress_key);
             Self::retain_action_read_evidence(state, &proposal, &observation, captured_at)?;
             let link = Self::clicked_link(state, proposal.action(), &observation);
             let typed = (proposal.action().kind() == SemanticActionKind::Fill
@@ -6486,6 +6520,38 @@ const AUTOMATIC_CHECK_SETTLE_MILLIS: [u64; 6] = [1_000; 6];
 /// back to the model with what to try instead.
 const MAX_FRUITLESS_STEPS: u8 = 8;
 
+type ProgressStamp = ([u8; 32], [u8; 32]);
+
+#[derive(Default)]
+struct NoProgress {
+    pending: Option<ProgressStamp>,
+    blocked: Vec<ProgressStamp>,
+}
+impl NoProgress {
+    fn refuses(&mut self, current: Option<ProgressStamp>) -> bool {
+        let Some(current) = current else {
+            return false;
+        };
+        if let Some(previous) = self.pending.take() {
+            if previous.0 == current.0 && !self.blocked.contains(&previous) {
+                if self.blocked.len() == 64 {
+                    self.blocked.remove(0);
+                }
+                self.blocked.push(previous);
+            }
+        }
+        if self.blocked.contains(&current) {
+            return true;
+        }
+        false
+    }
+    fn remember(&mut self, admitted: Option<ProgressStamp>) {
+        if let Some(admitted) = admitted {
+            self.pending = Some(admitted);
+        }
+    }
+}
+
 /// Counts refusals since the page last moved forward.
 #[derive(Default)]
 struct Fruitless(u8);
@@ -6520,6 +6586,46 @@ impl Fruitless {
 #[cfg(test)]
 mod fruitless_tests {
     use super::*;
+
+    #[test]
+    fn unchanged_operations_are_barred_before_a_second_dispatch_but_real_changes_are_allowed() {
+        let mut guard = NoProgress::default();
+        let a = ([1; 32], [10; 32]);
+        let different_action = ([1; 32], [11; 32]);
+        let changed_page = ([2; 32], [10; 32]);
+        let mut dispatched = 0;
+        for _ in 0..3 {
+            if !guard.refuses(Some(a)) {
+                dispatched += 1;
+                guard.remember(Some(a));
+            }
+        }
+        assert_eq!(dispatched, 1);
+        let mut through_read = NoProgress::default();
+        through_read.remember(Some(a));
+        assert!(!through_read.refuses(None));
+        through_read.remember(None);
+        assert!(
+            through_read.refuses(Some(a)),
+            "a cached read cannot reset the guard"
+        );
+        assert!(!guard.refuses(Some(different_action)));
+        guard.remember(Some(different_action));
+        assert!(!guard.refuses(Some(changed_page)));
+        guard.remember(Some(changed_page));
+        assert!(guard.refuses(Some(changed_page)));
+        assert!(
+            !guard.refuses(None),
+            "waiting, extracting and human control stay available"
+        );
+        for i in 0..200 {
+            let key = ([3; 32], [i as u8; 32]);
+            if !guard.refuses(Some(key)) {
+                guard.remember(Some(key));
+            }
+        }
+        assert!(guard.blocked.len() <= 64);
+    }
 
     #[test]
     fn only_a_long_run_of_refusals_with_nothing_done_ends_a_page() {

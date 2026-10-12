@@ -16,6 +16,7 @@ mod model_client;
 #[cfg(any(test, feature = "provider-transport"))]
 mod openai;
 mod pricing;
+mod progress;
 mod request;
 mod settlement;
 #[cfg(any(test, feature = "provider-transport"))]
