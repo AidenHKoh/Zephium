@@ -533,10 +533,12 @@ impl SemanticExtractionSchema {
                 && field.max_list_items().is_some_and(|items| items > 1))
     }
 
-    /// A read that decides over one whole-document capture: whole-page
-    /// findings, or a catalog whose rows lie below the first viewport.
+    /// Facts and records need a whole-document capture, including single
+    /// products whose identity or image metadata lies beyond the viewport.
     pub fn reads_whole_page(&self) -> bool {
-        self.is_whole_page_findings() || self.is_row_collection()
+        self.is_whole_page_findings()
+            || matches!(self.fields.as_slice(), [field]
+            if field.kind() == SemanticExtractionValueKind::Rows)
     }
 }
 
@@ -2826,6 +2828,23 @@ mod tests {
     use zephium_core::ids::ProfileId;
 
     #[cfg(feature = "probe-harness")]
+    #[test]
+    fn a_single_record_keeps_whole_page_evidence_without_enabling_listing_loading() {
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows(
+                "record".into(),
+                true,
+                vec![SemanticExtractionFieldSchema::try_text("name".into(), true, 128).unwrap()],
+                1,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        assert!(schema.reads_whole_page());
+        assert!(!schema.is_row_collection());
+    }
+
     #[test]
     fn native_name_probe_uses_only_exact_validated_public_name_sources() {
         use std::sync::{Arc, Mutex};
