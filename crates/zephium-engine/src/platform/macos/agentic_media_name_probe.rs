@@ -416,7 +416,8 @@ pub(super) fn instrument(source: &str) -> Option<String> {
         (
             r###"    const linkProofs=new WeakMap(),provenNames=new Set();"###,
             r###"    const pd=new Map(),pg=new Map(),pb=new WeakMap(),pl=new WeakMap();
-    for(const r of records)if(pd.size<32 && r.wire.r==="paragraph" && r.sensitivity!=="secret")pd.set(r.wire.k,[0,15,0,15,0]);
+    const priority=[...records.filter(r=>r.wire.r==="heading" && r.wire.l===1),...records.filter(r=>r.wire.r==="heading" && r.wire.l!==1),...records.filter(r=>r.wire.r!=="heading")];
+    for(const r of priority)if(pd.size<32 && ["heading","link","paragraph"].includes(r.wire.r) && r.sensitivity!=="secret")pd.set(r.wire.k,[0,15,0,15,0]);
     const mark=(r,at,reason,depth)=>{const d=pd.get(r.wire.k);if(d){d[at]=reason;d[at+1]=Math.min(8,depth);}};
     const linkProofs=new WeakMap(),provenNames=new Set();"###,
         ),
