@@ -29,7 +29,9 @@ pub use projection::{
 };
 pub use read::{untracked_document_address, DecisionLocatedRead, DecisionReadSelection};
 pub use results::{read_search_page, SearchPageRead, SEARCH_PAGE_RESULTS};
-pub use rows::DecisionRowDiscovery;
+pub use rows::{
+    native_listing_census, DecisionRowDiscovery, NativeListingCensus, NativeListingContinuation,
+};
 pub(super) use search::SearchDecisionRanking;
 pub use search::{search_enough_projection, search_reuse_projection, SearchQueryTerms};
 

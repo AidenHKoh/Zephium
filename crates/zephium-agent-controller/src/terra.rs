@@ -3083,9 +3083,25 @@ impl AgentBrowserSession {
         captured_at: zephium_agentic::SemanticCaptureInstant,
         schema: &zephium_agentic::SemanticExtractionSchema,
     ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
+        if self.initial_provider_started {
+            return Err(AgentBrowserProviderError::Continuation);
+        }
+        self.extract_owned_observation(observation, captured_at, schema, None)
+            .await
+    }
+
+    /// Maps fresh public evidence after bounded native loading; the existing
+    /// manifest, account and read admission still authorize every source.
+    pub(super) async fn extract_owned_observation<'a>(
+        &mut self,
+        observation: &'a zephium_agentic::SemanticObservation,
+        captured_at: zephium_agentic::SemanticCaptureInstant,
+        schema: &zephium_agentic::SemanticExtractionSchema,
+        retained: Option<&'a zephium_agentic::SemanticRetainedReadEvidence>,
+    ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
         use zephium_agentic::*;
         self.check_live()?;
-        if self.initial_provider_started || self.objective.is_none() {
+        if self.objective.is_none() || self.unverified_local_writes {
             return Err(AgentBrowserProviderError::Continuation);
         }
         if self.turns >= self.max_model_calls {
@@ -3105,6 +3121,12 @@ impl AgentBrowserSession {
             schema,
         )
         .map_err(AgentBrowserProviderError::Read)?;
+        let read = match retained {
+            Some(retained) => retained
+                .merge_for_extraction(read)
+                .map_err(AgentBrowserProviderError::Read)?,
+            None => read,
+        };
         if read.fragments().is_empty() {
             return Err(AgentBrowserProviderError::NoExtractionEvidence);
         }

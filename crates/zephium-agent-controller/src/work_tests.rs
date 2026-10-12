@@ -513,6 +513,10 @@ fn production_form_initial_completion_or_missing_field_never_calls_provider() {
     }
 }
 #[cfg(feature = "probe-harness")]
+#[path = "work_listing_tests.rs"]
+mod listing_tests;
+
+#[cfg(feature = "probe-harness")]
 #[path = "work_combined_tests.rs"]
 mod combined_tests;
 #[cfg(feature = "probe-harness")]
@@ -850,6 +854,8 @@ fn input_with_navigation_account(
 enum Fault {
     PlainRead,
     #[cfg(feature = "probe-harness")]
+    Listing,
+    #[cfg(feature = "probe-harness")]
     DecisionClick(bool),
     #[cfg(feature = "probe-harness")]
     DecisionTargetChanged,
@@ -1088,6 +1094,16 @@ impl AgentBrowserPort for Port {
             let mut value: serde_json::Value = serde_json::from_str(&wire).unwrap();
             value["n"].as_array_mut().unwrap().push(serde_json::json!({"k":3,"p":0,"r":"paragraph","t":"This is ordinary public reference text. ".repeat(40),"fc":true}));
             serde_json::to_string(&value).unwrap()
+        } else {
+            wire
+        };
+        #[cfg(feature = "probe-harness")]
+        let wire = if self.fault == Fault::Listing {
+            listing_tests::wire(
+                correlation.invocation().get(),
+                correlation.snapshot_generation().get(),
+                lock(&self.calls).contains(&7),
+            )
         } else {
             wire
         };
@@ -1359,7 +1375,7 @@ impl AgentBrowserPort for Port {
                 completion(request.fail(SemanticActionNativeFailure::TargetChanged, now));
                 return ContextDispatch::Scheduled;
             }
-            Fault::DecisionClick(_) => {
+            Fault::DecisionClick(_) | Fault::Listing => {
                 let now = request.requested_at();
                 let geometry = request.expected_geometry();
                 completion(request.complete(
@@ -2102,6 +2118,8 @@ enum ProviderFault {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExtractionFault {
     Direct,
+    Listing,
+    ListingDenied,
     None,
     RoleSelection,
     EmptyEvidence,
@@ -2850,6 +2868,12 @@ fn provider_fixture_with_discovery_account(
     if let Some(clock) = account_clock {
         approved.settings.clock = clock;
     }
+    if matches!(
+        fault,
+        ProviderFault::Extraction(ExtractionFault::Listing | ExtractionFault::ListingDenied)
+    ) {
+        approved.settings.clock = Arc::new(listing_tests::WallClock(Instant::now()));
+    }
     let task: Box<dyn AgentWorkTask> = if let Some(value) = form {
         Box::new(
             crate::AgentWorkFormTask::try_new_local_preparation(
@@ -2966,28 +2990,43 @@ fn provider_fixture_with_discovery_account(
             ready: None,
         })
     } else if let ProviderFault::Extraction(extraction_fault) = fault {
-        let field = if extraction_fault == ExtractionFault::Direct {
+        let field = if matches!(
+            extraction_fault,
+            ExtractionFault::Listing | ExtractionFault::ListingDenied
+        ) {
+            listing_tests::schema()
+        } else if extraction_fault == ExtractionFault::Direct {
             SemanticExtractionFieldSchema::try_text_list("label".into(), true, 4, 128).unwrap()
         } else {
             SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()
         };
         let extraction =
             AgentWorkExtractionTask::try_new(vec![field], AgentAccountScope::Anonymous).unwrap();
-        Box::new(if extraction_fault == ExtractionFault::Direct {
-            extraction.with_direct_extraction()
-        } else if extraction_fault == ExtractionFault::EmptyEvidence {
-            // The native snapshot is valid but none of its fields qualify as
-            // evidence under the trusted schema's role selection.
-            extraction.with_source_roles(
-                SemanticReadRoleSelection::try_new(&[SemanticRole::Paragraph]).unwrap(),
-            )
-        } else if extraction_fault == ExtractionFault::RoleSelection {
-            extraction.with_source_roles(
-                SemanticReadRoleSelection::try_new(&[SemanticRole::Textbox]).unwrap(),
-            )
+        if matches!(
+            extraction_fault,
+            ExtractionFault::Listing | ExtractionFault::ListingDenied
+        ) {
+            Box::new(listing_tests::ListingTask(
+                extraction,
+                extraction_fault == ExtractionFault::ListingDenied,
+            )) as Box<dyn AgentWorkTask>
         } else {
-            extraction
-        })
+            Box::new(if extraction_fault == ExtractionFault::Direct {
+                extraction.with_direct_extraction()
+            } else if extraction_fault == ExtractionFault::EmptyEvidence {
+                // The native snapshot is valid but none of its fields qualify as
+                // evidence under the trusted schema's role selection.
+                extraction.with_source_roles(
+                    SemanticReadRoleSelection::try_new(&[SemanticRole::Paragraph]).unwrap(),
+                )
+            } else if extraction_fault == ExtractionFault::RoleSelection {
+                extraction.with_source_roles(
+                    SemanticReadRoleSelection::try_new(&[SemanticRole::Textbox]).unwrap(),
+                )
+            } else {
+                extraction
+            })
+        }
     } else if fault == ProviderFault::HumanExtractionRequest {
         Box::new(HumanExtraction(
             AgentWorkExtractionTask::try_new(
@@ -3046,6 +3085,11 @@ fn provider_fixture_with_discovery_account(
     }
     let native_fault = if fault == ProviderFault::Extraction(ExtractionFault::Direct) {
         Fault::PlainRead
+    } else if matches!(
+        fault,
+        ProviderFault::Extraction(ExtractionFault::Listing | ExtractionFault::ListingDenied)
+    ) {
+        Fault::Listing
     } else if let ProviderFault::Navigation(fault) = fault {
         Fault::Navigation(fault)
     } else if let ProviderFault::Read(fault) = fault {
@@ -3206,6 +3250,19 @@ fn provider_fixture_with_discovery_account(
             requests / 2
         );
         combined_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);
+        return;
+    }
+    if matches!(
+        fault,
+        ProviderFault::Extraction(ExtractionFault::Listing | ExtractionFault::ListingDenied)
+    ) {
+        listing_tests::assert_result(
+            outcome,
+            shutdown,
+            &calls,
+            fault == ProviderFault::Extraction(ExtractionFault::ListingDenied),
+        );
+        assert_eq!(server.join().unwrap(), 2);
         return;
     }
     if fault == ProviderFault::Extraction(ExtractionFault::Direct) {
@@ -3707,7 +3764,16 @@ fn extraction_stream(fault: ExtractionFault) -> String {
     } else {
         "@r1"
     };
-    let value = if fault == ExtractionFault::Direct {
+    let value = if matches!(
+        fault,
+        ExtractionFault::Listing | ExtractionFault::ListingDenied
+    ) {
+        listing_tests::mapped_rows(if fault == ExtractionFault::ListingDenied {
+            2
+        } else {
+            3
+        })
+    } else if fault == ExtractionFault::Direct {
         format!(
             r#"{{"k":"text_list","items":[{{"value":"Field","sources":["{source}"]}}],"sources":["{source}"]}}"#
         )

@@ -3887,3 +3887,86 @@ fn owned_initial_extraction_requires_native_taint_and_the_exact_lease_without_a_
         }
     }
 }
+fn listing_census_fixture(extra: Vec<Value>) -> SemanticObservation {
+    let (_, call, previous, _) = admitted_fixture();
+    let mut nodes = vec![
+        json!({"k":1,"r":"document","o":16,"fc":true}),
+        json!({"k":2,"p":0,"r":"list","fc":true}),
+        json!({"k":3,"p":1,"r":"list_item","fc":true}),
+        json!({"k":4,"p":2,"r":"heading","l":2,"n":"First record","fc":true}),
+        json!({"k":5,"p":3,"r":"link","n":"First record","u":"https://example.test/item?id=1","o":1,"fc":true}),
+        json!({"k":6,"p":1,"r":"list_item","fc":true}),
+        json!({"k":7,"p":5,"r":"heading","l":2,"n":"Second record","fc":true}),
+        json!({"k":8,"p":6,"r":"link","n":"Second record","u":"https://example.test/item?id=2","o":1,"fc":true}),
+    ];
+    nodes.extend(extra);
+    let snapshot = decode_semantic_snapshot(
+        SemanticDecodeContext::new(
+            SemanticInvocationId::new(1).unwrap(),
+            previous.frames()[0].frame().clone(),
+            SemanticSnapshotGeneration::new(1).unwrap(),
+        ),
+        &serde_json::to_vec(
+            &json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":nodes}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    SemanticObservationAssembler::new(
+        SemanticObservationRequest::initial(
+            SemanticObservationId::new(1).unwrap(),
+            call.account().context(),
+            SemanticObservationBudget::try_new(128, 8192, 1).unwrap(),
+        ),
+        snapshot,
+    )
+    .unwrap()
+    .finish()
+    .unwrap()
+}
+
+#[test]
+fn native_listing_counts_distinct_full_destinations_without_a_decision_model() {
+    let observation = listing_census_fixture(vec![]);
+    let census = native_listing_census(&observation);
+    assert_eq!(census.identities.len(), 2);
+    assert_ne!(census.identities[0], census.identities[1]);
+    assert_eq!(
+        census.scroll,
+        Some(observation.frames()[0].nodes()[0].reference())
+    );
+    assert!(!census.limited);
+    assert!(census.continuation.is_none());
+}
+
+#[test]
+fn native_listing_continuations_exclude_record_actions_and_navigation_noise() {
+    let observation = listing_census_fixture(vec![
+        json!({"k":9,"p":2,"r":"button","n":"Load more","o":1,"fc":true}),
+        json!({"k":10,"p":0,"r":"landmark","lm":"banner","fc":true}),
+        json!({"k":11,"p":9,"r":"link","n":"Next page","u":"https://example.test/ad","o":1,"fc":true}),
+        json!({"k":12,"p":0,"r":"link","n":"Next","u":"https://example.test/unrelated","o":1,"fc":true}),
+        json!({"k":13,"p":0,"r":"landmark","lm":"navigation","n":"Pagination","fc":true}),
+        json!({"k":14,"p":12,"r":"link","n":"Next","u":"https://example.test/?page=2","o":1,"fc":true}),
+    ]);
+    let census = native_listing_census(&observation);
+    assert_eq!(census.identities.len(), 2);
+    assert_eq!(
+        census.continuation,
+        Some(NativeListingContinuation::NextPage(
+            observation.frames()[0].nodes()[13].reference()
+        ))
+    );
+}
+
+#[test]
+fn native_listing_leaves_modal_pages_to_the_existing_handoff_and_consent_path() {
+    let observation = listing_census_fixture(vec![
+        json!({"k":9,"p":0,"r":"dialog","n":"Sign in","fc":true}),
+    ]);
+    let census = native_listing_census(&observation);
+    assert!(census.limited);
+    assert!(
+        census.identities.is_empty() && census.scroll.is_none() && census.continuation.is_none()
+    );
+}

@@ -941,3 +941,190 @@ mod facts_tests {
         );
     }
 }
+
+/// A structural census, not a claim that candidates satisfy the person's goal.
+/// It grants no capture, navigation or action authority.
+pub struct NativeListingCensus {
+    /// Distinct observed record destinations, hashed without exposing page values.
+    pub identities: Vec<[u8; 32]>,
+    /// Current document scroll target, when the snapshot advertises it.
+    pub scroll: Option<SemanticReferenceId>,
+    /// Observed continuation outside the individual record subtrees.
+    pub continuation: Option<NativeListingContinuation>,
+    /// A hard structural bound or modal prevents automatic completion.
+    pub limited: bool,
+}
+
+/// A candidate control; the task must still assess its effect before dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeListingContinuation {
+    /// Follow this observed link through the ordinary navigation policy.
+    NextPage(SemanticReferenceId),
+    /// Activate through the ordinary action policy; never approve it implicitly.
+    LoadMore(SemanticReferenceId),
+}
+
+/// Finds repeated linked records and bounded continuation controls without a model.
+pub fn native_listing_census(observation: &SemanticObservation) -> NativeListingCensus {
+    use sha2::{Digest, Sha256};
+    let mut result = NativeListingCensus {
+        identities: vec![],
+        scroll: None,
+        continuation: None,
+        limited: false,
+    };
+    let Some(frame) = observation
+        .frames()
+        .first()
+        .filter(|_| observation.frames().len() == 1)
+    else {
+        result.limited = true;
+        return result;
+    };
+    let nodes = frame.nodes();
+    if nodes.len() > 2048 || nodes.iter().any(|node| node.role() == SemanticRole::Dialog) {
+        result.limited = true;
+        return result;
+    }
+    let mut depths = vec![0usize; nodes.len()];
+    let mut outside = vec![false; nodes.len()];
+    for (index, node) in nodes.iter().enumerate() {
+        if let Some(parent) = node.parent().map(usize::from) {
+            if parent >= index || depths[parent] >= 64 {
+                result.limited = true;
+                return result;
+            }
+            depths[index] = depths[parent] + 1;
+            outside[index] = outside[parent];
+        }
+        outside[index] |= matches!(
+            node.landmark_kind(),
+            Some(
+                SemanticLandmarkKind::Banner
+                    | SemanticLandmarkKind::Navigation
+                    | SemanticLandmarkKind::Contentinfo
+            )
+        );
+    }
+    result.scroll = nodes
+        .first()
+        .filter(|node| {
+            node.role() == SemanticRole::Document
+                && node.operations().contains(SemanticOperationClass::Scroll)
+        })
+        .map(SemanticNode::reference);
+    let references: BTreeSet<_> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(i, node)| !outside[*i] && node.sensitivity() == SemanticSensitivity::Public)
+        .map(|(_, node)| node.reference())
+        .collect();
+    let mut roots = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut examined = 0;
+    for group in row_groups(observation, &references)
+        .into_iter()
+        .filter(|group| group.rank >= 2)
+    {
+        for root in group.rows {
+            examined += 1;
+            if examined > 64 {
+                result.limited = true;
+                break;
+            }
+            let Some(pick) = row_pick(nodes, root, &references) else {
+                continue;
+            };
+            let Some(link) = pick
+                .link
+                .and_then(|reference| nodes.iter().find(|node| node.reference() == reference))
+                .and_then(SemanticNode::link_destination)
+            else {
+                continue;
+            };
+            let digest: [u8; 32] = Sha256::digest(link.as_url().as_str().as_bytes()).into();
+            if seen.insert(digest) {
+                result.identities.push(digest);
+                roots.push(root);
+            }
+        }
+        if result.limited {
+            break;
+        }
+    }
+    if roots.is_empty() {
+        return result;
+    }
+    for (index, node) in nodes.iter().enumerate() {
+        if !matches!(node.role(), SemanticRole::Button | SemanticRole::Link)
+            || node.sensitivity() != SemanticSensitivity::Public
+            || node.states().contains(SemanticState::Disabled)
+            || !node.operations().contains(SemanticOperationClass::Click)
+            || node
+                .form()
+                .is_some_and(|form| form.method() != SemanticFormMethod::Get)
+            || ancestors(nodes, index).any(|ancestor| {
+                roots.contains(&ancestor)
+                    || matches!(
+                        nodes[ancestor].landmark_kind(),
+                        Some(SemanticLandmarkKind::Banner | SemanticLandmarkKind::Contentinfo)
+                    )
+            })
+        {
+            continue;
+        }
+        let Some(name) = node
+            .name()
+            .map(|name| name.as_str())
+            .filter(|name| name.len() <= 80)
+        else {
+            continue;
+        };
+        let name = name
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        let explicit_next = matches!(
+            name.as_str(),
+            "next page"
+                | "next results"
+                | "następna strona"
+                | "nächste seite"
+                | "page suivante"
+                | "volgende pagina"
+        );
+        let pager = ancestors(nodes, index).any(|ancestor| {
+            nodes[ancestor].landmark_kind() == Some(SemanticLandmarkKind::Navigation)
+                && nodes[ancestor].name().is_some_and(|name| {
+                    matches!(
+                        name.as_str().to_lowercase().as_str(),
+                        "pagination" | "pages" | "results pages"
+                    )
+                })
+        });
+        if node.role() == SemanticRole::Link
+            && node.link_destination().is_some()
+            && (explicit_next || (name == "next" && pager))
+        {
+            result.continuation = Some(NativeListingContinuation::NextPage(node.reference()));
+            break;
+        }
+        if node.role() == SemanticRole::Button
+            && matches!(
+                name.as_str(),
+                "load more"
+                    | "show more results"
+                    | "load more results"
+                    | "pokaż więcej"
+                    | "załaduj więcej"
+                    | "mehr laden"
+                    | "afficher plus de résultats"
+            )
+        {
+            result.continuation = Some(NativeListingContinuation::LoadMore(node.reference()));
+            break;
+        }
+    }
+    result
+}

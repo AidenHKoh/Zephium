@@ -29,6 +29,8 @@ use challenge::{known_check, KnownCheck};
 mod decision;
 #[path = "work_inspection.rs"]
 mod inspection;
+#[path = "work_listing.rs"]
+mod listing;
 #[path = "work_navigation.rs"]
 mod navigation;
 
@@ -3891,9 +3893,16 @@ impl AgentWorkController {
                             proposed: AgentBrowserToolKind::Extract,
                         });
                     }
-                    Self::extract_current(state, worker, browser, step, &observation, captured_at)
-                        .await?;
-                    state.observation = Some(observation);
+                    let loaded = Self::extract_current(
+                        state,
+                        worker,
+                        browser,
+                        step,
+                        &observation,
+                        captured_at,
+                    )
+                    .await?;
+                    state.observation = Some(loaded.unwrap_or(observation));
                     return Ok(());
                 }
                 AgentBrowserToolKind::Act => {
@@ -4751,6 +4760,15 @@ impl AgentWorkController {
             }
             Err(error) => return Err(error),
         };
+        let captured_at = SemanticCaptureInstant::from_millis(
+            state
+                .journal_mut()?
+                .clock
+                .now()
+                .map_err(|_| AgentWorkFailure::Contract)?
+                .millis(),
+        );
+        Self::retain_action_read_evidence(state, &proposal, observation, captured_at)?;
         state
             .journal_mut()?
             .emit(AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Act))?;
@@ -5229,12 +5247,12 @@ impl AgentWorkController {
         turn: AgentBrowserProviderTurn,
         observation: &SemanticObservation,
         captured_at: SemanticCaptureInstant,
-    ) -> Result<(), AgentWorkFailure> {
+    ) -> Result<Option<SemanticObservation>, AgentWorkFailure> {
         state.check_task_contract()?;
         let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
         session.check_live().map_err(AgentWorkFailure::Browser)?;
-        // Original delivered baseline and original admitted account; neither
-        // can be minted or refreshed later by the local media owner.
+        // Keep the original run's capture capability and account authority.
+        // Native listing reads bind their newly admitted observation below.
         let record_crop_baseline = turn.turn.continuation().baseline().clone();
         // Model-picture preference is independent of the existing local crop
         // authority. Preserve only the original Sensitive+model capability gate.
@@ -5249,6 +5267,82 @@ impl AgentWorkController {
                 AgentBrowserProviderError::TurnLimit,
             ));
         }
+        let mut completed_listing = if matches!(turn.turn.proposal(),
+            AgentBrowserToolProposal::Extract { scope: AgentBrowserScopeProposal::Initial, schema }
+                if state.extraction_schema.as_ref().is_some_and(|expected| expected.id() == *schema && expected.is_row_collection()))
+            && turn
+                .turn
+                .continuation()
+                .baseline()
+                .authenticates(observation)
+        {
+            if observation
+                .frames()
+                .first()
+                .and_then(|frame| frame.nodes().first())
+                .is_some_and(|node| node.role() != SemanticRole::Document)
+            {
+                let schema = state
+                    .extraction_schema
+                    .as_ref()
+                    .ok_or(AgentWorkFailure::Contract)?;
+                let read = read_semantic_observation_for_schema(
+                    observation,
+                    SemanticReadAuthority::Acknowledged(turn.turn.continuation().baseline()),
+                    captured_at,
+                    SemanticReadSensitivityLimit::PublicOnly,
+                    SemanticReadBudget::EXTRACTION,
+                    schema,
+                )
+                .map_err(|error| {
+                    AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
+                })?;
+                state
+                    .retained_read_evidence
+                    .retain(&read, turn.turn.continuation().baseline())
+                    .map_err(|error| {
+                        AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
+                    })?;
+            }
+            let loaded = Box::pin(Self::load_listing(
+                state,
+                worker,
+                browser,
+                observation.clone(),
+            ))
+            .await?;
+            (loaded != *observation).then_some(loaded)
+        } else {
+            None
+        };
+        if let Some(loaded) = completed_listing.take() {
+            if state.human_request && Self::raise_human_wall(state, &loaded)? {
+                return Ok(Some(loaded));
+            }
+            if looks_like_human_challenge(&loaded) {
+                let (loaded, held) =
+                    Self::settle_human_challenge(state, worker, browser, loaded).await?;
+                if held {
+                    return Ok(Some(loaded));
+                }
+                completed_listing = Some(loaded);
+            } else {
+                completed_listing = Some(loaded);
+            }
+        }
+        let observation = completed_listing.as_ref().unwrap_or(observation);
+        let captured_at = if completed_listing.is_some() {
+            SemanticCaptureInstant::from_millis(
+                state
+                    .journal_mut()?
+                    .clock
+                    .now()
+                    .map_err(|_| AgentWorkFailure::Contract)?
+                    .millis(),
+            )
+        } else {
+            captured_at
+        };
         let expanded = if matches!(
             turn.turn.proposal(),
             AgentBrowserToolProposal::Extract {
@@ -5319,7 +5413,8 @@ impl AgentWorkController {
         // canvas, a gallery, prices drawn as images) is mapped with one
         // viewport screenshot beside its text, when the model can see. The
         // image is best effort: without it the mapping runs as before.
-        let mut viewport = if expanded.is_none()
+        let mut viewport = if completed_listing.is_none()
+            && expanded.is_none()
             && state.viewport_screenshot
             && state.native.screenshot_pending.is_none()
             && state
@@ -5345,7 +5440,7 @@ impl AgentWorkController {
             .await
             {
                 Ok(Some(screenshot)) => Some(screenshot),
-                Ok(None) => return Ok(()),
+                Ok(None) => return Ok(None),
                 Err(
                     AgentWorkFailure::Screenshot(_)
                     | AgentWorkFailure::ScreenshotRequest(_)
@@ -5383,27 +5478,44 @@ impl AgentWorkController {
                 viewport = None;
             }
         }
-        let result = Self::provider(
-            &mut state.native,
-            worker,
-            browser,
-            session.cancellation.clone(),
-            session.extract_from_with_evidence(
-                turn,
-                source,
-                expanded.as_ref().map(|_| observation),
-                &frames,
-                captured_at,
-                schema,
-                if state.progressive_observation || state.navigation_discovery.is_some() {
-                    Some(&state.retained_read_evidence)
-                } else {
-                    None
-                },
-                viewport.as_ref(),
-            ),
-        )
-        .await?;
+        let result = if completed_listing.is_some() {
+            Self::provider(
+                &mut state.native,
+                worker,
+                browser,
+                session.cancellation.clone(),
+                session.extract_owned_observation(
+                    source,
+                    captured_at,
+                    schema,
+                    Some(&state.retained_read_evidence),
+                ),
+            )
+            .await?
+        } else {
+            let result = Self::provider(
+                &mut state.native,
+                worker,
+                browser,
+                session.cancellation.clone(),
+                session.extract_from_with_evidence(
+                    turn,
+                    source,
+                    expanded.as_ref().map(|_| observation),
+                    &frames,
+                    captured_at,
+                    schema,
+                    if state.progressive_observation || state.navigation_discovery.is_some() {
+                        Some(&state.retained_read_evidence)
+                    } else {
+                        None
+                    },
+                    viewport.as_ref(),
+                ),
+            )
+            .await?;
+            result
+        };
         let dropped = result.stats().dropped();
         if state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete {
             return Err(AgentWorkFailure::Contract);
@@ -5412,6 +5524,15 @@ impl AgentWorkController {
         let mut owned = result
             .into_owned()
             .map_err(|_| AgentWorkFailure::Contract)?;
+        let record_crop_baseline = if completed_listing.is_some() {
+            // Owned extraction already admitted and mapped this exact public
+            // observation. This updates source identity, never capture authority.
+            SemanticObservationAcknowledgement::whole_page_scope(source)
+                .ok_or(AgentWorkFailure::Contract)?
+                .0
+        } else {
+            record_crop_baseline
+        };
         if state.viewport_screenshot && record_crop_config.permits_viewport_screenshot() {
             state.native.check_control(worker, browser)?;
             if let Some(current) = state
@@ -5467,7 +5588,7 @@ impl AgentWorkController {
                 .journal_mut()?
                 .emit(AgentWorkEventKind::ExtractionDropped { values: dropped })?;
         }
-        Ok(())
+        Ok(completed_listing)
     }
 
     async fn close_context(

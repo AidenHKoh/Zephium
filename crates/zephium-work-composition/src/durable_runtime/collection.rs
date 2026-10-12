@@ -480,14 +480,26 @@ impl WorkBrowseCollectionSchema {
                 },
             })
             .collect();
+        let mut notes = vec![if subjects.len() < self.max_items {
+            format!("Work validated {} records against a limit of {}; additional matches may exist or remain unread.", subjects.len(), self.max_items)
+        } else {
+            "Observed records only; this collection does not establish complete site coverage."
+                .into()
+        }];
+        if cells
+            .iter()
+            .flatten()
+            .any(|cell| matches!(cell.value, WorkCellValue::Unknown))
+        {
+            notes.push(
+                "Some requested values were not observed; unknown cells remain empty.".into(),
+            );
+        }
         Ok(WorkArtifactDataV1::ComparisonMatrix {
             subjects,
             criteria,
             cells,
-            notes: vec![
-                "Observed records only; this collection does not establish complete site coverage."
-                    .into(),
-            ],
+            notes,
         })
     }
 }
@@ -703,6 +715,34 @@ mod tests {
             matches!(&cells[0][1].value, WorkCellValue::Text { text } if text == "https://www.lego.com/london.png")
         );
         assert_eq!(cells[0][1].evidence, [0, 1]);
+    }
+
+    #[test]
+    fn short_collection_reports_validated_count_and_missing_values_without_claiming_page_exhaustion(
+    ) {
+        let request: WorkBrowseCollection = serde_json::from_value(serde_json::json!({
+            "title":"Results", "max_items":3, "columns":[
+                {"name":"price","required":false,"value":{"kind":"text"}},
+                {"name":"url","required":true,"value":{"kind":"url"}}
+            ]
+        }))
+        .unwrap();
+        let schema = WorkBrowseCollectionSchema::try_from(&request).unwrap();
+        let rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([[
+            {"name":"name","value":{"kind":"text","value":"Observed item","sources":[1]}},
+            {"name":"url","value":{"kind":"url","value":"https://example.test/item?variant=2","sources":[2]}}
+        ]])).unwrap();
+        let data = schema
+            .comparison(&rows, &mut |ids| Ok(ids.iter().map(|id| id - 1).collect()))
+            .unwrap();
+        data.validate(2).unwrap();
+        let WorkArtifactDataV1::ComparisonMatrix { notes, cells, .. } = data else {
+            panic!()
+        };
+        assert!(notes[0].contains("validated 1 records against a limit of 3"));
+        assert!(notes[0].contains("additional matches may exist or remain unread"));
+        assert!(notes[1].contains("unknown cells remain empty"));
+        assert!(matches!(cells[0][0].value, WorkCellValue::Unknown));
     }
 
     #[test]
