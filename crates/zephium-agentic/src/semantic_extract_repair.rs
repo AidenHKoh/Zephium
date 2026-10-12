@@ -21,6 +21,7 @@ use crate::{
 pub(crate) struct NormalizedExtraction {
     pub(crate) value: Value,
     pub(crate) dropped: usize,
+    pub(crate) ambiguous_records: bool,
 }
 
 /// `None` when the bytes hold no JSON object at all.
@@ -56,7 +57,13 @@ pub(crate) fn normalize_extraction_output(
             _ => Value::Object(root),
         },
     };
-    let fields = normalize_fields(schema.fields(), fields_value, &mut dropped);
+    let mut ambiguous_records = false;
+    let fields = normalize_fields(
+        schema.fields(),
+        fields_value,
+        &mut dropped,
+        &mut ambiguous_records,
+    );
     let mut output = Map::new();
     output.insert("v".into(), version);
     output.insert("schema".into(), schema_id);
@@ -64,6 +71,7 @@ pub(crate) fn normalize_extraction_output(
     Some(NormalizedExtraction {
         value: Value::Object(output),
         dropped,
+        ambiguous_records,
     })
 }
 
@@ -95,6 +103,7 @@ fn normalize_fields(
     schemas: &[SemanticExtractionFieldSchema],
     raw: Value,
     dropped: &mut usize,
+    ambiguous_records: &mut bool,
 ) -> Vec<Value> {
     let entries: Vec<(String, Value)> = match raw {
         Value::Array(items) => items
@@ -142,7 +151,7 @@ fn normalize_fields(
         if slots[index].is_some() || value.is_null() {
             continue;
         }
-        if let Some(value) = normalize_value(&schemas[index], value, dropped) {
+        if let Some(value) = normalize_value(&schemas[index], value, dropped, ambiguous_records) {
             slots[index] = Some(value);
         }
     }
@@ -243,12 +252,65 @@ fn scalar_text(value: Value) -> Option<String> {
     }
 }
 
+fn split_complete_record_groups(
+    schemas: &[SemanticExtractionFieldSchema],
+    fields: &Value,
+) -> Option<Vec<Value>> {
+    let fields = fields.as_array()?;
+    let width = schemas.len();
+    if width == 0 || fields.len() <= width || !fields.len().is_multiple_of(width) {
+        return None;
+    }
+    if !fields.chunks_exact(width).all(|group| {
+        group
+            .iter()
+            .zip(schemas)
+            .all(|(field, schema)| field.get("name").and_then(Value::as_str) == Some(schema.name()))
+    }) {
+        return None;
+    }
+    let mut identities = Vec::new();
+    for group in fields.chunks_exact(width) {
+        if identities.contains(&&group[0]) {
+            return None;
+        }
+        identities.push(&group[0]);
+    }
+    Some(
+        fields
+            .chunks_exact(width)
+            .map(|group| Value::Array(group.to_vec()))
+            .collect(),
+    )
+}
+
+fn duplicate_record_fields(schemas: &[SemanticExtractionFieldSchema], fields: &Value) -> bool {
+    let Some(fields) = fields.as_array() else {
+        return false;
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    fields.iter().any(|field| {
+        if field.get("value").is_some_and(Value::is_null) {
+            return false;
+        }
+        let Some(name) = field.get("name").and_then(Value::as_str) else {
+            return false;
+        };
+        let key = field_key(name);
+        schemas
+            .iter()
+            .position(|schema| field_key(schema.name()) == key)
+            .is_some_and(|index| !seen.insert(index))
+    })
+}
+
 /// One value in the canonical tagged shape of its trusted field kind, or
 /// `None` when nothing of that kind can be read from it.
 fn normalize_value(
     field: &SemanticExtractionFieldSchema,
     raw: Value,
     dropped: &mut usize,
+    ambiguous_records: &mut bool,
 ) -> Option<Value> {
     let kind = field.kind();
     if kind == SemanticExtractionValueKind::Rows {
@@ -265,24 +327,31 @@ fn normalize_value(
             _ => return None,
         };
         let children = field.row_fields().unwrap_or_default();
-        let items: Vec<Value> = items
-            .into_iter()
-            .filter_map(|item| {
-                let fields = match item {
-                    Value::Object(mut object) => match object.remove("fields") {
-                        Some(fields) => fields,
-                        None => Value::Object(object),
-                    },
-                    Value::Array(fields) => Value::Array(fields),
-                    _ => {
-                        *dropped += 1;
-                        return None;
-                    }
-                };
-                let fields = normalize_fields(children, fields, dropped);
-                Some(serde_json::json!({"fields": fields}))
-            })
-            .collect();
+        let mut rows = Vec::new();
+        for item in items {
+            let fields = match item {
+                Value::Object(mut object) => match object.remove("fields") {
+                    Some(fields) => fields,
+                    None => Value::Object(object),
+                },
+                Value::Array(fields) => Value::Array(fields),
+                _ => {
+                    *dropped += 1;
+                    continue;
+                }
+            };
+            // Only complete, ordered repetitions of the declared columns have
+            // unambiguous record boundaries. Every source/value is still admitted.
+            if let Some(groups) = split_complete_record_groups(children, &fields) {
+                for group in groups {
+                    rows.push(serde_json::json!({"fields": normalize_fields(children, group, dropped, ambiguous_records)}));
+                }
+            } else {
+                *ambiguous_records |= duplicate_record_fields(children, &fields);
+                rows.push(serde_json::json!({"fields": normalize_fields(children, fields, dropped, ambiguous_records)}));
+            }
+        }
+        let items = rows;
         return Some(serde_json::json!({"k": "rows", "items": items}));
     }
     let mut object = match raw {
@@ -491,6 +560,81 @@ pub(crate) fn parse_unsigned(text: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn three_listing_schema() -> SemanticExtractionSchema {
+        SemanticExtractionSchema::try_new(
+            crate::SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows(
+                "listings".into(),
+                true,
+                vec![
+                    SemanticExtractionFieldSchema::try_text("name".into(), true, 200).unwrap(),
+                    SemanticExtractionFieldSchema::try_url("url".into(), true, 2048).unwrap(),
+                    SemanticExtractionFieldSchema::try_text("price".into(), false, 64).unwrap(),
+                ],
+                3,
+            )
+            .unwrap()],
+        )
+        .unwrap()
+    }
+
+    fn flattened_listings() -> Value {
+        let fields: Vec<Value> = (0..3).flat_map(|index| [
+            serde_json::json!({"name":"name","value":{"k":"text","value":format!("Listing {index}"),"sources":[format!("@r{}",index*3+1)]}}),
+            serde_json::json!({"name":"url","value":{"k":"url","sources":[format!("@r{}",index*3+2)]}}),
+            serde_json::json!({"name":"price","value":{"k":"text","value":format!("{} EUR",100+index),"sources":[format!("@r{}",index*3+3)]}}),
+        ]).collect();
+        serde_json::json!({"fields":[{"name":"listings","value":{"k":"rows","items":[{"fields":fields}]}}]})
+    }
+
+    #[test]
+    fn complete_record_groups_flattened_into_one_row_are_not_collapsed() {
+        let output = flattened_listings();
+        let repaired = normalize_extraction_output(
+            &three_listing_schema(),
+            &serde_json::to_vec(&output).unwrap(),
+        )
+        .unwrap();
+        let rows = repaired.value["fields"][0]["value"]["items"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            3,
+            "three supplied identities must not become one record"
+        );
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(
+                row["fields"].as_array().unwrap(),
+                &output["fields"][0]["value"]["items"][0]["fields"]
+                    .as_array()
+                    .unwrap()[index * 3..index * 3 + 3]
+            );
+        }
+        assert_eq!(repaired.dropped, 0);
+    }
+
+    #[test]
+    fn ambiguous_or_repeated_identity_groups_require_a_mapper_correction() {
+        for repeated_identity in [false, true] {
+            let mut output = flattened_listings();
+            let fields = output["fields"][0]["value"]["items"][0]["fields"]
+                .as_array_mut()
+                .unwrap();
+            if repeated_identity {
+                fields[3] = fields[0].clone();
+            } else {
+                fields.remove(4);
+            }
+            let repaired = normalize_extraction_output(
+                &three_listing_schema(),
+                &serde_json::to_vec(&output).unwrap(),
+            )
+            .unwrap();
+            assert!(repaired.ambiguous_records);
+        }
+    }
 
     #[test]
     fn citation_spellings_name_the_same_fragment() {

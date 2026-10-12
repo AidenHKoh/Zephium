@@ -1504,11 +1504,13 @@ pub fn semantic_extraction_refusal_note(error: SemanticExtractionError) -> Strin
         | SemanticExtractionError::VersionMismatch
         | SemanticExtractionError::SchemaMismatch
         | SemanticExtractionError::FieldName
-        | SemanticExtractionError::DuplicateField
         | SemanticExtractionError::FieldOrder
         | SemanticExtractionError::UnexpectedField
         | SemanticExtractionError::TypeMismatch => {
             "the output did not follow the envelope. Return exactly {\"v\":1,\"schema\":<schema id>,\"fields\":[{\"name\":<S-line name>,\"value\":{\"k\":<S-line kind>,...}}]}; for rows, value is {\"k\":\"rows\",\"items\":[{\"fields\":[...]}]}; every text value has a value string and a sources array"
+        }
+        SemanticExtractionError::DuplicateField => {
+            "a record repeated a column, so record boundaries are ambiguous. Put every record in its own items entry, with each declared column appearing at most once in that entry's fields. Do not flatten several records into one fields array; keep each value with its own sources"
         }
         SemanticExtractionError::MissingRequiredField => {
             "a required field, or every record's required field, was missing or had no admissible evidence. Give each required field a value cited from a fragment that shows it"
@@ -1588,6 +1590,9 @@ pub(crate) fn extract_semantic_read_inner<'a>(
     let normalized =
         crate::semantic_extract_repair::normalize_extraction_output(schema, model_output)
             .ok_or(SemanticExtractionError::Malformed)?;
+    if normalized.ambiguous_records {
+        return Err(SemanticExtractionError::DuplicateField);
+    }
     let raw: RawExtraction =
         serde_json::from_value(normalized.value).map_err(|_| SemanticExtractionError::Malformed)?;
     if raw.version != SEMANTIC_EXTRACTION_SCHEMA_VERSION {
@@ -3526,6 +3531,117 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn flattened_record_repair_preserves_each_value_and_its_delivered_source() {
+        let mut nodes = vec![json!({"k":1,"r":"document","fc":true})];
+        for index in 0..3 {
+            nodes.extend([
+                json!({"k":index*3+2,"p":0,"r":"heading","l":2,"n":format!("Stay {index}"),"fc":true}),
+                json!({"k":index*3+3,"p":0,"r":"link","n":format!("Stay {index}"),"u":format!("https://example.test/stay/{index}?adults=2&date=2026-11-18"),"fc":true}),
+                json!({"k":index*3+4,"p":0,"r":"paragraph","t":format!("{} EUR",100+index),"fc":true}),
+            ]);
+        }
+        let observation = observation_with_nodes(Value::Array(nodes));
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows(
+                "listings".into(),
+                true,
+                vec![
+                    SemanticExtractionFieldSchema::try_text("name".into(), true, 200)
+                        .unwrap()
+                        .with_verbatim_text()
+                        .unwrap(),
+                    SemanticExtractionFieldSchema::try_url("url".into(), true, 2048).unwrap(),
+                    SemanticExtractionFieldSchema::try_text("price".into(), false, 64)
+                        .unwrap()
+                        .with_verbatim_text()
+                        .unwrap(),
+                ],
+                3,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+            &schema,
+        )
+        .unwrap();
+        let delivery = delivered(&read);
+        let token = |text: &str| {
+            read.fragments()
+                .iter()
+                .find(|fragment| fragment_text(**fragment) == Some(text))
+                .unwrap()
+                .id()
+                .model_token()
+        };
+        let fields: Vec<Value> = (0..3).flat_map(|index| [
+            json!({"name":"name","value":{"k":"text","value":format!("Stay {index}"),"sources":[token(&format!("Stay {index}"))]}}),
+            json!({"name":"url","value":{"k":"url","sources":[token(&format!("https://example.test/stay/{index}?adults=2&date=2026-11-18"))]}}),
+            json!({"name":"price","value":{"k":"text","value":format!("{} EUR",100+index),"sources":[token(&format!("{} EUR",100+index))]}}),
+        ]).collect();
+        let output = json!({"fields":[{"name":"listings","value":{"k":"rows","items":[{"fields":fields}]}}]});
+        let admit = |output: &Value| {
+            extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &serde_json::to_vec(output).unwrap(),
+            )
+        };
+        let result = admit(&output).unwrap();
+        let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+            panic!("rows")
+        };
+        assert_eq!(rows.items().len(), 3);
+        assert_eq!(result.stats().dropped(), 0);
+        for (index, row) in rows.items().iter().enumerate() {
+            let values: Vec<_> = row
+                .fields()
+                .iter()
+                .map(|field| match field.value() {
+                    SemanticExtractedValue::Text(text) | SemanticExtractedValue::Url(text) => {
+                        text.as_str()
+                    }
+                    _ => panic!("scalar"),
+                })
+                .collect();
+            assert_eq!(
+                values,
+                vec![
+                    format!("Stay {index}"),
+                    format!("https://example.test/stay/{index}?adults=2&date=2026-11-18"),
+                    format!("{} EUR", 100 + index)
+                ]
+            );
+        }
+        let mut ambiguous = output.clone();
+        ambiguous["fields"][0]["value"]["items"][0]["fields"]
+            .as_array_mut()
+            .unwrap()
+            .remove(4);
+        assert_eq!(
+            admit(&ambiguous).unwrap_err(),
+            SemanticExtractionError::DuplicateField
+        );
+        let mut forged = output.clone();
+        forged["fields"][0]["value"]["items"][0]["fields"][3]["value"] =
+            json!({"k":"text","value":"Not on this page","sources":["@r999"]});
+        let result = admit(&forged).unwrap();
+        let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+            panic!("rows")
+        };
+        assert_eq!(rows.items().len(), 2);
+        assert!(result.stats().dropped() > 0);
     }
 
     #[test]

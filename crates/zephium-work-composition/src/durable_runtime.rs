@@ -2416,8 +2416,11 @@ fn failure_note(failure: AgentWorkFailure) -> &'static str {
         AgentWorkFailure::Browser(Browser::NoProgress) => {
             "The page stopped showing new information"
         }
-        AgentWorkFailure::Browser(Browser::NoExtractionEvidence | Browser::Extraction(_)) => {
-            "The page showed nothing usable for the request"
+        AgentWorkFailure::Browser(Browser::NoExtractionEvidence) => {
+            "Work did not obtain enough page evidence to extract the requested records"
+        }
+        AgentWorkFailure::Browser(Browser::Extraction(_)) => {
+            "Work could not validate the extracted records; this does not mean the page had fewer matches"
         }
         AgentWorkFailure::Browser(Browser::Navigation(_)) => {
             "The page led somewhere the read may not follow"
@@ -2623,6 +2626,25 @@ fn page_failure_outcome(failure: AgentWorkFailure) -> WorkPageOutcomeV1 {
 #[cfg(test)]
 mod closed_result_tests {
     use super::*;
+
+    #[test]
+    fn malformed_records_are_an_extraction_failure_not_a_site_shortfall() {
+        let failure = AgentWorkFailure::Browser(
+            zephium_agent_controller::AgentBrowserProviderError::Extraction(
+                zephium_agentic::AgentProviderExtractionOutputError::Extraction(
+                    zephium_agentic::SemanticExtractionError::DuplicateField,
+                ),
+            ),
+        );
+        assert_eq!(
+            page_failure_outcome(failure),
+            WorkPageOutcomeV1::Refused {
+                stage: WorkPageFailureStageV1::Extraction,
+            }
+        );
+        assert_eq!(failure_note(failure),
+            "Work could not validate the extracted records; this does not mean the page had fewer matches");
+    }
 
     #[test]
     fn anonymous_early_failure_keeps_its_stage_without_overriding_a_wall() {
