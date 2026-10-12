@@ -1073,6 +1073,7 @@ pub fn read_selected_semantic_observation<'a>(
         0,
         None,
         None,
+        false,
     )
 }
 
@@ -1095,6 +1096,7 @@ pub fn read_semantic_observation_for_schema<'a>(
         schema.url_sources(),
         None,
         None,
+        schema.is_whole_page_findings(),
     )
 }
 
@@ -1138,6 +1140,7 @@ pub(crate) fn read_located_semantic_observation_at<'a>(
         schema.url_sources(),
         Some(references),
         document,
+        schema.is_whole_page_findings(),
     )
 }
 
@@ -1152,6 +1155,7 @@ fn read_projection<'a>(
     url_sources: u8,
     references: Option<&std::collections::BTreeSet<SemanticReferenceId>>,
     document: Option<&'a crate::ContextNavigationTarget>,
+    facts_priority: bool,
 ) -> Result<SemanticReadResult<'a>, SemanticReadError> {
     read_projection_with(
         observation,
@@ -1163,6 +1167,7 @@ fn read_projection<'a>(
         url_sources,
         references,
         document,
+        facts_priority,
         false,
     )
 }
@@ -1178,11 +1183,13 @@ fn read_projection_with<'a>(
     url_sources: u8,
     references: Option<&std::collections::BTreeSet<SemanticReferenceId>>,
     document: Option<&'a crate::ContextNavigationTarget>,
+    facts_priority: bool,
     viewport_image: bool,
 ) -> Result<SemanticReadResult<'a>, SemanticReadError> {
     let subtree = validate_authority(observation, authority)?;
     let mut builder = SemanticReadBuilder::new(observation, captured_at, budget, roles);
     builder.url_sources = url_sources;
+    builder.facts_priority = facts_priority;
     for snapshot in observation.frames() {
         let omitted_child = observation.frame_boundaries().iter().any(|boundary| {
             boundary.parent_frame() == snapshot.frame().frame()
@@ -1240,6 +1247,7 @@ pub fn read_semantic_observation_for_schema_with_viewport_image<'a>(
         schema.url_sources(),
         None,
         None,
+        schema.is_whole_page_findings(),
         true,
     )
 }
@@ -1347,6 +1355,7 @@ fn validate_authority(
 }
 
 struct SemanticReadBuilder<'a> {
+    facts_priority: bool,
     url_sources: u8,
     roles: SemanticReadRoleSelection,
     observation: &'a SemanticObservation,
@@ -1365,6 +1374,7 @@ impl<'a> SemanticReadBuilder<'a> {
         roles: SemanticReadRoleSelection,
     ) -> Self {
         Self {
+            facts_priority: false,
             url_sources: 0,
             roles,
             observation,
@@ -1663,7 +1673,10 @@ impl<'a> SemanticReadBuilder<'a> {
             // for links: shed with the record's text, not before it (an
             // Airbnb listing kept every price and lost every address, so a
             // required link column mapped no record at all).
-            rank: if field == SemanticReadField::LinkDestination && self.url_sources & 1 != 0 {
+            rank: if field == SemanticReadField::LinkDestination
+                && self.url_sources & 1 != 0
+                && !self.facts_priority
+            {
                 0
             } else {
                 shed_rank(field, node.role(), content)
@@ -1695,7 +1708,15 @@ impl<'a> SemanticReadBuilder<'a> {
                 .fragments
                 .iter()
                 .enumerate()
-                .max_by_key(|(index, fragment)| (fragment.region, fragment.rank, *index))
+                .max_by_key(|(index, fragment)| {
+                    // A fact read keeps actual prose and sidebar metadata over
+                    // a preceding directory of links. Catalogs keep their URLs.
+                    if self.facts_priority {
+                        (fragment.rank, fragment.region, *index)
+                    } else {
+                        (fragment.region, fragment.rank, *index)
+                    }
+                })
                 .map(|(index, _)| index)
             else {
                 break;
@@ -2561,6 +2582,7 @@ mod tests {
             1,
             None,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -2681,6 +2703,58 @@ mod tests {
             })
             .count();
         assert_eq!(laptops, 150);
+    }
+
+    #[test]
+    fn fact_read_preserves_late_prose_and_sidebar_facts_over_a_large_link_inventory() {
+        let mut nodes = vec![
+            json!({"k":1,"r":"document"}),
+            json!({"k":2,"p":0,"r":"landmark","lm":"main"}),
+        ];
+        for key in 3..183 {
+            nodes.push(json!({"k":key,"p":1,"r":"link","n":format!("File {key}"),"u":format!("https://example.test/file/{key}")}));
+        }
+        nodes.push(
+            json!({"k":183,"p":1,"r":"paragraph","t":"The current project supports Python 3.10+."}),
+        );
+        nodes.push(json!({"k":184,"p":0,"r":"landmark","lm":"complementary"}));
+        nodes.push(json!({"k":185,"p":183,"r":"paragraph","t":"License: Apache-2.0"}));
+        let observation = retained_observation(1, Value::Array(nodes));
+        let schema = crate::SemanticExtractionSchema::try_new(
+            crate::SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![crate::SemanticExtractionFieldSchema::try_text_list(
+                "facts".into(),
+                true,
+                8,
+                1024,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let ack = acknowledgement(&observation);
+        let read = read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+            &schema,
+        )
+        .unwrap();
+        for required in [
+            "The current project supports Python 3.10+.",
+            "License: Apache-2.0",
+        ] {
+            assert!(
+                read.fragments().iter().any(|fragment| fragment
+                    .content()
+                    .text()
+                    .is_some_and(|text| text.as_str() == required)),
+                "{required}"
+            );
+        }
+        assert!(read.fragments().len() <= usize::from(SemanticReadBudget::EXTRACTION.max_items()));
+        assert!(read.stats().omitted_items() > 0);
     }
 
     #[test]
