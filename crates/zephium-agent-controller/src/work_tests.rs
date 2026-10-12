@@ -2118,6 +2118,7 @@ enum ProviderFault {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExtractionFault {
     Direct,
+    DirectRecord,
     Listing,
     ListingDenied,
     None,
@@ -2130,6 +2131,13 @@ enum ExtractionFault {
     CancelCount,
     CancelStream,
     AuditLost,
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn a_single_public_record_maps_once_without_a_page_planner_turn() {
+    let _guard = lock(&SERIAL);
+    provider_fixture(ProviderFault::Extraction(ExtractionFault::DirectRecord));
 }
 
 #[cfg(feature = "probe-harness")]
@@ -2395,7 +2403,7 @@ fn provider_fixture_with_discovery_account(
             ProviderFault::ActionRepair | ProviderFault::ActionRepairRepeated => 4,
             ProviderFault::ActionRepairCancelled => 3,
             ProviderFault::CountRefused | ProviderFault::CancelCount => 1,
-            ProviderFault::Extraction(ExtractionFault::Direct) => 2,
+            ProviderFault::Extraction(ExtractionFault::Direct | ExtractionFault::DirectRecord) => 2,
             ProviderFault::Extraction(ExtractionFault::CancelCount) => 3,
             ProviderFault::Extraction(
                 ExtractionFault::WrongSchema
@@ -2697,7 +2705,10 @@ fn provider_fixture_with_discovery_account(
                             .replace("msg_2", "msg_3")
                         }
                     } else if let ProviderFault::Extraction(fault) = fault {
-                        if fault == ExtractionFault::Direct {
+                        if matches!(
+                            fault,
+                            ExtractionFault::Direct | ExtractionFault::DirectRecord
+                        ) {
                             extraction_stream(fault)
                                 .replace("resp_2", "resp_1")
                                 .replace("msg_2", "msg_1")
@@ -2990,12 +3001,23 @@ fn provider_fixture_with_discovery_account(
             ready: None,
         })
     } else if let ProviderFault::Extraction(extraction_fault) = fault {
-        let field = if matches!(
+        let field = if extraction_fault == ExtractionFault::DirectRecord {
+            SemanticExtractionFieldSchema::try_rows(
+                "label".into(),
+                true,
+                vec![SemanticExtractionFieldSchema::try_text("name".into(), true, 128).unwrap()],
+                1,
+            )
+            .unwrap()
+        } else if matches!(
             extraction_fault,
             ExtractionFault::Listing | ExtractionFault::ListingDenied
         ) {
             listing_tests::schema()
-        } else if extraction_fault == ExtractionFault::Direct {
+        } else if matches!(
+            extraction_fault,
+            ExtractionFault::Direct | ExtractionFault::DirectRecord
+        ) {
             SemanticExtractionFieldSchema::try_text_list("label".into(), true, 4, 128).unwrap()
         } else {
             SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()
@@ -3011,21 +3033,26 @@ fn provider_fixture_with_discovery_account(
                 extraction_fault == ExtractionFault::ListingDenied,
             )) as Box<dyn AgentWorkTask>
         } else {
-            Box::new(if extraction_fault == ExtractionFault::Direct {
-                extraction.with_direct_extraction()
-            } else if extraction_fault == ExtractionFault::EmptyEvidence {
-                // The native snapshot is valid but none of its fields qualify as
-                // evidence under the trusted schema's role selection.
-                extraction.with_source_roles(
-                    SemanticReadRoleSelection::try_new(&[SemanticRole::Paragraph]).unwrap(),
-                )
-            } else if extraction_fault == ExtractionFault::RoleSelection {
-                extraction.with_source_roles(
-                    SemanticReadRoleSelection::try_new(&[SemanticRole::Textbox]).unwrap(),
-                )
-            } else {
-                extraction
-            })
+            Box::new(
+                if matches!(
+                    extraction_fault,
+                    ExtractionFault::Direct | ExtractionFault::DirectRecord
+                ) {
+                    extraction.with_direct_extraction()
+                } else if extraction_fault == ExtractionFault::EmptyEvidence {
+                    // The native snapshot is valid but none of its fields qualify as
+                    // evidence under the trusted schema's role selection.
+                    extraction.with_source_roles(
+                        SemanticReadRoleSelection::try_new(&[SemanticRole::Paragraph]).unwrap(),
+                    )
+                } else if extraction_fault == ExtractionFault::RoleSelection {
+                    extraction.with_source_roles(
+                        SemanticReadRoleSelection::try_new(&[SemanticRole::Textbox]).unwrap(),
+                    )
+                } else {
+                    extraction
+                },
+            )
         }
     } else if fault == ProviderFault::HumanExtractionRequest {
         Box::new(HumanExtraction(
@@ -3083,7 +3110,10 @@ fn provider_fixture_with_discovery_account(
         state.input.as_mut().unwrap().settings.deadline = deadline;
         state.native.deadline = deadline;
     }
-    let native_fault = if fault == ProviderFault::Extraction(ExtractionFault::Direct) {
+    let native_fault = if matches!(
+        fault,
+        ProviderFault::Extraction(ExtractionFault::Direct | ExtractionFault::DirectRecord)
+    ) {
         Fault::PlainRead
     } else if matches!(
         fault,
@@ -3265,7 +3295,10 @@ fn provider_fixture_with_discovery_account(
         assert_eq!(server.join().unwrap(), 2);
         return;
     }
-    if fault == ProviderFault::Extraction(ExtractionFault::Direct) {
+    if matches!(
+        fault,
+        ProviderFault::Extraction(ExtractionFault::Direct | ExtractionFault::DirectRecord)
+    ) {
         assert_eq!(server.join().unwrap(), 1);
         let AgentWorkOutcome::Succeeded(mut success) = outcome else {
             panic!("{outcome:?}")
@@ -3273,10 +3306,17 @@ fn provider_fixture_with_discovery_account(
         assert_eq!(success.closure().model_calls(), 1);
         assert_eq!(success.closure().effects(), 0);
         let result = success.take_extraction().expect("owned facts");
-        let SemanticExtractedValue::TextList(values) = result.fields()[0].value() else {
-            panic!("text list")
-        };
-        assert_eq!(values.items()[0].as_str(), "Field");
+        if fault == ProviderFault::Extraction(ExtractionFault::DirectRecord) {
+            let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+                panic!("record")
+            };
+            assert_eq!(rows.items().len(), 1);
+        } else {
+            let SemanticExtractedValue::TextList(values) = result.fields()[0].value() else {
+                panic!("text list")
+            };
+            assert_eq!(values.items()[0].as_str(), "Field");
+        }
         assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
         return;
@@ -3764,7 +3804,9 @@ fn extraction_stream(fault: ExtractionFault) -> String {
     } else {
         "@r1"
     };
-    let value = if matches!(
+    let value = if fault == ExtractionFault::DirectRecord {
+        serde_json::json!({"k":"rows","items":[{"fields":[{"name":"name","value":{"k":"text","value":"Field","sources":[source]}}]}]}).to_string()
+    } else if matches!(
         fault,
         ExtractionFault::Listing | ExtractionFault::ListingDenied
     ) {
@@ -3773,7 +3815,10 @@ fn extraction_stream(fault: ExtractionFault) -> String {
         } else {
             3
         })
-    } else if fault == ExtractionFault::Direct {
+    } else if matches!(
+        fault,
+        ExtractionFault::Direct | ExtractionFault::DirectRecord
+    ) {
         format!(
             r#"{{"k":"text_list","items":[{{"value":"Field","sources":["{source}"]}}],"sources":["{source}"]}}"#
         )

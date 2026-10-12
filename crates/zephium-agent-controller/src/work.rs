@@ -3094,7 +3094,8 @@ impl AgentWorkController {
             && state
                 .extraction_schema
                 .as_ref()
-                .is_some_and(SemanticExtractionSchema::is_whole_page_findings)
+                .is_some_and(|schema| schema.is_whole_page_findings() || matches!(schema.fields(), [field]
+                    if field.kind() == SemanticExtractionValueKind::Rows && field.max_list_items() == Some(1)))
             && !zephium_agentic::semantic_observation_reads_sparse(&observation)
             && observation
                 .frames()
@@ -3111,6 +3112,15 @@ impl AgentWorkController {
                 .as_ref()
                 .ok_or(AgentWorkFailure::Contract)?;
             let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+            let crop_account = session.account;
+            let crop_config = if state.viewport_screenshot && session.supports_record_crops() {
+                session.config.clone().with_viewport_screenshot()
+            } else {
+                session.config.clone()
+            };
+            let crop_baseline = SemanticObservationAcknowledgement::whole_page_scope(&observation)
+                .ok_or(AgentWorkFailure::Contract)?
+                .0;
             let result = Self::provider(
                 &mut state.native,
                 worker,
@@ -3130,11 +3140,20 @@ impl AgentWorkController {
             state.check_task_contract()?;
             state.native.check_control(worker, browser)?;
             let dropped = result.stats().dropped();
-            state.extraction = Some(
-                result
-                    .into_owned()
-                    .map_err(|_| AgentWorkFailure::Contract)?,
-            );
+            let mut owned = result
+                .into_owned()
+                .map_err(|_| AgentWorkFailure::Contract)?;
+            Self::attach_record_crop_permission(
+                state,
+                worker,
+                browser,
+                &mut owned,
+                &observation,
+                &crop_baseline,
+                &crop_config,
+                crop_account,
+            )?;
+            state.extraction = Some(owned);
             if dropped > 0 {
                 state
                     .journal_mut()?
@@ -5533,6 +5552,35 @@ impl AgentWorkController {
         } else {
             record_crop_baseline
         };
+        Self::attach_record_crop_permission(
+            state,
+            worker,
+            browser,
+            &mut owned,
+            observation,
+            &record_crop_baseline,
+            &record_crop_config,
+            record_crop_account,
+        )?;
+        state.extraction = Some(owned);
+        if dropped > 0 {
+            state
+                .journal_mut()?
+                .emit(AgentWorkEventKind::ExtractionDropped { values: dropped })?;
+        }
+        Ok(completed_listing)
+    }
+
+    fn attach_record_crop_permission(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        owned: &mut SemanticOwnedExtractionResult,
+        observation: &SemanticObservation,
+        record_crop_baseline: &SemanticObservationAcknowledgement,
+        record_crop_config: &AgentProviderCallConfig,
+        record_crop_account: AgentContextAccountBinding,
+    ) -> Result<(), AgentWorkFailure> {
         if state.viewport_screenshot && record_crop_config.permits_viewport_screenshot() {
             state.native.check_control(worker, browser)?;
             if let Some(current) = state
@@ -5566,7 +5614,7 @@ impl AgentWorkController {
                             ),
                         );
                     owned.carry_record_crop_permission(
-                        &record_crop_config,
+                        record_crop_config,
                         &current.policy,
                         current.lease,
                         current
@@ -5575,20 +5623,14 @@ impl AgentWorkController {
                         record_crop_account,
                         current.account,
                         observation,
-                        &record_crop_baseline,
+                        record_crop_baseline,
                         now,
                         expires,
                     );
                 }
             }
         }
-        state.extraction = Some(owned);
-        if dropped > 0 {
-            state
-                .journal_mut()?
-                .emit(AgentWorkEventKind::ExtractionDropped { values: dropped })?;
-        }
-        Ok(completed_listing)
+        Ok(())
     }
 
     async fn close_context(

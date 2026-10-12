@@ -2894,6 +2894,18 @@ impl WorkModelClient for NativeRecordFinish {
                 .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
                 .count();
             let seen = results(&request);
+            let fetch = request
+                .tools
+                .iter()
+                .find(|t| t.name == "web_fetch")
+                .unwrap();
+            assert!(
+                fetch
+                    .schema
+                    .pointer("/properties/records/properties/columns")
+                    .is_some(),
+                "the lead must be able to request native records on its first public read"
+            );
             let create = request.tools.iter().find(|t| t.name == "create").unwrap();
             let has_raw_sheet = create
                 .schema
@@ -2923,7 +2935,11 @@ impl WorkModelClient for NativeRecordFinish {
                 0 => call(
                     "read",
                     "web_fetch",
-                    json!({"url":"https://records.example.com/one"}),
+                    json!({"url":"https://records.example.com/one","records":{"title":"Offers","max_items":2,"columns":[
+                        {"name":"price","value":{"kind":"text"},"required":false},
+                        {"name":"stock","value":{"kind":"text"},"required":false},
+                        {"name":"url","value":{"kind":"url"},"required":true}
+                    ]}}),
                 ),
                 1 => {
                     assert!(seen.contains("record r1:"), "{seen}");
@@ -3011,14 +3027,17 @@ async fn native_record_finish_fixture(mode: u8) {
         light: lead,
     };
     let done = drive(&mut shell,&queue,WorkLeadService::new(handle).run(profile,command(work,WorkRevision::INITIAL),None,models,&Search,|_,request|async move {
+        let WorkStepKindV1::Read { collection: Some(collection), .. } = &request.step else { panic!("native records must be requested on the first read") };
+        assert_eq!(collection.max_items, 2);
+        assert_eq!(collection.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["price", "stock", "url"]);
         let source = WorkEvidenceLink { extraction_id:WorkArtifactId::from(940),source_id:1 };
         Ok(outcome(None,vec![WorkArtifactDraft {
             output:request.output,title:"Original records".into(), evidence:vec![source],
             data:serde_json::from_value(json!({"kind":"comparison_matrix",
                 "subjects":[{"name":"First offer","homepage":"https://records.example.com/item?id=1&variant=blue"},{"name":"Second offer","homepage":"https://records.example.com/item?id=2&variant=red"}],
-                "criteria":[{"name":"Price","kind":{"kind":"text"}},{"name":"Stock","kind":{"kind":"text"}}],
-                "cells":[[{"value":{"kind":"text","text":"129,99 zł"},"evidence":[0]},{"value":{"kind":"text","text":"In stock"},"evidence":[0]}],
-                         [{"value":{"kind":"text","text":"€32.50 / item"},"evidence":[0]},{"value":{"kind":"text","text":"Out of stock"},"evidence":[0]}]]
+                "criteria":[{"name":"price","kind":{"kind":"text"}},{"name":"stock","kind":{"kind":"text"}},{"name":"url","kind":{"kind":"text"}}],
+                "cells":[[{"value":{"kind":"text","text":"129,99 zł"},"evidence":[0]},{"value":{"kind":"text","text":"In stock"},"evidence":[0]},{"value":{"kind":"text","text":"https://records.example.com/item?id=1&variant=blue"},"evidence":[0]}],
+                         [{"value":{"kind":"text","text":"€32.50 / item"},"evidence":[0]},{"value":{"kind":"text","text":"Out of stock"},"evidence":[0]},{"value":{"kind":"text","text":"https://records.example.com/item?id=2&variant=red"},"evidence":[0]}]]
             })).unwrap()
         }]))
     },|_|{})).await.unwrap();

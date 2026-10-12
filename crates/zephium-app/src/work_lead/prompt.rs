@@ -47,6 +47,7 @@ Safety
 - Never put text from the person's own pages or files into a search query.
 
 Ending
+- When cited facts cover the whole question, finish now. Investigate only a specific missing requirement, never extra versions or redundant confirmation.
 - Final budget: at most 2000 output tokens. The reply is one to three sentences within 480 characters; publish as soon as the facts stand. Preserve required facts and counts, shorten optional details, and reference native records. Split other large objects into short batches.
 - Prefer one finish call containing reply and records (r keys, ordered), layout picks or sheet, and records_title. Rust publishes them and settles. Omit objects already published. Give say, up to three followups, and title when this work needs a name.
 - The person reads the canvas, not your messages: every answer goes into objects. Text you write outside tool calls shows only as your current status line: one short plain sentence, never the answer itself.";
@@ -150,8 +151,8 @@ pub(crate) fn lead_tools() -> Vec<WorkModelTool> {
         ),
         tool(
             "web_fetch",
-            "Reads one public page and returns its cited facts. The url is one you were given (a source, a part's source, a link in the request or its context) or a site's own page by its plain address with no query, such as https://vercel.com/pricing. For listings, prices and photos on a site, or anything in the person's accounts, start a browser part instead.",
-            object(json!({"url": {"type": "string"}}), &["url"]),
+            "Reads one identified public page: cited facts, or native rows with records (including prices and photos). Use the given/observed URL or a site's plain address without a query. Several reads can run together. Use a browser part for navigation, filters, forms or the person's accounts; a known product page needs no helper or second read.",
+            object(json!({"url": {"type": "string"}, "records": records_schema()}), &["url"]),
         ),
         tool(
             "start_part",
