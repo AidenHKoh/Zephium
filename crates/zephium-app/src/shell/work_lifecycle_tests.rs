@@ -276,14 +276,52 @@ async fn page(
     })
 }
 
+#[tokio::test]
+async fn lifecycle_projection_waits_for_a_bounded_admission_slot() {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let work = new_work(&mut shell, &queue, &handle, "Read a public page").await;
+    let mut pending = Vec::new();
+    loop {
+        match handle.work_projection(profile, work) {
+            Ok(read) => {
+                pending.push(read);
+                assert!(pending.len() <= 8);
+            }
+            Err(WorkError::Capacity) => break,
+            Err(error) => panic!("{error:?}"),
+        }
+    }
+    assert!(!pending.is_empty());
+    let read = projection(&handle, profile, work);
+    tokio::pin!(read);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(read.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let state = drive(&mut shell, &queue, read).await;
+    assert_eq!(state.work.id, work);
+    drop(pending);
+}
+
+async fn admit<T>(submit: impl FnMut() -> Result<T, WorkError>) -> T {
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        crate::work_runtime::admitted(submit),
+    )
+    .await
+    .expect("lifecycle admission remained full for a second")
+    .expect("lifecycle submission was refused")
+}
+
 async fn projection(
     handle: &crate::Handle,
     profile: ProfileId,
     work: WorkId,
 ) -> WorkRuntimeProjection {
-    let WorkReply::Runtime(state) = handle
-        .work_projection(profile, work)
-        .unwrap()
+    let WorkReply::Runtime(state) = admit(|| handle.work_projection(profile, work))
+        .await
         .await
         .unwrap()
         .reply
@@ -303,8 +341,8 @@ async fn command(
 ) {
     for _ in 0..40 {
         let state = projection(handle, profile, work).await;
-        let submitted = handle
-            .work_command(
+        let submitted = admit(|| {
+            handle.work_command(
                 profile,
                 WorkCommandV1 {
                     version: 1,
@@ -314,8 +352,9 @@ async fn command(
                     intent: intent.clone(),
                 },
             )
-            .unwrap()
-            .await;
+        })
+        .await
+        .await;
         match submitted {
             Ok(_) => return,
             Err(WorkError::Conflict) => tokio::time::sleep(Duration::from_millis(20)).await,
