@@ -2341,6 +2341,7 @@ if(visited>=128)return null;
 visited+=1;
 const current=stack.pop();
 const type=nodeType(current);
+if(type===8)continue;
 if(type===3){
 const raw=read(characterDataGetter,current);
 if(typeof raw!=="string")return null;

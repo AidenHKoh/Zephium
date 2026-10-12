@@ -655,7 +655,7 @@ const negativeControl = process.argv[3] === "--without-document-parent-brand";
 const readonlyViewerCase = process.argv[3] === "--readonly-viewer";
 const commandCase = process.argv[3]?.startsWith('--isolated-command=') ? process.argv[3].slice('--isolated-command='.length) : null;
 const preparationOnly = process.env.ZEPHIUM_LOCAL_ISOLATED_FILL_PREPARATION_ONLY_PROBE === '1';
-assert(process.argv.length <= 4 && (process.argv[3] === undefined || negativeControl || commandCase || readonlyViewerCase), "unknown smoke mode");
+assert(process.argv.length <= 4 && (process.argv[3] === undefined || negativeControl || commandCase || readonlyViewerCase || process.argv[3] === "--credential-comments"), "unknown smoke mode");
 let source = fs.readFileSync(sourcePath, "utf8");
 if (commandCase) {
   const anchor = '  function runFixedFill(target, descriptor, request) {';
@@ -731,6 +731,28 @@ const invoke = (invocation, generation, scope, budget = {}) => runtime.invoke(JS
     ...(budget.lu === true ? { lu: true } : {})
   }
 }));
+
+if (process.argv[3] === "--credential-comments") {
+  main._children = new NodeList();
+  const hidden = "sk-hidden-comment-must-not-be-exported";
+  const cases = [["Quantity",1,8,false],["Password",1,8,true],["Count",129,8,true],["Unknown label node",1,7,true]];
+  for(const [name,count,type] of cases) {
+    const label=new Element("label");label.append(new CharacterData(name));
+    for(let i=0;i<count;i++){const comment=new Node(type);comment._data=hidden;label.append(comment);}
+    const input=new HTMLInputElement({type:"number","aria-label":name},"2");
+    input._labels=new NodeList([label]);main.append(label);main.append(input);
+  }
+  const wire=invoke(7,1,{k:"initial"},{n:128,t:16384,w:65536,x:4096,geo:false});
+  const nodes=JSON.parse(wire).n.filter(n=>n.r==="spinbutton");
+  assert(nodes.length===cases.length,"missing numeric controls");
+  for(let i=0;i<cases.length;i++) {
+    assert((nodes[i].q==="secret")===cases[i][3],"comment/credential/exhaustion classification mismatch: "+cases[i][0]);
+    if(!cases[i][3])assert(nodes[i].v?.value==="2","quantity was not readable");
+  }
+  assert(!wire.includes(hidden),"comment content was disclosed");
+  process.stdout.write("credential labels: comments ignored; passwords, unknown nodes and exhaustion stay closed\n");
+  process.exit(0);
+}
 
 if (readonlyViewerCase) {
   main._children = new NodeList();
