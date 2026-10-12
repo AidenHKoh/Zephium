@@ -83,6 +83,11 @@ pub trait AgentWorkLocalActionPolicy: Send {
         false
     }
 
+    /// Prefer one direct extraction when a plain read has complete public text.
+    fn prefers_direct_extraction(&self) -> bool {
+        false
+    }
+
     /// The first view is judged whole, before any model call, rather than
     /// as the model's fitted look.
     fn whole_first_look(&self) -> bool {
@@ -265,6 +270,11 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         self.local_actions
             .as_ref()
             .is_some_and(|policy| policy.patient_checks())
+    }
+    fn prefers_direct_extraction(&self) -> bool {
+        self.local_actions
+            .as_ref()
+            .is_some_and(|policy| policy.prefers_direct_extraction())
     }
     fn whole_first_look(&self) -> bool {
         self.local_actions

@@ -350,6 +350,10 @@ fn consequential(text: &str) -> bool {
 }
 
 impl AgentWorkLocalActionPolicy for ReadingInteractionPolicy {
+    fn prefers_direct_extraction(&self) -> bool {
+        true
+    }
+
     fn human_wall(&self, observation: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
         super::site_work::reading_wall(observation)
     }

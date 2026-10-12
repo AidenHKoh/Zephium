@@ -420,6 +420,11 @@ pub trait AgentWorkTask: Send {
     fn patient_checks(&self) -> bool {
         false
     }
+    /// A plain read may map its already captured public text directly, without
+    /// paying a page planner to choose Extract. Interaction tasks stay on their loop.
+    fn prefers_direct_extraction(&self) -> bool {
+        false
+    }
     /// The first view is judged whole before any model call.
     fn whole_first_look(&self) -> bool {
         false
@@ -990,6 +995,7 @@ impl AgentWorkSuccess {
 /// The product may opt into one acknowledged-ref subtree capture. The schema
 /// is frozen before admission; no native action is allowed.
 pub struct AgentWorkExtractionTask {
+    direct_extraction: bool,
     baseline_read: bool,
     progressive_observation: bool,
     schema: SemanticExtractionSchema,
@@ -998,6 +1004,13 @@ pub struct AgentWorkExtractionTask {
     subtree: bool,
 }
 impl AgentWorkExtractionTask {
+    /// Prefer direct mapping for a public fact read. The controller still
+    /// requires a whole-page findings schema and checks walls and sensitivity.
+    pub fn with_direct_extraction(mut self) -> Self {
+        self.direct_extraction = true;
+        self
+    }
+
     /// Registers one run-local schema and explicitly trusted account scope.
     pub fn try_new(
         fields: Vec<SemanticExtractionFieldSchema>,
@@ -1011,6 +1024,7 @@ impl AgentWorkExtractionTask {
             account,
             account_sample: std::cell::Cell::new(None),
             subtree: false,
+            direct_extraction: false,
             baseline_read: false,
             progressive_observation: false,
         })
@@ -1049,6 +1063,10 @@ impl AgentWorkExtractionTask {
     }
 }
 impl AgentWorkTask for AgentWorkExtractionTask {
+    fn prefers_direct_extraction(&self) -> bool {
+        self.direct_extraction
+    }
+
     fn allows_baseline_read(&self) -> bool {
         self.baseline_read
     }
@@ -3066,6 +3084,60 @@ impl AgentWorkController {
         );
         let mut progress = state.task_progress(&observation)?;
         if progress == AgentWorkTaskProgress::Complete {
+            state.observation = Some(observation);
+            return Ok(());
+        }
+        let direct = state.task.prefers_direct_extraction()
+            && state.navigation_length() == 0
+            && state
+                .extraction_schema
+                .as_ref()
+                .is_some_and(SemanticExtractionSchema::is_whole_page_findings)
+            && !zephium_agentic::semantic_observation_reads_sparse(&observation)
+            && observation
+                .frames()
+                .iter()
+                .flat_map(|frame| frame.nodes())
+                .all(|node| {
+                    node.sensitivity() == SemanticSensitivity::Public
+                        && node.role() != SemanticRole::Dialog
+                });
+        if direct {
+            state.refresh_account(worker, browser)?;
+            let schema = state
+                .extraction_schema
+                .as_ref()
+                .ok_or(AgentWorkFailure::Contract)?;
+            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+            let result = Self::provider(
+                &mut state.native,
+                worker,
+                browser,
+                session.cancellation.clone(),
+                session.extract_owned_initial(&observation, captured_at, schema),
+            )
+            .await?;
+            if result.is_empty() {
+                return Err(AgentWorkFailure::Browser(
+                    AgentBrowserProviderError::NoExtractionEvidence,
+                ));
+            }
+            if state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete {
+                return Err(AgentWorkFailure::Contract);
+            }
+            state.check_task_contract()?;
+            state.native.check_control(worker, browser)?;
+            let dropped = result.stats().dropped();
+            state.extraction = Some(
+                result
+                    .into_owned()
+                    .map_err(|_| AgentWorkFailure::Contract)?,
+            );
+            if dropped > 0 {
+                state
+                    .journal_mut()?
+                    .emit(AgentWorkEventKind::ExtractionDropped { values: dropped })?;
+            }
             state.observation = Some(observation);
             return Ok(());
         }

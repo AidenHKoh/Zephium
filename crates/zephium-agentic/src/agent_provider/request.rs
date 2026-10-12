@@ -3123,6 +3123,61 @@ impl AgentProviderExtractionRequestDraft {
         Ok(self)
     }
 
+    /// A task-owned text read starts directly with extraction. This draft grants
+    /// nothing: preparation still validates the exact lease, account, taints,
+    /// source delivery and budget before any request can reach transport.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_owned_read(
+        policy: &AgentRunPolicy,
+        lease: crate::AgentPlanLeaseBinding,
+        call: AgentModelCallRequest,
+        baseline: &SemanticObservationAcknowledgement,
+        schema: &SemanticExtractionSchema,
+        read: &SemanticReadResult<'_>,
+        config: &AgentProviderCallConfig,
+        objective: &AgentProviderObjective,
+        payload: crate::SemanticExtractionModelPayload,
+    ) -> Result<Self, AgentProviderRequestError> {
+        if call.lease() != lease.lease()
+            || !payload.matches(schema, read)
+            || !read.matches_acknowledgement(baseline)
+            || !config.permits_tool(AgentBrowserToolKind::Extract)
+        {
+            return Err(AgentPolicyError::Authority.into());
+        }
+        let (text, semantic_stats, delivery) = payload.into_provider_parts();
+        let body = encode_openai_extraction_payload(
+            config,
+            objective.as_str(),
+            &text,
+            &bound_extraction_output_schema(schema, Some(read)),
+        )?;
+        let continuation_transcript =
+            AgentProviderTranscript::try_initial(Arc::from(objective.as_str()), text)
+                .ok_or(AgentProviderRequestError::Encoding)?;
+        Ok(Self {
+            viewport_image_guard: None,
+            request: AgentProviderRequest {
+                call: AgentProviderCallIdentity {
+                    manifest: policy.manifest().id(),
+                    manifest_guard: policy.manifest().guard(),
+                    call: call.id(),
+                    lease: lease.lease(),
+                    node: lease.node(),
+                },
+                config: config.clone(),
+                endpoint: AgentProviderEndpoint::OpenAiResponses,
+                body,
+            },
+            baseline: baseline.clone(),
+            delivery,
+            semantic_stats,
+            continuation_transcript,
+            schema: schema.id(),
+            subtree_target: None,
+        })
+    }
+
     /// A typed read starts a focused mapping call without inventing a browser-tool continuation.
     #[cfg(feature = "provider-transport")]
     pub fn try_located(

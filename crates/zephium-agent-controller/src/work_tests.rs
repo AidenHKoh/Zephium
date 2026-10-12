@@ -848,6 +848,7 @@ fn input_with_navigation_account(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fault {
+    PlainRead,
     #[cfg(feature = "probe-harness")]
     DecisionClick(bool),
     #[cfg(feature = "probe-harness")]
@@ -1083,6 +1084,13 @@ impl AgentBrowserPort for Port {
             }
         );
         let wire = format!("{{\"v\":1,\"i\":{},\"g\":{},\"c\":\"complete\",\"n\":[{{\"k\":1,\"r\":\"document\",\"o\":16}},{{\"k\":2,\"p\":0,\"r\":\"textbox\",\"n\":\"Field\",\"s\":64,\"o\":2,\"v\":{{\"k\":\"text\",\"value\":\"\"}},\"b\":{{\"x\":10,\"y\":20,\"w\":120,\"h\":30}}}}]}}", correlation.invocation().get(), correlation.snapshot_generation().get());
+        let wire = if self.fault == Fault::PlainRead {
+            let mut value: serde_json::Value = serde_json::from_str(&wire).unwrap();
+            value["n"].as_array_mut().unwrap().push(serde_json::json!({"k":3,"p":0,"r":"paragraph","t":"This is ordinary public reference text. ".repeat(40),"fc":true}));
+            serde_json::to_string(&value).unwrap()
+        } else {
+            wire
+        };
         #[cfg(feature = "probe-harness")]
         let wire = if self.fault == Fault::ScrollVerification {
             wire.replace(
@@ -2093,6 +2101,7 @@ enum ProviderFault {
 #[cfg(feature = "probe-harness")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExtractionFault {
+    Direct,
     None,
     RoleSelection,
     EmptyEvidence,
@@ -2103,6 +2112,13 @@ enum ExtractionFault {
     CancelCount,
     CancelStream,
     AuditLost,
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn a_plain_public_fact_read_maps_once_without_a_page_planner_turn() {
+    let _guard = lock(&SERIAL);
+    provider_fixture(ProviderFault::Extraction(ExtractionFault::Direct));
 }
 
 #[cfg(feature = "probe-harness")]
@@ -2361,6 +2377,7 @@ fn provider_fixture_with_discovery_account(
             ProviderFault::ActionRepair | ProviderFault::ActionRepairRepeated => 4,
             ProviderFault::ActionRepairCancelled => 3,
             ProviderFault::CountRefused | ProviderFault::CancelCount => 1,
+            ProviderFault::Extraction(ExtractionFault::Direct) => 2,
             ProviderFault::Extraction(ExtractionFault::CancelCount) => 3,
             ProviderFault::Extraction(
                 ExtractionFault::WrongSchema
@@ -2662,7 +2679,11 @@ fn provider_fixture_with_discovery_account(
                             .replace("msg_2", "msg_3")
                         }
                     } else if let ProviderFault::Extraction(fault) = fault {
-                        if turns == 1 {
+                        if fault == ExtractionFault::Direct {
+                            extraction_stream(fault)
+                                .replace("resp_2", "resp_1")
+                                .replace("msg_2", "msg_1")
+                        } else if turns == 1 {
                             let arguments = match fault {
                                 ExtractionFault::WrongSchema => {
                                     r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":2}"#
@@ -2945,12 +2966,16 @@ fn provider_fixture_with_discovery_account(
             ready: None,
         })
     } else if let ProviderFault::Extraction(extraction_fault) = fault {
-        let extraction = AgentWorkExtractionTask::try_new(
-            vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
-            AgentAccountScope::Anonymous,
-        )
-        .unwrap();
-        Box::new(if extraction_fault == ExtractionFault::EmptyEvidence {
+        let field = if extraction_fault == ExtractionFault::Direct {
+            SemanticExtractionFieldSchema::try_text_list("label".into(), true, 4, 128).unwrap()
+        } else {
+            SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()
+        };
+        let extraction =
+            AgentWorkExtractionTask::try_new(vec![field], AgentAccountScope::Anonymous).unwrap();
+        Box::new(if extraction_fault == ExtractionFault::Direct {
+            extraction.with_direct_extraction()
+        } else if extraction_fault == ExtractionFault::EmptyEvidence {
             // The native snapshot is valid but none of its fields qualify as
             // evidence under the trusted schema's role selection.
             extraction.with_source_roles(
@@ -3019,7 +3044,9 @@ fn provider_fixture_with_discovery_account(
         state.input.as_mut().unwrap().settings.deadline = deadline;
         state.native.deadline = deadline;
     }
-    let native_fault = if let ProviderFault::Navigation(fault) = fault {
+    let native_fault = if fault == ProviderFault::Extraction(ExtractionFault::Direct) {
+        Fault::PlainRead
+    } else if let ProviderFault::Navigation(fault) = fault {
         Fault::Navigation(fault)
     } else if let ProviderFault::Read(fault) = fault {
         if fault == ReadFault::ActionLost {
@@ -3179,6 +3206,22 @@ fn provider_fixture_with_discovery_account(
             requests / 2
         );
         combined_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);
+        return;
+    }
+    if fault == ProviderFault::Extraction(ExtractionFault::Direct) {
+        assert_eq!(server.join().unwrap(), 1);
+        let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(success.closure().model_calls(), 1);
+        assert_eq!(success.closure().effects(), 0);
+        let result = success.take_extraction().expect("owned facts");
+        let SemanticExtractedValue::TextList(values) = result.fields()[0].value() else {
+            panic!("text list")
+        };
+        assert_eq!(values.items()[0].as_str(), "Field");
+        assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
         return;
     }
     if let ProviderFault::Extraction(fault) = fault {
@@ -3664,7 +3707,11 @@ fn extraction_stream(fault: ExtractionFault) -> String {
     } else {
         "@r1"
     };
-    let value = if fault == ExtractionFault::WrongKind {
+    let value = if fault == ExtractionFault::Direct {
+        format!(
+            r#"{{"k":"text_list","items":[{{"value":"Field","sources":["{source}"]}}],"sources":["{source}"]}}"#
+        )
+    } else if fault == ExtractionFault::WrongKind {
         format!(r#"{{"k":"boolean","value":true,"sources":["{source}"]}}"#)
     } else if fault == ExtractionFault::ForeignSource {
         // A value the page never shows: no citation can be repaired for it.

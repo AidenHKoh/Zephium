@@ -3772,3 +3772,118 @@ fn whole_page_findings_leave_clipped_observations_to_the_page_planner() {
         .is_ok());
     }
 }
+
+#[test]
+fn owned_initial_extraction_requires_native_taint_and_the_exact_lease_without_a_prior_model_call() {
+    for sensitive in [false, true] {
+        let mut nodes = vec![
+            json!({"k":1,"r":"document","fc":true}),
+            json!({"k":2,"p":0,"r":"paragraph","t":"Public exact value","fc":true}),
+        ];
+        if sensitive {
+            nodes.push(json!({"k":3,"p":0,"r":"paragraph","t":"Confidential content","q":"sensitive","fc":true}));
+        }
+        let (mut policy, original, observation, _) =
+            admitted_fixture_with_nodes(Value::Array(nodes));
+        let (baseline, _) =
+            SemanticObservationAcknowledgement::whole_page_scope(&observation).unwrap();
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![
+                SemanticExtractionFieldSchema::try_text("title".into(), true, 128)
+                    .unwrap()
+                    .with_verbatim_text()
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let read = read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Acknowledged(&baseline),
+            SemanticCaptureInstant::from_millis(101),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+            &schema,
+        )
+        .unwrap();
+        let revision = SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap();
+        let config = AgentProviderPricingSchedule::try_for_test(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderModelRevision::try_new("gpt-fixture".into()).unwrap(),
+            AgentProviderReasoningEffort::None,
+            revision.clone(),
+            AgentProviderPricingProfile::try_new(
+                AgentProviderPricingRevision::new(1).unwrap(),
+                32768,
+            )
+            .unwrap(),
+            AgentProviderTokenRates::try_new(1, 1, 1, 1).unwrap(),
+        )
+        .unwrap()
+        .try_provider_exact_call_config(1024, AgentProviderStreamBudget::STANDARD)
+        .unwrap()
+        .restrict_to_extraction();
+        let request = AgentModelCallRequest::new(
+            AgentModelCallId::new(1).unwrap(),
+            original.lease(),
+            original.account(),
+            AgentModelCallBudget::try_new(32768, 1024, 1000).unwrap(),
+            AgentPolicyInstant::from_millis(102),
+        );
+        let lease = AgentPlanLeaseBinding::new(original.lease(), AgentPlanNodeId::from_raw(15));
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Read the public value".into(),
+            &revision,
+        )
+        .unwrap();
+        let draft = |policy: &AgentRunPolicy, lease| {
+            let payload = encode_semantic_extraction_request(
+                &schema,
+                &read,
+                SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
+            )
+            .unwrap()
+            .admit_conservative_utf8(&revision)
+            .unwrap();
+            AgentProviderExtractionRequestDraft::try_owned_read(
+                policy, lease, request, &baseline, &schema, &read, &config, &objective, payload,
+            )
+        };
+        assert!(draft(&policy, lease)
+            .unwrap()
+            .try_prepare_for_provider_exact_count(&mut policy, request, &schema, &read)
+            .is_err());
+        assert_eq!(policy.pending_model_calls(), 0);
+        policy
+            .admit_owned_observation(&observation, original.account())
+            .unwrap();
+        let wrong_node =
+            AgentPlanLeaseBinding::new(original.lease(), AgentPlanNodeId::from_raw(999));
+        assert!(draft(&policy, wrong_node)
+            .unwrap()
+            .try_prepare_for_provider_exact_count(&mut policy, request, &schema, &read)
+            .is_err());
+        assert_eq!(policy.pending_model_calls(), 0);
+        let wrong_lease = AgentPlanLeaseBinding::new(AgentPlanLeaseId::from_raw(999), lease.node());
+        assert!(draft(&policy, wrong_lease).is_err());
+        assert_eq!(policy.pending_model_calls(), 0);
+        let draft = draft(&policy, lease).unwrap();
+        let body = String::from_utf8(draft.request().body().to_vec()).unwrap();
+        assert!(body.contains("Public exact value"));
+        assert!(!body.contains("Confidential content"));
+        let prepared =
+            draft.try_prepare_for_provider_exact_count(&mut policy, request, &schema, &read);
+        if sensitive {
+            assert!(matches!(
+                prepared,
+                Err(AgentProviderRequestError::Policy(
+                    AgentPolicyError::Sensitivity
+                ))
+            ));
+            assert_eq!(policy.pending_model_calls(), 0);
+        } else {
+            assert!(prepared.is_ok());
+            assert_eq!(policy.pending_model_calls(), 1);
+        }
+    }
+}

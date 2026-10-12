@@ -3067,6 +3067,91 @@ impl AgentBrowserSession {
             .map_err(AgentBrowserProviderError::Extraction)
     }
 
+    pub(super) async fn extract_owned_initial<'a>(
+        &mut self,
+        observation: &'a zephium_agentic::SemanticObservation,
+        captured_at: zephium_agentic::SemanticCaptureInstant,
+        schema: &zephium_agentic::SemanticExtractionSchema,
+    ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
+        use zephium_agentic::*;
+        self.check_live()?;
+        if self.initial_provider_started || self.objective.is_none() {
+            return Err(AgentBrowserProviderError::Continuation);
+        }
+        if self.turns >= self.max_model_calls {
+            return Err(AgentBrowserProviderError::TurnLimit);
+        }
+        let (baseline, _) = SemanticObservationAcknowledgement::whole_page_scope(observation)
+            .ok_or(AgentBrowserProviderError::Authority)?;
+        self.policy
+            .admit_owned_observation(observation, self.account)
+            .map_err(|_| AgentBrowserProviderError::Authority)?;
+        let read = read_semantic_observation_for_schema(
+            observation,
+            SemanticReadAuthority::Acknowledged(&baseline),
+            captured_at,
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+            schema,
+        )
+        .map_err(AgentBrowserProviderError::Read)?;
+        if read.fragments().is_empty() {
+            return Err(AgentBrowserProviderError::NoExtractionEvidence);
+        }
+        let payload = encode_semantic_extraction_request(
+            schema,
+            &read,
+            SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+        .map_err(AgentBrowserProviderError::InitialEncoding)?;
+        let request = self.next_model_call_request()?;
+        let prepared = AgentProviderExtractionRequestDraft::try_owned_read(
+            &self.policy,
+            self.lease,
+            request,
+            &baseline,
+            schema,
+            &read,
+            &self.config,
+            self.objective
+                .as_ref()
+                .ok_or(AgentBrowserProviderError::Continuation)?,
+            payload,
+        )
+        .and_then(|draft| {
+            draft.try_prepare_for_provider_exact_count(&mut self.policy, request, schema, &read)
+        })
+        .map_err(AgentBrowserProviderError::from_request)?;
+        self.initial_provider_started = true;
+        if let Some(journal) = &self.journal {
+            journal
+                .emit(work::AgentWorkEventKind::ToolProposed(
+                    AgentBrowserToolKind::Extract,
+                ))
+                .map_err(|_| AgentBrowserProviderError::Journal)?;
+        }
+        let (input, output) = prepared.into_transport_parts();
+        let (terminal, _, _) = self.drive_terminal(input, Some(output)).await?;
+        let mapped = self
+            .extraction_output
+            .take()
+            .ok_or(AgentBrowserProviderError::Authority)?
+            .finish(
+                &terminal,
+                schema,
+                &read,
+                SemanticReadSensitivityLimit::PublicOnly,
+            );
+        match mapped {
+            Err(AgentProviderExtractionOutputError::Extraction(refusal)) => {
+                self.map_after_refusal(refusal, &baseline, schema, &read)
+                    .await
+            }
+            mapped => mapped.map_err(AgentBrowserProviderError::Extraction),
+        }
+    }
+
     pub(super) async fn extract_located<'a>(
         &mut self,
         located: zephium_agentic::DecisionLocatedRead<'a>,
