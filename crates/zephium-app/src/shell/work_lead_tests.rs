@@ -2880,18 +2880,36 @@ async fn stop_during_early_reply_publication_drops_generation_and_refuses_late_c
     assert_ne!(state.executions[0].status, WorkExecutionStatus::Running);
 }
 
-#[tokio::test]
-async fn native_records_publish_with_reply_and_finish_in_one_final_model_turn() {
-    fn turns(turn: usize, seen: &str) -> Vec<WorkModelPart> {
-        match turn {
-            0 => vec![call(
-                "read",
-                "web_fetch",
-                json!({"url":"https://records.example.com/one"}),
-            )],
-            1 => {
-                assert!(seen.contains("record r1:"), "{seen}");
-                vec![call(
+struct NativeRecordFinish(u8);
+impl WorkModelClient for NativeRecordFinish {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        events: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let turn = request
+                .messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
+                .count();
+            let seen = results(&request);
+            let create = request.tools.iter().find(|t| t.name == "create").unwrap();
+            let has_raw_sheet = create
+                .schema
+                .pointer("/properties/data/anyOf")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|schema| schema["title"] == "sheet");
+            assert_eq!(
+                has_raw_sheet,
+                turn == 0,
+                "only source-backed creation narrows after the read"
+            );
+            let final_call = || {
+                call(
                     "finish",
                     "finish",
                     json!({
@@ -2899,11 +2917,79 @@ async fn native_records_publish_with_reply_and_finish_in_one_final_model_turn() 
                         "records":[{"source":"r2"},{"source":"r1"}],"layout":"picks","records_title":"Offers",
                         "say":"Both original records are available.","title":"Original offers"
                     }),
-                )]
+                )
+            };
+            let output = match turn {
+                0 => call(
+                    "read",
+                    "web_fetch",
+                    json!({"url":"https://records.example.com/one"}),
+                ),
+                1 => {
+                    assert!(seen.contains("record r1:"), "{seen}");
+                    match self.0 {
+                        0 => final_call(),
+                        1 => call(
+                            "rewrite",
+                            "create",
+                            json!({"kind":"sheet","title":"Offers",
+                            "data":{"columns":[{"kind":"text","label":"Name"},{"kind":"text","label":"Price"}],
+                            "rows":[{"cells":["First offer","FREE"]}]}}),
+                        ),
+                        2 => call(
+                            "unknown",
+                            "finish",
+                            json!({"reply":{"headline":"Lost table","text":"The table is complete."},
+                            "sheet":{"rows":["silently lost"]},"say":"Done","title":"Wrong result"}),
+                        ),
+                        _ => unreachable!(),
+                    }
+                }
+                2 if self.0 != 0 => {
+                    assert!(
+                        seen.contains(if self.0 == 1 {
+                            "use data.records"
+                        } else {
+                            "finish accepts only"
+                        }),
+                        "{seen}"
+                    );
+                    final_call()
+                }
+                _ => panic!("native records must settle within one repair call: {turn}: {seen}"),
+            };
+            if let WorkModelPart::ToolCall(tool) = &output {
+                events(WorkModelEvent::ToolCall(tool.clone()));
             }
-            _ => panic!("native projection must not require another model call: {turn}: {seen}"),
-        }
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    input_tokens: 1000,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 100,
+                    reasoning_tokens: 0,
+                    cost_micros: None,
+                },
+                assistant: vec![output],
+            })
+        })
     }
+}
+
+#[tokio::test]
+async fn native_records_publish_with_reply_and_finish_in_one_final_model_turn() {
+    native_record_finish_fixture(0).await;
+}
+#[tokio::test]
+async fn native_records_refuse_rewritten_values_and_repair_in_one_call() {
+    native_record_finish_fixture(1).await;
+}
+#[tokio::test]
+async fn native_records_reject_lost_finish_objects_before_early_reply_and_repair_once() {
+    native_record_finish_fixture(2).await;
+}
+async fn native_record_finish_fixture(mode: u8) {
     let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
     let (mut shell, queue, handle, profile) = fixture(store);
     let create = handle
@@ -2914,7 +3000,7 @@ async fn native_records_publish_with_reply_and_finish_in_one_final_model_turn() 
     let work = create.work_id().unwrap();
     drive(&mut shell, &queue, create).await.unwrap();
     let lead = LeadModel {
-        client: Arc::new(Turns(turns)),
+        client: Arc::new(NativeRecordFinish(mode)),
         ..model(Arc::new(Script {
             calls: Mutex::new(vec![]),
         }))
@@ -2949,6 +3035,15 @@ async fn native_records_publish_with_reply_and_finish_in_one_final_model_turn() 
             _ => None,
         })
         .collect();
+    assert!(
+        !execution
+            .artifacts
+            .iter()
+            .any(|a| matches!(a.data, WorkArtifactDataV1::Sheet { .. })),
+        "a model rewrite must never reach storage"
+    );
+    assert!(!execution.artifacts.iter().any(|a| matches!(&a.data, WorkArtifactDataV1::Reply {headline,..} if headline == "Lost table")),
+        "invalid finish fields must refuse before early publication");
     assert_eq!(picks.len(), 1);
     assert_eq!(picks[0][0].name, "Second offer");
     assert_eq!(picks[0][0].price.as_ref().unwrap().display, "€32.50 / item");

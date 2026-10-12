@@ -979,6 +979,15 @@ where
                 &mut messages,
                 super::lead::conversation_budget(&model.entry),
             );
+            if self
+                .run
+                .records
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .has_for(Some(part))
+            {
+                super::schema::native_record_create(&mut tools);
+            }
             let request = WorkModelRequest {
                 image_fence: None,
                 model: model.entry.model.clone(),

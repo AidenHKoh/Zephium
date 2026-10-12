@@ -255,7 +255,7 @@ where
     /// Runs the conversation to its end.
     pub(crate) async fn drive(&self) -> Result<WorkAttemptStatus, WorkError> {
         let system = self.system();
-        let tools = self.tools();
+        let mut tools = self.tools();
         let mut context = self.context.clone();
         if let Some(name) = self
             .run
@@ -291,6 +291,15 @@ where
             self.run.activity(WorkActivityV1::Planning);
             self.steers(&mut messages).await;
             compact(&mut messages, conversation_budget(&self.models.lead.entry));
+            if self
+                .run
+                .records
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .has_for(None)
+            {
+                super::schema::native_record_create(&mut tools);
+            }
             let sizes = Sections::of(&system, &tools, &messages);
             let model = &self.models.lead;
             let request = WorkModelRequest {
@@ -530,6 +539,28 @@ where
     }
 
     fn check_finish_records(&self, args: &Value) -> Result<(), (String, ObjectRefusal)> {
+        let Some(fields) = args.as_object() else {
+            return Err((
+                "finish arguments must be an object".into(),
+                ObjectRefusal::Shape,
+            ));
+        };
+        if fields.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "reply" | "records" | "layout" | "records_title" | "say" | "followups" | "title"
+            )
+        }) {
+            return Err(("finish accepts only reply, records, layout, records_title, say, followups and title; nothing was published. Select native records by r key, or create other objects separately.".into(), ObjectRefusal::Shape));
+        }
+        if args.get("records").is_none()
+            && (args.get("layout").is_some() || args.get("records_title").is_some())
+        {
+            return Err((
+                "layout and records_title require records; nothing was published".into(),
+                ObjectRefusal::Shape,
+            ));
+        }
         if let Some(records) = args.get("records") {
             let kind = args
                 .get("layout")
@@ -938,6 +969,11 @@ where
         }
         let data = args.get("data").cloned().unwrap_or(Value::Null);
         let sources = strings(args.get("sources"));
+        if let Some(fault) =
+            self.native_selection_fault(kind, &data, if helper { part } else { None })
+        {
+            return self.refuse(&key, ObjectRefusal::Source, fault);
+        }
         let mut proposed =
             match objects::propose(self.run, &canvas, kind, title, data, &sources, &[], lenient) {
                 Ok(proposed) => proposed,
@@ -996,6 +1032,17 @@ where
         }
     }
 
+    fn native_selection_fault(
+        &self,
+        kind: &str,
+        data: &Value,
+        part: Option<WorkPartId>,
+    ) -> Option<String> {
+        (matches!(kind, "picks" | "sheet") && data.get("records").is_none()
+            && self.run.records.lock().unwrap_or_else(|e| e.into_inner()).has_for(part))
+            .then(|| "Original records are available: use data.records with r keys in the desired order and optional annotations. Rust copies the original values, links and media; do not rewrite item values or cells.".into())
+    }
+
     async fn revise(&self, args: &Value) -> (String, bool) {
         let Some(id) = args
             .get("id")
@@ -1050,6 +1097,11 @@ where
             .to_owned();
         let data = args.get("data").cloned().unwrap_or(Value::Null);
         let sources = strings(args.get("sources"));
+        if target.in_this_run {
+            if let Some(fault) = self.native_selection_fault(kind, &data, target.artifact.part) {
+                return self.refuse(&key, ObjectRefusal::Source, fault);
+            }
+        }
         let mut proposed = match objects::propose(
             self.run,
             &canvas,

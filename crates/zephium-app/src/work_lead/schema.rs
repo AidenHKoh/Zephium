@@ -316,6 +316,21 @@ pub(crate) fn any(kinds: &[&str]) -> Value {
     json!({"anyOf": options, "description": "For extracted records, picks/sheet data is records in desired order: source is the r key returned by a read, annotation is optional. Rust copies values, links and images. Other objects use their kind schema."})
 }
 
+/// Once original rows exist, creation selects them instead of rewriting cells.
+/// Revision retains its general schema for older/manual objects; native objects
+/// of this execution are independently checked before a revision is accepted.
+pub(crate) fn native_record_create(tools: &mut [zephium_core::work::model::WorkModelTool]) {
+    for tool in tools.iter_mut().filter(|tool| tool.name == "create") {
+        if let Some(options) = tool
+            .schema
+            .pointer_mut("/properties/data/anyOf")
+            .and_then(Value::as_array_mut)
+        {
+            options.retain(|option| option["title"] != "sheet");
+        }
+    }
+}
+
 pub(crate) fn record_selection() -> Value {
     serde_json::json!({
             "title":"native_records", "type":"object", "additionalProperties":false,

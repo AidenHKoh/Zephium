@@ -71,6 +71,12 @@ pub(crate) enum Layout {
 }
 
 impl Records {
+    pub fn has_for(&self, part: Option<zephium_core::work::WorkPartId>) -> bool {
+        self.rows
+            .iter()
+            .any(|row| part.is_none() || row.part == part)
+    }
+
     pub fn remember_site(
         &mut self,
         host: &str,
