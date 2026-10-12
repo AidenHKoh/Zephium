@@ -1897,7 +1897,7 @@
     // Read-only document viewers may hold a long file. Inspect its whole value
     // before copying any prefix; cap aggregate work and refuse an exhausted scan.
     let valueClass;
-    if (readonlyText && raw.length > MAX_VALUE_BYTES) {
+    if (readonlyText) {
       const scanned = state.readonlyScanUnits || 0;
       if (raw.length > MAX_READONLY_SCAN_UNITS - scanned) valueClass = 1;
       else {

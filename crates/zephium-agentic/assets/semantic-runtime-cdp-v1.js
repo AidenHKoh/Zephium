@@ -2396,7 +2396,7 @@ return{value,bytes,secret,truncated:normalized.truncated};
 function consumeValueField(raw,state,fieldLimit=MAX_VALUE_BYTES,readonlyText=false){
 const remaining=mathMax(0,state.request.b.t-state.textBytes);
 let valueClass;
-if(readonlyText&&raw.length>MAX_VALUE_BYTES){
+if(readonlyText){
 const scanned=state.readonlyScanUnits||0;
 if(raw.length>MAX_READONLY_SCAN_UNITS-scanned)valueClass=1;
 else{

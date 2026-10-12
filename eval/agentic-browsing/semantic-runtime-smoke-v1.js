@@ -737,6 +737,7 @@ if (readonlyViewerCase) {
   const publicText = "Apache License, Version 2.0. " + "Public legal reference text. ".repeat(400);
   const cases = [
     ["Public readonly viewer", {"aria-readonly":"true"}, publicText, false],
+    ["Unicode readonly viewer", {"aria-readonly":"true"}, "Apache License, Version 2.0. " + "東京".repeat(1000), false],
     ["Long editable field", {}, publicText, true],
     ["Secret beyond copied prefix", {"aria-readonly":"true"}, publicText + " sk-synthetic-test-secret-never-export", true],
     ["Exhausted readonly survey", {"aria-readonly":"true"}, "x".repeat(65537), true],
