@@ -1857,6 +1857,40 @@ fn needs_person(kind: &zephium_core::work::runtime::WorkStepKindV1) -> bool {
     }
 }
 
+fn public_eval_model(public: bool, value: Option<&str>) -> Result<&'static str, &'static str> {
+    if !public {
+        return Ok("openai/gpt-6-luna");
+    }
+    match value {
+        None | Some("gpt-6-luna") => Ok("openai/gpt-6-luna"),
+        Some("gpt-6.1-sol") => Ok("openai/gpt-6.1-sol"),
+        Some("deepseek-flash") => Ok("deepseek/deepseek-flash"),
+        _ => Err("eval_model_choice"),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn evaluation_model_choices_cannot_change_private_qualification_or_supply_an_endpoint() {
+    for choice in [
+        None,
+        Some("deepseek-flash"),
+        Some("gpt-6.1-sol"),
+        Some("https://other.test/model"),
+    ] {
+        assert_eq!(
+            public_eval_model(false, choice).unwrap(),
+            "openai/gpt-6-luna"
+        );
+    }
+    assert_eq!(public_eval_model(true, None).unwrap(), "openai/gpt-6-luna");
+    assert_eq!(
+        public_eval_model(true, Some("deepseek-flash")).unwrap(),
+        "deepseek/deepseek-flash"
+    );
+    assert!(public_eval_model(true, Some("https://other.test/model")).is_err());
+}
+
 /// One lead scenario in a live host: every request in turn, one closed
 /// row per request, and the projection kept for reading its objects.
 pub(super) async fn lead_workflow(
@@ -1900,6 +1934,16 @@ pub(super) async fn lead_workflow(
         None
     };
     let (read_decisions, read_decision_name) = eval_read_decisions(read_decision_env.as_deref())?;
+    let eval_model_env = if public_eval {
+        match std::env::var("ZEPHIUM_EVAL_MODEL") {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(_) => return Err("eval_model_choice"),
+        }
+    } else {
+        None
+    };
+    let eval_model = public_eval_model(public_eval, eval_model_env.as_deref())?;
     let block_probe = scenario.name.starts_with("blocks-");
     let _ = STARTED.get_or_init(Instant::now);
     let eval_started = Instant::now();
@@ -1911,7 +1955,12 @@ pub(super) async fn lead_workflow(
             WorkModelRole::Page,
             WorkModelRole::Light,
         ] {
-            zephium_app::work_models::choose(profile, role, Some("openai/gpt-6-luna"))
+            let choice = if role == WorkModelRole::Lead && eval_model == "deepseek/deepseek-flash" {
+                "openai/gpt-6-luna"
+            } else {
+                eval_model
+            };
+            zephium_app::work_models::choose(profile, role, Some(choice))
                 .map_err(|_| "eval_model_choice")?;
         }
     }
@@ -1940,6 +1989,10 @@ pub(super) async fn lead_workflow(
     let mut light = resolve(WorkModelRole::Light)
         .await
         .unwrap_or_else(|| page.clone());
+    // Qualify Flash as the lead on public tasks without changing catalog defaults.
+    if public_eval && eval_model == "deepseek/deepseek-flash" {
+        lead = page.clone();
+    }
     if account_probe {
         for model in [&mut lead, &mut page, &mut light] {
             model.entry.supports.vision = false;
@@ -1952,10 +2005,7 @@ pub(super) async fn lead_workflow(
             ("page", &mut page),
             ("light", &mut light),
         ] {
-            if model.entry.model.provider != zephium_core::work::model::WorkModelProvider::OpenAi
-                || model.entry.model.model != "gpt-6-luna"
-                || PUBLIC_SEARCH_MODEL != "gpt-6-luna"
-            {
+            if model.entry.id != eval_model || PUBLIC_SEARCH_MODEL != "gpt-6-luna" {
                 return Err("eval_model_policy");
             }
             model.client = Arc::new(EvalModelClient {
