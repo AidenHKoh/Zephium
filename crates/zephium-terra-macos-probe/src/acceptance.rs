@@ -380,6 +380,8 @@ struct EvalDiagnostics {
     image_bytes: usize,
     images_limited: bool,
     page_traces: Vec<serde_json::Value>,
+    action_traces: Vec<serde_json::Value>,
+    action_traces_limited: bool,
     page_traces_limited: bool,
     truncated: bool,
 }
@@ -541,7 +543,62 @@ fn eval_trace_messages(
     )
 }
 
+fn action_trace(trace: &serde_json::Value) -> Option<serde_json::Value> {
+    let outputs = trace.get("output_tools")?.as_array()?;
+    if !outputs.iter().any(|tool| tool["tool"] == "act") {
+        return None;
+    }
+    let mut observation = None;
+    let mut updates = Vec::new();
+    for message in trace.get("messages")?.as_array()? {
+        if let Some(parts) = message.get("parts").and_then(serde_json::Value::as_array) {
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(serde_json::Value::as_str) {
+                    if text.starts_with("ZSEM3 ") {
+                        observation = Some(text.to_owned());
+                        updates.clear();
+                    }
+                }
+            }
+        }
+        if let Some(results) = message.get("results").and_then(serde_json::Value::as_array) {
+            for result in results {
+                if let Some(value) = result
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+                {
+                    if let Some(text) = value
+                        .get("observation")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|text| text.starts_with("ZSEM3 "))
+                    {
+                        observation = Some(text.to_owned());
+                        updates.clear();
+                        continue;
+                    }
+                }
+                updates.push(result.clone());
+            }
+        }
+    }
+    let summary = serde_json::json!({"call_index":trace["call_index"],"base_observation":observation?,"updates":updates,"proposals":outputs});
+    (summary.to_string().len() <= 24 * 1024).then_some(summary)
+}
+
 fn remember_eval_page_trace(local: &mut EvalDiagnostics, trace: serde_json::Value) {
+    if let Some(summary) = action_trace(&trace) {
+        if local.action_traces.len() == 64 {
+            local.action_traces.remove(0);
+            local.action_traces_limited = true;
+        }
+        local.action_traces.push(summary);
+    } else if trace["output_tools"]
+        .as_array()
+        .is_some_and(|tools| tools.iter().any(|tool| tool["tool"] == "act"))
+    {
+        local.action_traces_limited = true;
+    }
     if trace.to_string().len() > EVAL_PAGE_TRACE_BYTES {
         local.page_traces_limited = true;
         return;
@@ -558,7 +615,7 @@ fn export_eval_page_traces(public: bool, local: &EvalDiagnostics) -> serde_json:
     if !public {
         return serde_json::json!({"state":"withheld_private_provenance","turns":[]});
     }
-    serde_json::json!({"state":if local.page_traces.is_empty() && !local.page_traces_limited { "not_recorded" } else { "exported" },"turns":local.page_traces,"limited":local.page_traces_limited,
+    serde_json::json!({"state":if local.page_traces.is_empty() && !local.page_traces_limited { "not_recorded" } else { "exported" },"turns":local.page_traces,"actions":local.action_traces,"actions_limited":local.action_traces_limited,"limited":local.page_traces_limited,
         "scope":"Opt-in bounded local public page-model text and tool arguments. No system blocks, assistant prose, images, provider replay items or transport credentials; not a native action receipt."})
 }
 
@@ -723,6 +780,28 @@ mod page_trace_tests {
         let withheld = export_eval_page_traces(false, &local).to_string();
         assert!(!withheld.contains("synthetic-date"));
         assert!(!withheld.contains("public synthetic"));
+    }
+
+    #[test]
+    fn action_trace_retains_current_observations_without_goals_or_old_tool_replay() {
+        let trace = serde_json::json!({"call_index":7,"output_tools":[{"tool":"act","arguments":{"actions":[]}}],
+            "messages":[{"parts":[{"text":"private goal sentinel"},{"text":"ZSEM3 old"}]},
+            {"results":[{"content":"{\"observation\":\"ZSEM3 current\",\"status\":\"verified\"}"}]}]});
+        let summary = action_trace(&trace).unwrap();
+        assert_eq!(summary["base_observation"], "ZSEM3 current");
+        assert!(!summary.to_string().contains("private goal sentinel"));
+        let mut local = EvalDiagnostics::default();
+        for _ in 0..70 {
+            remember_eval_page_trace(&mut local, trace.clone());
+        }
+        assert_eq!(local.action_traces.len(), 64);
+        assert!(!export_eval_page_traces(false, &local)
+            .to_string()
+            .contains("ZSEM3 current"));
+        let mut oversized = trace;
+        oversized["messages"] =
+            serde_json::json!([{"parts":[{"text":format!("ZSEM3 {}","x".repeat(24*1024))}]}]);
+        assert!(action_trace(&oversized).is_none());
     }
 
     #[test]
