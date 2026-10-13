@@ -2,7 +2,8 @@
   import { onMount, tick } from "svelte";
   import { commands } from "$shared/ipc/bindings";
   import type { WorkLocalServerV1, WorkModelProvider } from "$shared/ipc/bindings";
-  import { type ModelsSession, keyState, providerMark, providerName } from "$domain/ai";
+  import { type ModelsSession, keyState, providerName } from "$domain/ai";
+  import ProviderMark from "$shared/ui/ProviderMark";
   import Button from "$shared/ui/Button";
   import Field from "$shared/ui/Field";
   import Icon from "$shared/ui/Icon";
@@ -172,9 +173,7 @@
 
 <div class="ai-row" data-editing={editing}>
   <div class="head">
-    <span class="tile" aria-hidden="true"
-      ><Icon icon={providerMark(provider)} size={17} strokeWidth={1.5} /></span
-    >
+    <span class="tile" aria-hidden="true"><ProviderMark {provider} size={20} /></span>
     <div class="copy">
       <h3>{name}</h3>
       <p>

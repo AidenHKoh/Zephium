@@ -9,4 +9,3 @@ export {
   shortName,
   usable,
 } from "./catalog";
-export { providerMark } from "./marks";

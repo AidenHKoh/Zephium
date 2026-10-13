@@ -10,12 +10,12 @@
     keyState,
     locked,
     pickerGroups,
-    providerMark,
     providerName,
     shortName,
     usable,
   } from "$domain/ai";
-  import Icon, { ZephiumMark } from "$shared/ui/Icon";
+  import Icon from "$shared/ui/Icon";
+  import ProviderMark from "$shared/ui/ProviderMark";
   import { ArrowDown01Icon, Key01Icon, Tick02Icon } from "../../lib/icons";
   import * as m from "$shared/i18n/messages";
   import "$shared/ui/Menu/popover.css";
@@ -148,9 +148,7 @@
 
 {#snippet heading(provider: WorkModelProvider)}
   <div class="heading" role="presentation">
-    <span class="heading-mark"
-      ><Icon icon={providerMark(provider)} size={13} strokeWidth={1.6} /></span
-    >
+    <span class="heading-mark"><ProviderMark {provider} size={14} /></span>
     <span>{providerName(provider)}</span>
   </div>
 {/snippet}
@@ -172,7 +170,7 @@
     >
       {#if current}
         <span class="trigger-mark" aria-hidden="true"
-          ><Icon icon={providerMark(current.model.provider)} size={14} strokeWidth={1.6} /></span
+          ><ProviderMark provider={current.model.provider} size={15} /></span
         >
         <span class="trigger-name">{shortName(current)}</span>
       {:else}
@@ -198,7 +196,7 @@
               <li>
                 <button type="button" class="ui-menu-item keyless" data-model-row onclick={signIn}>
                   <span class="ui-menu-icon" aria-hidden="true"
-                    ><Icon icon={ZephiumMark} size={15} strokeWidth={1.6} /></span
+                    ><ProviderMark provider="cloud" size={16} /></span
                   >
                   <span class="name">{m.ai_cloud_title()}</span>
                   <span class="hint">{m.work_model_sign_in()}</span>
@@ -227,7 +225,7 @@
                     onclick={settings}
                   >
                     <span class="ui-menu-icon" aria-hidden="true"
-                      ><Icon icon={providerMark(provider)} size={15} strokeWidth={1.6} /></span
+                      ><ProviderMark {provider} size={16} /></span
                     >
                     <span class="name">{providerName(provider)}</span>
                     <span class="hint"
