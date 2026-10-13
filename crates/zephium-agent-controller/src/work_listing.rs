@@ -29,6 +29,40 @@ impl ListingProgress {
 }
 
 impl AgentWorkController {
+    pub(super) fn preserves_listing_view(
+        kind: SemanticActionKind,
+        target: Option<SemanticReferenceId>,
+        observation: &SemanticObservation,
+    ) -> bool {
+        if kind == SemanticActionKind::Scroll {
+            return true;
+        }
+        if kind != SemanticActionKind::Click {
+            return false;
+        }
+        let census = native_listing_census(observation);
+        if observation
+            .frames()
+            .iter()
+            .flat_map(|frame| frame.nodes())
+            .any(|node| {
+                Some(node.reference()) == target
+                    && node
+                        .link_destination()
+                        .is_some_and(|link| census.contains_record_link(link))
+            })
+        {
+            return true;
+        }
+        match census.continuation {
+            Some(
+                NativeListingContinuation::LoadMore(next)
+                | NativeListingContinuation::NextPage(next),
+            ) => target == Some(next),
+            None => false,
+        }
+    }
+
     pub(super) async fn load_listing(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
@@ -144,6 +178,48 @@ mod tests {
             continuation: None,
             limited: false,
         }
+    }
+
+    #[cfg(feature = "probe-harness")]
+    #[test]
+    fn listing_preparation_resets_evidence_but_scroll_pagination_and_item_navigation_preserve_it() {
+        let (_, source) = super::super::super::tests::browser_fixture();
+        let frame = &source.frames()[0];
+        let wire = br#"{"v":1,"i":1,"g":1,"c":"complete","n":[
+            {"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"group"},{"k":3,"p":1,"r":"heading","l":2,"n":"One"},
+            {"k":4,"p":1,"r":"link","n":"One","u":"https://fixture.example.test/one","o":1},
+            {"k":5,"p":0,"r":"group"},{"k":6,"p":4,"r":"heading","l":2,"n":"Two"},
+            {"k":7,"p":4,"r":"link","n":"Two","u":"https://fixture.example.test/two","o":1},
+            {"k":8,"p":0,"r":"button","n":"Load more","o":1},
+            {"k":9,"p":0,"r":"button","n":"Price ascending","o":1}
+        ]}"#;
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                frame.invocation(),
+                frame.frame().clone(),
+                frame.generation(),
+            ),
+            wire,
+        )
+        .unwrap();
+        let look = SemanticObservationAssembler::new(source.request().clone(), snapshot)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let keeps = |kind, target| {
+            AgentWorkController::preserves_listing_view(
+                kind,
+                Some(SemanticReferenceId::new(target).unwrap()),
+                &look,
+            )
+        };
+        assert!(keeps(SemanticActionKind::Scroll, 1));
+        assert!(keeps(SemanticActionKind::Click, 8));
+        assert!(keeps(SemanticActionKind::Click, 4));
+        assert!(!keeps(SemanticActionKind::Click, 9));
+        assert!(!keeps(SemanticActionKind::Fill, 9));
+        assert!(!keeps(SemanticActionKind::Select, 9));
     }
 
     #[test]

@@ -145,6 +145,29 @@ impl SemanticRetainedReadEvidence {
         *self = Self::default();
     }
 
+    /// Discards a prepared listing view while preserving its document owner.
+    /// A followed navigation may present this predecessor again; marking it
+    /// consumed prevents that callback from resurrecting the obsolete values.
+    pub fn discard_view_before_action(
+        &mut self,
+        predecessor: &SemanticObservationAcknowledgement,
+    ) -> Result<(), SemanticReadError> {
+        if self
+            .context
+            .is_some_and(|context| context != predecessor.context())
+        {
+            return Err(SemanticReadError::AuthorityMismatch);
+        }
+        *self = Self {
+            context: Some(predecessor.context()),
+            roles: self.roles,
+            url_sources: self.url_sources,
+            last_seen: Some(predecessor.clone()),
+            ..Self::default()
+        };
+        Ok(())
+    }
+
     /// Advances the read owner along one accounted native navigation. This
     /// does not make old references actionable or authorize model disclosure;
     /// extraction policy independently rejoins every historical source to its

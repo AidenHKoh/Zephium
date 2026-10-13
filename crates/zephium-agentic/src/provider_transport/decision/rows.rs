@@ -964,6 +964,16 @@ pub enum NativeListingContinuation {
     LoadMore(SemanticReferenceId),
 }
 
+impl NativeListingCensus {
+    /// Whether this exact URL appeared as a record link in this census.
+    /// This is evidence bookkeeping, never permission to navigate.
+    pub fn contains_record_link(&self, target: &ContextNavigationTarget) -> bool {
+        use sha2::{Digest, Sha256};
+        let digest: [u8; 32] = Sha256::digest(target.as_url().as_str().as_bytes()).into();
+        self.identities.contains(&digest)
+    }
+}
+
 /// Finds repeated linked records and bounded continuation controls without a model.
 pub fn native_listing_census(observation: &SemanticObservation) -> NativeListingCensus {
     use sha2::{Digest, Sha256};

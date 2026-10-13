@@ -743,6 +743,21 @@ impl AgentWorkController {
     > {
         state.refresh_account(worker, browser)?;
         let rewritable = state.task.rewritable_field(proposal.action(), baseline);
+        let discard_listing_view = state
+            .extraction_schema
+            .as_ref()
+            .is_some_and(SemanticExtractionSchema::is_row_collection)
+            && !Self::preserves_listing_view(
+                proposal.action().kind(),
+                baseline.frames().iter().find_map(|frame| {
+                    proposal
+                        .action()
+                        .target_node(frame)
+                        .map(SemanticNode::reference)
+                }),
+                baseline,
+            );
+        let predecessor = proposal.baseline().clone();
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
         session.rewritable_fill = rewritable;
         let id = state.native.identity.id();
@@ -756,6 +771,14 @@ impl AgentWorkController {
                 .automation_state(id)
                 .map_err(|_| AgentWorkFailure::Context)?
         };
+        if discard_listing_view {
+            state
+                .retained_read_evidence
+                .discard_view_before_action(&predecessor)
+                .map_err(|error| {
+                    AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
+                })?;
+        }
         let request = session
             .authorize_action(
                 proposal,

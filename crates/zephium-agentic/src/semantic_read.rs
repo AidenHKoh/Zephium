@@ -3391,6 +3391,60 @@ mod tests {
     }
 
     #[test]
+    fn changed_listing_view_discards_old_values_and_cannot_retain_its_departure_again() {
+        let old = retained_observation(
+            1,
+            json!([
+                {"k":1,"r":"document","o":16}, {"k":2,"p":0,"r":"paragraph","t":"Before sorting: expensive first"}
+            ]),
+        );
+        let new = retained_observation(
+            2,
+            json!([
+                {"k":1,"r":"document","o":16}, {"k":2,"p":0,"r":"paragraph","t":"After sorting: cheapest first"}
+            ]),
+        );
+        let old_ack = acknowledgement(&old);
+        let new_ack = acknowledgement(&new);
+        let read = |look, ack| {
+            read_semantic_observation(
+                look,
+                SemanticReadAuthority::Acknowledged(ack),
+                SemanticCaptureInstant::from_millis(100),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::EXTRACTION,
+            )
+            .unwrap()
+        };
+        let old_read = read(&old, &old_ack);
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        evidence.retain(&old_read, &old_ack).unwrap();
+        assert!(evidence.retained_items() > 0);
+        evidence.discard_view_before_action(&old_ack).unwrap();
+        evidence.retain(&old_read, &old_ack).unwrap();
+        assert_eq!(
+            evidence.retained_items(),
+            0,
+            "the followed navigation must not re-add its old source"
+        );
+        let current = evidence.merge_for_extraction(read(&new, &new_ack)).unwrap();
+        assert_eq!(current.fragments().len(), 1);
+        assert_eq!(
+            current.fragments()[0].content().text().unwrap().as_str(),
+            "After sorting: cheapest first"
+        );
+        let mut foreign = read(&new, &new_ack);
+        foreign.context = context_with_id(999);
+        assert!(
+            matches!(
+                evidence.merge_for_extraction(foreign),
+                Err(SemanticReadError::AuthorityMismatch)
+            ),
+            "discarding a view must retain its original context guard"
+        );
+    }
+
+    #[test]
     fn extraction_pressure_keeps_late_facts_ahead_of_gallery_controls() {
         let mut history_nodes = vec![json!({"k":1,"r":"document","o":16})];
         for key in 2..=129 {
