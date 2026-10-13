@@ -4,7 +4,8 @@
   import * as settings from "../lib/settings-state.svelte";
   import { groups, sections } from "../lib/settings-model";
   import Icon from "$shared/ui/Icon";
-  import { ArrowLeft02Icon, Search01Icon } from "@hugeicons/core-free-icons";
+  import IconButton from "$shared/ui/IconButton";
+  import { Cancel01Icon, Search01Icon } from "@hugeicons/core-free-icons";
   import { untrack } from "svelte";
   import { captureFrom, playTo, type Origin } from "$shared/lib/plate-glide";
 
@@ -36,9 +37,16 @@
   data-glide-host
   aria-label={m.settings_title()}
 >
-  <button type="button" class="settings-back" onclick={() => void browser.open(null)}
-    ><Icon icon={ArrowLeft02Icon} size={15} />{m.settings_back()}</button
-  >
+  <!-- A panel beside the rail, headed like every tool's: closing it returns
+       to the page the rail still shows. -->
+  <header class="settings-panel-header">
+    <h2>{m.settings_title()}</h2>
+    <IconButton
+      icon={Cancel01Icon}
+      label={m.settings_back()}
+      onclick={() => void browser.close()}
+    />
+  </header>
   <div class="settings-sidebar-search">
     <Icon icon={Search01Icon} size={15} /><input
       type="search"

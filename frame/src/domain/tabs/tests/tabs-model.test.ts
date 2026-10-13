@@ -181,6 +181,19 @@ describe("tab projection admission", () => {
     expect(model.value.split_group).toBe(replacement);
   });
 
+  it("lets a late presentation update its tab without taking back the active tab", () => {
+    const model = new TabProjectionModel(snapshot(3, [tab("page", 1)], "page"));
+    // Native presents the restored page, then opens a new tab; the new tab's
+    // snapshot reaches the frame before the page's presentation does.
+    expect(
+      model.applySnapshot(snapshot(9, [tab("page", 1), tab("fresh", 8, { url: null })], "fresh")),
+    ).toBe(true);
+    const presented = tab("page", 6, { title: "Presented" });
+    expect(model.applyPresentation({ tab: presented, active: "page" })).toBe(true);
+    expect(model.value.active).toBe("fresh");
+    expect(model.value.tabs.find((candidate) => candidate.id === "page")).toBe(presented);
+  });
+
   it("rejects a presentation older than a previously applied delta", () => {
     const model = new TabProjectionModel(snapshot(3, [tab("a", 1)], "a"));
     const newest = tab("a", 7, { title: "Newest" });

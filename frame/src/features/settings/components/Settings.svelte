@@ -89,7 +89,6 @@
     <div class="settings-page">
       {#key state.query() ? "search" : current.id}<div class="settings-view">
           <header class="settings-page-heading">
-            <span class="settings-eyebrow">{m.settings_title()}</span>
             <h1 tabindex="-1">
               {state.query() ? m.settings_search_results() : current.title()}
             </h1>

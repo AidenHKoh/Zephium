@@ -284,6 +284,30 @@ fn settings_is_a_window_page_and_extensions_is_a_deduplicated_tab() {
 }
 
 #[test]
+fn a_new_tab_asked_for_from_settings_over_a_page_is_the_new_tab() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let web = active_id(&screen);
+    navigate_and_commit(&mut shell, web, "settings-new-tab.example");
+    let window = shell.windows.focused().unwrap().id;
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    shell.handle_operation(Command::Open);
+    let fresh = active_id(&screen);
+    assert_ne!(fresh, web);
+    assert_eq!(shell.active_browser_page(), None);
+    assert!(shell.items.tab(fresh).unwrap().url.is_none());
+    // The page leaves the stage, so the frame's new tab is what shows.
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .rev()
+            .find(|call| call.starts_with("layout@")),
+        Some(&format!("layout@{window} "))
+    );
+}
+
+#[test]
 fn trusted_extension_page_closure_removes_only_matching_typed_marker() {
     use zephium_core::item::TabContent;
 

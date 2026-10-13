@@ -8,7 +8,6 @@
     <div class="settings-page">
       <div class="settings-view">
         <header class="settings-page-heading">
-          <span class="settings-eyebrow">Settings</span>
           <h1>Connections</h1>
           <p>The tools and services Work can use as you.</p>
         </header>
