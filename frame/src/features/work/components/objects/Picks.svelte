@@ -117,7 +117,14 @@
 </section>
 
 <style>
+  header,
+  .set > :global(*),
+  .compare-sheet {
+    pointer-events: auto;
+  }
+
   .picks {
+    pointer-events: none;
     display: flex;
     flex-direction: column;
     gap: 14px;

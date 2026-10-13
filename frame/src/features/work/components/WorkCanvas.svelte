@@ -1067,6 +1067,17 @@
   }
   /* stylelint-enable selector-class-pattern */
 
+  /* A set of cards is taken by its cards and title; the gaps between them let the pane pan. */
+  /* stylelint-disable selector-class-pattern */
+  .work-canvas :global(.svelte-flow__node:has(.object.picks)) {
+    pointer-events: none;
+  }
+
+  .work-canvas :global(.svelte-flow__node:has(.object.picks) .work-resize-handle) {
+    pointer-events: auto;
+  }
+  /* stylelint-enable selector-class-pattern */
+
   /* While the person looks elsewhere during a run: one quiet way back to the work. */
   .follow {
     position: absolute;

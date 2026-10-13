@@ -106,6 +106,12 @@
     transition: box-shadow var(--motion-fast) var(--ease-out);
   }
 
+  /* Only the cards of a set take the pointer: its gaps belong to the canvas. */
+  .object.picks,
+  .object.picks > div {
+    pointer-events: none;
+  }
+
   .object.selected {
     box-shadow: 0 0 0 1.5px var(--color-ring);
   }
