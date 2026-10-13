@@ -7,6 +7,7 @@
   import PreferenceSelect from "../PreferenceSelect.svelte";
   import ImportBrowserData from "../ImportBrowserData.svelte";
   import DownloadPreferences from "../DownloadPreferences.svelte";
+  import LoginItemRow from "../LoginItemRow.svelte";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import Checkbox from "$shared/ui/Checkbox";
   import Select from "$shared/ui/Select";
@@ -56,7 +57,10 @@
     >{/if}
 </div>
 <SettingsGroup title={m.general_startup_title()}
-  ><PreferenceSelect id="general.startup" preference="tabs.startup" /></SettingsGroup
+  ><LoginItemRow /><PreferenceSelect
+    id="general.startup"
+    preference="tabs.startup"
+  /></SettingsGroup
 >
 <SettingsGroup title={m.general_data_group()}>
   <ImportBrowserData />

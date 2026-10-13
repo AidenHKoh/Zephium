@@ -92,6 +92,12 @@ export const fields = {
     description: m.pref_general_default_help,
     initial: false,
   },
+  "general.login": {
+    section: "general",
+    label: m.general_login_title,
+    description: m.general_login_help,
+    initial: false,
+  },
   "general.startup": {
     section: "general",
     label: m.pref_general_startup,
@@ -187,17 +193,37 @@ export const fields = {
     description: m.pref_tabs_duplicates_help,
     initial: true,
   },
+  "tabs.external": {
+    section: "tabs",
+    label: m.tabs_external,
+    description: m.tabs_external_help,
+    initial: "new-tab",
+    options: [
+      { value: "new-tab", label: m.tabs_external_option_same },
+      { value: "end", label: m.tabs_external_option_end },
+      { value: "after-current", label: m.tabs_external_option_next },
+    ],
+  },
+  "tabs.close-button": {
+    section: "tabs",
+    label: m.tabs_close_buttons,
+    description: m.tabs_close_buttons_help,
+    initial: "hover",
+    options: [
+      { value: "hover", label: m.tabs_close_buttons_option_hover },
+      { value: "always", label: m.tabs_close_buttons_option_always },
+    ],
+  },
   "tabs.archive": {
-    preview: true,
     section: "tabs",
     label: m.pref_tabs_archive,
     description: m.pref_tabs_archive_help,
-    initial: "Never",
+    initial: "never",
     options: [
-      { value: "Never", label: m.pref_tabs_archive_option_0 },
-      { value: "After 1 day", label: m.pref_tabs_archive_option_1 },
-      { value: "After 7 days", label: m.pref_tabs_archive_option_2 },
-      { value: "After 30 days", label: m.pref_tabs_archive_option_3 },
+      { value: "never", label: m.pref_tabs_archive_option_0 },
+      { value: "12h", label: m.pref_tabs_archive_option_1 },
+      { value: "1d", label: m.pref_tabs_archive_option_2 },
+      { value: "7d", label: m.pref_tabs_archive_option_3 },
     ],
   },
   "profiles.name": {

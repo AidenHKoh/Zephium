@@ -9,6 +9,9 @@
   import { untrack } from "svelte";
   import { captureFrom, playTo, type Origin } from "$shared/lib/plate-glide";
 
+  // The account mirror stays out of the browser's startup graph.
+  const identity = import("./SettingsIdentity.svelte");
+
   // The current page's plate travels to the next one, as a tab's does.
   let nav = $state<HTMLElement>();
   let current = $derived(settings.query() ? null : settings.section());
@@ -47,6 +50,7 @@
       onclick={() => void browser.close()}
     />
   </header>
+  {#await identity then { default: SettingsIdentity }}<SettingsIdentity />{/await}
   <div class="settings-sidebar-search">
     <Icon icon={Search01Icon} size={15} /><input
       type="search"

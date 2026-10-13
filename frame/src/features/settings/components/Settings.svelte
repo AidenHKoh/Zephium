@@ -3,20 +3,15 @@
   import { tick, onMount } from "svelte";
   import * as m from "$shared/i18n/messages";
   import { preferences } from "$domain/preferences";
-  import {
-    sections,
-    searchSettings,
-    emptySections,
-    type SettingsSection,
-  } from "../lib/settings-model";
+  import { sections, searchSettings, type SettingsSection } from "../lib/settings-model";
   import * as state from "../lib/settings-state.svelte";
-  import AppearancePage from "./sections/AppearancePage.svelte";
   import NewTabPage from "./sections/NewTabPage.svelte";
   import Icon from "$shared/ui/Icon";
   import { ArrowRight01Icon, Search01Icon } from "@hugeicons/core-free-icons";
   import EmptyState from "$shared/ui/EmptyState";
   import Button from "$shared/ui/Button";
   const loaders = {
+    appearance: () => import("./sections/AppearancePage.svelte"),
     general: () => import("./sections/GeneralPage.svelte"),
     tabs: () => import("./sections/TabsPage.svelte"),
     profiles: () => import("./sections/ProfilesPage.svelte"),
@@ -119,9 +114,7 @@
                     ><Icon icon={ArrowRight01Icon} size={16} /></button
                   >{/each}
               </div>{/if}
-          {:else if current.id === "appearance"}<AppearancePage />
           {:else if current.id === "newtab"}<NewTabPage />
-          {:else if emptySections.has(current.id)}<!-- Reserved product section; intentionally empty. -->
           {:else if loader}<LazyView
               {loader}
               loadingLabel={m.surface_loading()}

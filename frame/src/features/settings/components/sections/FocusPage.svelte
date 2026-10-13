@@ -7,12 +7,6 @@
   import PreferenceSwitch from "../PreferenceSwitch.svelte";
 </script>
 
-<SettingsGroup title={m.time_title()} description={m.time_local_only()}
-  ><PreferenceSwitch id="time.track" preference="time.track" /><PreferenceSelect
-    id="time.retention"
-    preference="time.retention"
-  /></SettingsGroup
->
 <SettingsGroup title={m.focus_title()}
   ><PreferenceSelect id="focus.minutes" preference="focus.minutes" /><PreferenceSwitch
     id="focus.breaks"
@@ -29,6 +23,12 @@
     >
   </div>
 </SettingsGroup>
+<SettingsGroup title={m.time_title()} description={m.time_local_only()}
+  ><PreferenceSwitch id="time.track" preference="time.track" /><PreferenceSelect
+    id="time.retention"
+    preference="time.retention"
+  /></SettingsGroup
+>
 
 <style>
   .shut {
