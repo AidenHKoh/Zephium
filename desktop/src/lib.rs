@@ -4958,6 +4958,10 @@ fn build_menu(
         .item(&item("tab.next")?)
         .item(&item("tab.previous")?)
         .separator()
+        .item(&item("tool.notes")?)
+        .item(&item("tool.tasks")?)
+        .item(&item("tool.time")?)
+        .item(&item("tool.history")?)
         .item(&item("tool.downloads")?)
         .item(&item("browser.tasks")?)
         .item(&item("browser.notes")?)
@@ -5239,14 +5243,14 @@ fn build_tools_menu(
     handle: &tauri::AppHandle,
     overrides: &std::collections::HashMap<String, String>,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
+    use tauri::menu::{Menu, PredefinedMenuItem};
     let resolved = zephium_core::commands::resolve(overrides);
     let item = |id: &str| build_command_menu_item(handle, &resolved, id);
-    let notes = MenuItemBuilder::with_id("tool.notes", "Notes").build(handle)?;
-    let tasks = MenuItemBuilder::with_id("tool.tasks", "Tasks").build(handle)?;
-    let activity = MenuItemBuilder::with_id("tool.time", "Time").build(handle)?;
+    let notes = item("tool.notes")?;
+    let tasks = item("tool.tasks")?;
+    let activity = item("tool.time")?;
     let first = PredefinedMenuItem::separator(handle)?;
-    let history = MenuItemBuilder::with_id("tool.history", "History").build(handle)?;
+    let history = item("tool.history")?;
     let downloads = item("tool.downloads")?;
     let bookmarks = item("tool.bookmarks")?;
     let second = PredefinedMenuItem::separator(handle)?;
@@ -5278,10 +5282,10 @@ fn build_profile_menu(
     let new_private = item("window.newPrivate")?;
     let split = MenuItemBuilder::with_id("split.choose", "Split View…").build(handle)?;
     let second = PredefinedMenuItem::separator(handle)?;
-    let notes = MenuItemBuilder::with_id("tool.notes", "Notes").build(handle)?;
-    let tasks = MenuItemBuilder::with_id("tool.tasks", "Tasks").build(handle)?;
-    let time = MenuItemBuilder::with_id("tool.time", "Time").build(handle)?;
-    let history = MenuItemBuilder::with_id("tool.history", "History").build(handle)?;
+    let notes = item("tool.notes")?;
+    let tasks = item("tool.tasks")?;
+    let time = item("tool.time")?;
+    let history = item("tool.history")?;
     let downloads = item("tool.downloads")?;
     let bookmarks = item("tool.bookmarks")?;
     let extensions = MenuItemBuilder::with_id("extensions.manage", "Extensions…").build(handle)?;

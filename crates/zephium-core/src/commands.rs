@@ -221,7 +221,7 @@ pub const REGISTRY: &[CommandSpec] = &[
     command(
         "browser.history",
         "Show All History",
-        split("CmdOrCtrl+Y", "Ctrl+H"),
+        split("CmdOrCtrl+Shift+Y", "Ctrl+Shift+H"),
         Group::History,
     ),
     command(
@@ -246,6 +246,33 @@ pub const REGISTRY: &[CommandSpec] = &[
         "tab.previous",
         "Previous Tab",
         Keys::same("Ctrl+Shift+Tab"),
+        Group::Window,
+    ),
+    // The tool panels, each on its own letter beside Bookmarks' (Option-Command
+    // on a Mac). Shift rather than Alt on Windows: Ctrl+Alt is AltGr on many
+    // layouts. History takes the browser's own key; its full page moves to Shift.
+    command(
+        "tool.notes",
+        "Notes",
+        split("CmdOrCtrl+Alt+E", "Ctrl+Shift+E"),
+        Group::Window,
+    ),
+    command(
+        "tool.tasks",
+        "Tasks",
+        split("CmdOrCtrl+Alt+T", "Ctrl+Shift+K"),
+        Group::Window,
+    ),
+    command(
+        "tool.time",
+        "Time",
+        split("CmdOrCtrl+Alt+F", "Ctrl+Shift+F"),
+        Group::Window,
+    ),
+    command(
+        "tool.history",
+        "History",
+        split("CmdOrCtrl+Y", "Ctrl+H"),
         Group::Window,
     ),
     command(
@@ -565,9 +592,14 @@ mod tests {
 
     #[test]
     fn history_follows_each_platform_convention() {
-        let history = get("browser.history").expect("history command");
+        // The platform's history key opens the quick panel; the full page is
+        // the same key with Shift.
+        let history = get("tool.history").expect("history panel command");
         assert_eq!(history.keys.on(Platform::Mac), Some("CmdOrCtrl+Y"));
         assert_eq!(history.keys.on(Platform::Other), Some("Ctrl+H"));
+        let page = get("browser.history").expect("history page command");
+        assert_eq!(page.keys.on(Platform::Mac), Some("CmdOrCtrl+Shift+Y"));
+        assert_eq!(page.keys.on(Platform::Other), Some("Ctrl+Shift+H"));
     }
 
     #[test]
