@@ -128,7 +128,7 @@
   "settings_expanded": "Expanded",
   "settings_compact": "Compact",
   "settings_material": "Window material",
-  "settings_material_desc": "Adapts to your operating system and transparency preferences.",
+  "settings_material_desc": "What the window is made of. Automatic picks the best your system offers.",
   "settings_material_glass": "Liquid Glass",
   "settings_material_vibrancy": "Vibrancy",
   "settings_material_solid": "Solid",
@@ -2891,5 +2891,7 @@
   "settings_work_screenshot_none": "You haven't allowed any sites.",
   "work_ask_screenshot_title": "Let Work look at pages on {site}?",
   "work_ask_screenshot_note": "When the page's text isn't enough, Work sends a picture of the page to your model.",
-  "work_ask_screenshot_receipt": "Page pictures on {site}"
+  "work_ask_screenshot_receipt": "Page pictures on {site}",
+  "settings_material_auto": "Automatic",
+  "settings_material_fallback": "Showing {material}: this system can't use your choice right now."
 }

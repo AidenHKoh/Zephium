@@ -402,7 +402,8 @@ pub fn apply_material(window: &WebviewWindow, dark: bool) -> bool {
     };
     // Use the fallible native adapter directly; the Tauri effect dispatcher
     // discards the underlying DWM error and can falsely report acrylic.
-    let contrast = menus::high_contrast();
+    let contrast = menus::high_contrast()
+        || crate::material::preference() == crate::material::Preference::None;
     let result = if contrast {
         window_vibrancy::clear_acrylic(window)
     } else {

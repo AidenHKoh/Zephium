@@ -6,6 +6,7 @@ pub const KEYS: &[&str] = &[
     "search.suggestions",
     "sidebar.mode",
     "ui.accent",
+    "ui.material",
     "ui.reduce-motion",
     "ui.newtab-greeting",
     "ui.newtab-name",
@@ -60,6 +61,12 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "ui.accent" => matches!(
             value,
             "graphite" | "sky" | "sage" | "rose" | "amber" | "teal" | "lavender" | "orchid"
+        ),
+        // What the window is made of. `auto` takes the best the system offers;
+        // a material the system cannot install falls back on its own.
+        "ui.material" => matches!(
+            value,
+            "auto" | "liquid_glass" | "vibrancy" | "acrylic" | "none"
         ),
         "ui.newtab-clock-format" => matches!(value, "system" | "12h" | "24h"),
         "ui.tab-layout" => matches!(value, "vertical" | "horizontal"),
@@ -203,6 +210,8 @@ mod tests {
         assert!(value_allowed("ui.accent", "sage"));
         assert!(value_allowed("ui.accent", "orchid"));
         assert!(!value_allowed("ui.accent", "purple"));
+        assert!(value_allowed("ui.material", "vibrancy"));
+        assert!(!value_allowed("ui.material", "mica"));
         assert!(value_allowed("ui.newtab-clock-format", "24h"));
         assert!(value_allowed("ui.newtab-tasks", "false"));
         assert!(value_allowed("ui.language", "en"));

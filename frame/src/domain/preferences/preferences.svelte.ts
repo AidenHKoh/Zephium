@@ -10,6 +10,7 @@ const defaults = {
   "search.suggestions": "true",
   "sidebar.mode": "default",
   "ui.accent": "graphite",
+  "ui.material": "auto",
   "ui.reduce-motion": "false",
   "ui.newtab-greeting": "false",
   "ui.newtab-name": "false",

@@ -2,7 +2,6 @@
   import PreferenceSelect from "../PreferenceSelect.svelte";
   import * as m from "$shared/i18n/messages";
   import { preferences } from "$domain/preferences";
-  import SegmentedControl from "$shared/ui/SegmentedControl";
   import Select from "$shared/ui/Select";
   import Switch from "$shared/ui/Switch";
   import SettingsGroup from "$shared/ui/SettingsGroup";
@@ -10,6 +9,7 @@
   import Icon from "$shared/ui/Icon";
   import { Tick02Icon } from "@hugeicons/core-free-icons";
   import { onMount } from "svelte";
+  import { IS_WINDOWS } from "$shared/platform";
   let material = $state("");
   onMount(() => {
     const update = () => {
@@ -23,6 +23,11 @@
     });
     return () => observer.disconnect();
   });
+  const themes = [
+    { value: "light", label: m.theme_light },
+    { value: "dark", label: m.theme_dark },
+    { value: "system", label: m.theme_system },
+  ];
   const tints = [
     { id: "graphite", label: m.settings_graphite },
     { id: "sky", label: m.settings_sky },
@@ -33,6 +38,25 @@
     { id: "lavender", label: m.settings_lavender },
     { id: "orchid", label: m.settings_orchid },
   ];
+  // What the person may choose here. Windows has one material worth having;
+  // a Mac offers the glass, the older vibrancy, or neither.
+  const materialOptions = IS_WINDOWS
+    ? [
+        { value: "auto", label: m.settings_material_acrylic() },
+        { value: "none", label: m.settings_material_solid() },
+      ]
+    : [
+        { value: "auto", label: m.settings_material_auto() },
+        { value: "liquid_glass", label: m.settings_material_glass() },
+        { value: "vibrancy", label: m.settings_material_vibrancy() },
+        { value: "none", label: m.settings_material_solid() },
+      ];
+  // A choice the system cannot install right now, such as glass on an older
+  // macOS or any material under Reduce Transparency, says what is showing.
+  let fallback = $derived.by(() => {
+    const chosen = preferences.value("ui.material");
+    return chosen !== "auto" && material !== "" && chosen !== material;
+  });
   const materials: Record<string, () => string> = {
     liquid_glass: m.settings_material_glass,
     vibrancy: m.settings_material_vibrancy,
@@ -43,37 +67,36 @@
 </script>
 
 <SettingsGroup title={m.settings_theme()}>
-  <div class="appearance-previews" aria-hidden="true">
-    {#each ["light", "dark", "system"] as theme (theme)}
-      <div
-        class="appearance-preview"
-        data-preview-theme={theme}
-        data-selected={preferences.value("appearance") === theme}
+  <!-- The pictures are the choice, as the system's own Appearance pane draws
+       it: one control, named under each picture. -->
+  <div
+    class="appearance-previews"
+    role="radiogroup"
+    aria-label={m.settings_color_scheme()}
+    data-setting="appearance.theme"
+  >
+    {#each themes as theme (theme.value)}
+      {@const selected = preferences.value("appearance") === theme.value}
+      <button
+        type="button"
+        role="radio"
+        class="appearance-choice"
+        aria-checked={selected}
+        disabled={preferences.saving()}
+        onclick={() => void preferences.set("appearance", theme.value)}
       >
-        <div class="mini-window">
-          <div class="mini-sidebar"><span></span><i></i><i></i><i></i></div>
-          <div class="mini-page"><span></span><i></i><i></i></div>
-        </div>
-      </div>
+        <span class="appearance-preview" data-selected={selected} aria-hidden="true">
+          {#each theme.value === "system" ? ["light", "dark"] : [theme.value] as tone (tone)}
+            <span class="mini-window" data-tone={tone}>
+              <span class="mini-sidebar"><span></span><i></i><i></i><i></i></span>
+              <span class="mini-page"><span></span><i></i><i></i></span>
+            </span>
+          {/each}
+        </span>
+        <span class="appearance-label">{theme.label()}</span>
+      </button>
     {/each}
   </div>
-  <SettingsRow
-    settingId="appearance.theme"
-    title={m.settings_color_scheme()}
-    description={m.settings_color_scheme_desc()}
-  >
-    <SegmentedControl
-      label={m.settings_color_scheme()}
-      value={preferences.value("appearance")}
-      disabled={preferences.saving()}
-      options={[
-        { value: "light", label: m.theme_light() },
-        { value: "dark", label: m.theme_dark() },
-        { value: "system", label: m.theme_system() },
-      ]}
-      onchange={(v) => void preferences.set("appearance", v)}
-    />
-  </SettingsRow>
   <SettingsRow
     settingId="appearance.accent"
     title={m.settings_accent()}
@@ -117,9 +140,17 @@
   <SettingsRow
     settingId="appearance.material"
     title={m.settings_material()}
-    description={m.settings_material_desc()}
-    ><span class="settings-value">{materials[material]?.() ?? m.settings_material_solid()}</span
-    ></SettingsRow
+    description={fallback
+      ? m.settings_material_fallback({ material: materials[material]?.() ?? "" })
+      : m.settings_material_desc()}
+    ><Select
+      label={m.settings_material()}
+      labelHidden
+      value={preferences.value("ui.material")}
+      disabled={preferences.saving()}
+      options={materialOptions}
+      onchange={(v) => void preferences.set("ui.material", v)}
+    /></SettingsRow
   >
   <PreferenceSelect id="appearance.density" preference="ui.density" />
 </SettingsGroup>

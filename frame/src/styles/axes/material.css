@@ -37,6 +37,7 @@
 /* Acrylic on Win11 22H2+ ignores the native tint parameter entirely, so the
    whole colour layer is ours and the wash carries more here than anywhere. */
 :root[data-material="acrylic"] {
+  --wash-window: 78%;
   --wash-raised: 66%;
   --wash-launcher: 82%;
 }

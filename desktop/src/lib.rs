@@ -3221,6 +3221,47 @@ fn apply_native_materials(app: &tauri::AppHandle, mode: &str) {
     }
 }
 
+pub(crate) fn app_setting(key: &str) -> Option<String> {
+    APP_STORE.get().and_then(|store| store.app_setting(key))
+}
+
+/// The appearance the app shows, which is the person's choice when they made
+/// one. A window's own theme reports the system's, so a light app on a dark
+/// Mac would otherwise paint its window and tint its glass for dark.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn appearance_is_light(window: &WebviewWindow) -> bool {
+    match NATIVE_APPEARANCE.load(Ordering::Acquire) {
+        APPEARANCE_LIGHT => true,
+        APPEARANCE_DARK => false,
+        _ => matches!(window.theme(), Ok(tauri::Theme::Light)),
+    }
+}
+
+/// Reinstalls the window material after the person picks another one.
+fn apply_native_material(app: &tauri::AppHandle, value: &str) {
+    material::choose(value);
+    reinstall_native_materials(app);
+}
+
+fn reinstall_native_materials(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        #[cfg(target_os = "macos")]
+        for (label, panel) in [(MAIN_LABEL, false), (overlay::PANEL_LABEL, true)] {
+            if let Some(window) = handle.get_webview_window(label) {
+                material::install(&window, panel);
+            }
+        }
+        #[cfg(target_os = "windows")]
+        apply_native_materials(
+            &handle,
+            &app_setting("appearance").unwrap_or_else(|| "system".into()),
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = handle;
+    });
+}
+
 fn apply_native_theme(app: &tauri::AppHandle, mode: &str) {
     let appearance = appearance_code(mode);
     // Publish the mode before set_theme: a synchronous ThemeChanged callback
@@ -3236,6 +3277,10 @@ fn apply_native_theme(app: &tauri::AppHandle, mode: &str) {
     app.set_theme(theme);
     #[cfg(target_os = "windows")]
     apply_native_materials(app, mode);
+    // The window's ground and the glass's tint follow the app's appearance,
+    // which a forced choice changes without the system's changing.
+    #[cfg(target_os = "macos")]
+    reinstall_native_materials(app);
 }
 
 fn accepted_ui_operation() -> zephium_ipc::OperationAdmission {
@@ -6032,6 +6077,9 @@ pub fn run() {
                         if matches!(mode, "system" | "light" | "dark") {
                             apply_native_theme(&emit_handle, mode);
                         }
+                    }
+                    if let Some(value) = id.strip_prefix("preference.ui.material=") {
+                        apply_native_material(&emit_handle, value);
                     }
                     emit_ui_command(&emit_handle, &id);
                 }
