@@ -985,6 +985,49 @@
     return null;
   }
 
+  // Framework menus sometimes expose only rendered text and a pointer cursor.
+  // Keep the text target, but never duplicate a native control or edit host.
+  function pointerTextControl(element) {
+    const interactive = node => {
+      const tag = tagName(node), role = explicitRole(node), editable = attribute(node,"contenteditable",16);
+      return ["a","area","button","label","input","textarea","select","option","summary","iframe","frame"].includes(tag) ||
+        (role !== null && ["button","link","checkbox","radio","tab","menu_item","option","textbox","searchbox","combobox","listbox","spinbutton","slider"].includes(role.role)) ||
+        (editable !== null && ["","true","plaintext-only"].includes(lower(editable)));
+    };
+    const nativeDescendant = root => {
+      const pending = [root]; let visited = 0;
+      while (pending.length > 0) {
+        if (++visited > 64) return true;
+        const at = pending.pop();
+        const children = childNodes(at);
+        if (listLength(children) > 64) return true;
+        for (let index=0; index<listLength(children); index+=1) {
+          const child=listItem(children,index);
+          if (nodeType(child)!==1) continue;
+          if (interactive(child)) return true;
+          pending.push(child);
+        }
+      }
+      return false;
+    };
+    try {
+      if (apply(getComputedStyleFixed,globalThis,[element]).cursor !== "pointer" || nativeDescendant(element)) return false;
+      let current=element;
+      for (let depth=0; depth<MAX_TREE_DEPTH; depth+=1) {
+        const parent=read(nodeParentGetter,current);
+        if (parent===document) return true;
+        if (parent===null || nodeType(parent)!==1) return false;
+        if (interactive(parent) || (["li","tr","td","th"].includes(tagName(parent)) && clickableItem(parent))) return false;
+        const cursor=apply(getComputedStyleFixed,globalThis,[current]).cursor;
+        if (cursor==="pointer" && apply(getComputedStyleFixed,globalThis,[parent]).cursor!=="pointer" && nativeDescendant(current)) return false;
+        if (parent!==element && genericTextDescriptor(parent,tagName(parent),"")!==null &&
+            apply(getComputedStyleFixed,globalThis,[parent]).cursor==="pointer") return false;
+        current=parent;
+      }
+    } catch (_) {}
+    return false;
+  }
+
   function classify(node) {
     if (node === document) return { role: "document", tag: "#document", inputType: "" };
     if (nodeType(node) !== 1) return null;
@@ -1019,6 +1062,10 @@
     // Some focus-managed widgets omit a role but declare enabled/disabled state.
     if (["div","span"].includes(tag) && ["0","-1"].includes(attribute(node,"tabindex",8)) &&
         ["true","false"].includes(lower(attribute(node,"aria-disabled",16)||""))) return {role:"button",tag,inputType};
+
+    if ((tag === "div" || tag === "span") && genericTextDescriptor(node,tag,inputType)!==null && pointerTextControl(node)) {
+      return {role:"button",tag,inputType,pointerText:true};
+    }
 
     if ((tag === "div" || tag === "span") && listLength(childNodes(node)) <= 1 && backgroundSource(node) !== null && isRenderedPhoto(node, tag)) {
       return { role: "image", tag, inputType, mediaKind: "background" };
@@ -1486,6 +1533,7 @@
     if (disabled || descriptor.noOperations === true) return 0;
     switch (descriptor.role) {
       case "button": {
+        if (descriptor.pointerText === true) return 1;
         const rect = elementRect(element);
         if (nativeActivation(element, descriptor) === 6 && rect !== null && !inViewport(rect)) {
           const ancestors = scrollAncestors(element);

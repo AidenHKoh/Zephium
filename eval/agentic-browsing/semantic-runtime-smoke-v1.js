@@ -2433,6 +2433,41 @@ async function finish() {
   }
 
   {
+    main._children = new NodeList();
+    const wrapper = main.append(new Element("div")); wrapper._cursor="pointer";
+    const label = wrapper.append(new Element("div")); label._cursor="pointer";
+    label.append(new CharacterData("Default order"));
+    const choices = wrapper.append(new Element("div")); choices._cursor="pointer";
+    const option = choices.append(new Element("div")); option._cursor="pointer";
+    option.append(new CharacterData("Price low to high"));
+    const ordinary = main.append(new Element("span")); ordinary.append(new CharacterData("Inert words"));
+    const native = main.append(new Element("button")); native._cursor="pointer";
+    const nativeText = native.append(new Element("span")); nativeText._cursor="pointer";
+    nativeText.append(new CharacterData("Native action"));
+    const edit = main.append(new HTMLInputElement({readonly:"", "aria-label":"Read only"},"fixed"));
+    const nativeLabel = main.append(new Element("label")); nativeLabel._cursor="pointer";
+    const labelText = nativeLabel.append(new Element("span")); labelText._cursor="pointer";
+    labelText.append(new CharacterData("Checkbox label"));
+    const editor = main.append(new Element("div",{contenteditable:""})); editor._cursor="pointer";
+    const editText = editor.append(new Element("span")); editText._cursor="pointer";
+    editText.append(new CharacterData("Editor words"));
+    const nodes = JSON.parse(invoke(192,192,{k:"initial"})).n;
+    for (const text of ["Default order","Price low to high"]) {
+      const control=nodes.find(node=>node.n===text);
+      assert(control && control.r==="button" && control.o===1,"pointer-only menu control was lost: "+text);
+    }
+    assert(nodes.filter(node=>node.n==="Native action" && node.r==="button").length===1,"native button was duplicated");
+    assert(!nodes.some(node=>node.r==="button" && ["Inert words","Checkbox label","Editor words"].includes(node.n)),"inert text or native labels became controls");
+    label._cursor="auto";
+    const prior = nodes.find(node=>node.n==="Default order");
+    const refused = await runtime.invoke(JSON.stringify({v:1,o:"action_execute",a:192001,i:192,g:192,t:prior.k,r:"button",k:"click",e:{x:10,y:10,w:160,h:32},p:0,z:null,f:descriptorFor(prior),of:null}));
+    assert(typeof refused==="string" && refused.startsWith("E2:target_") && !label._fixedClickCount,
+      "removed pointer affordance dispatched a click: "+refused);
+    const changed=JSON.parse(invoke(193,193,{k:"initial"})).n;
+    assert(!changed.some(node=>node.r==="button" && node.n==="Default order"),"pointer affordance survived its removal");
+  }
+
+  {
     // Typed fields take a value the browser stores unchanged and verify it;
     // any other value is refused before anything is dispatched.
     let generation = 600;
