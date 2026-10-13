@@ -480,11 +480,13 @@ pub(crate) fn classify(
         }
         SemanticActionKind::Click => {
             let dismiss = names_any(&text, &DISMISS_WORDS) && commits.is_none();
-            if matches!(node.role(), SemanticRole::Tab)
-                || node.activation() == Some(SemanticActivation::Disclosure)
-                || (node.role() == SemanticRole::Link && commits.is_none())
-                || node.activation() == Some(SemanticActivation::Navigation) && commits.is_none()
-                || dismiss
+            if commits.is_none()
+                && ((node.role() == SemanticRole::Tab
+                    && node.activation() != Some(SemanticActivation::Submit))
+                    || node.activation() == Some(SemanticActivation::Disclosure)
+                    || node.role() == SemanticRole::Link
+                    || node.activation() == Some(SemanticActivation::Navigation)
+                    || dismiss)
             {
                 SiteEffect::Read
             } else if node.role() == SemanticRole::Button && pays(node, snapshot) {
