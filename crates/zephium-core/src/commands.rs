@@ -233,7 +233,7 @@ pub const REGISTRY: &[CommandSpec] = &[
     command(
         "tool.bookmarks",
         "Show Bookmarks",
-        split("CmdOrCtrl+Alt+B", "Ctrl+Shift+O"),
+        split("CmdOrCtrl+Shift+B", "Ctrl+Shift+O"),
         Group::Bookmarks,
     ),
     command(
@@ -248,25 +248,25 @@ pub const REGISTRY: &[CommandSpec] = &[
         Keys::same("Ctrl+Shift+Tab"),
         Group::Window,
     ),
-    // The tool panels, each on its own letter beside Bookmarks' (Option-Command
-    // on a Mac). Shift rather than Alt on Windows: Ctrl+Alt is AltGr on many
-    // layouts. History takes the browser's own key; its full page moves to Shift.
+    // The tool panels, each on Shift and its own letter, as Bookmarks is.
+    // Never Alt on Windows: Ctrl+Alt is AltGr on many layouts. History takes
+    // the browser's own key; its full page moves to Shift.
     command(
         "tool.notes",
         "Notes",
-        split("CmdOrCtrl+Alt+E", "Ctrl+Shift+E"),
+        split("CmdOrCtrl+Shift+E", "Ctrl+Shift+E"),
         Group::Window,
     ),
     command(
         "tool.tasks",
         "Tasks",
-        split("CmdOrCtrl+Alt+T", "Ctrl+Shift+K"),
+        split("CmdOrCtrl+Shift+K", "Ctrl+Shift+K"),
         Group::Window,
     ),
     command(
         "tool.time",
         "Time",
-        split("CmdOrCtrl+Alt+F", "Ctrl+Shift+F"),
+        split("CmdOrCtrl+Shift+U", "Ctrl+Shift+F"),
         Group::Window,
     ),
     command(

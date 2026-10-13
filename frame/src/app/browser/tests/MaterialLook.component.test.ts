@@ -24,12 +24,12 @@ vi.mock("$shared/ipc/bindings", async () => {
     settingSet: async () => ({ accepted: true, operation_id: null }),
     keymapEntries: async () =>
       [
-        ["tool.notes", "Cmd+Alt+E"],
-        ["tool.tasks", "Cmd+Alt+T"],
-        ["tool.time", "Cmd+Alt+F"],
+        ["tool.notes", "Cmd+Shift+E"],
+        ["tool.tasks", "Cmd+Shift+K"],
+        ["tool.time", "Cmd+Shift+U"],
         ["tool.history", "Cmd+Y"],
         ["tool.downloads", "Cmd+Shift+J"],
-        ["tool.bookmarks", "Cmd+Alt+B"],
+        ["tool.bookmarks", "Cmd+Shift+B"],
         ["browser.settings", "Cmd+,"],
       ].map(([id, accelerator]) => ({
         id: id!,
