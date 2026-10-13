@@ -2,7 +2,7 @@ import { diagramLayout, diagramWidth } from "../diagram";
 import { BOARD } from "./layout";
 import type { ObjectView, SheetColumn } from "./types";
 import { versus } from "./versus";
-import { calendarHeight, calendarWidth, planWeeks } from "./plan-calendar";
+import { calendarHeight, calendarRowsFor, calendarWidth } from "./plan-calendar";
 
 type Range = { min: number; ideal: number; max: number };
 
@@ -55,7 +55,7 @@ export function objectWidth(view: ObjectView): Range {
       return { min: width(Math.min(2, across)), ideal: width(across), max: width(across) + 160 };
     }
     case "plan": {
-      if (!planWeeks(view)) return { min: 440, ideal: 640, max: 760 };
+      if (!calendarRowsFor(view)) return { min: 440, ideal: 640, max: 760 };
       const width = calendarWidth();
       return { min: width, ideal: width, max: width };
     }
@@ -137,9 +137,15 @@ export function objectHeight(view: ObjectView, width: number): number {
       return (view.title ? 34 : 0) + rows * height + (rows - 1) * CARD.gap;
     }
     case "plan": {
-      const weeks = planWeeks(view);
-      const body = weeks ? calendarHeight(weeks.length) : view.steps.length * 56;
-      return (view.title ? 40 : 0) + body + (view.total ? 48 : 0) + 16;
+      const calendar = calendarRowsFor(view);
+      if (calendar) {
+        const dated = view.steps.some((step) => step.date);
+        // The head holds the title, the add-to-calendar link or a month's turns; the foot, the tasks button.
+        const head = calendar.month ? 26 : view.title ? 23 : dated ? 15 : 0;
+        const foot = view.checkable ? 16 + 16 + 26 : 0;
+        return (head ? head + 16 : 0) + calendarHeight(calendar.rows, calendar.month) + foot;
+      }
+      return (view.title ? 40 : 0) + view.steps.length * 56 + (view.total ? 48 : 0) + 16;
     }
     case "list":
       if (view.style === "questions") {

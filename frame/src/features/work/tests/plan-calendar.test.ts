@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planWeeks } from "../lib/board/plan-calendar";
+import { planCalendar, planWeeks } from "../lib/board/plan-calendar";
 import type { PlanView } from "../lib/board/types";
 
 const plan = (dates: (string | undefined)[]): PlanView => ({
@@ -32,5 +32,48 @@ describe("plan calendar", () => {
     expect(planWeeks(plan(days(9, 4)))).toBeNull();
     expect(planWeeks(plan(days(9, 7)))).toBeNull();
     expect(planWeeks(plan([...days(9, 12), ...Array(6).fill(undefined)]))).toBeNull();
+  });
+
+  it("shows only the weeks that hold steps, folding a run of quiet ones into one row", () => {
+    const dates = [...days(5, 3), ...days(13, 2), "2026-12-02", "2026-12-03"];
+    const rows = planCalendar(
+      { ...plan(dates), calendar: true },
+      { firstDay: 1, today: new Date(2026, 9, 10) },
+    )!;
+    expect(rows.map((row) => row.kind)).toEqual(["week", "week", "quiet", "week"]);
+    const quiet = rows[2]!;
+    expect(quiet).toMatchObject({ kind: "quiet", from: "2026-10-19", to: "2026-11-29" });
+    expect(quiet.kind === "quiet" && quiet.weeks).toBe(6);
+    const first = rows[0]!;
+    expect(first.kind === "week" && first.month).toBe("2026-10");
+    const last = rows[3]!;
+    expect(last.kind === "week" && last.month).toBe("2026-12");
+  });
+
+  it("draws a step repeated on consecutive days as one bar, and counts a busy day's steps", () => {
+    const stay = (date: string) => ({ title: "Hostel", kind: "stay" as const, date });
+    const rows = planCalendar(
+      {
+        ...plan([]),
+        calendar: true,
+        steps: [stay("2026-10-26"), stay("2026-10-27"), stay("2026-10-28")],
+      },
+      { firstDay: 1 },
+    )!;
+    const week = rows[0]!;
+    if (week.kind !== "week") throw new Error("expected a week");
+    expect(week.lanes).toBe(1);
+    const slots = week.days.map((day) => day.slots[0]);
+    expect(slots.map((slot) => slot?.head ?? null)).toEqual([
+      true,
+      false,
+      false,
+      null,
+      null,
+      null,
+      null,
+    ]);
+    expect(slots[0]).toMatchObject({ starts: true, ends: false, span: 3, steps: [0, 1, 2] });
+    expect(week.days.every((day) => day.steps.length === 0)).toBe(true);
   });
 });
