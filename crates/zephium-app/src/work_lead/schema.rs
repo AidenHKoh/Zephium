@@ -301,7 +301,6 @@ pub(crate) fn data(kind: &str) -> Option<Value> {
 pub(crate) fn any(kinds: &[&str]) -> Value {
     let options: Vec<Value> = kinds
         .iter()
-        .filter(|kind| **kind != "picks")
         .filter_map(|kind| {
             data(kind).map(|mut schema| {
                 schema["title"] = json!(kind);
@@ -313,22 +312,7 @@ pub(crate) fn any(kinds: &[&str]) -> Value {
     if kinds.iter().any(|kind| matches!(*kind, "picks" | "sheet")) {
         options.push(record_selection());
     }
-    json!({"anyOf": options, "description": "For extracted records, picks/sheet data is records in desired order: source is the r key returned by a read; add subtitle, facts and annotation from what you read. Rust copies names, prices, links and images. Other objects use their kind schema."})
-}
-
-/// Once original rows exist, creation selects them instead of rewriting cells.
-/// Revision retains its general schema for older/manual objects; native objects
-/// of this execution are independently checked before a revision is accepted.
-pub(crate) fn native_record_create(tools: &mut [zephium_core::work::model::WorkModelTool]) {
-    for tool in tools.iter_mut().filter(|tool| tool.name == "create") {
-        if let Some(options) = tool
-            .schema
-            .pointer_mut("/properties/data/anyOf")
-            .and_then(Value::as_array_mut)
-        {
-            options.retain(|option| option["title"] != "sheet");
-        }
-    }
+    json!({"anyOf": options, "description": "Picks or a sheet of extracted records: data.records in desired order (r keys a read returned, with subtitle, facts and annotation from what you read); Rust copies names, prices, links and images. Write items yourself only for a shape records cannot carry, such as a flight's route. Other objects use their kind schema."})
 }
 
 pub(crate) fn record_selection() -> Value {

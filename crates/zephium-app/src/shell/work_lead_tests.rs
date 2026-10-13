@@ -2930,20 +2930,6 @@ impl WorkModelClient for NativeRecordFinish {
                         .is_some(),
                     "the lead must be able to request native records on its first public read"
                 );
-                let create = request.tools.iter().find(|t| t.name == "create").unwrap();
-                let has_raw_sheet = create
-                    .schema
-                    .pointer("/properties/data/anyOf")
-                    .unwrap()
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|schema| schema["title"] == "sheet");
-                assert_eq!(
-                    has_raw_sheet,
-                    turn == 0,
-                    "only source-backed creation narrows after the read"
-                );
             }
             let final_call = || {
                 let mut output = call(

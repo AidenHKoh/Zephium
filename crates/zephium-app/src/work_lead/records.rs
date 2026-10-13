@@ -84,10 +84,12 @@ pub(crate) enum Layout {
 }
 
 impl Records {
-    pub fn has_for(&self, part: Option<zephium_core::work::WorkPartId>) -> bool {
+    /// Whether `name` is the name of a record this run read.
+    pub fn names(&self, name: &str) -> bool {
+        let name = name.trim();
         self.rows
             .iter()
-            .any(|row| part.is_none() || row.part == part)
+            .any(|row| row.subject.name.trim().eq_ignore_ascii_case(name))
     }
 
     pub fn remember_site(

@@ -262,7 +262,7 @@ where
     /// Runs the conversation to its end.
     pub(crate) async fn drive(&self) -> Result<WorkAttemptStatus, WorkError> {
         let system = self.system();
-        let mut tools = self.tools();
+        let tools = self.tools();
         let mut context = self.context.clone();
         if let Some(name) = self
             .run
@@ -297,15 +297,6 @@ where
             }
             self.run.activity(WorkActivityV1::Planning);
             self.steers(&mut messages).await;
-            if self
-                .run
-                .records
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .has_for(None)
-            {
-                super::schema::native_record_create(&mut tools);
-            }
             compact(&mut messages, conversation_budget(&self.models.lead.entry));
             let (call_system, call_tools, call_messages) = (&system, &tools, &messages);
             let sizes = Sections::of(call_system, call_tools, call_messages);
@@ -978,6 +969,16 @@ where
                     ),
                 );
             }
+        } else if let Some(placed) = part.and_then(|part| {
+            canvas.iter().find(|o| {
+                o.in_this_run
+                    && o.artifact.part == Some(part)
+                    && o.artifact.data.kind_name() == kind
+            })
+        }) {
+            // The part's row holds one object of a kind: the lead's version
+            // of it replaces the part's.
+            return self.revise(&with_id(args, placed.artifact.id)).await;
         } else if let Some(held) = (kind == "picks")
             .then(|| {
                 let names: Vec<String> = args
@@ -1002,9 +1003,7 @@ where
         }
         let data = args.get("data").cloned().unwrap_or(Value::Null);
         let sources = strings(args.get("sources"));
-        if let Some(fault) =
-            self.native_selection_fault(kind, &data, if helper { part } else { None })
-        {
+        if let Some(fault) = self.rewritten_record(kind, &data) {
             return self.refuse(&key, ObjectRefusal::Source, fault);
         }
         let mut proposed =
@@ -1066,15 +1065,33 @@ where
         }
     }
 
-    fn native_selection_fault(
-        &self,
-        kind: &str,
-        data: &Value,
-        part: Option<WorkPartId>,
-    ) -> Option<String> {
-        (matches!(kind, "picks" | "sheet") && data.get("records").is_none()
-            && self.run.records.lock().unwrap_or_else(|e| e.into_inner()).has_for(part))
-            .then(|| "Original records are available: use data.records with r keys in the desired order, and add subtitle, facts and annotation per record from what you read. Rust copies names, prices, links and pictures.".into())
+    /// A hand-written pick or row that restates a record this run read: its
+    /// values must come from the record, so it is selected by its r key. A
+    /// pick that draws a route (a flight) is the lead's own shape.
+    fn rewritten_record(&self, kind: &str, data: &Value) -> Option<String> {
+        if data.get("records").is_some() {
+            return None;
+        }
+        let records = self.run.records.lock().unwrap_or_else(|e| e.into_inner());
+        let rewritten = match kind {
+            "picks" => data["items"].as_array().is_some_and(|items| {
+                items.iter().any(|item| {
+                    item.get("route").is_none()
+                        && item["name"]
+                            .as_str()
+                            .is_some_and(|name| records.names(name))
+                })
+            }),
+            "sheet" => data["rows"].as_array().is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row["cells"][0]
+                        .as_str()
+                        .is_some_and(|name| records.names(name))
+                })
+            }),
+            _ => false,
+        };
+        rewritten.then(|| "These are records a read returned: use data.records with their r keys in the desired order, and add subtitle, facts and annotation per record. Rust copies names, prices, links and pictures.".into())
     }
 
     async fn revise(&self, args: &Value) -> (String, bool) {
@@ -1131,11 +1148,6 @@ where
             .to_owned();
         let data = args.get("data").cloned().unwrap_or(Value::Null);
         let sources = strings(args.get("sources"));
-        if target.in_this_run {
-            if let Some(fault) = self.native_selection_fault(kind, &data, target.artifact.part) {
-                return self.refuse(&key, ObjectRefusal::Source, fault);
-            }
-        }
         let mut proposed = match objects::propose(
             self.run,
             &canvas,
