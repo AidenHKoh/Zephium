@@ -18,6 +18,8 @@ export const commands = {
 	workEditDraft: (expectedProfile: string, work: WorkId, expectedRevision: WorkRevision, command: WorkCommandId, execution: WorkExecutionId, artifact: WorkArtifactId, body: string) => __TAURI_INVOKE<WorkResponseV1_Serialize>("work_edit_draft", { expectedProfile, work, expectedRevision, command, execution, artifact, body }),
 	workOperation: (expectedProfile: string, operation: WorkCommandId, input: WorkOperationV1_Deserialize) => __TAURI_INVOKE<WorkOperationResponseV1_Serialize>("work_operation", { expectedProfile, operation, input }),
 	workOperationStatus: (expectedProfile: string, work: WorkId, operation: WorkCommandId, acknowledge: boolean) => __TAURI_INVOKE<WorkOperationResponseV1_Serialize>("work_operation_status", { expectedProfile, work, operation, acknowledge }),
+	/**  Whether turning Work off would stop work that is running now. */
+	workRunning: () => __TAURI_INVOKE<boolean>("work_running"),
 	/**  Manifest preview for the composer. Bodies never cross this boundary. */
 	workContextPreview: (expectedProfile: string, purpose: WorkContextPurpose, selection: WorkContextSelectionV1_Deserialize) => __TAURI_INVOKE<WorkContextPreviewV1_Serialize>("work_context_preview", { expectedProfile, purpose, selection }),
 	mediaImport: (expectedProfile: string) => typedError<MediaImportV1_Serialize, null>(__TAURI_INVOKE("media_import", { expectedProfile })),
@@ -1628,7 +1630,9 @@ export type OperationProcessed = OperationDisposition;
  *  enum prevents native errors, URLs, or attacker-controlled strings from
  *  becoming an unbounded privileged IPC/logging surface.
  */
-export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed";
+export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed" |
+/**  Work and AI features are switched off. */
+"work_disabled";
 
 /**
  *  Process-local reconciliation state for an admitted mutation. Pending and

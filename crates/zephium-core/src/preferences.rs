@@ -90,7 +90,19 @@ pub fn migrations(stored: impl Fn(&str) -> Option<String>) -> Vec<(&'static str,
         Some("small") => writes.push(("ui.text-size", "default")),
         _ => {}
     }
+    // Work without Work and AI is not a state any more: one switch holds both.
+    if stored("work.enabled").as_deref() == Some("false") {
+        writes.push(("ai.enabled", "false"));
+        writes.push(("work.enabled", "true"));
+    }
     writes
+}
+
+/// Work and AI features, the one switch that takes every Work and AI surface
+/// out of the app. Off, nothing of Work starts; its data stays.
+pub fn ai_enabled(stored: impl Fn(&str) -> Option<String>) -> bool {
+    stored("ai.enabled").as_deref() != Some("false")
+        && stored("work.enabled").as_deref() != Some("false")
 }
 
 pub fn value_allowed(key: &str, value: &str) -> bool {
@@ -392,5 +404,30 @@ mod tests {
         for (key, value) in migrations(stored(&[("ui.text-size", "large")])) {
             assert!(KEYS.contains(&key) && value_allowed(key, value));
         }
+    }
+
+    #[test]
+    fn work_and_ai_are_one_switch_that_defaults_on() {
+        let stored = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| (*v).to_owned())
+            }
+        };
+        assert!(KEYS.contains(&"ai.enabled"));
+        assert!(ai_enabled(stored(&[])));
+        assert!(ai_enabled(stored(&[("ai.enabled", "true")])));
+        assert!(!ai_enabled(stored(&[("ai.enabled", "false")])));
+        assert!(!ai_enabled(stored(&[("work.enabled", "false")])));
+        let carried = migrations(stored(&[("work.enabled", "false")]));
+        assert_eq!(carried, [("ai.enabled", "false"), ("work.enabled", "true")]);
+        for (key, value) in carried {
+            assert!(KEYS.contains(&key) && value_allowed(key, value));
+        }
+        assert!(
+            migrations(stored(&[("work.enabled", "true"), ("ai.enabled", "false")])).is_empty()
+        );
     }
 }

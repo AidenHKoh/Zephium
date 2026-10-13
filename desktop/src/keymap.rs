@@ -20,6 +20,10 @@ type EngineTable = Box<dyn Fn(Vec<Shortcut>) + Send + Sync>;
 pub(crate) struct Keymap {
     overrides: RwLock<HashMap<String, String>>,
     work_pane_shown: AtomicBool,
+    /// The two halves of Work and AI features as stored; either off takes
+    /// every Work key away.
+    ai_off: AtomicBool,
+    work_off: AtomicBool,
     /// Keyboard settings is recording a shortcut: window-level handlers stand
     /// aside so the keys reach the recorder instead of running commands.
     recording: AtomicBool,
@@ -38,6 +42,13 @@ pub(crate) struct Keymap {
 impl Keymap {
     pub(crate) fn load() -> Self {
         let keymap = Self::default();
+        if let Some(store) = APP_STORE.get() {
+            let off = |key: &str| store.app_setting(key).as_deref() == Some("false");
+            keymap.ai_off.store(off("ai.enabled"), Ordering::Release);
+            keymap
+                .work_off
+                .store(off("work.enabled"), Ordering::Release);
+        }
         let stored = APP_STORE
             .get()
             .and_then(|store| store.app_setting(SETTING))
@@ -75,10 +86,12 @@ impl Keymap {
     /// a bare Escape never leaves an ordinary page.
     fn engine_table(&self) -> Vec<Shortcut> {
         let shown = self.work_pane_shown.load(Ordering::Acquire);
+        let ai = self.ai_enabled();
         self.resolved()
             .iter()
             .filter(|command| command.group != Group::Global)
             .filter(|command| shown || command.group != Group::Work)
+            .filter(|command| ai || !command.id.starts_with("work."))
             .filter_map(|command| shortcut(command.id, command.accelerator.as_deref()?))
             .collect()
     }
@@ -123,6 +136,7 @@ impl Keymap {
                 .iter()
                 .filter(|_| !recording)
                 .filter(|command| command.group == Group::Keys)
+                .filter(|command| self.ai_enabled() || !command.id.starts_with("work."))
                 .filter_map(|command| {
                     let accelerator = command.accelerator.as_deref()?;
                     Some((Accelerator::parse(accelerator, Platform::Mac)?, command.id))
@@ -133,6 +147,23 @@ impl Keymap {
 
     pub(crate) fn work_pane_shown(&self) -> bool {
         self.work_pane_shown.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn ai_enabled(&self) -> bool {
+        !self.ai_off.load(Ordering::Acquire) && !self.work_off.load(Ordering::Acquire)
+    }
+
+    /// Follows a stored change of Work and AI features: off, Dictate and the
+    /// other Work keys stop matching anywhere.
+    pub(crate) fn follow_preference(&self, key: &str, value: &str) {
+        let flag = match key {
+            "ai.enabled" => &self.ai_off,
+            "work.enabled" => &self.work_off,
+            _ => return,
+        };
+        if flag.swap(value == "false", Ordering::AcqRel) != (value == "false") {
+            self.refresh_tables();
+        }
     }
 
     fn set_recording(&self, recording: bool) {
@@ -458,6 +489,32 @@ mod tests {
             .engine_table()
             .iter()
             .any(|s| s.id == "launcher.toggle"));
+    }
+
+    #[test]
+    fn work_keys_leave_every_table_while_work_and_ai_are_off() {
+        let keymap = Keymap::default();
+        keymap.work_pane_shown.store(true, Ordering::Release);
+        keymap.follow_preference("ai.enabled", "false");
+        assert!(!keymap.ai_enabled());
+        assert!(!keymap
+            .engine_table()
+            .iter()
+            .any(|s| s.id.starts_with("work.")));
+        #[cfg(target_os = "macos")]
+        assert!(!read(&keymap.key_table)
+            .iter()
+            .any(|(_, id)| id.starts_with("work.")));
+        keymap.follow_preference("ai.enabled", "true");
+        assert!(keymap.ai_enabled());
+        assert!(keymap
+            .engine_table()
+            .iter()
+            .any(|s| s.id == "work.pane.close"));
+        #[cfg(target_os = "macos")]
+        assert!(read(&keymap.key_table)
+            .iter()
+            .any(|(_, id)| *id == "work.dictate"));
     }
 
     #[test]

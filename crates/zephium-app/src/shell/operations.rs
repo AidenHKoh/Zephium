@@ -850,6 +850,14 @@ impl Shell {
             format!("preference.{key}={value}")
         };
         (self.emit)(Projection::UiCommand(command));
+        if matches!(key.as_str(), "ai.enabled" | "work.enabled")
+            && value == "false"
+            && self
+                .browser_page
+                .is_some_and(|(_, page)| page == crate::BrowserPage::Work)
+        {
+            let _ = self.operation_show_browser_page(None);
+        }
         operation_result(
             OperationOutcome::Deferred,
             OperationReason::StoreWorkPending,

@@ -626,12 +626,33 @@ fn disabled_work_rejects_native_entry_without_changing_browse() {
     let before = engine.calls();
     let refused = shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Work)));
     assert_eq!(refused.outcome, OperationOutcome::Rejected);
+    assert_eq!(refused.reason, OperationReason::WorkDisabled);
     assert_eq!(shell.active_browser_page(), None);
     assert_eq!(active_id(&screen), tab);
     assert_eq!(engine.calls(), before);
     let settings =
         shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
     assert_eq!(settings.outcome, OperationOutcome::Deferred);
+}
+
+#[test]
+fn switching_work_and_ai_off_refuses_work_and_returns_its_window_to_browse() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let tab = active_id(&screen);
+    navigate_and_commit(&mut shell, tab, "switch-off.example");
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Work)));
+    assert_eq!(shell.active_browser_page(), Some(crate::BrowserPage::Work));
+    let off = shell.operation_set_app_setting("ai.enabled".into(), "false".into());
+    assert_eq!(off.reason, OperationReason::StoreWorkPending);
+    assert_eq!(shell.active_browser_page(), None);
+    assert_eq!(active_id(&screen), tab);
+    let refused = shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Work)));
+    assert_eq!(refused.reason, OperationReason::WorkDisabled);
+    shell.operation_set_app_setting("ai.enabled".into(), "true".into());
+    let back = shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Work)));
+    assert_eq!(back.outcome, OperationOutcome::Deferred);
+    assert_eq!(shell.active_browser_page(), Some(crate::BrowserPage::Work));
 }
 
 #[test]

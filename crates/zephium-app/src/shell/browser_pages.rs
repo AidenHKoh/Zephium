@@ -163,9 +163,9 @@ impl Shell {
         page: Option<crate::BrowserPage>,
     ) -> OperationDisposition {
         if page == Some(crate::BrowserPage::Work)
-            && self.store.app_setting("work.enabled").as_deref() == Some("false")
+            && !zephium_core::preferences::ai_enabled(|key| self.store.app_setting(key))
         {
-            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+            return operation_result(OperationOutcome::Rejected, OperationReason::WorkDisabled);
         }
         if let Some(crate::BrowserPage::Extensions) = page {
             return self.open_extensions_tab();

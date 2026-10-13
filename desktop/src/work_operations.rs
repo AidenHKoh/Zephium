@@ -117,16 +117,6 @@ impl WorkOperations {
         if registry.preference.is_some() {
             return Err(WorkError::Conflict);
         }
-        // State publication may precede the task's final destructor. Conversely,
-        // an aborted task can remain Pending until observed. Inspect ownership.
-        if !enabled
-            && registry
-                .entries
-                .values()
-                .any(|entry| entry.task.as_ref().is_some_and(|task| !task.is_finished()))
-        {
-            return Err(WorkError::Conflict);
-        }
         let admission = dispatch();
         if admission.accepted {
             let operation_id = admission
@@ -166,7 +156,29 @@ impl WorkOperations {
             } else {
                 registry.work_enabled = pending.enabled;
             }
+            // Switched off, running work stops the way shutdown stops it: the
+            // dropped attempt is abandoned on its runtime lane, and its
+            // observation settles as unknown.
+            if !pending.enabled {
+                for task in registry
+                    .entries
+                    .values()
+                    .filter_map(|entry| entry.task.as_ref())
+                {
+                    task.abort();
+                }
+            }
         }
+    }
+
+    /// Whether any work is running now, so turning Work off can say it stops.
+    pub(crate) fn running(&self) -> bool {
+        self.0.lock().is_ok_and(|registry| {
+            registry
+                .entries
+                .values()
+                .any(|entry| entry.task.as_ref().is_some_and(|task| !task.is_finished()))
+        })
     }
 
     pub(crate) fn admit<F>(
@@ -424,45 +436,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_task_must_finish_before_disabling_even_after_terminal_publication() {
+    async fn switching_off_stops_running_work_once_the_setting_lands() {
+        for setting in ["ai.enabled", "work.enabled"] {
+            let owner = WorkOperations::default();
+            let key = (1.into(), 2.into());
+            owner.admit(key, input(1), std::future::pending()).unwrap();
+            assert!(owner.running());
+            owner
+                .preference(setting, "false", || queued("pref"))
+                .unwrap();
+            // Admission alone is not the setting: nothing stops before Store has it.
+            assert!(owner.running());
+            assert_eq!(
+                owner.admit((1.into(), 3.into()), input(3), std::future::pending()),
+                Err(WorkError::Unavailable)
+            );
+            owner.preference_processed(&processed("pref", true));
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while owner.running() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                owner.observe(key, 1.into(), false).unwrap(),
+                WorkOperationStateV1::Unknown
+            );
+            assert_eq!(
+                owner.admit((1.into(), 4.into()), input(4), std::future::pending()),
+                Err(WorkError::Unavailable)
+            );
+            assert!(owner.shutdown().await);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_setting_leaves_running_work_alone() {
         let owner = WorkOperations::default();
         let key = (1.into(), 2.into());
         owner.admit(key, input(1), std::future::pending()).unwrap();
-        // Model the interval between result publication and task destruction.
-        owner.0.lock().unwrap().entries.get_mut(&key).unwrap().state =
-            WorkOperationStateV1::Unknown;
-        owner.observe(key, 1.into(), true).unwrap();
-        assert!(owner.0.lock().unwrap().entries.contains_key(&key));
-        for setting in ["ai.enabled", "work.enabled"] {
-            assert!(matches!(
-                owner.preference(setting, "false", || panic!(
-                    "active refusal must precede dispatch"
-                )),
-                Err(WorkError::Conflict)
-            ));
-        }
-        owner.0.lock().unwrap().entries[&key]
-            .task
-            .as_ref()
-            .unwrap()
-            .abort();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while !owner.0.lock().unwrap().entries[&key]
-                .task
-                .as_ref()
-                .unwrap()
-                .is_finished()
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
         owner
-            .preference("work.enabled", "false", || queued("pref"))
+            .preference("ai.enabled", "false", || queued("pref"))
             .unwrap();
-        assert!(owner.0.lock().unwrap().retired.contains_key(&key));
-        assert!(!owner.0.lock().unwrap().entries.contains_key(&key));
+        owner.preference_processed(&processed("pref", false));
+        tokio::task::yield_now().await;
+        assert!(owner.running());
         assert!(owner.shutdown().await);
     }
 
@@ -483,11 +502,19 @@ mod tests {
         });
         let worker = worker.await.unwrap();
         let disable = disable.await.unwrap();
-        assert_ne!(
-            worker.is_ok(),
-            disable.is_ok(),
-            "exactly one admission must win"
-        );
+        // The setting always lands; a worker either won the gate first, and is
+        // stopped once the setting is stored, or is refused.
+        assert!(disable.is_ok());
+        if worker.is_ok() {
+            owner.preference_processed(&processed("pref", true));
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while owner.running() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
         // Shutdown must drain without waiting for an unobserved setting result.
         assert!(owner.shutdown().await);
     }

@@ -1290,7 +1290,7 @@ impl Store for FakeStore {
         self.visits.lock().unwrap().push(url);
     }
     fn app_setting(&self, key: &str) -> Option<String> {
-        if key == "work.enabled"
+        if key == "ai.enabled"
             && self
                 .work_disabled
                 .load(std::sync::atomic::Ordering::Acquire)

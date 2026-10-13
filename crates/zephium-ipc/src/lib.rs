@@ -924,6 +924,8 @@ pub enum OperationReason {
     ProfileDeletionPolicyRejected,
     ProfileDeletionInProgress,
     ProfileDeletionCompleted,
+    /// Work and AI features are switched off.
+    WorkDisabled,
 }
 
 /// The shell has processed an admitted operation in actor order. Consumers

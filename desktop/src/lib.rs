@@ -593,7 +593,12 @@ impl UiStartupGate {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
-        if let Some(next) = then {
+        // Models set up later have nowhere to open while Work and AI are off.
+        let ai = window
+            .app_handle()
+            .try_state::<keymap::Keymap>()
+            .is_none_or(|keymap| keymap.ai_enabled());
+        if let Some(next) = then.filter(|next| ai || !matches!(next, OnboardingNextV1::Models)) {
             let id = match next {
                 OnboardingNextV1::Account => "settings.account",
                 OnboardingNextV1::Models => "settings.ai",
@@ -1554,6 +1559,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_product::work_edit_draft,
             work_product::work_operation,
             work_product::work_operation_status,
+            work_product::work_running,
             work_product::work_context_preview,
             media::media_import,
             media::media_open,
@@ -3322,6 +3328,14 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
         return accepted_ui_operation();
     }
     if shutdown_started(app) {
+        return rejected_operation();
+    }
+    // Off, Work and AI have no way in; Work itself is refused by the shell.
+    if matches!(id, "mode.choose" | "work.dictate" | "tool.ai")
+        && !app
+            .try_state::<keymap::Keymap>()
+            .is_none_or(|keymap| keymap.ai_enabled())
+    {
         return rejected_operation();
     }
     if matches!(
@@ -6205,6 +6219,9 @@ pub fn run() {
                     if let Some((key, value)) = id.strip_prefix("preference.").and_then(|rest| rest.split_once('=')) {
                         if material::theme_changed(key, value) {
                             reinstall_native_materials(&emit_handle);
+                        }
+                        if let Some(keymap) = emit_handle.try_state::<keymap::Keymap>() {
+                            keymap.follow_preference(key, value);
                         }
                     }
                     emit_ui_command(&emit_handle, &id);
