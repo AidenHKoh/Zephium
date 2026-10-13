@@ -185,6 +185,10 @@ pub(super) const fn map_runtime_fault(
         SemanticActionRuntimeFault::StaleReference => SemanticActionNativeFailure::StaleReference,
         SemanticActionRuntimeFault::TargetChanged
         | SemanticActionRuntimeFault::TargetDescriptorChanged
+        | SemanticActionRuntimeFault::TargetDescriptorIncomplete
+        | SemanticActionRuntimeFault::TargetNameChanged
+        | SemanticActionRuntimeFault::TargetStateChanged
+        | SemanticActionRuntimeFault::TargetOperationsChanged
         | SemanticActionRuntimeFault::TargetGeometryChanged => {
             SemanticActionNativeFailure::TargetChanged
         }

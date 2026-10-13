@@ -869,6 +869,14 @@ pub enum SemanticActionRuntimeFault {
     TargetChanged,
     /// Captured semantic role, name, state or operation no longer matches.
     TargetDescriptorChanged,
+    /// Fresh descriptor could not be fully observed.
+    TargetDescriptorIncomplete,
+    /// The observed accessible name changed before dispatch.
+    TargetNameChanged,
+    /// The observed control state changed before dispatch.
+    TargetStateChanged,
+    /// The observed operation set changed before dispatch.
+    TargetOperationsChanged,
     /// Target layout moved beyond the admitted geometry tolerance.
     TargetGeometryChanged,
     /// Target became disabled or read-only for this operation.
@@ -938,11 +946,11 @@ impl SemanticActionRuntimeFault {
             "busy" => Some(Self::Busy),
             "stale_reference" => Some(Self::StaleReference),
             "target_changed" => Some(Self::TargetChanged),
-            "target_descriptor_changed"
-            | "target_descriptor_incomplete"
-            | "target_name_changed"
-            | "target_state_changed"
-            | "target_operations_changed" => Some(Self::TargetDescriptorChanged),
+            "target_descriptor_changed" => Some(Self::TargetDescriptorChanged),
+            "target_descriptor_incomplete" => Some(Self::TargetDescriptorIncomplete),
+            "target_name_changed" => Some(Self::TargetNameChanged),
+            "target_state_changed" => Some(Self::TargetStateChanged),
+            "target_operations_changed" => Some(Self::TargetOperationsChanged),
             "target_geometry_changed" => Some(Self::TargetGeometryChanged),
             "target_disabled" => Some(Self::TargetDisabled),
             "credential_boundary" => Some(Self::CredentialBoundary),
@@ -1485,6 +1493,38 @@ mod tests {
             .expect("assembler")
             .finish()
             .expect("observation")
+    }
+
+    #[test]
+    fn action_revalidation_diagnostics_preserve_the_closed_reason_without_content() {
+        for (code, expected) in [
+            (
+                "target_descriptor_changed",
+                SemanticActionRuntimeFault::TargetDescriptorChanged,
+            ),
+            (
+                "target_descriptor_incomplete",
+                SemanticActionRuntimeFault::TargetDescriptorIncomplete,
+            ),
+            (
+                "target_name_changed",
+                SemanticActionRuntimeFault::TargetNameChanged,
+            ),
+            (
+                "target_state_changed",
+                SemanticActionRuntimeFault::TargetStateChanged,
+            ),
+            (
+                "target_operations_changed",
+                SemanticActionRuntimeFault::TargetOperationsChanged,
+            ),
+        ] {
+            assert_eq!(SemanticActionRuntimeFault::parse(code), Some(expected));
+            assert_eq!(
+                SemanticActionRuntimeFault::parse(&format!("{code}:private value")),
+                None
+            );
+        }
     }
 
     #[test]
