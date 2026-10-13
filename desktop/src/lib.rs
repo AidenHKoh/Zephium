@@ -4769,6 +4769,8 @@ fn sidebar_set_width(
     if !platform::imp::publish_sidebar_resize_revision(revision) {
         return;
     }
+    #[cfg(target_os = "macos")]
+    platform::imp::sidebar_column_width(&caller, width);
     #[cfg(not(target_os = "macos"))]
     let _ = revision;
     shell.dispatch(Command::SetSidebarWidth(width, animate));

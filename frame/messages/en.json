@@ -2893,5 +2893,9 @@
   "work_ask_screenshot_note": "When the page's text isn't enough, Work sends a picture of the page to your model.",
   "work_ask_screenshot_receipt": "Page pictures on {site}",
   "settings_material_auto": "Automatic",
-  "settings_material_fallback": "Showing {material}: this system can't use your choice right now."
+  "settings_material_fallback": "Showing {material}: this system can't use your choice right now.",
+  "window_minimize": "Minimize",
+  "window_maximize": "Maximize",
+  "window_restore": "Restore Down",
+  "window_close": "Close"
 }

@@ -594,6 +594,11 @@ pub fn publish_sidebar_resize_revision(revision: u64) -> bool {
     sidebar_resize::publish_revision(revision)
 }
 
+/// Native has a new column width; a guide left at another edge goes off.
+pub fn sidebar_column_width(window: &WebviewWindow, width: f64) {
+    let _ = window.run_on_main_thread(move || sidebar_resize::column_width(width));
+}
+
 pub async fn configure_sidebar_resize(
     window: &WebviewWindow,
     width: f64,
@@ -601,7 +606,9 @@ pub async fn configure_sidebar_resize(
     revision: u64,
     shell: zephium_app::Handle,
 ) -> bool {
-    if !sidebar_resize::publish_revision(revision) {
+    // An older revision may still switch the guide off; only turning it on
+    // has to be current.
+    if !sidebar_resize::publish_revision(revision) && enabled {
         return false;
     }
     let generation = CHROME_GENERATION.load(Ordering::Acquire);
