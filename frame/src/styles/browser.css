@@ -564,6 +564,10 @@
   background: rgb(0 0 0 / 0.3);
   animation: interface-fade var(--motion-base) var(--ease-out);
 }
+/* The same dimming behind a native modal dialog in Settings. */
+.settings-modal::backdrop {
+  background: rgb(0 0 0 / 0.3);
+}
 .settings-dialog {
   position: fixed;
   z-index: 81;

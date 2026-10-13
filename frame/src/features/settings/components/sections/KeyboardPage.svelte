@@ -1,6 +1,7 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import { keymap, type KeymapEntry, type KeymapOutcome } from "$domain/keymap";
+  import { preferences } from "$domain/preferences";
   import { IS_MAC } from "$shared/platform";
   import { acceleratorFrom, acceleratorKeys, heldModifiers } from "$shared/lib/accelerator";
   import SettingsGroup from "$shared/ui/SettingsGroup";
@@ -13,7 +14,7 @@
 
   type Notice = { id: string; text: string; replace?: string };
 
-  let sections = $derived(keymapSections(keymap.all()));
+  let sections = $derived(keymapSections(keymap.all(), preferences.aiEnabled()));
   let anyCustomized = $derived(keymap.all().some((entry) => entry.customized));
   let recordingId = $state<string | null>(null);
   let held = $state<string[]>([]);

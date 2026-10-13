@@ -2,7 +2,7 @@
   import * as m from "$shared/i18n/messages";
   import { surface as browser } from "$domain/surface";
   import * as settings from "../lib/settings-state.svelte";
-  import { groups, sections } from "../lib/settings-model";
+  import { groups, shownSections } from "../lib/settings-model";
   import Icon from "$shared/ui/Icon";
   import IconButton from "$shared/ui/IconButton";
   import { Cancel01Icon, Search01Icon } from "@hugeicons/core-free-icons";
@@ -63,7 +63,7 @@
   <div class="settings-navigation-list" data-glide-scroller>
     {#each groups as group (group.id)}<div class="settings-nav-group">
         <h2>{group.label()}</h2>
-        {#each sections.filter((item) => item.group === group.id) as item (item.id)}<button
+        {#each shownSections().filter((item) => item.group === group.id) as item (item.id)}<button
             type="button"
             class="settings-nav-item"
             data-plate

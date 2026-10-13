@@ -56,6 +56,7 @@
   import { CaptionButtons } from "$shared/ui/WindowControls";
   import { installChromeMenu } from "$shared/lib/chrome-menu";
   import { tabs } from "$domain/tabs";
+  import { preferences } from "$domain/preferences";
   /** New Note, from the menu or its shortcut: a note starts where notes are open. */
   async function newNote() {
     const profile = tabs.profile()?.id;
@@ -286,7 +287,9 @@
         {#if !inWork}<AddressField {compact} /><StoreInstallRail />{/if}
         {#if paneled}<ModeTabs compact standalone />{/if}
       {:else if compact}<AddressField {compact} /><StoreInstallRail />
-      {:else if !incognito}<div class="sidebar-head"><ModeTabs /></div>{/if}
+      {:else if !incognito && preferences.aiEnabled()}<div class="sidebar-head">
+          <ModeTabs />
+        </div>{/if}
       <!-- One column in both environments: only what it lists changes, and the
            new list settles in where the old one was. -->
       {#key inWork}<div class="sidebar-mode-body" data-arriving={modeSwitched}>

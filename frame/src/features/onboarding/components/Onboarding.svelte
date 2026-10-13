@@ -4,6 +4,7 @@
   import * as m from "$shared/i18n/messages";
   import { browserImport } from "$domain/browser-import";
   import { tabs } from "$domain/tabs";
+  import { preferences } from "$domain/preferences";
   import { commands, type WorkLocalServerV1 } from "$shared/ipc/bindings";
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
@@ -14,7 +15,7 @@
   import * as motion from "$session/motion.svelte";
   import { SITES, SITE_URLS } from "../lib/catalog";
   import { frame, SHOTS, STAGE, type Shot } from "../lib/camera";
-  import { neighbour, position, STEPS, type Step } from "../lib/flow";
+  import { neighbour, position, stepsFor, type Step } from "../lib/flow";
   import { formName, type Box } from "../lib/formation";
   import { keptSites } from "../lib/kept";
   import { followUp, type Mind, type Then } from "../lib/minds";
@@ -72,7 +73,9 @@
   let masked = $derived(
     step === "welcome" || step === "you" || step === "import" || step === "ai" || step === "ready",
   );
-  let place = $derived(position(step));
+  // Work and its models are offered only while Work and AI are on.
+  let ai = $derived(preferences.aiEnabled());
+  let place = $derived(position(step, ai));
 
   const box: Box = { x: 340, y: 266, w: 560, h: (560 * WORDMARK.height) / WORDMARK.width };
 
@@ -148,7 +151,7 @@
     if (step === "ready") return m.onb_start();
     return m.onb_continue();
   });
-  const advance = () => (step === "ready" ? void finish() : go(neighbour(step, 1)));
+  const advance = () => (step === "ready" ? void finish() : go(neighbour(step, 1, ai)));
 
   function keydown(event: KeyboardEvent) {
     if (event.key !== "Enter" || event.repeat || event.isComposing) return;
@@ -244,6 +247,7 @@
         {sites}
         {imported}
         playing={step === "work"}
+        modes={ai}
         bind:element={windowElement}
       />
     </div>
@@ -284,13 +288,13 @@
             variant="ghost"
             size="large"
             shape="capsule"
-            onclick={() => go(neighbour(step, -1))}>{m.onb_back()}</Button
+            onclick={() => go(neighbour(step, -1, ai))}>{m.onb_back()}</Button
           >{/if}
       </span>
       <span class="middle">
         {#if notice}<span class="notice" role="status">{notice}</span>{:else}
           <ol aria-label={m.onb_progress({ current: place.at, total: place.of })}>
-            {#each STEPS.slice(1) as candidate, index (candidate)}
+            {#each stepsFor(ai).slice(1) as candidate, index (candidate)}
               <li
                 data-state={index + 1 < place.at ? "done" : index + 1 === place.at ? "now" : ""}
               ></li>

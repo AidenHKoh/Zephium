@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { neighbour, position, STEPS } from "../lib/flow";
+import { neighbour, position, STEPS, stepsFor } from "../lib/flow";
 
 describe("flow", () => {
   it("walks welcome, then seven steps, ending ready", () => {
@@ -24,5 +24,15 @@ describe("flow", () => {
     expect(neighbour("you", -1)).toBeUndefined();
     expect(neighbour("you", 1)).toBe("import");
     expect(neighbour("ready", 1)).toBeUndefined();
+  });
+});
+
+describe("flow without Work and AI", () => {
+  it("skips Work and its models, and counts what is left", () => {
+    expect(stepsFor(false)).not.toContain("work");
+    expect(stepsFor(false)).not.toContain("ai");
+    expect(position("ready", false)).toEqual({ at: 5, of: 5 });
+    expect(neighbour("launcher", 1, false)).toBe("ready");
+    expect(neighbour("ready", -1, false)).toBe("launcher");
   });
 });

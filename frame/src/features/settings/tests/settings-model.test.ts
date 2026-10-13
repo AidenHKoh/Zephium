@@ -71,3 +71,20 @@ it("finds every real tab option", async () => {
     expect(searchSettings(query!).some((result) => result.target === target)).toBe(true);
   }
 });
+
+it("collapses the Work group to its one page while Work and AI are off", async () => {
+  const { shownSections, searchSettings, searchSections } = await import("../lib/settings-model");
+  const work = (ai: boolean) =>
+    shownSections(ai)
+      .filter((section) => section.group === "work")
+      .map((section) => section.id);
+  expect(work(true)).toEqual(["work", "ai", "skills", "memory", "sites", "mcp"]);
+  expect(work(false)).toEqual(["work"]);
+  const gone = new Set(["ai", "skills", "memory", "sites", "mcp"]);
+  for (const query of ["models", "skills", "memory", "site access", "MCP", "API key", "dictation"])
+    expect(searchSettings(query, false).some((result) => gone.has(result.section))).toBe(false);
+  expect(searchSections("models", false).some((section) => gone.has(section.id))).toBe(false);
+  expect(searchSettings("Work and AI", false).map((result) => result.target)).toContain(
+    "ai.enabled",
+  );
+});

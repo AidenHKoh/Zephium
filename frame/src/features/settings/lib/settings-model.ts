@@ -1,4 +1,5 @@
 import * as m from "$shared/i18n/messages";
+import { preferences } from "$domain/preferences";
 import { fields } from "./catalog";
 import {
   Settings01Icon,
@@ -11,13 +12,13 @@ import {
   KeyboardIcon,
   Globe02Icon,
   ChipIcon,
-  AiBrowserIcon,
+  Briefcase02Icon,
   Clock01Icon,
   DashboardSpeed01Icon,
   InformationCircleIcon,
   UserMultiple02Icon,
   TranslateIcon,
-  MagicWand01Icon,
+  Mortarboard02Icon,
   Brain01Icon,
   Plug01Icon,
 } from "@hugeicons/core-free-icons";
@@ -91,8 +92,8 @@ const allSections = [
     id: "work",
     group: "work",
     title: m.section_work,
-    description: m.section_work_description,
-    icon: AiBrowserIcon,
+    description: m.ai_switch_section_description,
+    icon: Briefcase02Icon,
   },
   {
     id: "ai",
@@ -106,7 +107,7 @@ const allSections = [
     group: "work",
     title: m.section_skills,
     description: m.section_skills_description,
-    icon: MagicWand01Icon,
+    icon: Mortarboard02Icon,
   },
   {
     id: "memory",
@@ -164,19 +165,24 @@ export type SettingsSection = (typeof allSections)[number]["id"];
  *  only in development builds. A release offers only what works. */
 export const showPreviews = import.meta.env.DEV;
 /** Sections that hold nothing but placeholders today. */
-const previewSections = new Set<SettingsSection>(["profiles"]);
+const previewSections = new Set<SettingsSection>();
 export const sections = allSections.filter(
   (section) => showPreviews || !previewSections.has(section.id),
 );
+/** The Work group's pages past Work itself, which leave with Work and AI. */
+const aiSections = new Set<SettingsSection>(["ai", "skills", "memory", "sites", "mcp"]);
+export const shownSections = (ai = preferences.aiEnabled()) =>
+  ai ? sections : sections.filter((section) => !aiSections.has(section.id));
 export const groups = [
   { id: "browser", label: m.settings_browser },
   { id: "work", label: m.section_work },
   { id: "app", label: m.settings_application },
 ] as const;
-export function searchSettings(query: string) {
+export function searchSettings(query: string, ai = preferences.aiEnabled()) {
   const words = query.trim().toLocaleLowerCase().split(/\s+/u);
   const matches = (text: string) => words.every((word) => text.toLocaleLowerCase().includes(word));
-  const shown = new Set<string>(sections.map((section) => section.id));
+  const offered = shownSections(ai);
+  const shown = new Set<string>(offered.map((section) => section.id));
   const preferences = Object.entries(fields)
     .filter(
       ([, field]) =>
@@ -191,7 +197,7 @@ export function searchSettings(query: string) {
       description: field.description,
       target: id as string | null,
     }));
-  const destinations = sections
+  const destinations = offered
     .filter(
       (section) =>
         matches(section.title()) && !preferences.some((field) => field.section === section.id),
@@ -205,9 +211,9 @@ export function searchSettings(query: string) {
     }));
   return [...destinations, ...preferences];
 }
-export function searchSections(query: string) {
+export function searchSections(query: string, ai = preferences.aiEnabled()) {
   const words = query.trim().toLocaleLowerCase().split(/\s+/u);
-  return sections.filter((section) =>
+  return shownSections(ai).filter((section) =>
     words.every((word) =>
       [
         section.title(),

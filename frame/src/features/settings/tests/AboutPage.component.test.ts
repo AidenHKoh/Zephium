@@ -32,6 +32,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 vi.mock("$domain/preferences", () => ({
   preferences: {
     value: (key: string) => ({ "updates.auto-check": "true" })[key],
+    aiEnabled: () => true,
     saving: () => false,
     saveFailed: () => false,
     set: vi.fn().mockResolvedValue(undefined),

@@ -29,9 +29,7 @@
   request, so the thumb only travels once the environment has actually
   changed and can never be left on a side native refused.
 -->
-{#if preferences.value("work.enabled") === "false"}{:else if compact}<ModeWord
-    {standalone}
-  />{:else}<div class="modes">
+{#if !preferences.aiEnabled()}{:else if compact}<ModeWord {standalone} />{:else}<div class="modes">
     <SegmentedControl
       label={m.ui_mode_work_hint()}
       {options}

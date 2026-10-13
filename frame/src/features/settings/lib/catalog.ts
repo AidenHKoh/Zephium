@@ -511,6 +511,12 @@ export const fields = {
     description: m.ai_jev_key_desc,
     initial: "",
   },
+  "ai.enabled": {
+    section: "work",
+    label: m.ai_switch_title,
+    description: m.ai_switch_on,
+    initial: true,
+  },
   "about.updates": {
     section: "about",
     label: m.pref_about_updates,

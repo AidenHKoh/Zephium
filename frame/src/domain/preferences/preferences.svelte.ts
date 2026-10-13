@@ -64,6 +64,9 @@ const versions: Partial<Record<PreferenceKey, number>> = {};
 export const value = (key: PreferenceKey) => values[key];
 export const saving = () => pending !== null;
 export const saveFailed = () => failed;
+/** Work and AI features: off, every Work and AI surface leaves the app. */
+export const aiEnabled = () =>
+  values["ai.enabled"] !== "false" && values["work.enabled"] !== "false";
 function apply(key: PreferenceKey, next: string) {
   values[key] = next;
   versions[key] = (versions[key] ?? 0) + 1;

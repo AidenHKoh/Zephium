@@ -2,8 +2,9 @@ import "$styles/global.css";
 import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
-import type { WorkLocalServerV1 } from "$shared/ipc/bindings";
+import type { WorkLocalServerV1, WorkMoreModelsV1_Serialize } from "$shared/ipc/bindings";
 import { PROFILE, models } from "$shared/testing/work-models";
+import { emitNativeEvent } from "$shared/testing/native-events";
 import AiPage from "../components/sections/AiPage.svelte";
 
 vi.mock("$domain/tabs", () => ({
@@ -17,6 +18,11 @@ const native = vi.hoisted(() => ({
   account: vi.fn(),
   local: vi.fn(async () => [] as WorkLocalServerV1[]),
   endpoint: vi.fn(),
+  more: vi.fn(async (): Promise<WorkMoreModelsV1_Serialize> => ({
+    provider: "compatible",
+    entries: [],
+    fault: null,
+  })),
 }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
@@ -28,6 +34,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     accountGet: native.account,
     workLocalServers: native.local,
     workSetModelEndpoint: native.endpoint,
+    workMoreModels: native.more,
     voiceStatus: async () => ({
       version: 1,
       engines: ["on_device", "open_ai"],
@@ -187,4 +194,33 @@ test("a model server already running here is one click away", async () => {
   await expect
     .element(screen.getByText("Set OLLAMA_CONTEXT_LENGTH", { exact: false }))
     .toBeVisible();
+});
+
+test("a custom server is asked for its models once per address, even when it has none", async () => {
+  await page.viewport(1100, 1200);
+  native.more.mockReset();
+  native.read.mockResolvedValue(models({ base: "http://localhost:11434/v1" }));
+  for (const answer of [
+    { provider: "compatible", entries: [], fault: null },
+    { provider: "compatible", entries: [], fault: "unreachable" },
+  ] satisfies WorkMoreModelsV1_Serialize[]) {
+    native.more.mockReset();
+    native.more.mockResolvedValue(answer);
+    const screen = await render(AiPage);
+    await expect.element(screen.getByText("http://localhost:11434/v1")).toBeVisible();
+    await new Promise((settle) => setTimeout(settle, 400));
+    expect(native.more).toHaveBeenCalledTimes(1);
+    emitNativeEvent("workModelsChanged", { version: 1 });
+    await new Promise((settle) => setTimeout(settle, 200));
+    expect(native.more).toHaveBeenCalledTimes(1);
+    screen.unmount();
+  }
+  native.more.mockReset();
+  native.more.mockResolvedValue({ provider: "compatible", entries: [], fault: null });
+  const screen = await render(AiPage);
+  await expect.poll(() => native.more.mock.calls.length).toBe(1);
+  native.read.mockResolvedValue(models({ base: "http://localhost:1234/v1" }));
+  emitNativeEvent("workModelsChanged", { version: 1 });
+  await expect.poll(() => native.more.mock.calls.length).toBe(2);
+  screen.unmount();
 });
