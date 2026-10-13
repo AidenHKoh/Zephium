@@ -1,7 +1,32 @@
 import { commands } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 
+import {
+  DEFAULT_CONTRAST,
+  DEFAULT_THEME,
+  contrastOf,
+  forkOf,
+  preset,
+  resolveTheme,
+  sameSpec,
+  seedVars,
+  type ThemeSpec,
+} from "./palette";
+
 export type Appearance = "system" | "light" | "dark";
+
+/** The stored customization, as preference values. */
+export type Customization = {
+  theme: string;
+  custom: string;
+  /** `ui.theme-contrast`, 0 to 100. */
+  level: string;
+  /** The accessibility switch, which takes contrast to its full. */
+  contrast: boolean;
+  font: string;
+  fontSize: string;
+  codeFont: string;
+};
 
 const media = window.matchMedia("(prefers-color-scheme: light)");
 let appearance: Appearance = "system";
@@ -20,14 +45,81 @@ export function setReducedMotion(reduceMotion: boolean) {
   document.documentElement.setAttribute("data-reduce-motion", String(reduceMotion));
 }
 
-export function applyLayout(axes: {
-  density: "compact" | "comfortable";
-  contrast: boolean;
-  text: "large" | "small" | "default";
-}) {
+let customization: Customization | null = null;
+let draft: ThemeSpec | null = null;
+let draftLevel: number | null = null;
+const graphite = forkOf(preset(DEFAULT_THEME)!);
+
+export function applyCustomization(next: Customization) {
+  customization = next;
+  render();
+}
+
+const fields = {
+  "ui.theme": "theme",
+  "ui.theme-custom": "custom",
+  "ui.theme-contrast": "level",
+  "ui.contrast": "contrast",
+  "ui.font": "font",
+  "ui.font-size": "fontSize",
+  "ui.code-font": "codeFont",
+} as const satisfies Record<string, keyof Customization>;
+export type CustomizationKey = keyof typeof fields;
+export const customizationKeys = Object.keys(fields) as CustomizationKey[];
+
+/** For a surface without the preferences store, such as the launcher: one
+ *  stored or projected value at a time. */
+export function customize(key: CustomizationKey, value: string) {
+  const next: Customization = customization ?? {
+    theme: "zephium",
+    custom: "",
+    level: String(DEFAULT_CONTRAST),
+    contrast: false,
+    font: "system",
+    fontSize: "13",
+    codeFont: "system",
+  };
+  const field = fields[key];
+  applyCustomization(
+    field === "contrast" ? { ...next, contrast: value === "true" } : { ...next, [field]: value },
+  );
+}
+
+/** A theme being edited, shown everywhere before it is written. */
+export function previewTheme(spec: ThemeSpec | null) {
+  draft = spec;
+  render();
+}
+
+/** A contrast being dragged, shown before it is written. */
+export function previewContrast(level: number | null) {
+  draftLevel = level;
+  render();
+}
+
+function render() {
+  if (customization === null) return;
+  const root = document.documentElement;
+  const raised = customization.contrast;
+  const spec = draft ?? resolveTheme(customization.theme, customization.custom).spec;
+  const level = raised ? 100 : (draftLevel ?? contrastOf(customization.level));
+  const vars = seedVars(spec, level);
+  // Graphite keeps its literal tokens: only a chosen theme derives a ladder.
+  if (level === DEFAULT_CONTRAST && sameSpec(spec, graphite)) {
+    root.removeAttribute("data-palette");
+    for (const name of Object.keys(vars)) root.style.removeProperty(name);
+  } else {
+    for (const [name, value] of Object.entries(vars)) root.style.setProperty(name, value);
+    root.setAttribute("data-palette", "");
+  }
+  root.setAttribute("data-font", customization.font);
+  root.setAttribute("data-font-size", customization.fontSize);
+  root.setAttribute("data-code-font", customization.codeFont);
+}
+
+export function applyLayout(axes: { density: "compact" | "comfortable"; contrast: boolean }) {
   document.documentElement.setAttribute("data-density", axes.density);
   document.documentElement.setAttribute("data-contrast", String(axes.contrast));
-  document.documentElement.setAttribute("data-text", axes.text);
 }
 
 function apply() {

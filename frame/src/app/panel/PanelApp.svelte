@@ -50,8 +50,14 @@
     let stopMotion: (() => void) | undefined;
     let liveMotion = false;
     let liveLanguage = false;
+    const liveLook: string[] = [];
     const motionListener = events.uiCommand.listen(({ payload }) => {
       if (disposed) return;
+      const look = theme.customizationKeys.find((key) => payload.startsWith(`preference.${key}=`));
+      if (look) {
+        liveLook.push(look);
+        theme.customize(look, payload.slice(`preference.${look}=`.length));
+      }
       if (payload.startsWith("preference.ui.language=")) {
         liveLanguage = true;
         applyLanguage(payload.slice("preference.ui.language=".length));
@@ -79,11 +85,16 @@
         const [launcher] = await Promise.all([loadLauncherPanel(), theme.init(), faviconsReady]);
         if (disposed) return;
         Launcher = launcher.default;
-        const [motion, language] = await Promise.all([
+        const [motion, language, ...look] = await Promise.all([
           commands.settingGet("ui.reduce-motion").catch(() => null),
           commands.settingGet("ui.language").catch(() => null),
+          ...theme.customizationKeys.map((key) => commands.settingGet(key).catch(() => null)),
         ]);
         if (disposed) return;
+        theme.customizationKeys.forEach((key, index) => {
+          const value = look[index];
+          if (!liveLook.includes(key) && value != null) theme.customize(key, value);
+        });
         if (!liveMotion) theme.setReducedMotion(motion === "true");
         if (!liveLanguage) applyLanguage(language);
         await tick();

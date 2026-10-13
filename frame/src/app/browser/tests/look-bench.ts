@@ -6,6 +6,7 @@ import { favicons } from "$domain/favicons";
 import { surface } from "$domain/surface";
 import { tabs } from "$domain/tabs";
 import { preferences } from "$domain/preferences";
+import { theme } from "$domain/appearance";
 import * as launch from "$session/motion.svelte";
 
 const SITES: Record<string, { title: string; fill: string }> = {
@@ -116,3 +117,16 @@ export function wallpaper(
 export const settle = () => new Promise((resolve) => setTimeout(resolve, 450));
 export const shot = (name: string) =>
   page.screenshot({ path: `../../../../../target/look/premium/${name}.png` });
+
+/** A theme on the root as the browser applies it, with the default type. */
+export function themed(id: string) {
+  theme.applyCustomization({
+    theme: id,
+    custom: "",
+    level: "50",
+    contrast: false,
+    font: "system",
+    fontSize: "13",
+    codeFont: "system",
+  });
+}

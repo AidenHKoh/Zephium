@@ -2114,6 +2114,17 @@ pub(crate) fn restore_browser_chrome(
     }
 }
 
+/// What the launcher draws from the theme; the `=` keeps `ui.theme` from
+/// also matching `ui.theme-custom`.
+const LAUNCHER_THEME_KEYS: &[&str] = &[
+    "ui.theme=",
+    "ui.theme-custom=",
+    "ui.theme-contrast=",
+    "ui.contrast=",
+    "ui.font=",
+    "ui.font-size=",
+];
+
 fn emit_ui_command(app: &tauri::AppHandle, id: &str) {
     emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id);
     // The launcher follows appearance, motion and language only; anything else would
@@ -2121,6 +2132,10 @@ fn emit_ui_command(app: &tauri::AppHandle, id: &str) {
     if id.starts_with("theme.")
         || id.starts_with("preference.ui.reduce-motion=")
         || id.starts_with("preference.ui.language=")
+        || LAUNCHER_THEME_KEYS.iter().any(|key| {
+            id.strip_prefix("preference.")
+                .is_some_and(|rest| rest.starts_with(key))
+        })
     {
         emit_to_privileged(app, overlay::PANEL_LABEL, EVENT_UI, &id);
     }
@@ -5759,6 +5774,11 @@ pub fn run() {
                 APP_STORE.set(store.clone()).map_err(|_| {
                     std::io::Error::other("process-global application store is already installed")
                 })?;
+                for (key, value) in
+                    zephium_core::preferences::migrations(|key| store.app_setting(key))
+                {
+                    let _ = store.set_app_setting(key.into(), value.into());
+                }
                 updates::schedule_native_checks(app.handle());
                 work_models::install(app.handle());
                 account::install(app.handle());
@@ -6174,6 +6194,11 @@ pub fn run() {
                     }
                     if let Some(value) = id.strip_prefix("preference.ui.material=") {
                         apply_native_material(&emit_handle, value);
+                    }
+                    if let Some((key, value)) = id.strip_prefix("preference.").and_then(|rest| rest.split_once('=')) {
+                        if material::theme_changed(key, value) {
+                            reinstall_native_materials(&emit_handle);
+                        }
                     }
                     emit_ui_command(&emit_handle, &id);
                 }
@@ -6918,6 +6943,11 @@ mod tests {
                 zephium_core::work::environment::WORK_PLACEMENT_PIN
             ),
         ).expect("export Work constants");
+        std::fs::write(
+            "../frame/src/shared/ipc/theme-presets.json",
+            zephium_core::theme::presets_json(),
+        )
+        .expect("export theme presets");
     }
 
     #[test]

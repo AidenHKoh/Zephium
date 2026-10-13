@@ -395,10 +395,12 @@ pub fn round_corners(window: &WebviewWindow) {
 // Acrylic with a deep tint; a high-alpha tint keeps the blur readable
 // instead of smeared. Applies from Win10 up.
 pub fn apply_material(window: &WebviewWindow, dark: bool) -> bool {
-    let tint = if dark {
-        (24, 24, 28, 210)
-    } else {
-        (245, 245, 249, 210)
+    // Win10 draws this tint; 22H2 and later ignore it and the frame's wash
+    // carries the theme instead.
+    let tint = match crate::material::themed_ground(!dark) {
+        Some([r, g, b]) => (r, g, b, 210),
+        None if dark => (24, 24, 28, 210),
+        None => (245, 245, 249, 210),
     };
     // Use the fallible native adapter directly; the Tauri effect dispatcher
     // discards the underlying DWM error and can falsely report acrylic.

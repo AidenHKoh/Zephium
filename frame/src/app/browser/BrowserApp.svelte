@@ -49,14 +49,24 @@
     );
   });
 
+  $effect(() => {
+    theme.applyCustomization({
+      theme: preferences.value("ui.theme"),
+      custom: preferences.value("ui.theme-custom"),
+      level: preferences.value("ui.theme-contrast"),
+      contrast: preferences.value("ui.contrast") === "true",
+      font: preferences.value("ui.font"),
+      fontSize: preferences.value("ui.font-size"),
+      codeFont: preferences.value("ui.code-font"),
+    });
+  });
+
   $effect(() => applyLanguage(preferences.value("ui.language")));
 
   $effect(() => {
-    const text = preferences.value("ui.text-size");
     theme.applyLayout({
       density: preferences.value("ui.density") === "compact" ? "compact" : "comfortable",
       contrast: preferences.value("ui.contrast") === "true",
-      text: text === "large" || text === "small" ? text : "default",
     });
   });
 

@@ -40,9 +40,16 @@ pub const KEYS: &[&str] = &[
     "updates.auto-check",
     "notice.seen-version",
     "notice.security-dismissed",
+    "ui.theme",
+    "ui.theme-custom",
+    "ui.window-tint",
+    "ui.font",
+    "ui.font-size",
+    "ui.code-font",
     "tabs.archive",
     "tabs.external-position",
     "tabs.close-button",
+    "ui.theme-contrast",
 ];
 
 /// Interface languages a person may choose, by BCP 47 tag. One without a
@@ -54,6 +61,37 @@ pub const LANGUAGES: &[&str] = &[
     "nl", "pl", "pt-BR", "pt-PT", "ro", "ru", "sk", "sl", "sr", "sv", "sw", "ta", "te", "th", "tr",
     "uk", "vi", "zh-CN", "zh-TW",
 ];
+
+/// Monospaced faces for code, by id. The system's own on each platform, or
+/// one the person has installed; the frame offers only those it can find.
+pub const CODE_FONTS: &[&str] = &[
+    "system",
+    "menlo",
+    "jetbrains-mono",
+    "fira-code",
+    "ibm-plex-mono",
+    "cascadia-code",
+    "source-code-pro",
+    "consolas",
+];
+
+/// Settings from an earlier release carried into their replacements, as the
+/// writes to make. Run once at startup: each retired value is reset as it is
+/// carried, so a second run finds nothing to do.
+pub fn migrations(stored: impl Fn(&str) -> Option<String>) -> Vec<(&'static str, &'static str)> {
+    let mut writes = Vec::new();
+    match stored("ui.text-size").as_deref() {
+        Some("large") => {
+            if stored("ui.font-size").is_none() {
+                writes.push(("ui.font-size", "15"));
+            }
+            writes.push(("ui.text-size", "default"));
+        }
+        Some("small") => writes.push(("ui.text-size", "default")),
+        _ => {}
+    }
+    writes
+}
 
 pub fn value_allowed(key: &str, value: &str) -> bool {
     match key {
@@ -75,7 +113,17 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "ui.tab-layout" => matches!(value, "vertical" | "horizontal"),
         "ui.language" => LANGUAGES.contains(&value),
         "ui.density" => matches!(value, "comfortable" | "compact"),
+        // Retired for `ui.font-size`; still read once, by `migrations`.
         "ui.text-size" => matches!(value, "small" | "default" | "large"),
+        "ui.theme" => crate::theme::theme_allowed(value),
+        "ui.theme-custom" => value.is_empty() || crate::theme::parse_custom(value).is_some(),
+        "ui.window-tint" => value
+            .parse::<u8>()
+            .is_ok_and(|tint| tint <= 100 && value == tint.to_string()),
+        "ui.font" => matches!(value, "system" | "rounded" | "serif" | "mono"),
+        "ui.font-size" => matches!(value, "13" | "14" | "15"),
+        "ui.code-font" => CODE_FONTS.contains(&value),
+        "ui.theme-contrast" => crate::theme::contrast_allowed(value),
         "tabs.new-position" => matches!(value, "end" | "after-current"),
         // Where a link handed over by another application opens.
         "tabs.external-position" => matches!(value, "new-tab" | "end" | "after-current"),
@@ -257,6 +305,44 @@ mod tests {
     }
 
     #[test]
+    fn customization_preferences_are_closed_and_bounded() {
+        for key in [
+            "ui.theme",
+            "ui.theme-custom",
+            "ui.window-tint",
+            "ui.font",
+            "ui.font-size",
+            "ui.code-font",
+            "ui.theme-contrast",
+        ] {
+            assert!(KEYS.contains(&key));
+        }
+        assert!(value_allowed("ui.theme", "nord"));
+        assert!(value_allowed("ui.theme", "custom"));
+        assert!(!value_allowed("ui.theme", "monokai"));
+        assert!(value_allowed("ui.theme-custom", ""));
+        assert!(value_allowed(
+            "ui.theme-custom",
+            r##"{"light":{"bg":"#ffffff","fg":"#000000","accent":"#3366ff"},"dark":{"bg":"#000000","fg":"#ffffff","accent":"#88aaff"}}"##
+        ));
+        assert!(!value_allowed("ui.theme-custom", "{}"));
+        assert!(value_allowed("ui.theme-contrast", "72"));
+        assert!(!value_allowed("ui.theme-contrast", "101"));
+        for tint in ["0", "35", "100"] {
+            assert!(value_allowed("ui.window-tint", tint));
+        }
+        for tint in ["", "-1", "101", "050", "5.5", " 5"] {
+            assert!(!value_allowed("ui.window-tint", tint), "{tint:?}");
+        }
+        assert!(value_allowed("ui.font", "rounded"));
+        assert!(!value_allowed("ui.font", "comic-sans"));
+        assert!(value_allowed("ui.font-size", "15"));
+        assert!(!value_allowed("ui.font-size", "16"));
+        assert!(value_allowed("ui.code-font", "jetbrains-mono"));
+        assert!(!value_allowed("ui.code-font", "\"Fira Code\", serif"));
+    }
+
+    #[test]
     fn tab_options_are_closed_choices() {
         for key in [
             "tabs.archive",
@@ -277,5 +363,34 @@ mod tests {
         assert!(!value_allowed("tabs.external-position", "window"));
         assert!(value_allowed("tabs.close-button", "always"));
         assert!(!value_allowed("tabs.close-button", "never"));
+    }
+
+    #[test]
+    fn the_retired_text_size_carries_into_the_interface_size_once() {
+        let stored = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| (*v).to_owned())
+            }
+        };
+        assert_eq!(
+            migrations(stored(&[("ui.text-size", "large")])),
+            [("ui.font-size", "15"), ("ui.text-size", "default")]
+        );
+        assert_eq!(
+            migrations(stored(&[("ui.text-size", "large"), ("ui.font-size", "13")])),
+            [("ui.text-size", "default")]
+        );
+        assert_eq!(
+            migrations(stored(&[("ui.text-size", "small")])),
+            [("ui.text-size", "default")]
+        );
+        assert!(migrations(stored(&[("ui.text-size", "default")])).is_empty());
+        assert!(migrations(stored(&[])).is_empty());
+        for (key, value) in migrations(stored(&[("ui.text-size", "large")])) {
+            assert!(KEYS.contains(&key) && value_allowed(key, value));
+        }
     }
 }

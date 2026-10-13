@@ -24,6 +24,18 @@
     );
   });
 
+  $effect(() => {
+    theme.applyCustomization({
+      theme: preferences.value("ui.theme"),
+      custom: preferences.value("ui.theme-custom"),
+      level: preferences.value("ui.theme-contrast"),
+      contrast: preferences.value("ui.contrast") === "true",
+      font: preferences.value("ui.font"),
+      fontSize: preferences.value("ui.font-size"),
+      codeFont: preferences.value("ui.code-font"),
+    });
+  });
+
   // Drawn once what it shows has arrived, and before native reveals the
   // window, so the first frame is already the welcome.
   let ready = $state(false);

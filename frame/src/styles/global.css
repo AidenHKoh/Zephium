@@ -2,11 +2,13 @@
 @import "tailwindcss" source("../");
 @import "./tokens/primitive.css";
 @import "./tokens.css";
+@import "./axes/palette.css";
 @import "./axes/tint.css";
 @import "./axes/density.css";
 @import "./axes/contrast.css";
 @import "./axes/material.css";
 @import "./axes/motion.css";
+@import "./axes/type.css";
 @import "./controls.css";
 @import "./favicon.css";
 @import "./browser.css";
@@ -53,7 +55,7 @@ body {
   background: var(--color-canvas);
   color: var(--color-text);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--text-body);
   font-synthesis: none;
   font-kerning: normal;
   font-optical-sizing: auto;
@@ -271,4 +273,22 @@ kbd {
   --row-active: var(--row-active-ink);
   --row-pressed: var(--row-pressed-ink);
   --row-rim: var(--row-rim-ink);
+}
+
+/* The same overrides read from a chosen theme's own ink. */
+@supports (color: color-mix(in oklab, red, red)) {
+  :root[data-palette][data-material="liquid_glass"] :is(.browser-sidebar, [data-glass-text]) {
+    --color-muted: color-mix(in srgb, var(--seed-fg) calc(58% + 20% * var(--seed-k)), transparent);
+    --color-faint: color-mix(in srgb, var(--seed-fg) calc(31% + 24% * var(--seed-k)), transparent);
+  }
+  :root[data-palette][data-material="liquid_glass"][data-theme="light"]
+    :is(.browser-sidebar, [data-glass-text]) {
+    --color-muted: color-mix(in srgb, var(--seed-fg) calc(52% + 20% * var(--seed-k)), transparent);
+    --color-faint: color-mix(in srgb, var(--seed-fg) calc(31% + 24% * var(--seed-k)), transparent);
+  }
+  :root[data-palette][data-theme="light"] .browser-sidebar {
+    --color-text: color-mix(in srgb, var(--seed-fg) 90%, transparent);
+    --color-label-secondary: color-mix(in srgb, var(--seed-fg) 76%, transparent);
+    --color-row-current: color-mix(in srgb, var(--seed-fg) 84%, transparent);
+  }
 }
