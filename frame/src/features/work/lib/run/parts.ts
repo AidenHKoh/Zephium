@@ -143,6 +143,12 @@ function addLine(part: RunPart, kind: Step["kind"]) {
     part.lines!.push(line);
 }
 
+/** An approved step that sends, pays or deletes: running it again could do it twice. */
+export const effected = (step: Step) =>
+  step.kind.kind === "confirm" &&
+  ["communication", "purchase", "destructive"].includes(step.kind.confirm.category) &&
+  (step.kind.confirm.decision === "approved" || step.kind.confirm.decision === "allowed_for_run");
+
 /** A step a connection part draws as a row: a call (a read, before calls were their own) or a confirmation. */
 /** A part in one of these states is done working, for better or worse. */
 const ENDED: readonly string[] = ["done", "failed", "stopped"];
@@ -175,6 +181,7 @@ function factParts(
       const state =
         !going && ["planned", "running", "waiting"].includes(fact.state) ? "stopped" : fact.state;
       const host = fact.service?.host ? registrableSite(fact.service.host) : undefined;
+      const committed = steps.some(effected);
       const part: RunPart = {
         id: `part:${card}:${fact.id}`,
         key: fact.id,
@@ -194,8 +201,14 @@ function factParts(
         ...(fact.summary ? { summary: fact.summary } : {}),
         ...(fact.goal?.trim() ? { goal: fact.goal.trim() } : {}),
         ...(going && state === "running" && nowOf(steps) ? { now: nowOf(steps)! } : {}),
-        // A part that ended short offers its remedy at once, even while the run goes on.
-        ...(fact.need && (!going || ENDED.includes(state)) ? { need: fact.need } : {}),
+        // A part that ended short offers its remedy at once, even while the run goes on;
+        // never a retry once an approved send or purchase may have happened.
+        ...(fact.need &&
+        (!going || ENDED.includes(state)) &&
+        !(committed && fact.need.kind === "retry")
+          ? { need: fact.need }
+          : {}),
+        ...(committed && state === "failed" ? { summary: m.work_part_effect_unconfirmed() } : {}),
         ...(fact.service?.connection ? { connection: fact.service.connection } : {}),
         ...(fact.helper === "computer"
           ? { steps: [...ids], lines: [] }

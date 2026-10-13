@@ -1578,6 +1578,7 @@
   "work_part_site_error": "{part} met an error on its site",
   "work_part_no_answer": "{part} got no answer",
   "work_part_unfinished": "{part} didn’t finish",
+  "work_part_effect_unconfirmed": "Done on the site, but the result couldn’t be read back. Check there before trying again.",
   "work_need_again": "Try again",
   "work_need_again_request": "Try {part} again",
   "work_need_again_site": "Try {site} again",

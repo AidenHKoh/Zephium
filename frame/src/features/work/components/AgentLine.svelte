@@ -10,6 +10,7 @@
   import RunAsks from "./asks/RunAsks.svelte";
   import { asksOf, openAsks } from "./asks/asks";
   import { fileName } from "../lib/work-files";
+  import { effected } from "../lib/run/parts";
   import type { CanvasItem } from "../lib/canvas-model";
   import { Character, Orb, Shimmer, type Mood } from "$shared/ui/presence";
   import HostGlyph, { siteMark } from "./cards/HostGlyph.svelte";
@@ -326,7 +327,8 @@
         run: () => void commands.runCommand(faultFix.command),
       };
     if (ended) return { label: ended.action, run: ended.onact };
-    if (["failed", "interrupted"].includes(execution.status))
+    // Never a whole new try once an approved send or purchase may have happened.
+    if (["failed", "interrupted"].includes(execution.status) && !execution.steps?.some(effected))
       return {
         label: m.work_need_again(),
         run: () => void session.continueWith(m.work_line_try_again_request()),
