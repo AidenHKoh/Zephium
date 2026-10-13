@@ -18,6 +18,8 @@ pub enum AgentBrowserDecisionProvider {
     Emulation,
     /// Direct TypeSafe BYOK loaded by the trusted Keychain adapter.
     TypeSafe(AgentProviderCredential<DecisionCredentialProvider>),
+    /// TypeSafe selects actions only; unresolved choices return to the page planner.
+    TypeSafeActions(AgentProviderCredential<DecisionCredentialProvider>),
     /// Trusted cloud-session endpoint and its separately bound bearer.
     Cloud {
         /// HTTPS service base URL supplied by the cloud session, never a page.
@@ -30,6 +32,7 @@ pub enum AgentBrowserDecisionProvider {
 pub(super) struct BrowserDecisions {
     jev: Option<JevDecisionClient>,
     emulation: DecisionEmulation,
+    pub(super) actions_only: bool,
 }
 
 /// Who answers the typed questions the primary backend left open.
@@ -82,12 +85,13 @@ impl AgentBrowserSession {
         if self.turns != 0 || self.decisions.is_some() {
             return Err(AgentBrowserProviderError::Continuation);
         }
+        let actions_only = matches!(&provider, AgentBrowserDecisionProvider::TypeSafeActions(_));
         let jev = match provider {
             AgentBrowserDecisionProvider::Emulation => None,
-            AgentBrowserDecisionProvider::TypeSafe(credential) => Some(JevDecisionClient::direct(
-                self.transport.0.clone(),
-                credential,
-            )),
+            AgentBrowserDecisionProvider::TypeSafe(credential)
+            | AgentBrowserDecisionProvider::TypeSafeActions(credential) => Some(
+                JevDecisionClient::direct(self.transport.0.clone(), credential),
+            ),
             AgentBrowserDecisionProvider::Cloud {
                 base_url,
                 credential,
@@ -121,8 +125,18 @@ impl AgentBrowserSession {
                 )
             }
         };
-        self.decisions = Some(BrowserDecisions { jev, emulation });
+        self.decisions = Some(BrowserDecisions {
+            jev,
+            emulation,
+            actions_only,
+        });
         Ok(())
+    }
+
+    pub(super) fn actions_only_decisions(&self) -> bool {
+        self.decisions
+            .as_ref()
+            .is_some_and(|decisions| decisions.actions_only)
     }
 
     fn has_decision_capacity(&self) -> Result<bool, AgentBrowserProviderError> {
@@ -154,22 +168,15 @@ impl AgentBrowserSession {
             .objective
             .as_ref()
             .ok_or(AgentBrowserProviderError::Continuation)?;
-        let built = match schema.filter(|_| locate_only) {
-            Some(schema) => DecisionObservation::try_for_locate(
-                observation,
-                objective,
-                authority,
-                self.account,
-                schema,
-            ),
-            None => DecisionObservation::try_for_read(
-                observation,
-                objective,
-                authority,
-                self.account,
-                schema,
-            ),
-        };
+        let built = project_observation(
+            self.actions_only_decisions(),
+            observation,
+            objective,
+            authority,
+            self.account,
+            schema,
+            locate_only,
+        );
         let projection = match built {
             Ok(projection) => projection,
             Err(DecisionProjectionError::Capacity) => return Ok(None),
@@ -186,6 +193,9 @@ impl AgentBrowserSession {
         discovery: &zephium_agentic::DecisionRowDiscovery,
     ) -> Result<Option<DecisionObservationAnswers>, AgentBrowserProviderError> {
         self.check_live()?;
+        if self.actions_only_decisions() {
+            return Ok(None);
+        }
         if self.decisions.is_none() || !self.has_decision_capacity()? {
             return Ok(None);
         }
@@ -258,7 +268,8 @@ impl AgentBrowserSession {
         let fallback = projection
             .route(primary)
             .map_err(|_| AgentBrowserProviderError::Authority)?;
-        let can_emulate = self.has_decision_capacity()? && self.can_emulate();
+        let can_emulate =
+            !self.actions_only_decisions() && self.has_decision_capacity()? && self.can_emulate();
         if fallback.projection().is_some() {
             if let Some(journal) = &self.journal {
                 journal
@@ -408,5 +419,111 @@ impl AgentBrowserSession {
             }
             Err(error) => Err(AgentBrowserProviderError::RequestPolicy(error)),
         }
+    }
+}
+
+fn project_observation(
+    actions_only: bool,
+    observation: &zephium_agentic::SemanticObservation,
+    objective: &zephium_agentic::AgentProviderObjective,
+    authority: &zephium_agentic::AgentProviderActionAuthority,
+    account: zephium_agentic::AgentContextAccountBinding,
+    schema: Option<&zephium_agentic::SemanticExtractionSchema>,
+    locate_only: bool,
+) -> Result<DecisionObservation, DecisionProjectionError> {
+    if actions_only {
+        return DecisionObservation::try_new(observation, objective, authority, account);
+    }
+    match schema.filter(|_| locate_only) {
+        Some(schema) => {
+            DecisionObservation::try_for_locate(observation, objective, authority, account, schema)
+        }
+        None => {
+            DecisionObservation::try_for_read(observation, objective, authority, account, schema)
+        }
+    }
+}
+
+#[cfg(all(test, feature = "probe-harness"))]
+mod action_mode_tests {
+    use super::*;
+    #[test]
+    fn interaction_projection_cannot_turn_a_read_schema_into_jev_extraction_heads() {
+        let (session, source) = super::super::tests::browser_fixture();
+        let frame = &source.frames()[0];
+        let snapshot = zephium_agentic::decode_semantic_snapshot(
+            zephium_agentic::SemanticDecodeContext::new(
+                frame.invocation(), frame.frame().clone(), frame.generation(),
+            ),
+            br#"{"v":1,"i":1,"g":1,"c":"complete","n":[{"k":1,"r":"document","o":16},{"k":2,"p":0,"r":"paragraph","t":"Fixture detail: exact observed value"}]}"#,
+        ).unwrap();
+        let observation =
+            zephium_agentic::SemanticObservationAssembler::new(source.request().clone(), snapshot)
+                .unwrap()
+                .finish()
+                .unwrap();
+        let authority =
+            zephium_agentic::AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+        let objective = session.objective.as_ref().unwrap();
+        let schema = zephium_agentic::SemanticExtractionSchema::try_new(
+            zephium_agentic::SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![zephium_agentic::SemanticExtractionFieldSchema::try_text(
+                "detail".into(),
+                true,
+                128,
+            )
+            .unwrap()
+            .with_verbatim_text()
+            .unwrap()],
+        )
+        .unwrap();
+        let expected =
+            DecisionObservation::try_new(&observation, objective, &authority, session.account)
+                .unwrap()
+                .into_anonymous_eval_requests()
+                .unwrap()
+                .0
+                .encode()
+                .unwrap();
+        for locate in [false, true] {
+            let actual = project_observation(
+                true,
+                &observation,
+                objective,
+                &authority,
+                session.account,
+                Some(&schema),
+                locate,
+            )
+            .unwrap()
+            .into_anonymous_eval_requests()
+            .unwrap()
+            .0
+            .encode()
+            .unwrap();
+            assert_eq!(
+                actual, expected,
+                "action mode must never request value or row extraction"
+            );
+        }
+        let read = project_observation(
+            false,
+            &observation,
+            objective,
+            &authority,
+            session.account,
+            Some(&schema),
+            false,
+        )
+        .unwrap()
+        .into_anonymous_eval_requests()
+        .unwrap()
+        .0
+        .encode()
+        .unwrap();
+        assert_ne!(
+            read, expected,
+            "ordinary read decisions still retain their own schema"
+        );
     }
 }

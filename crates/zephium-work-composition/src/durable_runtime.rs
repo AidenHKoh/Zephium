@@ -38,6 +38,8 @@ pub enum WorkDecisionPreference {
     /// Answer the same typed questions with a model: the chosen one, or the
     /// existing OpenAI credential's.
     Emulation,
+    /// Opt-in action-only Jev pilot; plain reads and extraction stay on the selected model.
+    Interactions,
     /// Use the existing page planner directly.
     Disabled,
 }
@@ -587,6 +589,10 @@ impl NativeWorkComposition {
         // A page task acts through the page planner; typed read decisions
         // cover only reading.
         if page_task(&request) {
+            if settings.decisions != WorkDecisionPreference::Interactions {
+                settings.decisions = WorkDecisionPreference::Disabled;
+            }
+        } else if settings.decisions == WorkDecisionPreference::Interactions {
             settings.decisions = WorkDecisionPreference::Disabled;
         }
         let decisions = settings.decisions;
@@ -1049,6 +1055,7 @@ impl NativeWorkComposition {
                         | AgentWorkEventKind::Verified
                         | AgentWorkEventKind::ModelRequestedHuman(_)
                         | AgentWorkEventKind::DecisionSettled(_)
+                        | AgentWorkEventKind::DecisionPlanner(_)
                         | AgentWorkEventKind::DecisionFallback { .. }
                         | AgentWorkEventKind::RowRead { .. }
                         | AgentWorkEventKind::AppViewOpened
@@ -3277,6 +3284,20 @@ async fn configure_decisions(
                         "work: phase=decisions requested=recommended backend=emulation cause={cause}"
                     ));
                     AgentBrowserDecisionProvider::Emulation
+                }
+            }
+        }
+        WorkDecisionPreference::Interactions => {
+            match load_decision_credential(
+                load_development_typesafe_credential,
+                deadline.min(Instant::now() + DECISION_CREDENTIAL_WAIT),
+            )
+            .await
+            {
+                Ok(credential) => AgentBrowserDecisionProvider::TypeSafeActions(credential),
+                Err(cause) => {
+                    zephium_app::work_trace::record(format_args!("work: phase=decisions requested=interactions backend=planner cause={cause}"));
+                    return Ok(());
                 }
             }
         }

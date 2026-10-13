@@ -346,6 +346,7 @@ fn eval_read_decisions(
     match value {
         None | Some("recommended") => Ok((Preference::Recommended, "recommended")),
         Some("emulation") => Ok((Preference::Emulation, "emulation")),
+        Some("interactions") => Ok((Preference::Interactions, "interactions")),
         Some("disabled") => Ok((Preference::Disabled, "disabled")),
         _ => Err("eval_read_decisions"),
     }
@@ -365,6 +366,7 @@ mod read_decision_tests {
             ("recommended", P::Recommended),
             ("emulation", P::Emulation),
             ("disabled", P::Disabled),
+            ("interactions", P::Interactions),
         ] {
             assert_eq!(eval_read_decisions(Some(value)), Ok((expected, value)));
         }

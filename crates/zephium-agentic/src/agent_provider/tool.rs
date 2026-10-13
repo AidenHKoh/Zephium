@@ -462,7 +462,7 @@ pub struct AgentBrowserActProposal {
 }
 
 impl AgentBrowserActProposal {
-    fn try_new(
+    pub(super) fn try_new(
         actions: Vec<SemanticActionProposal>,
     ) -> Result<Self, AgentBrowserToolContractError> {
         let Some(first) = actions.first() else {

@@ -64,8 +64,45 @@ impl AgentWorkController {
             if session.decisions.is_none() || progress == AgentWorkTaskProgress::Complete {
                 break;
             }
+            let actions_only = session.actions_only_decisions();
             if state.decision_answers.is_none() {
-                if !state.human_request {
+                if actions_only {
+                    if state.task.human_wall(&observation).is_some()
+                        || looks_like_human_challenge(&observation)
+                    {
+                        let (fresh, held) =
+                            Self::settle_human_challenge(state, worker, browser, observation)
+                                .await?;
+                        observation = fresh;
+                        captured_at = SemanticCaptureInstant::from_millis(
+                            state
+                                .session
+                                .as_mut()
+                                .ok_or(AgentWorkFailure::Contract)?
+                                .policy_now()
+                                .map_err(AgentWorkFailure::Browser)?
+                                .millis(),
+                        );
+                        progress = state.task_progress(&observation)?;
+                        if held {
+                            return Ok((observation, captured_at, progress, true));
+                        }
+                    }
+                    state.refresh_account(worker, browser)?;
+                    let authority = state.action_authority(&observation)?;
+                    let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                    if session.account.account() != AgentAccountScope::Anonymous {
+                        break;
+                    }
+                    state.decision_answers = Self::provider(
+                        &mut state.native,
+                        worker,
+                        browser,
+                        session.cancellation.clone(),
+                        session.decide_observation(&observation, &authority, None, false),
+                    )
+                    .await?;
+                } else if !state.human_request {
                     if Self::classify_human_challenge(
                         state,
                         worker,
@@ -100,6 +137,13 @@ impl AgentWorkController {
                 }
             }
             let Some(mut answers) = state.decision_answers.take() else {
+                if actions_only {
+                    state
+                        .journal_mut()?
+                        .emit(AgentWorkEventKind::DecisionPlanner(
+                            AgentWorkDecisionRoute::Unavailable,
+                        ))?;
+                }
                 break;
             };
             // A catalog read finishes from the records it found, after at most
@@ -109,7 +153,7 @@ impl AgentWorkController {
             if let Some(schema) = state
                 .extraction_schema
                 .clone()
-                .filter(SemanticExtractionSchema::is_row_collection)
+                .filter(|schema| !actions_only && schema.is_row_collection())
             {
                 let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
                 if let Some(discovery) = answers
@@ -155,7 +199,7 @@ impl AgentWorkController {
             }
             let mut gap: Option<Box<zephium_agentic::DecisionReadSelection>> = None;
             let mut candidate: Option<Box<zephium_agentic::DecisionReadSelection>> = None;
-            if let Some(schema) = state.extraction_schema.clone() {
+            if let Some(schema) = state.extraction_schema.clone().filter(|_| !actions_only) {
                 let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
                 if let Some((selection, ready)) = answers
                     .take_read_progress_retaining_evidence(
@@ -287,6 +331,21 @@ impl AgentWorkController {
                 matches!(selection.operation(), DecisionOperation::Scroll(_))
             }) && more_below != Some(true)
             {
+                if actions_only {
+                    state
+                        .journal_mut()?
+                        .emit(AgentWorkEventKind::DecisionPlanner(
+                            AgentWorkDecisionRoute::ScrollUnverified,
+                        ))?;
+                }
+                break;
+            }
+            if actions_only && proposed.is_none() {
+                state
+                    .journal_mut()?
+                    .emit(AgentWorkEventKind::DecisionPlanner(
+                        AgentWorkDecisionRoute::Uncertain,
+                    ))?;
                 break;
             }
             // Rust's own re-observation is optimistic: if the page refuses it,
@@ -392,8 +451,28 @@ impl AgentWorkController {
                 .task
                 .decision_action_recipe(selection.operation(), &observation)?
             else {
+                if actions_only {
+                    let reason = match selection.operation() {
+                        DecisionOperation::Type(_) => AgentWorkDecisionRoute::TextRequired,
+                        DecisionOperation::Done => AgentWorkDecisionRoute::CompletionUnverified,
+                        DecisionOperation::Blocked => AgentWorkDecisionRoute::BlockUnverified,
+                        _ => AgentWorkDecisionRoute::Unsupported,
+                    };
+                    state
+                        .journal_mut()?
+                        .emit(AgentWorkEventKind::DecisionPlanner(reason))?;
+                }
                 break;
             };
+            let progress_key = recipe.progress_fingerprint(&observation);
+            if actions_only && state.no_progress.refuses(progress_key) {
+                state
+                    .journal_mut()?
+                    .emit(AgentWorkEventKind::DecisionPlanner(
+                        AgentWorkDecisionRoute::NoProgress,
+                    ))?;
+                break;
+            }
             let frames = observation
                 .frames()
                 .iter()
@@ -424,13 +503,33 @@ impl AgentWorkController {
             };
             let assessment = match state.task.assess_observed(proposal.action(), &observation) {
                 Ok(assessment) => assessment,
-                Err(AgentWorkFailure::ActionDenied) => break,
+                Err(AgentWorkFailure::ActionDenied) => {
+                    if actions_only {
+                        state
+                            .journal_mut()?
+                            .emit(AgentWorkEventKind::DecisionPlanner(
+                                AgentWorkDecisionRoute::Policy,
+                            ))?;
+                    }
+                    break;
+                }
+                Err(AgentWorkFailure::EffectRequired(_)) if actions_only => {
+                    state
+                        .journal_mut()?
+                        .emit(AgentWorkEventKind::DecisionPlanner(
+                            AgentWorkDecisionRoute::Policy,
+                        ))?;
+                    break;
+                }
                 Err(error) => return Err(error),
             };
             state
                 .journal_mut()?
                 .emit(AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Act))?;
             Self::retain_action_read_evidence(state, &proposal, &observation, captured_at)?;
+            if actions_only {
+                state.no_progress.remember(progress_key);
+            }
             let executed = Self::execute_prepared_action(
                 state,
                 worker,
@@ -442,6 +541,41 @@ impl AgentWorkController {
             .await;
             let (current, at, transition) = match executed {
                 Ok(settled) => settled,
+                Err(AgentWorkFailure::Browser(error))
+                    if actions_only
+                        && matches!(
+                            error,
+                            AgentBrowserProviderError::Action(_)
+                                | AgentBrowserProviderError::ActionRejected(_)
+                                | AgentBrowserProviderError::ActionUnverified
+                        ) =>
+                {
+                    let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                    let _ = session.take_rejected_refusal();
+                    if !session
+                        .close_failed_owned_action()
+                        .map_err(AgentWorkFailure::Browser)?
+                    {
+                        return Err(AgentWorkFailure::Browser(error));
+                    }
+                    state
+                        .journal_mut()?
+                        .emit(AgentWorkEventKind::DecisionPlanner(
+                            AgentWorkDecisionRoute::NativeRefused,
+                        ))?;
+                    observation = Box::pin(Self::observe(state, worker, browser)).await?;
+                    captured_at = SemanticCaptureInstant::from_millis(
+                        state
+                            .session
+                            .as_mut()
+                            .ok_or(AgentWorkFailure::Contract)?
+                            .policy_now()
+                            .map_err(AgentWorkFailure::Browser)?
+                            .millis(),
+                    );
+                    progress = state.task_progress(&observation)?;
+                    break;
+                }
                 Err(AgentWorkFailure::Browser(AgentBrowserProviderError::Action(_)))
                     if reobserving =>
                 {
@@ -469,6 +603,9 @@ impl AgentWorkController {
             captured_at = at;
             progress = state.task_progress(&observation)?;
             if unchanged >= MAX_UNCHANGED_DECISION_OBSERVATIONS {
+                if actions_only {
+                    break;
+                }
                 return Err(AgentWorkFailure::Browser(
                     AgentBrowserProviderError::NoProgress,
                 ));

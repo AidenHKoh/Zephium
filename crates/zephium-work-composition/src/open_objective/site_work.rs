@@ -1432,6 +1432,28 @@ fn credential(node: &SemanticNode) -> bool {
 }
 
 impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
+    fn decision_action_recipe(
+        &self,
+        operation: &zephium_agentic::DecisionOperation,
+        observation: &SemanticObservation,
+    ) -> Result<
+        Option<zephium_agentic::SemanticActionProposal>,
+        zephium_agent_controller::AgentWorkFailure,
+    > {
+        // The pilot executes only existing noncommitting read recipes. Text,
+        // unsupported controls and consequential actions stay with the planner.
+        let recipe = super::read_interactions::ReadingInteractionPolicy
+            .decision_action_recipe(operation, observation)?;
+        Ok(recipe.filter(|recipe| {
+            observation.frames().iter().any(|frame| {
+                frame.nodes().iter().any(|node| {
+                    node.reference() == recipe.intent().target()
+                        && classify(recipe.intent().kind(), None, node, frame) == SiteEffect::Read
+                })
+            })
+        }))
+    }
+
     fn allows_compound_forms(&self) -> bool {
         true
     }

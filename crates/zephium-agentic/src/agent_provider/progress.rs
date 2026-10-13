@@ -142,3 +142,15 @@ impl AgentBrowserToolProposal {
         Some((page.finalize().into(), intent.finalize().into()))
     }
 }
+
+impl crate::SemanticActionProposal {
+    /// Content-only refusal key shared by native decisions and the page planner.
+    /// This digest never carries action or observation authority.
+    pub fn progress_fingerprint(
+        &self,
+        observation: &SemanticObservation,
+    ) -> Option<([u8; 32], [u8; 32])> {
+        let actions = super::tool::AgentBrowserActProposal::try_new(vec![self.clone()]).ok()?;
+        AgentBrowserToolProposal::Act(actions).progress_fingerprint(observation)
+    }
+}

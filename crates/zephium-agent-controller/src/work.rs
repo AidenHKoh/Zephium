@@ -1521,6 +1521,7 @@ impl AgentWorkController {
                     consent_press: false,
                     keep_follow: false,
                     covered_controls: Vec::new(),
+                    no_progress: NoProgress::default(),
                     scroll_streak: 0,
                     look_streak: 0,
                     sign_in_refusals: 0,
@@ -1552,6 +1553,7 @@ struct WorkState {
     /// Controls of this document a click found covered, by role and name
     /// digest: the model is offered them for a key press only.
     covered_controls: Vec<u64>,
+    no_progress: NoProgress,
     /// Verified scrolls in a row with nothing else done.
     scroll_streak: u8,
     /// Whole looks of this page in a row with nothing done between them.
@@ -3204,7 +3206,7 @@ impl AgentWorkController {
         // fill value enters controller state. A repeat is told to change
         // approach; it is not the end of the page by itself.
         let mut action_refusals = Vec::<AgentProviderActionRefusalKey>::new();
-        let mut no_progress = NoProgress::default();
+        let mut no_progress = std::mem::take(&mut state.no_progress);
         // A control a single-page app re-renders comes back under a new
         // reference: counted by a digest of its role and name, a second
         // refusal tells the model to change approach.
@@ -6936,6 +6938,31 @@ fn looks_like_human_challenge(observation: &SemanticObservation) -> bool {
     matched
 }
 
+/// Closed reasons an interaction decision needs the page planner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentWorkDecisionRoute {
+    /// No answer passed provider and projection admission.
+    Unavailable,
+    /// The selected operation or target was uncertain or absent.
+    Uncertain,
+    /// Typing needs the planner's separately admitted text/form proposal.
+    TextRequired,
+    /// A done answer is not independent task completion.
+    CompletionUnverified,
+    /// A blocked answer is not independent wall verification.
+    BlockUnverified,
+    /// The selected control needs an unsupported native recipe.
+    Unsupported,
+    /// Scrolling lacked accepted evidence of useful content below.
+    ScrollUnverified,
+    /// The operation repeated against an unchanged page.
+    NoProgress,
+    /// Native policy requires a different or separately approved proposal.
+    Policy,
+    /// A native read failed; its original ownership was closed before replanning.
+    NativeRefused,
+}
+
 /// Content-free product phase. Model text never declares task completion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentWorkEventKind {
@@ -6970,6 +6997,8 @@ pub enum AgentWorkEventKind {
     },
     /// One typed decision call settled with closed provider/size/latency facts.
     DecisionSettled(DecisionCallDiagnostic),
+    /// Why an action-only decision returned to the planner; no target or page data.
+    DecisionPlanner(AgentWorkDecisionRoute),
     /// Per-kind fallback reasons; counts follow the decision routing contract.
     DecisionFallback {
         /// Noul, Choice and Score counts by unavailable, rate limited, invalid, uncertain.

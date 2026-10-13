@@ -69,13 +69,13 @@ mod decision_journal_tests;
 #[path = "work.rs"]
 pub(crate) mod work;
 pub use work::{
-    AgentWorkClosedUnsuccessfully, AgentWorkContextSpec, AgentWorkController, AgentWorkEvent,
-    AgentWorkEventKind, AgentWorkExtractionTask, AgentWorkFailure, AgentWorkHandle,
-    AgentWorkHumanRequest, AgentWorkInitialReadiness, AgentWorkOutcome, AgentWorkRecovery,
-    AgentWorkRetainedBrowser, AgentWorkRetainedController, AgentWorkRetainedHandle,
-    AgentWorkRetainedOutcome, AgentWorkRetainedRecovery, AgentWorkRetainedResourceSpec,
-    AgentWorkRunInput, AgentWorkRunSettings, AgentWorkSuccess, AgentWorkTask,
-    AgentWorkTaskProgress, AgentWorkWaitingForHuman, MAX_AGENT_WORK_EVENTS,
+    AgentWorkClosedUnsuccessfully, AgentWorkContextSpec, AgentWorkController,
+    AgentWorkDecisionRoute, AgentWorkEvent, AgentWorkEventKind, AgentWorkExtractionTask,
+    AgentWorkFailure, AgentWorkHandle, AgentWorkHumanRequest, AgentWorkInitialReadiness,
+    AgentWorkOutcome, AgentWorkRecovery, AgentWorkRetainedBrowser, AgentWorkRetainedController,
+    AgentWorkRetainedHandle, AgentWorkRetainedOutcome, AgentWorkRetainedRecovery,
+    AgentWorkRetainedResourceSpec, AgentWorkRunInput, AgentWorkRunSettings, AgentWorkSuccess,
+    AgentWorkTask, AgentWorkTaskProgress, AgentWorkWaitingForHuman, MAX_AGENT_WORK_EVENTS,
 };
 
 /// This text-only/discarding vertical never needs Terra's catalog-wide 128k
