@@ -104,14 +104,14 @@ impl AgentWorkController {
         turn: AgentBrowserProviderTurn,
         original: &SemanticObservation,
     ) -> Result<PreparedForm, AgentWorkFailure> {
-        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_ref().ok_or(crate::contract!())?;
         let config = session.config.clone();
         let binding = match turn.turn.proposal() {
             AgentBrowserToolProposal::FillForm(form) => turn
                 .turn
                 .continuation()
                 .bind_form_targets(form, original, &config),
-            _ => return Err(AgentWorkFailure::Contract),
+            _ => return Err(crate::contract!()),
         };
         let (_, continuation) = turn.into_tool_turn().into_parts();
         let binding = match binding {
@@ -120,9 +120,9 @@ impl AgentWorkController {
                 return continuation
                     .into_form_refresh(original, &config, 0, false, Some(error))
                     .map(PreparedForm::Refresh)
-                    .map_err(|_| AgentWorkFailure::Contract)
+                    .map_err(|_| crate::contract!())
             }
-            Err(_) => return Err(AgentWorkFailure::Contract),
+            Err(_) => return Err(crate::contract!()),
         };
         let mut current = original.clone();
         let deadline = Instant::now() + Duration::from_millis(MAX_FORM_MILLIS);
@@ -248,9 +248,9 @@ impl AgentWorkController {
                         SemanticWaitCondition::Immediate,
                         SemanticVerification::PageChanged,
                         SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS)
-                            .map_err(|_| AgentWorkFailure::Contract)?,
+                            .map_err(|_| crate::contract!())?,
                     )
-                    .map_err(|_| AgentWorkFailure::Contract)?;
+                    .map_err(|_| crate::contract!())?;
                     match Box::pin(Self::form_primitive(
                         state, worker, browser, &current, recipe, true,
                     ))
@@ -274,7 +274,7 @@ impl AgentWorkController {
         continuation
             .into_form_refresh(original, &config, completed, submitted, failure)
             .map(PreparedForm::Refresh)
-            .map_err(|_| AgentWorkFailure::Contract)
+            .map_err(|_| crate::contract!())
     }
 
     async fn form_primitive(
@@ -292,13 +292,12 @@ impl AgentWorkController {
             .iter()
             .map(|frame| frame.frame().clone())
             .collect::<Vec<_>>();
-        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_mut().ok_or(crate::contract!())?;
         session
             .policy
             .admit_owned_observation(observation, session.account)
-            .map_err(|_| AgentWorkFailure::Contract)?;
-        let batch =
-            SemanticActionBatchId::new(session.next_action).ok_or(AgentWorkFailure::Contract)?;
+            .map_err(|_| crate::contract!())?;
+        let batch = SemanticActionBatchId::new(session.next_action).ok_or(crate::contract!())?;
         let mut admitted = None;
         for _ in 0..2 {
             let Ok(proposal) = crate::AgentBrowserActionProposal::bind_code_owned(
@@ -337,7 +336,7 @@ impl AgentWorkController {
                         recipe.verification(),
                         recipe.settle_budget(),
                     )
-                    .map_err(|_| AgentWorkFailure::Contract)?;
+                    .map_err(|_| crate::contract!())?;
                 }
                 Err(AgentWorkFailure::EffectRequired(_)) => {
                     return Ok(Err(AgentBrowserFormFault::SeparateActionRequired))
@@ -370,7 +369,7 @@ impl AgentWorkController {
                     failure,
                 )),
             )) if crate::action::refused_before_acting(failure) => {
-                let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                let session = state.session.as_mut().ok_or(crate::contract!())?;
                 let _ = session.take_rejected_refusal();
                 if session
                     .close_failed_owned_action()
@@ -391,7 +390,7 @@ impl AgentWorkController {
                             | AgentBrowserProviderError::ActionUnverified
                     ) =>
             {
-                let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                let session = state.session.as_mut().ok_or(crate::contract!())?;
                 let _ = session.take_rejected_refusal();
                 if session
                     .close_failed_owned_action()

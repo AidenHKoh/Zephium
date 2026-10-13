@@ -176,7 +176,7 @@ impl AgentWorkDiscoveryTask {
         fields: Vec<SemanticExtractionFieldSchema>,
     ) -> Result<Self, AgentWorkFailure> {
         if identity.kind() != ContextKind::Owned {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         Ok(Self {
             identity,
@@ -345,7 +345,7 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
     ) -> Result<SemanticOperations, AgentWorkFailure> {
         self.local_actions
             .as_ref()
-            .ok_or(AgentWorkFailure::Contract)?
+            .ok_or(crate::contract!())?
             .model_action_operations(node, observation)
     }
     fn model_action_effect(&self) -> Option<SemanticEffectClass> {
@@ -369,7 +369,7 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
     ) -> Result<(), AgentWorkFailure> {
         self.local_actions
             .as_mut()
-            .ok_or(AgentWorkFailure::Contract)?
+            .ok_or(crate::contract!())?
             .accept_verified_action(result, observation)
     }
     fn terminal_extraction_ready(&self) -> bool {
@@ -400,7 +400,7 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
                 .discovery
                 .admits_origin(observation.frames()[0].frame().origin())
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         self.current = Some((context, observation.request().id()));
         Ok(AgentWorkTaskProgress::Continue)
@@ -409,22 +409,16 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         &self,
         _: &SemanticPreparedAction,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
-        Err(AgentWorkFailure::Contract)
+        Err(crate::contract!())
     }
     fn assess_observed(
         &self,
         action: &SemanticPreparedAction,
         observation: &SemanticObservation,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
-        let policy = self
-            .local_actions
-            .as_ref()
-            .ok_or(AgentWorkFailure::Contract)?;
+        let policy = self.local_actions.as_ref().ok_or(crate::contract!())?;
         let request = observation.request();
-        let snapshot = observation
-            .frames()
-            .first()
-            .ok_or(AgentWorkFailure::Contract)?;
+        let snapshot = observation.frames().first().ok_or(crate::contract!())?;
         if self.complete
             || self.current != Some((request.context(), request.id()))
             || action.source_observation() != request.id()
@@ -441,7 +435,7 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
                     SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
                 ))
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         let assessment = policy.assess(action, observation)?;
         if !assessment.matches_action(action)
@@ -451,7 +445,7 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
                 .discovery
                 .admits_origin(assessment.destination_origin())
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         Ok(assessment)
     }
@@ -461,12 +455,12 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         now: AgentPolicyInstant,
     ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
         if context.identity() != self.identity {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         if let Some(sample) = self.account.get() {
             if sample.context() == context && self.account_source.is_none() {
                 if now < sample.observed_at() {
-                    return Err(AgentWorkFailure::Contract);
+                    return Err(crate::contract!());
                 }
                 if now == sample.observed_at() {
                     return Ok(sample);
@@ -481,13 +475,13 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
                     || prior.frame_generation().get().checked_add(1)
                         != Some(context.frame_generation().get()))
             {
-                return Err(AgentWorkFailure::Contract);
+                return Err(crate::contract!());
             }
         }
         if let Some(source) = &self.account_source {
             let sample = source.sample(context)?;
             if sample.context() != context || sample.account() != self.account_scope {
-                return Err(AgentWorkFailure::Contract);
+                return Err(crate::contract!());
             }
             self.account.set(Some(sample));
             return Ok(sample);
@@ -509,13 +503,13 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         &mut self,
         result: &SemanticExtractionResult<'_>,
     ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
-        let (context, observation) = self.current.ok_or(AgentWorkFailure::Contract)?;
+        let (context, observation) = self.current.ok_or(crate::contract!())?;
         if self.complete
             || result.observation() != observation
             || self.account.get().map(|sample| sample.context()) != Some(context)
             || !self.terminal_extraction_ready()
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         let progress = self.extraction.accept_extraction(result)?;
         self.complete = true;
@@ -543,7 +537,7 @@ mod tests {
                     SemanticOperationClass::Click,
                     SemanticOperationClass::Fill,
                 ])
-                .map_err(|_| AgentWorkFailure::Contract)
+                .map_err(|_| crate::contract!())
             } else {
                 Ok(SemanticOperations::NONE)
             }
@@ -568,7 +562,7 @@ mod tests {
                 _ => false,
             };
             if !approved {
-                return Err(AgentWorkFailure::Contract);
+                return Err(crate::contract!());
             }
             Ok(AgentEffectAssessment::new(
                 action,
@@ -772,7 +766,7 @@ mod tests {
     struct Source(Arc<Mutex<Option<AgentContextAccountBinding>>>);
     impl AgentWorkAccountSource for Source {
         fn sample(&self, _: ContextJoin) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
-            self.0.lock().unwrap().ok_or(AgentWorkFailure::Contract)
+            self.0.lock().unwrap().ok_or(crate::contract!())
         }
     }
 
@@ -830,7 +824,7 @@ mod tests {
         );
         assert_eq!(
             task.attest_account(context, AgentPolicyInstant::from_millis(30_100)),
-            Err(AgentWorkFailure::Contract),
+            Err(crate::contract!()),
             "the task cannot rewrite a trusted clock backwards"
         );
     }
@@ -854,10 +848,7 @@ mod tests {
         )
         .unwrap();
         let now = AgentPolicyInstant::from_millis(100);
-        assert_eq!(
-            task.attest_account(context, now),
-            Err(AgentWorkFailure::Contract)
-        );
+        assert_eq!(task.attest_account(context, now), Err(crate::contract!()));
         let sample = AgentContextAccountBinding::new(
             AgentAccountAttestationId::generate(),
             context,
@@ -887,10 +878,7 @@ mod tests {
             ),
         ] {
             *published.lock().unwrap() = Some(candidate);
-            assert_eq!(
-                task.attest_account(context, now),
-                Err(AgentWorkFailure::Contract)
-            );
+            assert_eq!(task.attest_account(context, now), Err(crate::contract!()));
         }
         let renewed = AgentContextAccountBinding::new(
             AgentAccountAttestationId::generate(),

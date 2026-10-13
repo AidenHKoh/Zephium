@@ -28,7 +28,7 @@ impl AgentWorkController {
             || target.as_url().as_str().len() > MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES
             || SemanticOrigin::parse(target.as_url().as_str()).as_ref() != Ok(&context.origin)
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         Ok(())
     }
@@ -95,9 +95,7 @@ impl AgentWorkController {
         if refused.contains(&key) {
             return Ok(refusal.repeated());
         }
-        refused
-            .try_reserve(1)
-            .map_err(|_| AgentWorkFailure::Contract)?;
+        refused.try_reserve(1).map_err(|_| crate::contract!())?;
         refused.push(key);
         Ok(refusal)
     }
@@ -135,9 +133,7 @@ impl AgentWorkController {
         if refusal.reason() == SemanticActionBindingError::TargetCovered
             && !covered.contains(&control)
         {
-            covered
-                .try_reserve(1)
-                .map_err(|_| AgentWorkFailure::Contract)?;
+            covered.try_reserve(1).map_err(|_| crate::contract!())?;
             covered.push(control);
         }
         let count = match refused.iter_mut().find(|(known, _)| *known == control) {
@@ -146,9 +142,7 @@ impl AgentWorkController {
                 *count
             }
             None => {
-                refused
-                    .try_reserve(1)
-                    .map_err(|_| AgentWorkFailure::Contract)?;
+                refused.try_reserve(1).map_err(|_| crate::contract!())?;
                 refused.push((control, 1));
                 1
             }
@@ -196,7 +190,7 @@ impl AgentWorkController {
                 || !state.history_back
                 || state.native.retained.is_none()))
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         let discovery = state.navigation_discovery.as_ref();
         let expected = if discovery.is_some() {
@@ -214,15 +208,15 @@ impl AgentWorkController {
             None
         } else if let Some((_, target)) = &follow {
             if !discovery.is_some_and(|scope| scope.is_site_session() && scope.admits(target)) {
-                return Err(AgentWorkFailure::Contract);
+                return Err(crate::contract!());
             }
             Some(target.clone())
         } else if let (Some(scope), Some(turn)) = (discovery, turn.as_ref()) {
             let AgentBrowserToolProposal::Navigate(target) = turn.turn.proposal() else {
-                return Err(AgentWorkFailure::Contract);
+                return Err(crate::contract!());
             };
             if !scope.admits(target) {
-                return Err(AgentWorkFailure::Contract);
+                return Err(crate::contract!());
             }
             Some(target.clone())
         } else {
@@ -230,7 +224,7 @@ impl AgentWorkController {
                 state
                     .current_navigation_target()
                     .cloned()
-                    .ok_or(AgentWorkFailure::Contract)?,
+                    .ok_or(crate::contract!())?,
             )
         };
         if !is_back
@@ -240,9 +234,9 @@ impl AgentWorkController {
                 (Some(AgentBrowserToolProposal::Navigate(proposed)), Some(target)) if proposed == target
             )
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
-        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_ref().ok_or(crate::contract!())?;
         // Keep the original total ceiling and reserve the remaining exact route
         // proposals plus final extraction/mapping; no hop receives a new budget.
         let remaining_hops = if discovery.is_some() {
@@ -251,7 +245,7 @@ impl AgentWorkController {
             state
                 .navigation_length()
                 .checked_sub(state.navigation_hops)
-                .ok_or(AgentWorkFailure::Contract)?
+                .ok_or(crate::contract!())?
         };
         if usize::from(session.turns) + remaining_hops + 1 > usize::from(session.max_model_calls)
             || usize::try_from(
@@ -260,7 +254,7 @@ impl AgentWorkController {
                     .remaining_operations(session.lease.lease())
                     .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?,
             )
-            .map_err(|_| AgentWorkFailure::Contract)?
+            .map_err(|_| crate::contract!())?
                 < 2 * remaining_hops + 1
         {
             return Err(AgentWorkFailure::Browser(
@@ -289,7 +283,7 @@ impl AgentWorkController {
             let now = state
                 .session
                 .as_mut()
-                .ok_or(AgentWorkFailure::Contract)?
+                .ok_or(crate::contract!())?
                 .policy_now()
                 .map_err(AgentWorkFailure::Browser)?;
             retained.automation_state(now)?
@@ -301,21 +295,18 @@ impl AgentWorkController {
                 .map_err(|_| AgentWorkFailure::Context)?
         };
         let legacy_operation = if state.native.retained.is_none() {
-            Some(ContextOperationId::new(state.native.id()?).ok_or(AgentWorkFailure::Contract)?)
+            Some(ContextOperationId::new(state.native.id()?).ok_or(crate::contract!())?)
         } else {
             None
         };
-        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_mut().ok_or(crate::contract!())?;
         let (continuation, following) = match (turn, follow) {
             (Some(turn), None) => (turn.into_tool_turn().into_parts().1, false),
             (None, Some((continuation, _))) => (continuation, true),
-            _ => return Err(AgentWorkFailure::Contract),
+            _ => return Err(crate::contract!()),
         };
         if state.navigation_discovery.is_some() {
-            let schema = state
-                .extraction_schema
-                .as_ref()
-                .ok_or(AgentWorkFailure::Contract)?;
+            let schema = state.extraction_schema.as_ref().ok_or(crate::contract!())?;
             let read = read_semantic_observation_for_schema(
                 observation,
                 SemanticReadAuthority::Acknowledged(continuation.baseline()),
@@ -350,14 +341,14 @@ impl AgentWorkController {
                 authorization,
                 observation,
                 continuation.baseline(),
-                proposed_target.as_ref().ok_or(AgentWorkFailure::Contract)?,
+                proposed_target.as_ref().ok_or(crate::contract!())?,
             )
         } else {
             session.policy.authorize_navigation(
                 authorization,
                 observation,
                 continuation.baseline(),
-                proposed_target.as_ref().ok_or(AgentWorkFailure::Contract)?,
+                proposed_target.as_ref().ok_or(crate::contract!())?,
             )
         }
         .map_err(|error| {
@@ -383,14 +374,14 @@ impl AgentWorkController {
                 session
                     .policy
                     .cancel_navigation(permit)
-                    .map_err(|_| AgentWorkFailure::Contract)?;
+                    .map_err(|_| crate::contract!())?;
                 return Err(failure);
             }
         };
         let prepared = if let Some(retained) = &mut state.native.retained {
             retained.prepare_navigation(automation.context(), now)
         } else {
-            let op = legacy_operation.ok_or(AgentWorkFailure::Contract)?;
+            let op = legacy_operation.ok_or(crate::contract!())?;
             state
                 .native
                 .contexts()?
@@ -403,7 +394,7 @@ impl AgentWorkController {
                 state
                     .session
                     .as_mut()
-                    .ok_or(AgentWorkFailure::Contract)?
+                    .ok_or(crate::contract!())?
                     .policy
                     .cancel_navigation(permit)
                     .map_err(|error| {
@@ -414,7 +405,7 @@ impl AgentWorkController {
         };
         // The old registry join is now irrevocably stale, before native dispatch.
         state.native.snapshot_generation = None;
-        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_mut().ok_or(crate::contract!())?;
         let active = session
             .policy
             .dispatch_navigation(permit, operation, now)
@@ -436,10 +427,7 @@ impl AgentWorkController {
             }
         };
         session.navigation = Some(active);
-        let active = session
-            .navigation
-            .as_ref()
-            .ok_or(AgentWorkFailure::Contract)?;
+        let active = session.navigation.as_ref().ok_or(crate::contract!())?;
         state.native.operation = Some(operation);
         let dispatch = if let Some(retained) = &mut state.native.retained {
             if is_back {
@@ -448,9 +436,7 @@ impl AgentWorkController {
                 retained.dispatch_navigation(active)
             }
         } else {
-            let request = active
-                .native_request()
-                .map_err(|_| AgentWorkFailure::Contract)?;
+            let request = active.native_request().map_err(|_| crate::contract!())?;
             browser.dispatch(ContextNativeRequest::Navigate(request))
         };
         let refusal = match dispatch {
@@ -471,7 +457,7 @@ impl AgentWorkController {
         let journal_failure = session
             .journal
             .as_mut()
-            .ok_or(AgentWorkFailure::Contract)
+            .ok_or(crate::contract!())
             .and_then(|journal| journal.navigation_active(active))
             .err();
         if let Some(failure) = refusal {
@@ -486,7 +472,7 @@ impl AgentWorkController {
             let terminal = state
                 .session
                 .as_mut()
-                .ok_or(AgentWorkFailure::Contract)?
+                .ok_or(crate::contract!())?
                 .settle_navigation_refusal();
             let terminal = match terminal {
                 Ok(terminal) => terminal,
@@ -506,7 +492,7 @@ impl AgentWorkController {
                 let result = state
                     .session
                     .as_mut()
-                    .ok_or(AgentWorkFailure::Contract)?
+                    .ok_or(crate::contract!())?
                     .settle_navigation_terminal(&terminal);
                 let terminal_record = match result {
                     Ok(terminal_record) => terminal_record,
@@ -550,7 +536,7 @@ impl AgentWorkController {
         state.native.check_control(worker, browser)?;
         state.check_task_contract()?;
         if receipt.hop() != state.navigation_hops {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         if state.navigation_discovery.is_some() {
             state
@@ -570,7 +556,7 @@ impl AgentWorkController {
         let now = state
             .session
             .as_mut()
-            .ok_or(AgentWorkFailure::Contract)?
+            .ok_or(crate::contract!())?
             .policy_now()
             .map_err(AgentWorkFailure::Browser)?;
         let account = state.task.attest_account(operation.context(), now);
@@ -578,7 +564,7 @@ impl AgentWorkController {
         state
             .session
             .as_mut()
-            .ok_or(AgentWorkFailure::Contract)?
+            .ok_or(crate::contract!())?
             .accept_arrival(receipt, account?)
             .map_err(AgentWorkFailure::Browser)?;
         // A move can land on a sign-in, code or bot-check page: the person
@@ -595,7 +581,7 @@ impl AgentWorkController {
                 .journal_mut()?
                 .clock
                 .now()
-                .map_err(|_| AgentWorkFailure::Contract)?
+                .map_err(|_| crate::contract!())?
                 .millis(),
         );
         let progress = state.task_progress(&fresh)?;
@@ -606,7 +592,7 @@ impl AgentWorkController {
         let action_authority = state
             .session
             .as_ref()
-            .ok_or(AgentWorkFailure::Contract)?
+            .ok_or(crate::contract!())?
             .config
             .permits_tool(AgentBrowserToolKind::Act)
             .then(|| state.action_authority(&fresh))
@@ -614,14 +600,14 @@ impl AgentWorkController {
         let now = state
             .session
             .as_mut()
-            .ok_or(AgentWorkFailure::Contract)?
+            .ok_or(crate::contract!())?
             .policy_now()
             .map_err(AgentWorkFailure::Browser)?;
         let account = state.task.attest_account(operation.context(), now);
         state.native.check_control(worker, browser)?;
         state.check_task_contract()?;
         let account = account?;
-        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_mut().ok_or(crate::contract!())?;
         let turn = Self::provider(
             &mut state.native,
             worker,
@@ -713,10 +699,10 @@ impl AgentBrowserSession {
         terminal: &ContextNavigationSettlement,
     ) -> Result<NavigationTerminal, AgentWorkFailure> {
         if self.navigation_refusal.is_some() {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         let now = self.policy_now().map_err(AgentWorkFailure::Browser)?;
-        let active = self.navigation.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        let active = self.navigation.as_ref().ok_or(crate::contract!())?;
         let receipt = self
             .policy
             .settle_navigation(active, terminal, now)
@@ -734,17 +720,17 @@ impl AgentBrowserSession {
     pub(super) fn settle_navigation_refusal(
         &mut self,
     ) -> Result<NavigationTerminal, AgentWorkFailure> {
-        let refusal = self.navigation_refusal.ok_or(AgentWorkFailure::Contract)?;
+        let refusal = self.navigation_refusal.ok_or(crate::contract!())?;
         if self
             .navigation
             .as_ref()
             .map(AgentActiveNavigation::operation)
             != Some(refusal.operation)
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         let now = self.policy_now().map_err(AgentWorkFailure::Browser)?;
-        let active = self.navigation.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        let active = self.navigation.as_ref().ok_or(crate::contract!())?;
         let receipt = self
             .policy
             .refuse_navigation_dispatch(active, refusal.failure, now)
@@ -764,7 +750,7 @@ impl AgentBrowserSession {
         let journal_failure = self
             .journal
             .as_mut()
-            .ok_or(AgentWorkFailure::Contract)
+            .ok_or(crate::contract!())
             .and_then(|journal| journal.navigation_settled(receipt))
             .err();
         if journal_failure.is_none() {
@@ -904,10 +890,7 @@ impl WorkJournal {
         active: &AgentActiveNavigation,
     ) -> Result<(), AgentWorkFailure> {
         self.supervisor
-            .record_active_navigation(
-                self.execution.as_ref().ok_or(AgentWorkFailure::Contract)?,
-                active,
-            )
+            .record_active_navigation(self.execution.as_ref().ok_or(crate::contract!())?, active)
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.record()
     }
@@ -920,10 +903,7 @@ impl WorkJournal {
             .record_navigation_receipt(receipt)
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.supervisor
-            .record_navigation_result(
-                self.execution.as_ref().ok_or(AgentWorkFailure::Contract)?,
-                receipt,
-            )
+            .record_navigation_result(self.execution.as_ref().ok_or(crate::contract!())?, receipt)
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.record()
     }

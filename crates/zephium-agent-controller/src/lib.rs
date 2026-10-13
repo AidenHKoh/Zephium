@@ -13,6 +13,29 @@
     deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
 )]
 
+/// Where the last contract refusal was raised: a source location, never
+/// page or model content, so a failed page task can name its cause.
+static CONTRACT_SITE: std::sync::Mutex<&'static str> = std::sync::Mutex::new("");
+
+/// The source location of the most recent contract refusal.
+pub fn last_contract_site() -> &'static str {
+    *CONTRACT_SITE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[doc(hidden)]
+pub fn mark_contract_site(site: &'static str) {
+    *CONTRACT_SITE.lock().unwrap_or_else(|e| e.into_inner()) = site;
+}
+
+/// `AgentWorkFailure::Contract`, remembering where it was raised.
+macro_rules! contract {
+    () => {{
+        $crate::mark_contract_site(concat!(file!(), ":", line!()));
+        $crate::AgentWorkFailure::Contract
+    }};
+}
+pub(crate) use contract;
+
 #[cfg(all(feature = "probe-harness", not(debug_assertions)))]
 compile_error!("the agent controller probe harness is forbidden in optimized builds");
 

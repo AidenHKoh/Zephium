@@ -62,18 +62,18 @@ impl AgentWorkFormGoal {
                     || value.is_empty()
                     || value.len() > MAX_SEMANTIC_NAME_BYTES))
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         Ok(Self {
             name: name
                 .map(SemanticActionText::try_new)
                 .transpose()
-                .map_err(|_| AgentWorkFailure::Contract)?,
+                .map_err(|_| crate::contract!())?,
             prior_value: prior_value
                 .map(SemanticActionText::try_new)
                 .transpose()
-                .map_err(|_| AgentWorkFailure::Contract)?,
-            value: SemanticActionText::try_new(value).map_err(|_| AgentWorkFailure::Contract)?,
+                .map_err(|_| crate::contract!())?,
+            value: SemanticActionText::try_new(value).map_err(|_| crate::contract!())?,
             kind,
         })
     }
@@ -111,14 +111,14 @@ impl AgentWorkFormPhase {
     /// resolution independently refuses duplicate/missing semantic matches.
     pub fn try_new(goals: Vec<AgentWorkFormGoal>) -> Result<Self, AgentWorkFailure> {
         if goals.is_empty() || goals.len() > MAX_GOALS {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         for (index, goal) in goals.iter().enumerate() {
             if goals[..index].iter().any(|prior| {
                 prior.kind == goal.kind
                     && (prior.name.is_none() || goal.name.is_none() || prior.name == goal.name)
             }) {
-                return Err(AgentWorkFailure::Contract);
+                return Err(crate::contract!());
             }
         }
         Ok(Self { goals })
@@ -230,7 +230,7 @@ impl AgentWorkFormTask {
             || phases.len() > MAX_GOALS
             || phases.iter().map(|phase| phase.goals.len()).sum::<usize>() > MAX_GOALS
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         Ok(Self {
             baseline_read: false,
@@ -261,7 +261,7 @@ impl AgentWorkFormTask {
         observation: &SemanticObservation,
     ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
         let Some(snapshot) = observation.frames().first() else {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         };
         let frame = snapshot.frame();
         if observation.request().context().identity() != self.identity
@@ -278,7 +278,7 @@ impl AgentWorkFormTask {
                     || observation.request().id() == last.observation
             })
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         // All current-phase fields must resolve before any grant is retained.
         // A complete phase can advance using this fresh state; it does not
@@ -291,21 +291,21 @@ impl AgentWorkFormTask {
                     .enumerate()
                     .filter(|(_, node)| goal.matches(node));
                 let Some((target_index, target)) = matches.next() else {
-                    return Err(AgentWorkFailure::Contract);
+                    return Err(crate::contract!());
                 };
                 if matches.next().is_some()
                     || target.sensitivity() == SemanticSensitivity::Secret
                     || target.states().contains(SemanticState::Disabled)
                 {
-                    return Err(AgentWorkFailure::Contract);
+                    return Err(crate::contract!());
                 }
                 let (satisfied, option) = match goal.kind {
                     SemanticActionKind::Fill => {
                         if !target.operations().contains(SemanticOperationClass::Fill) {
-                            return Err(AgentWorkFailure::Contract);
+                            return Err(crate::contract!());
                         }
                         if !matches!(target.value(), Some(SemanticValueSummary::Text(_)) | None) {
-                            return Err(AgentWorkFailure::Contract);
+                            return Err(crate::contract!());
                         }
                         let equal = exact_text_value(target, &goal.value);
                         if !equal
@@ -314,13 +314,13 @@ impl AgentWorkFormTask {
                                 .as_ref()
                                 .is_some_and(|prior| !exact_text_value(target, prior))
                         {
-                            return Err(AgentWorkFailure::Contract);
+                            return Err(crate::contract!());
                         }
                         (equal, None)
                     }
                     SemanticActionKind::Select => {
                         if !target.operations().contains(SemanticOperationClass::Select) {
-                            return Err(AgentWorkFailure::Contract);
+                            return Err(crate::contract!());
                         }
                         let mut option = None;
                         let mut selected = 0;
@@ -340,21 +340,21 @@ impl AgentWorkFormTask {
                                     || node.sensitivity() == SemanticSensitivity::Secret
                                     || node.states().contains(SemanticState::Disabled)
                                 {
-                                    return Err(AgentWorkFailure::Contract);
+                                    return Err(crate::contract!());
                                 }
                                 option = Some(node);
                             }
                         }
-                        let option = option.ok_or(AgentWorkFailure::Contract)?;
+                        let option = option.ok_or(crate::contract!())?;
                         if selected > 1 {
-                            return Err(AgentWorkFailure::Contract);
+                            return Err(crate::contract!());
                         }
                         (
                             option.states().contains(SemanticState::Selected),
                             Some(option.reference()),
                         )
                     }
-                    _ => return Err(AgentWorkFailure::Contract),
+                    _ => return Err(crate::contract!()),
                 };
                 if !satisfied {
                     self.bindings.push(Binding {
@@ -434,7 +434,7 @@ impl AgentWorkTask for AgentWorkFormExtractionTask {
         observation: &SemanticObservation,
     ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
         if self.ready.is_some() || self.complete {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         match self.form.evaluate(observation)? {
             AgentWorkTaskProgress::Complete => {
@@ -449,7 +449,7 @@ impl AgentWorkTask for AgentWorkFormExtractionTask {
         action: &SemanticPreparedAction,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
         if self.ready.is_some() || self.complete {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         self.form.assess(action)
     }
@@ -465,7 +465,7 @@ impl AgentWorkTask for AgentWorkFormExtractionTask {
         result: &SemanticExtractionResult<'_>,
     ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
         if self.complete || self.ready != Some(result.observation()) {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         let progress = self.extraction.accept_extraction(result)?;
         self.complete = true;
@@ -518,7 +518,7 @@ impl AgentWorkTask for AgentWorkFormTask {
     ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
         self.bindings.clear();
         if self.refused || self.phase == self.phases.len() {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         let result = self.observe(observation);
         if result.is_err() {
@@ -532,12 +532,12 @@ impl AgentWorkTask for AgentWorkFormTask {
         node: &SemanticNode,
         observation: &SemanticObservation,
     ) -> Result<SemanticOperations, AgentWorkFailure> {
-        let baseline = self.baseline.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        let baseline = self.baseline.as_ref().ok_or(crate::contract!())?;
         if self.refused
             || observation.request().id() != baseline.observation
             || observation.request().generation() != baseline.generation
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         let Some(binding) = self
             .bindings
@@ -550,23 +550,20 @@ impl AgentWorkTask for AgentWorkFormTask {
             .phases
             .get(self.phase)
             .and_then(|phase| phase.goals.get(binding.goal))
-            .ok_or(AgentWorkFailure::Contract)?;
+            .ok_or(crate::contract!())?;
         let operation = match goal.kind {
             SemanticActionKind::Fill => SemanticOperationClass::Fill,
             SemanticActionKind::Select => SemanticOperationClass::Select,
-            _ => return Err(AgentWorkFailure::Contract),
+            _ => return Err(crate::contract!()),
         };
-        SemanticOperations::try_new(&[operation]).map_err(|_| AgentWorkFailure::Contract)
+        SemanticOperations::try_new(&[operation]).map_err(|_| crate::contract!())
     }
     fn assess(
         &self,
         action: &SemanticPreparedAction,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
-        let baseline = self.baseline.as_ref().ok_or(AgentWorkFailure::Contract)?;
-        let phase = self
-            .phases
-            .get(self.phase)
-            .ok_or(AgentWorkFailure::Contract)?;
+        let baseline = self.baseline.as_ref().ok_or(crate::contract!())?;
+        let phase = self.phases.get(self.phase).ok_or(crate::contract!())?;
         if self.refused
             || action.source_observation() != baseline.observation
             || action.source_observation_generation() != baseline.generation
@@ -574,19 +571,19 @@ impl AgentWorkTask for AgentWorkFormTask {
             || action.bound_action().snapshot_generation() != baseline.snapshot
             || action.effect() != self.effect
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         let binding = self
             .bindings
             .iter()
             .find(|binding| binding.target == action.target_reference())
-            .ok_or(AgentWorkFailure::Contract)?;
+            .ok_or(crate::contract!())?;
         let goal = &phase.goals[binding.goal];
         if action.kind() != goal.kind
             || action.bound_action().option_reference() != binding.option
             || (goal.kind == SemanticActionKind::Fill && action.fill_text() != Some(&goal.value))
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         Ok(AgentEffectAssessment::new(
             action,
@@ -606,13 +603,13 @@ impl AgentWorkTask for AgentWorkFormTask {
                 .as_ref()
                 .is_some_and(|baseline| baseline.frame.context() != context)
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         if let Some(sample) = self.account_sample.get() {
             return if sample.context() == context {
                 Ok(sample)
             } else {
-                Err(AgentWorkFailure::Contract)
+                Err(crate::contract!())
             };
         }
         // A constructor-supplied scope is not a live account detector. Preserve

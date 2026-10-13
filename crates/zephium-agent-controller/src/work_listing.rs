@@ -101,7 +101,7 @@ impl AgentWorkController {
         for _ in 0..MAX_LOADING_STEPS {
             state.check_task_contract()?;
             state.native.check_control(worker, browser)?;
-            let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+            let session = state.session.as_ref().ok_or(crate::contract!())?;
             if started.elapsed() >= Duration::from_millis(MAX_LOADING_MILLIS)
                 || session.next_action > session.max_actions
                 || session.turns.saturating_add(1) >= session.max_model_calls
@@ -143,14 +143,13 @@ impl AgentWorkController {
                 intent,
                 SemanticEffectClass::Read,
                 SemanticWaitCondition::MutationQuiet(
-                    SemanticMutationQuietPeriod::try_new(250)
-                        .map_err(|_| AgentWorkFailure::Contract)?,
+                    SemanticMutationQuietPeriod::try_new(250).map_err(|_| crate::contract!())?,
                 ),
                 verification,
                 SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS)
-                    .map_err(|_| AgentWorkFailure::Contract)?,
+                    .map_err(|_| crate::contract!())?,
             )
-            .map_err(|_| AgentWorkFailure::Contract)?;
+            .map_err(|_| crate::contract!())?;
             let Some(next) = Box::pin(Self::code_owned_read(
                 state,
                 worker,

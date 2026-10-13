@@ -173,7 +173,12 @@ impl ReadFailureTrace {
                 snapshot.phase
             );
             zephium_app::work_trace::record(format_args!(
-                "work: phase=page event=browser_failure cause={failure:?} state={:?} calls={} actions={} snapshots={} inspection_refusals={} navigation_refusals={} action_refusals={} last_action_refusal={:?} last_tool={:?} content=redacted",
+                "work: phase=page event=browser_failure cause={failure:?}{} state={:?} calls={} actions={} snapshots={} inspection_refusals={} navigation_refusals={} action_refusals={} last_action_refusal={:?} last_tool={:?} content=redacted",
+                if format!("{failure:?}") == "Contract" {
+                    format!(" site={}", zephium_agent_controller::last_contract_site())
+                } else {
+                    String::new()
+                },
                 snapshot.phase,
                 measure.model_calls,
                 measure.native_actions,
