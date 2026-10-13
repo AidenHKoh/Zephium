@@ -157,6 +157,7 @@ impl AgentProviderContinuation {
         }
         let note = match failure {
             Some(error) if error.fault == super::super::AgentBrowserFormFault::SubmitRequired => "form_not_run: this site tool completes a read-only search. Include its observed submit ref with the desired fields. For preparation without searching, use act. No field or submit action ran.".to_owned(),
+            Some(error) if error.fault == super::super::AgentBrowserFormFault::SeparateActionRequired => format!("form_stopped: verified_fields={completed_fields}; failed_field={:?}; reason=SeparateActionRequired. Native policy did not admit this control through fill_form. Do not retry the form or repeat completed fields. If this action is necessary, propose only that control with act so its normal policy and approval can run. No submission is established.", error.field),
             Some(error) => format!("form_stopped: verified_fields={completed_fields}; failed_field={:?}; reason={:?}. No successful submission is established. Inspect the fresh values and correct the named field once; do not repeat completed work or claim success.", error.field, error.fault),
             None => format!("form_processed: verified_fields={completed_fields}; submission_page_change_observed={submitted}. Inspect this fresh page and extract the result only when it answers the goal; a changed page alone does not prove successful search results."),
         };

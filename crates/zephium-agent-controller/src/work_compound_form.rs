@@ -116,7 +116,7 @@ impl AgentWorkController {
                 if actions >= MAX_FORM_ACTIONS || Instant::now() >= deadline {
                     failure = Some(AgentBrowserFormError {
                         field: Some((index + 1) as u8),
-                        fault: AgentBrowserFormFault::Target,
+                        fault: AgentBrowserFormFault::Limit,
                     });
                     break 'fields;
                 }
@@ -174,12 +174,15 @@ impl AgentWorkController {
                     state, worker, browser, &current, recipe, false,
                 ))
                 .await?;
-                let Some(next) = next else {
-                    failure = Some(AgentBrowserFormError {
-                        field: Some((index + 1) as u8),
-                        fault: AgentBrowserFormFault::Target,
-                    });
-                    break 'fields;
+                let next = match next {
+                    Ok(next) => next,
+                    Err(fault) => {
+                        failure = Some(AgentBrowserFormError {
+                            field: Some((index + 1) as u8),
+                            fault,
+                        });
+                        break 'fields;
+                    }
                 };
                 let committed = selected && binding.choice_collapsed(index, &current, &next);
                 current = next;
@@ -208,6 +211,12 @@ impl AgentWorkController {
             }
         }
         let mut submitted = false;
+        if failure.is_none() && (actions >= MAX_FORM_ACTIONS || Instant::now() >= deadline) {
+            failure = Some(AgentBrowserFormError {
+                field: None,
+                fault: AgentBrowserFormFault::Limit,
+            });
+        }
         if failure.is_none() {
             match binding.submit_reference(&current) {
                 Ok(Some(target)) => {
@@ -225,13 +234,8 @@ impl AgentWorkController {
                     ))
                     .await?
                     {
-                        Some(_) => submitted = true,
-                        None => {
-                            failure = Some(AgentBrowserFormError {
-                                field: None,
-                                fault: AgentBrowserFormFault::Target,
-                            })
-                        }
+                        Ok(_) => submitted = true,
+                        Err(fault) => failure = Some(AgentBrowserFormError { field: None, fault }),
                     }
                     if let Some(target) = state
                         .follow
@@ -258,7 +262,7 @@ impl AgentWorkController {
         observation: &SemanticObservation,
         mut recipe: SemanticActionProposal,
         read_only: bool,
-    ) -> Result<Option<SemanticObservation>, AgentWorkFailure> {
+    ) -> Result<Result<SemanticObservation, AgentBrowserFormFault>, AgentWorkFailure> {
         state.native.check_control(worker, browser)?;
         state.refresh_account(worker, browser)?;
         let frames = observation
@@ -281,22 +285,18 @@ impl AgentWorkController {
                 &frames,
                 batch,
             ) else {
-                return Ok(None);
+                return Ok(Err(AgentBrowserFormFault::Target));
             };
             match state.task.assess_observed(proposal.action(), observation) {
                 Ok(assessment) => {
-                    if !matches!(
-                        assessment.actual_effect(),
-                        SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
-                    ) || (read_only && assessment.actual_effect() != SemanticEffectClass::Read)
-                    {
-                        return Ok(None);
+                    if let Err(fault) = compound_effect(assessment.actual_effect(), read_only) {
+                        return Ok(Err(fault));
                     }
                     if !state
                         .action_authority(observation)?
                         .permits_action(observation, &recipe)
                     {
-                        return Ok(None);
+                        return Ok(Err(AgentBrowserFormFault::Target));
                     }
                     admitted = Some((proposal, assessment));
                     break;
@@ -317,14 +317,17 @@ impl AgentWorkController {
                     )
                     .map_err(|_| AgentWorkFailure::Contract)?;
                 }
-                Err(AgentWorkFailure::ActionDenied | AgentWorkFailure::EffectRequired(_)) => {
-                    return Ok(None)
+                Err(AgentWorkFailure::EffectRequired(_)) => {
+                    return Ok(Err(AgentBrowserFormFault::SeparateActionRequired))
+                }
+                Err(AgentWorkFailure::ActionDenied) => {
+                    return Ok(Err(AgentBrowserFormFault::Target))
                 }
                 Err(error) => return Err(error),
             }
         }
         let Some((proposal, assessment)) = admitted else {
-            return Ok(None);
+            return Ok(Err(AgentBrowserFormFault::Target));
         };
         state
             .journal_mut()?
@@ -357,7 +360,7 @@ impl AgentWorkController {
                     .close_failed_owned_read()
                     .map_err(AgentWorkFailure::Browser)?
                 {
-                    return Ok(None);
+                    return Ok(Err(AgentBrowserFormFault::Unverified));
                 }
                 return Err(AgentWorkFailure::Browser(error));
             }
@@ -366,7 +369,18 @@ impl AgentWorkController {
         if let Some(batch) = transition.batch_result() {
             state.task.accept_verified_action(batch, &current)?;
         }
-        Ok(Some(current))
+        Ok(Ok(current))
+    }
+}
+
+fn compound_effect(
+    effect: SemanticEffectClass,
+    read_only: bool,
+) -> Result<(), AgentBrowserFormFault> {
+    match effect {
+        SemanticEffectClass::Read => Ok(()),
+        SemanticEffectClass::LocalWrite if !read_only => Ok(()),
+        _ => Err(AgentBrowserFormFault::SeparateActionRequired),
     }
 }
 
@@ -374,6 +388,35 @@ impl AgentWorkController {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn compound_submission_never_widens_an_effect_or_hides_why_it_stopped() {
+        assert_eq!(compound_effect(SemanticEffectClass::Read, true), Ok(()));
+        assert_eq!(
+            compound_effect(SemanticEffectClass::LocalWrite, false),
+            Ok(())
+        );
+        assert_eq!(
+            compound_effect(SemanticEffectClass::LocalWrite, true),
+            Err(AgentBrowserFormFault::SeparateActionRequired)
+        );
+    }
+    #[test]
+    fn every_consequential_effect_requires_its_separate_admission() {
+        for effect in [
+            SemanticEffectClass::ExternalWrite,
+            SemanticEffectClass::Communication,
+            SemanticEffectClass::Purchase,
+            SemanticEffectClass::Destructive,
+            SemanticEffectClass::CapabilityBoundary,
+        ] {
+            for read_only in [false, true] {
+                assert_eq!(
+                    compound_effect(effect, read_only),
+                    Err(AgentBrowserFormFault::SeparateActionRequired)
+                );
+            }
+        }
+    }
     fn look(nodes: serde_json::Value) -> SemanticObservation {
         let identity = ContextIdentity::new(
             ContextId::generate(),

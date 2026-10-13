@@ -71,6 +71,12 @@ pub enum FormFault {
     Stale,
     /// A site search form needs its explicit read-only submit target.
     SubmitRequired,
+    /// Native policy requires a separately admitted action, not another form attempt.
+    SeparateActionRequired,
+    /// A dispatched operation did not establish its requested postcondition.
+    Unverified,
+    /// The bounded native preparation exhausted its action or time allowance.
+    Limit,
     /// The form does not belong to the acknowledged provider call and capability.
     Authority,
     /// The field has no uniquely matching observed option yet.
