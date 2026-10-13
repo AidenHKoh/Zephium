@@ -469,6 +469,11 @@ export const commands = {
 	 */
 	can_request: boolean,
 } | null>("default_browser_request"),
+	loginItemStatus: () => __TAURI_INVOKE<LoginItemStatus>("login_item_status"),
+	/**  Registers or removes the login item, then reports what the system holds. */
+	loginItemSet: (enabled: boolean) => __TAURI_INVOKE<LoginItemStatus>("login_item_set", { enabled }),
+	/**  Opens Login Items in System Settings, where a pending approval is given. */
+	loginItemOpenSettings: () => __TAURI_INVOKE<boolean>("login_item_open_settings"),
 	/**  The Bookmarks panel's reads and writes, scoped to the focused profile. */
 	bookmarkCall: (expectedProfile: string, call: BookmarkCall) => __TAURI_INVOKE<BookmarkResponse>("bookmark_call", { expectedProfile, call }),
 	timeCall: (expectedProfile: string, call: TimeCall) => __TAURI_INVOKE<TimeResponse>("time_call", { expectedProfile, call }),
@@ -1386,6 +1391,14 @@ export type LayoutChanged = LayoutState;
 export type LayoutState = {
 	dividers: DividerView[],
 	work_pane: WorkPaneLayout | null,
+};
+
+export type LoginItemStatus = {
+	/**  False where this build cannot register, such as an unbundled binary. */
+	supported: boolean,
+	enabled: boolean,
+	/**  Registered, but the person still has to allow it in System Settings. */
+	needs_approval: boolean,
 };
 
 export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica";

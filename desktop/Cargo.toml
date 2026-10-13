@@ -198,4 +198,5 @@ objc2-foundation = "0.3"
 objc2-quartz-core = "0.3"
 objc2-web-kit = "0.3"
 objc2-user-notifications = "0.3"
+objc2-service-management = { version = "0.3", default-features = false, features = ["std", "SMAppService", "objc2", "objc2-foundation"] }
 raw-window-handle.workspace = true

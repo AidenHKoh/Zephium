@@ -88,6 +88,7 @@ mod linux_shortcut;
 mod linux_shortcut_portal;
 #[cfg(any(target_os = "linux", test))]
 mod linux_x11_shortcut;
+mod login_item;
 mod material;
 mod media;
 mod memory_pressure;
@@ -1728,6 +1729,9 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             keymap::keymap_record,
             default_browser::default_browser_status,
             default_browser::default_browser_request,
+            login_item::login_item_status,
+            login_item::login_item_set,
+            login_item::login_item_open_settings,
             bookmark_call,
             time_call,
             focus_control,
