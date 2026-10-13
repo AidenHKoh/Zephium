@@ -1063,13 +1063,13 @@
     if (["div","span"].includes(tag) && ["0","-1"].includes(attribute(node,"tabindex",8)) &&
         ["true","false"].includes(lower(attribute(node,"aria-disabled",16)||""))) return {role:"button",tag,inputType};
 
+    if ((tag === "div" || tag === "span") && listLength(childNodes(node)) <= 1 && backgroundSource(node) !== null && isRenderedPhoto(node, tag)) {
+      return { role: "image", tag, inputType, mediaKind: "background" };
+    }
     if ((tag === "div" || tag === "span") && genericTextDescriptor(node,tag,inputType)!==null && pointerTextControl(node)) {
       return {role:"button",tag,inputType,pointerText:true};
     }
 
-    if ((tag === "div" || tag === "span") && listLength(childNodes(node)) <= 1 && backgroundSource(node) !== null && isRenderedPhoto(node, tag)) {
-      return { role: "image", tag, inputType, mediaKind: "background" };
-    }
     if (["video", "canvas", "svg"].includes(tag) && isRenderedPhoto(node, tag)) {
       return { role: "image", tag, inputType, mediaKind: tag === "video" ? "poster" : tag };
     }

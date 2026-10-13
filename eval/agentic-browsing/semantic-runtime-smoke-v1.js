@@ -391,7 +391,7 @@ Object.assign(globalThis, {
   innerHeight: 720,
   getComputedStyle(element) {
     return { display: "block", visibility: "visible", contentVisibility: "visible", overflowX: "auto", overflowY: "auto",
-      cursor: (element && element._cursor) || "auto" };
+      cursor: (element && element._cursor) || "auto", backgroundImage: (element && element._backgroundImage) || "none" };
   }
 });
 Object.defineProperty(globalThis, "crypto", {
@@ -2451,7 +2451,12 @@ async function finish() {
     const editor = main.append(new Element("div",{contenteditable:""})); editor._cursor="pointer";
     const editText = editor.append(new Element("span")); editText._cursor="pointer";
     editText.append(new CharacterData("Editor words"));
-    const nodes = JSON.parse(invoke(192,192,{k:"initial"})).n;
+    const photo = main.append(new Element("div",{"aria-label":"Pointer background photo"}));
+    photo._cursor="pointer"; photo._backgroundImage='url("https://fixture.example.test/photo.jpg")';
+    photo.rect={x:10,y:10,width:160,height:96}; photo.append(new CharacterData("Photo caption"));
+    const nodes = JSON.parse(invoke(192,192,{k:"initial"},{lu:true})).n;
+    assert(nodes.some(node=>node.r==="image" && node.m==="https://fixture.example.test/photo.jpg"),
+      "pointer inference must preserve background image evidence");
     for (const text of ["Default order","Price low to high"]) {
       const control=nodes.find(node=>node.n===text);
       assert(control && control.r==="button" && control.o===1,"pointer-only menu control was lost: "+text);
