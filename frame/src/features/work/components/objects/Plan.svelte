@@ -5,7 +5,7 @@
   import Mark, { hasMark } from "./Mark.svelte";
   import Title from "./Title.svelte";
   import PlanCalendar from "./PlanCalendar.svelte";
-  import { openingMonth, planWeeks } from "../../lib/board/plan-calendar";
+  import { openingMonth, planCalendar } from "../../lib/board/plan-calendar";
   import { ArrowLeft01Icon, ArrowRight01Icon } from "./icons";
   import { icsFileName, planIcs } from "../../lib/board/plan-ics";
   import { commands } from "$shared/ipc/bindings";
@@ -55,7 +55,7 @@
     turned = (now.getFullYear() - opening.getFullYear()) * 12 + now.getMonth() - opening.getMonth();
   }
   /** A long dated plan stands as its weeks; the centre keeps every step's words beneath. */
-  const weeks = $derived(planWeeks(object, keeps ? { month } : {}));
+  const rows = $derived(planCalendar(object, keeps ? { month } : {}));
   const onDays = $derived(object.steps.some((step) => step.date));
   let saving = $state(false);
   async function addToCalendar() {
@@ -76,7 +76,7 @@
   );
 </script>
 
-<section class="plan" class:priced class:calendar={!!weeks} aria-label={object.title}>
+<section class="plan" class:priced class:calendar={!!rows} aria-label={object.title}>
   {#if object.title || onDays || keeps}<header>
       {#if object.title}<Title text={object.title} />{/if}
       {#if keeps}<div class="month nodrag nopan">
@@ -104,8 +104,8 @@
           onclick={addToCalendar}>{m.work_plan_add_to_calendar()}</button
         >{/if}
     </header>{/if}
-  {#if weeks}<PlanCalendar {object} {weeks} {actions} />{/if}
-  {#if !weeks || centre}<div class="grid">
+  {#if rows}<PlanCalendar {object} {rows} month={keeps} {actions} />{/if}
+  {#if !rows || centre}<div class="grid">
       <ol class="steps">
         {#each object.steps as step, index (index)}
           <li class="step {step.kind}" class:done={step.done} class:first={!!dated[index]}>
@@ -159,9 +159,9 @@
           >
         </p>
       {/if}
-      {#if object.checkable && !centre && !weeks}<footer><MakeTasks id={object.id} /></footer>{/if}
+      {#if object.checkable && !centre && !rows}<footer><MakeTasks id={object.id} /></footer>{/if}
     </div>{/if}
-  {#if weeks && object.checkable && !centre}<footer><MakeTasks id={object.id} /></footer>{/if}
+  {#if rows && object.checkable && !centre}<footer><MakeTasks id={object.id} /></footer>{/if}
 </section>
 
 <style>

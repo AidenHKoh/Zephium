@@ -789,6 +789,8 @@
   "work_list_open_in": "Open in {app}",
   "work_list_show_answer": "Show answer",
   "work_plan_add_to_calendar": "Add to Calendar",
+  "work_plan_quiet_weeks": "{count} quiet weeks",
+  "work_plan_more_events": "+{count} more",
   "work_block_add_item": "Add an item",
   "work_block_new_event": "New event",
   "work_block_previous_month": "Previous month",
