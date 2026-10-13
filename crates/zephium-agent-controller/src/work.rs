@@ -2614,21 +2614,32 @@ impl AgentWorkController {
         Ok((observation, true))
     }
 
-    /// Stops for the person when the task reads a wall on this page.
+    /// Stops for the person when the task reads a wall on this page, or the
+    /// page is a well-known check only a person can pass. That check is read
+    /// the same way after any step as at the first look: a page the model
+    /// meets it on later is not another page to spend model calls on.
     fn raise_human_wall(
         state: &mut WorkState,
         observation: &SemanticObservation,
     ) -> Result<bool, AgentWorkFailure> {
-        let Some(reason) = state.task.human_wall(observation).or_else(|| {
-            state
-                .native
-                .retained
-                .as_ref()
-                .filter(|browser| {
-                    challenge::sign_in_route(browser.binding().document(), observation)
-                })
-                .map(|_| AgentBrowserHumanReason::SignIn)
-        }) else {
+        let Some(reason) = state
+            .task
+            .human_wall(observation)
+            .or_else(|| {
+                state
+                    .native
+                    .retained
+                    .as_ref()
+                    .filter(|browser| {
+                        challenge::sign_in_route(browser.binding().document(), observation)
+                    })
+                    .map(|_| AgentBrowserHumanReason::SignIn)
+            })
+            .or_else(|| {
+                (known_check(observation) == Some(KnownCheck::Person))
+                    .then_some(AgentBrowserHumanReason::HumanChallenge)
+            })
+        else {
             return Ok(false);
         };
         state

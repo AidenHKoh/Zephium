@@ -24,6 +24,9 @@ mod navigation_tests;
 #[path = "work_resources_action_tests.rs"]
 mod action_tests;
 
+#[path = "work_resources_wall_tests.rs"]
+mod wall_tests;
+
 struct Clock(AtomicU64);
 impl TerraControllerClock for Clock {
     fn now(&self) -> Result<AgentPolicyInstant, TerraControllerClockError> {
@@ -98,6 +101,8 @@ struct Native {
     before_publication: Mutex<Option<mpsc::Receiver<()>>>,
     final_document: Mutex<Option<ContextNavigationTarget>>,
     discovery: AtomicBool,
+    /// Reads from this one on (counting the first as 1) show a bot check; 0 never.
+    check_from_read: AtomicUsize,
     form_actions: AtomicBool,
     form_applied: AtomicBool,
     actions: AtomicUsize,
@@ -346,7 +351,10 @@ impl AgentBrowserPort for Native {
         {
             *self.read.lock().unwrap() = Some((request, callback));
         } else {
-            if self.form_actions.load(Ordering::Acquire) {
+            let check_from = self.check_from_read.load(Ordering::Acquire);
+            if check_from != 0 && self.reads.load(Ordering::Acquire) >= check_from {
+                wall_tests::check_result(request, callback);
+            } else if self.form_actions.load(Ordering::Acquire) {
                 action_tests::read_result(self, request, callback);
             } else if self.discovery.load(Ordering::Acquire) {
                 navigation_tests::read_result(self, request, callback);
