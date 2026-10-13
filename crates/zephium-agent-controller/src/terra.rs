@@ -3268,7 +3268,7 @@ impl AgentBrowserSession {
                 if repair == 1 || observation.is_none() {
                     return Err(AgentBrowserProviderError::ModelProtocol(
                         zephium_agentic::AgentProviderProtocolError::ToolContract(
-                            AgentBrowserToolKind::Act,
+                            refusal.kind(),
                             error,
                         ),
                         None,

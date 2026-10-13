@@ -1430,6 +1430,10 @@ fn credential(node: &SemanticNode) -> bool {
 }
 
 impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
+    fn allows_compound_forms(&self) -> bool {
+        true
+    }
+
     fn consent_dismissal(&self, observation: &SemanticObservation) -> Option<SemanticReferenceId> {
         super::consent::dismissal(observation)
     }

@@ -142,6 +142,25 @@ impl AgentProviderActionAuthority {
         })
     }
 
+    /// Checks a native compound primitive against the same current task vocabulary
+    /// advertised to the model. This is not effect or execution authority.
+    pub fn permits_action(
+        &self,
+        observation: &SemanticObservation,
+        action: &crate::SemanticActionProposal,
+    ) -> bool {
+        self.matches(observation)
+            && self
+                .required_effect
+                .is_none_or(|effect| effect == action.effect())
+            && self.entries.iter().any(|entry| {
+                entry.reference == action.intent().target()
+                    && entry
+                        .operations
+                        .contains(action.intent().kind().operation())
+            })
+    }
+
     /// Narrows model proposals; independent native effect assessment still applies.
     pub fn with_required_effect(mut self, effect: crate::SemanticEffectClass) -> Self {
         self.required_effect = Some(effect);
@@ -1059,6 +1078,45 @@ impl fmt::Debug for AgentProviderNavigationCheckpoint {
 }
 
 impl AgentProviderContinuation {
+    /// Binds only this call's exact form and advertised targets. Every later
+    /// primitive still requires fresh native binding and task/effect admission.
+    pub fn bind_form_targets(
+        &self,
+        form: &super::AgentBrowserFormProposal,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<super::AgentBrowserFormBinding, super::AgentBrowserFormError> {
+        use super::{AgentBrowserFormError, AgentBrowserFormFault};
+        let denied = AgentBrowserFormError {
+            field: None,
+            fault: AgentBrowserFormFault::Authority,
+        };
+        if config != &self.config
+            || !config.permits_tool(AgentBrowserToolKind::FillForm)
+            || self.tool_kind() != AgentBrowserToolKind::FillForm
+            || !self.baseline.matches(observation)
+            || super::form::decode(&self.correlation.arguments).as_ref() != Ok(form)
+        {
+            return Err(denied);
+        }
+        if config.requires_form_submit() && form.submit().is_none() {
+            return Err(AgentBrowserFormError {
+                field: None,
+                fault: AgentBrowserFormFault::SubmitRequired,
+            });
+        }
+        let targets = self
+            .transcript
+            .action_targets()
+            .filter(|targets| targets.matches(observation))
+            .ok_or(denied)?;
+        form.bind_targets(observation, |reference, kind| {
+            targets
+                .permitted_references(kind)
+                .any(|allowed| allowed == reference)
+        })
+    }
+
     /// Consumes the exact Navigate proposal and retires all old provider replay.
     /// The target must be the immutable trusted task destination, not a selector
     /// or a value inferred from page/model content by the host.
@@ -1108,6 +1166,7 @@ impl AgentProviderContinuation {
         if !matches!(
             self.correlation.kind(),
             AgentBrowserToolKind::Act
+                | AgentBrowserToolKind::FillForm
                 | AgentBrowserToolKind::Snapshot
                 | AgentBrowserToolKind::Locate
                 | AgentBrowserToolKind::Read
@@ -2693,6 +2752,108 @@ mod tests {
         .expect("assembler")
         .finish()
         .expect("finish")
+    }
+
+    #[test]
+    fn form_fields_keep_native_identity_and_the_advertised_operation_subset() {
+        use crate::{AgentBrowserFormFault, SemanticActionKind as Action};
+        let nodes = json!([
+            {"k":1,"r":"document","o":16,"fc":true},
+            {"k":2,"p":0,"r":"textbox","n":"From","o":2,"fc":true},
+            {"k":3,"p":0,"r":"button","n":"Search","o":1,"fc":true}
+        ]);
+        let before = observation_with_nodes(context(), 10, 10, 10, nodes.clone());
+        let form = super::super::form::decode(
+            r#"{"fields":[{"target":"@a2","value":"Northport"}],"submit":"@a3"}"#,
+        )
+        .unwrap();
+        let allowed = |reference, kind| {
+            (reference == SemanticReferenceId::new(2).unwrap() && kind == Action::Fill)
+                || (reference == SemanticReferenceId::new(3).unwrap() && kind == Action::Click)
+        };
+        assert_eq!(
+            form.bind_targets(&before, |_, _| false).unwrap_err().fault,
+            AgentBrowserFormFault::Target
+        );
+        let binding = form.bind_targets(&before, allowed).unwrap();
+        let current = observation_with_nodes(context(), 11, 11, 11, nodes.clone());
+        assert_eq!(
+            binding.field_reference(0, Action::Fill, &current).unwrap(),
+            SemanticReferenceId::new(2).unwrap()
+        );
+        assert!(binding.field_reference(0, Action::Click, &current).is_err());
+        assert!(binding
+            .field_reference(usize::MAX, Action::Fill, &current)
+            .is_err());
+        assert_eq!(
+            binding.submit_reference(&current).unwrap(),
+            Some(SemanticReferenceId::new(3).unwrap())
+        );
+        for (field, value) in [("n", json!("Password")), ("k", json!(9)), ("o", json!(0))] {
+            let mut changed = nodes.clone();
+            changed[1][field] = value;
+            let changed = observation_with_nodes(context(), 12, 12, 12, changed);
+            assert!(binding.field_reference(0, Action::Fill, &changed).is_err());
+        }
+        assert!(!format!("{binding:?}").contains("From"));
+    }
+
+    #[test]
+    fn form_choice_requires_an_owned_unique_committed_option_not_typed_text() {
+        use crate::{AgentBrowserFormFault, SemanticActionIntent, SemanticActionKind as Action};
+        let node = |selected| {
+            json!([
+                {"k":1,"r":"document","fc":true},
+                {"k":2,"p":0,"r":"combobox","n":"Station","v":{"k":"text","value":"Northport"},"o":6,"fc":true},
+                {"k":3,"p":1,"r":"option","n":"Northport","s":if selected {crate::SemanticState::Selected.bit()} else {0},"fc":true},
+                {"k":4,"p":0,"r":"option","n":"Northport","fc":true}
+            ])
+        };
+        let before = observation_with_nodes(context(), 20, 20, 20, node(false));
+        let form = super::super::form::decode(
+            r#"{"fields":[{"target":"@a2","value":"Northport"}],"submit":null}"#,
+        )
+        .unwrap();
+        let binding = form
+            .bind_targets(&before, |_, kind| {
+                matches!(kind, Action::Fill | Action::Select)
+            })
+            .unwrap();
+        let action = binding
+            .field_action(0, &before)
+            .unwrap()
+            .expect("must select, despite exact typed text");
+        assert!(
+            matches!(action.intent(), SemanticActionIntent::Select { target, option }
+            if *target == SemanticReferenceId::new(2).unwrap() && *option == SemanticReferenceId::new(3).unwrap())
+        );
+        let committed = observation_with_nodes(context(), 21, 21, 21, node(true));
+        assert!(binding.field_action(0, &committed).unwrap().is_none());
+        let mut open = node(false);
+        open[1]["s"] = json!(crate::SemanticState::Expanded.bit());
+        let open = observation_with_nodes(context(), 30, 30, 30, open);
+        let mut closed = node(false);
+        closed.as_array_mut().unwrap().truncate(2);
+        let after = observation_with_nodes(context(), 31, 31, 31, closed.clone());
+        assert!(binding.choice_collapsed(0, &open, &after));
+        assert!(!binding.choice_collapsed(0, &before, &after));
+        closed[1]["v"]["value"] = json!("Different station");
+        let changed = observation_with_nodes(context(), 32, 32, 32, closed);
+        assert!(!binding.choice_collapsed(0, &open, &changed));
+        let mut ambiguous = node(false);
+        ambiguous[3]["p"] = json!(1);
+        let ambiguous = observation_with_nodes(context(), 22, 22, 22, ambiguous);
+        assert_eq!(
+            binding.field_action(0, &ambiguous).unwrap_err().fault,
+            AgentBrowserFormFault::AmbiguousOption
+        );
+        let mut pending = node(false);
+        pending.as_array_mut().unwrap().remove(2);
+        let pending = observation_with_nodes(context(), 23, 23, 23, pending);
+        assert_eq!(
+            binding.field_action(0, &pending).unwrap_err().fault,
+            AgentBrowserFormFault::OptionPending
+        );
     }
 
     fn locate_result(
@@ -6126,7 +6287,8 @@ mod tests {
             .expect("diff output")
             .starts_with("ZDIFF3 "));
         let tools = wire["tools"].as_array().expect("tools");
-        assert_eq!(tools.len(), AgentBrowserToolKind::ALL.len() - 1);
+        assert_eq!(tools.len(), AgentBrowserToolKind::ALL.len() - 2);
+        assert!(tools.iter().all(|tool| tool["name"] != "fill_form"));
         assert!(tools.iter().all(|tool| tool["name"] != "back"));
         let debug = format!("{draft:?}");
         for secret in [
@@ -7281,7 +7443,9 @@ impl super::AgentProviderRejectedAction {
         (AgentProviderCallIdentity, AgentProviderBoundTranscript),
         AgentProviderContinuationError,
     > {
-        if config != &self.continuation.config || !config.permits_tool(AgentBrowserToolKind::Act) {
+        if config != &self.continuation.config
+            || !config.permits_tool(self.continuation.tool_kind())
+        {
             return Err(AgentProviderContinuationError::Config);
         }
         if !self.continuation.baseline.matches(observation) {

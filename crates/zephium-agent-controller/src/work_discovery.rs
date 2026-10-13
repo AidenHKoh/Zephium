@@ -23,6 +23,12 @@ pub trait AgentWorkAccountSource: Send {
 /// an assessment cannot prove that arbitrary page handlers have no side effects.
 /// Calls must be bounded and nonblocking.
 pub trait AgentWorkLocalActionPolicy: Send {
+    /// Allows native form preparation under this policy's existing per-action
+    /// assessment. Default off; grants no effect or submission authority.
+    fn allows_compound_forms(&self) -> bool {
+        false
+    }
+
     /// Supplies a fixed recipe for an accepted typed selection without granting authority.
     fn decision_action_recipe(
         &self,
@@ -323,6 +329,11 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
     }
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
         self.extraction.extraction_schema()
+    }
+    fn allows_compound_forms(&self) -> bool {
+        self.local_actions
+            .as_ref()
+            .is_some_and(|policy| policy.allows_compound_forms())
     }
     fn allows_actions_before_extraction(&self) -> bool {
         self.local_actions.is_some()

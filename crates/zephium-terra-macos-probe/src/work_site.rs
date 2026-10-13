@@ -31,6 +31,9 @@ mod human_fixture;
 #[path = "work_site_media.rs"]
 mod media_fixture;
 
+#[path = "work_site_journey.rs"]
+mod journey_fixture;
+
 /// The person's site as the Work contract sees it, and another site.
 const ACCOUNT: &str = "https://account.probe.test";
 const OTHER: &str = "https://other.probe.test";
@@ -59,6 +62,7 @@ const BOARD_FACT: &str = "Ticket ZP-42 is due Thursday";
 const DAY_FACT: &str = "Standup at 09:15";
 /// The vault's own sign-in, kept by the server: a tab sign-in stands for it.
 static VAULT_OPEN: AtomicBool = AtomicBool::new(false);
+static JOURNEY_FIELDS: AtomicUsize = AtomicUsize::new(0);
 /// Page loads the person's tabs made on the site, as the engine would count them.
 static TAB_LOADS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -86,6 +90,8 @@ enum Check {
     Human(human_fixture::Scenario),
     /// A search form and a script filter load their results without asking.
     Search,
+    /// Station suggestions and segmented numeric ARIA date/time inputs.
+    Journey,
     /// An approved send runs once, exactly as previewed.
     Approve,
     /// A total that changes after approval spends the approval.
@@ -314,6 +320,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
             .map(Check::Human)
             .collect(),
         Some("search") => vec![Check::Search],
+        Some("journey-form") => vec![Check::Journey],
         Some("approve") => vec![Check::Approve],
         Some("changed") => vec![Check::Changed],
         Some("decline") => vec![Check::Decline],
@@ -746,6 +753,21 @@ const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.
                 "<h1>Catalog</h1><form role=\"search\" action=\"/results\" method=\"get\"><label>Search the catalog <input type=\"search\" name=\"q\"></label><button>Search</button></form>",
             ),
         ),
+        (Site::Account, _, "/journey-form") => (
+            "200 OK", String::new(), page("Rail journeys", include_str!("work_site_journey.html")),
+        ),
+        (Site::Account, _, path) if path.starts_with("/journey-results?") => {
+            let values: std::collections::BTreeMap<_, _> = zephium_agentic::ContextNavigationTarget::parse(&format!("{ACCOUNT}{path}")).ok().map(|target| target.as_url().query_pairs().into_owned().collect()).unwrap_or_default();
+            let matches = [values.get("from").is_some_and(|value| value == "Northport"), values.get("to").is_some_and(|value| value == "Lakeside")]
+                .into_iter().chain([("day", 18), ("month", 11), ("year", 2026), ("hour", 9), ("minute", 0)].into_iter()
+                    .map(|(key, expected)| values.get(key).and_then(|value| value.parse::<u16>().ok()) == Some(expected)));
+            let fields = matches.enumerate().fold(0, |mask, (index, matches)| mask | (usize::from(matches) << index));
+            JOURNEY_FIELDS.store(fields, Ordering::SeqCst);
+            let correct = fields == 127;
+            ("200 OK", String::new(), page("Results", if correct {
+                "<h1>Northport to Lakeside, 18 November 2026 after 09:00</h1><p>Train Q17 departs 09:30, takes 75 minutes, no changes, fare EUR 25.</p>"
+            } else { "<h1>No matching fixture journeys</h1><p>The station and date fields did not match the request.</p>" }))
+        },
         (Site::Account, _, "/filters") => (
             "200 OK",
             String::new(),
@@ -1712,6 +1734,15 @@ pub(super) async fn workflow(
         let (entry, client) = zephium_app::work_models::resolve_entry(profile, WorkModelRole::Page)
             .await
             .map_err(|_| "page_model")?;
+        let client: Arc<dyn zephium_core::work::model::WorkModelClient> =
+            if checks == [Check::Journey] {
+                Arc::new(journey_fixture::Client {
+                    inner: client,
+                    calls: AtomicUsize::new(0),
+                })
+            } else {
+                client
+            };
         Some(
             zephium_agentic::AgentProviderModelClient::try_new(&entry, client)
                 .map_err(|_| "page_model")?,
@@ -1743,6 +1774,10 @@ pub(super) async fn workflow(
     let line = |text: String| {
         let _ = writeln!(std::io::stdout().lock(), "loopback-site: {text}");
     };
+    // This standalone public form has no account/session dependency.
+    if checks == [Check::Journey] {
+        return journey_fixture::run(&context).await;
+    }
     // Before any session the site opens as an empty session without a
     // question; the seed page signs the person in, in the profile's store.
     let seed = context
@@ -2032,6 +2067,12 @@ pub(super) async fn workflow(
                 // The page agent may stop before Send on its own; if it tried,
                 // the gate held it and the lead heard. Nothing is ever sent.
                 held == noticed && posts == 0
+            }
+            Check::Journey => {
+                let result = journey_fixture::run(&context).await?;
+                let passed = result.failure.is_none();
+                last = result.state;
+                passed
             }
             Check::Search => {
                 let run = context

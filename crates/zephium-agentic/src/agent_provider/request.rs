@@ -134,7 +134,10 @@ const AGENT_BROWSER_INSTRUCTIONS_V1: &str = concat!(
     "advertised ops. Observed ops describe DOM capabilities; the act tool's target enums are the narrower ",
     "task-approved choices. If a desired control is missing from those enums, inspect its containing ",
     "dialog or section; never substitute an unrelated allowed target. For text entry into a fill-capable control, including an editable combobox, ",
-    "use fill directly; no preparatory click is needed. value=\"\" means observed empty text; ",
+    "use fill directly; no preparatory click is needed. When fill_form is offered for a search/filter form, ",
+    "propose all desired visible field values and its submit control once, instead of separate act turns. ",
+    "Native code chooses widget operations, commits suggestions and verifies values. ",
+    "value=\"\" means observed empty text; ",
     "an absent value is unknown. Do not reuse a ",
     "different role's reference: select only a target ACT_TARGETS lists for select (a native select ",
     "including a multiple-select listbox), and its option must be a descendant r=option; a combobox whose ops include fill is a text ",
@@ -1759,6 +1762,7 @@ impl AgentPreparedObservationRequest {
             config,
             prior,
             transcript,
+            false,
         )
     }
 
@@ -1783,6 +1787,7 @@ impl AgentPreparedObservationRequest {
             config,
             prior,
             transcript,
+            false,
         )
     }
 
@@ -1798,6 +1803,7 @@ impl AgentPreparedObservationRequest {
         config: AgentProviderCallConfig,
         refusal: super::AgentProviderObservationRefusal,
     ) -> Result<Self, AgentProviderRequestError> {
+        let form_plan = refusal.is_form_offer();
         let (prior, transcript) = refusal
             .bind(observation, &config, payload.as_str().to_owned())
             .map_err(|_| AgentPolicyError::Authority)?;
@@ -1809,6 +1815,7 @@ impl AgentPreparedObservationRequest {
             config,
             prior,
             transcript,
+            form_plan,
         )
     }
 
@@ -1833,6 +1840,7 @@ impl AgentPreparedObservationRequest {
             config,
             prior,
             transcript,
+            false,
         )
     }
 
@@ -1858,6 +1866,7 @@ impl AgentPreparedObservationRequest {
             config,
             prior,
             transcript,
+            false,
         )
     }
 
@@ -1890,6 +1899,7 @@ impl AgentPreparedObservationRequest {
             config,
             prior,
             transcript,
+            false,
         )
     }
 
@@ -1901,6 +1911,7 @@ impl AgentPreparedObservationRequest {
         config: AgentProviderCallConfig,
         prior: AgentProviderCallIdentity,
         transcript: AgentProviderBoundTranscript,
+        form_plan: bool,
     ) -> Result<Self, AgentProviderRequestError> {
         let semantic_payload_tokens =
             AgentProviderInputTokenCount::from_measurement(payload.token_measurement());
@@ -1911,6 +1922,12 @@ impl AgentPreparedObservationRequest {
             return Err(AgentPolicyError::Authority.into());
         }
         let body = encode_openai_continuation_body(&config, &transcript)?;
+        let body = if form_plan {
+            focus_form_plan(body)?
+        } else {
+            body
+        };
+
         let body = encode_decision_budget(
             body,
             &config,
@@ -4687,6 +4704,25 @@ const MAX_ACTION_REFS_PER_VARIANT: usize = 128;
 /// The act vocabulary of the current observation as a host fact at the end
 /// of the input. It explains the constrained tools; native binding still
 /// checks every target independently of both the prompt and the schema.
+fn focus_form_plan(body: Vec<u8>) -> Result<Vec<u8>, AgentProviderRequestError> {
+    let mut wire: Value =
+        serde_json::from_slice(&body).map_err(|_| AgentProviderRequestError::Encoding)?;
+    let tools = wire["tools"]
+        .as_array_mut()
+        .ok_or(AgentProviderRequestError::Encoding)?;
+    if !tools.iter().any(|tool| tool["name"] == "fill_form") {
+        return Err(AgentProviderRequestError::Encoding);
+    }
+    tools.retain(|tool| {
+        matches!(
+            tool["name"].as_str(),
+            Some("fill_form" | "act" | "extract" | "show_for_human")
+        )
+    });
+    wire["tool_choice"] = json!("required");
+    encode_bounded_provider_body(&wire)
+}
+
 fn append_act_targets(
     body: Vec<u8>,
     config: &AgentProviderCallConfig,
@@ -5687,6 +5723,19 @@ fn openai_tool_wires<'a>(
     definitions
         .iter()
         .chain(supplemental_back_tool(config, definitions))
+        .chain(
+            (config.permits_tool(AgentBrowserToolKind::FillForm)
+                && !definitions
+                    .iter()
+                    .any(|tool| tool.kind == AgentBrowserToolKind::FillForm))
+            .then(|| {
+                if config.requires_form_submit() {
+                    &*SEARCH_FORM_TOOL
+                } else {
+                    &*FORM_TOOL
+                }
+            }),
+        )
         .chain(config.adds_baseline_read().then(|| &*BASELINE_READ_TOOL))
         .chain(
             config
@@ -5744,10 +5793,27 @@ fn anthropic_tool_wires<'a>(
         config.adds_viewport_screenshot(),
         config.adds_standalone_wait(),
         config.adds_human_request(),
+        config.permits_tool(AgentBrowserToolKind::FillForm)
+            && !definitions
+                .iter()
+                .any(|tool| tool.kind == AgentBrowserToolKind::FillForm),
     )?;
     Ok(definitions
         .iter()
         .chain(supplemental_back)
+        .chain(
+            (config.permits_tool(AgentBrowserToolKind::FillForm)
+                && !definitions
+                    .iter()
+                    .any(|tool| tool.kind == AgentBrowserToolKind::FillForm))
+            .then(|| {
+                if config.requires_form_submit() {
+                    &*ANTHROPIC_SEARCH_FORM_TOOL
+                } else {
+                    &*ANTHROPIC_FORM_TOOL
+                }
+            }),
+        )
         .chain(
             config
                 .adds_baseline_read()
@@ -5791,6 +5857,7 @@ fn validate_anthropic_tool_definitions(
     viewport_screenshot: bool,
     standalone_wait: bool,
     human_request: bool,
+    compound_form: bool,
 ) -> Result<(), AgentProviderRequestError> {
     let union_parameters = definitions
         .iter()
@@ -5805,6 +5872,7 @@ fn validate_anthropic_tool_definitions(
         .chain(viewport_screenshot.then(|| &*ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL))
         .chain(standalone_wait.then(|| &*ANTHROPIC_STANDALONE_WAIT_TOOL))
         .chain(human_request.then(|| &*ANTHROPIC_HUMAN_REQUEST_TOOL))
+        .chain(compound_form.then(|| &*ANTHROPIC_FORM_TOOL))
         .try_fold(0_usize, |total, tool| {
             total.checked_add(count_schema_unions(&tool.input_schema))
         });
@@ -5815,6 +5883,7 @@ fn validate_anthropic_tool_definitions(
         + usize::from(viewport_screenshot)
         + usize::from(standalone_wait)
         + usize::from(human_request)
+        + usize::from(compound_form)
         > MAX_ANTHROPIC_STRICT_TOOLS
         || union_parameters.is_none_or(|count| count > MAX_ANTHROPIC_SCHEMA_UNIONS)
     {
@@ -5852,6 +5921,33 @@ static BROWSER_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> =
 
 static LOCATE_ACT_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> =
     LazyLock::new(|| build_browser_tool_definitions(true));
+
+static FORM_TOOL: LazyLock<BrowserToolDefinition> = LazyLock::new(|| BrowserToolDefinition {
+    kind: AgentBrowserToolKind::FillForm,
+    description: tool_description(AgentBrowserToolKind::FillForm),
+    parameters: tool_parameters(AgentBrowserToolKind::FillForm, false),
+});
+
+static SEARCH_FORM_TOOL: LazyLock<BrowserToolDefinition> = LazyLock::new(|| {
+    let mut tool = FORM_TOOL.clone();
+    tool.parameters["properties"]["submit"] = reference_schema();
+    tool.description = "Complete one search/filter form: ordered target/value pairs and its observed submit button. Native code selects widget operations, commits suggestions, verifies values and runs the read-only search. Use exact text/option labels and observed field formats. Every effect is independently authorized. For preparation without running a search, use act instead.";
+    tool
+});
+
+static ANTHROPIC_SEARCH_FORM_TOOL: LazyLock<AnthropicBrowserToolDefinition> =
+    LazyLock::new(|| AnthropicBrowserToolDefinition {
+        kind: SEARCH_FORM_TOOL.kind,
+        description: SEARCH_FORM_TOOL.description,
+        input_schema: project_anthropic_schema(&SEARCH_FORM_TOOL.parameters),
+    });
+
+static ANTHROPIC_FORM_TOOL: LazyLock<AnthropicBrowserToolDefinition> =
+    LazyLock::new(|| AnthropicBrowserToolDefinition {
+        kind: FORM_TOOL.kind,
+        description: FORM_TOOL.description,
+        input_schema: project_anthropic_schema(&FORM_TOOL.parameters),
+    });
 
 static BASELINE_READ_TOOL: LazyLock<BrowserToolDefinition> = LazyLock::new(|| {
     BrowserToolDefinition {
@@ -6757,6 +6853,7 @@ fn tool_description(kind: AgentBrowserToolKind) -> &'static str {
         AgentBrowserToolKind::Act => {
             "Propose one bounded, homogeneous semantic action batch. Classify the action's effect, not the objective: read explores without changing form values; local_write changes reversible local page/form state, including search input and selection. Edits saved to a service require external_write; sending, buying and deleting require their corresponding stronger effects. The host independently assesses effects and permission."
         }
+        AgentBrowserToolKind::FillForm => "Fill a search/filter form in one turn: ordered target/value pairs. Use exact text or option labels and each field's observed format (numeric segments stay numeric). Native code chooses widget operations and verifies values. Supply submit when results are requested; null means prepare only. Each effect is independently authorized; failures name the field.",
         AgentBrowserToolKind::Wait => "Wait for one typed observable condition.",
         AgentBrowserToolKind::Read => "Request bounded readable semantic content.",
         AgentBrowserToolKind::Extract => "Apply one shell-registered extraction schema.",
@@ -6786,6 +6883,18 @@ fn tool_parameters(kind: AgentBrowserToolKind, snapshot_only: bool) -> Value {
                 json!({"type":"string","minLength":1,"maxLength":super::MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES,"pattern":browser_text_pattern(true, true, true)}),
             ),
             ("scope", scope_schema()),
+        ]),
+        AgentBrowserToolKind::FillForm => strict_object(vec![
+            (
+                "fields",
+                json!({"type":"array","minItems":1,"maxItems":super::MAX_AGENT_BROWSER_FORM_FIELDS,
+                "items":strict_object(vec![("target",reference_schema()),
+                    ("value",json!({"type":"string","maxLength":4096}))])}),
+            ),
+            (
+                "submit",
+                json!({"anyOf":[reference_schema(),{"type":"null"}]}),
+            ),
         ]),
         AgentBrowserToolKind::Act => strict_object(vec![(
             "actions",
@@ -7993,6 +8102,128 @@ mod tests {
         assert_eq!(short["tools"].as_array().unwrap().len(), 1);
         assert_eq!(short["tools"][0]["name"], "extract");
         assert_eq!(short["tool_choice"], "required");
+    }
+
+    #[test]
+    fn compound_form_is_opt_in_strict_and_never_expands_extraction_authority() {
+        for provider in [
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderKind::AnthropicMessages,
+        ] {
+            let base = provider_config(provider).restrict_to_navigation_actions_and_extraction();
+            assert!(!base.permits_tool(AgentBrowserToolKind::FillForm));
+            let enabled = base.clone().with_compound_form();
+            assert_ne!(base, enabled);
+            assert!(enabled.permits_tool(AgentBrowserToolKind::FillForm));
+            let encode = |config: &AgentProviderCallConfig| {
+                match provider {
+                    AgentProviderKind::OpenAiResponses => {
+                        encode_openai_body(config, "objective", "observation")
+                    }
+                    AgentProviderKind::AnthropicMessages => {
+                        encode_anthropic_body(config, "objective", "observation")
+                    }
+                }
+                .unwrap()
+            };
+            let absent: Value = serde_json::from_slice(&encode(&base)).unwrap();
+            assert!(absent["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| tool["name"] != "fill_form"));
+            let present: Value = serde_json::from_slice(&encode(&enabled)).unwrap();
+            let forms: Vec<_> = present["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|tool| tool["name"] == "fill_form")
+                .collect();
+            assert_eq!(forms.len(), 1);
+            let schema = &forms[0][match provider {
+                AgentProviderKind::OpenAiResponses => "parameters",
+                AgentProviderKind::AnthropicMessages => "input_schema",
+            }];
+            validate_strict_schema(schema);
+            assert_eq!(schema["additionalProperties"], false);
+            let readonly = base.restrict_to_extraction().with_compound_form();
+            assert!(!readonly.permits_tool(AgentBrowserToolKind::Act));
+            assert!(!readonly.permits_tool(AgentBrowserToolKind::FillForm));
+        }
+    }
+
+    #[test]
+    fn one_form_planning_turn_removes_inspection_but_preserves_edit_and_exit_paths() {
+        let config = openai_config(1024)
+            .restrict_to_site_actions_and_extraction()
+            .with_compound_form()
+            .with_progressive_observation()
+            .with_human_request();
+        let original = encode_openai_body(&config, "goal", "look").unwrap();
+        let focused: Value =
+            serde_json::from_slice(&focus_form_plan(original.clone()).unwrap()).unwrap();
+        let names: BTreeSet<_> = focused["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            BTreeSet::from(["act", "extract", "fill_form", "show_for_human"])
+        );
+        assert_eq!(focused["tool_choice"], "required");
+        assert_eq!(
+            encode_openai_body(&config, "goal", "look").unwrap(),
+            original,
+            "the next ordinary turn must retain its original capability profile"
+        );
+    }
+
+    #[test]
+    fn search_form_requires_submission_while_trusted_preparation_remains_available() {
+        for provider in [
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderKind::AnthropicMessages,
+        ] {
+            let config = provider_config(provider)
+                .restrict_to_site_actions_and_extraction()
+                .with_compound_form();
+            let bytes = match provider {
+                AgentProviderKind::OpenAiResponses => encode_openai_body(&config, "goal", "look"),
+                AgentProviderKind::AnthropicMessages => {
+                    encode_anthropic_body(&config, "goal", "look")
+                }
+            }
+            .unwrap();
+            let wire: Value = serde_json::from_slice(&bytes).unwrap();
+            let tool = wire["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == "fill_form")
+                .unwrap();
+            let schema = &tool[if provider == AgentProviderKind::OpenAiResponses {
+                "parameters"
+            } else {
+                "input_schema"
+            }];
+            validate_strict_schema(schema);
+            assert!(super::super::call_schema::schema_problem(
+                schema,
+                &json!({"fields":[{"target":"@a1","value":"Northport"}],"submit":null})
+            )
+            .is_some());
+            assert!(super::super::call_schema::schema_problem(
+                schema,
+                &json!({"fields":[{"target":"@a1","value":"Northport"}],"submit":"@a2"})
+            )
+            .is_none());
+            assert!(config.requires_form_submit());
+            assert!(!provider_config(provider)
+                .with_compound_form()
+                .requires_form_submit());
+        }
     }
 
     #[test]
@@ -9636,6 +9867,7 @@ mod tests {
                 (AgentBrowserToolKind::Snapshot, 1_682),
                 (AgentBrowserToolKind::Locate, 2_373),
                 (AgentBrowserToolKind::Act, 14_301),
+                (AgentBrowserToolKind::FillForm, 970),
                 (AgentBrowserToolKind::Wait, 2_152),
                 (AgentBrowserToolKind::Read, 1_510),
                 (AgentBrowserToolKind::Extract, 1_602),
@@ -9644,7 +9876,7 @@ mod tests {
                 (AgentBrowserToolKind::ResumeAfterHuman, 204),
             ]
         );
-        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 25_802);
+        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 26772);
     }
 
     #[test]
@@ -9854,7 +10086,8 @@ mod tests {
         assert_eq!(content[0]["text"], "Submit the reviewed form");
         assert_eq!(content[1]["text"], "ZSEM1\ncontent=untrusted");
         let tools = wire["tools"].as_array().expect("tools");
-        assert_eq!(tools.len(), AgentBrowserToolKind::ALL.len() - 1);
+        assert_eq!(tools.len(), AgentBrowserToolKind::ALL.len() - 2);
+        assert!(tools.iter().all(|tool| tool["name"] != "fill_form"));
         assert!(tools.iter().all(|tool| tool["name"] != "back"));
         assert!(tools.iter().all(|tool| tool["strict"] == true));
         let schema_unions = tools
@@ -9932,6 +10165,9 @@ mod tests {
             }
             AgentBrowserToolKind::Act => {
                 r#"{"actions":[{"kind":"click","target":"@a1","effect":"external_write","wait":{"kind":"semantic_change"},"verification":{"kind":"target_state","state":"focused","present":true},"settle_millis":1000}]}"#
+            }
+            AgentBrowserToolKind::FillForm => {
+                r#"{"fields":[{"target":"@a1","value":"Northport"}],"submit":null}"#
             }
             AgentBrowserToolKind::Wait => {
                 r#"{"condition":{"kind":"document_ready"},"timeout_millis":1000}"#

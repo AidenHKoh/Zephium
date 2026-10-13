@@ -341,6 +341,10 @@ pub struct AgentProviderRejectedAction {
 }
 
 impl AgentProviderRejectedAction {
+    /// Original rejected tool, retained through its single repair turn.
+    pub fn kind(&self) -> super::AgentBrowserToolKind {
+        self.continuation.tool_kind()
+    }
     /// Content-free category for local reliability counters.
     pub const fn error(&self) -> super::AgentBrowserToolContractError {
         self.error

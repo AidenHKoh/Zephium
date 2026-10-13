@@ -146,6 +146,7 @@ struct Baseline {
 /// worker, timer, queue, persistence or hidden replay path.
 pub struct AgentWorkFormTask {
     baseline_read: bool,
+    compound_forms: bool,
     identity: ContextIdentity,
     origin: SemanticOrigin,
     account: AgentAccountScope,
@@ -233,6 +234,7 @@ impl AgentWorkFormTask {
         }
         Ok(Self {
             baseline_read: false,
+            compound_forms: false,
             identity,
             origin,
             account,
@@ -391,7 +393,23 @@ pub struct AgentWorkFormExtractionTask {
     ready: Option<SemanticObservationId>,
     complete: bool,
 }
+impl AgentWorkFormExtractionTask {
+    /// Enables bounded native field preparation followed by this task's existing
+    /// extraction. Every effect still requires its original independent policy.
+    pub fn with_compound_forms(mut self) -> Self {
+        self.form.compound_forms = true;
+        self.form.baseline_read = true;
+        self
+    }
+}
 impl AgentWorkTask for AgentWorkFormExtractionTask {
+    fn allows_compound_forms(&self) -> bool {
+        self.form.allows_compound_forms()
+    }
+    fn allows_progressive_observation(&self) -> bool {
+        self.form.allows_progressive_observation()
+    }
+
     fn allows_actions_before_extraction(&self) -> bool {
         true
     }
@@ -484,6 +502,13 @@ fn exact_text_value(node: &SemanticNode, expected: &SemanticActionText) -> bool 
 }
 
 impl AgentWorkTask for AgentWorkFormTask {
+    fn allows_compound_forms(&self) -> bool {
+        self.compound_forms
+    }
+    fn allows_progressive_observation(&self) -> bool {
+        self.compound_forms
+    }
+
     fn allows_baseline_read(&self) -> bool {
         self.baseline_read
     }

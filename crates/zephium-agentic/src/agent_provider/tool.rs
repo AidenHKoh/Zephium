@@ -199,6 +199,8 @@ pub enum AgentBrowserToolKind {
     Locate,
     /// Propose one bounded homogeneous semantic action batch.
     Act,
+    /// Propose a bounded, independently verified native form.
+    FillForm,
     /// Wait for one typed condition under a relative ceiling.
     Wait,
     /// Request bounded readable semantic content.
@@ -214,7 +216,7 @@ pub enum AgentBrowserToolKind {
 }
 
 impl AgentBrowserToolKind {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::Navigate,
         Self::Back,
         Self::Forward,
@@ -222,6 +224,7 @@ impl AgentBrowserToolKind {
         Self::Snapshot,
         Self::Locate,
         Self::Act,
+        Self::FillForm,
         Self::Wait,
         Self::Read,
         Self::Extract,
@@ -239,6 +242,7 @@ impl AgentBrowserToolKind {
             "snapshot" => Some(Self::Snapshot),
             "locate" => Some(Self::Locate),
             "act" => Some(Self::Act),
+            "fill_form" => Some(Self::FillForm),
             "wait" => Some(Self::Wait),
             "read" => Some(Self::Read),
             "extract" => Some(Self::Extract),
@@ -259,6 +263,7 @@ impl AgentBrowserToolKind {
             Self::Snapshot => "snapshot",
             Self::Locate => "locate",
             Self::Act => "act",
+            Self::FillForm => "fill_form",
             Self::Wait => "wait",
             Self::Read => "read",
             Self::Extract => "extract",
@@ -568,6 +573,8 @@ pub enum AgentBrowserToolProposal {
     },
     /// Bounded semantic action proposal.
     Act(AgentBrowserActProposal),
+    /// Form data grants no effects; each field and submit needs native admission.
+    FillForm(super::AgentBrowserFormProposal),
     /// Typed wait proposal under one relative ceiling.
     Wait {
         /// Closed condition.
@@ -603,6 +610,7 @@ impl AgentBrowserToolProposal {
             Self::Snapshot(_) => AgentBrowserToolKind::Snapshot,
             Self::Locate { .. } => AgentBrowserToolKind::Locate,
             Self::Act(_) => AgentBrowserToolKind::Act,
+            Self::FillForm(_) => AgentBrowserToolKind::FillForm,
             Self::Wait { .. } => AgentBrowserToolKind::Wait,
             Self::Read(_) => AgentBrowserToolKind::Read,
             Self::Extract { .. } => AgentBrowserToolKind::Extract,
@@ -621,6 +629,7 @@ impl fmt::Debug for AgentBrowserToolProposal {
             Self::Snapshot(scope) | Self::Read(scope) => value.field("scope", scope),
             Self::Locate { query, scope } => value.field("query", query).field("scope", scope),
             Self::Act(actions) => value.field("actions", actions),
+            Self::FillForm(form) => value.field("form", form),
             Self::Wait { condition, timeout } => value
                 .field("condition", condition)
                 .field("timeout", timeout),
@@ -641,6 +650,7 @@ impl fmt::Debug for AgentBrowserToolProposal {
 #[must_use]
 #[derive(Eq, PartialEq)]
 pub(crate) struct AgentBrowserToolCall {
+    kind: AgentBrowserToolKind,
     source_call: AgentProviderCallIdentity,
     id: AgentBrowserToolCallId,
     proposal: Result<Box<AgentBrowserToolProposal>, (AgentBrowserToolContractError, String)>,
@@ -701,7 +711,7 @@ impl AgentBrowserToolCall {
         )
     }
 
-    /// Retains a rejected Act solely for one authenticated error result. It
+    /// Retains a rejected action/form solely for one authenticated error result. It
     /// contains no proposal and cannot yield native action authority.
     pub(super) fn decode_openai_or_rejected_action(
         source_call: AgentProviderCallIdentity,
@@ -717,7 +727,7 @@ impl AgentBrowserToolCall {
         let proposal = match decode_proposal(name, &arguments) {
             Ok(proposal) => Ok(Box::new(proposal)),
             Err(error)
-                if name == "act"
+                if matches!(name, "act" | "fill_form")
                     && matches!(
                         error,
                         AgentBrowserToolContractError::Arguments
@@ -725,6 +735,7 @@ impl AgentBrowserToolCall {
                             | AgentBrowserToolContractError::ActionBatch
                             | AgentBrowserToolContractError::Reference
                             | AgentBrowserToolContractError::Wait
+                            | AgentBrowserToolContractError::Form(_)
                     ) =>
             {
                 validate_json_depth(&arguments)?;
@@ -736,6 +747,8 @@ impl AgentBrowserToolCall {
             Err(error) => return Err(error),
         };
         Ok(Self {
+            kind: AgentBrowserToolKind::parse(name)
+                .ok_or(AgentBrowserToolContractError::ToolName)?,
             source_call,
             id,
             proposal,
@@ -760,6 +773,7 @@ impl AgentBrowserToolCall {
         let id = AgentBrowserToolCallId::try_new(id)?;
         let proposal = Box::new(decode_proposal(name, &arguments)?);
         Ok(Self {
+            kind: proposal.kind(),
             source_call,
             id,
             proposal: Ok(proposal),
@@ -830,10 +844,7 @@ impl AgentBrowserToolCall {
             AgentProviderToolCallCorrelation {
                 source_call: self.source_call,
                 id: self.id,
-                kind: self
-                    .proposal
-                    .as_ref()
-                    .map_or(AgentBrowserToolKind::Act, |proposal| proposal.kind()),
+                kind: self.kind,
                 extraction_schema,
                 extraction_scope,
                 read_scope,
@@ -971,6 +982,9 @@ pub enum AgentBrowserToolContractError {
     /// Action count, text, effect, or aggregate settle ceiling was invalid.
     #[error("agent browser semantic action batch is invalid")]
     ActionBatch,
+    /// Invalid form data, identified without its private contents.
+    #[error("agent browser form is invalid: {0:?}")]
+    Form(super::AgentBrowserFormError),
     /// Standalone wait condition or relative timeout was invalid.
     #[error("agent browser wait is invalid")]
     Wait,
@@ -1046,6 +1060,9 @@ pub(super) fn decode_proposal(
                 AgentBrowserActProposal::try_new(actions)?,
             ))
         }
+        AgentBrowserToolKind::FillForm => super::form::decode(arguments)
+            .map(AgentBrowserToolProposal::FillForm)
+            .map_err(AgentBrowserToolContractError::Form),
         AgentBrowserToolKind::Wait => {
             let value: WaitArgumentsWire = parse(arguments)?;
             let condition = decode_standalone_wait(value.condition)?;
@@ -1109,6 +1126,9 @@ pub(crate) fn browser_call_problem(
         }
         AgentBrowserToolKind::Locate => serde_problem::<LocateWire>(arguments),
         AgentBrowserToolKind::Act => serde_problem::<ActWire>(arguments),
+        AgentBrowserToolKind::FillForm => super::form::decode(arguments)
+            .err()
+            .map(|error| format!("form field {:?}: {:?}", error.field, error.fault)),
         AgentBrowserToolKind::Wait => serde_problem::<WaitArgumentsWire>(arguments),
         AgentBrowserToolKind::Extract => serde_problem::<ExtractWire>(arguments),
         AgentBrowserToolKind::ShowForHuman => serde_problem::<HumanWire>(arguments),
@@ -1139,6 +1159,7 @@ pub(crate) fn browser_call_problem(
                     "actions must hold 1 to {MAX_SEMANTIC_ACTIONS_PER_BATCH} actions that all declare the same effect (a consequential effect stands alone), with at most {MAX_SEMANTIC_ACTION_BATCH_SETTLE_MILLIS} ms of settle_millis and {MAX_SEMANTIC_ACTION_BATCH_TEXT_BYTES} bytes of fill text between them"
                 );
             }
+            AgentBrowserToolContractError::Form(error) => return format!("form field {:?}: {:?}", error.field, error.fault),
             AgentBrowserToolContractError::Wait => {
                 "the wait's condition or timeout_millis is out of range"
             }
@@ -2288,6 +2309,28 @@ mod tests {
             OpenAiResponseReplayItem::FunctionCall,
         ])
         .is_none());
+    }
+
+    #[test]
+    fn rejected_form_keeps_its_own_correlation_and_has_no_action_proposal() {
+        let call = AgentBrowserToolCall::decode_openai_or_rejected_action(
+            source_call(), "fc_form".into(), "call_form".into(), "fill_form",
+            r#"{"fields":[{"target":"@a1","value":"Northport"},{"target":"@a2","value":42}],"submit":null}"#.into(),
+        ).unwrap();
+        let (correlation, proposal) = call.into_checked_continuation_parts();
+        assert_eq!(correlation.kind(), AgentBrowserToolKind::FillForm);
+        assert_eq!(correlation.id().as_str(), "call_form");
+        let (error, note) = proposal.unwrap_err();
+        assert_eq!(
+            error,
+            AgentBrowserToolContractError::Form(super::super::AgentBrowserFormError {
+                field: Some(2),
+                fault: super::super::AgentBrowserFormFault::Shape,
+            })
+        );
+        assert!(note.contains("fill_form"));
+        assert!(note.contains("Some(2)"));
+        assert!(!note.contains("Northport"));
     }
 
     #[test]

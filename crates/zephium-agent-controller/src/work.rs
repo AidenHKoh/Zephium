@@ -25,10 +25,13 @@ mod tests;
 #[path = "work_challenge.rs"]
 mod challenge;
 use challenge::{known_check, KnownCheck};
+#[path = "work_compound_form.rs"]
+mod compound_form;
 #[path = "work_decision.rs"]
 mod decision;
 #[path = "work_inspection.rs"]
 mod inspection;
+
 #[path = "work_listing.rs"]
 mod listing;
 #[path = "work_navigation.rs"]
@@ -301,6 +304,11 @@ pub trait AgentWorkTask: Send {
     /// schema tasks remain read-only. This setting and the schema are frozen at
     /// admission; it grants no effect permission beyond the original policy.
     fn allows_actions_before_extraction(&self) -> bool {
+        false
+    }
+    /// Enables bounded native field preparation from one model proposal. This
+    /// grants no new effects; every primitive still uses the ordinary task policy.
+    fn allows_compound_forms(&self) -> bool {
         false
     }
     /// Returns the task-approved operation subset for one node in the exact
@@ -1369,6 +1377,7 @@ impl AgentWorkController {
         let extraction_schema = task.extraction_schema().cloned();
         let actions_before_extraction = task.allows_actions_before_extraction();
         let subtree_extraction = task.allows_subtree_extraction();
+        let compound_forms = task.allows_compound_forms();
         let baseline_read = task.allows_baseline_read();
         let progressive_observation = task.allows_progressive_observation();
         let viewport_screenshot = task.allows_viewport_screenshot();
@@ -1493,6 +1502,7 @@ impl AgentWorkController {
                     task,
                     extraction_schema,
                     actions_before_extraction,
+                    compound_forms,
                     subtree_extraction,
                     baseline_read,
                     progressive_observation,
@@ -1563,6 +1573,7 @@ struct WorkState {
     history_back: bool,
     extraction_schema: Option<SemanticExtractionSchema>,
     actions_before_extraction: bool,
+    compound_forms: bool,
     subtree_extraction: bool,
     extraction: Option<SemanticOwnedExtractionResult>,
     input: Option<AgentWorkRunInput>,
@@ -1777,6 +1788,7 @@ impl WorkState {
             || self.task.navigation_route() != self.navigation_route.as_ref()
             || self.task.navigation_discovery() != self.navigation_discovery.as_ref()
             || self.task.allows_actions_before_extraction() != self.actions_before_extraction
+            || self.task.allows_compound_forms() != self.compound_forms
             || self.task.allows_subtree_extraction() != self.subtree_extraction
             || self.task.allows_baseline_read() != self.baseline_read
             || self.task.allows_progressive_observation() != self.progressive_observation
@@ -2427,6 +2439,9 @@ impl AgentWorkController {
         session.config = session
             .config
             .with_navigation_available(!state.navigation_complete());
+        if state.compound_forms {
+            session.config = session.config.with_compound_form();
+        }
         if state.baseline_read {
             session.config = session.config.with_baseline_read();
         }
@@ -3111,59 +3126,8 @@ impl AgentWorkController {
                         && node.role() != SemanticRole::Dialog
                 });
         if direct {
-            state.refresh_account(worker, browser)?;
-            let schema = state
-                .extraction_schema
-                .as_ref()
-                .ok_or(AgentWorkFailure::Contract)?;
-            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-            let crop_account = session.account;
-            let crop_config = if state.viewport_screenshot && session.supports_record_crops() {
-                session.config.clone().with_viewport_screenshot()
-            } else {
-                session.config.clone()
-            };
-            let crop_baseline = SemanticObservationAcknowledgement::whole_page_scope(&observation)
-                .ok_or(AgentWorkFailure::Contract)?
-                .0;
-            let result = Self::provider(
-                &mut state.native,
-                worker,
-                browser,
-                session.cancellation.clone(),
-                session.extract_owned_initial(&observation, captured_at, schema),
-            )
-            .await?;
-            if result.is_empty() {
-                return Err(AgentWorkFailure::Browser(
-                    AgentBrowserProviderError::NoExtractionEvidence,
-                ));
-            }
-            if state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete {
-                return Err(AgentWorkFailure::Contract);
-            }
-            state.check_task_contract()?;
-            state.native.check_control(worker, browser)?;
-            let dropped = result.stats().dropped();
-            let mut owned = result
-                .into_owned()
-                .map_err(|_| AgentWorkFailure::Contract)?;
-            Self::attach_record_crop_permission(
-                state,
-                worker,
-                browser,
-                &mut owned,
-                &observation,
-                &crop_baseline,
-                &crop_config,
-                crop_account,
-            )?;
-            state.extraction = Some(owned);
-            if dropped > 0 {
-                state
-                    .journal_mut()?
-                    .emit(AgentWorkEventKind::ExtractionDropped { values: dropped })?;
-            }
+            Self::finish_owned_extraction(state, worker, browser, &observation, captured_at, false)
+                .await?;
             state.observation = Some(observation);
             return Ok(());
         }
@@ -3253,6 +3217,7 @@ impl AgentWorkController {
         let mut last_refused: Option<(AgentProviderActionRefusalKey, u8)> = None;
         // Looks refused in a row: from the third, the host takes one itself.
         let mut refused_looks = 0u8;
+        let mut compound_form_offered = false;
         loop {
             state.check_task_contract()?;
             // Deliver acknowledged audit batches while idle so long runs keep
@@ -3323,6 +3288,34 @@ impl AgentWorkController {
                     );
                     continue;
                 }
+            }
+            if !compound_form_offered
+                && state.compound_forms
+                && state
+                    .navigation_discovery
+                    .as_ref()
+                    .is_some_and(AgentNavigationDiscovery::is_site_session)
+                && Self::can_batch_search_fill(turn.turn.proposal(), &observation)
+            {
+                compound_form_offered = true;
+                state.native.check_control(worker, browser)?;
+                state.refresh_account(worker, browser)?;
+                let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                let refusal = turn
+                    .into_tool_turn()
+                    .into_parts()
+                    .1
+                    .prefer_compound_form(&observation, &session.config)
+                    .map_err(|_| AgentWorkFailure::Contract)?;
+                turn = Self::provider(
+                    &mut state.native,
+                    worker,
+                    browser,
+                    session.cancellation.clone(),
+                    session.continue_after_scope_refusal(refusal, &observation),
+                )
+                .await?;
+                continue;
             }
             let progress_key = turn.turn.proposal().progress_fingerprint(&observation);
             if no_progress.refuses(progress_key) {
@@ -3869,6 +3862,86 @@ impl AgentWorkController {
                         () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
                     }
                 }
+                let next =
+                    Self::inspect_current(state, worker, browser, checkpoint, &observation).await?;
+                observation = next.0;
+                captured_at = next.1;
+                progress = next.2;
+                let Some(next_turn) = next.3 else {
+                    state.observation = Some(observation);
+                    return Ok(());
+                };
+                turn = next_turn;
+                frames.clear();
+                frames.extend(
+                    observation
+                        .frames()
+                        .iter()
+                        .map(|snapshot| snapshot.frame().clone()),
+                );
+                continue;
+            }
+            if step.turn.proposal().kind() == AgentBrowserToolKind::FillForm {
+                no_progress.remember(progress_key);
+                if !state.compound_forms || !state.progressive_observation {
+                    return Err(AgentWorkFailure::Contract);
+                }
+                let prepared = Box::pin(Self::prepare_compound_form(
+                    state,
+                    worker,
+                    browser,
+                    step,
+                    &observation,
+                ))
+                .await?;
+                let checkpoint = match prepared {
+                    compound_form::PreparedForm::Refresh(checkpoint) => checkpoint,
+                    compound_form::PreparedForm::Follow(follow) => {
+                        let next = Self::navigate_current(
+                            state,
+                            worker,
+                            browser,
+                            navigation::NavigationStart::Follow(follow),
+                            &observation,
+                            captured_at,
+                            progress,
+                        )
+                        .await?;
+                        (observation, captured_at, progress, turn) = match next {
+                            (observation, at, progress, Some(turn)) => {
+                                (observation, at, progress, turn)
+                            }
+                            (observation, _, _, None) => {
+                                state.observation = Some(observation);
+                                return Ok(());
+                            }
+                        };
+                        frames.clear();
+                        frames.extend(
+                            observation
+                                .frames()
+                                .iter()
+                                .map(|snapshot| snapshot.frame().clone()),
+                        );
+                        continue;
+                    }
+                    compound_form::PreparedForm::Ready(current) => {
+                        let captured = SemanticCaptureInstant::from_millis(
+                            state
+                                .journal_mut()?
+                                .clock
+                                .now()
+                                .map_err(|_| AgentWorkFailure::Contract)?
+                                .millis(),
+                        );
+                        Self::finish_owned_extraction(
+                            state, worker, browser, &current, captured, true,
+                        )
+                        .await?;
+                        state.observation = Some(*current);
+                        return Ok(());
+                    }
+                };
                 let next =
                     Self::inspect_current(state, worker, browser, checkpoint, &observation).await?;
                 observation = next.0;
@@ -5262,6 +5335,80 @@ impl AgentWorkController {
         )
         .await?;
         Ok(Ok((observation, captured_at, next_turn)))
+    }
+
+    async fn finish_owned_extraction(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        observation: &SemanticObservation,
+        captured_at: SemanticCaptureInstant,
+        after_preparation: bool,
+    ) -> Result<(), AgentWorkFailure> {
+        state.refresh_account(worker, browser)?;
+        let schema = state
+            .extraction_schema
+            .as_ref()
+            .ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let crop_account = session.account;
+        let crop_config = if state.viewport_screenshot && session.supports_record_crops() {
+            session.config.clone().with_viewport_screenshot()
+        } else {
+            session.config.clone()
+        };
+        let crop_baseline = SemanticObservationAcknowledgement::whole_page_scope(observation)
+            .ok_or(AgentWorkFailure::Contract)?
+            .0;
+        let result = Self::provider(
+            &mut state.native,
+            worker,
+            browser,
+            session.cancellation.clone(),
+            async {
+                if after_preparation {
+                    session
+                        .extract_owned_observation(observation, captured_at, schema, None)
+                        .await
+                } else {
+                    session
+                        .extract_owned_initial(observation, captured_at, schema)
+                        .await
+                }
+            },
+        )
+        .await?;
+        if result.is_empty() {
+            return Err(AgentWorkFailure::Browser(
+                AgentBrowserProviderError::NoExtractionEvidence,
+            ));
+        }
+        if state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete {
+            return Err(AgentWorkFailure::Contract);
+        }
+        state.check_task_contract()?;
+        state.native.check_control(worker, browser)?;
+        let dropped = result.stats().dropped();
+        let mut owned = result
+            .into_owned()
+            .map_err(|_| AgentWorkFailure::Contract)?;
+        Self::attach_record_crop_permission(
+            state,
+            worker,
+            browser,
+            &mut owned,
+            observation,
+            &crop_baseline,
+            &crop_config,
+            crop_account,
+        )?;
+        state.extraction = Some(owned);
+        if dropped > 0 {
+            state
+                .journal_mut()?
+                .emit(AgentWorkEventKind::ExtractionDropped { values: dropped })?;
+        }
+        Ok(())
     }
 
     async fn extract_current(

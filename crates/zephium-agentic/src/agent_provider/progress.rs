@@ -105,6 +105,15 @@ impl AgentBrowserToolProposal {
                     }
                 }
             }
+            Self::FillForm(form) => {
+                for field in form.fields() {
+                    target(&mut intent, observation, field.target())?;
+                    text(&mut intent, field.value().as_str());
+                }
+                if let Some(submit) = form.submit() {
+                    target(&mut intent, observation, submit)?;
+                }
+            }
             // Waiting, new visual evidence, extraction and human handoffs remain
             // available when another operation made no observable progress.
             _ => return None,

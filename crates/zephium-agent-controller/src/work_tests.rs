@@ -853,6 +853,7 @@ fn input_with_navigation_account(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fault {
     PlainRead,
+    CompoundFields,
     #[cfg(feature = "probe-harness")]
     Listing,
     #[cfg(feature = "probe-harness")]
@@ -1078,7 +1079,9 @@ impl AgentBrowserPort for Port {
         let correlation = invocation.correlation();
         assert_eq!(
             correlation.snapshot_generation().get(),
-            if matches!(
+            if self.fault == Fault::CompoundFields {
+                1 + lock(&self.calls).iter().filter(|&&call| call == 7).count() as u64
+            } else if matches!(
                 self.fault,
                 Fault::Hydration | Fault::SkeletonHydration | Fault::SkeletonPersistent
             ) {
@@ -1192,6 +1195,17 @@ impl AgentBrowserPort for Port {
                     0
                 }
             )
+        } else {
+            wire
+        };
+        #[cfg(feature = "probe-harness")]
+        let wire = if self.fault == Fault::CompoundFields {
+            let filled = lock(&self.calls).iter().filter(|&&call| call == 7).count();
+            serde_json::json!({"v":SEMANTIC_WIRE_VERSION,"i":correlation.invocation().get(),"g":correlation.snapshot_generation().get(),"c":"complete","n":[
+                {"k":1,"r":"document","fc":true},
+                {"k":2,"p":0,"r":"textbox","n":"Field","s":64,"o":2,"fc":true,"v":{"k":"text","value":if filled > 0 {"fixture value"} else {""}},"b":{"x":10,"y":20,"w":120,"h":30}},
+                {"k":3,"p":0,"r":"textbox","n":"Second","o":2,"fc":true,"v":{"k":"text","value":if filled > 1 {"second value"} else {""}},"b":{"x":10,"y":70,"w":120,"h":30}}
+            ]}).to_string()
         } else {
             wire
         };
@@ -1412,6 +1426,7 @@ impl AgentBrowserPort for Port {
                 return ContextDispatch::Scheduled;
             }
             Fault::ActionVerification
+            | Fault::CompoundFields
             | Fault::ActionApplied
             | Fault::ActionAppliedBoundary
             | Fault::ActionAppliedLargeDiff
@@ -2095,6 +2110,8 @@ fn variable_provider_turns_use_real_worker_io_and_stop_at_the_exact_ceiling() {
 #[cfg(feature = "probe-harness")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProviderFault {
+    CompoundForm,
+
     ActionRepair,
     ActionRepairRepeated,
     ActionRepairCancelled,
@@ -2254,6 +2271,20 @@ fn production_form_task_keeps_actor_refusal_and_callback_owners() {
 }
 
 #[cfg(feature = "probe-harness")]
+#[test]
+fn native_compound_field_prepares_then_extracts_with_existing_effect_policy() {
+    let _guard = lock(&SERIAL);
+    provider_fixture_with_form(ProviderFault::CompoundForm, Some("fixture value"));
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn native_compound_form_cannot_widen_the_trusted_field_value() {
+    let _guard = lock(&SERIAL);
+    provider_fixture_with_form(ProviderFault::CompoundForm, Some("not authorized"));
+}
+
+#[cfg(feature = "probe-harness")]
 fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
     provider_fixture_with_account(fault, form, None);
 }
@@ -2376,6 +2407,13 @@ fn provider_fixture_with_discovery_account(
         2
     } else {
         match fault {
+            ProviderFault::CompoundForm => {
+                if form == Some("fixture value") {
+                    4
+                } else {
+                    2
+                }
+            }
             ProviderFault::Navigation(fault) => fault.requests(),
             ProviderFault::Read(fault) => fault.requests(),
             ProviderFault::Scoped(fault) => fault.requests(),
@@ -2733,6 +2771,16 @@ fn provider_fixture_with_discovery_account(
                             | ProviderFault::HumanExtractionRequest
                     ) {
                         named_tool_stream(turns, "show_for_human", r#"{\"reason\":\"sign_in\"}"#)
+                    } else if fault == ProviderFault::CompoundForm {
+                        if turns == 1 {
+                            named_tool_stream(
+                                turns,
+                                "fill_form",
+                                r#"{\"fields\":[{\"target\":\"@a2\",\"value\":\"fixture value\"},{\"target\":\"@a3\",\"value\":\"second value\"}],\"submit\":null}"#,
+                            )
+                        } else {
+                            extraction_stream(ExtractionFault::None)
+                        }
                     } else if fault == ProviderFault::Native(Fault::ScrollVerification) {
                         named_tool_stream(
                             turns,
@@ -2886,22 +2934,36 @@ fn provider_fixture_with_discovery_account(
         approved.settings.clock = Arc::new(listing_tests::WallClock(Instant::now()));
     }
     let task: Box<dyn AgentWorkTask> = if let Some(value) = form {
-        Box::new(
-            crate::AgentWorkFormTask::try_new_local_preparation(
-                approved.context.identity,
-                approved.context.origin.clone(),
-                AgentAccountScope::Anonymous,
-                vec![
-                    crate::AgentWorkFormPhase::try_new(vec![crate::AgentWorkFormGoal::fill(
-                        Some("Field".into()),
-                        value.into(),
+        let mut goals =
+            vec![crate::AgentWorkFormGoal::fill(Some("Field".into()), value.into()).unwrap()];
+        if fault == ProviderFault::CompoundForm {
+            goals.push(
+                crate::AgentWorkFormGoal::fill(Some("Second".into()), "second value".into())
+                    .unwrap(),
+            );
+        }
+        let task = crate::AgentWorkFormTask::try_new_local_preparation(
+            approved.context.identity,
+            approved.context.origin.clone(),
+            AgentAccountScope::Anonymous,
+            vec![crate::AgentWorkFormPhase::try_new(goals).unwrap()],
+        )
+        .unwrap();
+        if fault == ProviderFault::CompoundForm {
+            Box::new(
+                task.with_baseline_read()
+                    .with_extraction(vec![SemanticExtractionFieldSchema::try_text(
+                        "label".into(),
+                        true,
+                        64,
                     )
                     .unwrap()])
-                    .unwrap(),
-                ],
+                    .unwrap()
+                    .with_compound_forms(),
             )
-            .unwrap(),
-        )
+        } else {
+            Box::new(task)
+        }
     } else if let ProviderFault::Navigation(fault) = fault {
         if matches!(
             fault,
@@ -3110,7 +3172,9 @@ fn provider_fixture_with_discovery_account(
         state.input.as_mut().unwrap().settings.deadline = deadline;
         state.native.deadline = deadline;
     }
-    let native_fault = if matches!(
+    let native_fault = if fault == ProviderFault::CompoundForm {
+        Fault::CompoundFields
+    } else if matches!(
         fault,
         ProviderFault::Extraction(ExtractionFault::Direct | ExtractionFault::DirectRecord)
     ) {
@@ -3234,6 +3298,33 @@ fn provider_fixture_with_discovery_account(
             requests / 2
         );
         read_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);
+        return;
+    }
+    if fault == ProviderFault::CompoundForm {
+        if form != Some("fixture value") {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(closed.policy_settlement().closure().effects(), 0);
+            assert!(!calls.contains(&7));
+            assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+            assert_eq!(server.join().unwrap(), 1);
+            return;
+        }
+
+        assert!(
+            matches!(outcome, AgentWorkOutcome::Succeeded(_)),
+            "{outcome:?}; native calls={calls:?}; events={:?}",
+            events.iter().map(|event| event.kind()).collect::<Vec<_>>()
+        );
+        assert_eq!(server.join().unwrap(), 2);
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        let AgentWorkOutcome::Succeeded(success) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(success.closure().model_calls(), 2);
+        assert_eq!(success.closure().effects(), 2);
+        assert_eq!(calls.iter().filter(|&&call| call == 7).count(), 2);
         return;
     }
     if form.is_some() && fault == ProviderFault::Native(Fault::ActionApplied) {

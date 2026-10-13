@@ -121,6 +121,48 @@ impl AgentProviderContinuation {
         ))
     }
 
+    /// Retires a form proposal after the host has processed its fields through
+    /// normal native action admission. This is reporting, never effect authority.
+    /// A changed page after submit is not claimed to satisfy the user's goal.
+    pub fn into_form_refresh(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+        completed_fields: u8,
+        submitted: bool,
+        failure: Option<super::super::AgentBrowserFormError>,
+    ) -> Result<AgentProviderObservationCheckpoint, Box<Self>> {
+        if config != &self.config
+            || self.correlation.kind() != AgentBrowserToolKind::FillForm
+            || !config.permits_tool(AgentBrowserToolKind::FillForm)
+            || !AgentProviderObservationCheckpoint::refreshable(&self, observation)
+        {
+            return Err(Box::new(self));
+        }
+        let Ok(form) = super::super::form::decode(&self.correlation.arguments) else {
+            return Err(Box::new(self));
+        };
+        if usize::from(completed_fields) > form.fields().len()
+            || (submitted
+                && (failure.is_some()
+                    || form.submit().is_none()
+                    || usize::from(completed_fields) != form.fields().len()))
+            || failure.is_some_and(|failure| {
+                failure
+                    .field
+                    .is_some_and(|field| field == 0 || usize::from(field) > form.fields().len())
+            })
+        {
+            return Err(Box::new(self));
+        }
+        let note = match failure {
+            Some(error) if error.fault == super::super::AgentBrowserFormFault::SubmitRequired => "form_not_run: this site tool completes a read-only search. Include its observed submit ref with the desired fields. For preparation without searching, use act. No field or submit action ran.".to_owned(),
+            Some(error) => format!("form_stopped: verified_fields={completed_fields}; failed_field={:?}; reason={:?}. No successful submission is established. Inspect the fresh values and correct the named field once; do not repeat completed work or claim success.", error.field, error.fault),
+            None => format!("form_processed: verified_fields={completed_fields}; submission_page_change_observed={submitted}. Inspect this fresh page and extract the result only when it answers the goal; a changed page alone does not prove successful search results."),
+        };
+        Ok(AgentProviderObservationCheckpoint::refresh(self, note))
+    }
+
     /// A planner that asked the person to sign in on a page with no sign-in
     /// form of its own is told that signing in is optional there, nothing
     /// was asked of anyone, and given a fresh look to carry on as a guest.
@@ -382,6 +424,7 @@ impl AgentProviderContinuation {
                 AgentBrowserToolKind::Snapshot
                     | AgentBrowserToolKind::Locate
                     | AgentBrowserToolKind::Act
+                    | AgentBrowserToolKind::FillForm
             )
         {
             return Err(Box::new(self));
@@ -389,6 +432,26 @@ impl AgentProviderContinuation {
         Ok(AgentProviderObservationRefusal(
             self,
             InspectionRefusal::NoProgress,
+        ))
+    }
+
+    /// Offers the native search-form path once before an individual fill runs.
+    /// This is guidance, not a new grant; preparation-only work may repeat Act.
+    pub fn prefer_compound_form(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderObservationRefusal, Box<Self>> {
+        if config != &self.config
+            || !config.permits_tool(AgentBrowserToolKind::FillForm)
+            || self.correlation.kind() != AgentBrowserToolKind::Act
+            || !self.baseline.matches(observation)
+        {
+            return Err(Box::new(self));
+        }
+        Ok(AgentProviderObservationRefusal(
+            self,
+            InspectionRefusal::PreferForm,
         ))
     }
 
@@ -423,6 +486,7 @@ pub enum AgentProviderObservationResolution {
 pub struct AgentProviderObservationRefusal(AgentProviderContinuation, InspectionRefusal);
 
 enum InspectionRefusal {
+    PreferForm,
     Invalid,
     Repeated,
     Limit,
@@ -507,6 +571,10 @@ impl AgentProviderObservationRefusal {
         ))
     }
 
+    pub(in crate::agent_provider) fn is_form_offer(&self) -> bool {
+        matches!(self.1, InspectionRefusal::PreferForm)
+    }
+
     pub(in crate::agent_provider) fn bind(
         self,
         observation: &SemanticObservation,
@@ -523,6 +591,7 @@ impl AgentProviderObservationRefusal {
             return Err(AgentProviderContinuationError::Baseline);
         }
         let (code, guidance) = match self.1 {
+            InspectionRefusal::PreferForm => ("compound_form_available", "Nothing ran. This read-only search form has several editable fields. When the objective needs results, use fill_form with ALL requested field values and the observed submit ref in one call; native code commits station/option choices and verifies values. Do not handle each station or date segment in separate Act turns. If the objective explicitly asks only to prepare without searching, repeat the original Act; that remains allowed."),
             InspectionRefusal::NoProgress => ("no_progress", "Nothing executed. This same operation left the observed page unchanged and is barred on this state. Choose a different action, target or query; wait for a real change if still loading, or extract the evidence already available. Changing only verification or timeout does not make a different action."),
             InspectionRefusal::Limit => ("inspection_budget_exhausted", "The inspection budget for this document is exhausted. No capture occurred; current refs and retained evidence remain available. Read or extract available evidence, or navigate through an admitted observed link when the remaining navigation budget allows. Do not request another snapshot of this document."),
             InspectionRefusal::Repeated => ("repeated_snapshot_scope", "This scope and query were already inspected. No capture occurred and current refs remain valid. Inspect a different region, use text_search within a current eligible boundary, or follow an observed detail link when allowed. Extract only the evidence actually available; repeating this subtree does not advance truncated content."),
@@ -531,7 +600,7 @@ impl AgentProviderObservationRefusal {
             InspectionRefusal::Invalid => ("invalid_snapshot_scope", "No capture occurred; this observation and its refs remain current. text_search and region require a current document/landmark/group/dialog ref. A heading is only eligible for surrounding_text or subtree; its subtree excludes following prose. If no eligible search boundary exists here, snapshot(initial) can restore current viewport anchors. You may extract retained evidence instead. Choose another operation within the remaining budget; do not repeat the rejected scope."),
         };
         let result = serde_json::json!({
-            "status": "refused", "code": code, "executed": false,
+            "status": if matches!(self.1, InspectionRefusal::PreferForm) { "form_plan_needed" } else { "refused" }, "code": code, "executed": false,
             "guidance": guidance,
             "observation_unchanged": true,
         })

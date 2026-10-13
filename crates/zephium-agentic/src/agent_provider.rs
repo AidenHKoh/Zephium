@@ -11,6 +11,7 @@ mod anthropic;
 mod call_schema;
 mod continuation;
 mod extraction;
+mod form;
 #[cfg(feature = "provider-transport")]
 mod model_client;
 #[cfg(any(test, feature = "provider-transport"))]
@@ -51,6 +52,11 @@ pub use continuation::{
 pub use extraction::{
     AgentProviderExtractionOutputBinding, AgentProviderExtractionOutputCollector,
     AgentProviderExtractionOutputError,
+};
+pub use form::{
+    FormBinding as AgentBrowserFormBinding, FormError as AgentBrowserFormError,
+    FormFault as AgentBrowserFormFault, FormField as AgentBrowserFormField,
+    FormProposal as AgentBrowserFormProposal, MAX_FORM_FIELDS as MAX_AGENT_BROWSER_FORM_FIELDS,
 };
 use pricing::AgentProviderCatalogBinding;
 pub(crate) use pricing::AgentProviderPricedUsage;
@@ -803,6 +809,7 @@ pub struct AgentProviderCallConfig {
     store_response: bool,
     tools: BrowserToolProfile,
     baseline_read: bool,
+    compound_form: bool,
     progressive_observation: bool,
     viewport_screenshot: bool,
     standalone_wait: bool,
@@ -875,6 +882,7 @@ impl AgentProviderCallConfig {
             store_response: false,
             tools: BrowserToolProfile::Full,
             baseline_read: false,
+            compound_form: false,
             progressive_observation: false,
             viewport_screenshot: false,
             standalone_wait: false,
@@ -893,6 +901,12 @@ impl AgentProviderCallConfig {
     /// applies equally to every provider protocol and request turn.
     pub fn restrict_to_locate_and_act(mut self) -> Self {
         self.tools = BrowserToolProfile::LocateAct;
+        self
+    }
+
+    /// Enables the bounded host form executor, without granting any native effect.
+    pub fn with_compound_form(mut self) -> Self {
+        self.compound_form = true;
         self
     }
 
@@ -1091,8 +1105,15 @@ impl AgentProviderCallConfig {
         )
     }
 
+    pub(super) fn requires_form_submit(&self) -> bool {
+        self.compound_form && self.tools == BrowserToolProfile::SiteActionsExtraction
+    }
+
     /// Reports whether this immutable request profile advertises a tool kind.
     pub fn permits_tool(&self, kind: AgentBrowserToolKind) -> bool {
+        if kind == AgentBrowserToolKind::FillForm {
+            return self.compound_form && self.permits_tool(AgentBrowserToolKind::Act);
+        }
         if matches!(
             kind,
             AgentBrowserToolKind::Navigate | AgentBrowserToolKind::Back

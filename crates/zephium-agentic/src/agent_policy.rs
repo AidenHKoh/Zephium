@@ -5114,7 +5114,8 @@ mod tests {
         assert!(wire.get("metadata").is_none());
         assert_eq!(wire["input"].as_array().expect("input").len(), 2);
         let tools = wire["tools"].as_array().expect("tools");
-        assert_eq!(tools.len(), crate::AgentBrowserToolKind::ALL.len() - 1);
+        assert_eq!(tools.len(), crate::AgentBrowserToolKind::ALL.len() - 2);
+        assert!(tools.iter().all(|tool| tool["name"] != "fill_form"));
         assert!(tools.iter().all(|tool| tool["name"] != "back"));
         assert!(wire["tools"]
             .as_array()

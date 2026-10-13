@@ -600,6 +600,7 @@ impl ProbeFailure {
             AgentBrowserToolKind::Snapshot => "snapshot",
             AgentBrowserToolKind::Locate => "locate",
             AgentBrowserToolKind::Act => "act",
+            AgentBrowserToolKind::FillForm => "fill_form",
             AgentBrowserToolKind::Wait => "wait",
             AgentBrowserToolKind::Read => "read",
             AgentBrowserToolKind::Extract => "extract",
