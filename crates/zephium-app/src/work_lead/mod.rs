@@ -5,6 +5,7 @@
 //! Rust admits every tool call.
 pub(crate) mod blocks;
 mod call;
+mod finalize;
 mod folders;
 mod found;
 mod hands;

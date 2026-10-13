@@ -1835,7 +1835,10 @@ impl WorkModelClient for FolderHandoffModel {
         _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
     ) -> WorkModelFuture<'a> {
         Box::pin(async move {
-            let lead = request.tools.iter().any(|tool| tool.name == "start_part");
+            let lead = request
+                .tools
+                .iter()
+                .any(|tool| matches!(tool.name.as_str(), "start_part" | "continue_work"));
             let turn = request
                 .messages
                 .iter()
@@ -2894,32 +2897,51 @@ impl WorkModelClient for NativeRecordFinish {
                 .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
                 .count();
             let seen = results(&request);
-            let fetch = request
+            if request
                 .tools
                 .iter()
-                .find(|t| t.name == "web_fetch")
-                .unwrap();
-            assert!(
-                fetch
+                .any(|tool| tool.name == "continue_work")
+            {
+                assert_eq!(
+                    request
+                        .tools
+                        .iter()
+                        .map(|tool| tool.name.as_str())
+                        .collect::<Vec<_>>(),
+                    ["finish", "continue_work"]
+                );
+                assert!(turn > 0);
+                assert!(request.max_output_tokens <= 2048);
+                assert_eq!(request.reasoning, Some(WorkModelReasoning::Low));
+                assert!(matches!(request.tool_choice, WorkModelToolChoice::Required));
+            } else {
+                let fetch = request
+                    .tools
+                    .iter()
+                    .find(|t| t.name == "web_fetch")
+                    .unwrap();
+                assert!(
+                    fetch
+                        .schema
+                        .pointer("/properties/records/properties/columns")
+                        .is_some(),
+                    "the lead must be able to request native records on its first public read"
+                );
+                let create = request.tools.iter().find(|t| t.name == "create").unwrap();
+                let has_raw_sheet = create
                     .schema
-                    .pointer("/properties/records/properties/columns")
-                    .is_some(),
-                "the lead must be able to request native records on its first public read"
-            );
-            let create = request.tools.iter().find(|t| t.name == "create").unwrap();
-            let has_raw_sheet = create
-                .schema
-                .pointer("/properties/data/anyOf")
-                .unwrap()
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|schema| schema["title"] == "sheet");
-            assert_eq!(
-                has_raw_sheet,
-                turn == 0,
-                "only source-backed creation narrows after the read"
-            );
+                    .pointer("/properties/data/anyOf")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|schema| schema["title"] == "sheet");
+                assert_eq!(
+                    has_raw_sheet,
+                    turn == 0,
+                    "only source-backed creation narrows after the read"
+                );
+            }
             let final_call = || {
                 let mut output = call(
                     "finish",
@@ -3129,7 +3151,10 @@ impl WorkModelClient for FailedCatalogThenDetail {
         _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
     ) -> WorkModelFuture<'a> {
         Box::pin(async move {
-            let lead = request.tools.iter().any(|tool| tool.name == "start_part");
+            let lead = request
+                .tools
+                .iter()
+                .any(|tool| matches!(tool.name.as_str(), "start_part" | "continue_work"));
             let turn = request
                 .messages
                 .iter()

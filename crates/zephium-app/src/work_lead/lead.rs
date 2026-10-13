@@ -285,6 +285,7 @@ where
         let mut failed_calls = 0u8;
         // A turn that ran out of output is asked again once, briefly.
         let mut ran_long = false;
+        let mut finish_candidate = false;
         loop {
             if self.run.cancelled().await {
                 return Ok(WorkAttemptStatus::Cancelled);
@@ -297,7 +298,6 @@ where
             }
             self.run.activity(WorkActivityV1::Planning);
             self.steers(&mut messages).await;
-            compact(&mut messages, conversation_budget(&self.models.lead.entry));
             if self
                 .run
                 .records
@@ -307,29 +307,46 @@ where
             {
                 super::schema::native_record_create(&mut tools);
             }
-            let sizes = Sections::of(&system, &tools, &messages);
+            let finishing = if finish_candidate && self.parts_running() == 0 {
+                super::finalize::prepare(&messages, &tools, self.memory.as_deref())
+            } else {
+                None
+            };
+            finish_candidate = false;
+            compact(&mut messages, conversation_budget(&self.models.lead.entry));
+            let (call_system, call_tools, call_messages) = finishing
+                .as_ref()
+                .map(|turn| (&turn.system, &turn.tools, &turn.messages))
+                .unwrap_or((&system, &tools, &messages));
+            let sizes = Sections::of(call_system, call_tools, call_messages);
             let model = &self.models.lead;
             let request = WorkModelRequest {
                 image_fence: None,
                 model: model.entry.model.clone(),
-                system: system.clone(),
-                tools: tools.clone(),
-                messages: messages.clone(),
-                max_output_tokens: if ran_long {
+                system: call_system.clone(),
+                tools: call_tools.clone(),
+                messages: call_messages.clone(),
+                max_output_tokens: if ran_long || finishing.is_some() {
                     model.entry.max_output.min(2_048)
                 } else {
                     model.entry.max_output.clamp(4_096, LEAD_TURN_OUTPUT)
                 },
-                reasoning: model.entry.supports.reasoning.then_some(if ran_long {
-                    WorkModelReasoning::Low
-                } else {
-                    WorkModelReasoning::Medium
-                }),
+                reasoning: model.entry.supports.reasoning.then_some(
+                    if ran_long || finishing.is_some() {
+                        WorkModelReasoning::Low
+                    } else {
+                        WorkModelReasoning::Medium
+                    },
+                ),
                 native_search: false,
-                parallel_tools: true,
-                tool_choice: WorkModelToolChoice::Auto,
+                parallel_tools: finishing.is_none(),
+                tool_choice: if finishing.is_some() {
+                    WorkModelToolChoice::Required
+                } else {
+                    WorkModelToolChoice::Auto
+                },
                 volatile_tail: 0,
-                cache_key: Some(work_model_cache_key(&system, &tools)),
+                cache_key: Some(work_model_cache_key(call_system, call_tools)),
             };
             let (called, early_reply) = self.call_with_early_reply(model, request).await;
             let (outcome, usage) = match called {
@@ -409,6 +426,7 @@ where
                         "ask_folder" => "ask_folder",
                         "load_skill" => "load_skill",
                         "finish" => "finish",
+                        "continue_work" => "continue_work",
                         "revise_block" => "revise_block",
                         _ => "other",
                     })
@@ -442,11 +460,14 @@ where
                 )]));
                 continue;
             }
-            let (results, progress, finished) =
-                match self.execute(&calls, early_reply.as_ref()).await {
-                    Ok(done) => done,
-                    Err(status) => return Ok(status),
-                };
+            let (results, progress, finished) = match self
+                .execute(&calls, early_reply.as_ref(), finishing.is_some())
+                .await
+            {
+                Ok(done) => done,
+                Err(status) => return Ok(status),
+            };
+            finish_candidate = super::finalize::after_browser_result(&calls, &results);
             messages.push(WorkModelMessage::ToolResults(results));
             if finished {
                 return Ok(WorkAttemptStatus::Succeeded);
@@ -668,6 +689,7 @@ where
         &self,
         calls: &[WorkModelToolCall],
         early_reply: Option<&EarlyReply>,
+        finish_turn: bool,
     ) -> Result<(Vec<WorkModelToolResult>, bool, bool), WorkAttemptStatus> {
         let mut terminal = None;
         let mut answers: Vec<Option<(String, bool)>> = vec![None; calls.len()];
@@ -793,6 +815,7 @@ where
                         Some(super::folders::request(self.run, text("folder"), text("why")).await);
                 }
                 "load_skill" => answers[index] = Some(self.load_skill(args).await),
+                "continue_work" if finish_turn => answers[index] = Some(super::finalize::continued(args)),
                 "finish" => finish_at = Some(index),
                 name => match self
                     .extra
