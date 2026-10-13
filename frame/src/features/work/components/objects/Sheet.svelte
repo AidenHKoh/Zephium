@@ -304,13 +304,13 @@
     flex: none;
     overflow: hidden;
     border-radius: var(--radius-inset);
-    background: var(--color-product-plate);
+    background: var(--color-fill);
   }
 
+  /* A row thumbnail is a few dozen pixels: a photo fills its square, whatever it shows. */
   .picture img {
     display: block;
-    object-fit: contain;
-    mix-blend-mode: multiply;
+    object-fit: cover;
   }
 
   .text {
