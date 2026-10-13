@@ -197,6 +197,160 @@ fn items_mut(data: &mut Value, mut f: impl FnMut(&mut Map<String, Value>)) {
 }
 
 /// Plain values where the wire wants decimal strings; models send numbers.
+/// A reply set the way the canvas shows it, instead of refused for its form:
+/// list lines become points, headings and quotes become prose, links keep
+/// their words, and text past its limit ends at a sentence, the rest moving
+/// to points while they have room.
+fn shape_reply(data: &mut Value) {
+    use zephium_core::work::objects::limit::REPLY_HEADLINE;
+    use zephium_core::work::objects::limit::{REPLY_POINT, REPLY_POINTS, REPLY_TEXT};
+    if let Some(Value::String(headline)) = data.get_mut("headline") {
+        *headline = words_within(headline, REPLY_HEADLINE);
+    }
+    let Some(text) = data.get("text").and_then(Value::as_str).map(str::to_owned) else {
+        return;
+    };
+    let mut points: Vec<String> = data
+        .get("points")
+        .and_then(Value::as_array)
+        .map(|points| {
+            points
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut prose: Vec<String> = Vec::new();
+    let mut listed: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            continue;
+        }
+        let numbered = line
+            .split_once(['.', ')'])
+            .filter(|(number, rest)| {
+                !number.is_empty()
+                    && number.len() <= 2
+                    && number.bytes().all(|b| b.is_ascii_digit())
+                    && rest.starts_with(' ')
+            })
+            .map(|(_, rest)| rest);
+        let item = ["- ", "* ", "+ ", "• "]
+            .iter()
+            .find_map(|mark| line.strip_prefix(mark))
+            .or(numbered);
+        if let Some(item) = item {
+            listed.push(inline_words(item.trim()));
+        } else {
+            let line = line.trim_start_matches(['#', '>', ' ']);
+            if line.is_empty() {
+                if prose.last().is_some_and(|last| !last.is_empty()) {
+                    prose.push(String::new());
+                }
+            } else {
+                prose.push(inline_words(line));
+            }
+        }
+    }
+    let mut text = prose.join("\n").replace("\n\n\n", "\n\n");
+    text = text.trim().to_owned();
+    // A reply that was only a list leads with its first item.
+    if text.is_empty() && !listed.is_empty() {
+        text = listed.remove(0);
+    }
+    listed.extend(points);
+    points = listed;
+    if text.chars().count() > REPLY_TEXT {
+        let (kept, rest) = sentences_within(&text, REPLY_TEXT);
+        text = kept;
+        let room = REPLY_POINTS.saturating_sub(points.len());
+        let moved: Vec<String> = rest.into_iter().take(room).collect();
+        points.splice(0..0, moved);
+    }
+    let points: Vec<Value> = points
+        .into_iter()
+        .filter(|point| !point.trim().is_empty())
+        .take(REPLY_POINTS)
+        .map(|point| Value::String(words_within(&point, REPLY_POINT)))
+        .collect();
+    data["text"] = Value::String(text);
+    if !points.is_empty() || data.get("points").is_some() {
+        data["points"] = Value::Array(points);
+    }
+}
+
+/// Markdown links keep their words and images go; the canvas draws its own.
+fn inline_words(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(open) = rest.find('[') {
+        let image = rest[..open].ends_with('!');
+        let Some(close) = rest[open..].find("](").map(|i| open + i) else {
+            break;
+        };
+        let Some(end) = rest[close..].find(')').map(|i| close + i) else {
+            break;
+        };
+        out.push_str(&rest[..if image { open - 1 } else { open }]);
+        if !image {
+            out.push_str(&rest[open + 1..close]);
+        }
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out.trim().to_owned()
+}
+
+/// The whole sentences that fit in `max` characters, and the sentences after.
+fn sentences_within(text: &str, max: usize) -> (String, Vec<String>) {
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    for (index, (at, c)) in chars.iter().enumerate() {
+        let next = chars.get(index + 1).map(|(_, c)| *c);
+        if matches!(c, '.' | '!' | '?' | '\n') && next.is_none_or(char::is_whitespace) {
+            let end = at + c.len_utf8();
+            sentences.push(text[start..end].trim().to_owned());
+            start = end;
+        }
+    }
+    if start < text.len() {
+        sentences.push(text[start..].trim().to_owned());
+    }
+    sentences.retain(|s| !s.is_empty());
+    let mut kept = String::new();
+    let mut taken = 0;
+    for sentence in &sentences {
+        let joined = if kept.is_empty() {
+            sentence.clone()
+        } else {
+            format!("{kept} {sentence}")
+        };
+        if joined.chars().count() > max {
+            break;
+        }
+        kept = joined;
+        taken += 1;
+    }
+    if kept.is_empty() {
+        return (words_within(text, max), vec![]);
+    }
+    (kept, sentences.split_off(taken))
+}
+
+/// At most `max` characters, cut between words with an ellipsis.
+fn words_within(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let cut: String = text.chars().take(max.saturating_sub(1)).collect();
+    let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head);
+    format!("{}…", cut.trim_end_matches([',', ';', ':', ' ']))
+}
+
 fn normalize(kind: &str, data: &mut Value) {
     fn stringify(value: &mut Value) {
         match value {
@@ -237,6 +391,7 @@ fn normalize(kind: &str, data: &mut Value) {
         }
     });
     match kind {
+        "reply" => shape_reply(data),
         "picks" => items_mut(data, |item| {
             if let Some(price) = item.get_mut("price").and_then(Value::as_object_mut) {
                 if let Some(amount) = price.get_mut("amount") {
@@ -1118,6 +1273,51 @@ fn keep_shown_pictures(data: &mut WorkArtifactDataV1, shown: impl Fn(&str) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_reply_written_as_markdown_is_set_not_refused() {
+        let mut data = json!({
+            "headline": "Svelte 5.40 adds attachments, async components and a new way to read state across files",
+            "text": "## What changed\nSvelte 5.40 is out. See [the release notes](https://svelte.dev/blog).\n\n- Attachments replace actions\n- Async components\n1. Faster hydration",
+        });
+        normalize("reply", &mut data);
+        let headline = data["headline"].as_str().unwrap();
+        assert!(headline.chars().count() <= 80 && headline.ends_with('…'));
+        assert_eq!(
+            data["text"],
+            "What changed\nSvelte 5.40 is out. See the release notes."
+        );
+        assert_eq!(
+            data["points"],
+            json!([
+                "Attachments replace actions",
+                "Async components",
+                "Faster hydration"
+            ])
+        );
+        let reply: WorkArtifactDataV1 = serde_json::from_value(
+            json!({"kind":"reply","headline":headline,"text":data["text"],"points":data["points"]}),
+        )
+        .unwrap();
+        assert!(reply.lead_fault(0).is_none());
+    }
+
+    #[test]
+    fn a_long_reply_ends_at_a_sentence_and_the_rest_become_points() {
+        let sentence =
+            "The updater checks a signed manifest on every launch and installs in the background.";
+        let text = [sentence; 8].join(" ");
+        let mut data = json!({"headline":"Tauri updater","text":text});
+        normalize("reply", &mut data);
+        let text = data["text"].as_str().unwrap();
+        assert!(text.chars().count() <= 480 && text.ends_with('.'));
+        let points = data["points"].as_array().unwrap();
+        assert!(!points.is_empty() && points.len() <= 5);
+        assert!(points
+            .iter()
+            .all(|p| p.as_str().unwrap().chars().count() <= 140));
+    }
 
     #[test]
     fn native_media_never_enters_model_input_or_survives_model_object_fields() {

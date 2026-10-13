@@ -87,7 +87,8 @@ impl Script {
                     ]
                 }
                 2 => {
-                    assert!(seen.contains("already covers this subject"), "{seen}");
+                    // A second plan on the same subject revises the first.
+                    assert!(!seen.contains("already covers this subject"), "{seen}");
                     vec![call(
                         "r4",
                         "finish",
@@ -149,8 +150,9 @@ impl Script {
                 ]
             }
             2 => {
+                // An overlong headline is clipped between words, not refused.
                 assert!(
-                    seen.contains("headline is one line of 1 to 80 characters"),
+                    !seen.contains("headline is one line of 1 to 80 characters"),
                     "{seen}"
                 );
                 vec![call(
@@ -753,10 +755,11 @@ async fn a_lead_run_splits_into_parts_builds_the_result_and_revises_on_follow_up
     };
     assert_eq!(steps[0].pick.as_ref().unwrap().artifact, picks.id);
     assert_eq!(object("plan").part, None);
+    // The second reply revised the first instead of being refused.
     assert_eq!(
         run.artifacts
             .iter()
-            .filter(|a| a.data.kind_name() == "reply")
+            .filter(|a| a.data.kind_name() == "reply" && a.revises.is_none())
             .count(),
         1
     );
@@ -2991,6 +2994,7 @@ impl WorkModelClient for NativeRecordFinish {
                             "long-point",
                             "finish",
                             json!({"reply":{"headline":"Lost table","text":"Both offers were read.","points":["x".repeat(141)]},
+                                "records":[{"source":"r2"},{"source":"r1"}],"layout":"picks","records_title":"Offers",
                                 "reply_sources":["s1"],"say":"Done","title":"Offers"}),
                         ),
                         4 => call(
@@ -3070,7 +3074,7 @@ async fn unknown_finish_reply_source_refuses_before_early_publication() {
     native_record_finish_fixture(4).await;
 }
 #[tokio::test]
-async fn overlong_final_reply_point_repairs_once_without_restoring_browsing_tools() {
+async fn overlong_final_reply_point_is_clipped_without_a_repair_call() {
     native_record_finish_fixture(5).await;
 }
 async fn native_record_finish_fixture(mode: u8) {
@@ -3129,8 +3133,17 @@ async fn native_record_finish_fixture(mode: u8) {
             .any(|a| matches!(a.data, WorkArtifactDataV1::Sheet { .. })),
         "a model rewrite must never reach storage"
     );
-    assert!(!execution.artifacts.iter().any(|a| matches!(&a.data, WorkArtifactDataV1::Reply {headline,..} if headline == "Lost table")),
-        "invalid finish fields must refuse before early publication");
+    if mode == 5 {
+        // An overlong point is clipped between words; the finish needs no repair.
+        assert!(execution
+            .artifacts
+            .iter()
+            .any(|a| matches!(&a.data, WorkArtifactDataV1::Reply {points,..}
+            if points.first().is_some_and(|p| p.chars().count() == 140 && p.ends_with('…')))));
+    } else {
+        assert!(!execution.artifacts.iter().any(|a| matches!(&a.data, WorkArtifactDataV1::Reply {headline,..} if headline == "Lost table")),
+            "invalid finish fields must refuse before early publication");
+    }
     assert_eq!(picks.len(), 1);
     assert_eq!(picks[0][0].name, "Second offer");
     assert_eq!(picks[0][0].price.as_ref().unwrap().display, "€32.50 / item");

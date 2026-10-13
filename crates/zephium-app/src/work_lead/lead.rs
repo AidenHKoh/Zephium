@@ -973,15 +973,9 @@ where
         let lenient = self.tried(&key);
         if kind == "reply" {
             let reply = self.state().reply;
+            // A second reply is the model updating its answer: revise it.
             if let Some(reply) = reply {
-                if lenient {
-                    return self.revise(&with_id(args, reply)).await;
-                }
-                return self.refuse(
-                    &key,
-                    ObjectRefusal::Second,
-                    format!("This request already has its reply ({reply}); revise it instead"),
-                );
+                return self.revise(&with_id(args, reply)).await;
             }
         }
         let projection = match self.run.probe.runtime_projection().await {
@@ -1006,7 +1000,7 @@ where
                 .iter()
                 .find(|o| o.in_this_run && o.artifact.part.is_some() && o.artifact.part == part)
             {
-                if lenient && placed.artifact.data.kind_name() == kind {
+                if placed.artifact.data.kind_name() == kind {
                     return self.revise(&with_id(args, placed.artifact.id)).await;
                 }
                 return self.refuse(
@@ -1035,29 +1029,10 @@ where
             })
             .flatten()
         {
-            if lenient {
-                return self.revise(&with_id(args, held.artifact.id)).await;
-            }
-            return self.refuse(
-                &key,
-                ObjectRefusal::Duplicate,
-                format!(
-                    "picks {} from the part already holds these things and stands in the result as it is; add the reply around it, and revise it (id {}) only to change it",
-                    held.artifact.id, held.artifact.id
-                ),
-            );
+            // The same things again are an update of the part's picks.
+            return self.revise(&with_id(args, held.artifact.id)).await;
         } else if let Some(existing) = objects::duplicate(&canvas, kind, title, part) {
-            if lenient {
-                return self.revise(&with_id(args, existing.artifact.id)).await;
-            }
-            return self.refuse(
-                &key,
-                ObjectRefusal::Duplicate,
-                format!(
-                    "{kind} {} \"{}\" already covers this subject: revise it with revise (id {}) instead of placing a copy",
-                    existing.artifact.id, existing.artifact.title, existing.artifact.id
-                ),
-            );
+            return self.revise(&with_id(args, existing.artifact.id)).await;
         }
         let data = args.get("data").cloned().unwrap_or(Value::Null);
         let sources = strings(args.get("sources"));
