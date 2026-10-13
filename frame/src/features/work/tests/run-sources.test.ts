@@ -57,6 +57,8 @@ test("Sources lead with what the objects cite, then what was read, each page onc
   });
   const sources = runSources([execution]);
   expect(sources.rows.map((row) => row.title)).toEqual(["Vercel pricing", "Lambda pricing"]);
+  // What the run used is marked; a search result it only looked at is not.
+  expect(sources.rows.map((row) => !!row.used)).toEqual([true, false]);
   expect(sources.rows[0]!.host).toBe("vercel.com");
   expect(sources.unread).toEqual([
     expect.objectContaining({

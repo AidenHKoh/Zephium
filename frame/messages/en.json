@@ -841,6 +841,8 @@
   "work_browser_preview_only": "Descriptive preview. Opening or taking over this resource requires native authorization.",
   "work_sources": "Sources",
   "work_sources_all": "Show all {count}",
+  "work_sources_looked": "Looked at {count} more",
+  "work_sources_looked_list": "Also looked at",
   "work_sources_unread_one": "One page couldn’t be opened",
   "work_sources_unread": "{count} pages couldn’t be opened",
   "work_follow": "Follow",

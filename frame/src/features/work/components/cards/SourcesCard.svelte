@@ -13,7 +13,11 @@
 
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
   const board = getContext<BoardActions | undefined>(canvasBoard);
-  const rows = $derived(item.drawn?.rows ?? []);
+  const all = $derived(item.drawn?.rows ?? []);
+  /** What the run used leads; search results it only looked at fold into one line. */
+  const used = $derived(all.filter((row) => row.used));
+  const rows = $derived(used.length ? used : all);
+  const looked = $derived(used.length ? all.filter((row) => !row.used) : []);
   const unread = $derived(item.drawn?.unread ?? []);
   /** Pictures of the pages the run read, up to four, one site each before a site's second. */
   const frames = $derived.by(() => {
@@ -24,9 +28,9 @@
     return [...first, ...framed.filter((row) => !first.includes(row))].slice(0, 4);
   });
   /** The whole list, or the pages that would not open, over the canvas: the card never grows. */
-  let sheet = $state<"all" | "missed" | null>(null);
+  let sheet = $state<"all" | "looked" | "missed" | null>(null);
   const shown = $derived(rows.slice(0, SOURCE_ROWS));
-  const toggle = (which: "all" | "missed") => (event: MouseEvent) => {
+  const toggle = (which: "all" | "looked" | "missed") => (event: MouseEvent) => {
     event.stopPropagation();
     sheet = sheet === which ? null : which;
   };
@@ -102,13 +106,23 @@
             </button>
           </li>{/each}
       </ul>{/if}
-    {#if rows.length > SOURCE_ROWS || unread.length}<div class="more">
+    {#if rows.length > SOURCE_ROWS || looked.length || unread.length}<div class="more">
         {#if rows.length > SOURCE_ROWS}<button
             type="button"
             class="quiet nodrag nopan"
             aria-expanded={sheet === "all"}
             onclick={toggle("all")}
             >{m.work_sources_all({ count: rows.length })}<Icon
+              icon={ArrowDown01Icon}
+              size={11}
+            /></button
+          >{/if}
+        {#if looked.length}<button
+            type="button"
+            class="quiet nodrag nopan"
+            aria-expanded={sheet === "looked"}
+            onclick={toggle("looked")}
+            >{m.work_sources_looked({ count: looked.length })}<Icon
               icon={ArrowDown01Icon}
               size={11}
             /></button
@@ -126,7 +140,11 @@
             /></button
           >{/if}
         {#if sheet}<Popover
-            label={sheet === "all" ? m.work_sources() : m.work_env_unread_list()}
+            label={sheet === "missed"
+              ? m.work_env_unread_list()
+              : sheet === "looked"
+                ? m.work_sources_looked_list()
+                : m.work_sources()}
             side="below"
             width={440}
             onclose={() => (sheet = null)}
@@ -136,7 +154,8 @@
               class:unread={sheet === "missed"}
               aria-label={sheet === "missed" ? m.work_env_unread_list() : undefined}
             >
-              {#if sheet === "all"}{#each rows as row (row.key)}<li>
+              {#if sheet !== "missed"}{#each sheet === "looked" ? looked : rows as row (row.key)}<li
+                  >
                     <button
                       type="button"
                       class="row nodrag nopan"

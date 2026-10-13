@@ -15,6 +15,8 @@ export type RunSource = {
   /** The page's newest captured frame, when the run opened it. */
   frame?: string;
   file?: { record: string; path: string };
+  /** The run's objects cite it or it was read: not just a search result passed over. */
+  used?: boolean;
 };
 export type RunSources = {
   rows: RunSource[];
@@ -163,6 +165,7 @@ export function runSources(
     const known = seen.get(at) ?? seen.get(named);
     if (known) {
       if (!known.frame && row.frame) known.frame = row.frame;
+      if (row.used) known.used = true;
       seen.set(at, known);
       return;
     }
@@ -172,7 +175,10 @@ export function runSources(
   };
   for (const run of runs)
     for (const artifact of run.artifacts)
-      for (const link of artifact.evidence ?? []) admit(resolve(run, link));
+      for (const link of artifact.evidence ?? []) {
+        const row = resolve(run, link);
+        admit(row && { ...row, used: true });
+      }
   for (const run of runs)
     for (const step of run.steps ?? []) {
       if (step.kind.kind !== "read" || step.status !== "succeeded") continue;
@@ -190,6 +196,7 @@ export function runSources(
         host,
         title: clipText(pageName(runs, url, step.id) || host, TEXT),
         ...(frame ? { frame } : {}),
+        used: true,
       });
     }
   for (const run of runs) {
