@@ -591,3 +591,37 @@ fn redirects_unwrap_only_to_web_pages_and_never_follow_ad_clicks() {
         canonical("https://a.example/x?id=2")
     );
 }
+
+#[test]
+fn a_results_address_link_never_stands_as_its_title() {
+    // The address link sits in the result's heading too, before the title.
+    let html = r#"<html><body><main><ol>
+      <li><article>
+        <h3><a href="https://allegro.pl/listing?string=karta+3090"><span>allegro.pl</span></a></h3>
+        <h2><a href="https://allegro.pl/listing?string=karta+3090"><span>Karta 3090 24 GB - Allegro</span></a></h2>
+      </article></li>
+      <li><article>
+        <h2><a href="https://allegro.pl/listing?string=rtx+3090"><span>allegro.pl</span></a>
+            <a href="https://allegro.pl/listing?string=rtx+3090"><span>Karta graficzna RTX 3090 - Niska cena na Allegro</span></a></h2>
+        <div><span>Karty graficzne RTX 3090 24 GB w niskich cenach.</span></div>
+      </article></li>
+      <li><article>
+        <h2><a href="https://www.ycombinator.com/blog/demo-day"><span>ycombinator.com › blog</span></a>
+            <a href="https://www.ycombinator.com/blog/demo-day"><span>2026 Demo Day Dates | Y Combinator</span></a></h2>
+      </article></li>
+    </ol></main></body></html>"#;
+    let read = read(
+        SearchEngine::DuckDuckGo,
+        "https://duckduckgo.com/?q=rtx+3090",
+        html,
+    );
+    let titles: Vec<&str> = hits(&read).iter().map(|(title, ..)| *title).collect();
+    assert_eq!(
+        titles,
+        [
+            "Karta 3090 24 GB - Allegro",
+            "Karta graficzna RTX 3090 - Niska cena na Allegro",
+            "2026 Demo Day Dates | Y Combinator"
+        ]
+    );
+}

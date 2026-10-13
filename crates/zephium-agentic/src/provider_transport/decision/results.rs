@@ -211,6 +211,45 @@ impl Rules<'_> {
     }
 }
 
+/// A result's words without the address it leads to in front: its host,
+/// with or without `www.`, and a breadcrumb of its path. None when the words
+/// are only that address.
+fn past_site(text: &str, url: &str) -> Option<String> {
+    let Some(host) = url::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+    else {
+        return Some(text.to_owned());
+    };
+    let host = host.trim_start_matches("www.");
+    let trimmed = text.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let bare = lower
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("www.");
+    let Some(rest) = bare.strip_prefix(host) else {
+        return Some(trimmed.to_owned());
+    };
+    if !rest.is_empty() && !rest.starts_with([' ', '/', '›', '>']) {
+        return Some(trimmed.to_owned());
+    }
+    // The same words in their own case: the address is ASCII, so its byte
+    // length carries over.
+    let rest = &trimmed[trimmed.len() - rest.len()..];
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    let mut at = 0;
+    while at < words.len() {
+        match words[at] {
+            "›" | ">" | "/" => at += 2,
+            word if word.starts_with('/') => at += 1,
+            _ => break,
+        }
+    }
+    let title = words.get(at..).unwrap_or_default().join(" ");
+    (!title.is_empty()).then_some(title)
+}
+
 /// The page a tracking redirect stands for: Google's `/url?q=`, Bing's
 /// `/ck/a?u=a1<base64>`, DuckDuckGo's `/l/?uddg=` and any engine's plain
 /// `url=` parameter.
@@ -369,6 +408,15 @@ impl<'a> Page<'a> {
                 None => None,
             };
             let Some(text) = text else { continue };
+            // A result's address ("allegro.pl", "tokio.rs › docs") names its
+            // site, not its page: alone it is the address link, and the title
+            // link comes after it; read with the title, it is left off.
+            let Some(text) = rules
+                .destination(node.link_destination())
+                .map_or(Some(text.clone()), |url| past_site(&text, &url))
+            else {
+                continue;
+            };
             titles.push(Title {
                 link: index,
                 inside,
