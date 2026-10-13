@@ -1,6 +1,7 @@
 @import "./axes/bootstrap.css";
 @import "tailwindcss" source("../");
 @import "./tokens/primitive.css";
+@import "./tokens/avatar.css";
 @import "./tokens.css";
 @import "./axes/palette.css";
 @import "./axes/tint.css";

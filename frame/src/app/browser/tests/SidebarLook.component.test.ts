@@ -61,8 +61,21 @@ test("the rail at rest", async () => {
   const farthest = stack.querySelector<HTMLElement>(".shelf-item")!;
   await expect.poll(() => getComputedStyle(farthest).opacity).toBe("1");
   await expect.poll(() => getComputedStyle(stack).opacity).toBe("1");
-  expect(farthest.textContent?.trim()).toBe("");
-  expect(farthest.getAttribute("aria-label")).toBe("Incognito");
+  // Farthest first: making a profile, then a private window, then the tools
+  // in the native menu's order, and Settings last, nearest the case.
+  const items = [...stack.querySelectorAll<HTMLElement>(".shelf-item")];
+  expect(items.map((item) => item.getAttribute("aria-label"))).toEqual([
+    "New Profile…",
+    "Incognito",
+    "Notes",
+    "Tasks",
+    "Time",
+    "History",
+    "Downloads",
+    "Bookmarks",
+    "Settings",
+  ]);
+  expect(items.every((item) => item.textContent?.trim() === "")).toBe(true);
   await page
     .elementLocator(screen.container)
     .screenshot({ path: "../../../../../target/rail-shelf.png" });

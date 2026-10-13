@@ -11,10 +11,10 @@
     usageTone,
   } from "$domain/account";
   import type { AccountOfferV1 } from "$shared/ipc/bindings";
+  import { preferences } from "$domain/preferences";
   import * as m from "$shared/i18n/messages";
   import Button from "$shared/ui/Button";
   import SegmentedControl from "$shared/ui/SegmentedControl";
-  import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import { explainAccountFault } from "../../lib/account";
 
@@ -26,6 +26,8 @@
   const paid = $derived(subscription?.status === "active");
   const billing = $derived(account?.billing === true);
   const hosted = $derived(account?.hosted_models !== false);
+  // Off, the plan stays and Zephium AI's usage and credits leave with Work.
+  const ai = $derived(preferences.aiEnabled());
   const amount = (units: string | null | undefined) =>
     usage ? credits(units, usage.unit_scale) : null;
 
@@ -155,108 +157,168 @@
   }
 </script>
 
-{#if !hosted}<p class="note">{m.account_hosted_off()}</p>
+{#if !hosted}{#if ai}<p class="note">{m.account_hosted_off()}</p>{/if}
 {:else}
-  <SettingsGroup title={m.account_usage_group()}>
-    <div class="usage">
-      <div class="usage-copy">
-        <h3>{m.account_usage_title()}</h3>
-        <p>{usageLine}</p>
+  <section class="plan" aria-label={ai ? m.account_usage_group() : m.account_plan_group()}>
+    <div class="head">
+      <div class="title">
+        <span class="eyebrow">{ai ? m.account_usage_group() : m.account_plan_group()}</span>
+        <h3>{planName(currentPlan) ?? m.account_plan_free()}</h3>
+        {#if planLine}<p>{planLine}</p>{/if}
       </div>
-      {#if usage?.used_percent != null}<div
-          class="meter"
-          role="meter"
-          aria-label={m.account_usage_meter()}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={usage.used_percent}
-          aria-valuetext={allowanceLine ?? undefined}
-          data-tone={usageTone(usage.used_percent)}
-        >
-          <span style:inline-size={`${usage.used_percent}%`}></span>
-        </div>
-        {#if allowanceLine}<p class="caption">{allowanceLine}</p>{/if}{/if}
+      {#if billing && paid}<Button
+          pending={busy === "manage"}
+          disabled={!!busy && busy !== "manage"}
+          onclick={() => void session.manage()}>{m.account_billing_manage()}</Button
+        >{/if}
     </div>
-    {#if bonusLine}<SettingsRow title={m.account_bonus_title()}
-        ><span class="value">{bonusLine}</span></SettingsRow
-      >{/if}
-    <SettingsRow title={m.account_extra_title()}
-      ><span class="value"
-        >{positive(usage?.purchased_remaining) && amount(usage?.purchased_remaining)
-          ? m.account_extra_value({ amount: amount(usage?.purchased_remaining)! })
-          : m.account_extra_none()}</span
-      ></SettingsRow
-    >
-    {#if held}<SettingsRow title={m.account_held_title()}
-        ><span class="value">{m.account_held_value({ amount: held })}</span></SettingsRow
-      >{/if}
-    {#if dailyLine}<SettingsRow title={m.account_daily_title()}
-        ><span class="value">{dailyLine}</span></SettingsRow
-      >{/if}
-    {#if History}<History />
-    {:else}<SettingsRow title={m.account_history_row()} description={m.account_history_row_desc()}
-        ><Button size="compact" pending={loadingHistory} onclick={() => void showHistory()}
-          >{m.account_history_show()}</Button
-        ></SettingsRow
-      >{/if}
-  </SettingsGroup>
-  {#if unconfirmed}<p class="note" role="status">{m.account_unsettled()}</p>{/if}
-
-  {#if billing}
-    <SettingsGroup title={m.account_plan_group()}>
-      <SettingsRow title={planName(currentPlan) ?? m.account_plan_free()} description={planLine}>
-        {#if paid}<Button
-            pending={busy === "manage"}
-            disabled={!!busy && busy !== "manage"}
-            onclick={() => void session.manage()}>{m.account_billing_manage()}</Button
-          >{/if}
-      </SettingsRow>
-      {#each upgrades as id (id)}
-        {@const offer = offerFor(id)}
-        {#if offer}<SettingsRow
-            title={offer.name ?? planName(id) ?? id}
-            description={[priced(offer), ...offer.features].filter(Boolean).join(" · ")}
+    {#if ai}<div class="usage">
+        <div class="usage-copy">
+          <h4>{m.account_usage_title()}</h4>
+          <p>{usageLine}</p>
+        </div>
+        {#if usage?.used_percent != null}<div
+            class="meter"
+            role="meter"
+            aria-label={m.account_usage_meter()}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={usage.used_percent}
+            aria-valuetext={allowanceLine ?? undefined}
+            data-tone={usageTone(usage.used_percent)}
           >
-            {#if intervals.length > 1}<SegmentedControl
-                label={m.account_plan_group()}
-                size="compact"
-                options={intervals.map((value) => ({ value, label: intervalName(value) }))}
-                bind:value={interval}
-              />{/if}
+            <span style:inline-size={`${usage.used_percent}%`}></span>
+          </div>
+          {#if allowanceLine}<p class="caption">{allowanceLine}</p>{/if}{/if}
+      </div>{/if}
+    <div class="rows">
+      {#if ai}{#if bonusLine}<SettingsRow title={m.account_bonus_title()}
+            ><span class="value">{bonusLine}</span></SettingsRow
+          >{/if}
+        <SettingsRow title={m.account_extra_title()}
+          ><span class="value"
+            >{positive(usage?.purchased_remaining) && amount(usage?.purchased_remaining)
+              ? m.account_extra_value({ amount: amount(usage?.purchased_remaining)! })
+              : m.account_extra_none()}</span
+          ></SettingsRow
+        >
+        {#if held}<SettingsRow title={m.account_held_title()}
+            ><span class="value">{m.account_held_value({ amount: held })}</span></SettingsRow
+          >{/if}
+        {#if dailyLine}<SettingsRow title={m.account_daily_title()}
+            ><span class="value">{dailyLine}</span></SettingsRow
+          >{/if}
+        {#if History}<History />
+        {:else}<SettingsRow
+            title={m.account_history_row()}
+            description={m.account_history_row_desc()}
+            ><Button size="compact" pending={loadingHistory} onclick={() => void showHistory()}
+              >{m.account_history_show()}</Button
+            ></SettingsRow
+          >{/if}{/if}
+      {#if billing}
+        {#each upgrades as id (id)}
+          {@const offer = offerFor(id)}
+          {#if offer}<SettingsRow
+              title={offer.name ?? planName(id) ?? id}
+              description={[priced(offer), ...offer.features].filter(Boolean).join(" · ")}
+            >
+              {#if intervals.length > 1}<SegmentedControl
+                  label={m.account_plan_group()}
+                  size="compact"
+                  options={intervals.map((value) => ({ value, label: intervalName(value) }))}
+                  bind:value={interval}
+                />{/if}
+              <Button
+                variant="primary"
+                pending={buying === offerKey(offer)}
+                disabled={!!busy}
+                onclick={() => void buy(offer)}>{m.account_upgrade()}</Button
+              >
+            </SettingsRow>{/if}
+        {/each}
+        {#each ai ? topups : [] as offer (offer.id)}
+          {@const price = priceLabel(offer.price)}
+          <SettingsRow title={offer.name ?? m.account_topup_title()} description={topUpLine(offer)}>
             <Button
-              variant="primary"
               pending={buying === offerKey(offer)}
               disabled={!!busy}
-              onclick={() => void buy(offer)}>{m.account_upgrade()}</Button
+              onclick={() => void buy(offer)}>{price ?? m.account_topup_buy()}</Button
             >
-          </SettingsRow>{/if}
-      {/each}
-      {#each topups as offer (offer.id)}
-        {@const price = priceLabel(offer.price)}
-        <SettingsRow title={offer.name ?? m.account_topup_title()} description={topUpLine(offer)}>
-          <Button
-            pending={buying === offerKey(offer)}
-            disabled={!!busy}
-            onclick={() => void buy(offer)}>{price ?? m.account_topup_buy()}</Button
-          >
-        </SettingsRow>
-      {/each}
-    </SettingsGroup>
-    {#if account?.checkout_open}<p class="note" role="status">
-        {m.account_checkout_waiting()}
-      </p>{/if}
-    {#if billingFault}<p class="note" data-tone="error" role="alert">{billingFault}</p>{/if}
-  {/if}
+          </SettingsRow>
+        {/each}
+      {/if}
+    </div>
+  </section>
+  {#if unconfirmed}<p class="note" role="status">{m.account_unsettled()}</p>{/if}
+  {#if billing && account?.checkout_open}<p class="note" role="status">
+      {m.account_checkout_waiting()}
+    </p>{/if}
+  {#if billingFault}<p class="note" data-tone="error" role="alert">{billingFault}</p>{/if}
 {/if}
 
 <style>
-  .usage {
-    display: grid;
-    gap: 12px;
-    padding: 14px 18px;
+  /* The plan is the account's one card: what it is, how much of it is used,
+     and the way to more, before the details under it. */
+  .plan {
+    overflow: hidden;
+    margin-block-end: 34px;
+    border-radius: var(--radius-card);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-card);
   }
 
-  .usage-copy h3 {
+  .head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 20px 18px 0;
+  }
+
+  .title {
+    display: grid;
+    gap: 2px;
+    min-inline-size: 0;
+  }
+
+  .eyebrow {
+    color: var(--color-muted);
+    font-size: var(--text-caption);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  h3 {
+    margin: 0;
+    color: var(--color-text);
+    font-size: 20px;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -0.02em;
+  }
+
+  .title p {
+    margin: 0;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+  }
+
+  .usage {
+    display: grid;
+    gap: 10px;
+    padding: 18px 18px 20px;
+  }
+
+  .usage-copy {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 4px 16px;
+  }
+
+  h4 {
     margin: 0;
     color: var(--color-text);
     font-size: var(--text-page-title);
@@ -267,19 +329,15 @@
   .usage-copy p,
   .value,
   .caption {
-    margin: 2px 0 0;
+    margin: 0;
     color: var(--color-muted);
     font-size: var(--text-label);
     font-variant-numeric: tabular-nums;
   }
 
-  .caption {
-    margin: -4px 0 0;
-  }
-
   .meter {
     overflow: hidden;
-    block-size: 6px;
+    block-size: 8px;
     border-radius: var(--radius-capsule);
     background: var(--color-track);
   }
@@ -298,6 +356,19 @@
 
   .meter[data-tone="full"] span {
     background: var(--color-danger);
+  }
+
+  .rows {
+    position: relative;
+  }
+
+  .rows::before {
+    position: absolute;
+    top: 0;
+    block-size: 1px;
+    background: var(--color-border);
+    content: "";
+    inset-inline: 16px 0;
   }
 
   .note {

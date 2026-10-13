@@ -33,6 +33,7 @@
 <SettingsRow title={m.account_delete()} description={m.account_delete_desc()}>
   <Button
     variant="danger"
+    size="compact"
     disabled={!!busy}
     onclick={() => {
       opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;

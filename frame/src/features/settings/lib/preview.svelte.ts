@@ -4,14 +4,13 @@ type Entry = { id: string; name: string; value: string };
 type SessionDraft = {
   values: Record<string, string | boolean>;
   collections: Record<string, Entry[]>;
-  photo: string | null;
 };
 const sessions = new SvelteMap<string, SessionDraft>();
 function session() {
   const profile = tabs.profile()?.id ?? "initial";
   let draft = sessions.get(profile);
   if (!draft) {
-    const created = $state<SessionDraft>({ values: {}, collections: {}, photo: null });
+    const created = $state<SessionDraft>({ values: {}, collections: {} });
     draft = created;
     sessions.set(profile, draft);
   }
@@ -41,10 +40,6 @@ export function saveEntry(key: string, entry: Entry) {
 export function removeEntry(key: string, id: string) {
   session().collections[key] = entries(key).filter((item) => item.id !== id);
 }
-export const photo = () => sessions.get(scope())?.photo ?? null;
-export function setPhoto(value: string | null) {
-  session().photo = value;
-}
 export function reset() {
   sessions.delete(tabs.profile()?.id ?? "initial");
 }
@@ -61,7 +56,6 @@ export function capture() {
           items.map((item) => ({ ...item })),
         ]),
       ),
-      photo: source?.photo ?? null,
     },
   };
 }

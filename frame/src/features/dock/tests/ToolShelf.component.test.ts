@@ -15,6 +15,7 @@ vi.mock("$shared/ipc/bindings", async () => {
   return mockBindings({
     runCommand: native.run,
     toolsMenuPopup: native.toolsMenu,
+    profilesGet: async () => ({ status: "ok" as const, data: null }),
     sidebarSetWidth: vi.fn(async () => undefined),
   });
 });
@@ -48,7 +49,7 @@ test("the tools stay out of reach until the case is pressed", async () => {
     .toHaveAttribute("aria-current", "true");
 });
 
-test("the profile opens on incognito, then its tools, and the whole list is a secondary click away", async () => {
+test("the profile opens on new profile and incognito, then its tools, and the whole list is a secondary click away", async () => {
   const screen = await render(ToolShelf);
   const tools = screen.getByRole("button", { name: "Tools", exact: true });
   await expect.element(tools).toHaveAttribute("aria-haspopup", "menu");
@@ -57,6 +58,7 @@ test("the profile opens on incognito, then its tools, and the whole list is a se
     item.textContent?.trim(),
   );
   expect(names).toEqual([
+    "New Profile…",
     "Incognito",
     "Notes",
     "Tasks",

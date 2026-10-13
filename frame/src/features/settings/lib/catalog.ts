@@ -268,25 +268,6 @@ export const fields = {
       { value: "7d", label: m.pref_tabs_archive_option_3 },
     ],
   },
-  "profiles.name": {
-    preview: true,
-    section: "profiles",
-    label: m.pref_profiles_name,
-    description: m.pref_profiles_name_help,
-    initial: "",
-  },
-  "profiles.icon": {
-    preview: true,
-    section: "profiles",
-    label: m.pref_profiles_icon,
-    description: m.pref_profiles_icon_help,
-    initial: "Initials",
-    options: [
-      { value: "Initials", label: m.pref_profiles_icon_option_0 },
-      { value: "Icon", label: m.pref_profiles_icon_option_1 },
-      { value: "Photo", label: m.pref_profiles_icon_option_2 },
-    ],
-  },
   "search.provider": {
     section: "search",
     label: m.pref_search_provider,

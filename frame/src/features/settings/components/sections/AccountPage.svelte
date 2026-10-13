@@ -1,21 +1,26 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { accountSession as session, initials, planName } from "$domain/account";
+  import { accountSession as session } from "$domain/account";
+  import { profiles } from "$domain/profiles";
   import * as m from "$shared/i18n/messages";
   import Button from "$shared/ui/Button";
-  import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import AccountDelete from "../account/AccountDelete.svelte";
   import AccountDevices from "../account/AccountDevices.svelte";
+  import AccountEmail from "../account/AccountEmail.svelte";
+  import AccountIdentity from "../account/AccountIdentity.svelte";
   import AccountPlan from "../account/AccountPlan.svelte";
-  import AccountProfile from "../account/AccountProfile.svelte";
   import AccountServer from "../account/AccountServer.svelte";
   import AccountSignIn from "../account/AccountSignIn.svelte";
   import { explainAccountFault } from "../../lib/account";
 
   onMount(() => {
     void session.retain().then(() => session.refresh());
-    return () => session.release();
+    void profiles.retain();
+    return () => {
+      session.release();
+      profiles.release();
+    };
   });
 
   const account = $derived(session.account());
@@ -24,13 +29,6 @@
   const ended = $derived(
     fault?.fault === "signed_out" ? explainAccountFault("signed_out", null) : null,
   );
-  const subtitle = $derived.by(() => {
-    if (!account) return "";
-    const plan = planName(account.plan);
-    return [account.name ? account.email : null, plan ? m.account_plan_line({ plan }) : null]
-      .filter(Boolean)
-      .join(" · ");
-  });
   const signOutFault = $derived(
     fault?.action === "sign_out" ? explainAccountFault(fault.fault, fault.retryAfter) : null,
   );
@@ -51,28 +49,26 @@
       {m.account_update_required()}
     </p>{/if}
   {#if !account.signed_in}
-    {#if moved}<p class="note" role="status">{m.account_email_moved({ email: moved })}</p>
-    {:else if ended}<p class="note" role="status">{ended}</p>{/if}
+    {#if moved}<p class="note centred" role="status">
+        {m.account_email_moved({ email: moved })}
+      </p>
+    {:else if ended}<p class="note centred" role="status">{ended}</p>{/if}
     <AccountSignIn />
   {:else}
-    <div class="identity">
-      <span class="avatar" aria-hidden="true">{initials(account.email, account.name)}</span>
-      <div class="who">
-        <h2>{account.name ?? account.email}</h2>
-        {#if subtitle}<p>{subtitle}</p>{/if}
-      </div>
-    </div>
+    <AccountIdentity />
     {#if account.notice}<p class="note" data-tone={account.notice.warning ? "warning" : undefined}>
         {account.notice.text}
       </p>{/if}
-    <AccountProfile />
     <AccountPlan />
     <AccountDevices />
-    <SettingsGroup title={m.section_account()}>
+    <section class="quiet" aria-labelledby="account-data">
+      <h2 id="account-data">{m.account_data_group()}</h2>
+      <AccountEmail />
       <SettingsRow title={m.account_export_title()} description={m.account_export_desc()}>
         {#if exported === "saved"}<span class="saved" role="status">{m.account_export_saved()}</span
           >{/if}
         <Button
+          size="compact"
           pending={busy === "export"}
           disabled={!!busy && busy !== "export"}
           onclick={() => void exportData()}>{m.account_export()}</Button
@@ -80,13 +76,14 @@
       </SettingsRow>
       <SettingsRow title={m.account_sign_out_title()} description={m.account_sign_out_desc()}>
         <Button
+          size="compact"
           pending={busy === "sign_out"}
           disabled={!!busy && busy !== "sign_out"}
           onclick={() => void session.signOut()}>{m.account_sign_out()}</Button
         >
       </SettingsRow>
       <AccountDelete />
-    </SettingsGroup>
+    </section>
     {#if signOutFault}<p class="note" data-tone="error" role="alert">{signOutFault}</p>{/if}
     {#if exported && exported !== "saved"}<p class="note" data-tone="error" role="alert">
         {exported}
@@ -96,47 +93,39 @@
 {/if}
 
 <style>
-  .identity {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    padding: 8px 0 30px;
-  }
-
-  .avatar {
-    display: grid;
-    flex: none;
-    inline-size: 52px;
-    block-size: 52px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-fill-strong);
-    color: var(--color-text);
-    font-size: 19px;
-    font-weight: 500;
-    letter-spacing: 0.01em;
-    place-items: center;
-    box-shadow: inset 0 0 0 0.5px var(--color-border);
-  }
-
-  .who {
-    min-inline-size: 0;
-  }
-
-  h2 {
+  /* The welcome, or the person's own name, is the page's heading: the
+     section's title stays only for assistive technology. */
+  :global(.settings-view:has(:is(.welcome, .account-identity)) > .settings-page-heading) {
+    position: absolute;
     overflow: hidden;
-    margin: 0;
-    color: var(--color-text);
-    font-size: 18px;
-    font-weight: 500;
-    letter-spacing: -0.02em;
-    text-overflow: ellipsis;
+    inline-size: 1px;
+    block-size: 1px;
+    clip-path: inset(50%);
     white-space: nowrap;
   }
 
-  .who p {
-    margin: 4px 0 0;
+  /* Data and the way out sit under everything else, without a card: they
+     matter, but they are not what anyone opened Account to do. */
+  .quiet {
+    margin-block: 6px 26px;
+  }
+
+  .quiet h2 {
+    margin: 0 0 4px;
+    padding-inline: 16px;
     color: var(--color-muted);
     font-size: var(--text-label);
+    font-weight: 600;
+    line-height: 20px;
+  }
+
+  .quiet :global(.ui-settings-row) {
+    min-block-size: 0;
+    padding-block: 11px;
+  }
+
+  .quiet :global(.ui-settings-copy h3) {
+    font-size: var(--text-body);
   }
 
   .note {
@@ -144,6 +133,10 @@
     color: var(--color-muted);
     font-size: var(--text-label);
     line-height: 1.5;
+  }
+
+  .centred {
+    text-align: center;
   }
 
   .note[data-tone="error"] {

@@ -12,6 +12,7 @@ vi.mock("$shared/ipc/bindings", async () => {
   return mockBindings({
     accountGet: async () => ({ account: state.account!, fault: null, retry_after: null }),
     accountUsageHistory: async () => history,
+    profilesGet: async () => ({ status: "ok" as const, data: null }),
     accountReceipt: async (id: string) => ({
       request: history.requests.find((row) => row.id === id) ?? null,
       fault: null,

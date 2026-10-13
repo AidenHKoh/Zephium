@@ -1,11 +1,15 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
-  import { IncognitoIcon, Settings02Icon, UserIcon } from "@hugeicons/core-free-icons";
+  import { onMount } from "svelte";
+  import { Add01Icon, IncognitoIcon, Settings02Icon, UserIcon } from "@hugeicons/core-free-icons";
   import { commands } from "$shared/ipc/bindings";
   import * as tools from "$session/tools.svelte";
+  import { requestNew } from "$session/profile-sheet.svelte";
   import { tabs } from "$domain/tabs";
+  import { drawn, profiles } from "$domain/profiles";
   import Disclosure from "$shared/ui/Disclosure";
   import Icon from "$shared/ui/Icon";
+  import ProfileAvatar from "$shared/ui/ProfileAvatar";
   import { RECORD_TOOLS, SHELF_TOOLS, toolPresentation } from "../lib/dock-tools";
   import NoticePip from "./NoticePip.svelte";
   import { keymap } from "$domain/keymap";
@@ -14,9 +18,24 @@
 
   let { compact = false }: { compact?: boolean } = $props();
   const groups = [SHELF_TOOLS, RECORD_TOOLS] as const;
-  // Settings closes the stack nearest the avatar; the private window opens it.
+  onMount(() => {
+    void profiles.retain();
+    return () => profiles.release();
+  });
+  // Settings closes the stack nearest the avatar; the private window opens
+  // it, under the other profiles this window could be.
   const count = SHELF_TOOLS.length + RECORD_TOOLS.length + 2;
-  const name = $derived(tabs.profile()?.name ?? "");
+  const name = $derived(tabs.profile()?.name ?? profiles.current()?.name ?? "");
+  const others = $derived(profiles.inPrivate() ? [] : profiles.others());
+  /** The avatar the person chose; until then the foot is the account glyph. */
+  const chosen = $derived.by(() => {
+    const current = profiles.inPrivate() ? null : profiles.current();
+    return current && current.avatar.revision > 0 ? drawn(current) : null;
+  });
+  function newProfile() {
+    requestNew();
+    run("settings.profiles");
+  }
   function pick(kind: (typeof SHELF_TOOLS)[number] | (typeof RECORD_TOOLS)[number]) {
     if (tools.activeTool() === kind) tools.close();
     else tools.open(kind);
@@ -80,19 +99,39 @@
     triggerClass={["case", tools.activeTool() !== null && "case-lit"].filter(Boolean).join(" ")}
     panelClass="shelf-stack"
   >
-    {#snippet trigger()}<Icon
-        icon={UserIcon}
-        size={compact ? 16 : 17}
-        strokeWidth={1.7}
-      />{#if compact}<NoticePip />{/if}{/snippet}
+    {#snippet trigger()}{#if chosen}<ProfileAvatar
+          view={chosen}
+          size={compact ? 36 : 40}
+        />{:else}<Icon
+          icon={UserIcon}
+          size={compact ? 16 : 17}
+          strokeWidth={1.7}
+        />{/if}{#if compact}<NoticePip />{/if}{/snippet}
     {#if !compact && name}
-      <div class="shelf-profile" role="presentation" style:--step={count + 1}>
-        <span class="avatar" aria-hidden="true"
-          ><Icon icon={UserIcon} size={14} strokeWidth={1.8} /></span
-        >
+      <div class="shelf-profile" role="presentation" style:--step={count + others.length + 2}>
+        {#if chosen}<ProfileAvatar view={chosen} size={24} />{:else}<span
+            class="avatar"
+            aria-hidden="true"><Icon icon={UserIcon} size={14} strokeWidth={1.8} /></span
+          >{/if}
         <span class="shelf-profile-name">{name}</span>
       </div>
     {/if}
+    {#each others as profile, index (profile.id)}
+      <button
+        type="button"
+        role="menuitem"
+        class="ui-menu-item shelf-item"
+        style:--step={count + others.length - index}
+        title={compact ? m.profiles_menu_label({ name: profile.name }) : undefined}
+        aria-label={m.profiles_menu_label({ name: profile.name })}
+        onclick={() => void profiles.switchTo(profile.id)}
+      >
+        <span class="ui-menu-icon"><ProfileAvatar view={drawn(profile)} size={20} /></span>
+        {#if !compact}<span>{profile.name}</span>{/if}
+      </button>
+    {/each}
+    {@render row(Add01Icon, m.profiles_menu_new(), null, count, newProfile)}
+    <div class="shelf-rule" role="separator"></div>
     {@render row(
       IncognitoIcon,
       m.profile_incognito(),
@@ -160,6 +199,20 @@
   .shelf :global(.case:active) {
     scale: 0.94;
     transition-duration: var(--motion-instant);
+  }
+
+  /* A chosen picture fills the lit circle; its light still catches the top. */
+  .shelf :global(.case .profile-avatar) {
+    pointer-events: none;
+  }
+
+  .shelf :global(.case:has(.profile-avatar)::after) {
+    position: absolute;
+    border-radius: inherit;
+    box-shadow: var(--shine-top);
+    content: "";
+    inset: 0;
+    pointer-events: none;
   }
 
   /* The same, small, beside the profile's name. */

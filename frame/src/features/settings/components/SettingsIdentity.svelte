@@ -2,12 +2,17 @@
   import { onMount } from "svelte";
   import { accountSession as session, initials, planName } from "$domain/account";
   import * as m from "$shared/i18n/messages";
+  import { identityAvatar, profiles } from "$domain/profiles";
+  import ProfileAvatar from "$shared/ui/ProfileAvatar";
   import * as settings from "../lib/settings-state.svelte";
-  import AccountAvatar from "./AccountAvatar.svelte";
 
   onMount(() => {
     void session.retain();
-    return () => session.release();
+    void profiles.retain();
+    return () => {
+      session.release();
+      profiles.release();
+    };
   });
 
   let account = $derived(session.account());
@@ -34,8 +39,8 @@
         data-plate
         aria-current={current ? "page" : undefined}
         onclick={() => settings.select("account")}
-        >{#if signedIn}<AccountAvatar
-            view={{ initials: initials(account.email, account.name) }}
+        >{#if signedIn}<ProfileAvatar
+            view={identityAvatar(profiles.current(), initials(account.email, account.name))}
           />{:else}<img class="mark" src="/zephium-icon.png" alt="" />{/if}<span class="copy"
           ><strong>{title}</strong><small>{detail}</small></span
         ></button
