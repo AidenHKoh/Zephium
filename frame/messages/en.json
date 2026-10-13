@@ -2127,6 +2127,7 @@
   "work_board_details": "Details",
   "work_board_fewer": "Show less",
   "work_board_pending": "The answer is on its way…",
+  "work_board_waiting": "Waiting for you on {site}",
   "work_board_read_all": "Read it all",
   "work_board_visit": "Open {host}",
   "work_run_did": "What it did",

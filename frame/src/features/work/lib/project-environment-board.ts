@@ -28,6 +28,7 @@ import { RUN, placeRun } from "./run/layout";
 import { localReads, runParts, type PartAsk, type RunInputView, type RunPart } from "./run/parts";
 import { PART, partSize, rowKey, type PartShape } from "./run/part-size";
 import { runSources } from "./run/sources";
+import { siteName } from "./run/site";
 import { computerRows, computerView } from "./parts/computer";
 import { foundByPart } from "./run/found";
 import { provenance } from "./run/provenance";
@@ -439,11 +440,15 @@ export function environmentStages(
       }));
       const headId = `head:${draft.card}`;
       const lead = leadEntries(snapshot, projection, draft.executions);
+      // While the run waits on the person, the answer's place says so, not that it is coming.
+      const waiting = live ? parts.find((part) => part.ask) : undefined;
       const set = runObjects({
         board,
         head: headId,
         live,
-        pending: m.work_board_pending(),
+        pending: waiting
+          ? m.work_board_waiting({ site: siteName(waiting.host ?? waiting.title) })
+          : m.work_board_pending(),
         lead: lead.entries,
         ...(options.fetched ? { fetched: options.fetched } : {}),
       });

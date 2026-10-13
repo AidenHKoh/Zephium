@@ -176,6 +176,8 @@ export type PartView = {
   cited?: readonly { key: string; url: string; where: string; title: string; opened?: boolean }[];
   /** The rows are one web search's results, not the sites research cited. */
   search?: boolean;
+  /** Every result is on one site: its mark says so, so no row repeats its name. */
+  oneSite?: boolean;
   /** What the run searched for, and how many searches the row stands for. */
   query?: string;
   queries?: number;

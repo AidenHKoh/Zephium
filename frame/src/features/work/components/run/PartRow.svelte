@@ -237,7 +237,7 @@
               <span class="result">{row.title || row.where}</span>
               {#if row.opened}<span class="went" aria-label={m.work_part_result_opened()}
                   ><Icon icon={ArrowUpRight01Icon} size={12} /></span
-                >{:else}<span class="where">{row.where}</span>{/if}
+                >{:else if !part.oneSite}<span class="where">{row.where}</span>{/if}
             </button>
           </li>{:else}{#if working}{#each [0, 1, 2] as index (index)}<li
                 class="pending"

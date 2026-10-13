@@ -860,6 +860,9 @@ export function environmentParts(
                       cited: searchRows(part.sources),
                       citedCount: part.sources.length,
                       search: true,
+                      ...(new Set(part.sources.map((row) => row.where)).size === 1
+                        ? { oneSite: true }
+                        : {}),
                       ...(part.query ? { query: part.query } : {}),
                       ...(part.queries ? { queries: part.queries } : {}),
                     }
