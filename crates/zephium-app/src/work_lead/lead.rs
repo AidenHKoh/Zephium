@@ -286,6 +286,7 @@ where
         // A turn that ran out of output is asked again once, briefly.
         let mut ran_long = false;
         let mut finish_candidate = false;
+        let mut finish_repaired = false;
         loop {
             if self.run.cancelled().await {
                 return Ok(WorkAttemptStatus::Cancelled);
@@ -468,6 +469,18 @@ where
                 Err(status) => return Ok(status),
             };
             finish_candidate = super::finalize::after_browser_result(&calls, &results);
+            if finish_candidate {
+                finish_repaired = false;
+            } else if finishing.is_some()
+                && !finish_repaired
+                && calls.iter().all(|call| call.name == "finish")
+                && results.iter().any(|result| result.is_error)
+            {
+                // Repair the final object's shape against the same compact
+                // evidence; restoring all tools invited another investigation.
+                finish_candidate = true;
+                finish_repaired = true;
+            }
             messages.push(WorkModelMessage::ToolResults(results));
             if finished {
                 return Ok(WorkAttemptStatus::Succeeded);

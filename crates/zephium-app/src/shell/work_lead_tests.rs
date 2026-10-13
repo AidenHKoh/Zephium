@@ -2987,6 +2987,12 @@ impl WorkModelClient for NativeRecordFinish {
                             json!({"reply":{"headline":"Lost table","text":"The table is complete."},
                             "sheet":{"rows":["silently lost"]},"say":"Done","title":"Wrong result"}),
                         ),
+                        5 => call(
+                            "long-point",
+                            "finish",
+                            json!({"reply":{"headline":"Lost table","text":"Both offers were read.","points":["x".repeat(141)]},
+                                "reply_sources":["s1"],"say":"Done","title":"Offers"}),
+                        ),
                         4 => call(
                             "unknown-source",
                             "finish",
@@ -2999,8 +3005,19 @@ impl WorkModelClient for NativeRecordFinish {
                     }
                 }
                 2 if self.0 != 0 => {
+                    if matches!(self.0, 2 | 4 | 5) {
+                        assert!(
+                            request
+                                .tools
+                                .iter()
+                                .any(|tool| tool.name == "continue_work"),
+                            "one final-shape repair must retain the compact tool set"
+                        );
+                    }
                     assert!(
-                        seen.contains(if self.0 == 1 {
+                        seen.contains(if self.0 == 5 {
+                            "140"
+                        } else if self.0 == 1 {
                             "use data.records"
                         } else if self.0 == 4 {
                             "is not a source of this run"
@@ -3051,6 +3068,10 @@ async fn cited_reply_and_records_finish_in_one_call_with_original_evidence() {
 #[tokio::test]
 async fn unknown_finish_reply_source_refuses_before_early_publication() {
     native_record_finish_fixture(4).await;
+}
+#[tokio::test]
+async fn overlong_final_reply_point_repairs_once_without_restoring_browsing_tools() {
+    native_record_finish_fixture(5).await;
 }
 async fn native_record_finish_fixture(mode: u8) {
     let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
