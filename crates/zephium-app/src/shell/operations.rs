@@ -318,17 +318,26 @@ impl Shell {
         let Some(active) = self.windows.focused().map(|window| window.active) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         };
-        if new_tab && self.tab_preferences.switch_to_open {
-            if let Some(open) = self.open_tab_for(&input) {
-                return self.operation_activate(open);
-            }
-        }
         if let Some(id) = active.filter(|_| !new_tab) {
             // Navigating in place also returns from a browser page, which is
             // what opening a row from the history library should do.
             return self.operation_navigate(id, input);
         }
-        let Some((id, mut effects)) = self.open_tab_with_id() else {
+        self.open_url_in_new_tab_at(input, self.tab_preferences.new_position)
+    }
+
+    /// `input` is already a classified address.
+    fn open_url_in_new_tab_at(
+        &mut self,
+        input: String,
+        position: tabs::NewTabPosition,
+    ) -> OperationDisposition {
+        if self.tab_preferences.switch_to_open {
+            if let Some(open) = self.open_tab_for(&input) {
+                return self.operation_activate(open);
+            }
+        }
+        let Some((id, mut effects)) = self.open_tab_at(position) else {
             // Reaching the bounded item limit must not repurpose and navigate
             // the caller's existing active tab.
             return operation_result(
@@ -384,9 +393,19 @@ impl Shell {
         if self.private_shown() {
             let _ = self.operation_leave_private();
         }
+        // A browser page in front hands the whole batch to Browse at once.
+        if self.active_browser_page().is_some() && !self.browser_return_ready {
+            self.browser_after_return = Some(Box::new(Command::OpenExternal(urls)));
+            let _ = self.operation_show_browser_page(None);
+            return;
+        }
+        let position = self
+            .tab_preferences
+            .external_position
+            .unwrap_or(self.tab_preferences.new_position);
         for url in urls.into_iter().take(limit) {
-            if zephium_core::navigation::external_target(&url).is_some() {
-                let _ = self.operation_open_url(url, true);
+            if let Some(url) = zephium_core::navigation::external_target(&url) {
+                let _ = self.open_url_in_new_tab_at(url.to_string(), position);
             }
         }
     }

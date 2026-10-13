@@ -533,6 +533,12 @@ impl Items {
         }
     }
 
+    pub fn set_last_active(&mut self, id: ItemId, at_ms: u64) {
+        if let Some(tab) = self.tab_mut(id) {
+            tab.last_active_ms = Some(at_ms);
+        }
+    }
+
     /// Roll back the optimistic `view` bit when the native engine cannot
     /// create a controller. The next explicit navigation/activation can then
     /// retry instead of leaving an unrecoverable blank tab.

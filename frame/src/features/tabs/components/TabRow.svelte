@@ -212,7 +212,8 @@
 
   /* While the close control shows, the title dissolves before it rather than
      running underneath it. */
-  .browse-tab:is(:hover, :focus-within) .tab-label {
+  .browse-tab:is(:hover, :focus-within) .tab-label,
+  :global([data-close-buttons="always"]) .browse-tab:has(.tab-close) .tab-label {
     margin-inline-end: 22px;
   }
 
@@ -241,6 +242,7 @@
     color: var(--color-text);
   }
 
+  :global([data-close-buttons="always"]) .tab-close,
   .tab-close:focus-visible {
     opacity: 1;
   }

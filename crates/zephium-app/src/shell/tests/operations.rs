@@ -1133,6 +1133,7 @@ fn keyboard_selection_walks_the_sidebar_from_favorites_through_pinned_folders() 
         url: format!("https://{host}/"),
         title: host.into(),
         zoom: 1.0,
+        last_active_ms: None,
     };
     let pinned = Placement::Space {
         space,
@@ -1527,4 +1528,146 @@ fn a_new_tab_opened_from_settings_fills_the_window_with_the_new_tab() {
         .find(|call| call.starts_with("layout@"))
         .unwrap();
     assert!(!last_layout.contains(&page.to_string()), "{last_layout}");
+}
+
+fn open_page(shell: &mut Shell, screen: &Screen, url: &str) -> ItemId {
+    shell.handle(Command::Run("tab.new".into()));
+    let id = active_id(screen);
+    shell.handle(Command::Navigate {
+        id,
+        input: url.into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id,
+        url: url.into(),
+    }));
+    shell.handle(Command::Engine(EngineEvent::LoadingChanged {
+        id,
+        loading: false,
+    }));
+    id
+}
+
+#[test]
+fn idle_today_tabs_close_into_history_and_tabs_in_use_stay() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let old = open_page(&mut shell, &screen, "https://old.example/");
+    let kept_by_engine = open_page(&mut shell, &screen, "https://form.example/");
+    let recent = open_page(&mut shell, &screen, "https://recent.example/");
+    let front = open_page(&mut shell, &screen, "https://front.example/");
+    let now = crate::shell::tabs::unix_millis().unwrap();
+    assert!(shell.items.tab(front).unwrap().last_active_ms.unwrap() >= now - 1_000);
+    let eight_days_ago = now - 8 * 24 * 60 * 60 * 1000;
+    for id in [old, kept_by_engine, front] {
+        shell.items.set_last_active(id, eight_days_ago);
+    }
+    shell.items.set_last_active(recent, now - 60 * 60 * 1000);
+
+    shell.handle(Command::Tick);
+    assert!(shell.items.tab(old).is_some(), "never is the default");
+
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.archive".into(),
+        value: "7d".into(),
+    });
+    // A page the engine refused to discard holds state a reload would lose.
+    shell.residency.discard_protected_until.insert(
+        kept_by_engine,
+        std::time::Instant::now() + std::time::Duration::from_secs(60),
+    );
+    shell.handle(Command::Tick);
+    assert!(shell.items.tab(old).is_none());
+    assert_eq!(
+        shell.recently_closed.last().map(|tab| tab.url.as_str()),
+        Some("https://old.example/")
+    );
+    for id in [kept_by_engine, recent, front] {
+        assert!(shell.items.tab(id).is_some());
+    }
+    assert!(shell.items.tab(front).unwrap().last_active_ms.unwrap() >= now);
+    assert_eq!(active_id(&screen), front);
+}
+
+#[test]
+fn a_tab_without_a_recorded_time_starts_its_clock_when_first_seen() {
+    let store = Arc::new(FakeStore::default());
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.archive".into(), "12h".into());
+    let (mut shell, _engine, screen) = setup_with(store);
+    shell.handle(Command::Bootstrap);
+    open_page(&mut shell, &screen, "https://front.example/");
+    let space = shell.windows.focused().unwrap().space;
+    let legacy = ItemId::generate();
+    assert!(shell.items.insert_unloaded_tab(
+        legacy,
+        Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        },
+        url::Url::parse("https://legacy.example/").unwrap(),
+        "Legacy",
+    ));
+    assert_eq!(shell.items.tab(legacy).unwrap().last_active_ms, None);
+    shell.handle(Command::Tick);
+    let stamped = shell.items.tab(legacy).unwrap().last_active_ms;
+    assert!(stamped.is_some_and(|ms| ms + 1_000 >= crate::shell::tabs::unix_millis().unwrap()));
+}
+
+#[test]
+fn links_from_other_apps_follow_new_tabs_unless_placed_on_their_own() {
+    let store = Arc::new(FakeStore::default());
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.new-position".into(), "after-current".into());
+    let (mut shell, _engine, screen) = setup_with(store);
+    shell.handle(Command::Bootstrap);
+    let first = open_page(&mut shell, &screen, "https://first.example/");
+    open_page(&mut shell, &screen, "https://second.example/");
+    let today = |screen: &Screen| {
+        last(screen)
+            .nodes
+            .iter()
+            .filter(|node| node.section == SidebarSectionView::Today && node.parent_id.is_none())
+            .filter_map(|node| ItemId::parse(&node.id))
+            .collect::<Vec<_>>()
+    };
+    let follows = |screen: &Screen, opened: ItemId| {
+        let order = today(screen);
+        let at = order.iter().position(|id| *id == first).unwrap();
+        order.get(at + 1) == Some(&opened)
+    };
+
+    // By default a handed-over link lands where a new tab would.
+    shell.handle(Command::Activate(first));
+    shell.handle(Command::OpenExternal(
+        vec!["https://beside.example/".into()],
+    ));
+    assert!(follows(&screen, active_id(&screen)));
+
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.external-position".into(),
+        value: "end".into(),
+    });
+    shell.handle(Command::Activate(first));
+    shell.handle(Command::OpenExternal(vec!["https://end.example/".into()]));
+    let end = active_id(&screen);
+    assert_eq!(today(&screen).last(), Some(&end));
+
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.new-position".into(),
+        value: "end".into(),
+    });
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.external-position".into(),
+        value: "after-current".into(),
+    });
+    shell.handle(Command::Activate(first));
+    shell.handle(Command::OpenExternal(vec!["https://next.example/".into()]));
+    assert!(follows(&screen, active_id(&screen)));
 }

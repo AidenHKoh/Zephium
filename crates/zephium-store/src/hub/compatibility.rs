@@ -83,9 +83,9 @@ impl Hub {
                     PersistedKind::Folder { name } => {
                         ("folder", Some(name.as_str()), None, None, 1.0)
                     }
-                    PersistedKind::Tab { url, title, zoom } => {
-                        ("tab", None, Some(url.as_str()), Some(title.as_str()), *zoom)
-                    }
+                    PersistedKind::Tab {
+                        url, title, zoom, ..
+                    } => ("tab", None, Some(url.as_str()), Some(title.as_str()), *zoom),
                     PersistedKind::BrowserTab { .. } => {
                         return Err(invalid_data(
                             "legacy session writer cannot encode browser-owned tabs",
@@ -263,6 +263,7 @@ impl Hub {
                         url,
                         title: title.unwrap_or_default(),
                         zoom,
+                        last_active_ms: None,
                     },
                     _ => {
                         return Err(invalid_data("compatibility item has an invalid kind"));

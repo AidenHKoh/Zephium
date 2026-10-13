@@ -18,10 +18,36 @@ pub(super) enum AfterClose {
     Recent,
 }
 
+/// How long a Today tab may go unused before it closes into History.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum ArchiveAfter {
+    #[default]
+    Never,
+    HalfDay,
+    Day,
+    Week,
+}
+
+impl ArchiveAfter {
+    pub(super) fn millis(self) -> Option<u64> {
+        const HOUR: u64 = 60 * 60 * 1000;
+        match self {
+            Self::Never => None,
+            Self::HalfDay => Some(12 * HOUR),
+            Self::Day => Some(24 * HOUR),
+            Self::Week => Some(7 * 24 * HOUR),
+        }
+    }
+}
+
 /// The person's choices about how tabs open and close.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct TabPreferences {
     pub(super) new_position: NewTabPosition,
+    /// Where a link handed over by another application opens; none
+    /// follows `new_position`.
+    pub(super) external_position: Option<NewTabPosition>,
+    pub(super) archive_after: ArchiveAfter,
     pub(super) after_close: AfterClose,
     /// Opening an address already open in this space goes to that tab.
     pub(super) switch_to_open: bool,
@@ -33,6 +59,8 @@ impl Default for TabPreferences {
     fn default() -> Self {
         Self {
             new_position: NewTabPosition::default(),
+            external_position: None,
+            archive_after: ArchiveAfter::default(),
             after_close: AfterClose::default(),
             switch_to_open: true,
             start_with_new_tab: false,
@@ -48,6 +76,8 @@ impl TabPreferences {
             "tabs.after-close",
             "tabs.switch-to-open",
             "tabs.startup",
+            "tabs.external-position",
+            "tabs.archive",
         ] {
             if let Some(value) = store.app_setting(key) {
                 preferences.apply(key, &value);
@@ -68,6 +98,15 @@ impl TabPreferences {
             ("tabs.after-close", "recent") => self.after_close = AfterClose::Recent,
             ("tabs.switch-to-open", value) => self.switch_to_open = value == "true",
             ("tabs.startup", value) => self.start_with_new_tab = value == "new-tab",
+            ("tabs.external-position", "new-tab") => self.external_position = None,
+            ("tabs.external-position", "end") => self.external_position = Some(NewTabPosition::End),
+            ("tabs.external-position", "after-current") => {
+                self.external_position = Some(NewTabPosition::AfterCurrent)
+            }
+            ("tabs.archive", "never") => self.archive_after = ArchiveAfter::Never,
+            ("tabs.archive", "12h") => self.archive_after = ArchiveAfter::HalfDay,
+            ("tabs.archive", "1d") => self.archive_after = ArchiveAfter::Day,
+            ("tabs.archive", "7d") => self.archive_after = ArchiveAfter::Week,
             _ => {}
         }
     }
@@ -88,6 +127,13 @@ impl Shell {
     }
 
     pub(super) fn open_tab_with_id(&mut self) -> Option<(ItemId, Vec<Effect>)> {
+        self.open_tab_at(self.tab_preferences.new_position)
+    }
+
+    pub(super) fn open_tab_at(
+        &mut self,
+        position: NewTabPosition,
+    ) -> Option<(ItemId, Vec<Effect>)> {
         if self
             .windows
             .focused()
@@ -106,7 +152,7 @@ impl Shell {
         if !self.items.insert_tab(id, today) {
             return None;
         }
-        if self.tab_preferences.new_position == NewTabPosition::AfterCurrent {
+        if position == NewTabPosition::AfterCurrent {
             let roots = self.items.roots(today);
             if let Some(at) =
                 current.and_then(|current| roots.iter().position(|root| *root == current))
@@ -137,10 +183,17 @@ impl Shell {
             return Vec::new();
         };
         let prev = win.active.replace(id).filter(|p| *p != id);
+        let now = unix_millis();
         if let Some(prev) = prev {
             self.items.set_lifecycle(prev, Lifecycle::Inactive);
+            if let Some(now) = now {
+                self.items.set_last_active(prev, now);
+            }
         }
         self.items.set_lifecycle(id, Lifecycle::Active);
+        if let Some(now) = now {
+            self.items.set_last_active(id, now);
+        }
         self.cancel_page_permission_if_not_foreground();
         self.residency.recent.retain(|r| *r != id);
         self.residency.recent.push(id);
@@ -157,11 +210,7 @@ impl Shell {
         self.native_openers.remove(&id);
         // An Essential is kept, not closed: the page ends and the site stays.
         let kept = self.kept_slot(id);
-        let closed_at_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
-            .filter(|ms| (1_000..=9_007_199_254_740_991).contains(ms));
+        let closed_at_ms = unix_millis();
         let closed = kept
             .is_none()
             .then(|| self.windows.focused())
@@ -675,4 +724,13 @@ impl Shell {
         fx.extend(self.items.navigate(id, url));
         self.commit(fx);
     }
+}
+
+/// Wall-clock now in Unix milliseconds, within the range persisted times use.
+pub(super) fn unix_millis() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+        .filter(|ms| (1_000..=zephium_core::session::MAX_EXACT_MS).contains(ms))
 }

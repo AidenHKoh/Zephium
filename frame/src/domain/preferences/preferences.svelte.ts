@@ -41,6 +41,9 @@ const defaults = {
   "performance.memory": "balanced",
   "performance.exceptions": "",
   "updates.auto-check": "true",
+  "tabs.archive": "never",
+  "tabs.external-position": "new-tab",
+  "tabs.close-button": "hover",
 } as const;
 export type PreferenceKey = keyof typeof defaults;
 const values = $state<Record<PreferenceKey, string>>({ ...defaults });

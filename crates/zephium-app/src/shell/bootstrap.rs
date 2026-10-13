@@ -311,6 +311,7 @@ impl Shell {
         self.apply_deferred_web_extensions();
         let waiting = std::mem::take(&mut self.pending_external);
         self.open_external(waiting);
+        self.archive_idle_tabs();
         if !retired_settings.is_empty() {
             self.schedule_persist();
         }

@@ -3,6 +3,7 @@
   import { SvelteSet } from "svelte/reactivity";
   import type { SidebarSectionView, TabView } from "$shared/ipc/bindings";
   import { tabs } from "$domain/tabs";
+  import { preferences } from "$domain/preferences";
   import type { Snippet } from "svelte";
   import type { TabTileProps } from "../lib/tab-tile";
   import FolderRow from "./FolderRow.svelte";
@@ -143,6 +144,7 @@
   class={["tab-list", variant === "essentials" && "tab-list-flush"]}
   aria-label={label}
   hidden={entries.length === 0}
+  data-close-buttons={preferences.value("tabs.close-button")}
 >
   <ul
     bind:this={list}

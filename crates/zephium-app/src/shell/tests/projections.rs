@@ -18,6 +18,7 @@ fn tab(id: ItemId, parent: Option<ItemId>, placement: Placement, host: &str) -> 
             url: format!("https://{host}/"),
             title: host.into(),
             zoom: 1.0,
+            last_active_ms: None,
         },
     }
 }

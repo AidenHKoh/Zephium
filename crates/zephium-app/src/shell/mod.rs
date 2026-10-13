@@ -1,5 +1,6 @@
 //! Authoritative browser-shell state machine and effect coordination.
 
+mod archive;
 mod blocker;
 mod blocker_sites;
 mod blocker_statistics;
@@ -1207,6 +1208,7 @@ impl Shell {
                 if extension_actions.rejected {
                     crate::diagnostic!("extensions: maintenance could not refresh toolbar actions");
                 }
+                self.archive_idle_tabs();
                 if self.maintain_views() {
                     self.project_items();
                 }

@@ -40,6 +40,9 @@ pub const KEYS: &[&str] = &[
     "updates.auto-check",
     "notice.seen-version",
     "notice.security-dismissed",
+    "tabs.archive",
+    "tabs.external-position",
+    "tabs.close-button",
 ];
 
 /// Interface languages a person may choose, by BCP 47 tag. One without a
@@ -74,6 +77,11 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "ui.density" => matches!(value, "comfortable" | "compact"),
         "ui.text-size" => matches!(value, "small" | "default" | "large"),
         "tabs.new-position" => matches!(value, "end" | "after-current"),
+        // Where a link handed over by another application opens.
+        "tabs.external-position" => matches!(value, "new-tab" | "end" | "after-current"),
+        // How long a Today tab may sit unused before it closes into History.
+        "tabs.archive" => matches!(value, "never" | "12h" | "1d" | "7d"),
+        "tabs.close-button" => matches!(value, "hover" | "always"),
         "tabs.after-close" => matches!(value, "next" | "previous" | "recent"),
         // A new tab in front at launch; everything restored stays in the sidebar.
         "tabs.startup" => matches!(value, "continue" | "new-tab"),
@@ -246,5 +254,28 @@ mod tests {
         ] {
             assert!(!value_allowed(key, value));
         }
+    }
+
+    #[test]
+    fn tab_options_are_closed_choices() {
+        for key in [
+            "tabs.archive",
+            "tabs.external-position",
+            "tabs.close-button",
+        ] {
+            assert!(KEYS.contains(&key));
+        }
+        for value in ["never", "12h", "1d", "7d"] {
+            assert!(value_allowed("tabs.archive", value));
+        }
+        for value in ["", "0", "30d", "12 hours", "Never"] {
+            assert!(!value_allowed("tabs.archive", value), "{value:?}");
+        }
+        for value in ["new-tab", "end", "after-current"] {
+            assert!(value_allowed("tabs.external-position", value));
+        }
+        assert!(!value_allowed("tabs.external-position", "window"));
+        assert!(value_allowed("tabs.close-button", "always"));
+        assert!(!value_allowed("tabs.close-button", "never"));
     }
 }

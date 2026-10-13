@@ -23,6 +23,8 @@ pub const MAX_RECENTLY_CLOSED_TABS: usize = 32;
 pub const MAX_SESSION_NAME_CHARS: usize = 256;
 pub const MAX_ITEM_TREE_DEPTH: usize = 64;
 pub const MAX_SPLIT_DEPTH: usize = 64;
+/// Persisted wall-clock times stay within JavaScript's exact integer range.
+pub const MAX_EXACT_MS: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionState {
@@ -68,6 +70,9 @@ pub enum PersistedKind {
         url: String,
         title: String,
         zoom: f64,
+        /// Absent on legacy snapshots and for tabs never in front.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_active_ms: Option<u64>,
     },
     /// Browser-owned pages have no navigable URL or native content view.
     BrowserTab {
@@ -206,6 +211,7 @@ fn collect(items: &Items, placement: Placement, out: &mut Vec<PersistedItem>) {
                         url: url.to_string(),
                         title: tab.title.clone(),
                         zoom: tab.zoom,
+                        last_active_ms: tab.last_active_ms,
                     },
                 },
             },
@@ -289,7 +295,12 @@ pub fn restore(state: SessionState) -> Restored {
             PersistedKind::Folder { name } => ItemKind::Folder {
                 name: bounded_name(&name, "Folder"),
             },
-            PersistedKind::Tab { url, title, zoom } => {
+            PersistedKind::Tab {
+                url,
+                title,
+                zoom,
+                last_active_ms,
+            } => {
                 let Ok(url) = Url::parse(&url) else {
                     continue;
                 };
@@ -304,6 +315,8 @@ pub fn restore(state: SessionState) -> Restored {
                 } else {
                     1.0
                 };
+                tab.last_active_ms =
+                    last_active_ms.filter(|ms| (1_000..=MAX_EXACT_MS).contains(ms));
                 ItemKind::Tab(tab)
             }
             PersistedKind::BrowserTab { page } => {
@@ -726,6 +739,57 @@ mod tests {
     }
 
     #[test]
+    fn a_tabs_last_active_time_survives_restore_and_legacy_rows_have_none() {
+        let profile = ProfileId::from(1);
+        let space = SpaceId::from(2);
+        let tab = |id: u128, last_active_ms: Option<u64>| PersistedItem {
+            id: ItemId::from(id),
+            parent: None,
+            placement: today(space),
+            kind: PersistedKind::Tab {
+                url: format!("https://example.com/{id}"),
+                title: "E".into(),
+                zoom: 1.0,
+                last_active_ms,
+            },
+        };
+        let state = SessionState {
+            profiles: vec![PersistedProfile {
+                id: profile,
+                name: "P".into(),
+                kind: ProfileKind::Default,
+            }],
+            spaces: vec![PersistedSpace {
+                id: space,
+                profile,
+                name: "S".into(),
+            }],
+            items: vec![tab(10, Some(1_700_000_000_000)), tab(11, None)],
+            ..SessionState::default()
+        };
+        let restored = restore(state.clone());
+        assert_eq!(
+            restored.items.tab(ItemId::from(10)).unwrap().last_active_ms,
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(canonicalize(state.clone()), state);
+        let json = serde_json::to_string(&state.items[1]).unwrap();
+        assert!(!json.contains("last_active_ms"));
+        let legacy: PersistedItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(legacy, state.items[1]);
+
+        let mut hostile = state;
+        hostile.items = vec![tab(12, Some(MAX_EXACT_MS + 1)), tab(13, Some(0))];
+        let restored = restore(hostile);
+        for id in [12, 13] {
+            assert_eq!(
+                restored.items.tab(ItemId::from(id)).unwrap().last_active_ms,
+                None
+            );
+        }
+    }
+
+    #[test]
     fn restore_drops_dangling_references() {
         let state = SessionState {
             profiles: vec![],
@@ -742,6 +806,7 @@ mod tests {
                     url: "https://example.com/".into(),
                     title: "E".into(),
                     zoom: 1.0,
+                    last_active_ms: None,
                 },
             }],
             active_space: Some(SpaceId::from(2)),
@@ -799,6 +864,7 @@ mod tests {
                         url: "https://example.com/".into(),
                         title: format!("\u{202e}Example\0{}", "y".repeat(600)),
                         zoom: f64::INFINITY,
+                        last_active_ms: None,
                     },
                 },
                 PersistedItem {
@@ -809,6 +875,7 @@ mod tests {
                         url: "file:///etc/passwd".into(),
                         title: "Local file".into(),
                         zoom: 1.0,
+                        last_active_ms: None,
                     },
                 },
                 PersistedItem {
@@ -819,6 +886,7 @@ mod tests {
                         url: "https://private.example/".into(),
                         title: "Private".into(),
                         zoom: 1.0,
+                        last_active_ms: None,
                     },
                 },
             ],
