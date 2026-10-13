@@ -585,7 +585,7 @@ fn eval_action_targets(tools: &[zephium_core::work::model::WorkModelTool]) -> se
 
 fn action_trace(trace: &serde_json::Value) -> Option<serde_json::Value> {
     let outputs = trace.get("output_tools")?.as_array()?;
-    if !outputs.iter().any(|tool| tool["tool"] == "act") {
+    if outputs.is_empty() {
         return None;
     }
     let mut observation = None;
@@ -622,12 +622,60 @@ fn action_trace(trace: &serde_json::Value) -> Option<serde_json::Value> {
             }
         }
     }
-    let summary = serde_json::json!({"call_index":trace["call_index"],"base_observation":observation?,"updates":updates,"proposals":outputs,"allowed_targets":trace["allowed_targets"]});
+    let observation = observation?;
+    let mut summary = serde_json::json!({"call_index":trace["call_index"],"base_observation":observation,"updates":updates,"proposals":outputs,"allowed_targets":trace["allowed_targets"]});
+    if summary.to_string().len() > 24 * 1024 {
+        let mut compact = String::new();
+        for line in observation.lines() {
+            let role = line.split_ascii_whitespace().nth(3).unwrap_or("");
+            if (line.starts_with("ZSEM3 ")
+                || line.starts_with("F ")
+                || matches!(
+                    role,
+                    "r=button"
+                        | "r=combobox"
+                        | "r=listbox"
+                        | "r=option"
+                        | "r=checkbox"
+                        | "r=radio"
+                        | "r=textbox"
+                        | "r=searchbox"
+                        | "r=heading"
+                        | "r=status"
+                ))
+                && compact.len() + line.len() + 1 <= 12 * 1024
+            {
+                compact.push_str(line);
+                compact.push('\n');
+            }
+        }
+        if !compact.starts_with("ZSEM3 ") {
+            return None;
+        }
+        summary["base_observation"] = compact.into();
+        summary["base_observation_limited"] = true.into();
+        summary["updates"] = updates
+            .iter()
+            .rev()
+            .take(2)
+            .rev()
+            .map(|update| {
+                let bytes = update.to_string().len();
+                if bytes <= 2048 {
+                    update.clone()
+                } else {
+                    serde_json::json!({"omitted":true,"bytes":bytes})
+                }
+            })
+            .collect::<Vec<_>>()
+            .into();
+    }
     (summary.to_string().len() <= 24 * 1024).then_some(summary)
 }
 
 fn remember_eval_page_trace(local: &mut EvalDiagnostics, trace: serde_json::Value) {
     if let Some(summary) = action_trace(&trace) {
+        local.action_traces_limited |= summary["base_observation_limited"] == true;
         if local.action_traces.len() == 64 {
             local.action_traces.remove(0);
             local.action_traces_limited = true;
@@ -864,6 +912,45 @@ mod page_trace_tests {
         oversized["messages"] =
             serde_json::json!([{"parts":[{"text":format!("ZSEM3 {}","x".repeat(24*1024))}]}]);
         assert!(action_trace(&oversized).is_none());
+    }
+
+    #[test]
+    fn large_action_context_keeps_complete_control_states_and_proposals() {
+        let mut observation =
+            "ZSEM3 content=untrusted nodes=322\nF f1 origin=\"https://fixture.example/\"\n"
+                .to_owned();
+        for index in 1..=320 {
+            observation.push_str(&format!(
+                "N @a{index} p=- r=paragraph text=\"{}\"\n",
+                "x".repeat(120)
+            ));
+        }
+        observation.push_str("N @a321 p=- r=button ops=click name=\"Price low to high\"\n");
+        let trace = serde_json::json!({"call_index":7,"output_tools":[{"tool":"act","arguments":{"actions":[{"kind":"click","target":"@a321"}]}}],
+            "messages":[{"parts":[{"text":observation}]}]});
+        let summary = action_trace(&trace).unwrap();
+        assert_eq!(summary["base_observation_limited"], true);
+        assert!(summary["base_observation"]
+            .as_str()
+            .unwrap()
+            .contains("name=\"Price low to high\"\n"));
+        assert_eq!(
+            summary["proposals"][0]["arguments"]["actions"][0]["target"],
+            "@a321"
+        );
+        assert!(summary.to_string().len() < 24 * 1024);
+        let mut after = trace.clone();
+        after["output_tools"][0]["tool"] = "extract".into();
+        assert!(action_trace(&after).unwrap()["base_observation"]
+            .as_str()
+            .unwrap()
+            .contains("Price low to high"));
+        let mut local = EvalDiagnostics::default();
+        remember_eval_page_trace(&mut local, trace);
+        assert!(local.action_traces_limited);
+        assert!(!export_eval_page_traces(false, &local)
+            .to_string()
+            .contains("Price low to high"));
     }
 
     #[test]
