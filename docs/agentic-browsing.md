@@ -333,18 +333,19 @@ equivalence or cross-site Work storage sharing with macOS.
 
 ### 4.3 Work's own website data
 
-Pages Work opens without the person's session (public reads, page tasks on
-sites the person is not signed in to through Work, sites marked Never or
-declined for the run, and search results pages) use **Work's own website
-data**: one persistent store per durable Zephium profile, separate from the
+Pages Work opens without the person's session (public reads, public page
+tasks, sites marked Never or declined for the run, and search results pages)
+use **Work's own website data**: one persistent store per durable Zephium profile, separate from the
 profile's own store and from every other profile's. It remembers what a
 person-free browser would remember between visits: solved bot checks such as
 DataDome or Cloudflare clearance cookies, consent choices such as Google's EU
 consent, and site preferences. Earlier Work kept these pages in per-run
 ephemeral storage, so every run met the same consent wall and bot check again
 and failed on sites that only let a returning browser through. Work's store
-holds no session of the person's: it is signed in somewhere only if the person
-signs in inside a Work page.
+holds no session of the person's. A site the run works on as the person (their
+inbox, issues, messages) opens in the profile's own store even when they are
+signed out there, after the run's entry question, so a sign-in they make during
+Work is theirs in normal browsing too, and the reverse.
 
 - macOS: a persistent `WKWebsiteDataStore` from `dataStoreForIdentifier:` with
   an identifier derived from the profile (SHA-256 of a domain tag and the

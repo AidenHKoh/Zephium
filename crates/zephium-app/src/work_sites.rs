@@ -408,6 +408,8 @@ pub struct RunSites {
     decided: BTreeMap<String, Option<String>>,
     /// Sites this run reads publicly, without the person's session.
     public: Vec<String>,
+    /// Sites this run works on as the person: their account there.
+    account: Vec<String>,
     /// Sites where the person allowed edits for this run.
     edits: Vec<String>,
 }
@@ -418,6 +420,7 @@ impl RunSites {
             standing,
             decided: BTreeMap::new(),
             public: Vec::new(),
+            account: Vec::new(),
             edits: Vec::new(),
         }
     }
@@ -431,6 +434,9 @@ impl RunSites {
     }
     pub fn personal(&mut self, site: &str) {
         self.public.retain(|known| known != site);
+        if !self.account.iter().any(|known| known == site) {
+            self.account.push(site.to_owned());
+        }
     }
     pub fn allow_edits(&mut self, site: &str) {
         if !self.edits.iter().any(|edit| edit == site) {
@@ -498,6 +504,10 @@ impl RunSites {
             // session rather than asking to use it.
             (true, true) => Entry::Private(PrivateBecause::Public),
             (true, false) => Entry::Ask,
+            // Signed out of an account the run works on as the person: it
+            // still opens in their profile, so the sign-in they make there
+            // is theirs in normal browsing too.
+            (false, _) if self.account.iter().any(|known| known == site) => Entry::Ask,
             // Nothing of the person's to use: the page opens in Work's own
             // website data, which keeps what the site remembers for Work.
             (false, _) => Entry::Private(PrivateBecause::Public),
@@ -689,6 +699,14 @@ mod tests {
         ));
         run.personal("lego.com");
         assert_eq!(run.entry("lego.com", true), Entry::Ask);
+        // Signed out of an account the run works on as the person: asked,
+        // so the page and the sign-in are in the person's own profile.
+        run.personal("linear.app");
+        assert_eq!(run.entry("linear.app", false), Entry::Ask);
+        assert_eq!(
+            run.entry("airbnb.com", false),
+            Entry::Private(PrivateBecause::Public)
+        );
         let mut private = RunSites::new(true, vec![]);
         assert_eq!(
             private.entry("slack.com", true),
