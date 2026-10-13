@@ -140,6 +140,31 @@
     while(snapshots.size>8)snapshots.delete(snapshots.keys().next().value);
   }
 
+// Only known gradient layers are decorative; URLs, paint worklets and
+// unknown image functions remain visual ambiguity, including in mixed layers.
+function decorativeBackground(value) {
+  if(value==='none')return true;
+  if(value.length>4096 || /(?:url|paint|image-set|element)\s*\(/i.test(value))return false;
+  let at=0,layers=0;
+  while(at<value.length && ++layers<=8) {
+    while(/\s/.test(value[at]||'') && at<value.length)at++;
+    const prefix=value.slice(at).match(/^(?:repeating-)?(?:linear|radial|conic)-gradient\(/i);
+    if(!prefix)return false;
+    at+=prefix[0].length;let depth=1;
+    while(at<value.length && depth) {
+      const c=value[at++];
+      if(c==='"' || c==="'" || c==='\\' || c===';')return false;
+      if(c==='(' && ++depth>16)return false;
+      if(c===')')depth--;
+    }
+    if(depth)return false;
+    while(at<value.length && /\s/.test(value[at]))at++;
+    if(at===value.length)return true;
+    if(value[at++]!==',')return false;
+  }
+  return false;
+}
+
 function ariaRecordProof(records, nameRecord, charge, cache) {
   const name = nameRecord.element;
   if (nameRecord.wire.r !== 'paragraph' || !name.id || name.getRootNode() !== document) return null;
@@ -170,9 +195,14 @@ function ariaRecordProof(records, nameRecord, charge, cache) {
       if(record.wire.r==='paragraph' && id && id.length<=512)ids.set(id,0);
     }
     cache.ids=ids;
-    cache.complete=walk(document.documentElement,16384,node=>{
-      if(node.nodeType===1 && ids.has(node.id))ids.set(node.id,Math.min(2,ids.get(node.id)+1));
-    });
+    // Native selection inventories every ID without spending the shared JS
+    // traversal allowance on unrelated text and decorative descendants.
+    const declared=document.querySelectorAll('[id]');
+    cache.complete=declared.length<=2048;
+    if(cache.complete)for(const node of declared) {
+      if(!charge()){cache.complete=false;break;}
+      if(ids.has(node.id))ids.set(node.id,Math.min(2,ids.get(node.id)+1));
+    }
   }
   if(!cache.complete || cache.ids.get(name.id)!==1)return null;
   const visible = node => {
@@ -185,7 +215,7 @@ function ariaRecordProof(records, nameRecord, charge, cache) {
   for (let depth=0; root && depth<8; depth++,root=root.parentElement) {
     if (!charge() || ['html','body','main','nav','header','footer','aside','article','li'].includes(root.localName) || root.getAttribute('role')==='listitem') return null;
     const links = [], visuals = [], texts = [];
-    if (!walk(root,64,node => {
+    if (!walk(root,256,node => {
       if (node.nodeType===3) {
         if (node.nodeValue.length>2048) return false;
         if (/\S/.test(node.nodeValue) && node.parentElement && visible(node.parentElement)) texts.push(node);
@@ -193,30 +223,36 @@ function ariaRecordProof(records, nameRecord, charge, cache) {
       }
       if (node.nodeType!==1) return;
       const tag=node.localName, s=style(node);
-      if (node.shadowRoot || tag.includes('-') || ['iframe','frame','object','embed','input','textarea','select','button'].includes(tag) || node.isContentEditable) return false;
+      if (node.shadowRoot || tag.includes('-') || ['iframe','frame','object','embed','input','textarea','select'].includes(tag) || node.isContentEditable) return false;
       if (node!==root && (['article','li'].includes(tag) || node.getAttribute('role')==='listitem')) return false;
       if (tag==='a' || node.getAttribute('role')==='link') links.push(node);
-      const visual=['img','video','canvas','svg'].includes(tag) || s.backgroundImage!=='none';
-      if (visual) visuals.push(node);
+      const visual=['img','video','canvas','svg'].includes(tag) || !decorativeBackground(s.backgroundImage);
+      if (visual && visible(node)) {
+        const b=rect.call(node);
+        // Small controls and avatars are not listing pictures. Large unobserved
+        // visuals still count, so an incomplete card cannot gain ownership.
+        if (b.width>=64 && b.height>=48) visuals.push(node);
+      }
       for (const pseudo of ['::before','::after']) {
         const p=style(node,pseudo);
-        if (p.backgroundImage!=='none' || p.content.includes('url(')) return false;
+        if (!decorativeBackground(p.backgroundImage) || p.content.includes('url(')) return false;
       }
     })) return null;
     if (!visuals.length || !links.length) continue;
-    if (visuals.length!==1 || links.length!==1) return null;
-    const visual=visuals[0], link=links[0], box=rect.call(root);
-    const labelled=(link.getAttribute('aria-labelledby')||'').trim().split(/\s+/);
-    if (labelled.length!==1 || labelled[0]!==name.id || !link.hasAttribute('href') || !visible(link) || !visible(visual) || !sameBox(rect.call(link),box)) return null;
+    const labelled=links.filter(link=>(link.getAttribute('aria-labelledby')||'').trim()===name.id);
+    // Carousel links can precede the card's accessibility-labelled overlay.
+    if (!labelled.length) continue;
+    if (visuals.length!==1 || labelled.length!==1) return null;
+    const visual=visuals[0], link=labelled[0], box=rect.call(root);
+    if (!link.hasAttribute('href') || links.some(other=>!other.hasAttribute('href') || other.href!==link.href) || !visible(link) || !visible(visual) || !sameBox(rect.call(link),box)) return null;
     const imageRecord=records.find(r=>r.element===visual && r.media && r.media!=='page_image' && r.media!=='record');
     const linkRecord=records.find(r=>r.element===link && r.wire.r==='link' && r.wire.u);
     if (!imageRecord || !linkRecord || link.href.length>4096) return null;
     const image=rect.call(visual);
-    if (image.width<64 || image.height<48 || image.x<0 || image.y<0 || image.right>innerWidth || image.bottom>innerHeight ||
-        bname.x<0 || bname.y<0 || bname.right>innerWidth || bname.bottom>innerHeight || bname.y<image.bottom-2 || bname.y-image.bottom>32 || bname.x<image.x-2 || bname.right>image.right+2 ||
+    if (image.width<64 || image.height<48 || bname.y<image.bottom-2 || bname.y-image.bottom>32 || bname.x<image.x-2 || bname.right>image.right+2 ||
         box.width>image.width+32 || image.x<box.x-2 || image.right>box.right+2) return null;
     let content=visual.parentElement;
-    for(let depth=0;content && !content.contains(name) && depth<8;depth++){if(!charge())return null;content=content.parentElement;}
+    for(let depth=0;content && !content.contains(name) && depth<32;depth++){if(!charge())return null;content=content.parentElement;}
     if(!content || !root.contains(content) || !content.contains(name))return null;
     let branch=visual;
     while(branch.parentElement!==content) {
@@ -224,15 +260,27 @@ function ariaRecordProof(records, nameRecord, charge, cache) {
       branch=branch.parentElement;
     }
     // First card text must be this Name; photo-branch text is ambiguous.
-    if (texts.some(text=>branch.contains(text)) || !texts.length || !name.contains(texts[0])) return null;
-    const peers=root.parentElement?.children;
-    if (!peers || peers.length<2 || peers.length>64) return null;
+    const caption=texts.filter(text=>!branch.contains(text));
+    if (!caption.length || !name.contains(caption[0])) return null;
+    let peerRoot=root, peers=null;
+    for(let depth=0;depth<8;depth++) {
+      const parent=peerRoot.parentElement;
+      if(!parent || parent.children.length>64 || !charge())return null;
+      const visiblePeers=[];
+      for(const peer of parent.children){if(!charge())return null;if(visible(peer))visiblePeers.push(peer);}
+      const separate=visiblePeers.some(peer=>peer!==peerRoot && (()=>{const b=rect.call(peer);return b.right<=box.left+2 || b.left>=box.right-2 || b.bottom<=box.top+2 || b.top>=box.bottom-2;})());
+      if(separate){peers=visiblePeers;break;}
+      if(!['div','section'].includes(parent.localName) || parent.getAttribute('role') || !sameBox(rect.call(parent),box) ||
+          visiblePeers.some(peer=>{const b=rect.call(peer);return b.left<box.left-2 || b.right>box.right+2 || b.top<box.top-2 || b.bottom>box.bottom+2;}))return null;
+      peerRoot=parent;
+    }
+    if (!peers || peers.length<2) return null;
     let repeated=false;
     for (const peer of peers) {
       if (!charge()) return null;
-      if (peer===root || peer.localName!==root.localName || !visible(peer)) continue;
+      if (peer===peerRoot || peer.localName!==peerRoot.localName || !visible(peer)) continue;
       const b=rect.call(peer);
-      if (Math.abs(b.width-box.width)<=2 && Math.abs(b.height-box.height)<=2 &&
+      if (Math.abs(b.width-box.width)<=2 &&
           (b.right<=box.left+2 || b.left>=box.right-2 || b.bottom<=box.top+2 || b.top>=box.bottom-2)) repeated=true;
     }
     if (!repeated) return null;

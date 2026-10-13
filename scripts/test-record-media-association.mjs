@@ -17,9 +17,9 @@ class Element {
   hasAttribute(key){return Object.hasOwn(this.attrs,key);}
   get content(){return this.attrs.content||'';}
   get textContent(){return this.childNodes.map(node=>node.nodeType===3?node.nodeValue:node.textContent).join('');}
-  set textContent(text){this.childNodes=[{nodeType:3,nodeValue:text,parentNode:this,childNodes:[]}];}
+  set textContent(text){this.childNodes=[{nodeType:3,nodeValue:text,parentNode:this,parentElement:this,childNodes:[]}];}
   contains(node){for(;node;node=node.parentNode)if(node===this)return true;return false;}
-  getBoundingClientRect(){return {...this.box,right:this.box.x+this.box.width,bottom:this.box.y+this.box.height};}
+  getBoundingClientRect(){return {...this.box,right:this.box.x+this.box.width,bottom:this.box.y+this.box.height,left:this.box.x,top:this.box.y};}
   querySelector(){return null;}
 }
 const asset=readFileSync(process.argv[2]||new URL('../crates/zephium-agentic/assets/semantic-record-media-v1.js',import.meta.url),'utf8');
@@ -30,6 +30,7 @@ const page='https://catalog.example.test/product?id=7&variant=blue';
 function fixture({other=false, metadata=true, duplicate=false, changedUrl=false, responsive=false, pageImage=false, brand=null, declaredBrand=brand, largeDoc=false}={}) {
   const document={nodeType:9,baseURI:page,URL:page};
   const html=new Element('html');html.parentNode=document;document.documentElement=html;
+  document.querySelectorAll=selector=>{assert.equal(selector,'[id]');const found=[],stack=[html];while(stack.length){const n=stack.pop();if(n.nodeType===1&&n.id)found.push(n);stack.push(...(n.childNodes||[]));}return found;};
   const head=html.append(new Element('head'));
   const body=html.append(new Element('body'));
   const main=body.append(new Element('main'));
@@ -60,7 +61,7 @@ function fixture({other=false, metadata=true, duplicate=false, changedUrl=false,
   }
   const context={Element,document,WeakRef,WeakMap,Map,Set,URL,JSON,AbortController,innerWidth:1000,innerHeight:800,
     location:{origin:new URL(page).origin},setTimeout,clearTimeout,addEventListener(){},fetch(){throw Error('no network in structural fixture');},btoa(){throw Error('no pixels in structural fixture');},
-    getComputedStyle(){return {display:'block',visibility:'visible',backgroundImage:'none',content:''};}};
+    getComputedStyle(node,pseudo){return {display:'block',visibility:'visible',backgroundImage:pseudo?'none':node.attrs.background||'none',content:''};}};
   runInNewContext(program,context);
   const api=context.__zephiumRecordMediaV1;
   const helpers={apply:Reflect.apply,read:(get,node)=>get.call(node),nodeContains:Element.prototype.contains,
@@ -132,3 +133,93 @@ assert.equal((await invoke('X1')).s,'unavailable');
 cors.photo.attrs.content='https://images.example.test/changed.webp';
 assert.equal((await invoke('U1')).s,'unavailable','changed source cannot publish fetched bytes');
 console.log('record image CORS fallback and exact-source revalidation fixtures passed');
+
+
+// Observed pattern: one explicit ARIA-labelled card overlay, several carousel
+// links to that same record, small icon buttons, and transparent grid wrappers.
+Object.defineProperty(Element.prototype,'href',{get(){return new URL(this.attrs.href||'',page).href;}});
+function cardFixture({mixed=false,wrapped=true,duplicateId=false,extraVisual=false,deep=false}={}) {
+  const document={nodeType:9,baseURI:page,URL:page};
+  const html=new Element('html');html.parentNode=document;document.documentElement=html;
+  document.querySelectorAll=selector=>{assert.equal(selector,'[id]');const found=[],stack=[html];while(stack.length){const n=stack.pop();if(n.nodeType===1&&n.id)found.push(n);stack.push(...(n.childNodes||[]));}return found;};
+  const body=html.append(new Element('body')),main=body.append(new Element('main'));
+  Object.defineProperty(document,'scripts',{get:()=>[]});
+  const records=[],cards=[];
+  for(let card=0;card<2;card++) {
+    const x=card*350,box={x,y:0,width:320,height:340};
+    let parent=main;
+    if(wrapped)for(let i=0;i<3;i++)parent=parent.append(new Element('div',{},box));
+    const root=parent.append(new Element('div',{role:'group'},box));
+    const href='https://catalog.example.test/rooms/'+card+'?check_in=2026-11-18&adults=2';
+    const overlay=root.append(new Element('a',{href,'aria-labelledby':'title-'+card},box));
+    const content=root.append(new Element('div',{},box));
+    const gallery=content.append(new Element('div',{}, {x,y:0,width:320,height:240}));
+    let imageParent=gallery;if(deep)for(let depth=0;depth<12;depth++)imageParent=imageParent.append(new Element('div',{}, {x,y:0,width:320,height:240}));
+    const image=imageParent.append(new Element('img',{src:'https://images.example.test/room-'+card+'.jpg'}, {x,y:0,width:320,height:240}));
+    for(let i=0;i<6;i++)gallery.append(new Element('a',{href:mixed&&card===0&&i===0?'https://catalog.example.test/other':href},{x,y:0,width:320,height:240}));
+    const save=gallery.append(new Element('button',{'aria-label':'Save'}, {x:x+280,y:10,width:30,height:30}));
+    save.append(new Element('svg',{}, {x:x+285,y:15,width:16,height:16}));
+    const badge=gallery.append(new Element('span',{}, {x:x+8,y:8,width:90,height:20}));badge.textContent='Guest favorite';
+    gallery.append(new Element('div',{background:'linear-gradient(rgba(0, 0, 0, 0.5), transparent)'},{x,y:0,width:320,height:240}));
+    const details=content.append(new Element('div',{}, {x,y:244,width:320,height:90}));
+    const name=details.append(new Element('div',{id:'title-'+card}, {x:x+8,y:246,width:300,height:20}));name.textContent='Room by the bay';
+    const key=card*20+1;
+    records.push({element:name,media:null,sensitivity:'public',wire:{k:key,r:'paragraph',t:name.textContent,b:{x:x+8,y:246,w:300,h:20}}},
+      {element:image,media:'image',sensitivity:'public',wire:{k:key+1,r:'image',b:{x,y:0,w:320,h:240}}},
+      {element:overlay,media:null,sensitivity:'public',wire:{k:key+2,r:'link',n:name.textContent,u:href,b:{x,y:0,w:320,h:340}}});
+    for(let i=0;i<4;i++) {
+      const detail=details.append(new Element('div',{}, {x:x+8,y:268+i*14,width:280,height:12}));detail.textContent='Detail '+i;
+      records.push({element:detail,media:null,sensitivity:'public',wire:{k:key+3+i,r:'paragraph',t:detail.textContent,b:{x:x+8,y:268+i*14,w:280,h:12}}});
+    }
+    if(extraVisual&&card===0)gallery.append(new Element('canvas',{}, {x:x+10,y:10,width:100,height:100}));
+    cards.push({root,overlay,image,name,gallery,href,key});
+  }
+  if(duplicateId)main.append(new Element('div',{id:'title-0'}));
+  const context={Element,document,WeakRef,WeakMap,Map,Set,URL,JSON,AbortController,innerWidth:1000,innerHeight:800,
+    location:{origin:new URL(page).origin},setTimeout,clearTimeout,addEventListener(){},fetch(){throw Error('no network');},btoa(){throw Error('no pixels');},
+    getComputedStyle(node,pseudo){return {display:'block',visibility:'visible',backgroundImage:pseudo?'none':node.attrs.background||'none',content:''};}};
+  runInNewContext(program,context);
+  const api=context.__zephiumRecordMediaV1;
+  const helpers={apply:Reflect.apply,read:(get,node)=>get.call(node),nodeContains:Element.prototype.contains,elementRect:node=>node.getBoundingClientRect(),tagName:node=>node.localName,nodeType:node=>node.nodeType,nodeParentGetter:function(){return this.parentNode;},imageCompleteGetter:function(){return this.complete;},imageNaturalWidthGetter:function(){return this.naturalWidth;},pageTitleText:()=>null};
+  const rows=api.evidence(records,1,1,helpers);
+  return {api,rows,cards};
+}
+const cards=cardFixture();
+for(const card of cards.cards) {
+  assert(cards.rows.find(row=>row.k===card.key+1)?.r.includes(card.key),'explicit card label lost its own picture behind carousel links or transparent wrappers');
+  assert(!cards.rows.find(row=>row.k===card.key+1)?.r.includes(card.key===1?21:1),'adjacent card stole a same-named picture');
+  assert(cards.api.target({i:1,g:1,k:card.key+1,n:card.key}),'fresh ARIA card proof did not revalidate');
+}
+for(const config of [{mixed:true},{duplicateId:true},{extraVisual:true}]) {
+  const bad=cardFixture(config);
+  assert(!bad.rows.find(row=>row.k===2)?.r.includes(1),'ambiguous card acquired image authority');
+}
+cards.cards[0].gallery.children.find(node=>node.localName==='a').attrs.href='https://catalog.example.test/changed';
+assert.equal(cards.api.target({i:1,g:1,k:2,n:1}),null,'changed carousel destination reused a card proof');
+const full=cardFixture();for(let i=0;i<260;i++)full.cards[0].root.append(new Element('span'));
+assert.equal(full.api.target({i:1,g:1,k:2,n:1}),null,'exhausted local card survey kept an old proof');
+console.log('ARIA card carousel, wrapper, ambiguity and fresh revalidation fixtures passed');
+
+const idLimit=cardFixture();
+for(let i=0;i<2050;i++)idLimit.cards[0].root.getRootNode().documentElement.append(new Element('div',{id:'extra-'+i}));
+assert.equal(idLimit.api.target({i:1,g:1,k:2,n:1}),null,'exhausted ID inventory retained an ARIA proof');
+
+for(const background of ['linear-gradient(red,blue), url(https://images.example.test/other.jpg)','linear-gradient(red,blue), paint(other)','image-set(url(https://images.example.test/other.jpg) 1x)']) {
+ const mutated=cardFixture();mutated.cards[0].gallery.children.find(node=>node.attrs.background).attrs.background=background;
+ assert.equal(mutated.api.target({i:1,g:1,k:2,n:1}),null,'a non-gradient image layer reused the card proof');
+}
+console.log('decorative-gradient discrimination and mixed-image rejection passed');
+
+const deep=cardFixture({deep:true});assert(deep.api.target({i:1,g:1,k:2,n:1}),'bounded deep carousel nesting lost the exact card');
+const below=cardFixture();let branch=below.cards[0].root;while(branch.parentElement?.localName==='div')branch=branch.parentElement;
+const stack=[branch];while(stack.length){const node=stack.pop();if(node.nodeType===1){node.box.y+=1000;stack.push(...node.children);}}
+assert(below.api.target({i:1,g:1,k:2,n:1}),'scrolling a proven card outside the viewport invalidated its unchanged public image source');
+let surveyed=false;const cropOutside=JSON.parse(await below.api.invoke('V1:{"i":1,"g":1,"k":2,"n":1}',()=>{surveyed=true;throw Error('must not capture offscreen');}));
+assert.equal(cropOutside.s,'unavailable');assert.equal(surveyed,false,'offscreen crop reached privacy/capture');
+const uneven=cardFixture();uneven.cards[1].root.box.height+=24;
+assert(uneven.api.target({i:1,g:1,k:2,n:1}),'a neighboring card with a longer caption broke record ownership');
+console.log('deep carousels, variable card heights and offscreen crop refusal passed');
+
+const decorated=cardFixture();decorated.cards[0].root.parentElement.append(new Element('div',{}, {...decorated.cards[0].root.box}));
+assert(decorated.api.target({i:1,g:1,k:2,n:1}),'a contained overlapping grid decoration broke the exact card proof');
+console.log('contained wrapper decoration preserves only the same labelled card');
