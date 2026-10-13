@@ -1133,7 +1133,7 @@ where
     ) -> Option<String> {
         (matches!(kind, "picks" | "sheet") && data.get("records").is_none()
             && self.run.records.lock().unwrap_or_else(|e| e.into_inner()).has_for(part))
-            .then(|| "Original records are available: use data.records with r keys in the desired order and optional annotations. Rust copies the original values, links and media; do not rewrite item values or cells.".into())
+            .then(|| "Original records are available: use data.records with r keys in the desired order, and add subtitle, facts and annotation per record from what you read. Rust copies names, prices, links and pictures.".into())
     }
 
     async fn revise(&self, args: &Value) -> (String, bool) {

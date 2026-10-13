@@ -1,7 +1,7 @@
 //! Immutable extraction rows addressed by run-local keys. The model selects
 //! records; only native code copies their values and media into canvas objects.
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use zephium_core::work::{artifact::*, objects::*, WorkArtifactId};
 
 #[derive(Debug)]
@@ -55,6 +55,19 @@ pub(crate) struct Selection {
     pub annotation: Option<String>,
     #[serde(default)]
     pub recommended: bool,
+    /// What the thing is, in a few words, when its name doesn't say it.
+    pub subtitle: Option<String>,
+    /// The details that decide the choice, as the lead read them. They come
+    /// before the record's own columns; the record's name, price, link and
+    /// pictures are never rewritten.
+    #[serde(default)]
+    pub facts: Vec<Fact>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Fact {
+    pub label: String,
+    pub value: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -210,64 +223,90 @@ impl Records {
         out
     }
 
+    /// Builds picks or a table from the selected records. A selection that
+    /// can't be used, or a value over a limit, is left out on its own and
+    /// named in `left_out`; only a selection with nothing usable is refused.
     pub fn present(&self, request: &Presentation) -> Result<super::objects::Proposed, RecordError> {
-        if request.title.trim() != request.title
-            || request.title.is_empty()
-            || request.title.chars().count() > super::objects::MAX_TITLE_CHARS
-            || request.title.chars().any(char::is_control)
-        {
-            return Err("title must be one line of 1 to 60 characters".into());
+        let title: String = super::call::plain(&request.title)
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+            .chars()
+            .take(super::objects::MAX_TITLE_CHARS)
+            .collect();
+        let title = title.trim().to_owned();
+        if title.is_empty() {
+            return Err("records_title needs a few words naming what was found".into());
         }
-        if request.records.is_empty() || request.records.len() > MAX_PICKS {
-            return Err("select 1 to 12 record keys".into());
-        }
-        let mut selected = Vec::new();
+        let mut left_out = Vec::new();
+        let mut selected: Vec<(&str, &Record, u16, &Selection)> = Vec::new();
         let mut evidence: Vec<WorkEvidenceLink> = Vec::new();
         for selection in &request.records {
-            if selected
-                .iter()
-                .any(|(key, _, _): &(&str, &Record, u16)| *key == selection.source)
-            {
-                return Err("a record key may be selected only once".into());
+            let key = selection.source.trim();
+            if selected.iter().any(|(known, ..)| *known == key) {
+                continue;
             }
-            let index = selection
-                .source
+            if selected.len() >= MAX_PICKS {
+                left_out.push(format!("{key} (at most {MAX_PICKS} records)"));
+                continue;
+            }
+            let Some(index) = key
                 .strip_prefix('r')
                 .and_then(|s| s.parse::<usize>().ok())
-                .filter(|i| *i > 0)
-                .ok_or("unknown record key")?
-                - 1;
-            if selection.source != format!("r{}", index + 1) {
-                return Err("unknown record key".into());
-            }
-            let record = self
-                .rows
-                .get(index)
-                .ok_or("record key was not returned in this run")?;
-            let links: Vec<&WorkEvidenceLink> = record
+                .filter(|i| *i > 0 && key == format!("r{i}"))
+                .map(|i| i - 1)
+            else {
+                left_out.push(format!("{key} (not a record key)"));
+                continue;
+            };
+            let Some(record) = self.rows.get(index) else {
+                left_out.push(format!("{key} (not returned in this run)"));
+                continue;
+            };
+            let mut links: Vec<&WorkEvidenceLink> = record
                 .fields
                 .iter()
                 .flat_map(|(_, cell)| &cell.evidence)
                 .filter_map(|i| record.evidence.get(usize::from(*i)))
                 .collect();
-            let first = links
-                .first()
-                .ok_or("record has no admitted field evidence")?;
+            // A record whose only value is its name still came from its read.
+            if links.is_empty() {
+                links = record.evidence.iter().take(1).collect();
+            }
+            let Some(first) = links.first() else {
+                left_out.push(format!("{key} (no source)"));
+                continue;
+            };
+            let added = links
+                .iter()
+                .filter(|link| !evidence.contains(**link))
+                .count();
+            if evidence.len() + added > MAX_ARTIFACT_EVIDENCE {
+                left_out.push(format!("{key} (source limit)"));
+                continue;
+            }
             for link in &links {
                 if !evidence.contains(*link) {
                     evidence.push((*link).clone());
                 }
             }
-            if evidence.len() > MAX_ARTIFACT_EVIDENCE {
-                return Err("selection exceeds the evidence budget; select fewer records".into());
-            }
             let source = evidence.iter().position(|link| link == *first).unwrap() as u16;
-            selected.push((selection.source.as_str(), record, source));
+            selected.push((key, record, source, selection));
+        }
+        if selected.is_empty() {
+            return Err(RecordError {
+                message: format!(
+                    "none of the selected records could be used: {}; select r keys a read returned",
+                    left_out.join("; ")
+                ),
+                reason: super::objects::ObjectRefusal::Source,
+            });
         }
         let data = match request.layout {
             Layout::Picks => {
                 let mut items = Vec::new();
-                for ((_, record, source), selection) in selected.iter().zip(&request.records) {
+                for (_, record, source, selection) in &selected {
                     let mut value = json!({"name":record.subject.name, "image_candidates":record.subject.image_candidates, "media_attempted":record.subject.media_attempted, "source":source, "recommended":selection.recommended});
                     for (key, text) in [
                         ("subtitle", &record.subject.descriptor),
@@ -281,7 +320,30 @@ impl Records {
                     if let Some(media) = &record.subject.record_media {
                         value["record_media"] = json!(media);
                     }
-                    let mut facts = Vec::new();
+                    if record.subject.descriptor.is_none() {
+                        if let Some(subtitle) = selection.subtitle.as_deref().map(str::trim) {
+                            if !subtitle.is_empty() {
+                                value["subtitle"] = json!(subtitle);
+                            }
+                        }
+                    }
+                    let mut facts: Vec<Value> = selection
+                        .facts
+                        .iter()
+                        .map(|fact| (fact.label.trim(), fact.value.trim()))
+                        // The page's own value for a label stands over the lead's.
+                        .filter(|(label, value)| {
+                            !label.is_empty()
+                                && !value.is_empty()
+                                && !super::objects::says_not_found(value)
+                                && super::found::price_rank(&label.to_lowercase()).is_none()
+                                && !record.fields.iter().any(|(criterion, cell)| {
+                                    criterion.name.eq_ignore_ascii_case(label)
+                                        && display(&cell.value).is_some()
+                                })
+                        })
+                        .map(|(label, value)| json!({"label":label,"value":value,"kind":"text"}))
+                        .collect();
                     let mut has_price = false;
                     for (criterion, cell) in &record.fields {
                         let Some(text) = display(&cell.value) else {
@@ -319,10 +381,15 @@ impl Records {
                             }
                             value["price"] = price;
                             has_price = true;
-                        } else {
+                        } else if !facts.iter().any(|fact| {
+                            fact["label"]
+                                .as_str()
+                                .is_some_and(|label| label.eq_ignore_ascii_case(&criterion.name))
+                        }) {
                             facts.push(json!({"label":criterion.name,"value":text,"kind":"text"}));
                         }
                     }
+                    facts.truncate(zephium_core::work::objects::limit::PICK_FACTS);
                     value["facts"] = json!(facts);
                     items.push(
                         serde_json::from_value::<WorkPickV1>(value)
@@ -336,7 +403,7 @@ impl Records {
             }
             Layout::Table => {
                 let mut names = Vec::new();
-                for (_, record, _) in &selected {
+                for (_, record, ..) in &selected {
                     for (criterion, _) in &record.fields {
                         if !names.contains(&criterion.name) {
                             names.push(criterion.name.clone());
@@ -347,13 +414,13 @@ impl Records {
                 for name in &names {
                     let link = selected
                         .iter()
-                        .filter(|(_, record, _)| {
+                        .filter(|(_, record, ..)| {
                             record
                                 .fields
                                 .iter()
                                 .any(|(criterion, _)| criterion.name == *name)
                         })
-                        .all(|(_, record, _)| {
+                        .all(|(_, record, ..)| {
                             matches!(
                                 record.field_kind(name),
                                 Some(
@@ -365,12 +432,12 @@ impl Records {
                     columns.push(json!({"label":name,"kind":if link { "link" } else { "text" }}));
                 }
                 columns.push(json!({"label":"Source link","kind":"link"}));
-                let annotate = request.records.iter().any(|r| r.annotation.is_some());
+                let annotate = selected.iter().any(|(.., r)| r.annotation.is_some());
                 if annotate {
                     columns.push(json!({"label":"Annotation","kind":"text"}));
                 }
                 let mut rows = Vec::new();
-                for ((_, record, source), selection) in selected.iter().zip(&request.records) {
+                for (_, record, source, selection) in &selected {
                     let mut cells = vec![record.subject.name.clone()];
                     for name in &names {
                         cells.push(
@@ -404,20 +471,27 @@ impl Records {
                     .map_err(|_| "native table projection failed")?
             }
         };
-        if let Some(fault) = data.lead_fault(evidence.len()) {
-            return Err(RecordError {
-                message: format!(
-                    "native record presentation: {}; original records remain unchanged",
-                    fault.describe()
-                ),
-                reason: super::objects::ObjectRefusal::Field(fault.field),
-            });
-        }
+        // Page values over a limit are left out one by one, never the whole set.
+        let mut value = serde_json::to_value(&data).map_err(|_| "native projection failed")?;
+        let data = loop {
+            let parsed: WorkArtifactDataV1 =
+                serde_json::from_value(value.clone()).map_err(|_| "native projection failed")?;
+            let Some(fault) = parsed.lead_fault(evidence.len()) else {
+                break parsed;
+            };
+            if left_out.len() >= 64 || !super::schema::drop(&mut value, &fault) {
+                return Err(RecordError {
+                    message: format!("native record presentation: {}", fault.describe()),
+                    reason: super::objects::ObjectRefusal::Field(fault.field),
+                });
+            }
+            left_out.push(fault.describe());
+        };
         Ok(super::objects::Proposed {
-            title: request.title.clone(),
+            title,
             data,
             evidence,
-            left_out: vec![],
+            left_out,
         })
     }
 }
@@ -646,6 +720,39 @@ mod tests {
     }
 
     #[test]
+    fn the_leads_facts_lead_the_card_and_never_rewrite_page_values() {
+        let mut records = Records::default();
+        records.register(&fixture(), None);
+        let selection: Presentation = serde_json::from_value(json!({"title":"GPUs","layout":"picks","records":[
+            {"source":"r2","subtitle":"Triple-fan RTX 3090","recommended":true,"annotation":"Cheapest card in working order.",
+             "facts":[{"label":"VRAM","value":"24 GB"},{"label":"Condition","value":"Used"},{"label":"Stock","value":"not shown"},
+                      {"label":"price","value":"1 zł"}]}
+        ]})).unwrap();
+        let proposed = records
+            .present(&selection)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let WorkArtifactDataV1::Picks { items, .. } = proposed.data else {
+            panic!()
+        };
+        let pick = &items[0];
+        assert_eq!(pick.subtitle.as_deref(), Some("Triple-fan RTX 3090"));
+        assert!(pick.recommended);
+        let facts: Vec<(&str, &str)> = pick
+            .facts
+            .iter()
+            .map(|fact| (fact.label.as_str(), fact.value.as_str()))
+            .collect();
+        // The record's own Stock stands over the lead's, and the page's price
+        // is the price.
+        assert_eq!(facts[..2], [("VRAM", "24 GB"), ("Condition", "Used")]);
+        assert!(facts.contains(&("Stock", "Out of stock")));
+        assert_eq!(
+            pick.price.as_ref().unwrap().amount.as_deref(),
+            Some("100.00")
+        );
+    }
+
+    #[test]
     fn failed_catalog_read_cannot_erase_requested_columns_from_same_site_fallback() {
         let schema: zephium_core::work::collection::WorkBrowseCollection = serde_json::from_value(json!({
             "title":"Books", "max_items":3,"columns":[
@@ -678,15 +785,23 @@ mod tests {
     fn keys_cannot_invent_or_rewrite_records_and_overflow_is_never_truncated() {
         let mut records = Records::default();
         records.register(&fixture(), None);
-        let mut selection = request("picks");
-        selection.records[0].source = "r0".into();
-        assert!(records.present(&selection).is_err());
-        selection.records[0].source = "r1".into();
-        assert!(records.present(&selection).is_err());
-        selection.records[0].source = "r3".into();
-        assert!(records.present(&selection).is_err());
-        selection.records[0].source = "r01".into();
-        assert!(records.present(&selection).is_err());
+        // A key that isn't a record is left out; the records it sits beside stand.
+        for key in ["r0", "r1", "r3", "r01"] {
+            let mut selection = request("picks");
+            selection.records[0].source = key.into();
+            let proposed = records
+                .present(&selection)
+                .unwrap_or_else(|e| panic!("{e}"));
+            let WorkArtifactDataV1::Picks { items, .. } = proposed.data else {
+                panic!()
+            };
+            assert_eq!(items.len(), 1, "{key}");
+            assert_eq!(items[0].name, records.rows[0].subject.name);
+            assert_eq!(proposed.left_out.is_empty(), key == "r1", "{key}");
+        }
+        let mut nothing = request("picks");
+        nothing.records = vec![serde_json::from_value(json!({"source":"r9"})).unwrap()];
+        assert!(records.present(&nothing).is_err());
         assert!(
             serde_json::from_value::<Selection>(json!({"source":"r1","price":"free"})).is_err()
         );

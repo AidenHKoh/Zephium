@@ -313,7 +313,7 @@ pub(crate) fn any(kinds: &[&str]) -> Value {
     if kinds.iter().any(|kind| matches!(*kind, "picks" | "sheet")) {
         options.push(record_selection());
     }
-    json!({"anyOf": options, "description": "For extracted records, picks/sheet data is records in desired order: source is the r key returned by a read, annotation is optional. Rust copies values, links and images. Other objects use their kind schema."})
+    json!({"anyOf": options, "description": "For extracted records, picks/sheet data is records in desired order: source is the r key returned by a read; add subtitle, facts and annotation from what you read. Rust copies names, prices, links and images. Other objects use their kind schema."})
 }
 
 /// Once original rows exist, creation selects them instead of rewriting cells.
@@ -336,7 +336,12 @@ pub(crate) fn record_selection() -> Value {
             "title":"native_records", "type":"object", "additionalProperties":false,
             "properties":{"records":{"type":"array", "minItems":1, "maxItems":12, "items":{
                 "type":"object", "additionalProperties":false,
-                "properties":{"source":{"type":"string"},"annotation":{"type":"string","maxLength":160},"recommended":{"type":"boolean"}},
+                "properties":{
+                    "source":{"type":"string"},
+                    "subtitle":{"type":"string","maxLength":80},
+                    "facts":{"type":"array","maxItems":4,"description":"Details that decide the choice: VRAM 24 GB, Condition Used.","items":{"type":"object","additionalProperties":false,"properties":{"label":{"type":"string","maxLength":20},"value":{"type":"string","maxLength":120}},"required":["label","value"]}},
+                    "annotation":{"type":"string","maxLength":160,"description":"Why it stands out or what to watch for."},
+                    "recommended":{"type":"boolean","description":"Your pick, by condition and fit, not only price."}},
                 "required":["source"]}}}, "required":["records"]
     })
 }

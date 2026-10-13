@@ -331,7 +331,8 @@ pub(crate) fn propose(
         }))
         .map_err(|_| {
             (
-                "records needs source, optional annotation and recommended".into(),
+                "each record is source, with optional subtitle, facts, annotation and recommended"
+                    .into(),
                 ObjectRefusal::Shape,
             )
         })?;
@@ -670,6 +671,11 @@ const PICK_TAGS: [&str; 5] = [
     "recommended",
     "best choice",
 ];
+
+/// The value says it was not found rather than giving it.
+pub(crate) fn says_not_found(text: &str) -> bool {
+    says(text, &NOT_FOUND)
+}
 
 fn says(text: &str, words: &[&str]) -> bool {
     affirms(text, words, false)
