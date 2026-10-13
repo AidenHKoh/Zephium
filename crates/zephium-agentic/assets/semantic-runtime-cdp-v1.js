@@ -527,7 +527,7 @@ if(request.p===2&&(!["https:","http:"].includes(parsed.protocol)||parsed.origin=
 const abort=new AbortController();pending=abort;let headers=false;
 const timer=setTimeout(()=>abort.abort(),request.q||1500);
 try{
-const response=await fetchAsset(url,{signal:abort.signal,credentials:request.p===2?"omit":current.node.crossOrigin==="anonymous"?"same-origin":"include",mode:"cors",redirect:"error",cache:"force-cache"});
+const response=await fetchAsset(url,{signal:abort.signal,credentials:request.p===2?"omit":current.node.crossOrigin==="anonymous"?"same-origin":"include",mode:"cors",redirect:"error",headers:{Accept:"image/png,image/jpeg,image/webp"},cache:"no-store"});
 headers=true;const type=(response.headers.get("content-type")||"").split(";")[0].trim().toLowerCase();
 if(!response.ok|| !["image/png","image/jpeg","image/webp"].includes(type)||
 Number(response.headers.get("content-length")||0)>MAX_RAW|| !response.body)throw new Error();

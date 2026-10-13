@@ -27,7 +27,7 @@ assert.equal(asset.split('Object.freeze({evidence,invoke})').length,2);
 // Expose only the private revalidation predicate in this synthetic process.
 const program=asset.replace('Object.freeze({evidence,invoke})','Object.freeze({evidence,invoke,target})');
 const page='https://catalog.example.test/product?id=7&variant=blue';
-function fixture({other=false, metadata=true, duplicate=false, changedUrl=false, responsive=false, pageImage=false, brand=null, declaredBrand=brand, largeDoc=false}={}) {
+function fixture({other=false, metadata=true, duplicate=false, changedUrl=false, responsive=false, pageImage=false, brand=null, declaredBrand=brand, largeDoc=false, negotiated=false}={}) {
   const document={nodeType:9,baseURI:page,URL:page};
   const html=new Element('html');html.parentNode=document;document.documentElement=html;
   document.querySelectorAll=selector=>{assert.equal(selector,'[id]');const found=[],stack=[html];while(stack.length){const n=stack.pop();if(n.nodeType===1&&n.id)found.push(n);stack.push(...(n.childNodes||[]));}return found;};
@@ -62,6 +62,19 @@ function fixture({other=false, metadata=true, duplicate=false, changedUrl=false,
   const context={Element,document,WeakRef,WeakMap,Map,Set,URL,JSON,AbortController,innerWidth:1000,innerHeight:800,
     location:{origin:new URL(page).origin},setTimeout,clearTimeout,addEventListener(){},fetch(){throw Error('no network in structural fixture');},btoa(){throw Error('no pixels in structural fixture');},
     getComputedStyle(node,pseudo){return {display:'block',visibility:'visible',backgroundImage:pseudo?'none':node.attrs.background||'none',content:''};}};
+  if (negotiated) {
+    const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0XkAAAAASUVORK5CYII=','base64');
+    context.Blob=Blob;
+    context.btoa=value=>Buffer.from(value,'binary').toString('base64');
+    context.createImageBitmap=async()=>({width:1,height:1,close(){}});
+    document.createElement=()=>({width:0,height:0,getContext:()=>({drawImage(){}}),toBlob:reply=>reply(new Blob([png],{type:'image/png'}))});
+    context.fetch=async(url,options)=>{
+      // The cached page-image variant omitted Vary: Accept.
+      const supported=options.cache==='no-store' && options.headers?.Accept==='image/png,image/jpeg,image/webp';
+      let sent=false;
+      return {ok:true,headers:new Map([['content-type',supported?'image/png':'image/avif']]),body:{getReader:()=>({read:async()=>sent?{done:true}:(sent=true,{done:false,value:png})})}};
+    };
+  }
   runInNewContext(program,context);
   const api=context.__zephiumRecordMediaV1;
   const helpers={apply:Reflect.apply,read:(get,node)=>get.call(node),nodeContains:Element.prototype.contains,
@@ -223,3 +236,10 @@ console.log('deep carousels, variable card heights and offscreen crop refusal pa
 const decorated=cardFixture();decorated.cards[0].root.parentElement.append(new Element('div',{}, {...decorated.cards[0].root.box}));
 assert(decorated.api.target({i:1,g:1,k:2,n:1}),'a contained overlapping grid decoration broke the exact card proof');
 console.log('contained wrapper decoration preserves only the same labelled card');
+
+const negotiated=fixture({negotiated:true});
+let attemptedCrop=false;
+const negotiatedResult=JSON.parse(await negotiated.api.invoke('M1:{"i":1,"g":1,"k":2,"n":1}',()=>{attemptedCrop=true;throw Error('no screenshot authority');}));
+assert.equal(negotiatedResult.s,'fetch','supported-format negotiation must retrieve the asset before crop fallback');
+assert.equal(attemptedCrop,false,'a usable fetched image must not depend on screenshot authority');
+console.log('image content negotiation preserves native fetch without pixel capture');
