@@ -299,6 +299,9 @@ function uniqueInputs(inputs: readonly RunInputView[], shown: Set<string>): RunI
   });
 }
 
+/** The lead's own web searches, whose rows are its results rather than the sites it cited. */
+export const searchPart = (part: RunPart) => part.key.startsWith("search:");
+
 /** How a part's own node stands: its pages as windows, its sources, its helper's view or its ask. */
 export function partShape(part: RunPart, projection?: WorkRuntimeProjection): PartShape {
   if (part.ask) {
@@ -317,12 +320,16 @@ export function partShape(part: RunPart, projection?: WorkRuntimeProjection): Pa
       rows: Math.max(rows, Math.min(PART.helperLines, part.lines?.length ?? 0)),
     };
   }
-  if (part.helper === "research" && !part.pages.length)
+  if (part.helper === "research" && !part.pages.length) {
+    const search = searchPart(part);
+    const cap = search ? PART.searchRows : PART.sourceRows;
     return {
       kind: "sources",
-      rows: part.sources.length,
-      more: part.sources.length > PART.sourceRows,
+      // A search's words stand over its results as one more row.
+      rows: Math.min(cap, part.sources.length || (search ? 3 : 0)) + (search ? 1 : 0),
+      more: part.sources.length > cap,
     };
+  }
   if (!part.pages.length) return { kind: "label" };
   return { kind: "pages", count: part.pages.length };
 }

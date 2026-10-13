@@ -2,7 +2,13 @@
   import Icon from "$shared/ui/Icon";
   import type { CanvasItem, PartPage } from "../../lib/canvas-model";
   import { PART, partLead, rowKey, stackSize } from "../../lib/run/part-size";
-  import { CommandLineIcon, FileEditIcon, File01Icon, Search01Icon } from "../../lib/icons";
+  import {
+    ArrowUpRight01Icon,
+    CommandLineIcon,
+    FileEditIcon,
+    File01Icon,
+    Search01Icon,
+  } from "../../lib/icons";
   import { askCard, partContent } from "./slots";
   import { needWords } from "../../lib/run/need";
   import { getContext, untrack } from "svelte";
@@ -59,6 +65,8 @@
   const working = $derived(part.state === "running" || part.state === "waiting");
   const cited = $derived(part.cited ?? []);
   const more = $derived(Math.max(0, (part.citedCount ?? 0) - cited.length));
+  /** A search whose results the run went on to open: the rest it passed over. */
+  const chosen = $derived(cited.some((row) => row.opened));
   /** Folded, each window behind the front one peeks out right and below it. */
   const placeOf = (index: number) =>
     `translate(${index * PART.behindX}px, ${index * PART.behindY}px)`;
@@ -203,6 +211,42 @@
       {#if part.pages.length > 1}<span class="count" style:inset-inline-start="{stack.width}px"
           >{part.pages.length}</span
         >{/if}
+    </div>
+  {:else if shape === "sources" && part.search}
+    <div class="slot" style:inset-inline-start="{partLead}px">
+      <ul class="results" bind:this={workBody}>
+        {#if part.query}<li class="query" title={part.query}>
+            <Icon icon={Search01Icon} size={13} /><span class="words">{part.query}</span>
+            {#if part.queries}<span class="again">+{part.queries - 1}</span>{/if}
+          </li>{/if}
+        {#each cited as row (row.key)}<li>
+            <button
+              type="button"
+              class="row nodrag"
+              class:opened={row.opened}
+              class:passed={chosen && !row.opened}
+              title={row.title || row.url}
+              onclick={(event) => {
+                event.stopPropagation();
+                onlist();
+              }}
+            >
+              <span class="site-mark"
+                ><HostGlyph host={row.where} url={row.url} size={14} initial={false} /></span
+              >
+              <span class="result">{row.title || row.where}</span>
+              {#if row.opened}<span class="went" aria-label={m.work_part_result_opened()}
+                  ><Icon icon={ArrowUpRight01Icon} size={12} /></span
+                >{:else}<span class="where">{row.where}</span>{/if}
+            </button>
+          </li>{:else}{#if working}{#each [0, 1, 2] as index (index)}<li
+                class="pending"
+                style:inline-size="{100 - index * 18}%"
+                style:--delay="{index * 120}ms"
+                aria-hidden="true"
+              ></li>{/each}{/if}{/each}
+        {#if more}<li class="rest">{m.work_part_more_results({ count: more })}</li>{/if}
+      </ul>
     </div>
   {:else if shape === "sources"}
     <div class="slot" style:inset-inline-start="{partLead}px">
@@ -495,6 +539,126 @@
     padding-inline-start: 21px;
   }
 
+  /* A search's results: the ones the run opened in full, the ones it passed over quieter. */
+  .results {
+    display: flex;
+    flex-direction: column;
+    inline-size: 320px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  /* What it searched for, set like the field it was typed into. */
+  .query {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    block-size: 30px;
+    margin-block-end: 4px;
+    padding: 0 10px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-fill);
+    color: var(--color-muted);
+  }
+
+  .words {
+    flex: 1;
+    min-inline-size: 0;
+    overflow: hidden;
+    color: var(--color-text);
+    font-size: var(--text-body);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .query .again {
+    flex: none;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    inline-size: 100%;
+    block-size: 28px;
+    padding: 0 6px;
+    border: 0;
+    border-radius: var(--radius-inset);
+    background: transparent;
+    color: var(--color-text);
+    font: inherit;
+    text-align: start;
+    cursor: default;
+    transition: opacity var(--motion-base) var(--ease-out);
+  }
+
+  .row:hover {
+    background: var(--color-control-hover);
+  }
+
+  .row.passed {
+    opacity: 0.5;
+  }
+
+  .row.passed:hover {
+    opacity: 1;
+  }
+
+  .result {
+    flex: 1;
+    min-inline-size: 0;
+    overflow: hidden;
+    font-size: var(--text-body);
+    white-space: nowrap;
+    mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
+  }
+
+  .row.opened .result {
+    font-weight: 600;
+  }
+
+  .where {
+    flex: none;
+    max-inline-size: 40%;
+    overflow: hidden;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .went {
+    display: grid;
+    flex: none;
+    place-items: center;
+    color: var(--color-muted);
+  }
+
+  /* Results on their way: quiet bars that breathe until the engine answers. */
+  .pending {
+    block-size: 12px;
+    margin: 8px 6px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-fill);
+    animation: breathe 1.4s var(--ease-in-out) var(--delay) infinite;
+  }
+
+  @keyframes breathe {
+    50% {
+      opacity: 0.45;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pending {
+      animation: none;
+    }
+  }
+
   .cited {
     display: flex;
     flex-direction: column;
@@ -553,6 +717,7 @@
     mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
   }
 
+  .results .rest,
   .cited .rest {
     padding: 4px 6px 0 28px;
     color: var(--color-muted);

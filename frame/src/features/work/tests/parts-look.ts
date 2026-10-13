@@ -424,3 +424,145 @@ export function fixScene(stage: Stage): BoardScene {
     pages: [],
   };
 }
+
+const RESULTS = [
+  [
+    "https://www.airbnb.com/rooms/53012345",
+    "The Heart of Lisbon's City Center – Apartments for Rent",
+  ],
+  [
+    "https://www.airbnb.com/s/Lisbon--Portugal/homes",
+    "Lisbon Vacation Rentals & Homes - Portugal | Airbnb",
+  ],
+  ["https://www.airbnb.com/rooms/41122334", "My home in Lisbon - Apartments for Rent in Lisbon"],
+  ["https://www.booking.com/city/pt/lisbon.html", "The 10 best hotels in Lisbon, Portugal"],
+  ["https://www.tripadvisor.com/Hotels-g189158-Lisbon", "Lisbon Hotels: Find Cheap Hotel Deals"],
+  [
+    "https://www.vrbo.com/vacation-rentals/europe/portugal/lisbon",
+    "Lisbon vacation rentals | Vrbo",
+  ],
+  ["https://www.lisbonlux.com/lisbon-hotels", "Where to stay in Lisbon"],
+] as const;
+
+/** "3 Airbnb stays in Lisbon": the site's own search failed, so the lead searched the web and opened two listings. */
+export function searchScene(stage: "searching" | "done"): BoardScene {
+  const id = `search-${stage}`;
+  const done = stage === "done";
+  const query = "Airbnb Lisbon 2 guests 4–7 December under €120 a night";
+  const steps: WorkStepFact[] = [
+    step("a-1", "stays", { kind: "read", url: "https://www.airbnb.com/" }, "failed", {
+      note: "The page gave nothing",
+    }),
+    {
+      id: "s-1",
+      turn: 2,
+      kind: { kind: "search", query },
+      status: done ? "succeeded" : "running",
+      ...(done ? { evidence: "search-1" } : {}),
+    } as WorkStepFact,
+    ...(done
+      ? RESULTS.filter((_, index) => index === 0 || index === 2).map(
+          ([url], index) =>
+            ({
+              id: `r-${index}`,
+              turn: 3,
+              kind: { kind: "read", url },
+              status: "succeeded",
+            }) as WorkStepFact,
+        )
+      : []),
+  ];
+  const run = {
+    id,
+    approved_revision: "1",
+    status: done ? "completed" : "running",
+    attempts: [],
+    spec: {
+      plan_revision: "1",
+      request: "Find 3 Airbnb stays in Lisbon",
+      limits: LIMITS,
+      nodes: [],
+    },
+    artifacts: [],
+    provider_evidence: done
+      ? [
+          {
+            id: "search-1",
+            node: "agent",
+            attempt: "attempt",
+            evidence: {
+              version: 1,
+              provider: "browser",
+              model: "",
+              response_model: "",
+              response_id: "",
+              search_call_id: "",
+              answer: "",
+              citations: RESULTS.map(([url, title]) => ({
+                url,
+                title,
+                start_index: 0,
+                end_index: 0,
+              })),
+              actual_input_tokens: 0,
+              actual_output_tokens: 0,
+            },
+          },
+        ]
+      : [],
+    user_artifacts: [],
+    steps,
+    parts: [
+      {
+        id: "stays",
+        title: "Airbnb stays",
+        helper: "browser",
+        service: { host: "airbnb.com" },
+        goal: "3 stays in Lisbon for 2, 4–7 December",
+        state: "failed",
+        need: { kind: "retry", host: "airbnb.com", reason: "couldnt_read" },
+      },
+    ],
+  } as unknown as WorkExecutionFact;
+  const work = `${id}-work`;
+  const projection = {
+    version: 1,
+    interrupted: [],
+    executions: [run],
+    work: {
+      schema_version: 2,
+      profile: PROFILE,
+      id: work,
+      revision: "1",
+      lifecycle: "active",
+      objective: "Find 3 Airbnb stays in Lisbon for 2 people, 4–7 December, under €120 a night",
+      objective_revision: "1",
+      context_revision: "1",
+      objective_author: "user",
+      questions: [],
+      status: done ? "plan_ready" : "running",
+      plan: null,
+    },
+  } as unknown as WorkRuntimeProjection;
+  const snapshot = {
+    version: 1,
+    profile: PROFILE,
+    id: `${id}-canvas`,
+    space: "space",
+    title: id,
+    revision: "1",
+    lifecycle: "active",
+    areas: [],
+    view: { revision: "1", x: 0, y: 0, zoom_milli: 1000, placements: [] },
+    elements: [
+      { id: `${id}-request`, area: null, reference: { kind: "objective", objective: work } },
+    ],
+  } as unknown as WorkEnvironmentSnapshot;
+  return {
+    name: id,
+    snapshot,
+    objectives: new Map([[work, projection]]),
+    pictures: new Map(),
+    pages: [],
+  };
+}

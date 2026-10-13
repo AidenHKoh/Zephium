@@ -69,6 +69,10 @@ export type RunPart = {
   lines?: { kind: "read" | "write" | "command" | "search"; text: string }[];
   /** While it works, what it is doing now, in words: "Reading Lux 2br near YC". */
   now?: string;
+  /** A web search's words, its latest when it searched more than once. */
+  query?: string;
+  /** How many searches the row stands for, when more than one. */
+  queries?: number;
 };
 
 /** What a step is doing while it runs, as a live part's row says it. */
@@ -220,6 +224,8 @@ function factParts(
       if (part.lines) for (const step of steps) addLine(part, step.kind);
       parts.push(part);
     }
+    const searched = leadSearches(card, run, going);
+    if (searched) parts.push({ ...searched, order: parts.length });
     const lead = leadReads(card, run, recorded, going);
     if (lead) parts.push({ ...lead, order: parts.length });
   }
@@ -279,6 +285,67 @@ function leadReads(
     sources: [],
     order: 0,
     ...(reading && nowOf(steps) ? { now: nowOf(steps)! } : {}),
+  };
+}
+
+/** An address as a person would recognise it again: no fragment, no tracking tag. */
+function samePage(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    for (const key of [...parsed.searchParams.keys()])
+      if (key.startsWith("utm_")) parsed.searchParams.delete(key);
+    return `${parsed.hostname.replace(/^www\./u, "")}${parsed.pathname.replace(/\/$/u, "")}${parsed.search}`;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * The web searches the lead ran itself, outside any part, as one row: what it
+ * asked, the results in the engine's order, and which of them it went on to open.
+ */
+function leadSearches(card: string, run: WorkExecutionFact, going: boolean): RunPart | null {
+  const steps = (run.steps ?? []).filter((step) => !step.part && step.kind.kind === "search");
+  if (!steps.length) return null;
+  const opened = new Set(
+    (run.steps ?? []).flatMap((step) =>
+      step.kind.kind === "read" ? [samePage(step.kind.url)] : [],
+    ),
+  );
+  const seen = new Set<string>();
+  const sources: SourceRow[] = [];
+  for (const step of steps) {
+    const record = run.provider_evidence?.find((entry) => entry.id === step.evidence);
+    for (const [index, result] of (record?.evidence.citations ?? []).entries()) {
+      const page = samePage(result.url);
+      if (!result.url || seen.has(page)) continue;
+      seen.add(page);
+      sources.push({
+        key: `${step.id}:${index}`,
+        url: result.url,
+        where: hostOf(result.url).replace(/^www\./u, ""),
+        title: result.title.trim(),
+        ...(opened.has(page) ? { opened: true } : {}),
+      });
+    }
+  }
+  const queries = steps.flatMap((step) => (step.kind.kind === "search" ? [step.kind.query] : []));
+  const searching = going && steps.some((step) => step.status === "running");
+  return {
+    id: `part:${card}:search:${run.id}`,
+    key: `search:${run.id}`,
+    title: m.work_part_search(),
+    helper: "research",
+    state: searching ? "running" : "done",
+    pages: [],
+    unread: [],
+    sources,
+    order: 0,
+    query: queries.at(-1)!,
+    ...(queries.length > 1 ? { queries: queries.length } : {}),
+    ...(sources.length ? { summary: m.work_part_results({ count: sources.length }) } : {}),
+    ...(searching && nowOf(steps) ? { now: nowOf(steps)! } : {}),
   };
 }
 

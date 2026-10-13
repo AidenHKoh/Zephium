@@ -15,7 +15,7 @@ import { agentDoing, isLive, type AgentDoing } from "./agent-steps";
 import { subjectFacts, subjectKey, subjectsOf } from "./subjects";
 import { firstRequest, type WorkStage } from "./project-environment-thread";
 import { host, observedTitle } from "./project-environment-stage";
-import { BOARD_PIN, laneElement, partShape } from "./project-environment-board";
+import { BOARD_PIN, laneElement, partShape, searchPart } from "./project-environment-board";
 import type { RunPart } from "./run/parts";
 import { hostOf, siteName } from "./run/site";
 import type { SourceRow } from "./project-environment-stage";
@@ -625,6 +625,20 @@ export function environmentAgents(
  * What a search part read, one row per site as its address reads, with the
  * page it read there: never a vendor's name standing in for its site.
  */
+/** A search's first results in the engine's order, the ones it opened lifted to the top. */
+function searchRows(rows: readonly SourceRow[]) {
+  return [...rows]
+    .sort((a, b) => Number(!!b.opened) - Number(!!a.opened))
+    .slice(0, PART.searchRows)
+    .map((row) => ({
+      key: row.key,
+      url: row.url,
+      where: row.where,
+      title: row.title,
+      ...(row.opened ? { opened: true } : {}),
+    }));
+}
+
 function citedSites(rows: readonly SourceRow[]) {
   const sites = new Map<string, { key: string; url: string; where: string; title: string }>();
   for (const row of rows) {
@@ -841,8 +855,18 @@ export function environmentParts(
             : {}),
           ...(part.helper === "research"
             ? {
-                cited: citedSites(part.sources).slice(0, PART.sourceRows),
-                citedCount: citedSites(part.sources).length,
+                ...(searchPart(part)
+                  ? {
+                      cited: searchRows(part.sources),
+                      citedCount: part.sources.length,
+                      search: true,
+                      ...(part.query ? { query: part.query } : {}),
+                      ...(part.queries ? { queries: part.queries } : {}),
+                    }
+                  : {
+                      cited: citedSites(part.sources).slice(0, PART.sourceRows),
+                      citedCount: citedSites(part.sources).length,
+                    }),
               }
             : {}),
         },

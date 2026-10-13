@@ -30,6 +30,8 @@ export type SourceRow = {
   title: string;
   note?: string;
   file?: { record: string; path: string; kind: string };
+  /** A search result the run went on to open. */
+  opened?: boolean;
 };
 /** A file a step disclosed: the folder it sits in stands where a host would. */
 function fileRow(key: string, record: WorkFileRecordV1, title?: string): SourceRow {

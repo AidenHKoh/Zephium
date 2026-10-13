@@ -18,6 +18,8 @@ export const PART = {
   sources: 320,
   sourceRow: 28,
   sourceRows: 3,
+  /** A search's results: enough to see what it chose and what it passed over. */
+  searchRows: 5,
   helper: 400,
   helperLines: 5,
   ask: 360,
@@ -65,9 +67,7 @@ export function partSize(shape: PartShape, measured?: number): { width: number; 
     case "sources":
       return {
         width: lead + PART.sources,
-        height: tall(
-          Math.min(PART.sourceRows, shape.rows) * PART.sourceRow + (shape.more ? 24 : 0),
-        ),
+        height: tall(shape.rows * PART.sourceRow + (shape.more ? 24 : 0)),
       };
     case "helper":
       return { width: lead + PART.helper, height: tall(shape.rows * 24 + 8) };

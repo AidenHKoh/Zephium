@@ -172,8 +172,13 @@ export type PartView = {
   /** While it works, what it is doing now, in words. */
   now?: string;
   pages: readonly PartPage[];
-  /** What a search part cited, first few. */
-  cited?: readonly { key: string; url: string; where: string; title: string }[];
+  /** What a search part cited, first few; a web search's results, marked when the run opened them. */
+  cited?: readonly { key: string; url: string; where: string; title: string; opened?: boolean }[];
+  /** The rows are one web search's results, not the sites research cited. */
+  search?: boolean;
+  /** What the run searched for, and how many searches the row stands for. */
+  query?: string;
+  queries?: number;
   /** Everything it cited, for the count past the first few. */
   citedCount?: number;
   /** The connection a connection part works through, for its mark. */
