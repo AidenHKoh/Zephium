@@ -2019,8 +2019,17 @@ fn admit_value<'a>(
                     (Some(value), Some(token)) if cited.is_empty() => (token, value),
                     (value, _) => match value {
                         None => match cited.as_slice() {
+                            [] => return Err(SemanticExtractionError::VerbatimMismatch),
                             [(token, exact)] => (*token, field.verbatim_value(exact).to_owned()),
-                            _ => return Err(SemanticExtractionError::VerbatimMismatch),
+                            // A value the page splits across lines reads as one.
+                            [(token, _), ..] => (
+                                *token,
+                                cited
+                                    .iter()
+                                    .map(|(_, exact)| exact.trim())
+                                    .collect::<Vec<_>>()
+                                    .join(" "),
+                            ),
                         },
                         Some(value) => {
                             let found = cited.iter().find(|(_, exact)| {
@@ -2030,8 +2039,12 @@ fn admit_value<'a>(
                                         && crate::semantic_money::currency_amounts(exact)
                                             .contains(&value.as_str()))
                             });
+                            let found = match found {
+                                Some((token, _)) => Some((*token, value.clone())),
+                                None => loose_copy(&cited, &value, !field.money_like()),
+                            };
                             match found {
-                                Some((token, _)) => (*token, value),
+                                Some(found) => found,
                                 // A price written with its label ("Price 806 zł")
                                 // publishes the one amount it names, when the
                                 // cited text shows that amount.
@@ -2391,6 +2404,61 @@ fn clip_text(value: &str, max_bytes: usize) -> String {
 
 /// The fragment that shows `amount` in `currency`: a cited one, another
 /// field of a cited node, or the only fragment in the read that shows it.
+/// A copy that differs from what the page shows only in quotes, dashes,
+/// spaces or case, or that is a part of one fragment's text, still copies
+/// that fragment. Returns the text to keep: the page's own when the two
+/// are the same words, the copy when it is a part of the fragment.
+fn loose_copy<'a>(
+    cited: &[(&'a String, &str)],
+    value: &str,
+    part: bool,
+) -> Option<(&'a String, String)> {
+    fn fold(text: &str) -> String {
+        let mapped: String = text
+            .chars()
+            .map(|c| match c {
+                '\u{2018}' | '\u{2019}' | '\u{201B}' | '\u{2032}' => '\'',
+                '\u{201C}' | '\u{201D}' | '\u{201F}' | '\u{2033}' => '"',
+                '\u{2010}'..='\u{2015}' | '\u{2212}' => '-',
+                c if c.is_whitespace() => ' ',
+                c => c,
+            })
+            .collect::<String>()
+            .replace('\u{2026}', "...");
+        mapped
+            .split(' ')
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    }
+    let copy = fold(value);
+    if copy.chars().count() < 3 {
+        return None;
+    }
+    cited
+        .iter()
+        .find(|(_, exact)| fold(exact) == copy)
+        .map(|(token, exact)| (*token, (*exact).to_owned()))
+        .or_else(|| {
+            // A part, whole words only, and never of an amount: "299" is not
+            // a copy of "1 299,00 zł".
+            let whole_words = |exact: &str| {
+                let exact = fold(exact);
+                exact.match_indices(&copy).any(|(at, _)| {
+                    let before = exact[..at].chars().next_back();
+                    let after = exact[at + copy.len()..].chars().next();
+                    !before.is_some_and(char::is_alphanumeric)
+                        && !after.is_some_and(char::is_alphanumeric)
+                })
+            };
+            cited
+                .iter()
+                .find(|(_, exact)| part && whole_words(exact))
+                .map(|(token, _)| (*token, value.to_owned()))
+        })
+}
+
 fn money_source(
     raw_sources: &[String],
     read: &SemanticReadResult<'_>,
@@ -2859,6 +2927,34 @@ struct RawTextItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_copy_differing_only_in_quotes_spaces_or_case_still_copies_its_fragment() {
+        let (a, b) = ("@r1".to_owned(), "@r2".to_owned());
+        let cited = [
+            (&a, "Price list"),
+            (
+                &b,
+                "Posted \u{201C}testing agentic browsing v2\u{201D}  just now",
+            ),
+        ];
+        // The same words: the page's own text is kept.
+        assert_eq!(
+            loose_copy(&cited, "price  LIST", true),
+            Some((&a, "Price list".to_owned()))
+        );
+        // A part of a fragment, with straight quotes: the copy stands.
+        assert_eq!(
+            loose_copy(&cited, "\"testing agentic browsing v2\"", true),
+            Some((&b, "\"testing agentic browsing v2\"".to_owned()))
+        );
+        assert_eq!(loose_copy(&cited, "something else", true), None);
+        assert_eq!(loose_copy(&cited, "v2", true), None);
+        assert_eq!(loose_copy(&cited, "agentic brow", true), None);
+        // Never a part of an amount.
+        let price = [(&a, "1 299,00 zł")];
+        assert_eq!(loose_copy(&price, "299,00 zł", false), None);
+    }
     use crate::{
         decode_semantic_snapshot, encode_semantic_read, read_semantic_observation,
         ContextCapabilities, ContextCapability, ContextId, ContextIdentity, ContextKind,
@@ -4694,7 +4790,7 @@ mod tests {
     }
 
     #[test]
-    fn verbatim_text_requires_one_exact_source_and_preserves_privacy() {
+    fn verbatim_text_copies_its_cited_source_and_preserves_privacy() {
         let observation = observation();
         let read = read(&observation, 31);
         let delivery = delivered(&read);
@@ -4706,13 +4802,12 @@ mod tests {
         .unwrap();
         for (value, sources, expected) in [
             ("Quarterly summary", json!(["@r1"]), None),
+            // Whole words of the cited text, or the same words spaced
+            // differently, still copy it.
+            ("Quarterly", json!(["@r1"]), None),
+            ("Quarterly summary ", json!(["@r1"]), None),
             (
-                "Quarterly",
-                json!(["@r1"]),
-                Some(SemanticExtractionError::VerbatimMismatch),
-            ),
-            (
-                "Quarterly summary ",
+                "Quarterly summ",
                 json!(["@r1"]),
                 Some(SemanticExtractionError::VerbatimMismatch),
             ),
