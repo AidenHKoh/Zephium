@@ -19,6 +19,57 @@ pub struct Profile {
     pub kind: ProfileKind,
 }
 
+/// Colours and symbols are indices into the frame's curated sets, so a
+/// stored avatar never names a colour or glyph the interface cannot draw.
+pub const PROFILE_AVATAR_COLORS: u8 = 10;
+pub const PROFILE_AVATAR_SYMBOLS: u8 = 16;
+/// A photo is stored downscaled; nothing larger is ever written or served.
+pub const MAX_PROFILE_AVATAR_PHOTO_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileAvatarStyle {
+    Initials,
+    Symbol,
+    Photo,
+}
+
+/// How a profile is drawn. `revision` advances on every change so a photo's
+/// URL changes with it; revision 0 is the unsaved default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProfileAvatar {
+    pub style: ProfileAvatarStyle,
+    pub color: u8,
+    pub symbol: u8,
+    pub revision: u32,
+}
+
+impl ProfileAvatar {
+    /// Initials on a colour picked from the id, stable across launches.
+    pub fn initial(profile: ProfileId) -> Self {
+        let seed = profile.bytes().iter().fold(0_u32, |sum, byte| {
+            sum.wrapping_mul(31).wrapping_add(u32::from(*byte))
+        });
+        Self {
+            style: ProfileAvatarStyle::Initials,
+            color: (seed % u32::from(PROFILE_AVATAR_COLORS)) as u8,
+            symbol: 0,
+            revision: 0,
+        }
+    }
+
+    pub fn valid(&self) -> bool {
+        self.color < PROFILE_AVATAR_COLORS && self.symbol < PROFILE_AVATAR_SYMBOLS
+    }
+}
+
+/// A profile name as it is kept: bounded, stripped of controls, never empty.
+pub fn profile_name(name: &str) -> Option<String> {
+    let name = crate::session::bounded_name(name.trim(), "");
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 #[derive(Default)]
 pub struct Profiles {
     order: Vec<ProfileId>,
@@ -53,11 +104,12 @@ impl Profiles {
     /// as a restored one is, and a name with nothing left is refused rather
     /// than replaced, so a cleared field never renames a profile to a default.
     pub fn rename(&mut self, id: ProfileId, name: &str) -> bool {
-        let name = crate::session::bounded_name(name.trim(), "");
-        let name = name.trim();
+        let Some(name) = profile_name(name) else {
+            return false;
+        };
         match self.map.get_mut(&id) {
-            Some(profile) if !name.is_empty() && profile.kind != ProfileKind::Incognito => {
-                name.clone_into(&mut profile.name);
+            Some(profile) if profile.kind != ProfileKind::Incognito => {
+                profile.name = name;
                 true
             }
             _ => false,
@@ -118,6 +170,27 @@ mod tests {
         assert_eq!(profiles.get(personal).unwrap().name, "Alex Rivera");
         assert!(!profiles.rename(ProfileId::from(2), "Private"));
         assert!(!profiles.rename(ProfileId::from(3), "Nobody"));
+    }
+
+    #[test]
+    fn a_default_avatar_is_stable_initials_within_the_curated_set() {
+        let first = ProfileAvatar::initial(ProfileId::from(42));
+        assert_eq!(first, ProfileAvatar::initial(ProfileId::from(42)));
+        assert_eq!(first.style, ProfileAvatarStyle::Initials);
+        assert_eq!(first.revision, 0);
+        assert!(first.valid());
+        assert!(!ProfileAvatar {
+            color: PROFILE_AVATAR_COLORS,
+            ..first
+        }
+        .valid());
+        assert!(!ProfileAvatar {
+            symbol: PROFILE_AVATAR_SYMBOLS,
+            ..first
+        }
+        .valid());
+        assert_eq!(profile_name("  Work \n").as_deref(), Some("Work"));
+        assert_eq!(profile_name(" \u{200f} "), None);
     }
 
     #[test]

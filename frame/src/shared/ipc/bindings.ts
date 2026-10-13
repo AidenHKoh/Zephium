@@ -298,6 +298,17 @@ export const commands = {
 	blockerRetry: (failedGeneration: string) => __TAURI_INVOKE<OperationAdmission>("blocker_retry", { failedGeneration }),
 	blockerRefreshSources: () => __TAURI_INVOKE<OperationAdmission>("blocker_refresh_sources"),
 	profilesDelete: (profile: string) => __TAURI_INVOKE<OperationAdmission>("profiles_delete", { profile }),
+	profilesGet: () => typedError<{
+	current: string | null,
+	private: boolean,
+	profiles: ProfileEntryView[],
+} | null, null>(__TAURI_INVOKE("profiles_get")),
+	profilesCreate: (name: string, avatar: ProfileAvatarInputV1, andSwitch: boolean) => __TAURI_INVOKE<OperationAdmission>("profiles_create", { name, avatar, andSwitch }),
+	profilesSwitch: (profile: string) => __TAURI_INVOKE<OperationAdmission>("profiles_switch", { profile }),
+	profilesRename: (profile: string, name: string) => __TAURI_INVOKE<OperationAdmission>("profiles_rename", { profile, name }),
+	profilesSetAvatar: (profile: string, avatar: ProfileAvatarInputV1) => __TAURI_INVOKE<OperationAdmission>("profiles_set_avatar", { profile, avatar }),
+	/**  Picks a picture natively and stages its 256px square copy. */
+	profileAvatarPick: () => typedError<ProfileAvatarPickV1, null>(__TAURI_INVOKE("profile_avatar_pick")),
 	operationStatus: (operationId: string) => __TAURI_INVOKE<OperationStatus>("operation_status", { operationId }),
 	operationsReconcile: () => __TAURI_INVOKE<OperationDisposition[]>("operations_reconcile"),
 	operationAcknowledge: (operationId: string) => __TAURI_INVOKE<boolean>("operation_acknowledge", { operationId }),
@@ -1724,6 +1735,36 @@ export type PersonalHideView = {
 	enabled: boolean,
 };
 
+export type ProfileAvatarInputV1 = {
+	style: ProfileAvatarStyleView,
+	color: number,
+	symbol: number,
+	/**  The token `profile_avatar_pick` returned, for a photo style. */
+	photo: string | null,
+};
+
+export type ProfileAvatarPickV1 = { kind: "picked"; token: string } | { kind: "cancelled" } | { kind: "unsupported" } | { kind: "unavailable" };
+
+export type ProfileAvatarStyleView = "initials" | "symbol" | "photo";
+
+/**
+ *  How a profile is drawn. Colour and symbol index the frame's curated sets;
+ *  a photo is served by native under its revision, never sent as bytes.
+ */
+export type ProfileAvatarView = {
+	style: ProfileAvatarStyleView,
+	color: number,
+	symbol: number,
+	revision: number,
+};
+
+export type ProfileEntryView = {
+	id: string,
+	name: string,
+	kind: ProfileKindView,
+	avatar: ProfileAvatarView,
+};
+
 export type ProfileId = string;
 
 export type ProfileKindView = "default" | "named" | "incognito";
@@ -1736,6 +1777,16 @@ export type ProfileView = {
 	id: string,
 	name: string,
 	kind: ProfileKindView,
+};
+
+/**
+ *  Every persistent profile, in order, and the one the window browses as.
+ *  `private` is set while the window shows its private scope instead.
+ */
+export type ProfilesView = {
+	current: string | null,
+	private: boolean,
+	profiles: ProfileEntryView[],
 };
 
 /**  Why a recorded shortcut was not taken. */

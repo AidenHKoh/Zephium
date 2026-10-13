@@ -23,6 +23,7 @@ mod persistence;
 mod presentation;
 mod private;
 mod profile_deletion;
+mod profile_roster;
 mod projections;
 mod scope;
 mod search;
@@ -222,6 +223,7 @@ pub struct Shell {
     zoom: ZoomState,
     divider: Option<GrabbedDivider>,
     private: Option<private::PrivateSession>,
+    roster: profile_roster::RosterState,
     /// Sites allowed to open a kind of application link without asking,
     /// for this run only.
     external_apps_allowed: std::collections::HashSet<(ProfileId, String, String)>,
@@ -454,6 +456,7 @@ impl Shell {
             zoom: ZoomState::default(),
             divider: None,
             private: None,
+            roster: profile_roster::RosterState::default(),
             external_apps_allowed: std::collections::HashSet::new(),
             residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),
@@ -750,6 +753,33 @@ impl Shell {
             }
             Command::RenameFocusedProfile(name) => {
                 let _ = self.operation_rename_focused_profile(&name);
+            }
+            Command::CreateProfile {
+                name,
+                avatar,
+                photo,
+                switch,
+            } => {
+                let _ = self.operation_create_profile(&name, avatar, photo, switch);
+            }
+            Command::SwitchProfile(profile) => {
+                let _ = self.operation_switch_profile(profile);
+            }
+            Command::RenameProfile { profile, name } => {
+                let _ = self.operation_rename_profile(profile, &name);
+            }
+            Command::SetProfileAvatar {
+                profile,
+                avatar,
+                photo,
+            } => {
+                let _ = self.operation_set_profile_avatar(profile, avatar, photo);
+            }
+            Command::ProfileAvatarPhoto { profile, reply } => {
+                self.profile_avatar_photo(profile, reply);
+            }
+            Command::Profiles { reply } => {
+                let _ = reply.try_send(self.profiles_view());
             }
             Command::Close(id) => {
                 let _ = self.operation_close(id);

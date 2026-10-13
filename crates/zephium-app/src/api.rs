@@ -310,6 +310,33 @@ pub enum Command {
     /// Keeps one of onboarding's catalog sites, named by its catalog id.
     KeepSite(String),
     RenameFocusedProfile(String),
+    /// A named profile with its own space, engine store and content policy.
+    CreateProfile {
+        name: String,
+        avatar: zephium_core::profiles::ProfileAvatar,
+        photo: Option<Arc<Vec<u8>>>,
+        /// Shows the new profile in the window once it exists.
+        switch: bool,
+    },
+    /// Shows a persistent profile in the window.
+    SwitchProfile(ProfileId),
+    RenameProfile {
+        profile: ProfileId,
+        name: String,
+    },
+    /// A photo style carries its already downscaled bytes.
+    SetProfileAvatar {
+        profile: ProfileId,
+        avatar: zephium_core::profiles::ProfileAvatar,
+        photo: Option<Arc<Vec<u8>>>,
+    },
+    ProfileAvatarPhoto {
+        profile: ProfileId,
+        reply: SyncSender<Option<Vec<u8>>>,
+    },
+    Profiles {
+        reply: SyncSender<Option<zephium_ipc::ProfilesView>>,
+    },
     Navigate {
         id: ItemId,
         input: String,

@@ -319,6 +319,29 @@ pub trait Store {
             error: crate::resources::ResourceError::Unavailable,
         });
     }
+    /// Every saved profile avatar, read once at startup. Profiles without a
+    /// row are drawn with [`crate::profiles::ProfileAvatar::initial`].
+    fn load_profile_avatars(&self) -> Vec<(ProfileId, crate::profiles::ProfileAvatar)> {
+        Vec::new()
+    }
+    /// Replaces a profile's avatar. A photo style carries its downscaled
+    /// bytes; any other style clears the stored photo.
+    fn save_profile_avatar(
+        &self,
+        _profile: ProfileId,
+        _avatar: crate::profiles::ProfileAvatar,
+        _photo: Option<std::sync::Arc<Vec<u8>>>,
+        done: Box<dyn FnOnce(bool) + Send>,
+    ) {
+        done(false);
+    }
+    fn profile_avatar_photo(
+        &self,
+        _profile: ProfileId,
+        done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
+    ) {
+        done(None);
+    }
     /// Notes kept in the profile database before notes became Markdown
     /// files, for their one-time move into the notes folder. `None` when they
     /// cannot be read now.

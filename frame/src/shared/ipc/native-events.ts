@@ -6,6 +6,7 @@ import type {
   WorkModelsChanged,
   AccountChanged,
   PanelState,
+  ProfilesView,
   FaviconsView,
   NoteOpenRequested,
   NoteChanges,
@@ -88,6 +89,7 @@ export const nativeEventNames = {
   focusChanged: "zephium:focus",
   voiceChanged: "zephium:voice-changed",
   voiceLevels: "zephium:voice-levels",
+  profilesChanged: "zephium:profiles",
 } as const;
 
 export const events = {
@@ -143,4 +145,5 @@ export const events = {
   focusChanged: scopedEvent<FocusChanged>(nativeEventNames.focusChanged),
   voiceChanged: scopedEvent<VoiceChanged>(nativeEventNames.voiceChanged),
   voiceLevels: scopedEvent<VoiceLevels>(nativeEventNames.voiceLevels),
+  profilesChanged: scopedEvent<ProfilesView>(nativeEventNames.profilesChanged),
 };

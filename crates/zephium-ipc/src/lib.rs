@@ -308,6 +308,41 @@ pub enum ProfileKindView {
     Incognito,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileAvatarStyleView {
+    Initials,
+    Symbol,
+    Photo,
+}
+
+/// How a profile is drawn. Colour and symbol index the frame's curated sets;
+/// a photo is served by native under its revision, never sent as bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ProfileAvatarView {
+    pub style: ProfileAvatarStyleView,
+    pub color: u8,
+    pub symbol: u8,
+    pub revision: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ProfileEntryView {
+    pub id: String,
+    pub name: String,
+    pub kind: ProfileKindView,
+    pub avatar: ProfileAvatarView,
+}
+
+/// Every persistent profile, in order, and the one the window browses as.
+/// `private` is set while the window shows its private scope instead.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ProfilesView {
+    pub current: Option<String>,
+    pub private: bool,
+    pub profiles: Vec<ProfileEntryView>,
+}
+
 /// One ordered space owned by the focused profile.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct SpaceView {
@@ -1306,6 +1341,7 @@ pub enum Projection {
     BlockerStatus(BlockerStatusView),
     Focus(FocusStatus),
     OperationProcessed(OperationDisposition),
+    Profiles(ProfilesView),
 }
 
 /// Shared Rust-owned Notes/Tasks wire model.

@@ -26,6 +26,13 @@ pub(super) struct PrivateSession {
     shown: bool,
 }
 
+impl PrivateSession {
+    /// The regular profile while the private scope is in front.
+    pub(super) fn regular_profile(&self) -> ProfileId {
+        self.other.profile
+    }
+}
+
 impl Shell {
     pub(super) fn private_shown(&self) -> bool {
         self.private.as_ref().is_some_and(|session| session.shown)
@@ -156,7 +163,7 @@ impl Shell {
 
     /// Shows whichever scope the window is not showing, keeping the other's
     /// tabs, focus and splits as they were.
-    fn swap_private_scope(&mut self) -> Vec<Effect> {
+    pub(super) fn swap_private_scope(&mut self) -> Vec<Effect> {
         let Some(session) = self.private.as_mut() else {
             return Vec::new();
         };

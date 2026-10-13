@@ -100,6 +100,7 @@ mod platform;
 mod presence;
 #[cfg(target_os = "windows")]
 mod privileged_runtime_windows;
+mod profiles;
 mod resource_close;
 mod search_providers;
 mod startup_alert;
@@ -1675,6 +1676,12 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             blocker_retry,
             blocker_refresh_sources,
             profiles_delete,
+            profiles::profiles_get,
+            profiles::profiles_create,
+            profiles::profiles_switch,
+            profiles::profiles_rename,
+            profiles::profiles_set_avatar,
+            profiles::profile_avatar_pick,
             operation_status,
             operations_reconcile,
             operation_acknowledge,
@@ -6235,6 +6242,9 @@ pub fn run() {
                     } else {
                         diagnostic!("operation: rejected duplicate or unreserved actor disposition");
                     }
+                }
+                Projection::Profiles(view) => {
+                    emit_to_privileged(&emit_handle, MAIN_LABEL, "zephium:profiles", &view)
                 }
 
             });

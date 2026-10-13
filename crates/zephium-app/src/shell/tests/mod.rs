@@ -925,6 +925,13 @@ pub(crate) struct FakeStore {
             zephium_core::permissions::PagePermissionPatch,
         )>,
     >,
+    pub(super) avatars: Mutex<
+        Vec<(
+            ProfileId,
+            zephium_core::profiles::ProfileAvatar,
+            Option<Arc<Vec<u8>>>,
+        )>,
+    >,
 }
 
 impl FakeStore {
@@ -950,6 +957,33 @@ impl FakeStore {
 }
 
 impl Store for FakeStore {
+    fn save_profile_avatar(
+        &self,
+        profile: ProfileId,
+        avatar: zephium_core::profiles::ProfileAvatar,
+        photo: Option<Arc<Vec<u8>>>,
+        done: Box<dyn FnOnce(bool) + Send>,
+    ) {
+        self.avatars.lock().unwrap().push((profile, avatar, photo));
+        done(true);
+    }
+
+    fn profile_avatar_photo(
+        &self,
+        profile: ProfileId,
+        done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
+    ) {
+        let photo = self
+            .avatars
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(owner, _, _)| *owner == profile)
+            .and_then(|(_, _, photo)| photo.as_deref().cloned());
+        done(photo);
+    }
+
     fn load_page_permission_catalog(
         &self,
         profile: ProfileId,
@@ -1632,6 +1666,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::BlockerStatus(_) => {}
         Projection::Focus(_) => {}
         Projection::OperationProcessed(_) => {}
+        Projection::Profiles(_) => {}
         Projection::OpenNote { .. } => {}
     }
 }
@@ -1915,6 +1950,7 @@ mod persistence;
 mod presentation;
 mod private;
 mod profile_deletion;
+mod profiles;
 mod projections;
 mod search;
 mod shutdown;

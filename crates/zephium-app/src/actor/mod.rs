@@ -874,6 +874,36 @@ impl Handle {
     /// This is intentionally an in-process API. The desktop does not expose
     /// it to raw page content, and callers must use the request's bounded
     /// receive method instead of blocking a native UI thread indefinitely.
+    /// The persistent profiles and the one the window shows.
+    pub fn profiles(&self) -> Receiver<Option<zephium_ipc::ProfilesView>> {
+        let (reply, receiver) = sync_channel(1);
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self.queue.try_push(Command::Profiles { reply })
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
+
+    /// A profile's stored photo, for serving to chrome under its revision.
+    pub fn profile_avatar_photo(&self, profile: ProfileId) -> Receiver<Option<Vec<u8>>> {
+        let (reply, receiver) = sync_channel(1);
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self
+            .queue
+            .try_push(Command::ProfileAvatarPhoto { profile, reply })
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
+
     pub fn content_policy_status(&self, profile: ProfileId) -> ContentPolicyStatusRequest {
         let (reply, receiver) = sync_channel(1);
         let command = Command::ContentPolicyStatus { profile, reply };
@@ -1183,6 +1213,10 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::SetTabEssential { .. }
             | Command::KeepSite(_)
             | Command::RenameFocusedProfile(_)
+            | Command::CreateProfile { .. }
+            | Command::SwitchProfile(_)
+            | Command::RenameProfile { .. }
+            | Command::SetProfileAvatar { .. }
             | Command::Activate(_)
             | Command::Close(_)
             | Command::Navigate { .. }

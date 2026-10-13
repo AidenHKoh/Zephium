@@ -21,6 +21,21 @@ impl Shell {
             } => self.operation_set_tab_essential(id, essential, before),
             Command::KeepSite(id) => self.operation_keep_site(&id),
             Command::RenameFocusedProfile(name) => self.operation_rename_focused_profile(&name),
+            Command::CreateProfile {
+                name,
+                avatar,
+                photo,
+                switch,
+            } => self.operation_create_profile(&name, avatar, photo, switch),
+            Command::SwitchProfile(profile) => self.operation_switch_profile(profile),
+            Command::RenameProfile { profile, name } => {
+                self.operation_rename_profile(profile, &name)
+            }
+            Command::SetProfileAvatar {
+                profile,
+                avatar,
+                photo,
+            } => self.operation_set_profile_avatar(profile, avatar, photo),
             Command::Navigate { id, input } => self.operation_navigate(id, input),
             Command::Reload(id) => self.operation_reload(id),
             Command::AnswerPageRequest { id, decision } => {

@@ -4,6 +4,7 @@ mod actor;
 mod bounded_json;
 mod hub;
 pub use hub::media::{admit as admit_media, MediaAdmissionError, MediaStore};
+pub use hub::profile_avatars::prepare_avatar_photo;
 mod legacy;
 mod migrations;
 mod pane;
