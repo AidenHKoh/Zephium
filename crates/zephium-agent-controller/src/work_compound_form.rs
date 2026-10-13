@@ -24,7 +24,7 @@ impl AgentWorkController {
         Self::is_batchable_search_fill(action, look)
     }
 
-    fn is_batchable_search_fill(
+    pub(crate) fn is_batchable_search_fill(
         action: &SemanticActionProposal,
         look: &SemanticObservation,
     ) -> bool {
@@ -47,6 +47,28 @@ impl AgentWorkController {
         else {
             return false;
         };
+        let field = &frame.nodes()[index];
+        let numeric_segment = |node: &SemanticNode| {
+            node.role() == SemanticRole::Spinbutton
+                && node.sensitivity() == SemanticSensitivity::Public
+                && node.operations().contains(SemanticOperationClass::Fill)
+                && !node.states().contains(SemanticState::Disabled)
+                && node.form().is_none()
+        };
+        if numeric_segment(field)
+            && field.parent().is_some_and(|parent| {
+                frame.nodes()[usize::from(parent)].role() == SemanticRole::Group
+            })
+            && frame
+                .nodes()
+                .iter()
+                .filter(|node| node.parent() == field.parent() && numeric_segment(node))
+                .take(2)
+                .count()
+                == 2
+        {
+            return true;
+        }
         let search_scope = |mut at: usize| loop {
             let node = &frame.nodes()[at];
             if node.landmark_kind() == Some(SemanticLandmarkKind::Search) {

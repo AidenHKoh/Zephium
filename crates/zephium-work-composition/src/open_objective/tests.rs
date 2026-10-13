@@ -1085,18 +1085,20 @@ fn committing_labels_cannot_become_read_actions_by_claiming_a_disclosure_or_tab_
     use serde_json::json;
     for role in ["button", "tab"] {
         for activation in [1, 6] {
-            let observation = reading_observation(
-                json!([
-                    {"k":1,"r":"document","o":16,"fc":true},
-                    {"k":2,"p":0,"r":role,"n":"Send message","ak":activation,"o":9,"fc":true}
-                ]),
-                "complete",
-            );
-            let frame = &observation.frames()[0];
-            assert_eq!(
-                site_work::classify(SemanticActionKind::Click, None, &frame.nodes()[1], frame),
-                site_work::SiteEffect::Commit(site_work::Consequence::Communication)
-            );
+            for name in ["Send message", "Accept"] {
+                let observation = reading_observation(
+                    json!([
+                        {"k":1,"r":"document","o":16,"fc":true},
+                        {"k":2,"p":0,"r":role,"n":name,"ak":activation,"o":9,"fc":true}
+                    ]),
+                    "complete",
+                );
+                let frame = &observation.frames()[0];
+                assert_eq!(
+                    site_work::classify(SemanticActionKind::Click, None, &frame.nodes()[1], frame),
+                    site_work::SiteEffect::Commit(site_work::Consequence::Communication)
+                );
+            }
         }
     }
 }

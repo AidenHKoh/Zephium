@@ -1,6 +1,44 @@
 //! Synthetic semantics only; exercise real decode/bind/prepare contracts.
 use super::*;
 
+#[cfg(feature = "probe-harness")]
+#[test]
+fn segmented_numeric_group_uses_the_compound_path_without_requiring_an_html_form() {
+    let frame = frame();
+    for (parent, role, sensitivity, operations, states, expected) in [
+        (1, "spinbutton", "public", 2, 0, true),
+        (0, "spinbutton", "public", 2, 0, false),
+        (1, "textbox", "public", 2, 0, false),
+        (1, "spinbutton", "secret", 2, 0, false),
+        (1, "spinbutton", "public", 1, 0, false),
+        (1, "spinbutton", "public", 0, 8, false),
+    ] {
+        let wire = serde_json::json!({"v":1,"i":1,"g":1,"c":"complete","n":[
+            {"k":1,"r":"document","o":16}, {"k":2,"p":0,"r":"group"},
+            {"k":3,"p":1,"r":"spinbutton","n":"Day","o":2,"v":{"k":"text","value":"13"}},
+            {"k":4,"p":parent,"r":role,"n":"Month","q":sensitivity,"o":operations,"s":states,
+                "v":if sensitivity == "secret" { serde_json::json!({"k":"redacted"}) } else { serde_json::json!({"k":"text","value":"10"}) }},
+            {"k":5,"p":0,"r":"button","n":"Accept","o":1}
+        ]});
+        let look = decode(&frame, 1, &wire.to_string());
+        let action = SemanticActionProposal::try_new(
+            SemanticActionIntent::Fill {
+                target: look.frames()[0].nodes()[2].reference(),
+                value: SemanticActionText::try_new("18".into()).unwrap(),
+            },
+            SemanticEffectClass::LocalWrite,
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::TargetValueMatchesInput,
+            SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::AgentWorkController::is_batchable_search_fill(&action, &look),
+            expected
+        );
+    }
+}
+
 #[test]
 fn static_task_scopes_never_renew_their_initial_account_sample() {
     let frame = frame();

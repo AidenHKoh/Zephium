@@ -5931,7 +5931,7 @@ static FORM_TOOL: LazyLock<BrowserToolDefinition> = LazyLock::new(|| BrowserTool
 static SEARCH_FORM_TOOL: LazyLock<BrowserToolDefinition> = LazyLock::new(|| {
     let mut tool = FORM_TOOL.clone();
     tool.parameters["properties"]["submit"] = reference_schema();
-    tool.description = "Complete one search/filter form: ordered target/value pairs and its observed submit button. Native code selects widget operations, commits suggestions, verifies values and runs the read-only search. Use exact text/option labels and observed field formats. Every effect is independently authorized. For preparation without running a search, use act instead.";
+    tool.description = "Batch one search/filter/date form: all requested target/value pairs and its observed final control. Use exact option labels and observed formats; date/time segments stay numeric. Native code verifies fields, then independently gates the final control: only a read-only control runs here; other effects stop for normal approval. For intentionally preparation-only work use act.";
     tool
 });
 
