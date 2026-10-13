@@ -343,6 +343,21 @@ impl AgentWorkController {
         .await;
         let (current, _, transition) = match result {
             Ok(result) => result,
+            Err(AgentWorkFailure::Browser(
+                error @ AgentBrowserProviderError::Action(crate::AgentBrowserActionError::Failed(
+                    failure,
+                )),
+            )) if crate::action::refused_before_acting(failure) => {
+                let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                let _ = session.take_rejected_refusal();
+                if session
+                    .close_failed_owned_action()
+                    .map_err(AgentWorkFailure::Browser)?
+                {
+                    return Ok(Err(AgentBrowserFormFault::ChangedBeforeAction));
+                }
+                return Err(AgentWorkFailure::Browser(error));
+            }
             Err(AgentWorkFailure::Browser(error))
                 if read_only
                     && matches!(

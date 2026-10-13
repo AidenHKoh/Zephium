@@ -1080,7 +1080,7 @@ impl AgentBrowserPort for Port {
         assert_eq!(
             correlation.snapshot_generation().get(),
             if matches!(self.fault, Fault::CompoundFields(_)) {
-                1 + lock(&self.calls).iter().filter(|&&call| call == 7).count() as u64
+                lock(&self.calls).iter().filter(|&&call| call == 3).count() as u64
             } else if matches!(
                 self.fault,
                 Fault::Hydration | Fault::SkeletonHydration | Fault::SkeletonPersistent
@@ -1200,7 +1200,9 @@ impl AgentBrowserPort for Port {
         };
         #[cfg(feature = "probe-harness")]
         let wire = if matches!(self.fault, Fault::CompoundFields(_)) {
-            let filled = lock(&self.calls).iter().filter(|&&call| call == 7).count();
+            let attempts = lock(&self.calls).iter().filter(|&&call| call == 7).count();
+            let filled =
+                attempts.saturating_sub(usize::from(self.fault == Fault::CompoundFields(true)));
             serde_json::json!({"v":SEMANTIC_WIRE_VERSION,"i":correlation.invocation().get(),"g":correlation.snapshot_generation().get(),"c":"complete","n":[
                 {"k":1,"r":"document","fc":true},
                 {"k":2,"p":0,"r":"textbox","n":"Field","s":64,"o":2,"fc":true,"v":{"k":"text","value":if filled > 0 {"fixture value"} else {""}},"b":{"x":10,"y":20,"w":120,"h":30}},
@@ -1384,7 +1386,9 @@ impl AgentBrowserPort for Port {
             return ContextDispatch::Scheduled;
         }
         match self.fault {
-            Fault::CompoundFields(true) => {
+            Fault::CompoundFields(true)
+                if lock(&self.calls).iter().filter(|&&call| call == 7).count() == 1 =>
+            {
                 let now = request.requested_at();
                 completion(request.fail(SemanticActionNativeFailure::TargetChanged, now));
                 return ContextDispatch::Scheduled;
@@ -2285,7 +2289,7 @@ fn native_compound_field_prepares_then_extracts_with_existing_effect_policy() {
 
 #[cfg(feature = "probe-harness")]
 #[test]
-fn native_compound_target_change_closes_the_exact_failed_write_without_pending_debt() {
+fn native_compound_target_change_replans_from_a_fresh_look_without_pending_debt() {
     let _guard = lock(&SERIAL);
     provider_fixture_with_form(ProviderFault::CompoundFormRefused, Some("fixture value"));
 }
@@ -2421,7 +2425,9 @@ fn provider_fixture_with_discovery_account(
     } else {
         match fault {
             ProviderFault::CompoundForm | ProviderFault::CompoundFormRefused => {
-                if form == Some("fixture value") && fault != ProviderFault::CompoundFormRefused {
+                if fault == ProviderFault::CompoundFormRefused {
+                    8
+                } else if form == Some("fixture value") {
                     4
                 } else {
                     2
@@ -2788,7 +2794,43 @@ fn provider_fixture_with_discovery_account(
                         fault,
                         ProviderFault::CompoundForm | ProviderFault::CompoundFormRefused
                     ) {
-                        if turns == 1 {
+                        if fault == ProviderFault::CompoundFormRefused && turns == 2 {
+                            named_tool_stream(
+                                turns,
+                                "act",
+                                r#"{\"actions\":[{\"kind\":\"fill\",\"target\":\"@a2\",\"value\":\"fixture value\",\"effect\":\"local_write\",\"wait\":{\"kind\":\"immediate\"},\"verification\":{\"kind\":\"target_value_matches_input\"},\"settle_millis\":2000}]}"#,
+                            )
+                        } else if fault == ProviderFault::CompoundFormRefused && turns == 3 {
+                            fn reference(value: &serde_json::Value) -> Option<String> {
+                                match value {
+                                    serde_json::Value::String(text) => text
+                                        .lines()
+                                        .filter(|line| {
+                                            line.starts_with("N @")
+                                                && line.contains("name=\"Second\"")
+                                        })
+                                        .filter_map(|line| {
+                                            line.split_whitespace().nth(1).map(str::to_owned)
+                                        })
+                                        .last(),
+                                    serde_json::Value::Array(items) => {
+                                        items.iter().filter_map(reference).last()
+                                    }
+                                    serde_json::Value::Object(items) => {
+                                        items.values().filter_map(reference).last()
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            let body: serde_json::Value =
+                                serde_json::from_slice(&request[header + 4..expected]).unwrap();
+                            let target = reference(&body).expect("fresh second field");
+                            let args=serde_json::json!({"fields":[{"target":target,"value":"second value"}],"submit":null}).to_string();
+                            let escaped = serde_json::to_string(&args).unwrap();
+                            named_tool_stream(turns, "fill_form", &escaped[1..escaped.len() - 1])
+                        } else if turns == 1
+                            || (fault == ProviderFault::CompoundFormRefused && turns == 3)
+                        {
                             named_tool_stream(
                                 turns,
                                 "fill_form",
@@ -3326,26 +3368,28 @@ fn provider_fixture_with_discovery_account(
         return;
     }
     if fault == ProviderFault::CompoundFormRefused {
-        let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
-            panic!("{outcome:?}");
+        let AgentWorkOutcome::Succeeded(success) = outcome else {
+            panic!(
+                "{outcome:?}; calls={calls:?}; events={:?}",
+                events.iter().map(|e| e.kind()).collect::<Vec<_>>()
+            );
         };
-        assert_eq!(
-            closed.failure(),
-            AgentWorkFailure::Browser(AgentBrowserProviderError::Action(
-                crate::AgentBrowserActionError::Failed(SemanticActionFailure::TargetChanged)
-            ))
-        );
         assert!(
             matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)),
             "{shutdown:?}"
         );
+        assert_eq!(calls.iter().filter(|&&call| call == 7).count(), 3);
         assert_eq!(
-            calls.iter().filter(|&&call| call == 7).count(),
-            1,
-            "no refused action replay"
+            success.closure().effects(),
+            3,
+            "one accounted refusal plus two verified writes"
         );
-        assert_eq!(closed.policy_settlement().closure().effects(), 1);
-        assert_eq!(server.join().unwrap(), 1);
+        assert_eq!(
+            success.closure().model_calls(),
+            4,
+            "replanning is a fresh acknowledged model turn"
+        );
+        assert_eq!(server.join().unwrap(), 4);
         return;
     }
     if matches!(

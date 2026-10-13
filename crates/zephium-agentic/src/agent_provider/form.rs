@@ -73,6 +73,8 @@ pub enum FormFault {
     SubmitRequired,
     /// Native policy requires a separately admitted action, not another form attempt.
     SeparateActionRequired,
+    /// Native preflight refused before mutation; the next look may safely replan.
+    ChangedBeforeAction,
     /// A dispatched operation did not establish its requested postcondition.
     Unverified,
     /// The bounded native preparation exhausted its action or time allowance.
