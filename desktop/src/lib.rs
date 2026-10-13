@@ -3342,8 +3342,11 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             _ => rejected_operation(),
         };
     }
-    // Site protection acts on the frame's focused page state.
-    if matches!(id, PROTECTION_SITE_COMMAND | PROTECTION_HIDE_COMMAND) {
+    // Site protection acts on the frame's focused page state, and an
+    // extension's button opens from the frame, which holds its action.
+    if matches!(id, PROTECTION_SITE_COMMAND | PROTECTION_HIDE_COMMAND)
+        || id.starts_with(EXTENSION_ACTION_COMMAND)
+    {
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
             accepted_ui_operation()
         } else {
@@ -4380,8 +4383,52 @@ fn bookmark_menu_popup(
     caller.popup_menu_at(&menu, anchor).is_ok()
 }
 
+/// One extension's button, carried into the rail's menu. The frame holds the
+/// action and its popup; native only draws the row and relays the choice.
+#[derive(Clone, Debug, serde::Deserialize, specta::Type)]
+pub struct SidebarMenuExtension {
+    id: String,
+    label: String,
+    /// 32×32 RGBA, base64, as the frame already holds it.
+    icon: Option<String>,
+    enabled: bool,
+}
+
+const SIDEBAR_MENU_EXTENSIONS: usize = 24;
+const EXTENSION_ACTION_COMMAND: &str = "extension.action=";
+
+fn extension_menu_id(id: &str) -> Option<String> {
+    (!id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_graphic()))
+        .then(|| format!("{EXTENSION_ACTION_COMMAND}{id}"))
+}
+
+fn extension_menu_label(label: &str) -> String {
+    let label: String = label
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect();
+    // A bare `&` would become a Windows mnemonic.
+    let label = label.replace('&', "&&");
+    if label.is_empty() {
+        "Extension".into()
+    } else {
+        label
+    }
+}
+
+fn extension_menu_icon(icon: Option<&str>) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let rgba = base64::engine::general_purpose::STANDARD
+        .decode(icon?)
+        .ok()?;
+    (rgba.len() == 32 * 32 * 4).then_some(rgba)
+}
+
 #[tauri::command]
 #[specta::specta]
+#[allow(clippy::too_many_arguments)]
 fn sidebar_menu_popup(
     caller: WebviewWindow,
     app: tauri::AppHandle,
@@ -4389,6 +4436,8 @@ fn sidebar_menu_popup(
     y: f64,
     site_protected: Option<bool>,
     can_hide: bool,
+    extensions: Vec<SidebarMenuExtension>,
+    manage_extensions: bool,
 ) -> bool {
     if !authorize(&caller, CallerPolicy::Main, "sidebar_menu_popup") {
         return false;
@@ -4411,7 +4460,14 @@ fn sidebar_menu_popup(
         return false;
     };
     let keymap = keymap_overrides(&app);
-    let Ok(menu) = build_sidebar_menu(&app, &keymap, site_protected, can_hide) else {
+    let Ok(menu) = build_sidebar_menu(
+        &app,
+        &keymap,
+        site_protected,
+        can_hide,
+        &extensions,
+        manage_extensions,
+    ) else {
         return false;
     };
     caller.popup_menu_at(&menu, anchor).is_ok()
@@ -5130,9 +5186,12 @@ fn build_sidebar_menu(
     overrides: &std::collections::HashMap<String, String>,
     site_protected: Option<bool>,
     can_hide: bool,
+    extensions: &[SidebarMenuExtension],
+    manage_extensions: bool,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{
-        CheckMenuItemBuilder, IsMenuItem, Menu, MenuItemBuilder, PredefinedMenuItem,
+        CheckMenuItemBuilder, IconMenuItemBuilder, IsMenuItem, Menu, MenuItemBuilder,
+        PredefinedMenuItem,
     };
 
     let resolved = zephium_core::commands::resolve(overrides);
@@ -5154,9 +5213,38 @@ fn build_sidebar_menu(
         )),
         None => None,
     };
+    // At rail width the extensions have no tray to sit in, so their buttons
+    // stand here, each with its own icon, above the way to manage them.
+    let mut extension_items = Vec::new();
+    for extension in extensions.iter().take(SIDEBAR_MENU_EXTENSIONS) {
+        let Some(id) = extension_menu_id(&extension.id) else {
+            continue;
+        };
+        let label = extension_menu_label(&extension.label);
+        let builder = IconMenuItemBuilder::with_id(id, label).enabled(extension.enabled);
+        let item = match extension_menu_icon(extension.icon.as_deref()) {
+            Some(rgba) => builder
+                .icon(tauri::image::Image::new_owned(rgba, 32, 32))
+                .build(handle)?,
+            None => builder.build(handle)?,
+        };
+        extension_items.push(item);
+    }
+    let extension_rule = PredefinedMenuItem::separator(handle)?;
+    let manage =
+        MenuItemBuilder::with_id("extensions.manage", "Manage Extensions…").build(handle)?;
     let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&back, &forward, &reload];
     if let Some((rule, site, hide)) = &protection {
         items.extend([rule as &dyn IsMenuItem<tauri::Wry>, site, hide]);
+    }
+    if manage_extensions {
+        items.push(&extension_rule);
+        items.extend(
+            extension_items
+                .iter()
+                .map(|item| item as &dyn IsMenuItem<tauri::Wry>),
+        );
+        items.push(&manage);
     }
     items.extend([&separator as &dyn IsMenuItem<tauri::Wry>, &compact]);
 

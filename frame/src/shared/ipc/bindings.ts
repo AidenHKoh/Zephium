@@ -370,7 +370,7 @@ export const commands = {
 	tabMenuPopup: (id: string, x: number | null, y: number | null, context: TabMenuContext) => __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, context }),
 	bookmarkMenuPopup: (x: number | null, y: number | null, folder: boolean) => __TAURI_INVOKE<boolean>("bookmark_menu_popup", { x, y, folder }),
 	profileMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("profile_menu_popup", { x, y }),
-	sidebarMenuPopup: (x: number | null, y: number | null, siteProtected: boolean | null, canHide: boolean) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y, siteProtected, canHide }),
+	sidebarMenuPopup: (x: number | null, y: number | null, siteProtected: boolean | null, canHide: boolean, extensions: SidebarMenuExtension[], manageExtensions: boolean) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y, siteProtected, canHide, extensions, manageExtensions }),
 	toolsMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("tools_menu_popup", { x, y }),
 	/**
 	 *  New Tab has its own main-only entry. The actor revalidates the bound blank
@@ -2064,6 +2064,18 @@ export type SearchResults = {
 export type ShutSiteView = {
 	site: string,
 	icon: IconRef | null,
+};
+
+/**
+ *  One extension's button, carried into the rail's menu. The frame holds the
+ *  action and its popup; native only draws the row and relays the choice.
+ */
+export type SidebarMenuExtension = {
+	id: string,
+	label: string,
+	/**  32×32 RGBA, base64, as the frame already holds it. */
+	icon: string | null,
+	enabled: boolean,
 };
 
 /**
