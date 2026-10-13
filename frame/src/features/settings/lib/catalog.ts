@@ -86,6 +86,48 @@ export const fields = {
     description: m.settings_reduce_motion_desc,
     initial: false,
   },
+  "appearance.palette": {
+    section: "appearance",
+    label: m.look_theme,
+    description: m.look_theme_desc,
+    initial: "zephium",
+  },
+  "appearance.colors": {
+    section: "appearance",
+    label: m.look_colors,
+    description: m.look_editing_desc,
+    initial: "",
+  },
+  "appearance.contrast": {
+    section: "appearance",
+    label: m.look_contrast,
+    description: m.look_contrast_desc,
+    initial: "50",
+  },
+  "appearance.tint": {
+    section: "appearance",
+    label: m.look_tint,
+    description: m.look_tint_desc,
+    initial: "0",
+  },
+  "appearance.font": {
+    section: "appearance",
+    label: m.look_font,
+    description: m.look_font_desc,
+    initial: "system",
+  },
+  "appearance.font-size": {
+    section: "appearance",
+    label: m.look_size,
+    description: m.look_size_desc,
+    initial: "13",
+  },
+  "appearance.code-font": {
+    section: "appearance",
+    label: m.look_code_font,
+    description: m.look_code_font_desc,
+    initial: "system",
+  },
   "general.default": {
     section: "general",
     label: m.pref_general_default,
@@ -349,17 +391,6 @@ export const fields = {
     label: m.pref_downloads_ask,
     description: m.pref_downloads_ask_help,
     initial: false,
-  },
-  "accessibility.text": {
-    section: "shortcuts",
-    label: m.pref_accessibility_text,
-    description: m.pref_accessibility_text_help,
-    initial: "default",
-    options: [
-      { value: "small", label: m.pref_accessibility_text_option_0 },
-      { value: "default", label: m.pref_accessibility_text_option_1 },
-      { value: "large", label: m.pref_accessibility_text_option_2 },
-    ],
   },
   "accessibility.contrast": {
     section: "shortcuts",

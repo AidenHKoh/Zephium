@@ -6,7 +6,6 @@
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Button from "$shared/ui/Button";
-  import PreferenceSelect from "../PreferenceSelect.svelte";
   import PreferenceSwitch from "../PreferenceSwitch.svelte";
   import LauncherShortcut from "../LauncherShortcut.svelte";
   import ShortcutField from "../ShortcutField.svelte";
@@ -169,10 +168,7 @@
   </div>
 {/if}
 <SettingsGroup title={m.settings_accessibility()}
-  ><PreferenceSelect id="accessibility.text" preference="ui.text-size" /><PreferenceSwitch
-    id="accessibility.contrast"
-    preference="ui.contrast"
-  /></SettingsGroup
+  ><PreferenceSwitch id="accessibility.contrast" preference="ui.contrast" /></SettingsGroup
 >
 
 <style>

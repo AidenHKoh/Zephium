@@ -187,143 +187,6 @@
   color: var(--color-danger);
   font-size: 12px;
 }
-.appearance-previews {
-  display: flex;
-  gap: 14px;
-  padding: 20px 20px 16px;
-}
-.appearance-choice {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  align-items: center;
-  gap: 9px;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--color-label-secondary);
-  font: inherit;
-  font-size: var(--text-label);
-  cursor: default;
-}
-.appearance-choice[aria-checked="true"] {
-  color: var(--color-text);
-  font-weight: 550;
-}
-.appearance-choice:focus-visible {
-  outline: none;
-}
-.appearance-preview {
-  position: relative;
-  display: block;
-  width: 100%;
-  border-radius: var(--radius-row);
-  box-shadow: 0 0 0 0 transparent;
-  transition:
-    box-shadow var(--motion-fast) var(--ease-out),
-    scale var(--motion-slow) var(--ease-spring);
-}
-.appearance-choice:active .appearance-preview {
-  scale: 0.98;
-}
-/* The ring the platform draws round a chosen picture: a gap of the card's own
-   colour, then the accent, neither heavier than it needs to be. */
-.appearance-preview[data-selected="true"] {
-  box-shadow:
-    0 0 0 2.5px var(--color-card),
-    0 0 0 4.5px color-mix(in srgb, var(--color-accent) 78%, transparent);
-}
-.appearance-choice:focus-visible .appearance-preview {
-  box-shadow:
-    0 0 0 2.5px var(--color-card),
-    0 0 0 4.5px var(--color-ring);
-}
-/* System is both: the dark window takes the lower right of the light one. */
-.appearance-preview .mini-window + .mini-window {
-  position: absolute;
-  inset: 0;
-  clip-path: polygon(100% 0, 100% 100%, 0 100%);
-}
-.mini-window {
-  height: 90px;
-  display: flex;
-  padding: 6px;
-  gap: 6px;
-  background: #e2e3e8;
-  border-radius: var(--radius-row);
-  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.06);
-  overflow: hidden;
-}
-.mini-sidebar {
-  display: flex;
-  flex: 0 0 26%;
-  flex-direction: column;
-  gap: 5px;
-  padding-block: 3px;
-}
-.mini-sidebar span {
-  display: block;
-  width: 20px;
-  height: 4px;
-  background: #a5a6ae;
-  border-radius: 3px;
-  margin-bottom: 8px;
-}
-.mini-sidebar i {
-  height: 5px;
-  border-radius: 3px;
-  background: #c1c2ca;
-}
-.mini-sidebar i:nth-child(2) {
-  background: #f4f4f6;
-  height: 9px;
-}
-.mini-page {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border-radius: 4px;
-  background: #f7f7f9;
-}
-.mini-page span {
-  width: 34%;
-  height: 6px;
-  border-radius: 3px;
-  background: #b9bac4;
-  margin-bottom: 3px;
-}
-.mini-page i {
-  width: 60%;
-  height: 4px;
-  border-radius: 3px;
-  background: #dedee5;
-}
-.mini-window[data-tone="dark"] {
-  background: #303137;
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.06);
-}
-.mini-window[data-tone="dark"] .mini-page {
-  background: #1c1d22;
-}
-.mini-window[data-tone="dark"] .mini-sidebar i {
-  background: #494a52;
-}
-.mini-window[data-tone="dark"] .mini-sidebar i:nth-child(2) {
-  background: #5d5e66;
-}
-.mini-window[data-tone="dark"] .mini-sidebar span {
-  background: #6a6b73;
-}
-.mini-window[data-tone="dark"] .mini-page span {
-  background: #55565e;
-}
-.mini-window[data-tone="dark"] .mini-page i {
-  background: #383941;
-}
 .accent-choices {
   display: flex;
   gap: 9px;
@@ -440,13 +303,6 @@
   }
   .settings-page .ui-settings-control {
     max-width: 100%;
-  }
-  .appearance-previews {
-    gap: 6px;
-    padding-inline: 12px;
-  }
-  .mini-window {
-    height: 70px;
   }
 }
 @media (max-width: 1000px) {
@@ -1079,20 +935,6 @@
 }
 :root[data-contrast="true"] .settings-page .ui-settings-group {
   outline: 1px solid var(--color-border-strong);
-}
-:root[data-text="large"]
-  :is(.settings-nav-item, .ui-input, .ui-button, .settings-page .ui-settings-copy h3) {
-  font-size: 14px;
-}
-:root[data-text="small"]
-  :is(.settings-nav-item, .ui-input, .ui-button, .settings-page .ui-settings-copy h3) {
-  font-size: 12px;
-}
-:root[data-text="large"] .browser-sidebar {
-  --sidebar-row-text: 14px;
-}
-:root[data-text="small"] .browser-sidebar {
-  --sidebar-row-text: 12px;
 }
 /* Sidebar labels sit a step below full white so they belong to the material;
    only the current item is fully lit. */

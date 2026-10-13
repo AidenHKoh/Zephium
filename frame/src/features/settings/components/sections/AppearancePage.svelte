@@ -1,35 +1,53 @@
 <script lang="ts">
   import PreferenceSelect from "../PreferenceSelect.svelte";
+  import MiniWindow from "../appearance/MiniWindow.svelte";
+  import ModePicker from "../appearance/ModePicker.svelte";
+  import ThemeGallery from "../appearance/ThemeGallery.svelte";
+  import ThemeColors from "../appearance/ThemeColors.svelte";
+  import FontPicker from "../appearance/FontPicker.svelte";
+  import { createThemeEditor } from "../../lib/theme-editor.svelte";
+  import { codeFonts, installedCodeFonts } from "../../lib/code-fonts";
   import * as m from "$shared/i18n/messages";
   import { preferences } from "$domain/preferences";
+  import { palette, type Mode } from "$domain/appearance";
   import Select from "$shared/ui/Select";
   import Switch from "$shared/ui/Switch";
+  import Slider from "$shared/ui/Slider";
+  import SegmentedControl from "$shared/ui/SegmentedControl";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Icon from "$shared/ui/Icon";
   import { Tick02Icon } from "@hugeicons/core-free-icons";
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { IS_WINDOWS } from "$shared/platform";
-  let material = $state("");
+
+  const editor = createThemeEditor();
+  onDestroy(() => editor.dispose());
+
+  // Read from the root as the page is created, so its first frame is
+  // already in the window's mode and material.
+  const root = document.documentElement;
+  const rootMode = (): Mode => (root.dataset.theme === "light" ? "light" : "dark");
+  let material = $state(root.dataset.material ?? "none");
+  let windowMode = $state<Mode>(rootMode());
+  // Colours are edited for one mode at a time; it starts as the window's.
+  let mode = $state<Mode>(rootMode());
+  let installed = $state<string[]>([]);
   onMount(() => {
     const update = () => {
-      material = document.documentElement.dataset.material ?? "none";
+      material = root.dataset.material ?? "none";
+      const next = rootMode();
+      if (next !== windowMode) mode = next;
+      windowMode = next;
     };
     update();
+    installed = installedCodeFonts();
     const observer = new MutationObserver(update);
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["data-material"],
-    });
+    observer.observe(root, { attributes: true, attributeFilter: ["data-material", "data-theme"] });
     return () => observer.disconnect();
   });
-  const themes = [
-    { value: "light", label: m.theme_light },
-    { value: "dark", label: m.theme_dark },
-    { value: "system", label: m.theme_system },
-  ];
+
   const tints = [
-    { id: "graphite", label: m.settings_graphite },
     { id: "sky", label: m.settings_sky },
     { id: "sage", label: m.settings_sage },
     { id: "rose", label: m.settings_rose },
@@ -38,6 +56,11 @@
     { id: "lavender", label: m.settings_lavender },
     { id: "orchid", label: m.settings_orchid },
   ];
+  // The accessibility switch takes every theme to full contrast.
+  let contrast = $derived(preferences.value("ui.contrast") === "true" ? 100 : editor.contrast);
+  let themed = $derived(editor.selected !== palette.DEFAULT_THEME);
+  let graphite = $derived(themed ? m.look_accent_theme() : m.settings_graphite());
+
   // What the person may choose here. Windows has one material worth having;
   // a Mac offers the glass, the older vibrancy, or neither.
   const materialOptions = IS_WINDOWS
@@ -64,62 +87,115 @@
     mica: m.settings_material_mica,
     none: m.settings_material_solid,
   };
+
+  // The tint is shown as it is dragged and written once it rests. Windows
+  // tints with the theme on its own, so there it is not offered.
+  let tintDraft = $state<number | null>(null);
+  let tint = $derived(tintDraft ?? Number(preferences.value("ui.window-tint")));
+  let tintTimer: ReturnType<typeof setTimeout> | null = null;
+  function writeTint() {
+    if (tintTimer !== null) clearTimeout(tintTimer);
+    tintTimer = null;
+    if (tintDraft === null) return;
+    const next = String(tintDraft);
+    void preferences.set("ui.window-tint", next).finally(() => {
+      if (tintTimer === null) tintDraft = null;
+    });
+  }
+  function dragTint(value: number) {
+    tintDraft = value;
+    if (tintTimer !== null) clearTimeout(tintTimer);
+    tintTimer = setTimeout(writeTint, 400);
+  }
+  onDestroy(writeTint);
+
+  let codeFontOptions = $derived([
+    { value: "system", label: m.look_code_system() },
+    ...codeFonts
+      .filter(({ id }) => installed.includes(id) || preferences.value("ui.code-font") === id)
+      .map(({ id, family }) => ({ value: id, label: family })),
+  ]);
 </script>
 
-<SettingsGroup title={m.settings_theme()}>
-  <!-- The pictures are the choice, as the system's own Appearance pane draws
-       it: one control, named under each picture. -->
-  <div
-    class="appearance-previews"
-    role="radiogroup"
-    aria-label={m.settings_color_scheme()}
-    data-setting="appearance.theme"
-  >
-    {#each themes as theme (theme.value)}
-      {@const selected = preferences.value("appearance") === theme.value}
-      <button
-        type="button"
-        role="radio"
-        class="appearance-choice"
-        aria-checked={selected}
-        disabled={preferences.saving()}
-        onclick={() => void preferences.set("appearance", theme.value)}
-      >
-        <span class="appearance-preview" data-selected={selected} aria-hidden="true">
-          {#each theme.value === "system" ? ["light", "dark"] : [theme.value] as tone (tone)}
-            <span class="mini-window" data-tone={tone}>
-              <span class="mini-sidebar"><span></span><i></i><i></i><i></i></span>
-              <span class="mini-page"><span></span><i></i><i></i></span>
-            </span>
-          {/each}
-        </span>
-        <span class="appearance-label">{theme.label()}</span>
-      </button>
-    {/each}
-  </div>
+<div class="preview" role="img" aria-label={m.look_preview()}>
+  <MiniWindow
+    spec={editor.current}
+    {contrast}
+    {mode}
+    material={material === "" ? "none" : material}
+    tint={IS_WINDOWS ? 0 : tint}
+    inheritAccent={preferences.value("ui.accent") !== "graphite" && mode === windowMode}
+  />
+</div>
+
+<SettingsGroup title={m.look_mode()}>
+  <ModePicker spec={editor.current} {contrast} material={material === "" ? "none" : material} />
+</SettingsGroup>
+
+<SettingsGroup title={m.look_theme()}>
+  <ThemeGallery {editor} {mode} />
   <SettingsRow
     settingId="appearance.accent"
     title={m.settings_accent()}
-    description={m.settings_accent_desc()}
+    description={m.look_accent_desc()}
   >
     <div class="accent-choices" role="group" aria-label={m.settings_accent()}>
-      {#each tints as tint (tint.id)}<button
+      {#each [{ id: "graphite", label: () => graphite }, ...tints] as choice (choice.id)}
+        {@const chosen = preferences.value("ui.accent") === choice.id}
+        <button
           class="accent-swatch"
-          style:--swatch={`var(--color-tint-${tint.id})`}
-          aria-label={tint.label()}
-          title={tint.label()}
-          aria-pressed={preferences.value("ui.accent") === tint.id}
+          style:--swatch={choice.id === "graphite" && themed
+            ? "var(--seed-accent)"
+            : `var(--color-tint-${choice.id})`}
+          aria-label={choice.label()}
+          title={choice.label()}
+          aria-pressed={chosen}
           disabled={preferences.saving()}
-          onclick={() => void preferences.set("ui.accent", tint.id)}
-          >{#if preferences.value("ui.accent") === tint.id}<Icon
-              icon={Tick02Icon}
-              size={14}
-            />{/if}</button
-        >{/each}
+          onclick={() => void preferences.set("ui.accent", choice.id)}
+          >{#if chosen}<Icon icon={Tick02Icon} size={14} />{/if}</button
+        >
+      {/each}
     </div>
   </SettingsRow>
 </SettingsGroup>
-<SettingsGroup title={m.settings_layout()}>
+
+<SettingsGroup title={m.look_colors()}>
+  <ThemeColors {editor} bind:mode />
+</SettingsGroup>
+
+<SettingsGroup title={m.look_window()}>
+  <SettingsRow
+    settingId="appearance.material"
+    title={m.settings_material()}
+    description={fallback
+      ? m.settings_material_fallback({ material: materials[material]?.() ?? "" })
+      : m.settings_material_desc()}
+    ><Select
+      label={m.settings_material()}
+      labelHidden
+      value={preferences.value("ui.material")}
+      disabled={preferences.saving()}
+      options={materialOptions}
+      onchange={(v) => void preferences.set("ui.material", v)}
+    /></SettingsRow
+  >
+  {#if !IS_WINDOWS && material !== "none" && material !== ""}
+    <SettingsRow settingId="appearance.tint" title={m.look_tint()} description={m.look_tint_desc()}>
+      <div class="slider">
+        <Slider
+          label={m.look_tint()}
+          slim
+          value={tint}
+          format={(value) => `${value}%`}
+          onchange={dragTint}
+          oncommit={(value) => {
+            tintDraft = value;
+            writeTint();
+          }}
+        />
+      </div>
+    </SettingsRow>
+  {/if}
   <SettingsRow
     settingId="appearance.sidebar"
     title={m.settings_sidebar()}
@@ -137,24 +213,46 @@
       onchange={(v) => void preferences.set("sidebar.mode", v)}
     />
   </SettingsRow>
-  <SettingsRow
-    settingId="appearance.material"
-    title={m.settings_material()}
-    description={fallback
-      ? m.settings_material_fallback({ material: materials[material]?.() ?? "" })
-      : m.settings_material_desc()}
-    ><Select
-      label={m.settings_material()}
-      labelHidden
-      value={preferences.value("ui.material")}
-      disabled={preferences.saving()}
-      options={materialOptions}
-      onchange={(v) => void preferences.set("ui.material", v)}
-    /></SettingsRow
-  >
-  <PreferenceSelect id="appearance.density" preference="ui.density" />
 </SettingsGroup>
-<SettingsGroup title={m.settings_motion()}>
+
+<SettingsGroup title={m.look_typography()}>
+  <FontPicker />
+  <SettingsRow
+    settingId="appearance.font-size"
+    title={m.look_size()}
+    description={m.look_size_desc()}
+  >
+    <SegmentedControl
+      label={m.look_size()}
+      size="compact"
+      value={preferences.value("ui.font-size")}
+      disabled={preferences.saving()}
+      options={[
+        { value: "13", label: "13" },
+        { value: "14", label: "14" },
+        { value: "15", label: "15" },
+      ]}
+      onchange={(v) => void preferences.set("ui.font-size", v)}
+    />
+  </SettingsRow>
+  <SettingsRow
+    settingId="appearance.code-font"
+    title={m.look_code_font()}
+    description={m.look_code_font_desc()}
+  >
+    <Select
+      label={m.look_code_font()}
+      labelHidden
+      value={preferences.value("ui.code-font")}
+      disabled={preferences.saving()}
+      options={codeFontOptions}
+      onchange={(v) => void preferences.set("ui.code-font", v)}
+    />
+  </SettingsRow>
+</SettingsGroup>
+
+<SettingsGroup title={m.look_advanced()}>
+  <PreferenceSelect id="appearance.density" preference="ui.density" />
   <SettingsRow
     settingId="appearance.motion"
     title={m.settings_reduce_motion()}
@@ -168,3 +266,19 @@
     /></SettingsRow
   >
 </SettingsGroup>
+
+<style>
+  .preview {
+    height: 272px;
+    margin-block-end: 34px;
+    overflow: hidden;
+    border-radius: var(--radius-card);
+    box-shadow:
+      var(--shadow-card),
+      0 0 0 0.5px var(--color-border);
+  }
+
+  .slider {
+    width: 240px;
+  }
+</style>
