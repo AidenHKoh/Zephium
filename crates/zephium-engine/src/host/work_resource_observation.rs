@@ -519,6 +519,9 @@ impl EngineHost {
                             read.refuse(SemanticRuntimePortFailure::Transport);
                             return;
                         };
+                        #[cfg(feature = "agentic-browser-qa")]
+                        eprintln!("work_observation phase=dispatch presentation_facts={:?}; content=redacted",
+                            read.presentation.as_ref().map(WorkObservationPresentation::liveness_facts));
                         read.dispatched = true;
                         let correlation = read.correlation.clone();
                         let callback_guard = guard.clone();
