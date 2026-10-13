@@ -55,7 +55,7 @@ pub const MAX_SEMANTIC_RUNTIME_VISITED_NODES: u32 = 32 * 1024;
 pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// Maximum immutable production runtime source bytes installed per document.
 ///
-/// The fixed 203 KiB ceiling covers the digest-pinned semantic runtime including
+/// The fixed 206 KiB ceiling covers the digest-pinned semantic runtime including
 /// production Fill, native-select, public links and bounded source-coalesced
 /// windows, keyword discovery, independent page-dialog samples, bounded fill
 /// diagnostics, covered-target centring and the page's structured-data facts,
@@ -89,8 +89,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0x75, 0x02, 0x43, 0xfc, 0xcc, 0x0e, 0x9c, 0xa8, 0xc1, 0x6b, 0x1d, 0x89, 0x8a, 0x3e, 0x41, 0x49,
-    0x4c, 0xa8, 0x65, 0x00, 0xcd, 0x02, 0x04, 0xc6, 0xe4, 0x6a, 0xc5, 0x2a, 0x77, 0xc7, 0x6e, 0xe5,
+    0x2e, 0x9d, 0xb6, 0x41, 0x67, 0xd8, 0xe7, 0x2f, 0xd6, 0xb2, 0xca, 0x4d, 0xba, 0x2c, 0xc5, 0x5d,
+    0x6e, 0x4f, 0xa9, 0x88, 0x93, 0xfb, 0x8a, 0xe2, 0xb8, 0x8b, 0xef, 0xb4, 0xfc, 0x01, 0x14, 0x3d,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -1818,7 +1818,7 @@ mod tests {
         assert!(source.len() <= 36 * 1024);
         assert_eq!(
             format!("{:x}", Sha256::digest(source.as_bytes())),
-            "2f876745591095ff7d209aa38b99e4755853d09a34f678f0a12312b7697c96b9"
+            "46111abaf3e6cbbf0255fa65258184075d6af32b8d2be6436e9379627127bf6d"
         );
         assert!(source.contains("new AbortController()"));
         assert!(source.contains("redirect:\"error\""));

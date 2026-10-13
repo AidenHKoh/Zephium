@@ -446,7 +446,7 @@ impl UiStartupGate {
             return;
         }
         #[cfg(feature = "work-development-traces")]
-        startup_styles::capture(window, &self.expected_url, "document-loaded");
+        startup_styles::capture(window, &self.expected(), "document-loaded");
         self.document_loaded.store(true, Ordering::Release);
         self.show_if_ready(window);
     }
@@ -459,7 +459,7 @@ impl UiStartupGate {
             return false;
         }
         #[cfg(feature = "work-development-traces")]
-        startup_styles::capture(window, &self.expected_url, "frontend-ready");
+        startup_styles::capture(window, &self.expected(), "frontend-ready");
         self.frontend_ready.store(true, Ordering::Release);
         self.show_if_ready(window);
         true
@@ -497,7 +497,7 @@ impl UiStartupGate {
             }
             on_main_window_mapped(window);
             #[cfg(feature = "work-development-traces")]
-            startup_styles::after_show(window, &self.expected_url);
+            startup_styles::after_show(window, &self.expected());
         }
     }
 

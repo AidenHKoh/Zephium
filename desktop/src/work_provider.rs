@@ -27,6 +27,11 @@ impl WorkProviders {
         let _ = (engine, store);
         // The page lane and searches log their refusals as closed facts.
         zephium_app::work_trace::install(Arc::new(record_diagnostic));
+        zephium_app::work_trace::install_record_media(Arc::new(|event| {
+            record_diagnostic(format_args!(
+                "work: phase=record_media detail={event:?}; content=redacted"
+            ));
+        }));
         record_diagnostic(format_args!(
             "work: event=session_started build={} content=redacted",
             option_env!("ZEPHIUM_BUILD_REVISION").unwrap_or("unknown")

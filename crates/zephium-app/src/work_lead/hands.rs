@@ -843,8 +843,22 @@ where
                 collection,
             } => {
                 let measured = step.measurements.as_ref();
+                let records: usize = step
+                    .artifacts
+                    .iter()
+                    .filter_map(|id| {
+                        execution
+                            .artifacts
+                            .iter()
+                            .find(|artifact| artifact.id == *id)
+                    })
+                    .map(|artifact| match &artifact.data {
+                        WorkArtifactDataV1::ComparisonMatrix { subjects, .. } => subjects.len(),
+                        _ => 0,
+                    })
+                    .sum();
                 crate::work_trace::record(format_args!(
-                    "work: phase=page site={} task={} status={:?} wall_ms={} calls={} actions={} tokens={} records={} outcome={:?}",
+                    "work: phase=page site={} task={} status={:?} wall_ms={} calls={} actions={} tokens={} records={} artifacts={} outcome={:?}",
                     crate::work_sites::site_of(url).unwrap_or_default(),
                     goal.is_some(),
                     step.status,
@@ -852,6 +866,7 @@ where
                     measured.map_or(0, |m| m.planner_calls),
                     measured.map_or(0, |m| m.native_actions),
                     measured.map_or(0, |m| m.model_tokens),
+                    records,
                     step.artifacts.len(),
                     measured.and_then(|m| m.outcome),
                 ));

@@ -145,10 +145,88 @@ pub(crate) fn decode(
     Ok(out)
 }
 
+/// Closed native retrieval result. A missing picture is not a privacy refusal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum SemanticRecordMediaOutcome {
+    /// No native result has settled.
+    Pending = 0,
+    /// The original snapshot no longer holds this source.
+    MissingSource = 1,
+    /// The observed element is detached.
+    Detached = 2,
+    /// The identity text changed.
+    ChangedText = 3,
+    /// The declared identity changed.
+    ChangedIdentity = 4,
+    /// The image left its proven record container.
+    ChangedBoundary = 5,
+    /// The observed image URL changed.
+    ChangedUrl = 6,
+    /// The element is outside the usable viewport.
+    NotVisible = 7,
+    /// The image has not decoded.
+    NotLoaded = 8,
+    /// The fresh privacy survey refused capture.
+    PrivacyRefused = 9,
+    /// The native request or reply violated its contract.
+    InvalidRequest = 10,
+    /// Another bounded media operation is pending.
+    Busy = 11,
+    /// The native session retrieved the image.
+    Fetched = 12,
+    /// Native transport did not return a qualified result.
+    TransportRefused = 13,
+    /// The run has no pixel-capture authority; public image URLs remain separate.
+    CropNotAuthorized = 14,
+}
+impl SemanticRecordMediaOutcome {
+    /// Decode only the isolated runtime's closed reason codes.
+    pub fn from_code(code: u8) -> Option<Self> {
+        Some(match code {
+            0 => Self::Pending,
+            1 => Self::MissingSource,
+            2 => Self::Detached,
+            3 => Self::ChangedText,
+            4 => Self::ChangedIdentity,
+            5 => Self::ChangedBoundary,
+            6 => Self::ChangedUrl,
+            7 => Self::NotVisible,
+            8 => Self::NotLoaded,
+            9 => Self::PrivacyRefused,
+            10 => Self::InvalidRequest,
+            11 => Self::Busy,
+            12 => Self::Fetched,
+            13 => Self::TransportRefused,
+            14 => Self::CropNotAuthorized,
+            _ => return None,
+        })
+    }
+    /// Requires a separate original public-read grant; this grants no fetch authority.
+    pub fn permits_public_candidate(self) -> bool {
+        matches!(
+            self,
+            Self::MissingSource
+                | Self::Detached
+                | Self::ChangedText
+                | Self::ChangedIdentity
+                | Self::ChangedBoundary
+                | Self::ChangedUrl
+                | Self::NotVisible
+                | Self::NotLoaded
+                | Self::Busy
+                | Self::Fetched
+                | Self::CropNotAuthorized
+        )
+    }
+}
+
 /// Exact native candidate associated with an admitted source record. This is
 /// historical data; the live retained owner must separately admit and revalidate it.
 #[derive(Clone)]
 pub struct SemanticRecordMediaPlan {
+    pub(crate) outcome: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    pub(crate) fetch_stage: std::sync::Arc<std::sync::atomic::AtomicU8>,
     pub(crate) crop: Option<SemanticRecordCropPermit>,
     pub(crate) record: u16,
     pub(crate) source: [u8; 32],
@@ -159,6 +237,46 @@ pub struct SemanticRecordMediaPlan {
     pub(crate) name_key: u64,
 }
 impl SemanticRecordMediaPlan {
+    /// Closed stage counters only, never MIME strings, URLs, pixels or page text.
+    pub fn native_fetch_stage(&self) -> &'static str {
+        match self.fetch_stage.load(std::sync::atomic::Ordering::Acquire) {
+            0 => "none",
+            1 => "network",
+            2 => "status",
+            3 => "type",
+            4 => "size",
+            5 => "body",
+            6 => "dimensions",
+            7 => "decode",
+            8 => "raster",
+            _ => "unknown",
+        }
+    }
+    /// Store an isolated-runtime closed stage after wire validation.
+    pub fn record_native_fetch_stage(&self, stage: u8) {
+        if stage <= 8 {
+            self.fetch_stage
+                .store(stage, std::sync::atomic::Ordering::Release);
+        }
+    }
+    /// Shared by the native owner and the source-record projection, never model input.
+    pub fn native_outcome(&self) -> SemanticRecordMediaOutcome {
+        SemanticRecordMediaOutcome::from_code(
+            self.outcome.load(std::sync::atomic::Ordering::Acquire),
+        )
+        .unwrap_or(SemanticRecordMediaOutcome::TransportRefused)
+    }
+    /// Privacy refusal is sticky even if a later optional retrieval completes.
+    pub fn record_native_outcome(&self, outcome: SemanticRecordMediaOutcome) {
+        let _ = self.outcome.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |old| {
+                (old != SemanticRecordMediaOutcome::PrivacyRefused as u8).then_some(outcome as u8)
+            },
+        );
+    }
+
     /// Canonical flattened source-row position, independent of model image labels.
     pub const fn record(&self) -> u16 {
         self.record

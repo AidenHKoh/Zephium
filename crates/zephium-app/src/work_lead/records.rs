@@ -454,13 +454,13 @@ impl Records {
                         cells.push(selection.annotation.clone().unwrap_or_default());
                     }
                     let mut row = json!({"cells":cells,"source":source});
-                    if record.subject.media_attempted {
-                        row["entity"] = json!({"media_attempted":true});
+                    if record.subject.media_attempted || record.subject.record_media.is_some() {
+                        row["entity"] = json!({"media_attempted":record.subject.media_attempted});
                         if let Some(media) = &record.subject.record_media {
                             row["entity"]["record_media"] = json!(media);
                         }
                     }
-                    if !record.subject.media_attempted {
+                    if !record.subject.media_attempted && record.subject.record_media.is_none() {
                         if let Some(image) = record.subject.image_candidates.first() {
                             row["entity"] = json!({"image": image});
                         }

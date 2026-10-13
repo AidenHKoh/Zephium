@@ -946,6 +946,7 @@ impl NativeWorkComposition {
         let mut media_plans = Vec::new();
         let mut record_media = Vec::new();
         let native_media = collection.is_some() && page.is_some();
+        let mut public_media_fallback = false;
         let mut requested_read = false;
         let mut requested_close = false;
         let mut user_cancelled = false;
@@ -1861,6 +1862,20 @@ impl NativeWorkComposition {
                                 == zephium_agentic::WorkBrowserAnonymousReadStatus::Current,
                             measure.resolved_handoff,
                         );
+                        public_media_fallback = fetch_mode
+                            == zephium_agentic::WorkBrowserMediaFetchMode::PublicAssetRetry;
+                        if public_media_fallback {
+                            let candidates = collection
+                                .as_ref()
+                                .zip(archived.as_ref())
+                                .map(|(schema, archive)| schema.public_candidate_records(archive))
+                                .unwrap_or_default();
+                            media_plans.retain(|plan| !candidates.contains(&plan.record()));
+                            zephium_app::work_trace::record(format_args!(
+                                "work: phase=record_media public_candidates={} native_supplements={}; content=redacted",
+                                candidates.len(), media_plans.len(),
+                            ));
+                        }
                         let native_started = !media_plans.is_empty()
                             && guard.0.read_record_media(media_plans.clone(), fetch_mode);
                         media_complete = !native_started;
@@ -1900,6 +1915,12 @@ impl NativeWorkComposition {
                     if media_started && !media_complete {
                         if let Some(images) = guard.0.take_record_media() {
                             media_complete = true;
+                            for plan in &media_plans {
+                                zephium_app::work_trace::record(format_args!(
+                                    "work: phase=record_media record={} outcome={:?} fetch_stage={}; content=redacted",
+                                    plan.record(), plan.native_outcome(), plan.native_fetch_stage(),
+                                ));
+                            }
                             let image_count = images.len();
                             let crop_count = images
                                 .iter()
@@ -2107,6 +2128,18 @@ impl NativeWorkComposition {
                                     output,
                                     &archive,
                                     native_media.then_some(record_media.as_slice()),
+                                    &(0..MAX_ARTIFACT_SUBJECTS as u16)
+                                        .filter(|record| {
+                                            public_media_fallback
+                                                && media_plans
+                                                    .iter()
+                                                    .filter(|plan| plan.record() == *record)
+                                                    .all(|plan| {
+                                                        plan.native_outcome()
+                                                            .permits_public_candidate()
+                                                    })
+                                        })
+                                        .collect::<Vec<u16>>(),
                                 )
                             })
                             .map(|artifact| vec![artifact]),

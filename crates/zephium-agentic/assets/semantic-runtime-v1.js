@@ -1066,6 +1066,8 @@
     if ((tag === "div" || tag === "span") && listLength(childNodes(node)) <= 1 && backgroundSource(node) !== null && isRenderedPhoto(node, tag)) {
       return { role: "image", tag, inputType, mediaKind: "background" };
     }
+    const moneyText=(tag==="div" || tag==="span")?shownMoneyText(node):null;
+    if(moneyText!==null && !pointerTextControl(node))return {role:"paragraph",tag,inputType,moneyText,noOperations:true};
     if ((tag === "div" || tag === "span") && genericTextDescriptor(node,tag,inputType)!==null && pointerTextControl(node)) {
       return {role:"button",tag,inputType,pointerText:true};
     }
@@ -1156,26 +1158,25 @@
     );
   }
 
-  // A price shown to people but hidden from assistive technology, which
-  // reads a clipped copy instead (Booking hides that copy too): a rendered
-  // element whose own short text is a figure with a currency.
-  function isShownPrice(element, tag) {
-    if (tag === "svg" || tag === "img") return false;
-    const children = childNodes(element);
-    const count = listLength(children);
-    if (count === 0 || count > 4) return false;
-    let text = "";
-    for (let index = 0; index < count; index += 1) {
-      const child = listItem(children, index);
-      if (child === null || nodeType(child) !== 3) return false;
-      const raw = read(characterDataGetter, child);
-      if (typeof raw !== "string") return false;
-      text += raw;
-      if (text.length > 64) return false;
+  // A price can split integer and fractional parts into spans,
+  // hiding one from accessibility. Read the bounded inline unit atomically.
+  function shownMoneyText(element) {
+    const pending=[element];let text="",count=0;
+    while(pending.length) {
+      if(++count>16)return null;
+      const node=pending.pop(),type=nodeType(node);
+      if(type===3) {const raw=read(characterDataGetter,node);if(typeof raw!=="string" || text.length+raw.length>64 || /\d$/u.test(text) && /^\d/u.test(raw))return null;text+=raw;continue;}
+      if(type!==1 || !["div","span","b","strong","i","em","small","sup","sub"].includes(tagName(node)) ||
+          has(node,"hidden") || has(node,"inert") || has(node,"contenteditable") || explicitRole(node)!==null || !styleIsVisible(node))return null;
+      const children=childNodes(node),length=listLength(children);if(length+pending.length>16)return null;
+      for(let index=length-1;index>=0;index--)pending.push(listItem(children,index));
     }
-    const rect = elementRect(element);
-    return rect !== null && rect.width > 4 && rect.height > 4 && styleIsVisible(element) &&
-      FIGURE_TEXT.test(text) && CURRENCY_TEXT.test(text);
+    const rect=elementRect(element);
+    return rect!==null && rect.width>4 && rect.height>4 && FIGURE_TEXT.test(text) && CURRENCY_TEXT.test(text) &&
+      /^[\s\d.,'\u2019+\u2212()\-]+$/u.test(text.replace(CURRENCY_TEXT,"")) ? text : null;
+  }
+  function isShownPrice(element, tag) {
+    return tag!=="svg" && tag!=="img" && shownMoneyText(element)!==null;
   }
 
   // The page's own picture (og:image) is the one image every product or
@@ -2233,6 +2234,9 @@
         appendSink(record, descriptor.pageTitle === true ? pageTitleText(element, descriptor.tag) || "" : descriptor.pageFacts, state);
         record.sink = null;
       }
+      if(typeof descriptor.moneyText==="string") {
+        record.sinkBytes=0;appendSink(record,descriptor.moneyText,state);record.sink=null;
+      }
       const imageSource = descriptor.role === "image" && (descriptor.tag === "img" || descriptor.pageImage === true || descriptor.mediaKind === "background" || descriptor.mediaKind === "poster");
       if (((descriptor.role === "link" && (descriptor.tag === "a" || descriptor.pageAddress === true)) || imageSource) &&
           record.sensitivity === "public") {
@@ -2477,6 +2481,10 @@
             sink = record.sink !== null ? index :
               inheritsProse && record.sensitivity === "public" &&
                 sink !== null && records[sink].sink === "text" ? sink : null;
+            if(typeof descriptor.moneyText==="string") {
+              if(record.sensitivity==="public")appendVisibleText(records,{sink:null,parent:item.parent,nameAncestors},descriptor.moneyText,state);
+              continue;
+            }
             // A region is one structural level, not a full-DOM subtree. Keep
             // nested regions as current, independently expandable anchors so
             // an earlier navigation/sidebar cannot consume the parent's prose

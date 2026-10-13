@@ -1262,6 +1262,8 @@ fn public_asset_retry_needs_frozen_public_isolation_not_a_cookie_free_claim() {
                         )
                         .unwrap();
                     let plan = crate::SemanticRecordMediaPlan {
+                        outcome: Default::default(),
+                        fetch_stage: Default::default(),
                         crop: None,
                         record: 0,
                         source: [1; 32],
@@ -1410,6 +1412,8 @@ fn original_read_fixture() -> (
     };
     let binding = rows.read_binding(&lease, tick(4)).unwrap();
     let plan = crate::SemanticRecordMediaPlan {
+        outcome: Default::default(),
+        fetch_stage: Default::default(),
         crop: None,
         record: 0,
         source: [1; 32],

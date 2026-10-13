@@ -127,7 +127,8 @@ mod semantic_media;
 mod semantic_media_probe;
 pub use semantic_media::{
     SemanticMediaEvidence, SemanticMediaKind, SemanticRecordMediaDiagnostics,
-    SemanticRecordMediaPlan, MAX_SEMANTIC_MEDIA, MAX_SEMANTIC_MEDIA_RELATIONS,
+    SemanticRecordMediaOutcome, SemanticRecordMediaPlan, MAX_SEMANTIC_MEDIA,
+    MAX_SEMANTIC_MEDIA_RELATIONS,
 };
 #[cfg(feature = "probe-harness")]
 pub use semantic_media_probe::{

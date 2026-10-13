@@ -1141,11 +1141,7 @@ pub(crate) fn hydrate_record_media(
                 subjects, cells, ..
             } = &artifact.data
             {
-                for (index, subject) in subjects
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, subject)| subject.media_attempted)
-                {
+                for (index, subject) in subjects.iter().enumerate() {
                     let matches = cells.get(index).is_some_and(|cells| {
                         cells
                             .iter()
@@ -1153,16 +1149,23 @@ pub(crate) fn hydrate_record_media(
                             .any(|index| artifact.evidence.get(usize::from(*index)) == Some(wanted))
                     });
                     if matches {
-                        if matched && image != subject.record_media {
+                        if matched
+                            && image
+                                != Some((subject.record_media.clone(), subject.media_attempted))
+                        {
                             ambiguous = true;
                         }
                         matched = true;
-                        image = subject.record_media.clone();
+                        image = Some((subject.record_media.clone(), subject.media_attempted));
                     }
                 }
             }
         }
-        matched.then_some(if ambiguous { None } else { image })
+        if ambiguous {
+            Some((None, true))
+        } else {
+            image
+        }
     };
     if let WorkArtifactDataV1::List { items, .. } = &mut proposed.data {
         for item in items {
@@ -1170,10 +1173,10 @@ pub(crate) fn hydrate_record_media(
             item.media_attempted = false;
             let index = item.record_source;
             let source = index.and_then(|index| proposed.evidence.get(usize::from(index)));
-            if let Some(image) =
+            if let Some((image, withheld)) =
                 source.and_then(|source| list_record_media(source, executions, profile, work))
             {
-                item.media_attempted = true;
+                item.media_attempted = withheld;
                 item.record_source = index;
                 item.record_media = image;
             }
@@ -1186,10 +1189,12 @@ pub(crate) fn hydrate_record_media(
             let source = item
                 .source
                 .and_then(|index| proposed.evidence.get(usize::from(index)));
-            if let Some(image) = source.and_then(lookup) {
-                item.media_attempted = true;
+            if let Some((image, withheld)) = source.and_then(lookup) {
+                item.media_attempted = withheld;
                 item.record_media = image;
-                item.image_candidates.clear();
+                if withheld {
+                    item.image_candidates.clear();
+                }
             }
         }
     }
@@ -1203,9 +1208,13 @@ fn list_record_media(
     executions: &[WorkExecutionFact],
     profile: zephium_core::ids::ProfileId,
     work: WorkId,
-) -> Option<Option<zephium_core::work::media::WorkRecordMediaRefV1>> {
+) -> Option<(
+    Option<zephium_core::work::media::WorkRecordMediaRefV1>,
+    bool,
+)> {
     let mut matched = false;
     let mut refused = false;
+    let mut withheld = false;
     let mut selected = None;
     for execution in executions {
         for artifact in &execution.artifacts {
@@ -1224,9 +1233,9 @@ fn list_record_media(
                     continue;
                 }
                 matched = true;
+                withheld |= subject.media_attempted;
                 let Some(media) = subject.record_media.as_ref().filter(|media| {
-                    subject.media_attempted
-                        && media.validate().is_ok()
+                    media.validate().is_ok()
                         && media.profile == profile
                         && media.work == work
                         && media.execution == execution.id
@@ -1235,16 +1244,18 @@ fn list_record_media(
                         && media.extraction == wanted.extraction_id
                 }) else {
                     refused = true;
+                    withheld |= subject.record_media.is_some();
                     continue;
                 };
                 if selected.as_ref().is_some_and(|old| old != media) {
                     refused = true;
+                    withheld = true;
                 }
                 selected = Some(media.clone());
             }
         }
     }
-    matched.then_some(if refused { None } else { selected })
+    matched.then_some((if refused { None } else { selected }, withheld))
 }
 
 /// Removes picture addresses `shown` does not know from the pictures the
@@ -1584,6 +1595,21 @@ mod list_record_media_tests {
             .unwrap()
             .contains("record_media"));
     }
+    #[test]
+    fn public_native_picture_does_not_need_a_withholding_flag() {
+        let (profile, work, mut fact, source, media) = fixture();
+        let WorkArtifactDataV1::ComparisonMatrix { subjects, .. } = &mut fact.artifacts[0].data
+        else {
+            panic!()
+        };
+        subjects[0].media_attempted = false;
+        let mut value = proposed(source, Some(0));
+        hydrate_record_media(&mut value, &[fact], profile, work);
+        assert_eq!(item(&value).record_media.as_ref(), Some(&media));
+        assert!(!item(&value).media_attempted);
+        assert!(value.data.lead_fault(2).is_none());
+    }
+
     #[test]
     fn list_missing_or_stale_record_source_never_falls_back_to_text_source() {
         let (profile, work, fact, source, _) = fixture();
