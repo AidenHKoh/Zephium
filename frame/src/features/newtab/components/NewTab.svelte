@@ -20,6 +20,7 @@
   import { groundPath, notchShape, notchWidth, roundedRect } from "../lib/ground";
   import { layout, type Box } from "../lib/layout";
   import { WORDMARK } from "$shared/lib/wordmark";
+  import { reducedMotion } from "$shared/lib/motion";
 
   let {
     search,
@@ -38,6 +39,8 @@
   } = $props();
 
   const id = $props.id();
+  // One pass of light across the name as the page arrives, then stillness.
+  const glint = !reducedMotion();
 
   let width = $state(0);
   let height = $state(0);
@@ -240,6 +243,33 @@
         <stop offset="0" class="lip" />
         <stop offset="0.5" class="lip" stop-opacity="0" />
       </linearGradient>
+      <!-- A soft band of light that crosses the name once as the page arrives,
+           driven by the document itself: no frame of script, and nothing
+           left running once it has passed. -->
+      <linearGradient
+        id={`${id}-glint`}
+        gradientUnits="userSpaceOnUse"
+        x1={page.mark.x - page.mark.h * 3}
+        x2={page.mark.x}
+        y1="0"
+        y2={page.mark.h}
+      >
+        <stop offset="0" class="glint" stop-opacity="0" />
+        <stop offset="0.5" class="glint" />
+        <stop offset="1" class="glint" stop-opacity="0" />
+        {#if glint}<animateTransform
+            attributeName="gradientTransform"
+            type="translate"
+            from="0 0"
+            to={`${page.mark.w + page.mark.h * 3} 0`}
+            begin="0.18s"
+            dur="1.2s"
+            calcMode="spline"
+            keyTimes="0;1"
+            keySplines="0.3 0 0.2 1"
+            fill="freeze"
+          />{/if}
+      </linearGradient>
       <linearGradient id={`${id}-wash`} x1="0" y1="0" x2="0" y2="1">
         <stop offset="0" class="wash-lit" />
         <stop offset="1" class="wash-dim" />
@@ -249,6 +279,7 @@
     <path class="page" d={patch} mask={`url(#${id}-cut)`} />
     <use class="solid" href={`#${id}-letters`} />
     <use class="wash" href={`#${id}-letters`} fill={`url(#${id}-wash)`} />
+    {#if glint}<use href={`#${id}-letters`} fill={`url(#${id}-glint)`} />{/if}
     <path class="rim" d={lip} stroke={`url(#${id}-lip-up)`} />
     {#each openings as opening, index (index)}
       <path class="pane" d={opening} stroke={`url(#${id}-lip-down)`} />
@@ -408,6 +439,10 @@
 
   :global(:root:not([data-material="none"])[data-material]) .wash {
     display: inline;
+  }
+
+  .glint {
+    stop-color: var(--color-glint);
   }
 
   .wash-lit {

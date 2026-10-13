@@ -87,16 +87,21 @@ button {
   overflow: clip;
 }
 
-:root[data-material="none"] .browser-sidebar {
+/* The window's own ground, the colour native paints behind the chrome, so the
+   gutter around a page the frame draws reads as window rather than page. The
+   column is not painted again on top: one ground, with only the page set
+   apart from it. */
+:root[data-material="none"] body {
   background: var(--color-chrome);
 }
 
-/* Only the opaque tier draws its own window edge; the others get one from the
-   native material's own rounded layer. */
-:root[data-material="none"] .shell {
+/* Only the opaque tier on Windows draws its own window edge, where chrome is
+   the whole window. On macOS the window paints itself and AppKit rounds it;
+   chrome there is only the sidebar, which an edge would frame as a plate. */
+:root[data-material="none"] .shell[data-caption] {
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-card);
-  background: var(--color-canvas);
+  background: var(--color-chrome);
 }
 
 /* Stands in for the content WebView when a tab has no page yet, so switching
@@ -203,7 +208,6 @@ kbd {
     outline: 2px solid Highlight;
   }
 
-  .chrome-button-active,
   .icon-button-active {
     border: 1px solid Highlight;
   }
@@ -240,4 +244,31 @@ kbd {
 :root[data-material="liquid_glass"][data-theme="light"] :is(.browser-sidebar, [data-glass-text]) {
   --color-muted: rgb(27 28 33 / 0.72);
   --color-faint: rgb(27 28 33 / 0.55);
+}
+
+/* A light sidebar reads in ink a step back from black, as the platform's own
+   sidebars do, and everything lit in it is lifted rather than inked, so the
+   current tab, the field, the kept sites and the profile share one tone. */
+:root[data-theme="light"] .browser-sidebar {
+  --color-text: rgb(28 28 31 / 0.9);
+  --color-label-secondary: rgb(28 28 31 / 0.76);
+  --color-fill: rgb(255 255 255 / 0.14);
+  --color-tile: var(--lift);
+  --color-tile-hover: var(--lift-pressed);
+  --row-hover: var(--lift-hover);
+  --row-active: var(--lift);
+  --row-pressed: var(--lift-pressed);
+  --row-rim: var(--lift-rim);
+  --sidebar-row-weight-current: 500;
+  --color-row-current: rgb(28 28 31 / 0.84);
+}
+
+/* Menus opening from the column float on their own white material, where a
+   lift would vanish; they keep the ink states. */
+:root[data-theme="light"] .browser-sidebar .ui-disclosure-panel {
+  --color-fill: var(--ink-a5);
+  --row-hover: var(--row-hover-ink);
+  --row-active: var(--row-active-ink);
+  --row-pressed: var(--row-pressed-ink);
+  --row-rim: var(--row-rim-ink);
 }

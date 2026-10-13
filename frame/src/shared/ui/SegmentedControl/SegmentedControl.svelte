@@ -144,8 +144,8 @@
     inset-inline-start: var(--seg-pad);
     width: calc((100% - var(--seg-pad) * 2) / var(--seg-count));
     border-radius: calc(var(--seg-radius) - var(--seg-pad));
-    background: var(--row-active);
-    box-shadow: var(--row-rim);
+    background: var(--segment-thumb);
+    box-shadow: var(--shadow-segment-thumb);
     translate: calc(var(--seg-index) * 100%) 0;
     transition:
       translate var(--motion-base) var(--ease-spring),

@@ -93,22 +93,14 @@
   flex: none;
 }
 .settings-nav-item,
-.settings-back {
-  transition:
-    background-color var(--motion-instant) var(--ease-smooth),
-    color var(--motion-instant) var(--ease-smooth),
-    scale var(--motion-fast) var(--ease-smooth);
-}
 .settings-nav-item,
-.settings-back,
 .settings-nav-group h2,
 .ui-settings-section > h2 {
   /* stylelint-disable-next-line property-no-vendor-prefix */
   -webkit-user-select: none;
   user-select: none;
 }
-.settings-nav-item:active,
-.settings-back:active {
+.settings-nav-item:active {
   scale: 0.97;
   transition-duration: var(--motion-fast);
 }
@@ -197,18 +189,61 @@
 }
 .appearance-previews {
   display: flex;
-  gap: 12px;
-  padding: 20px 20px 6px;
+  gap: 14px;
+  padding: 20px 20px 16px;
+}
+.appearance-choice {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-label-secondary);
+  font: inherit;
+  font-size: var(--text-label);
+  cursor: default;
+}
+.appearance-choice[aria-checked="true"] {
+  color: var(--color-text);
+  font-weight: 550;
+}
+.appearance-choice:focus-visible {
+  outline: none;
 }
 .appearance-preview {
-  flex: 1;
-  min-width: 0;
-  padding: 3px;
-  border-radius: var(--radius-control);
-  border: 1px solid transparent;
+  position: relative;
+  display: block;
+  width: 100%;
+  border-radius: var(--radius-row);
+  box-shadow: 0 0 0 0 transparent;
+  transition:
+    box-shadow var(--motion-fast) var(--ease-out),
+    scale var(--motion-slow) var(--ease-spring);
 }
+.appearance-choice:active .appearance-preview {
+  scale: 0.98;
+}
+/* The ring the platform draws round a chosen picture: a gap of the card's own
+   colour, then the accent, neither heavier than it needs to be. */
 .appearance-preview[data-selected="true"] {
-  border-color: var(--color-accent);
+  box-shadow:
+    0 0 0 2.5px var(--color-card),
+    0 0 0 4.5px color-mix(in srgb, var(--color-accent) 78%, transparent);
+}
+.appearance-choice:focus-visible .appearance-preview {
+  box-shadow:
+    0 0 0 2.5px var(--color-card),
+    0 0 0 4.5px var(--color-ring);
+}
+/* System is both: the dark window takes the lower right of the light one. */
+.appearance-preview .mini-window + .mini-window {
+  position: absolute;
+  inset: 0;
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
 }
 .mini-window {
   height: 90px;
@@ -217,6 +252,7 @@
   gap: 6px;
   background: #e2e3e8;
   border-radius: var(--radius-row);
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.06);
   overflow: hidden;
 }
 .mini-sidebar {
@@ -266,18 +302,26 @@
   border-radius: 3px;
   background: #dedee5;
 }
-.appearance-preview[data-preview-theme="dark"] .mini-window {
+.mini-window[data-tone="dark"] {
   background: #303137;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.06);
 }
-.appearance-preview[data-preview-theme="dark"] .mini-page,
-.appearance-preview[data-preview-theme="system"] .mini-page {
+.mini-window[data-tone="dark"] .mini-page {
   background: #1c1d22;
 }
-.appearance-preview[data-preview-theme="dark"] .mini-sidebar i {
+.mini-window[data-tone="dark"] .mini-sidebar i {
   background: #494a52;
 }
-.appearance-preview[data-preview-theme="dark"] .mini-page i,
-.appearance-preview[data-preview-theme="system"] .mini-page i {
+.mini-window[data-tone="dark"] .mini-sidebar i:nth-child(2) {
+  background: #5d5e66;
+}
+.mini-window[data-tone="dark"] .mini-sidebar span {
+  background: #6a6b73;
+}
+.mini-window[data-tone="dark"] .mini-page span {
+  background: #55565e;
+}
+.mini-window[data-tone="dark"] .mini-page i {
   background: #383941;
 }
 .accent-choices {
@@ -293,12 +337,21 @@
   border-radius: 50%;
   color: #fff;
   background: var(--swatch);
+  box-shadow:
+    inset 0 0.5px 0 rgb(255 255 255 / 0.3),
+    inset 0 0 0 0.5px rgb(0 0 0 / 0.12);
   outline: 2px solid transparent;
-  outline-offset: 3px;
+  outline-offset: 2px;
   cursor: default;
+  transition:
+    outline-color var(--motion-fast) var(--ease-out),
+    scale var(--motion-slow) var(--ease-spring);
+}
+.accent-swatch:active {
+  scale: 0.92;
 }
 .accent-swatch[aria-pressed="true"] {
-  outline-color: var(--swatch);
+  outline-color: color-mix(in srgb, var(--swatch) 55%, transparent);
 }
 .settings-results {
   display: grid;
@@ -332,50 +385,6 @@
   display: block;
   margin-block-start: 5px;
   font-size: 12px;
-}
-.identity-card {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 8px 0 30px;
-}
-.identity-avatar {
-  display: grid;
-  place-items: center;
-  width: 52px;
-  height: 52px;
-  border-radius: 50%;
-  background: var(--color-fill);
-  color: var(--color-muted);
-}
-.identity-card h2,
-.settings-intro h2 {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 500;
-  letter-spacing: -0.02em;
-}
-.identity-card p {
-  margin: 4px 0 0;
-  color: var(--color-muted);
-  font-size: 12px;
-}
-.settings-intro {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 16px;
-  padding-block: 8px 32px;
-  color: var(--color-muted);
-}
-.settings-intro h2 {
-  color: var(--color-text);
-}
-.settings-intro p {
-  max-width: 450px;
-  font-size: 13px;
-  line-height: 1.7;
-  margin: 0;
 }
 .settings-about {
   display: flex;
@@ -423,35 +432,6 @@
   max-width: 920px;
   margin-inline: auto;
   padding: 40px clamp(24px, 6vw, 72px);
-}
-.library-empty {
-  min-height: 350px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-}
-.library-icon {
-  display: grid;
-  place-items: center;
-  height: 64px;
-  width: 64px;
-  border-radius: var(--radius-card);
-  background: var(--color-fill);
-  color: var(--color-muted);
-  margin-block-end: 20px;
-}
-.library-empty h2 {
-  font-size: 17px;
-  font-weight: 500;
-  letter-spacing: -0.025em;
-}
-.library-empty p {
-  font-size: 13px;
-  line-height: 1.7;
-  color: var(--color-muted);
-  max-width: 340px;
 }
 @container (max-width: 450px) {
   .settings-page .ui-settings-row {
@@ -534,32 +514,35 @@
 .sidebar-tool-rail {
   flex: 0 0 56px;
 }
+/* Beside a full-height panel the rail keeps only the lights' row. */
+.sidebar-lights {
+  flex: none;
+  height: var(--titlebar-height);
+}
 .settings-sidebar-navigation {
   position: relative;
   min-height: 0;
   flex: 1;
   display: flex;
   flex-direction: column;
-  padding: 8px 8px 0;
+  padding: 0 8px;
 }
-.settings-back {
+/* Headed like a tool panel: its name, and the way out. */
+/* The panel runs the full height, so its title shares the lights' row. */
+.settings-panel-header {
   display: flex;
   align-items: center;
-  gap: 9px;
-  min-height: 36px;
-  padding: 8px;
-  margin-bottom: 10px;
-  border: 0;
-  border-radius: var(--radius-row);
-  color: var(--color-muted);
-  background: transparent;
-  font-size: 12px;
-  text-align: start;
-  cursor: default;
+  gap: 8px;
+  min-height: var(--titlebar-height);
+  margin-block: 4px 6px;
+  padding-inline: 4px 0;
 }
-.settings-back:hover {
-  background: var(--color-fill);
-  color: var(--color-text);
+.settings-panel-header h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 550;
+  letter-spacing: -0.015em;
 }
 .settings-sidebar-search {
   display: flex;
@@ -593,12 +576,6 @@
 .settings-shell > .settings-content {
   border-radius: inherit;
   box-shadow: none;
-}
-.settings-eyebrow {
-  display: block;
-  font-size: 11px;
-  color: var(--color-faint);
-  margin-bottom: 10px;
 }
 /* A row after a row draws its own inset hairline; this rule only joins a row
    to a section that is not one, so two rows never get two dividers. */
@@ -974,14 +951,18 @@
     box-shadow var(--motion-fast) var(--ease-out);
 }
 /* With nothing kept, the row still holds a tile's worth of space on the
-   tiles' own ground: an empty slot, not a dashed outline of one. A line of
-   grey text alone would read as a bug; a wireframe reads as unfinished. */
+   tiles' own ground: an empty slot, not a dashed outline of one. */
 .dock-sites[data-empty="true"] {
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: var(--dock-tile);
-  background: var(--color-card);
+  background: var(--color-tile);
+}
+/* On a card the thumb has to stand off white, so it is raised, not lifted. */
+.settings-page {
+  --segment-thumb: var(--segment-thumb-card);
+  --shadow-segment-thumb: var(--shadow-segment-thumb-card);
 }
 .dock-sites[data-over="true"] {
   background: var(--color-fill-hover);
@@ -1073,78 +1054,6 @@
   max-width: 180px;
   white-space: nowrap;
 }
-.settings-inline-note {
-  margin: 10px 4px 24px;
-  font-size: 11px;
-  line-height: 1.65;
-  color: var(--color-muted);
-}
-.language-order {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  background: var(--color-surface);
-  border-radius: var(--radius-control);
-  overflow: hidden;
-}
-.language-order li {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 14px 16px;
-}
-.language-order li + li {
-  border-top: 1px solid var(--color-border);
-}
-.language-index {
-  width: 18px;
-  flex: none;
-  color: var(--color-faint);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-.language-label {
-  flex: 1;
-  min-width: 0;
-}
-.language-label strong {
-  display: block;
-  font-size: 13px;
-  font-weight: 450;
-}
-.language-label > span {
-  display: block;
-  font-size: 11px;
-  color: var(--color-muted);
-  margin-top: 4px;
-}
-.language-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-.language-picker {
-  overflow-y: auto;
-  max-height: min(320px, 38vh);
-  overscroll-behavior: contain;
-}
-.language-picker-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 2px;
-}
-.language-picker-row small {
-  color: var(--color-faint);
-  font-size: 10px;
-}
-.language-picker > p {
-  font-size: 12px;
-  color: var(--color-muted);
-  padding: 20px;
-  text-align: center;
-}
 .settings-result-section {
   display: block;
   font-size: 10px;
@@ -1159,10 +1068,6 @@
   }
   .settings-callout > .ui-button {
     margin-inline-start: 60px;
-  }
-  .language-order li {
-    padding: 12px;
-    gap: 10px;
   }
 }
 :root[data-density="compact"] .browser-sidebar {
@@ -1192,13 +1097,11 @@
 /* Sidebar labels sit a step below full white so they belong to the material;
    only the current item is fully lit. */
 .settings-sidebar-navigation .settings-nav-item,
-.settings-sidebar-navigation .settings-back,
 .browser-sidebar .folder-row {
   color: var(--color-label-secondary);
 }
 .settings-sidebar-navigation .settings-nav-item:hover,
-.settings-sidebar-navigation .settings-nav-item[aria-current="page"],
-.settings-sidebar-navigation .settings-back:hover {
+.settings-sidebar-navigation .settings-nav-item[aria-current="page"] {
   color: var(--color-text);
 }
 .settings-sidebar-navigation .settings-nav-group h2 {
@@ -1209,7 +1112,6 @@
 .settings-page-heading > p,
 .settings-page .ui-settings-copy p,
 .settings-page .ui-settings-section > h2,
-.settings-page .settings-eyebrow,
 .settings-page .settings-value {
   color: var(--color-label-secondary);
 }
@@ -1232,5 +1134,56 @@
   from {
     opacity: 0;
     translate: -8px 0;
+  }
+}
+
+/* A list that scrolls dissolves at whichever edge still has more of it, and
+   is cut by nothing: a plate there would sit on the glass. Driven by the
+   list's own scroll, so it costs nothing while still and shows nothing when
+   everything fits. */
+@property --edge-top {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0;
+}
+@property --edge-bottom {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0;
+}
+.scroll-edges {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 var(--edge-top),
+    #000 calc(100% - var(--edge-bottom)),
+    transparent
+  );
+}
+@supports (animation-timeline: scroll()) {
+  .scroll-edges {
+    animation:
+      edge-top linear both,
+      edge-bottom linear both;
+    animation-timeline: scroll(self), scroll(self);
+    animation-range:
+      0 24px,
+      calc(100% - 24px) 100%;
+  }
+}
+@keyframes edge-top {
+  from {
+    --edge-top: 0px;
+  }
+  to {
+    --edge-top: 18px;
+  }
+}
+@keyframes edge-bottom {
+  from {
+    --edge-bottom: 18px;
+  }
+  to {
+    --edge-bottom: 0px;
   }
 }

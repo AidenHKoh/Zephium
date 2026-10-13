@@ -55,6 +55,19 @@
   --color-fill-strong: rgb(255 255 255 / 0.22);
   --color-card: rgb(255 255 255 / 0.05);
 
+  /* What sits on the glass itself: a kept site's tile, the tool case and the
+     address field. Its own rung, because a page's card is set on a solid page
+     and these are set on a material that changes with the desktop. */
+  --color-tile: rgb(255 255 255 / 0.06);
+  --color-tile-hover: rgb(255 255 255 / 0.1);
+  --color-address: rgb(255 255 255 / 0.065);
+  --color-address-hover: rgb(255 255 255 / 0.095);
+  --shadow-tile: none;
+
+  /* A grouped card's edge. On a dark page the luminance step is the edge; on
+     a light one white on pale grey needs a hairline to stay crisp. */
+  --shadow-card: none;
+
   --color-border: rgb(255 255 255 / 0.07);
   --color-border-strong: rgb(255 255 255 / 0.13);
 
@@ -65,6 +78,14 @@
   --row-active: rgb(255 255 255 / 0.075);
   --row-pressed: rgb(255 255 255 / 0.1);
   --row-rim: inset 0 0 0 1px rgb(255 255 255 / 0.06);
+
+  /* A segmented control's thumb is a thing that moves, not a selected row,
+     so it lifts the way the platform's does: in dark the row's own plate, in
+     light a frosted white capsule. */
+  --segment-thumb: var(--row-active);
+  --shadow-segment-thumb: var(--row-rim);
+  --segment-thumb-card: var(--row-active);
+  --shadow-segment-thumb-card: var(--row-rim);
 
   /* The scroll thumb, which is the whole scrollbar: there is no track, no
      buttons and no gutter shading anywhere in this product. */
@@ -287,6 +308,11 @@
   /* The dots of a working indicator: the text's own tone, brighter in front. */
   --color-dots: var(--color-text);
 
+  /* The platform's close red on Windows, the same in both themes. */
+  --color-close: #c42b1c;
+  --color-close-pressed: #c84031;
+  --color-on-close: #fff;
+
   /* YouTube's own play mark, the same in both themes: a video from there says so. */
   --color-youtube: #ff0033;
   --color-on-youtube: #fff;
@@ -375,8 +401,26 @@
      panel from the page; the drop only has to say which one is in front. */
   --shadow-menu: 0 0 0 1px rgb(255 255 255 / 0.08), 0 14px 44px -10px rgb(0 0 0 / 0.34);
 
+  /* Light caught by the edges of something that floats: a line along the top
+     where the light falls and a fainter one along the foot, as on the
+     platform's own glass. Never a glow, and only on what genuinely floats or
+     is a pressable object on the glass. */
+  --shine:
+    inset 0 1px 0 0 rgb(255 255 255 / 0.13), inset 0 -1px 0 0 rgb(255 255 255 / 0.04),
+    inset 0 0 0 1px rgb(255 255 255 / 0.05);
+
+  /* The same light along the top edge alone: on a round thing it thins away
+     down either side on its own, with nothing drawn below. */
+  --shine-top: inset 0 1px 0 0 rgb(255 255 255 / 0.1);
+
   /* A sheet standing on the bottom edge: its rim, and height cast upward. */
   --shadow-sheet: 0 0 0 0.5px rgb(255 255 255 / 0.08), 0 -10px 40px -20px rgb(0 0 0 / 0.4);
+
+  /* Light crossing the name on the new tab as it arrives. */
+  --color-glint: rgb(255 255 255 / 0.34);
+
+  /* A small control riding the corner of something else. */
+  --shadow-badge: 0 0 0 0.5px var(--color-border-strong), 0 1px 3px rgb(0 0 0 / 0.18);
 
   /* The platform face, and only the platform face. Native menus, alerts and
      file dialogs open out of this chrome in SF and cannot be told otherwise,
@@ -577,24 +621,52 @@
   --color-menu: color-mix(in srgb, var(--color-float) var(--wash-raised), transparent);
   --color-menu-separator: rgb(24 24 27 / 0.09);
 
-  /* Light chrome gains elevation by getting brighter, not darker, so the
-     active state is a white pill rather than a heavier overlay. */
+  /* Chrome states are the dark theme's recipe with ink for light: a faint
+     translucent overlay on the material, never an opaque plate. A white
+     plate on light glass reads as a sticker laid on the window; a breath of
+     ink lets the glass show through every state, as the platform's own light
+     sidebars do. */
   --color-fill: var(--ink-a5);
   --color-fill-hover: rgb(24 24 27 / 0.08);
-  --color-fill-active: rgb(255 255 255 / 0.92);
+  --color-fill-active: rgb(24 24 27 / 0.075);
   --color-fill-pressed: rgb(24 24 27 / 0.11);
   --color-fill-strong: var(--ink-a16);
   --color-card: rgb(255 255 255 / 0.92);
+  --color-tile: rgb(24 24 27 / 0.045);
+  --color-tile-hover: rgb(24 24 27 / 0.07);
+
+  /* A field in a light sidebar is lighter than its ground, as the platform's
+     own are; a darker one reads as a control that is switched off. */
+  --color-address: var(--lift);
+  --color-address-hover: var(--lift-pressed);
+  --shadow-tile: none;
+  --shadow-card: 0 0 0 0.5px rgb(24 24 27 / 0.07), 0 1px 1.5px rgb(24 24 27 / 0.03);
 
   --color-border: var(--ink-a7);
   --color-border-strong: rgb(24 24 27 / 0.13);
 
-  /* Light chrome gains elevation by getting brighter, so the active row is a
-     white plate rather than a heavier overlay. */
-  --row-hover: rgb(24 24 27 / 0.04);
-  --row-active: rgb(255 255 255 / 0.8);
-  --row-pressed: rgb(24 24 27 / 0.07);
-  --row-rim: inset 0 0 0 1px rgb(24 24 27 / 0.05);
+  --row-hover-ink: rgb(24 24 27 / 0.04);
+  --row-active-ink: rgb(24 24 27 / 0.075);
+  --row-pressed-ink: rgb(24 24 27 / 0.1);
+  --row-rim-ink: inset 0 0 0 1px rgb(24 24 27 / 0.03);
+  --row-hover: var(--row-hover-ink);
+  --row-active: var(--row-active-ink);
+  --row-pressed: var(--row-pressed-ink);
+  --row-rim: var(--row-rim-ink);
+
+  /* On the glass the light theme lifts rather than inks: a breath of white,
+     no rim and no glow, the field and the current tab in one tone. */
+  --lift: rgb(255 255 255 / 0.3);
+  --lift-hover: rgb(255 255 255 / 0.16);
+  --lift-pressed: rgb(255 255 255 / 0.4);
+  --lift-rim: 0 0 0 0 transparent;
+
+  /* Lifts are the dark theme's recipe read for light: a breath of white on
+     the material with its edge catching the light, never a white plate. */
+  --segment-thumb: rgb(255 255 255 / 0.42);
+  --shadow-segment-thumb: 0 0 0 0.5px rgb(24 24 27 / 0.05), 0 1px 2px rgb(24 24 27 / 0.05);
+  --segment-thumb-card: rgb(255 255 255);
+  --shadow-segment-thumb-card: 0 0 0 0.5px rgb(24 24 27 / 0.08), 0 1px 3px rgb(24 24 27 / 0.1);
   --scroll-thumb: rgb(24 24 27 / 0.2);
   --scroll-thumb-hover: rgb(24 24 27 / 0.34);
 
@@ -698,7 +770,11 @@
   --shadow-overlay: 0 12px 36px rgb(24 24 27 / 0.14), 0 0 0 0.5px rgb(24 24 27 / 0.1);
   --shadow-popover: var(--shadow-float);
   --shadow-menu: 0 0 0 1px rgb(24 24 27 / 0.09), 0 14px 44px -10px rgb(24 24 27 / 0.16);
+  --shine: inset 0 1px 0 0 rgb(255 255 255 / 0.3);
+  --shine-top: inset 0 1px 0 0 rgb(255 255 255 / 0.55);
   --shadow-sheet: 0 0 0 0.5px rgb(24 24 27 / 0.08), 0 -10px 40px -20px rgb(24 24 27 / 0.14);
+  --shadow-badge: 0 0 0 0.5px var(--color-border-strong), 0 1px 3px rgb(24 24 27 / 0.14);
+  --color-glint: rgb(255 255 255 / 0.62);
 
   --favicon-rest-opacity: 0.9;
   --favicon-rest-saturation: 0.92;
