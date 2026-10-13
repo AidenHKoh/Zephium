@@ -742,15 +742,23 @@ if (process.argv[3] === "--owned-options") {
   main.append(combo("First shared","shared"));main.append(combo("Second shared","shared"));main.append(popup("shared","Ambiguous choices"));
   main.append(combo("Inactive owner","active-shared","false"));main.append(combo("Active owner","active-shared"));main.append(popup("active-shared","Active choices"));
   main.append(combo("Not an option owner","plain-control"));main.append(new Element("button",{id:"plain-control","aria-label":"Unrelated button"}));
+  main.append(combo("Wrapped owner","popup-wrapper"));
+  const wrapper=new Element("div",{id:"popup-wrapper"});
+  const wrapped=popup("nested-list","Wrapped choices");wrapped._children=new NodeList();
+  const station=new Element("li",{role:"option","aria-label":"Harbor Central."});station.append(new CharacterData("Harbor Central"));wrapped.append(station);wrapper.append(wrapped);main.append(wrapper);
+  main.append(combo("Ambiguous wrapper owner","double-wrapper"));
+  const doubled=new Element("div",{id:"double-wrapper"});doubled.append(popup("double-one","Double first"));doubled.append(popup("double-two","Double second"));main.append(doubled);
   const wire=JSON.parse(invoke(7,1,{k:"initial"},{n:128,t:16384,w:65536,x:4096,geo:false}));
   const at=name=>wire.n.findIndex(node=>node.n===name);
-  for(const [owner,list] of [["From","Origin choices"],["To","Destination choices"],["Active owner","Active choices"]]) {
+  for(const [owner,list] of [["From","Origin choices"],["To","Destination choices"],["Active owner","Active choices"],["Wrapped owner","Wrapped choices"]]) {
     assert(at(owner)>=0&&at(list)>=0,"missing form ownership fixture");
     assert(wire.n[at(list)].p===at(owner),"listbox lost its observed ARIA owner: "+list);
   }
   for(const owner of ["From","To"])assert(wire.n[at("Unrelated choices")].p!==at(owner),"unrelated popup was adopted");
   for(const owner of ["First shared","Second shared"])assert(wire.n[at("Ambiguous choices")].p!==at(owner),"ambiguous popup was adopted");
   assert(wire.n[at("Unrelated button")].p!==at("Not an option owner"),"ARIA reference adopted a non-listbox control");
+  assert(wire.n[at("Harbor Central.")].t==="Harbor Central","option lost its distinct observed visible label");
+  for(const list of ["Double first","Double second"])assert(wire.n[at(list)].p!==at("Ambiguous wrapper owner"),"ambiguous wrapper chose one listbox");
   assert(wire.n.every((node,index)=>node.p===undefined||node.p<index),"ownership broke snapshot order");
   process.stdout.write("owned options: exact ARIA relationships, active owner, ambiguity and unrelated controls checked\n");
   process.exit(0);

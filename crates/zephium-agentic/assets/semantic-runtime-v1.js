@@ -2024,6 +2024,7 @@
   }
 
   function recordSink(descriptor, hasName) {
+    if (descriptor.role === "option" && hasName) return "text";
     if (
       descriptor.role === "button" ||
       descriptor.role === "link" ||
@@ -2953,8 +2954,15 @@
       for (const id of ids) {
         let element;
         try { element = apply(find, root, [id]); } catch (_) { continue; }
-        const target = records.findIndex(record => record.element === element && record.wire.r === "listbox" && record.wire.q !== "secret" && record.wire.fc !== false);
-        if (target <= index) continue;
+        if (element === null) continue;
+        const targets = [];
+        for (let at = index + 1; at < records.length; at += 1) {
+          const record = records[at];
+          if (record.wire.r === "listbox" && record.wire.q !== "secret" && record.wire.fc !== false &&
+              (record.element === element || apply(nodeContains, element, [record.element]))) targets.push(at);
+        }
+        if (targets.length !== 1) continue;
+        const target = targets[0];
         const candidates = owners.get(target) || [];
         if (!candidates.includes(index)) candidates.push(index);
         owners.set(target, candidates);

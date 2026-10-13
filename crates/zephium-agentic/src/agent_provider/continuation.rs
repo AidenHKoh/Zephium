@@ -2840,6 +2840,14 @@ mod tests {
         closed[1]["v"]["value"] = json!("Different station");
         let changed = observation_with_nodes(context(), 32, 32, 32, closed);
         assert!(!binding.choice_collapsed(0, &open, &changed));
+        let mut visible = node(false);
+        visible[2]["n"] = json!("Northport.");
+        visible[2]["t"] = json!("Northport");
+        let visible = observation_with_nodes(context(), 33, 33, 33, visible);
+        assert!(
+            binding.field_action(0, &visible).unwrap().is_some(),
+            "exact observed visible labels also identify options"
+        );
         let mut ambiguous = node(false);
         ambiguous[3]["p"] = json!(1);
         let ambiguous = observation_with_nodes(context(), 22, 22, 22, ambiguous);

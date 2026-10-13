@@ -310,6 +310,9 @@ impl FormBinding {
             .filter(|node| {
                 node.name()
                     .is_some_and(|name| name.as_str() == field.value.as_str())
+                    || node
+                        .text()
+                        .is_some_and(|text| text.as_str() == field.value.as_str())
             })
             .copied()
             .collect();
