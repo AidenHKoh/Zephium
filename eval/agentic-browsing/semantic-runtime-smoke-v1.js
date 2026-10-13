@@ -655,7 +655,7 @@ const negativeControl = process.argv[3] === "--without-document-parent-brand";
 const readonlyViewerCase = process.argv[3] === "--readonly-viewer";
 const commandCase = process.argv[3]?.startsWith('--isolated-command=') ? process.argv[3].slice('--isolated-command='.length) : null;
 const preparationOnly = process.env.ZEPHIUM_LOCAL_ISOLATED_FILL_PREPARATION_ONLY_PROBE === '1';
-assert(process.argv.length <= 4 && (process.argv[3] === undefined || negativeControl || commandCase || readonlyViewerCase || process.argv[3] === "--credential-comments"), "unknown smoke mode");
+assert(process.argv.length <= 4 && (process.argv[3] === undefined || negativeControl || commandCase || readonlyViewerCase || process.argv[3] === "--credential-comments" || process.argv[3] === "--owned-options"), "unknown smoke mode");
 let source = fs.readFileSync(sourcePath, "utf8");
 if (commandCase) {
   const anchor = '  function runFixedFill(target, descriptor, request) {';
@@ -731,6 +731,30 @@ const invoke = (invocation, generation, scope, budget = {}) => runtime.invoke(JS
     ...(budget.lu === true ? { lu: true } : {})
   }
 }));
+
+if (process.argv[3] === "--owned-options") {
+  main._children = new NodeList();
+  const combo=(name,id,expanded="true")=>new HTMLInputElement({role:"combobox","aria-label":name,"aria-controls":id,"aria-expanded":expanded},"");
+  const popup=(id,name)=>{const list=new Element("div",{id,role:"listbox","aria-label":name});list.append(new Element("button",{role:"option","aria-label":"Northport"}));return list;};
+  main.append(combo("From","origin-options"));main.append(combo("To","destination-options"));
+  main.append(popup("origin-options","Origin choices"));main.append(popup("destination-options","Destination choices"));
+  main.append(popup("unrelated","Unrelated choices"));
+  main.append(combo("First shared","shared"));main.append(combo("Second shared","shared"));main.append(popup("shared","Ambiguous choices"));
+  main.append(combo("Inactive owner","active-shared","false"));main.append(combo("Active owner","active-shared"));main.append(popup("active-shared","Active choices"));
+  main.append(combo("Not an option owner","plain-control"));main.append(new Element("button",{id:"plain-control","aria-label":"Unrelated button"}));
+  const wire=JSON.parse(invoke(7,1,{k:"initial"},{n:128,t:16384,w:65536,x:4096,geo:false}));
+  const at=name=>wire.n.findIndex(node=>node.n===name);
+  for(const [owner,list] of [["From","Origin choices"],["To","Destination choices"],["Active owner","Active choices"]]) {
+    assert(at(owner)>=0&&at(list)>=0,"missing form ownership fixture");
+    assert(wire.n[at(list)].p===at(owner),"listbox lost its observed ARIA owner: "+list);
+  }
+  for(const owner of ["From","To"])assert(wire.n[at("Unrelated choices")].p!==at(owner),"unrelated popup was adopted");
+  for(const owner of ["First shared","Second shared"])assert(wire.n[at("Ambiguous choices")].p!==at(owner),"ambiguous popup was adopted");
+  assert(wire.n[at("Unrelated button")].p!==at("Not an option owner"),"ARIA reference adopted a non-listbox control");
+  assert(wire.n.every((node,index)=>node.p===undefined||node.p<index),"ownership broke snapshot order");
+  process.stdout.write("owned options: exact ARIA relationships, active owner, ambiguity and unrelated controls checked\n");
+  process.exit(0);
+}
 
 if (process.argv[3] === "--credential-comments") {
   main._children = new NodeList();

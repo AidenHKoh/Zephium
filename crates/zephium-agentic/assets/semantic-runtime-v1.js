@@ -120,6 +120,7 @@
   const removeAttribute = Element.prototype.removeAttribute;
   const getBoundingClientRect = Element.prototype.getBoundingClientRect;
   const documentGetElementById = Document.prototype.getElementById;
+  const shadowGetElementById = typeof ShadowRoot === "function" ? ShadowRoot.prototype.getElementById : null;
   const documentElementFromPoint = Document.prototype.elementFromPoint;
   const getComputedStyleFixed = globalThis.getComputedStyle;
   const htmlElementClick =
@@ -2930,6 +2931,55 @@
     return records;
   }
 
+  // Reflect observed ARIA popup ownership, never label similarity. Only a
+  // captured listbox with one active owner is joined; no hidden node is added.
+  function associateOwnedChoices(records, state) {
+    const owners = new Map();
+    for (let index = 0; index < records.length; index += 1) {
+      const owner = records[index];
+      if (owner.wire.r !== "combobox" || owner.wire.q === "secret" || owner.wire.fc === false) continue;
+      let root;
+      try { root = apply(nodeGetRoot, owner.element, []); } catch (_) { continue; }
+      const find = root === document ? documentGetElementById : shadowGetElementById;
+      if (typeof find !== "function") continue;
+      const ids = new Set();
+      for (const attributeName of ["aria-controls", "aria-owns"]) {
+        const raw = attribute(owner.element, attributeName, 512, state);
+        if (raw === null) continue;
+        const parts = apply(stringSplit, raw, [/\s+/]);
+        if (parts.length > 8) continue;
+        for (const id of parts) if (id.length > 0 && id.length <= 128) ids.add(id);
+      }
+      for (const id of ids) {
+        let element;
+        try { element = apply(find, root, [id]); } catch (_) { continue; }
+        const target = records.findIndex(record => record.element === element && record.wire.r === "listbox" && record.wire.q !== "secret" && record.wire.fc !== false);
+        if (target <= index) continue;
+        const candidates = owners.get(target) || [];
+        if (!candidates.includes(index)) candidates.push(index);
+        owners.set(target, candidates);
+      }
+    }
+    for (const [target, candidates] of owners) {
+      const expanded = candidates.filter(index => ((records[index].wire.s || 0) & 4) !== 0);
+      const eligible = expanded.length > 0 ? expanded : candidates;
+      if (eligible.length !== 1) continue;
+      const prior = records[target].wire.p;
+      records[target].wire.p = eligible[0];
+      const depths = [];
+      for (let index = 0; index < records.length; index += 1) {
+        const parent = records[index].wire.p;
+        depths.push(parent === undefined ? 0 : depths[parent] + 1);
+      }
+      if (depths.some(depth => depth > MAX_TREE_DEPTH)) {
+        if (prior === undefined) delete records[target].wire.p;
+        else records[target].wire.p = prior;
+        continue;
+      }
+      for (let index = 0; index < records.length; index += 1) records[index].depth = depths[index];
+    }
+  }
+
   // Exact native node keys, never label similarity. Only the nearest shared
   // non-page ancestor and its geometry associate an image with record text.
   function mediaEvidence(records, request) {
@@ -4320,6 +4370,7 @@
         records = traverse(anchor, state, true);
       }
     }
+    associateOwnedChoices(records, state);
     if (state.regionBoundary) mark(state, "scope_boundary", false);
     return encodeSnapshot(request, records, state.completeness);
   }
