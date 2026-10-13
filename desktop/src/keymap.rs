@@ -33,9 +33,6 @@ pub(crate) struct Keymap {
     /// on macOS is a menu key equivalent.
     #[cfg(target_os = "macos")]
     key_table: Arc<RwLock<Vec<(Accelerator, &'static str)>>>,
-    /// The Work pane's bindings, enabled only while the pane is shown.
-    #[cfg(target_os = "macos")]
-    work_menu_items: std::sync::Mutex<Vec<tauri::menu::MenuItem<tauri::Wry>>>,
 }
 
 impl Keymap {
@@ -134,16 +131,8 @@ impl Keymap {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    pub(crate) fn adopt_work_menu_items(&self, items: Vec<tauri::menu::MenuItem<tauri::Wry>>) {
-        let shown = self.work_pane_shown.load(Ordering::Acquire);
-        for item in &items {
-            let _ = item.set_enabled(shown);
-        }
-        *self
-            .work_menu_items
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = items;
+    pub(crate) fn work_pane_shown(&self) -> bool {
+        self.work_pane_shown.load(Ordering::Acquire)
     }
 
     fn set_recording(&self, recording: bool) {
@@ -152,28 +141,32 @@ impl Keymap {
         }
     }
 
-    pub(crate) fn set_work_pane_shown(&self, shown: bool) {
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    pub(crate) fn set_work_pane_shown(&self, app: &tauri::AppHandle, shown: bool) {
         if self.work_pane_shown.swap(shown, Ordering::AcqRel) == shown {
             return;
         }
-        // Off the main thread a menu setter waits for the main thread, which
-        // may itself be waiting for this lock in adopt_work_menu_items; take
-        // the items out before touching them.
+        self.refresh_tables();
+        // Off the main thread a menu setter blocks on the main thread, which
+        // may be waiting on this caller; hand the rebuild over instead. It
+        // reads the state when it runs, so out-of-order flips settle on the
+        // latest one.
         #[cfg(target_os = "macos")]
-        let items = self
-            .work_menu_items
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        #[cfg(target_os = "macos")]
-        for item in &items {
-            if item.set_enabled(shown).is_err() {
-                write_diagnostic(format_args!(
-                    "menu: work pane binding state was not applied"
-                ));
+        {
+            let handle = app.clone();
+            let queued = app.run_on_main_thread(move || {
+                let Some(keymap) = handle.try_state::<Keymap>() else {
+                    return;
+                };
+                if install_menu_bar(&handle, &keymap.overrides(), keymap.work_pane_shown()).is_err()
+                {
+                    write_diagnostic(format_args!("menu: work pane items were not applied"));
+                }
+            });
+            if queued.is_err() {
+                write_diagnostic(format_args!("menu: work pane items were not applied"));
             }
         }
-        self.refresh_tables();
     }
 
     fn update(&self, app: &tauri::AppHandle, change: impl FnOnce(&mut HashMap<String, String>)) {
@@ -196,7 +189,7 @@ impl Keymap {
         }
         self.refresh_tables();
         #[cfg(target_os = "macos")]
-        if install_menu_bar(app, &self.overrides()).is_err() {
+        if install_menu_bar(app, &self.overrides(), self.work_pane_shown()).is_err() {
             write_diagnostic(format_args!("keymap: menu bar was not rebuilt"));
         }
         emit_to_privileged(

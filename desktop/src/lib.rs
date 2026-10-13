@@ -3786,7 +3786,7 @@ fn menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64) -> b
         return false;
     };
     let keymap = keymap_overrides(&app);
-    let Ok((menu, _)) = build_menu(&app, &keymap) else {
+    let Ok(menu) = build_menu(&app, &keymap, false) else {
         return false;
     };
     caller.popup_menu_at(&menu, anchor).is_ok()
@@ -4969,15 +4969,17 @@ fn build_quit_menu_item(
         .build(handle)
 }
 
+/// Page keystrokes never reach privileged chrome, so the Work pane's
+/// dismissal keys are menu items, present in View only while a pane is shown.
+const WORK_PANE_MENU_COMMAND_IDS: [&str; 2] = ["work.pane.close", "work.pane.openInBrowse"];
+
 /// The application menu: the macOS menu bar, and the "more" popup on Windows
-/// and Linux. Returns the Work pane items, which only the menu bar keeps.
+/// and Linux.
 fn build_menu(
     handle: &tauri::AppHandle,
     overrides: &std::collections::HashMap<String, String>,
-) -> tauri::Result<(
-    tauri::menu::Menu<tauri::Wry>,
-    Vec<tauri::menu::MenuItem<tauri::Wry>>,
-)> {
+    work_pane: bool,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, SubmenuBuilder};
 
     let resolved = zephium_core::commands::resolve(overrides);
@@ -5041,8 +5043,17 @@ fn build_menu(
         .item(&appearance)
         .separator()
         .item(&item("url.focus")?)
-        .item(&item("page.devtools")?)
-        .build()?;
+        .item(&item("page.devtools")?);
+    let view = if work_pane {
+        let mut view = view.separator();
+        for id in WORK_PANE_MENU_COMMAND_IDS {
+            view = view.item(&item(id)?);
+        }
+        view
+    } else {
+        view
+    }
+    .build()?;
     let history = SubmenuBuilder::new(handle, "History")
         .item(&item("nav.back")?)
         .item(&item("nav.forward")?)
@@ -5066,42 +5077,31 @@ fn build_menu(
         .item(&item("tool.time")?)
         .item(&item("tool.history")?)
         .item(&item("tool.downloads")?)
-        .item(&item("browser.tasks")?)
+        .separator()
         .item(&item("browser.notes")?)
-        .build()?;
-    // Page keystrokes never reach privileged chrome, so the pane's dismissal
-    // keys live in the menu and are enabled exactly while a pane is shown.
-    let pane_close = build_command_menu_item_enabled(handle, &resolved, "work.pane.close", false)?;
-    let pane_open =
-        build_command_menu_item_enabled(handle, &resolved, "work.pane.openInBrowse", false)?;
-    let work = SubmenuBuilder::new(handle, "Work")
-        .item(&pane_close)
-        .item(&pane_open)
+        .item(&item("browser.tasks")?)
         .build()?;
     let help = SubmenuBuilder::new(handle, "Help")
         .item(&item("settings.shortcuts")?)
         .build()?;
 
-    let menu = Menu::with_items(
+    Menu::with_items(
         handle,
         &[
-            &app_menu, &file, &edit, &view, &history, &bookmarks, &work, &window, &help,
+            &app_menu, &file, &edit, &view, &history, &bookmarks, &window, &help,
         ],
-    )?;
-    Ok((menu, vec![pane_close, pane_open]))
+    )
 }
 
-/// Installs (or reinstalls, after a rebinding) the macOS menu bar.
+/// Installs (or reinstalls, after a rebinding or a Work pane showing or
+/// hiding) the macOS menu bar. Main thread only.
 #[cfg(target_os = "macos")]
 fn install_menu_bar(
     app: &tauri::AppHandle,
     overrides: &std::collections::HashMap<String, String>,
+    work_pane: bool,
 ) -> tauri::Result<()> {
-    let (menu, work_items) = build_menu(app, overrides)?;
-    app.set_menu(menu)?;
-    if let Some(keymap) = app.try_state::<keymap::Keymap>() {
-        keymap.adopt_work_menu_items(work_items);
-    }
+    app.set_menu(build_menu(app, overrides, work_pane)?)?;
     Ok(())
 }
 
@@ -6032,7 +6032,7 @@ pub fn run() {
             // Windows and Linux get the same menu as a popup from the sidebar
             // "more" button instead of a persistent bar.
             #[cfg(target_os = "macos")]
-            install_menu_bar(&handle, &keymap)?;
+            install_menu_bar(&handle, &keymap, false)?;
             app.on_menu_event(|app, event| {
                 let _ = execute_command(app, event.id().0.as_str());
             });
@@ -6179,7 +6179,7 @@ pub fn run() {
                 }
                 Projection::Layout(layout) => {
                     if let Some(keymap) = emit_handle.try_state::<keymap::Keymap>() {
-                        keymap.set_work_pane_shown(layout.work_pane.is_some());
+                        keymap.set_work_pane_shown(&emit_handle, layout.work_pane.is_some());
                     }
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_LAYOUT, &layout)
                 }
@@ -6857,6 +6857,35 @@ mod tests {
         assert!(!source.contains("PredefinedMenuItem::quit"));
         assert!(source.contains("if id == \"browser.quit\""));
         assert!(source.contains("app.exit(0)"));
+    }
+
+    #[test]
+    fn menu_bar_hosts_pane_keys_in_view_and_lists_each_panel_once() {
+        let source = include_str!("lib.rs");
+        let menu = source
+            .split("fn build_menu(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn install_menu_bar").next())
+            .expect("menu builder");
+        assert!(!menu.contains("\"Work\""), "the menu bar has no Work menu");
+        assert!(menu.contains("for id in WORK_PANE_MENU_COMMAND_IDS"));
+        let pane: Vec<_> = zephium_core::commands::REGISTRY
+            .iter()
+            .filter(|command| command.group == zephium_core::commands::Group::Work)
+            .map(|command| command.id)
+            .collect();
+        assert_eq!(pane, super::WORK_PANE_MENU_COMMAND_IDS);
+        for id in [
+            "tool.notes",
+            "tool.tasks",
+            "tool.time",
+            "tool.history",
+            "tool.downloads",
+            "browser.notes",
+            "browser.tasks",
+        ] {
+            assert_eq!(menu.matches(&format!("item(\"{id}\")")).count(), 1, "{id}");
+        }
     }
 
     #[test]
