@@ -5,18 +5,15 @@
   let {
     sites,
     above,
-    extensions,
     compact = false,
     tools = true,
     foot,
   }: {
     sites?: Snippet;
-    /** Extension buttons stacked into the tool case, at rail width only. */
-    extensions?: Snippet;
     /** Kept sites that did not fit beside the shelf, in rows over it. */
     above?: Snippet;
     compact?: boolean;
-    /** The browser's tool case; Work keeps its own tools on the canvas. */
+    /** The profile and its tools; Work keeps its own on the canvas. */
     tools?: boolean;
     /** What closes the rail at its very foot, below the kept sites. */
     foot?: Snippet;
@@ -32,10 +29,14 @@
 <!-- The base of the column settles last, once the list above it has. -->
 <footer class="dock" data-compact={compact} data-cascade style:--cascade={8}>
   {#if above}{@render above()}{/if}
+  <!-- In the row the profile leads; down the rail it closes the column. -->
   <div class="dock-base">
-    {#if tools}<ToolShelf {compact} {extensions} />
+    {#if tools && !compact}<ToolShelf />
       <span class="dock-rule" aria-hidden="true"></span>{/if}
     {#if sites}<div class="dock-sites-slot">{@render sites()}</div>{/if}
+    {#if tools && compact}<span class="dock-rule" aria-hidden="true"></span><ToolShelf
+        compact
+      />{/if}
     {#if foot}<span class="dock-rule" aria-hidden="true"></span>{@render foot()}{/if}
   </div>
 </footer>

@@ -28,24 +28,32 @@
   "these stay" without spending a row on a word, and the rows themselves carry
   the difference by having no close control.
 -->
+<!-- Opening a tab never scrolls away with the tabs it adds to. -->
+<div class="new-tab-slot" data-cascade style:--cascade={0}>
+  <button type="button" class="new-tab" onclick={tabs.open}>
+    <Icon icon={Add01Icon} size={16} />
+    <span>{m.new_tab()}</span>
+  </button>
+</div>
+
 <div
   data-tabs-drop
   use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/tabs`}
-  class="tab-scroller"
+  class="tab-scroller scroll-edges"
   data-glide-scroller
 >
-  <TabList entries={pinned} section="pinned" label={m.pinned_tabs()} {splitting} {onSelect} />
+  <TabList
+    entries={pinned}
+    section="pinned"
+    label={m.pinned_tabs()}
+    cascadeFrom={1}
+    {splitting}
+    {onSelect}
+  />
 
   {#if pinned.length > 0}
     <div class="tab-divider" aria-hidden="true"></div>
   {/if}
-
-  <div class="new-tab-slot" data-cascade style:--cascade={pinned.length}>
-    <button type="button" class="new-tab" onclick={tabs.open}>
-      <Icon icon={Add01Icon} size={16} />
-      <span>{m.new_tab()}</span>
-    </button>
-  </div>
 
   <TabList
     entries={today}
@@ -73,6 +81,7 @@
   }
 
   .new-tab-slot {
+    flex: none;
     padding-inline: var(--sidebar-inset);
     padding-block: 2px calc(var(--sidebar-row-gap) + 2px);
   }
@@ -87,7 +96,7 @@
     border: 0;
     border-radius: var(--radius-row);
     background: transparent;
-    color: var(--color-faint);
+    color: var(--color-muted);
     font: inherit;
     font-size: var(--sidebar-row-text);
     font-weight: var(--sidebar-row-weight);

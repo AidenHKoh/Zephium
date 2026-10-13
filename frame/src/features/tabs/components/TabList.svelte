@@ -53,6 +53,8 @@
     drop: ({ id, x, y, over, before }) => {
       // A split's tabs share one row, so they never reorder in place; let go
       // anywhere in the sidebar and the tab leaves its split for there.
+      // A tab that cannot be kept goes back where it was.
+      if (over?.closest("[data-essentials-drop]") && !tabDrag.keepable(id)) return;
       if (tabs.inSplit(id) && over?.closest("[data-essentials-drop], [data-tabs-drop]")) {
         const essential = !!over.closest("[data-essentials-drop]");
         void tabDrag.leaveSplit(id, essential || before ? { essential, before } : null);
@@ -202,7 +204,7 @@
           tab={unit.tab}
           active={unit.tab.id === tabs.activeId()}
           depth={unit.depth}
-          closable={section === "today"}
+          closable={section === "today" && !tabs.loneNewTab(unit.tab.id)}
           class={[
             variant === "essentials" ? "col-span-full" : "",
             hiddenUnits.has(unit.key) ? "hidden" : "",

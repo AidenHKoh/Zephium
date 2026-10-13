@@ -35,7 +35,7 @@ export const sidebarMode = () => mode;
 export const isCompact = () => mode === "compact";
 export const expanded = () => expandedWidth;
 /** The chrome gap between the rail and an open utility panel. */
-const PANEL_GAP = 8;
+export const PANEL_GAP = 8;
 let panelExtent = $state.raw(0);
 
 export const effectiveWidth = () =>

@@ -148,7 +148,8 @@
     height: 36px;
     border: 0;
     border-radius: var(--radius-capsule);
-    background: var(--color-card);
+    background: var(--color-tile);
+    box-shadow: var(--shine), var(--shadow-tile);
     cursor: default;
     transition:
       background-color var(--motion-fast) var(--ease-out),
@@ -160,7 +161,7 @@
     width: 36px;
     height: 36px;
     border-radius: var(--radius-capsule);
-    background: var(--color-card);
+    background: var(--color-tile);
     transition: background-color var(--motion-fast) var(--ease-out);
   }
 
@@ -171,7 +172,7 @@
   }
 
   .rail-site:hover {
-    background: var(--color-fill-hover);
+    background: var(--color-tile-hover);
   }
 
   .rail-site:active {

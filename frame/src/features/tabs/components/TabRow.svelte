@@ -156,7 +156,7 @@
      the column. The rest sit a step back so the list reads as one surface. */
   .browse-tab[data-selected="true"] {
     background: var(--row-active);
-    color: var(--color-text);
+    color: var(--color-row-current, var(--color-text));
     font-weight: var(--sidebar-row-weight-current);
   }
 
@@ -203,10 +203,17 @@
     overflow: hidden;
     white-space: nowrap;
     mask-image: var(--mask-fade-end);
+    transition: margin-inline-end var(--motion-fast) var(--ease-out);
   }
 
   .tab-label:dir(rtl) {
     mask-image: var(--mask-fade-end-rtl);
+  }
+
+  /* While the close control shows, the title dissolves before it rather than
+     running underneath it. */
+  .browse-tab:is(:hover, :focus-within) .tab-label {
+    margin-inline-end: 22px;
   }
 
   .tab-close {

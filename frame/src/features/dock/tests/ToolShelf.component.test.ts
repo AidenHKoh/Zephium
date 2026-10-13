@@ -48,7 +48,7 @@ test("the tools stay out of reach until the case is pressed", async () => {
     .toHaveAttribute("aria-current", "true");
 });
 
-test("the records follow the tools, and the whole list is a secondary click away", async () => {
+test("the profile opens on incognito, then its tools, and the whole list is a secondary click away", async () => {
   const screen = await render(ToolShelf);
   const tools = screen.getByRole("button", { name: "Tools", exact: true });
   await expect.element(tools).toHaveAttribute("aria-haspopup", "menu");
@@ -57,6 +57,7 @@ test("the records follow the tools, and the whole list is a secondary click away
     item.textContent?.trim(),
   );
   expect(names).toEqual([
+    "Incognito",
     "Notes",
     "Tasks",
     "Time",
@@ -92,4 +93,14 @@ test("expanded, the case carries no glyph; the sidebar's own notice speaks", asy
   notices.show("Link copied");
   await new Promise((resolve) => setTimeout(resolve, 50));
   expect(screen.container.querySelector(".pip")).toBeNull();
+});
+
+test("a press on the page, which takes focus away, puts the stack away", async () => {
+  const screen = await render(ToolShelf);
+  screen.container.style.paddingBlockStart = "280px";
+  const stack = screen.container.querySelector<HTMLElement>(".shelf-stack")!;
+  await screen.getByRole("button", { name: "Tools", exact: true }).click();
+  await expect.poll(() => stack.inert).toBe(false);
+  window.dispatchEvent(new FocusEvent("blur"));
+  await expect.poll(() => stack.inert).toBe(true);
 });

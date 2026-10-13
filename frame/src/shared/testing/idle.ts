@@ -75,7 +75,12 @@ export function wakeupCounter() {
       counting = false;
       const animations = document
         .getAnimations()
-        .filter((animation) => animation.playState === "running")
+        // A scroll-driven animation moves only when its scroller does; on the
+        // document clock is what ticks at rest.
+        .filter(
+          (animation) =>
+            animation.playState === "running" && animation.timeline === document.timeline,
+        )
         .map((animation) => {
           const target = (animation.effect as KeyframeEffect | null)?.target;
           const name =

@@ -55,8 +55,16 @@
     const outside = (event: PointerEvent) => {
       if (!(event.target instanceof Node) || !root?.contains(event.target)) dismiss(false);
     };
+    // A press on a web page lands in another view and never reaches this
+    // document; it takes focus with it, so the window going out of focus
+    // is that press, as it is any other application's.
+    const away = () => dismiss(false);
     window.addEventListener("pointerdown", outside, true);
-    return () => window.removeEventListener("pointerdown", outside, true);
+    window.addEventListener("blur", away);
+    return () => {
+      window.removeEventListener("pointerdown", outside, true);
+      window.removeEventListener("blur", away);
+    };
   });
 
   function onkeydown(event: KeyboardEvent) {

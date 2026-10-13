@@ -3,10 +3,21 @@
   import { Briefcase02Icon, Globe02Icon } from "@hugeicons/core-free-icons";
   import Icon from "$shared/ui/Icon";
   import { surface } from "$domain/surface";
+  import { untrack } from "svelte";
 
   let { standalone = false }: { standalone?: boolean } = $props();
 
   const inWork = $derived(surface.currentPage() === "work");
+  // The thumb stretches only on a change of side, never on arrival.
+  let moved = $state(false);
+  let seen: boolean | null = null;
+  $effect(() => {
+    const next = inWork;
+    untrack(() => {
+      if (seen !== null && seen !== next) moved = true;
+      seen = next;
+    });
+  });
   const MODES = [
     { work: false, label: m.mode_browse, icon: Globe02Icon },
     { work: true, label: m.mode_work, icon: Briefcase02Icon },
@@ -22,6 +33,7 @@
 <div
   class="mode-switch"
   data-work={inWork}
+  data-moved={moved}
   data-standalone={standalone}
   role="group"
   aria-label={m.ui_mode_work_hint()}
@@ -35,13 +47,13 @@
       title={mode.label()}
       onclick={() => {
         if (inWork !== mode.work) void surface.open(mode.work ? "work" : null);
-      }}><Icon icon={mode.icon} size={14} strokeWidth={1.7} /></button
+      }}><Icon icon={mode.icon} size={15} strokeWidth={1.7} /></button
     >{/each}
 </div>
 
 <style>
   .mode-switch {
-    --cell: 22px;
+    --cell: 24px;
 
     position: relative;
     display: grid;
@@ -50,23 +62,49 @@
     padding: 2px;
     border-radius: var(--radius-capsule);
     background: var(--color-fill);
-    outline: 0.5px solid var(--color-border);
-    outline-offset: -0.5px;
+    box-shadow: var(--row-rim);
   }
 
+  /* The expanded switch's own thumb, lifted on the glass rather than laid on
+     it as a disc, and it travels like liquid: drawn out along the way, round
+     again on arrival. */
   .thumb {
     position: absolute;
     inset-block: 2px;
     inset-inline-start: 2px;
     inline-size: var(--cell);
     border-radius: var(--radius-capsule);
-    background: var(--color-float);
-    box-shadow: var(--shadow-raised);
-    transition: transform var(--motion-base) var(--ease-emphasized);
+    background: var(--segment-thumb);
+    box-shadow: var(--shadow-segment-thumb);
+    transition: translate var(--motion-base) var(--ease-spring);
   }
 
   .mode-switch[data-work="true"] .thumb {
-    transform: translateX(var(--cell));
+    translate: var(--cell) 0;
+  }
+
+  :global([dir="rtl"]) .mode-switch[data-work="true"] .thumb {
+    translate: calc(var(--cell) * -1) 0;
+  }
+
+  .mode-switch[data-moved="true"][data-work="true"] .thumb {
+    animation: thumb-travel-in var(--motion-base) var(--ease-out);
+  }
+
+  .mode-switch[data-moved="true"][data-work="false"] .thumb {
+    animation: thumb-travel-out var(--motion-base) var(--ease-out);
+  }
+
+  @keyframes thumb-travel-in {
+    40% {
+      scale: 1.22 0.94;
+    }
+  }
+
+  @keyframes thumb-travel-out {
+    40% {
+      scale: 1.22 0.94;
+    }
   }
 
   .mode {
@@ -79,13 +117,20 @@
     border: 0;
     border-radius: var(--radius-capsule);
     background: transparent;
-    color: var(--color-faint);
+    color: var(--color-muted);
     cursor: default;
-    transition: color var(--motion-fast) var(--ease-out);
+    transition:
+      color var(--motion-fast) var(--ease-out),
+      scale var(--motion-slow) var(--ease-spring);
   }
 
   .mode:hover {
-    color: var(--color-label-secondary);
+    color: var(--color-text);
+  }
+
+  .mode:active {
+    scale: 0.9;
+    transition-duration: var(--motion-instant);
   }
 
   .mode[aria-pressed="true"] {
@@ -107,6 +152,10 @@
   @media (prefers-reduced-motion: reduce) {
     .thumb {
       transition: none;
+    }
+
+    .mode-switch[data-moved="true"][data-work] .thumb {
+      animation: none;
     }
   }
 </style>

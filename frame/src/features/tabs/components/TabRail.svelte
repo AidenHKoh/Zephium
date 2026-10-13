@@ -4,7 +4,7 @@
   import { tabs } from "$domain/tabs";
   import FavIcon from "$shared/ui/FavIcon";
   import { favicons } from "$domain/favicons";
-  import { Add01Icon, Globe02Icon, PuzzleIcon } from "@hugeicons/core-free-icons";
+  import { Add01Icon, Cancel01Icon, Globe02Icon, PuzzleIcon } from "@hugeicons/core-free-icons";
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
   import { untrack } from "svelte";
@@ -36,6 +36,8 @@
     reorder: () => ({ essential: false }),
     drop: ({ id, x, y, over, before }) => {
       const essential = !!over?.closest("[data-essentials-drop]");
+      // A tab that cannot be kept goes back where it was.
+      if (essential && !tabDrag.keepable(id)) return;
       if (tabs.inSplit(id) && (essential || over?.closest("[data-tabs-drop]")))
         void tabDrag.leaveSplit(id, essential || before ? { essential, before } : null);
       else if (essential) void tabDrag.move(id, true, before);
@@ -63,9 +65,22 @@
   tooltip, which is the only label that can appear outside the chrome
   WebView's rectangle.
 -->
+<!-- Like the expanded list, the rail opens with the way to a new tab, which
+     stays put while the tabs below it scroll. -->
+<div class="rail-new-slot" data-cascade style:--cascade={0}>
+  <button
+    type="button"
+    class="rail-item rail-new"
+    title={m.new_tab()}
+    aria-label={m.new_tab()}
+    onclick={tabs.open}
+  >
+    <Icon icon={Add01Icon} size={16} />
+  </button>
+</div>
 <div
   use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/rail`}
-  class="rail-scroller"
+  class="rail-scroller scroll-edges"
   data-glide-scroller
 >
   <ul bind:this={list} class="rail-list" data-tabs-drop role="list" aria-label={m.open_tabs()}>
@@ -73,7 +88,7 @@
       {@const active = tab.id === tabs.activeId()}
       <li
         data-cascade
-        style:--cascade={index}
+        style:--cascade={index + 1}
         data-motion-key={`tab:${tab.id}`}
         data-zephium-tab-id={tab.id}
         data-zephium-tab-url={tab.url ?? ""}
@@ -105,19 +120,18 @@
           />
           <span data-zephium-tab-label class="sr-only">{tab.title}</span>
         </button>
+        <!-- A rail has no row to put a close control in, so it rides the
+             mark's corner, the way a notification's does. -->
+        {#if !tabs.loneNewTab(tab.id)}<button
+            type="button"
+            class="rail-close"
+            title={m.close_tab()}
+            aria-label={m.close_named_tab({ title: tab.title || m.untitled_tab() })}
+            onclick={() => tabs.close(tab.id)}
+            ><Icon icon={Cancel01Icon} size={8} strokeWidth={2.4} /></button
+          >{/if}
       </li>
     {/each}
-    <li data-cascade style:--cascade={entries.length}>
-      <button
-        type="button"
-        class="rail-item rail-new"
-        title={m.new_tab()}
-        aria-label={m.new_tab()}
-        onclick={tabs.open}
-      >
-        <Icon icon={Add01Icon} size={16} />
-      </button>
-    </li>
   </ul>
 </div>
 
@@ -129,6 +143,15 @@
   />{/if}
 
 <style>
+  /* Close under the head's rule, so the way to a new tab reads as the
+     first thing of the list rather than a thing apart from it. */
+  .rail-new-slot {
+    display: flex;
+    flex: none;
+    justify-content: center;
+    padding-block: 0 2px;
+  }
+
   .rail-scroller {
     display: flex;
     flex: 1;
@@ -136,7 +159,7 @@
     min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
-    padding-block: 8px;
+    padding-block: 4px 8px;
   }
 
   /* The expanded list's own pitch, row for row, so a tab sits at the same
@@ -180,5 +203,56 @@
   .rail-item[aria-current="page"] {
     background: var(--row-active);
     box-shadow: var(--row-rim);
+  }
+
+  .rail-list > li {
+    position: relative;
+  }
+
+  /* A small raised disc on the mark's corner: it waits a beat before it
+     appears, so running the pointer down the rail does not set every one off. */
+  .rail-close {
+    position: absolute;
+    inset-block-start: -3px;
+    inset-inline-end: -3px;
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-capsule);
+    background: var(--color-float);
+    box-shadow: var(--shadow-badge);
+    color: var(--color-muted);
+    opacity: 0;
+    scale: 0.6;
+    pointer-events: none;
+    cursor: default;
+    transition:
+      opacity var(--motion-fast) var(--ease-out),
+      scale var(--motion-base) var(--ease-spring),
+      color var(--motion-instant) var(--ease-out);
+  }
+
+  .rail-close:focus-visible {
+    opacity: 1;
+    scale: 1;
+    pointer-events: auto;
+  }
+
+  .rail-close:hover {
+    color: var(--color-text);
+  }
+
+  .rail-list > li:hover .rail-close {
+    opacity: 1;
+    scale: 1;
+    pointer-events: auto;
+    transition-delay: 160ms, 160ms, 0ms;
+  }
+
+  .rail-list > li:hover .rail-close:active {
+    scale: 0.9;
   }
 </style>

@@ -121,6 +121,29 @@ describe("Svelte tab state lifecycle", () => {
     expect(harness.stops.map((stop) => stop.mock.calls.length)).toEqual([1, 1, 1, 1]);
   });
 
+  it("offers no close on the window's one empty new tab", async () => {
+    const state = await import("../tabs.svelte");
+    await state.init();
+    const snapshot = (value: number, tabs: TabView[]): ItemsState => ({
+      projection_revision: revision(value),
+      profile: { id: "profile-a", name: "Personal", kind: "default" },
+      spaces: [{ id: "space-a", name: "Main" }],
+      active_space_id: "space-a",
+      nodes: [],
+      tabs,
+      active: tabs[0]?.id ?? null,
+      split_group: null,
+    });
+    const empty = { ...tab("fresh", 1), url: null };
+    harness.listeners.items?.({ payload: snapshot(2, [empty]) });
+    expect(state.loneNewTab("fresh")).toBe(true);
+    harness.listeners.items?.({ payload: snapshot(3, [tab("fresh", 3)]) });
+    expect(state.loneNewTab("fresh")).toBe(false);
+    harness.listeners.items?.({ payload: snapshot(4, [empty, tab("page", 4)]) });
+    expect(state.loneNewTab("fresh")).toBe(false);
+    state.dispose();
+  });
+
   it("publishes presentation state inside the synchronous Svelte flush", async () => {
     const state = await import("../tabs.svelte");
     await state.init();

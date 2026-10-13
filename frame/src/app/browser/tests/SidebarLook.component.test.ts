@@ -62,7 +62,7 @@ test("the rail at rest", async () => {
   await expect.poll(() => getComputedStyle(farthest).opacity).toBe("1");
   await expect.poll(() => getComputedStyle(stack).opacity).toBe("1");
   expect(farthest.textContent?.trim()).toBe("");
-  expect(farthest.getAttribute("aria-label")).toBe("Notes");
+  expect(farthest.getAttribute("aria-label")).toBe("Incognito");
   await page
     .elementLocator(screen.container)
     .screenshot({ path: "../../../../../target/rail-shelf.png" });
