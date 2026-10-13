@@ -82,6 +82,12 @@
   $effect(() => {
     const command = ui.uiCommand();
     if (command.seq === 0 || command.id !== "url.focus" || input === undefined) return;
+    // At rail width the field is not drawn; the launcher stands in for it.
+    const tab = untrack(() => tabs.activeTab());
+    if (compact && tab?.url && (tab.content ?? "web") === "web") {
+      void commands.launcherEdit(tab.id, tab.url);
+      return;
+    }
     input.focus();
     input.select();
   });

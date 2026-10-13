@@ -1073,8 +1073,9 @@ impl Shell {
                 context,
                 action,
                 background,
+                replace,
             } => {
-                let _ = self.operation_run_search_action(*context, action, background);
+                let _ = self.operation_run_search_action(*context, action, background, replace);
             }
             Command::OpenUrl { input, new_tab } => {
                 let _ = self.operation_open_url(input, new_tab);

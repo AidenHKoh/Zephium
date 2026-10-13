@@ -313,6 +313,10 @@ export const commands = {
 	space_id: string | null,
 	error: boolean,
 	corner_radius: number,
+	/**  The address the launcher opens on when it edits the current page's. */
+	seed: string | null,
+	/**  The tab whose address is being edited; it is no destination of its own. */
+	seed_tab: string | null,
 } | null>("panel_ready"),
 	panelIntent: (intent: PanelIntent) => __TAURI_INVOKE<boolean>("panel_intent", { intent }),
 	/**
@@ -320,6 +324,11 @@ export const commands = {
 	 *  places the material behind it.
 	 */
 	panelLayout: (layout: PanelLayout) => __TAURI_INVOKE<void>("panel_layout", { layout }),
+	/**
+	 *  Opens the launcher on the current page's address. At rail width the field
+	 *  is not drawn, so this is how the page's address is edited there.
+	 */
+	launcherEdit: (tabId: string, url: string) => __TAURI_INVOKE<boolean>("launcher_edit", { tabId, url }),
 	launcherTrigger: () => __TAURI_INVOKE<{
 	shortcut: string,
 	default_shortcut: string,
@@ -1690,6 +1699,10 @@ export type PanelState = {
 	space_id: string | null,
 	error: boolean,
 	corner_radius: number,
+	/**  The address the launcher opens on when it edits the current page's. */
+	seed: string | null,
+	/**  The tab whose address is being edited; it is no destination of its own. */
+	seed_tab: string | null,
 };
 
 export type PersonalHideView = {

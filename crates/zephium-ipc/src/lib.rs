@@ -455,6 +455,10 @@ pub struct PanelState {
     pub space_id: Option<String>,
     pub error: bool,
     pub corner_radius: u16,
+    /// The address the launcher opens on when it edits the current page's.
+    pub seed: Option<String>,
+    /// The tab whose address is being edited; it is no destination of its own.
+    pub seed_tab: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]

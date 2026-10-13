@@ -853,6 +853,7 @@ fn scoped_launcher_actions_reject_stale_requests_and_unoffered_actions() {
             url: "https://not-in-results.example/".into(),
         },
         background: false,
+        replace: None,
     });
     assert_eq!(forged.reason, OperationReason::InvalidScope);
     shell.handle(Command::CancelSearch {
@@ -862,6 +863,7 @@ fn scoped_launcher_actions_reject_stale_requests_and_unoffered_actions() {
         context: Box::new(context),
         action: SearchAction::ActivateTab { id: id.to_string() },
         background: false,
+        replace: None,
     });
     assert_eq!(stale.reason, OperationReason::InvalidScope);
 }
@@ -896,6 +898,7 @@ fn a_background_launcher_open_keeps_the_current_tab_and_the_search() {
             context: Box::new(context.clone()),
             action: action.clone(),
             background: true,
+            replace: None,
         });
         // Deferred: the new view settles once native has created it.
         assert!(matches!(
@@ -907,6 +910,56 @@ fn a_background_launcher_open_keeps_the_current_tab_and_the_search() {
     assert_eq!(shell.items.view_ids().len(), before + 2);
     // The launcher is still showing these rows, so they must still admit.
     assert_eq!(shell.search.context.as_ref(), Some(&context));
+}
+
+#[test]
+fn an_address_chosen_while_editing_replaces_the_page_in_front() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let active = active_id(&screen);
+    let window = shell.windows.focused().unwrap();
+    let context = zephium_ipc::SearchContext {
+        window_id: window.id.to_string(),
+        session_id: "0000000000000001".into(),
+        request_id: "one".into(),
+        profile_id: window.profile.to_string(),
+        space_id: window.space.to_string(),
+    };
+    shell.handle(Command::SearchScoped {
+        query: "example.com".into(),
+        context: Box::new(context.clone()),
+    });
+    let action = shell
+        .search
+        .results
+        .iter()
+        .find(|result| matches!(result.action, SearchAction::OpenUrl { .. }))
+        .map(|result| result.action.clone())
+        .expect("the typed address is offered");
+    let today = |shell: &Shell| {
+        let window = shell.windows.focused().unwrap();
+        shell
+            .items
+            .roots(Placement::Space {
+                space: window.space,
+                section: SpaceSection::Today,
+            })
+            .len()
+    };
+    let before = today(&shell);
+    let opened = shell.handle_operation(Command::RunSearchAction {
+        context: Box::new(context),
+        action,
+        background: false,
+        replace: Some(active.to_string()),
+    });
+    assert!(matches!(
+        opened.outcome,
+        OperationOutcome::Applied | OperationOutcome::Deferred
+    ));
+    assert_eq!(shell.windows.focused().unwrap().active, Some(active));
+    assert_eq!(today(&shell), before);
+    assert!(shell.items.pending_navigation_request(active).is_some());
 }
 
 #[test]

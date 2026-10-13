@@ -39,7 +39,8 @@ impl Shell {
                 context,
                 action,
                 background,
-            } => self.operation_run_search_action(*context, action, background),
+                replace,
+            } => self.operation_run_search_action(*context, action, background, replace),
             Command::InvokeExtensionAction {
                 runtime,
                 revision,

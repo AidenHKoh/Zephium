@@ -228,6 +228,7 @@ impl Shell {
         context: zephium_ipc::SearchContext,
         action: SearchAction,
         background: bool,
+        replace: Option<String>,
     ) -> OperationDisposition {
         if !self.search_context_current(&context)
             || self.search.context.as_ref() != Some(&context)
@@ -296,6 +297,13 @@ impl Shell {
                     .and_then(|value| value.split_once(':'))
                     .and_then(|(id, _)| ItemId::parse(id))
                 {
+                    self.operation_navigate(id, url)
+                } else if let Some(id) = replace
+                    .as_deref()
+                    .and_then(ItemId::parse)
+                    .filter(|id| self.windows.focused().and_then(|w| w.active) == Some(*id))
+                {
+                    // The launcher stood in for the page's own address field.
                     self.operation_navigate(id, url)
                 } else {
                     self.operation_open_url(url, true)

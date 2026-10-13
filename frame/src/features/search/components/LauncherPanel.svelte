@@ -169,6 +169,9 @@
         clearTimeout(arrival);
         if (entering) arrival = setTimeout(() => (entering = false), ARRIVAL_MS);
         surface.begin(next);
+        // Editing a page's address opens on that address, selected, so typing
+        // replaces it and Return goes back to it.
+        if (next.seed) surface.seed(next.seed);
         input?.focus();
         input?.select();
       } else if (bound !== null) {

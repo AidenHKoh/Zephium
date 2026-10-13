@@ -1682,6 +1682,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             panel_ready,
             panel_intent,
             panel_layout,
+            launcher_edit,
             launcher_trigger,
             launcher_set_shortcut,
             launcher_record_shortcut,
@@ -3576,6 +3577,7 @@ fn newtab_run(
             context: Box::new(context),
             action,
             background: false,
+            replace: None,
         },
     )
 }
@@ -3655,6 +3657,7 @@ fn launcher_run(
             context: Box::new(context),
             action,
             background,
+            replace: overlay.editing_tab(),
         },
     );
     if !accepted {
@@ -4559,6 +4562,31 @@ fn onboarding_finish(
         diagnostic!("onboarding: finishing could not be recorded");
     }
     gate.hand_over(&caller)
+}
+
+/// Opens the launcher on the current page's address. At rail width the field
+/// is not drawn, so this is how the page's address is edited there.
+#[tauri::command]
+#[specta::specta]
+fn launcher_edit(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    tab_id: String,
+    url: String,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "launcher_edit")
+        || tab_id.is_empty()
+        || tab_id.len() > 64
+        || !tab_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        || url.is_empty()
+        || url.len() > 8192
+        || url.chars().any(char::is_control)
+    {
+        return false;
+    }
+    overlay::request(&app, move |panel| panel.edit(tab_id, url))
 }
 
 #[tauri::command]

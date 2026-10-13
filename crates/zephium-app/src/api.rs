@@ -487,6 +487,9 @@ pub enum Command {
         /// Open an address in a new tab behind the current one and keep the
         /// search alive. Ignored by every other action.
         background: bool,
+        /// The tab whose address the launcher was opened to edit: an address
+        /// chosen there replaces that tab's page while it is still in front.
+        replace: Option<String>,
     },
     OpenUrl {
         input: String,
