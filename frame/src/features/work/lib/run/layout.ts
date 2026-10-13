@@ -3,11 +3,13 @@ import { branch, merge, type Point } from "./lines";
 
 /**
  * A run on the 8 px grid, left to right: the inputs hang left of the request
- * at x = 0, the parts start 96 past the request, the result 96 past the
- * widest part row. The parts stand as a column centred on the request, so
- * parallel work forks from one point, up and down alike, and merges the same
- * way into the result. The run's spine runs through the request's first line,
- * the middle of the fork and the answer's headline. Its Sources stand under
+ * at x = 0, then the run's work in the order it happened, one column per
+ * step of the lead (what began together stands together), each 96 past the
+ * last, and the result 96 past the last column. A column is centred on the
+ * request's line, so parallel work forks from one point, up and down alike;
+ * each column's work merges and forks on into the next, and the last merges
+ * into the result, whose headline stands level with the topmost row so a
+ * long result reads down from the top of the run. Its Sources stand under
  * its result.
  */
 export const RUN = {
@@ -46,6 +48,8 @@ type RunRow = {
   found: readonly Sized[];
   /** The part's work reaches the result. */
   feeds: boolean;
+  /** Which step of the run began it: later work stands in a column further right. */
+  phase?: number;
 };
 export type RunInputs = {
   /** The request, and where its first line of words ends, when that is short of its column. */
@@ -89,64 +93,100 @@ export type RunPlace = {
 
 const ORIGIN = { source: { x: 0, y: 0 }, target: { x: 0, y: 0 } };
 
-export function placeRun(top: number, run: RunInputs): RunPlace {
+type RowEnd = { row: RunRow; end: Point; last: string; lastRect: Rect };
+
+/** One column of rows from its top-left: where each row and what it found stand. */
+function placeColumn(rows: readonly RunRow[], x: number, top: number) {
   const rects: Record<string, Rect> = {};
   const lines: RunLine[] = [];
-  const partsX = RUN.request + RUN.fork;
-  let y = top + RUN.spine - RUN.labelMid;
-  let widest = 0;
-  const rowEnds: { row: RunRow; end: Point; last: string; lastRect: Rect }[] = [];
-  for (const row of run.rows) {
+  const ends: RowEnd[] = [];
+  const labels: number[] = [];
+  let y = top;
+  let right = x;
+  for (const row of rows) {
     const rowTop = y;
-    rects[row.part.id] = { x: partsX, y: rowTop, width: row.part.width, height: row.part.height };
-    const start = snap(partsX + row.part.width + RUN.found);
-    let x = start;
+    rects[row.part.id] = { x, y: rowTop, width: row.part.width, height: row.part.height };
+    labels.push(rowTop + RUN.labelMid);
+    const start = snap(x + row.part.width + RUN.found);
+    let at = start;
     let lineTop = rowTop;
     let lineHeight = 0;
     let height = row.part.height;
     let last = row.part.id;
-    let farthest = partsX + row.part.width;
+    let farthest = x + row.part.width;
     // What a part found runs along its row, and wraps under itself rather than pushing the result off the view.
     for (const found of row.found) {
-      if (x > start && x + found.width - start > RUN.foundRow) {
+      if (at > start && at + found.width - start > RUN.foundRow) {
         lineTop = snap(lineTop + lineHeight + RUN.foundGap);
-        x = start;
+        at = start;
         lineHeight = 0;
       }
-      rects[found.id] = { x, y: lineTop, width: found.width, height: found.height };
+      rects[found.id] = { x: at, y: lineTop, width: found.width, height: found.height };
       if (lineTop === rowTop) last = found.id;
-      farthest = Math.max(farthest, x + found.width);
-      x = snap(x + found.width + RUN.foundGap);
+      farthest = Math.max(farthest, at + found.width);
+      at = snap(at + found.width + RUN.foundGap);
       lineHeight = Math.max(lineHeight, found.height);
       height = Math.max(height, lineTop - rowTop + found.height);
     }
     const first = row.found[0] ? rects[row.found[0].id] : undefined;
     // The part's work is joined to what it found, straight along the row.
     if (first) {
-      const y = rowTop + RUN.labelMid;
-      const from = { x: partsX + row.part.width + RUN.air, y };
+      const ly = rowTop + RUN.labelMid;
       lines.push({
         id: `found:${row.part.id}`,
         kind: "found",
         source: row.part.id,
         target: row.found[0]!.id,
-        points: [from, { x: first.x - RUN.air, y }],
+        points: [
+          { x: x + row.part.width + RUN.air, y: ly },
+          { x: first.x - RUN.air, y: ly },
+        ],
         from: { x: row.part.width + RUN.air, y: RUN.labelMid },
         to: { x: -RUN.air, y: RUN.labelMid },
         laid: ORIGIN,
       });
     }
     const lastRect = rects[last]!;
-    const right = lastRect.x + lastRect.width;
-    widest = Math.max(widest, farthest - partsX);
-    rowEnds.push({ row, end: { x: right + RUN.air, y: rowTop + RUN.labelMid }, last, lastRect });
+    right = Math.max(right, farthest);
+    ends.push({
+      row,
+      end: { x: lastRect.x + lastRect.width + RUN.air, y: rowTop + RUN.labelMid },
+      last,
+      lastRect,
+    });
     y = snap(rowTop + height + RUN.rowGap);
   }
-  const partsBottom = run.rows.length ? y - RUN.rowGap : top;
-  const labels = run.rows.map((row) => rects[row.part.id]!.y + RUN.labelMid);
-  const spine = labels.length
-    ? Math.max(top + RUN.spine, Math.round((labels[0]! + labels.at(-1)!) / 8) * 4)
+  return { rects, lines, ends, labels, width: right - x, bottom: y - RUN.rowGap };
+}
+
+export function placeRun(top: number, run: RunInputs): RunPlace {
+  const rects: Record<string, Rect> = {};
+  const lines: RunLine[] = [];
+  const partsX = RUN.request + RUN.fork;
+  const phases = [...new Set(run.rows.map((row) => row.phase ?? 0))].sort((a, b) => a - b);
+  const groups = phases.map((phase) => run.rows.filter((row) => (row.phase ?? 0) === phase));
+  // Measured once at the top to centre every column on one spine.
+  const first = top + RUN.spine - RUN.labelMid;
+  const middles = groups.map((rows) => {
+    const { labels } = placeColumn(rows, 0, 0);
+    return (labels[0]! + labels.at(-1)!) / 2;
+  });
+  const spine = groups.length
+    ? Math.max(top + RUN.spine, Math.round((first + Math.max(...middles)) / 4) * 4)
     : top + RUN.spine;
+  const columns: (ReturnType<typeof placeColumn> & { x: number })[] = [];
+  let x = partsX;
+  groups.forEach((rows, index) => {
+    const column = placeColumn(rows, x, Math.max(first, Math.round(spine - middles[index]!)));
+    Object.assign(rects, column.rects);
+    lines.push(...column.lines);
+    columns.push({ ...column, x });
+    x = snap(x + column.width + RUN.fork);
+  });
+  const rowEnds = columns.flatMap((column) => column.ends);
+  const labels = columns.flatMap((column) => column.labels);
+  const partsBottom = columns.length ? Math.max(...columns.map((column) => column.bottom)) : top;
+  const lastColumn = columns.at(-1);
   const request = { x: 0, y: spine - RUN.spine, width: RUN.request, height: run.request.height };
   // Lines leave from the end of the words, never from the column's edge past a short request.
   const requestEnd = Math.min(RUN.request, run.request.end ?? RUN.request);
@@ -183,8 +223,10 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
   }
 
   // Without parts the answer stands a fork's width past the words, joined to them by one line.
-  const resultX = run.rows.length ? snap(partsX + widest + RUN.feed) : snap(requestEnd + RUN.fork);
-  const resultTop = spine - RUN.resultMid;
+  const resultX = lastColumn
+    ? snap(lastColumn.x + lastColumn.width + RUN.feed)
+    : snap(requestEnd + RUN.fork);
+  const resultTop = (labels.length ? Math.min(spine, ...labels) : spine) - RUN.resultMid;
   let blocks = resultTop;
   if (run.head) {
     rects[run.head.id] = {
@@ -201,11 +243,12 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
   const resultId = run.head?.id ?? Object.keys(run.board.at)[0];
   let resultRight = resultX + Math.max(run.head?.width ?? 0, run.board.width);
 
-  // A request's line branches to the head of every row; each row's end merges into the result.
+  // The request's line branches to the head of every row of the first column.
   const start = { x: requestEnd + RUN.air, y: spine };
-  const partEnds = labels.map((y) => ({ x: partsX - RUN.air, y }));
+  const firstRows = groups[0] ?? [];
+  const partEnds = (columns[0]?.labels ?? []).map((y) => ({ x: partsX - RUN.air, y }));
   branch(start, RUN.request + RUN.fork / 2, partEnds).forEach((points, index) => {
-    const row = run.rows[index]!;
+    const row = firstRows[index]!;
     lines.push({
       id: `line:${row.part.id}`,
       kind: "part",
@@ -217,11 +260,42 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
       laid: ORIGIN,
     });
   });
+  // Each column's work merges on the spine and forks on into the next column.
+  columns.slice(1).forEach((column, index) => {
+    const before = columns[index]!;
+    const junction = { x: column.x - RUN.fork / 2, y: spine };
+    const merged = merge(
+      before.ends.map((entry) => entry.end),
+      junction.x,
+      junction,
+    );
+    const forked = branch(
+      junction,
+      junction.x,
+      column.labels.map((y) => ({ x: column.x - RUN.air, y })),
+    );
+    before.ends.forEach((entry, a) => {
+      column.ends.forEach((next, b) => {
+        lines.push({
+          id: `step:${entry.row.part.id}:${next.row.part.id}`,
+          kind: "part",
+          source: entry.last,
+          target: next.row.part.id,
+          points: [...merged[a]!, ...forked[b]!.slice(1)],
+          from: { x: entry.lastRect.width + RUN.air, y: entry.end.y - entry.lastRect.y },
+          to: { x: -RUN.air, y: RUN.labelMid },
+          laid: ORIGIN,
+        });
+      });
+    });
+  });
   if (resultId) {
-    const into = { x: resultX - RUN.air, y: spine };
     const result = rects[resultId]!;
-    const to = { x: -RUN.air, y: spine - result.y };
-    const feeding = rowEnds.filter((entry) => entry.row.feeds);
+    const into = { x: resultX - RUN.air, y: resultTop + RUN.resultMid };
+    const to = { x: -RUN.air, y: into.y - result.y };
+    // The last column's work reaches the result; earlier columns reach it through the later ones.
+    const last = lastColumn?.ends.filter((entry) => entry.row.feeds) ?? [];
+    const feeding = last.length ? last : rowEnds.filter((entry) => entry.row.feeds);
     const ends = feeding.map((entry) => entry.end);
     merge(ends, resultX - RUN.feed / 2, into).forEach((points, index) => {
       const entry = feeding[index]!;

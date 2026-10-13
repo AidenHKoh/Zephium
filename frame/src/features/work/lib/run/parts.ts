@@ -51,6 +51,8 @@ export type RunPart = {
   sources: SourceRow[];
   /** Where the part began in its run, for its row's order. */
   order: number;
+  /** The lead's turn that started it: work begun later stands to the right of what it built on. */
+  turn?: number;
   /** The connection a connection part works through: "github". */
   connection?: string;
   /** What the part came to, in its helper's words: "3 homes". */
@@ -74,6 +76,12 @@ export type RunPart = {
   /** How many searches the row stands for, when more than one. */
   queries?: number;
 };
+
+/** The earliest lead turn among `steps`. */
+function firstTurn(steps: readonly Step[]): { turn?: number } {
+  const turns = steps.map((step) => step.turn).filter((turn) => typeof turn === "number");
+  return turns.length ? { turn: Math.min(...turns) } : {};
+}
 
 /** What a step is doing while it runs, as a live part's row says it. */
 function nowWords(step: Step): string | undefined {
@@ -202,6 +210,7 @@ function factParts(
               )
             : [],
         order: parts.length,
+        ...firstTurn(steps),
         ...(fact.summary ? { summary: fact.summary } : {}),
         ...(fact.goal?.trim() ? { goal: fact.goal.trim() } : {}),
         ...(going && state === "running" && nowOf(steps) ? { now: nowOf(steps)! } : {}),
@@ -284,6 +293,7 @@ function leadReads(
     unread,
     sources: [],
     order: 0,
+    ...firstTurn(steps),
     ...(reading && nowOf(steps) ? { now: nowOf(steps)! } : {}),
   };
 }
@@ -342,6 +352,7 @@ function leadSearches(card: string, run: WorkExecutionFact, going: boolean): Run
     unread: [],
     sources,
     order: 0,
+    ...firstTurn(steps),
     query: queries.at(-1)!,
     ...(queries.length > 1 ? { queries: queries.length } : {}),
     ...(sources.length ? { summary: m.work_part_results({ count: sources.length }) } : {}),

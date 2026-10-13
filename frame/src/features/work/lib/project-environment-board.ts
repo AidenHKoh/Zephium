@@ -527,7 +527,10 @@ export function environmentStages(
           return [[object.id, { ...pin, width, height: sized(object, width, false) }] as const];
         }),
       );
+      // Work the lead began in a later turn stands in a column further right.
+      const begun = [...new Set(parts.map((part) => part.turn ?? 0))].sort((a, b) => a - b);
       const rows = parts.map((part) => ({
+        phase: begun.indexOf(part.turn ?? 0),
         part: {
           id: part.id,
           ...partSize(
