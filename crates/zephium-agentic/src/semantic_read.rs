@@ -555,12 +555,17 @@ pub struct SemanticReadFragment<'a> {
     region: u8,
     /// How useful it is within its region, for shedding: lower is kept.
     rank: u8,
+    record_root: Option<crate::semantic::SemanticNodeKey>,
 }
 
 impl<'a> SemanticReadFragment<'a> {
     /// Non-actionable result-local provenance identity.
     pub const fn id(self) -> SemanticReadFragmentId {
         self.id
+    }
+
+    pub(crate) const fn record_root(self) -> Option<crate::semantic::SemanticNodeKey> {
+        self.record_root
     }
 
     /// Semantic field class.
@@ -783,6 +788,41 @@ impl<'a> SemanticReadResult<'a> {
             snapshot: provenance.snapshot().get(),
             node: provenance.node_key.get(),
         })
+    }
+
+    pub(crate) fn record_identity_sources(
+        &self,
+        original: &[SemanticReadFragmentId],
+    ) -> Vec<SemanticReadFragmentId> {
+        let mut identities = original.to_vec();
+        for candidate in self.fragments() {
+            if candidate.role() == SemanticRole::Image
+                || !matches!(
+                    candidate.field(),
+                    SemanticReadField::AccessibleName
+                        | SemanticReadField::VisibleText
+                        | SemanticReadField::LinkDestination
+                )
+            {
+                continue;
+            }
+            let Some(root) = candidate.record_root() else {
+                continue;
+            };
+            let same_card = original
+                .iter()
+                .filter_map(|id| self.fragment(*id))
+                .any(|source| {
+                    source.record_root() == Some(root)
+                        && source.provenance().frame() == candidate.provenance().frame()
+                        && source.provenance().observation() == candidate.provenance().observation()
+                        && source.provenance().snapshot() == candidate.provenance().snapshot()
+                });
+            if same_card && !identities.contains(&candidate.id()) {
+                identities.push(candidate.id());
+            }
+        }
+        identities
     }
 
     pub(crate) fn count_media_relations(
@@ -1431,6 +1471,7 @@ fn validate_authority(
 }
 
 struct SemanticReadBuilder<'a> {
+    record_roots: std::collections::BTreeMap<(u64, u64), crate::semantic::SemanticNodeKey>,
     facts_priority: bool,
     url_sources: u8,
     roles: SemanticReadRoleSelection,
@@ -1449,7 +1490,23 @@ impl<'a> SemanticReadBuilder<'a> {
         budget: SemanticReadBudget,
         roles: SemanticReadRoleSelection,
     ) -> Self {
+        let mut record_roots = std::collections::BTreeMap::new();
+        for frame in observation.frames() {
+            for (node, root) in frame
+                .nodes()
+                .iter()
+                .zip(crate::semantic_record::roots(frame))
+            {
+                if let Some(root) = root {
+                    record_roots.insert(
+                        (u64::from(frame.frame().frame().get()), node.key().get()),
+                        root,
+                    );
+                }
+            }
+        }
         Self {
+            record_roots,
             facts_priority: false,
             url_sources: 0,
             roles,
@@ -1742,6 +1799,10 @@ impl<'a> SemanticReadBuilder<'a> {
             id,
             field,
             role: node.role(),
+            record_root: self
+                .record_roots
+                .get(&(u64::from(snapshot.frame().frame().get()), node.key().get()))
+                .copied(),
             content,
             states: node.states(),
             provenance,
@@ -2188,6 +2249,12 @@ fn read_guard(
             u8::from(fragment.states.contains(crate::SemanticState::Checked)),
         ]);
         let provenance = fragment.provenance;
+        hasher.update(
+            fragment
+                .record_root
+                .map_or(0, |root| root.get())
+                .to_be_bytes(),
+        );
         if !provenance.fields_complete {
             hasher.update(b"FIELDS-UNPROVEN-1\0");
         }

@@ -155,6 +155,7 @@ mod semantic_observation;
 mod semantic_probe_evidence;
 mod semantic_read;
 mod semantic_read_model;
+mod semantic_record;
 mod semantic_runtime;
 mod semantic_screenshot;
 mod semantic_settle;

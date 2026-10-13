@@ -61,6 +61,7 @@ impl Content {
 }
 
 struct Fragment {
+    record_root: Option<crate::semantic::SemanticNodeKey>,
     fields_complete: bool,
     node_key: crate::semantic::SemanticNodeKey,
     field: SemanticReadField,
@@ -246,6 +247,7 @@ impl SemanticRetainedReadEvidence {
                         }
                     };
                     Fragment {
+                        record_root: fragment.record_root(),
                         fields_complete: source.fields_complete(),
                         node_key: source.node_key,
                         field: fragment.field(),
@@ -457,6 +459,7 @@ impl SemanticRetainedReadEvidence {
                     id: SemanticReadFragmentId::new(current.stats.items)
                         .expect("bounded nonzero fragment"),
                     field: source.field,
+                    record_root: source.record_root,
                     role: source.role,
                     states: source.states,
                     content,

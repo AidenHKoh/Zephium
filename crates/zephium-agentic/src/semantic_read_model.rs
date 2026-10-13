@@ -579,6 +579,9 @@ pub fn encode_semantic_read(
                 checked_write(&mut output, format_args!("{value}"))?;
             }
         }
+        if let Some(root) = fragment.record_root() {
+            checked_write(&mut output, format_args!(" card={}", root.get()))?;
+        }
         for (state, label) in [
             (crate::SemanticState::Selected, "selected"),
             (crate::SemanticState::Checked, "checked"),
