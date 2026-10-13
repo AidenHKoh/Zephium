@@ -1084,10 +1084,15 @@ where
                             }
                             WorkCellValue::Unknown => continue,
                         };
-                        line.push_str(&format!(" · {}: {value}", criterion.name));
-                        line.push_str(&cite(&cell.evidence));
+                        append_record_cell(
+                            &mut line,
+                            &criterion.name,
+                            &value,
+                            row.homepage.as_deref(),
+                            &cite(&cell.evidence),
+                        );
                     }
-                    out.push_str(&clip(&line, 900));
+                    out.push_str(&line);
                     out.push('\n');
                 }
                 for note in notes {
@@ -1115,6 +1120,31 @@ where
         }
         out
     }
+}
+
+// The native record owns the full values. Clipping a row mid-URL made the
+// helper treat retained images as missing and reopen already-read pages.
+fn append_record_cell(
+    line: &mut String,
+    name: &str,
+    value: &str,
+    homepage: Option<&str>,
+    citation: &str,
+) {
+    let shown = if homepage == Some(value) {
+        "same full URL as this record"
+    } else if line.chars().count()
+        + name.chars().count()
+        + value.chars().count()
+        + citation.chars().count()
+        + 5
+        > 900
+    {
+        "stored verbatim in this record (not missing)"
+    } else {
+        value
+    };
+    line.push_str(&format!(" · {name}: {shown}{citation}"));
 }
 
 /// The run's search provider behind its shared search permits.
@@ -1370,6 +1400,32 @@ pub(crate) fn collection(value: Option<&Value>) -> Result<Option<WorkBrowseColle
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn record_summary_does_not_cut_images_or_repeat_long_record_urls() {
+        let url = format!("https://catalog.example/item?query={}", "x".repeat(360));
+        let image = format!("https://images.example/photo?variant={}", "y".repeat(160));
+        let mut line = format!("- record r1: One stay · url {url}");
+        append_record_cell(&mut line, "listing url", &url, Some(&url), " [s1]");
+        append_record_cell(
+            &mut line,
+            "total",
+            "$236 total, originally $279",
+            Some(&url),
+            " [s2]",
+        );
+        append_record_cell(&mut line, "image", &image, Some(&url), " [s3]");
+        append_record_cell(&mut line, "dates", "Nov 18 – 21", Some(&url), " [s4]");
+        assert_eq!(line.matches(&url).count(), 1);
+        assert!(line.contains(&image), "{line}");
+        assert!(line.contains("Nov 18 – 21 [s4]"), "{line}");
+        assert!(!line.contains('…'));
+        let long = "界".repeat(1_000);
+        append_record_cell(&mut line, "details", &long, Some(&url), " [s5]");
+        assert!(line.ends_with("details: stored verbatim in this record (not missing) [s5]"));
+        assert!(!line.contains('界'), "never emit part of a stored value");
+        assert!(line.contains("$236 total, originally $279 [s2]"));
+    }
 
     #[derive(Default)]
     struct Counting {
