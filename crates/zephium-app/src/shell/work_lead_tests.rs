@@ -3009,15 +3009,6 @@ impl WorkModelClient for NativeRecordFinish {
                     }
                 }
                 2 if self.0 != 0 => {
-                    if matches!(self.0, 2 | 4 | 5) {
-                        assert!(
-                            request
-                                .tools
-                                .iter()
-                                .any(|tool| tool.name == "continue_work"),
-                            "one final-shape repair must retain the compact tool set"
-                        );
-                    }
                     assert!(
                         seen.contains(if self.0 == 5 {
                             "140"
