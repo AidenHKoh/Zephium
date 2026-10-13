@@ -1331,6 +1331,17 @@ pub fn semantic_observation_reads_sparse(observation: &SemanticObservation) -> b
     text < SPARSE_TEXT_BYTES || (images >= SPARSE_IMAGES && text / images < SPARSE_TEXT_PER_IMAGE)
 }
 
+/// Short text alone does not justify pixels. Automatic visual fallback also
+/// needs observed visual content; an explicit screenshot request stays separate.
+pub fn semantic_observation_needs_visual_mapping(observation: &SemanticObservation) -> bool {
+    semantic_observation_reads_sparse(observation)
+        && observation
+            .frames()
+            .iter()
+            .flat_map(|frame| frame.nodes())
+            .any(|node| node.role() == SemanticRole::Image)
+}
+
 /// Below this much visible text a look reads as sparse.
 const SPARSE_TEXT_BYTES: usize = 1_200;
 /// A gallery: this many pictures, each with this little text beside it.
@@ -2327,6 +2338,34 @@ mod tests {
         .unwrap()
         .finish()
         .unwrap()
+    }
+
+    #[test]
+    fn short_text_results_do_not_require_pixels_but_visual_surfaces_can() {
+        let plain = retained_observation(
+            1,
+            json!([
+                {"k":1,"r":"document"},
+                {"k":2,"p":0,"r":"paragraph","t":"Train Q17 departs 09:30, takes 75 minutes, no changes, fare EUR 25."}
+            ]),
+        );
+        assert!(semantic_observation_reads_sparse(&plain));
+        assert!(!semantic_observation_needs_visual_mapping(&plain));
+        let visual = retained_observation(
+            2,
+            json!([
+                {"k":1,"r":"document"}, {"k":2,"p":0,"r":"image","n":"Chart"}
+            ]),
+        );
+        assert!(semantic_observation_needs_visual_mapping(&visual));
+        let dense = retained_observation(
+            3,
+            json!([
+                {"k":1,"r":"document"}, {"k":2,"p":0,"r":"image","n":"Illustration"},
+                {"k":3,"p":0,"r":"paragraph","t":"Readable reference text. ".repeat(60)}
+            ]),
+        );
+        assert!(!semantic_observation_needs_visual_mapping(&dense));
     }
 
     #[test]

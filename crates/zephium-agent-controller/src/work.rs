@@ -5450,7 +5450,7 @@ impl AgentWorkController {
                 .retained
                 .as_ref()
                 .is_none_or(|browser| browser.supports_screenshots())
-            && zephium_agentic::semantic_observation_reads_sparse(observation)
+            && zephium_agentic::semantic_observation_needs_visual_mapping(observation)
         {
             let baseline = turn.turn.continuation().baseline().clone();
             match Self::capture_screenshot(
