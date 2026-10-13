@@ -2590,13 +2590,17 @@ fn resolve_source_url(
     if field == crate::SemanticReadField::ImageSource {
         if let Some(subject) = subject {
             let candidates = read.images_for_record(&subject.sources);
-            return candidates
+            if let Some(found) = candidates
                 .iter()
                 .copied()
                 .filter_map(observed)
                 .find(|(url, _)| proposed == Some(url.as_str()))
                 .or_else(|| candidates.iter().copied().find_map(observed))
-                .ok_or(SemanticExtractionError::SourceInvalid);
+            {
+                return Ok(found);
+            }
+            // Native matching is optional enrichment. The existing observed,
+            // cited/labelled URL path below supplies candidates, never pixels.
         }
     }
     let subject = subject.map(|subject| subject.name.as_str());
@@ -4165,6 +4169,8 @@ mod tests {
             SemanticRecordCropPermit::admit(context, account, account, true, now, expires).unwrap();
         permission.remaining = std::sync::Arc::new(AtomicU8::new(1));
         let mut plan = SemanticRecordMediaPlan {
+            outcome: Default::default(),
+            fetch_stage: Default::default(),
             crop: None,
             record: 0,
             source: [1; 32],
@@ -4174,6 +4180,16 @@ mod tests {
             key: 2,
             name_key: 3,
         };
+        let native = plan.clone();
+        native.record_native_outcome(crate::SemanticRecordMediaOutcome::MissingSource);
+        assert!(plan.native_outcome().permits_public_candidate());
+        native.record_native_outcome(crate::SemanticRecordMediaOutcome::PrivacyRefused);
+        native.record_native_outcome(crate::SemanticRecordMediaOutcome::Fetched);
+        assert_eq!(
+            plan.native_outcome(),
+            crate::SemanticRecordMediaOutcome::PrivacyRefused
+        );
+        assert!(!plan.native_outcome().permits_public_candidate());
         assert!(
             !plan.begin_local_crop(now),
             "an archive alone has no crop permission"
@@ -4201,7 +4217,7 @@ mod tests {
     }
 
     #[test]
-    fn unassociated_optional_picture_never_discards_source_backed_text() {
+    fn cited_public_picture_is_a_candidate_without_native_pixel_authority() {
         let observation = observation_with_nodes(json!([
             {"k":1,"r":"document","o":16},
             {"k":2,"p":0,"r":"heading","l":1,"n":"Cabin Alpha"},
@@ -4255,9 +4271,35 @@ mod tests {
             panic!("rows")
         };
         assert_eq!(rows.items().len(), 1);
-        assert_eq!(rows.items()[0].fields().len(), 1);
+        assert_eq!(rows.items()[0].fields().len(), 2);
         assert_eq!(rows.items()[0].fields()[0].name(), "name");
-        assert_eq!(result.stats().dropped(), 1);
+        assert_eq!(result.stats().dropped(), 0);
+        assert!(
+            result.media.is_empty(),
+            "a cited URL never mints a native pixel/crop plan"
+        );
+        let mut missing = output.clone();
+        missing["fields"][0]["value"]["items"][0]["fields"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        let repaired = extract_semantic_read(
+            &schema,
+            &read,
+            &delivered(&read),
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&missing).unwrap(),
+        )
+        .unwrap();
+        let SemanticExtractedValue::Rows(rows) = repaired.fields()[0].value() else {
+            panic!("rows")
+        };
+        assert_eq!(
+            rows.items()[0].fields().len(),
+            2,
+            "the observed named-image candidate also fills an omitted optional image field"
+        );
+        assert!(repaired.media.is_empty());
     }
 
     #[test]

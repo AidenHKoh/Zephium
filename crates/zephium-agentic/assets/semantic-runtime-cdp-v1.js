@@ -428,17 +428,23 @@ bound.set(record.wire.k,{link:new WeakRef(proof.link),root:new WeakRef(proof.roo
 remember(invocation,generation,records,rows);
 return rows;
 }
+let targetRefusal=1,fetchStage=0;
+const unavailable=r=>({v:1,s:"unavailable",r,f:fetchStage});
 function target(request){
+targetRefusal=1;
 const entry=snapshots.get(request.i+":"+request.g)?.get(request.k),name=entry?.names.get(request.n);
 const node=entry?.node.deref(),named=name?.node.deref(),card=name?.card?.deref();
-if(!node?.isConnected|| !named?.isConnected||label(named)!==name.text)return null;
+if(!entry|| !name)return null;
+targetRefusal=2;if(!node?.isConnected|| !named?.isConnected)return null;
+targetRefusal=3;if(label(named)!==name.text)return null;
+targetRefusal=4;
 if(name.witness?.kind==="entity"){
 const witness=name.witness,script=witness.script.deref();let work=0;
 if(!script||address(document.URL)!==witness.page||pageEntityName(named)!==witness.title)return null;
 const catalog=entityCatalog(()=>++work<=16384),matches=catalog?.flatMap(part=>part.items.filter(item=>item.url===witness.page).map(item=>({script:part.node,item})));
 const declared=observedImageSources(node);declared.add(address(source(node,entry.kind)));
 if(matches?.length!==1||matches[0].script!==script|| !entityNameMatches(matches[0].item,witness.title)||(!witness.pageImage&& !matches[0].item.images.includes(witness.identity))|| !declared.has(witness.identity))return null;
-}else if(entry.kind!=="page_image"&&(!card?.isConnected|| !card.contains(node)|| !card.contains(named)))return null;
+}else if(entry.kind!=="page_image"&&(!card?.isConnected|| !card.contains(node)|| !card.contains(named))){targetRefusal=5;return null;}
 if(name.witness&&name.witness.kind!=="entity"){
 const witness=name.witness,link=witness.link.deref(),root=witness.root.deref();
 if(!link?.isConnected|| !root?.isConnected)return null;
@@ -449,16 +455,16 @@ if(!proof||proof.link!==link||proof.root!==root||proof.id!==witness.id||proof.hr
 }
 if(entry.kind==="record"&&label(node)!==entry.content)return null;
 const url=source(node,entry.kind);
-if(url!==entry.source&& !(entry.kind==="image"&&entry.lazy?.has(url)&&node.complete&&node.naturalWidth>=32))return null;
+targetRefusal=6;if(url!==entry.source&& !(entry.kind==="image"&&entry.lazy?.has(url)&&node.complete&&node.naturalWidth>=32))return null;
 return{entry,node,url};
 }
 function crop(request,privacy){
-const current=target(request);if(!current||current.entry.kind==="page_image")return{v:1,s:"unavailable"};
+const current=target(request);if(!current)return unavailable(targetRefusal);if(current.entry.kind==="page_image")return unavailable(7);
 const box=rect.call(current.node),computed=style(current.node);
 if(computed.visibility!=="visible"||computed.display==="none"||box.width<64||box.height<48||
-box.x<0||box.y<0||box.right>innerWidth||box.bottom>innerHeight)return{v:1,s:"unavailable"};
-if(current.entry.kind==="image"&&(!current.node.complete||current.node.naturalWidth<32))return{v:1,s:"unavailable"};
-let proof;try{proof=parse(privacy());}catch(_){return{v:1,s:"unavailable"};}if(!proof.c)return{v:1,s:"unavailable"};
+box.x<0||box.y<0||box.right>innerWidth||box.bottom>innerHeight)return unavailable(7);
+if(current.entry.kind==="image"&&(!current.node.complete||current.node.naturalWidth<32))return unavailable(8);
+let proof;try{proof=parse(privacy());}catch(_){return unavailable(9);}if(!proof.c)return unavailable(9);
 return{v:1,s:"crop",p:proof,i:request.i,g:request.g,k:request.k,n:request.n,b:{x:box.x,y:box.y,w:box.width,h:box.height}};
 }
 function dimensions(bytes,type){
@@ -488,11 +494,11 @@ return size&&size.every(value=>value>0&&value<=2048)?size:null;
 }
 async function sanitize(parts,total,type,signal){
 const bytes=new Uint8Array(total);let offset=0;for(const part of parts){bytes.set(part,offset);offset+=part.length;}
-const size=dimensions(bytes,type);if(!size||signal.aborted)throw new Error();
-const bitmap=await createImageBitmap(new Blob([bytes],{type}));
+fetchStage=6;const size=dimensions(bytes,type);if(!size||signal.aborted)throw new Error();
+fetchStage=7;const bitmap=await createImageBitmap(new Blob([bytes],{type}));
 try{
 if(signal.aborted||bitmap.width!==size[0]||bitmap.height!==size[1])throw new Error();
-const canvas=document.createElement("canvas"),context=canvas.getContext("2d",{alpha:false});if(!context)throw new Error();
+fetchStage=8;const canvas=document.createElement("canvas"),context=canvas.getContext("2d",{alpha:false});if(!context)throw new Error();
 try{
 for(const[width,height]of[[320,240],[240,180],[160,120],[80,60]]){
 if(signal.aborted)throw new Error();
@@ -509,29 +515,32 @@ throw new Error();
 }finally{bitmap.close();}
 }
 async function invoke(encoded,privacy){
-if(pending||typeof encoded!=="string"||encoded.length>256|| !["M1:","V1:","U1:"].includes(encoded.slice(0,3)))return stringify({v:1,s:"unavailable"});
+if(pending)return stringify(unavailable(11));
+fetchStage=0;
+if(typeof encoded!=="string"||encoded.length>256|| !["M1:","V1:","U1:"].includes(encoded.slice(0,3)))return stringify(unavailable(10));
 let request;
-try{request=parse(encoded.slice(3));}catch(_){return stringify({v:1,s:"unavailable"});}
-if(!["g,i,k,n","g,i,k,n,q","g,i,k,n,p,q"].includes(Object.keys(request).sort().join(","))|| !Object.values(request).every(value=>Number.isSafeInteger(value)&&value>0)||request.q>1500||request.p&&request.p!==1&&request.p!==2||(encoded.startsWith("V1:")||encoded.startsWith("U1:"))&&(request.p||request.q))return stringify({v:1,s:"unavailable"});
-const current=target(request);if(!current)return stringify({v:1,s:"unavailable"});
+try{request=parse(encoded.slice(3));}catch(_){return stringify(unavailable(10));}
+if(!["g,i,k,n","g,i,k,n,q","g,i,k,n,p,q"].includes(Object.keys(request).sort().join(","))|| !Object.values(request).every(value=>Number.isSafeInteger(value)&&value>0)||request.q>1500||request.p&&request.p!==1&&request.p!==2||(encoded.startsWith("V1:")||encoded.startsWith("U1:"))&&(request.p||request.q))return stringify(unavailable(10));
+const current=target(request);if(!current)return stringify(unavailable(targetRefusal));
 if(encoded.startsWith("V1:"))return stringify(crop(request,privacy));
 const url=current.url;
 if(encoded.startsWith("U1:")){
-let parsed;try{parsed=new URL(url,document.baseURI);}catch(_){return stringify({v:1,s:"unavailable"});}
-return stringify(parsed.protocol==="https:"&&parsed.origin!==location.origin?{v:1,s:"public_asset",i:request.i,g:request.g,k:request.k,n:request.n,u:url}:{v:1,s:"unavailable"});
+let parsed;try{parsed=new URL(url,document.baseURI);}catch(_){return stringify(unavailable(10));}
+return stringify(parsed.protocol==="https:"&&parsed.origin!==location.origin?{v:1,s:"public_asset",i:request.i,g:request.g,k:request.k,n:request.n,u:url}:unavailable(10));
 }
 if(!url||url.length>4096)return stringify(crop(request,privacy));
 let parsed;try{parsed=new URL(url,document.baseURI);}catch(_){return stringify(crop(request,privacy));}
 if(!["https:","http:","blob:","data:"].includes(parsed.protocol))return stringify(crop(request,privacy));
-if(request.p===2&&(!["https:","http:"].includes(parsed.protocol)||parsed.origin===location.origin))return stringify({v:1,s:"unavailable"});
+if(request.p===2&&(!["https:","http:"].includes(parsed.protocol)||parsed.origin===location.origin))return stringify(unavailable(10));
 const abort=new AbortController();pending=abort;let headers=false;
 const timer=setTimeout(()=>abort.abort(),request.q||1500);
 try{
-const response=await fetchAsset(url,{signal:abort.signal,credentials:request.p===2?"omit":current.node.crossOrigin==="anonymous"?"same-origin":"include",mode:"cors",redirect:"error",headers:{Accept:"image/png,image/jpeg,image/webp"},cache:"no-store"});
+fetchStage=1;const response=await fetchAsset(url,{signal:abort.signal,credentials:request.p===2?"omit":current.node.crossOrigin==="anonymous"?"same-origin":"include",mode:"cors",redirect:"error",headers:{Accept:"image/png,image/jpeg,image/webp"},cache:"no-store"});
 headers=true;const type=(response.headers.get("content-type")||"").split(";")[0].trim().toLowerCase();
-if(!response.ok|| !["image/png","image/jpeg","image/webp"].includes(type)||
-Number(response.headers.get("content-length")||0)>MAX_RAW|| !response.body)throw new Error();
-const reader=response.body.getReader(),parts=[];let total=0;
+fetchStage=2;if(!response.ok)throw new Error();
+fetchStage=3;if(!["image/png","image/jpeg","image/webp"].includes(type))throw new Error();
+fetchStage=4;if(Number(response.headers.get("content-length")||0)>MAX_RAW|| !response.body)throw new Error();
+fetchStage=5;const reader=response.body.getReader(),parts=[];let total=0;
 while(true){const item=await reader.read();if(item.done)break;total+=item.value.length;if(total>MAX_RAW){abort.abort();throw new Error();}parts.push(item.value);}
 if(!target(request)||abort.signal.aborted)throw new Error();
 const output=await sanitize(parts,total,type,abort.signal);

@@ -5048,7 +5048,7 @@ export type WorkPickV1_Deserialize = {
 	image_candidates?: string[],
 	/**  Host-only immutable native record image; never supplied by model tools. */
 	record_media?: WorkRecordMediaRefV1 | null,
-	/**  Native enrichment was attempted; absence never triggers a cookie-less refetch. */
+	/**  Host withheld remote fallback for privacy/account authority; not an enrichment failure. */
 	media_attempted?: boolean,
 	/**  A bare public host whose logo stands for the subject. */
 	logo_host?: string | null,
@@ -5073,7 +5073,7 @@ export type WorkPickV1_Serialize = {
 	image_candidates?: string[],
 	/**  Host-only immutable native record image; never supplied by model tools. */
 	record_media?: WorkRecordMediaRefV1 | null,
-	/**  Native enrichment was attempted; absence never triggers a cookie-less refetch. */
+	/**  Host withheld remote fallback for privacy/account authority; not an enrichment failure. */
 	media_attempted?: boolean,
 	/**  A bare public host whose logo stands for the subject. */
 	logo_host?: string | null,
@@ -6370,7 +6370,7 @@ export type WorkSubject_Deserialize = {
 	image_candidates?: string[],
 	/**  Host-only immutable native record image; never supplied by model tools. */
 	record_media?: WorkRecordMediaRefV1 | null,
-	/**  Native enrichment was attempted; absence never triggers a cookie-less refetch. */
+	/**  Host withheld remote fallback for privacy/account authority; not an enrichment failure. */
 	media_attempted?: boolean,
 };
 
@@ -6388,7 +6388,7 @@ export type WorkSubject_Serialize = {
 	image_candidates?: string[],
 	/**  Host-only immutable native record image; never supplied by model tools. */
 	record_media?: WorkRecordMediaRefV1 | null,
-	/**  Native enrichment was attempted; absence never triggers a cookie-less refetch. */
+	/**  Host withheld remote fallback for privacy/account authority; not an enrichment failure. */
 	media_attempted?: boolean,
 };
 

@@ -912,6 +912,8 @@ impl<'a> SemanticReadResult<'a> {
         hash.update(association.key.to_be_bytes());
         hash.update(name.provenance().node_key.get().to_be_bytes());
         Some(crate::SemanticRecordMediaPlan {
+            outcome: Default::default(),
+            fetch_stage: Default::default(),
             crop: None,
             record,
             source: hash.finalize().into(),

@@ -155,7 +155,7 @@ pub struct WorkPickV1 {
     /// Host-only immutable native record image; never supplied by model tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_media: Option<super::media::WorkRecordMediaRefV1>,
-    /// Native enrichment was attempted; absence never triggers a cookie-less refetch.
+    /// Host withheld remote fallback for privacy/account authority; not an enrichment failure.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub media_attempted: bool,
     /// A bare public host whose logo stands for the subject.
@@ -1036,7 +1036,7 @@ pub(super) fn check_picks(budget: &mut Budget, evidence: usize, items: &[WorkPic
         if item
             .record_media
             .as_ref()
-            .is_some_and(|media| media.validate().is_err() || !item.media_attempted)
+            .is_some_and(|media| media.validate().is_err())
         {
             return Err(place("items[].record_media", i)
                 .dropping(F::PickImages, Remove("items[].record_media")));
@@ -1425,9 +1425,11 @@ pub(super) fn check_list(
             evidence,
             place("items[].record_source", i),
         )?;
-        if item.record_media.as_ref().is_some_and(|media| {
-            media.validate().is_err() || !item.media_attempted || item.record_source.is_none()
-        }) {
+        if item
+            .record_media
+            .as_ref()
+            .is_some_and(|media| media.validate().is_err() || item.record_source.is_none())
+        {
             return Err(place("items[].record_media", i)
                 .dropping(F::ListItemMedia, Remove("items[].record_media")));
         }
@@ -1539,7 +1541,7 @@ pub(super) fn check_sheet(
                 || entity
                     .record_media
                     .as_ref()
-                    .is_some_and(|media| media.validate().is_err() || !entity.media_attempted)
+                    .is_some_and(|media| media.validate().is_err())
             {
                 return Err(place("rows[].entity", Some(index))
                     .dropping(F::SheetEntity, Remove("rows[].entity")));

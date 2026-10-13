@@ -8,7 +8,10 @@ use std::{
     cell::{Cell, RefCell},
     rc::Rc,
 };
-use zephium_agentic::{SemanticRecordMediaPlan, WorkBrowserMediaProgress, WorkBrowserRecordImage};
+use zephium_agentic::{
+    SemanticRecordMediaOutcome, SemanticRecordMediaPlan, WorkBrowserMediaProgress,
+    WorkBrowserRecordImage,
+};
 
 macro_rules! media_stage {
     ($stage:ident) => {
@@ -170,8 +173,10 @@ impl Batch {
                         }
                     }
                     Some(NativeMediaResult::Fetched(bytes)) => {
+                        plan.record_native_outcome(SemanticRecordMediaOutcome::Fetched);
                         media_stage!(Fetched);
                         if let Some(image) = record_media::raster(&plan, bytes, None) {
+                            plan.record_native_outcome(SemanticRecordMediaOutcome::Fetched);
                             batch.images.borrow_mut().push(image);
                             batch.next();
                         } else {
@@ -182,7 +187,9 @@ impl Batch {
                         media_stage!(Crop);
                         batch.capture_crop(plan, crop)
                     }
-                    Some(NativeMediaResult::Unavailable) => {
+                    Some(NativeMediaResult::Unavailable(reason, stage)) => {
+                        plan.record_native_outcome(reason);
+                        plan.record_native_fetch_stage(stage);
                         media_stage!(Unavailable);
                         batch.next()
                     }
@@ -226,6 +233,9 @@ impl Batch {
                 {
                     media_stage!(PublicAssetVerified);
                     if let Some(image) = record_media::raster_public(&pending.plan, bytes) {
+                        pending
+                            .plan
+                            .record_native_outcome(SemanticRecordMediaOutcome::Fetched);
                         batch.images.borrow_mut().push(image);
                     } else {
                         media_stage!(PublicAssetRasterRejected);
@@ -254,6 +264,11 @@ impl Batch {
                 Some(NativeMediaResult::Crop(crop)) if batch.current(&plan) => {
                     batch.capture_crop(plan, crop)
                 }
+                Some(NativeMediaResult::Unavailable(reason, stage)) => {
+                    plan.record_native_outcome(reason);
+                    plan.record_native_fetch_stage(stage);
+                    batch.next()
+                }
                 Some(_) => batch.next(),
                 None => batch.finish(false),
             }),
@@ -261,6 +276,7 @@ impl Batch {
     }
     fn capture_crop(self: Rc<Self>, plan: SemanticRecordMediaPlan, crop: Crop) {
         if !plan.local_crop_permitted(Instant::now()) {
+            plan.record_native_outcome(SemanticRecordMediaOutcome::CropNotAuthorized);
             media_stage!(CropPermissionMissing);
             self.next();
             return;
@@ -335,6 +351,7 @@ impl Batch {
             self.cancelled.clone(),
             move |frame| {
                 let Ok(frame) = frame else {
+                    plan.record_native_outcome(SemanticRecordMediaOutcome::PrivacyRefused);
                     after.next();
                     return;
                 };
@@ -356,9 +373,15 @@ impl Batch {
                                 if let Some(image) =
                                     record_media::raster(&plan, frame.png, Some(frame.geometry))
                                 {
+                                    plan.record_native_outcome(SemanticRecordMediaOutcome::Fetched);
                                     final_owner.images.borrow_mut().push(image);
                                 }
                             }
+                            final_owner.next();
+                        } else if let Some(NativeMediaResult::Unavailable(reason, stage)) = outcome
+                        {
+                            plan.record_native_outcome(reason);
+                            plan.record_native_fetch_stage(stage);
                             final_owner.next();
                         } else if outcome.is_some() {
                             final_owner.next();

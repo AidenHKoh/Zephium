@@ -165,7 +165,7 @@ pub struct WorkSubject {
     /// Host-only immutable native record image; never supplied by model tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_media: Option<super::media::WorkRecordMediaRefV1>,
-    /// Native enrichment was attempted; absence never triggers a cookie-less refetch.
+    /// Host withheld remote fallback for privacy/account authority; not an enrichment failure.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub media_attempted: bool,
 }
@@ -635,9 +635,6 @@ fn validate_subjects(
         }
         if let Some(media) = &subject.record_media {
             media.validate()?;
-            if !subject.media_attempted {
-                return Err(WorkError::Invalid);
-            }
         }
         if subject.image_candidates.len() > 3 {
             return Err(WorkError::Invalid);

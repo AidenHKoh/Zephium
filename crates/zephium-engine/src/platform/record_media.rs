@@ -15,7 +15,7 @@ pub(crate) struct Crop {
 pub(crate) enum NativeMediaResult {
     RetryableNetwork,
     PublicAsset(String),
-    Unavailable,
+    Unavailable(zephium_agentic::SemanticRecordMediaOutcome, u8),
     Fetched(Vec<u8>),
     Crop(Crop),
 }
@@ -74,7 +74,19 @@ impl MediaInvocation {
         }
         let status = object.get("s")?.as_str()?;
         if status == "unavailable" {
-            return (object.len() == 2).then_some(NativeMediaResult::Unavailable);
+            return (object.len() == 4)
+                .then(|| {
+                    let code = u8::try_from(object.get("r")?.as_u64()?).ok()?;
+                    let stage = u8::try_from(object.get("f")?.as_u64()?).ok()?;
+                    if stage > 8 {
+                        return None;
+                    }
+                    let reason = zephium_agentic::SemanticRecordMediaOutcome::from_code(code)?;
+                    (1..=11)
+                        .contains(&code)
+                        .then_some(NativeMediaResult::Unavailable(reason, stage))
+                })
+                .flatten();
         }
         let expected: serde_json::Value = serde_json::from_str(self.wire.get(3..)?).ok()?;
         for key in ["i", "g", "k", "n"] {
@@ -112,7 +124,10 @@ impl MediaInvocation {
             "crop" if object.len() == 8 => {
                 let proof = PixelPrivacyProof::decode(&serde_json::to_vec(object.get("p")?).ok()?)?;
                 if !proof.clear() {
-                    return Some(NativeMediaResult::Unavailable);
+                    return Some(NativeMediaResult::Unavailable(
+                        zephium_agentic::SemanticRecordMediaOutcome::PrivacyRefused,
+                        0,
+                    ));
                 }
                 let rect = object.get("b")?.as_object()?;
                 if rect.len() != 4 {
@@ -373,6 +388,35 @@ impl MediaRetryWindow {
 mod retry_tests {
     use super::*;
     use std::time::{Duration, Instant};
+    #[test]
+    fn native_media_refusals_are_closed_and_privacy_never_permits_fallback() {
+        use zephium_agentic::SemanticRecordMediaOutcome as O;
+        let request = MediaInvocation {
+            wire: "M1:{\"i\":1,\"g\":2,\"k\":3,\"n\":4}".into(),
+            retry_report: false,
+            public_asset: false,
+        };
+        for code in 1..=11 {
+            let body = format!("{{\"v\":1,\"s\":\"unavailable\",\"r\":{code},\"f\":0}}");
+            let Some(NativeMediaResult::Unavailable(reason, stage)) =
+                request.decode(body.as_bytes())
+            else {
+                panic!()
+            };
+            assert_eq!(stage, 0);
+            assert_eq!(reason, O::from_code(code).unwrap());
+            if code == 9 || code == 10 {
+                assert!(!reason.permits_public_candidate());
+            }
+        }
+        for body in [
+            r#"{"v":1,"s":"unavailable","r":0}"#,
+            r#"{"v":1,"s":"unavailable","r":12}"#,
+            r#"{"v":1,"s":"unavailable","r":"page content"}"#,
+        ] {
+            assert!(request.decode(body.as_bytes()).is_none());
+        }
+    }
     #[test]
     fn public_asset_wire_requires_original_source_coordinates_and_explicit_retry_mode() {
         let body=br#"{"v":1,"s":"public_asset","i":1,"g":2,"k":3,"n":4,"u":"https://cdn.example.com/photo.png"}"#;
