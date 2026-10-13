@@ -1992,6 +1992,16 @@ fn given_pages(objective: &str, spec: &PartSpec) -> Vec<String> {
             let Ok(url) = url::Url::parse(word) else {
                 continue;
             };
+            // A root URL plus an explicit search is an entry point, not a
+            // source of matching records. Reading it first feeds unrelated
+            // recommendations to the helper and suppresses the results route.
+            if spec.search.is_some()
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none()
+            {
+                continue;
+            }
             let url = url.to_string();
             if !url.starts_with("https://")
                 || url.len() > 1024
@@ -2401,6 +2411,39 @@ mod tests {
             .columns
             .iter()
             .all(|c| c.required == (c.name == "url")));
+    }
+
+    #[test]
+    fn a_typed_search_skips_only_the_bare_entry_page_and_keeps_specific_sources() {
+        let mut part = PartSpec {
+            title: "Catalog".into(),
+            helper: WorkHelperV1::Browser,
+            goal: "Find three matching items".into(),
+            brief: String::new(),
+            service: Some(WorkPartServiceV1 {
+                host: Some("catalog.example".into()),
+                connection: None,
+            }),
+            records: vec!["price".into(), "url".into()],
+            search: Some(super::super::recipes::SiteSearch {
+                query: Some("red boots".into()),
+                ..Default::default()
+            }),
+            declined: None,
+        };
+        assert!(given_pages("Start at https://catalog.example/", &part).is_empty());
+        for url in [
+            "https://catalog.example/items",
+            "https://catalog.example/?q=red",
+            "https://catalog.example/#details",
+        ] {
+            assert_eq!(given_pages(url, &part), [url]);
+        }
+        part.search = None;
+        assert_eq!(
+            given_pages("Read https://catalog.example/", &part),
+            ["https://catalog.example/"]
+        );
     }
 
     #[test]
