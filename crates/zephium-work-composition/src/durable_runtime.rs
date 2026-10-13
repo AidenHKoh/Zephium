@@ -896,6 +896,16 @@ impl NativeWorkComposition {
             original_spec.document_policy,
             intervention_origin.is_some(),
         );
+        // A page in Work's own storage holds nothing of the person's: its
+        // pictures are the site's public ones, so a record whose native
+        // picture failed keeps its observed picture (unless a sign-in there
+        // made it an account page; a solved bot check does not).
+        let own_store_session = resume_plan.as_ref().is_some_and(|plan| {
+            matches!(
+                plan.request.session,
+                zephium_app::work_sites::SiteSession::Private
+            )
+        });
         let original_deadline = original_spec.deadline;
         let construction_attempt = invocation.construction_attempt;
         let mut ready_deadline = original_deadline
@@ -2130,14 +2140,19 @@ impl NativeWorkComposition {
                                     native_media.then_some(record_media.as_slice()),
                                     &(0..MAX_ARTIFACT_SUBJECTS as u16)
                                         .filter(|record| {
-                                            public_media_fallback
-                                                && media_plans
+                                            keeps_observed_picture(
+                                                own_store_session
+                                                    && !measure.resolved_handoff.is_some_and(
+                                                        |kind| kind.includes(
+                                                            zephium_core::work::runtime::WorkPageHandoffKindV1::SignIn,
+                                                        ),
+                                                    ),
+                                                public_media_fallback,
+                                                media_plans
                                                     .iter()
                                                     .filter(|plan| plan.record() == *record)
-                                                    .all(|plan| {
-                                                        plan.native_outcome()
-                                                            .permits_public_candidate()
-                                                    })
+                                                    .map(|plan| plan.native_outcome()),
+                                            )
                                         })
                                         .collect::<Vec<u16>>(),
                                 )
@@ -4560,6 +4575,40 @@ fn original_anonymous_read_intent(
                 && !request.hold_typing
         })
 }
+/// Whether a record whose native picture did not land keeps the picture
+/// its page showed: always on a page in Work's own storage, and on another
+/// page only after an anonymous read proved it public and the native outcome
+/// leaves the public picture standing.
+fn keeps_observed_picture(
+    own_store_page: bool,
+    public_media_fallback: bool,
+    mut outcomes: impl Iterator<Item = zephium_agentic::SemanticRecordMediaOutcome>,
+) -> bool {
+    own_store_page
+        || public_media_fallback && outcomes.all(|outcome| outcome.permits_public_candidate())
+}
+
+#[cfg(test)]
+mod observed_picture_tests {
+    use super::keeps_observed_picture;
+    use zephium_agentic::SemanticRecordMediaOutcome as Outcome;
+
+    #[test]
+    fn a_page_in_works_own_storage_keeps_its_pictures() {
+        // The Airbnb results a page task read: native pictures refused or
+        // not visible, no anonymous read. Before, every picture was dropped.
+        let outcomes = [Outcome::PrivacyRefused, Outcome::NotVisible];
+        assert!(keeps_observed_picture(true, false, outcomes.into_iter()));
+        assert!(!keeps_observed_picture(false, false, outcomes.into_iter()));
+        assert!(!keeps_observed_picture(false, true, outcomes.into_iter()));
+        assert!(keeps_observed_picture(
+            false,
+            true,
+            [Outcome::NotVisible].into_iter()
+        ));
+    }
+}
+
 fn public_asset_fetch_mode(
     original_public: bool,
     resolved: Option<zephium_core::work::runtime::WorkPageHandoffKindV1>,
