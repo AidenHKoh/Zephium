@@ -1726,7 +1726,10 @@ pub(super) async fn workflow(
     keys: Vec<zephium_agentic::AgentProviderCredential>,
 ) -> Result<WorkflowResult, &'static str> {
     let checks = CHECKS.get().cloned().unwrap_or_else(|| ALL.to_vec());
-    let chosen = if std::env::var_os("ZEPHIUM_PROBE_CHOSEN_PAGE_MODEL").is_some() {
+    let chosen = if std::env::var_os("ZEPHIUM_PROBE_CHOSEN_PAGE_MODEL").is_some()
+        || (checks == [Check::Journey]
+            && std::env::var_os("ZEPHIUM_PROBE_JOURNEY_SCRIPTED").is_some())
+    {
         use zephium_core::work::model::WorkModelRole;
         let _ = zephium_app::work_models::view(profile).await;
         zephium_app::work_models::choose(profile, WorkModelRole::Page, Some("openai/gpt-6-luna"))
