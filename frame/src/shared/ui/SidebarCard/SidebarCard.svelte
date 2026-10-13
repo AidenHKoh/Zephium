@@ -27,6 +27,7 @@
     dismissLabel = "",
     ondismiss,
     actions = [],
+    expires = 0,
   }: {
     /** A pill is one action, the whole of it clickable; a card is a notice
      *  that can be dismissed, with the actions it offers as rows. */
@@ -42,6 +43,10 @@
     dismissLabel?: string;
     ondismiss?: () => void;
     actions?: SidebarCardAction[];
+    /** A passing notice: it leaves on its own after this many milliseconds,
+     *  shown as a line that drains under the title and holds while the
+     *  pointer rests on the card. */
+    expires?: number;
   } = $props();
 
   const uid = $props.id();
@@ -93,6 +98,12 @@
           onclick={leave}
         />{/if}
     </div>
+    {#if expires > 0 && ondismiss && !reducedMotion()}<span
+        class="expiry"
+        style:--expires={`${expires}ms`}
+        aria-hidden="true"
+        onanimationend={leave}
+      ></span>{/if}
     {#if actions.length > 0}
       <div class="actions">
         {#each actions as action (action.label)}
@@ -122,6 +133,32 @@
     border-radius: var(--radius-card);
     background: var(--row-active);
     box-shadow: var(--row-rim);
+  }
+
+  /* Time left, as a hairline that empties toward its start; resting on the
+     card holds it, so a notice being read is never taken away. */
+  .expiry {
+    display: block;
+    height: 2px;
+    margin: 2px 8px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-border-strong);
+    transform-origin: left center;
+    animation: sidebar-card-expiry var(--expires) linear forwards;
+  }
+
+  :global([dir="rtl"]) .expiry {
+    transform-origin: right center;
+  }
+
+  .sidebar-card:is(:hover, :focus-within) .expiry {
+    animation-play-state: paused;
+  }
+
+  @keyframes sidebar-card-expiry {
+    to {
+      transform: scaleX(0);
+    }
   }
 
   /* The title lines up with the glyphs of the rows under it. */
