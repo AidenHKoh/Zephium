@@ -278,7 +278,9 @@ Well-known bot checks are read by Rust from the first look, without a typed
 decision or a model call: a small page whose short texts or embedded frame
 titles are Cloudflare's, DataDome's, hCaptcha's, reCAPTCHA's checkbox or a
 "verify you are human" line. A widget only a person can pass goes to the
-person at once; a script check ("Just a moment", "Verifying you are human",
+person at once, on any later look too (a look the model asked for, the page
+after a verified step), so a check met after the first look costs no model
+call; a script check ("Just a moment", "Verifying you are human",
 a DataDome device check, a page that is only a frame) is looked at again each
 second, for two seconds on a research read and six on a page task, and one
 that clears by itself is never shown. Such a page is not waited on as a page
