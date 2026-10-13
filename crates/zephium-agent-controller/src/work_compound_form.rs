@@ -357,7 +357,7 @@ impl AgentWorkController {
                 let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
                 let _ = session.take_rejected_refusal();
                 if session
-                    .close_failed_owned_read()
+                    .close_failed_owned_action()
                     .map_err(AgentWorkFailure::Browser)?
                 {
                     return Ok(Err(AgentBrowserFormFault::Unverified));

@@ -4056,7 +4056,7 @@ impl AgentBrowserSession {
                 if crate::action::refused_before_acting(failure) {
                     // Code-owned reads have no provider continuation. Their exact
                     // accounted refusal still needs journaling before failed closure.
-                    self.close_failed_owned_read()?;
+                    self.close_failed_owned_action()?;
                 }
                 Err(AgentBrowserProviderError::Action(error))
             }
@@ -4064,9 +4064,9 @@ impl AgentBrowserSession {
         }
     }
 
-    /// Closes a failed code-owned read so the next action may start. False
-    /// when the action is not one; the caller then fails as before.
-    pub(crate) fn close_failed_owned_read(&mut self) -> Result<bool, AgentBrowserProviderError> {
+    /// Journals a settled code-owned read failure or a local write refused
+    /// before acting. Pending or uncertain writes remain owned and refuse closure.
+    pub(crate) fn close_failed_owned_action(&mut self) -> Result<bool, AgentBrowserProviderError> {
         if self.action_executions.status().pending() != 0
             || self.action_settlements.status().pending() != 0
             || self.action_terminal.is_some()
@@ -4078,7 +4078,7 @@ impl AgentBrowserSession {
             self.failure = None;
             return Ok(true);
         };
-        let terminal = match action.into_failed_owned_read() {
+        let terminal = match action.into_failed_owned_action() {
             Ok(terminal) => terminal,
             Err(action) => {
                 self.action = Some(*action);

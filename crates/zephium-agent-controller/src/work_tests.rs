@@ -853,7 +853,7 @@ fn input_with_navigation_account(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fault {
     PlainRead,
-    CompoundFields,
+    CompoundFields(bool),
     #[cfg(feature = "probe-harness")]
     Listing,
     #[cfg(feature = "probe-harness")]
@@ -1079,7 +1079,7 @@ impl AgentBrowserPort for Port {
         let correlation = invocation.correlation();
         assert_eq!(
             correlation.snapshot_generation().get(),
-            if self.fault == Fault::CompoundFields {
+            if matches!(self.fault, Fault::CompoundFields(_)) {
                 1 + lock(&self.calls).iter().filter(|&&call| call == 7).count() as u64
             } else if matches!(
                 self.fault,
@@ -1199,7 +1199,7 @@ impl AgentBrowserPort for Port {
             wire
         };
         #[cfg(feature = "probe-harness")]
-        let wire = if self.fault == Fault::CompoundFields {
+        let wire = if matches!(self.fault, Fault::CompoundFields(_)) {
             let filled = lock(&self.calls).iter().filter(|&&call| call == 7).count();
             serde_json::json!({"v":SEMANTIC_WIRE_VERSION,"i":correlation.invocation().get(),"g":correlation.snapshot_generation().get(),"c":"complete","n":[
                 {"k":1,"r":"document","fc":true},
@@ -1384,6 +1384,11 @@ impl AgentBrowserPort for Port {
             return ContextDispatch::Scheduled;
         }
         match self.fault {
+            Fault::CompoundFields(true) => {
+                let now = request.requested_at();
+                completion(request.fail(SemanticActionNativeFailure::TargetChanged, now));
+                return ContextDispatch::Scheduled;
+            }
             Fault::DecisionTargetChanged => {
                 let now = request.requested_at();
                 completion(request.fail(SemanticActionNativeFailure::TargetChanged, now));
@@ -1426,7 +1431,7 @@ impl AgentBrowserPort for Port {
                 return ContextDispatch::Scheduled;
             }
             Fault::ActionVerification
-            | Fault::CompoundFields
+            | Fault::CompoundFields(_)
             | Fault::ActionApplied
             | Fault::ActionAppliedBoundary
             | Fault::ActionAppliedLargeDiff
@@ -2111,6 +2116,7 @@ fn variable_provider_turns_use_real_worker_io_and_stop_at_the_exact_ceiling() {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProviderFault {
     CompoundForm,
+    CompoundFormRefused,
 
     ActionRepair,
     ActionRepairRepeated,
@@ -2279,6 +2285,13 @@ fn native_compound_field_prepares_then_extracts_with_existing_effect_policy() {
 
 #[cfg(feature = "probe-harness")]
 #[test]
+fn native_compound_target_change_closes_the_exact_failed_write_without_pending_debt() {
+    let _guard = lock(&SERIAL);
+    provider_fixture_with_form(ProviderFault::CompoundFormRefused, Some("fixture value"));
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
 fn native_compound_form_cannot_widen_the_trusted_field_value() {
     let _guard = lock(&SERIAL);
     provider_fixture_with_form(ProviderFault::CompoundForm, Some("not authorized"));
@@ -2407,8 +2420,8 @@ fn provider_fixture_with_discovery_account(
         2
     } else {
         match fault {
-            ProviderFault::CompoundForm => {
-                if form == Some("fixture value") {
+            ProviderFault::CompoundForm | ProviderFault::CompoundFormRefused => {
+                if form == Some("fixture value") && fault != ProviderFault::CompoundFormRefused {
                     4
                 } else {
                     2
@@ -2771,7 +2784,10 @@ fn provider_fixture_with_discovery_account(
                             | ProviderFault::HumanExtractionRequest
                     ) {
                         named_tool_stream(turns, "show_for_human", r#"{\"reason\":\"sign_in\"}"#)
-                    } else if fault == ProviderFault::CompoundForm {
+                    } else if matches!(
+                        fault,
+                        ProviderFault::CompoundForm | ProviderFault::CompoundFormRefused
+                    ) {
                         if turns == 1 {
                             named_tool_stream(
                                 turns,
@@ -2936,7 +2952,10 @@ fn provider_fixture_with_discovery_account(
     let task: Box<dyn AgentWorkTask> = if let Some(value) = form {
         let mut goals =
             vec![crate::AgentWorkFormGoal::fill(Some("Field".into()), value.into()).unwrap()];
-        if fault == ProviderFault::CompoundForm {
+        if matches!(
+            fault,
+            ProviderFault::CompoundForm | ProviderFault::CompoundFormRefused
+        ) {
             goals.push(
                 crate::AgentWorkFormGoal::fill(Some("Second".into()), "second value".into())
                     .unwrap(),
@@ -2949,7 +2968,10 @@ fn provider_fixture_with_discovery_account(
             vec![crate::AgentWorkFormPhase::try_new(goals).unwrap()],
         )
         .unwrap();
-        if fault == ProviderFault::CompoundForm {
+        if matches!(
+            fault,
+            ProviderFault::CompoundForm | ProviderFault::CompoundFormRefused
+        ) {
             Box::new(
                 task.with_baseline_read()
                     .with_extraction(vec![SemanticExtractionFieldSchema::try_text(
@@ -3172,8 +3194,11 @@ fn provider_fixture_with_discovery_account(
         state.input.as_mut().unwrap().settings.deadline = deadline;
         state.native.deadline = deadline;
     }
-    let native_fault = if fault == ProviderFault::CompoundForm {
-        Fault::CompoundFields
+    let native_fault = if matches!(
+        fault,
+        ProviderFault::CompoundForm | ProviderFault::CompoundFormRefused
+    ) {
+        Fault::CompoundFields(fault == ProviderFault::CompoundFormRefused)
     } else if matches!(
         fault,
         ProviderFault::Extraction(ExtractionFault::Direct | ExtractionFault::DirectRecord)
@@ -3300,7 +3325,33 @@ fn provider_fixture_with_discovery_account(
         read_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);
         return;
     }
-    if fault == ProviderFault::CompoundForm {
+    if fault == ProviderFault::CompoundFormRefused {
+        let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(
+            closed.failure(),
+            AgentWorkFailure::Browser(AgentBrowserProviderError::Action(
+                crate::AgentBrowserActionError::Failed(SemanticActionFailure::TargetChanged)
+            ))
+        );
+        assert!(
+            matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)),
+            "{shutdown:?}"
+        );
+        assert_eq!(
+            calls.iter().filter(|&&call| call == 7).count(),
+            1,
+            "no refused action replay"
+        );
+        assert_eq!(closed.policy_settlement().closure().effects(), 1);
+        assert_eq!(server.join().unwrap(), 1);
+        return;
+    }
+    if matches!(
+        fault,
+        ProviderFault::CompoundForm | ProviderFault::CompoundFormRefused
+    ) {
         if form != Some("fixture value") {
             let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
                 panic!("{outcome:?}");

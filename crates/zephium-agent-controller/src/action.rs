@@ -681,15 +681,17 @@ impl AgentBrowserAction {
         }
     }
 
-    /// A failed code-owned read (no model continuation) closes its batch so
-    /// the page goes on to the model's own first look.
-    pub(crate) fn into_failed_owned_read(self) -> Result<SemanticActionBatchResult, Box<Self>> {
+    /// A settled failed code-owned read, or a local write refused before
+    /// acting, closes its exact accounted batch. Uncertain writes stay owned.
+    pub(crate) fn into_failed_owned_action(self) -> Result<SemanticActionBatchResult, Box<Self>> {
         if !self.finished
             || self.native.is_some()
             || self.pending.is_some()
             || self.terminal.is_some()
             || self.journal_failed
-            || self.proposal.action.effect() != SemanticEffectClass::Read
+            || !self.failed.as_ref().is_some_and(|failed| {
+                owned_failure_may_close(self.proposal.action.effect(), failed.failure())
+            })
             || self.proposal.continuation.is_some()
             || self
                 .failed
@@ -1121,4 +1123,42 @@ pub(crate) const fn refused_before_acting(failure: SemanticActionFailure) -> boo
             | SemanticActionFailure::StaleReference
             | SemanticActionFailure::UnsupportedInteraction
     )
+}
+
+// Recovery is disposal of an accounted failure, never permission to replay.
+fn owned_failure_may_close(effect: SemanticEffectClass, failure: SemanticActionFailure) -> bool {
+    effect == SemanticEffectClass::Read
+        || (effect == SemanticEffectClass::LocalWrite && refused_before_acting(failure))
+}
+
+#[cfg(test)]
+mod owned_failure_tests {
+    use super::*;
+    #[test]
+    fn preflight_failure_closes_local_work_but_never_uncertain_or_external_writes() {
+        assert!(owned_failure_may_close(
+            SemanticEffectClass::LocalWrite,
+            SemanticActionFailure::TargetChanged
+        ));
+        assert!(!owned_failure_may_close(
+            SemanticEffectClass::LocalWrite,
+            SemanticActionFailure::NeedsHuman
+        ));
+        for effect in [
+            SemanticEffectClass::ExternalWrite,
+            SemanticEffectClass::Communication,
+            SemanticEffectClass::Purchase,
+            SemanticEffectClass::Destructive,
+            SemanticEffectClass::CapabilityBoundary,
+        ] {
+            assert!(!owned_failure_may_close(
+                effect,
+                SemanticActionFailure::TargetChanged
+            ));
+            assert!(!owned_failure_may_close(
+                effect,
+                SemanticActionFailure::NeedsHuman
+            ));
+        }
+    }
 }
