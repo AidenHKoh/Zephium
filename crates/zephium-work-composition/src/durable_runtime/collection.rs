@@ -308,6 +308,7 @@ impl WorkBrowseCollectionSchema {
     ) -> Result<WorkArtifactDataV1, WorkError> {
         let mut subjects = Vec::new();
         let mut cells = Vec::new();
+        let mut seen_rows = std::collections::BTreeSet::new();
         for (record, row) in items.iter().enumerate() {
             if row
                 .iter()
@@ -326,11 +327,10 @@ impl WorkBrowseCollectionSchema {
             else {
                 return Err(WorkError::Invalid);
             };
-            // One name is one subject: a repeated card keeps its first row.
-            if subjects
-                .iter()
-                .any(|subject: &WorkSubject| subject.name.trim() == name.trim())
-            {
+            // A display name is not an identity (stays and product variants
+            // often share one). Only the exact values and their citations dedup.
+            let identity = serde_json::to_vec(row).map_err(|_| WorkError::Invalid)?;
+            if !seen_rows.insert(identity) {
                 continue;
             }
             let name_evidence = cite(sources)?;
@@ -928,9 +928,9 @@ mod tests {
     }
 
     #[test]
-    fn repeated_names_keep_their_first_row_as_one_subject() {
-        // Recorded shape: Airbnb's monthly stays page read four rows under one
-        // repeated name, and the duplicate subjects refused the whole matrix.
+    fn repeated_names_preserve_distinct_values_and_sources_but_exact_rows_dedup() {
+        // The observed Airbnb failure used repeated display names. They are
+        // separate cited listings, not permission to silently drop later rows.
         let schema = WorkBrowseCollectionSchema::try_new(
             "Observed stays".into(),
             vec![
@@ -952,6 +952,7 @@ mod tests {
             row(" Monthly stay", 3, "$2,300"),
             row("Studio", 5, "$1,900"),
             row("Monthly stay", 7, "$2,500"),
+            row("Monthly stay", 1, "$2,100"),
         ]))
         .unwrap();
         let mut cited = Vec::new();
@@ -972,8 +973,14 @@ mod tests {
             .iter()
             .map(|subject| subject.name.as_str())
             .collect();
-        assert_eq!(names, ["Monthly stay", "Studio"]);
+        assert_eq!(
+            names,
+            ["Monthly stay", " Monthly stay", "Studio", "Monthly stay"]
+        );
         assert!(matches!(&cells[0][0].value, WorkCellValue::Text { text } if text == "$2,100"));
-        assert_eq!(cited, [1, 2, 5, 6]);
+        assert_eq!(cited, [1, 2, 3, 4, 5, 6, 7, 8]);
+        for (row, expected) in cells.iter().zip(["$2,100", "$2,300", "$1,900", "$2,500"]) {
+            assert!(matches!(&row[0].value, WorkCellValue::Text { text } if text == expected));
+        }
     }
 }

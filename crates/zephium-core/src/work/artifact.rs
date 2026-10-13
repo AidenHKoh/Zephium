@@ -611,6 +611,7 @@ fn validate_subjects(
     budget: &mut TextBudget,
     subjects: &[WorkSubject],
     required: bool,
+    unique_names: bool,
 ) -> Result<(), WorkError> {
     if required {
         bounded(subjects.len(), MAX_ARTIFACT_SUBJECTS)?;
@@ -621,7 +622,7 @@ fn validate_subjects(
     for subject in subjects {
         validate_text(&subject.name, 256)?;
         budget.text(&subject.name)?;
-        if subject.name.trim().is_empty() || !names.insert(subject.name.trim()) {
+        if subject.name.trim().is_empty() || (unique_names && !names.insert(subject.name.trim())) {
             return Err(WorkError::Invalid);
         }
         if let Some(descriptor) = &subject.descriptor {
@@ -848,7 +849,7 @@ impl WorkArtifactField {
             Self::Evidence => "evidence lists more than 64 source keys or repeats one",
             Self::DocumentText => "document needs 1 to 128 paragraphs of non-empty text",
             Self::DocumentBlocks => "document blocks are malformed",
-            Self::Subjects => "subjects need unique non-empty names, at most 32, with at most three image candidates and public HTTPS links",
+            Self::Subjects => "subjects need non-empty names (unique outside matrices), at most 32, with at most three image candidates and public HTTPS links",
             Self::MatrixCriterion => "comparison_matrix criteria need 1 to 16 unique names; a measurement names a unit and a basis, a rating a rubric and a scale_max of 2 to 10",
             Self::MatrixShape => "comparison_matrix cells hold one row per subject in subjects order, and every subject's row has one cell per criterion, in criteria order; never one row per criterion",
             Self::CellEvidence => "cell evidence must cite listed source keys, at most eight, without repeats",
@@ -1312,7 +1313,7 @@ impl WorkArtifactDataV1 {
                 notes,
             } => {
                 *at = F::Subjects;
-                subjects_ok(&mut budget, subjects, true)?;
+                subjects_ok(&mut budget, subjects, true, false)?;
                 *at = F::MatrixCriterion;
                 bounded(criteria.len(), MAX_ARTIFACT_CRITERIA)?;
                 let mut names = BTreeSet::new();
@@ -1413,7 +1414,7 @@ impl WorkArtifactDataV1 {
             }
             Self::Findings { subjects, items } => {
                 *at = F::Subjects;
-                subjects_ok(&mut budget, subjects, false)?;
+                subjects_ok(&mut budget, subjects, false, true)?;
                 *at = F::FindingItems;
                 bounded(items.len(), MAX_ARTIFACT_FINDINGS)?;
                 for finding in items {
@@ -1562,7 +1563,7 @@ impl WorkArtifactDataV1 {
                 *at = F::CollectionSummary;
                 budget.text(summary)?;
                 *at = F::Subjects;
-                subjects_ok(&mut budget, subjects, false)?;
+                subjects_ok(&mut budget, subjects, false, true)?;
                 *at = F::CollectionEntry;
                 if entries.len() > MAX_ARTIFACT_SOURCE_ENTRIES {
                     return Err(WorkError::Invalid);
@@ -2227,6 +2228,43 @@ mod tests {
             image_candidates: vec![],
         }
     }
+    #[test]
+    fn matrix_subjects_are_positional_and_may_share_a_display_name() {
+        let matrix = WorkArtifactDataV1::ComparisonMatrix {
+            subjects: vec![
+                subject("Apartment in Lisbon"),
+                subject("Apartment in Lisbon"),
+            ],
+            criteria: vec![WorkCriterion {
+                name: "Price".into(),
+                kind: WorkCriterionKind::Text,
+            }],
+            cells: ["€120", "€140"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    vec![WorkCell {
+                        value: WorkCellValue::Text { text: value.into() },
+                        evidence: vec![index as u16],
+                        note: None,
+                        general_knowledge: false,
+                    }]
+                })
+                .collect(),
+            notes: vec![],
+        };
+        assert_eq!(matrix.validate(2), Ok(()));
+        let subjects = vec![subject("Same"), subject("Same")];
+        assert_eq!(
+            validate_subjects(&mut TextBudget(0), &subjects, false, true),
+            Err(WorkError::Invalid)
+        );
+        assert_eq!(
+            validate_subjects(&mut TextBudget(0), &[subject(" ")], true, false),
+            Err(WorkError::Invalid)
+        );
+    }
+
     #[test]
     fn a_matrix_by_criterion_is_refused_with_the_shape_rule() {
         let text = |value: &str| WorkCell {
