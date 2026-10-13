@@ -432,7 +432,7 @@ fn project_observation(
     locate_only: bool,
 ) -> Result<DecisionObservation, DecisionProjectionError> {
     if actions_only {
-        return DecisionObservation::try_new(observation, objective, authority, account);
+        return DecisionObservation::try_for_actions(observation, objective, authority, account);
     }
     match schema.filter(|_| locate_only) {
         Some(schema) => {
@@ -451,19 +451,38 @@ mod action_mode_tests {
     fn interaction_projection_cannot_turn_a_read_schema_into_jev_extraction_heads() {
         let (session, source) = super::super::tests::browser_fixture();
         let frame = &source.frames()[0];
+        let wire = serde_json::to_vec(&serde_json::json!({"v":1,"i":1,"g":1,"c":"complete","n":[
+            {"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"paragraph","t":"Fixture detail ".repeat(200)},
+            {"k":3,"p":0,"r":"paragraph","t":"Sort order"},
+            {"k":4,"p":0,"r":"button","n":"Default","o":1}
+        ]}))
+        .unwrap();
         let snapshot = zephium_agentic::decode_semantic_snapshot(
             zephium_agentic::SemanticDecodeContext::new(
-                frame.invocation(), frame.frame().clone(), frame.generation(),
+                frame.invocation(),
+                frame.frame().clone(),
+                frame.generation(),
             ),
-            br#"{"v":1,"i":1,"g":1,"c":"complete","n":[{"k":1,"r":"document","o":16},{"k":2,"p":0,"r":"paragraph","t":"Fixture detail: exact observed value"}]}"#,
-        ).unwrap();
+            &wire,
+        )
+        .unwrap();
         let observation =
             zephium_agentic::SemanticObservationAssembler::new(source.request().clone(), snapshot)
                 .unwrap()
                 .finish()
                 .unwrap();
-        let authority =
-            zephium_agentic::AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+        let authority = zephium_agentic::AgentProviderActionAuthority::try_new(
+            &observation,
+            &[(
+                observation.frames()[0].nodes()[3].reference(),
+                zephium_agentic::SemanticOperations::try_new(&[
+                    zephium_agentic::SemanticOperationClass::Click,
+                ])
+                .unwrap(),
+            )],
+        )
+        .unwrap();
         let objective = session.objective.as_ref().unwrap();
         let schema = zephium_agentic::SemanticExtractionSchema::try_new(
             zephium_agentic::SemanticExtractionSchemaId::new(1).unwrap(),
@@ -477,14 +496,50 @@ mod action_mode_tests {
             .unwrap()],
         )
         .unwrap();
-        let expected =
-            DecisionObservation::try_new(&observation, objective, &authority, session.account)
-                .unwrap()
-                .into_anonymous_eval_requests()
-                .unwrap()
-                .0
-                .encode()
-                .unwrap();
+        let expected = DecisionObservation::try_for_actions(
+            &observation,
+            objective,
+            &authority,
+            session.account,
+        )
+        .unwrap()
+        .into_anonymous_eval_requests()
+        .unwrap()
+        .0
+        .encode()
+        .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&expected).contains("Fixture detail"),
+            "action decisions must not pay for unrelated extraction prose"
+        );
+        for value in ["Default", "Sort order", "click_target"] {
+            assert!(
+                String::from_utf8_lossy(&expected).contains(value),
+                "missing control context: {value}"
+            );
+        }
+        let answers = project_observation(
+            true,
+            &observation,
+            objective,
+            &authority,
+            session.account,
+            Some(&schema),
+            false,
+        )
+        .unwrap()
+        .route(Err(DecisionCallFailure::Unavailable))
+        .unwrap()
+        .finish(None);
+        assert!(answers.matches_observation(&observation, session.account));
+        assert!(!answers.matches_observation(&source, session.account));
+        let fresh_account = zephium_agentic::AgentContextAccountBinding::new(
+            zephium_agentic::AgentAccountAttestationId::generate(),
+            session.account.context(),
+            session.account.account(),
+            zephium_agentic::AgentPolicyInstant::from_millis(1002),
+        );
+        assert!(!answers.matches_observation(&observation, fresh_account));
         for locate in [false, true] {
             let actual = project_observation(
                 true,
@@ -521,6 +576,10 @@ mod action_mode_tests {
         .0
         .encode()
         .unwrap();
+        assert!(
+            read.len() > expected.len() + 2_000,
+            "the action table must remove the unrelated prose"
+        );
         assert_ne!(
             read, expected,
             "ordinary read decisions still retain their own schema"

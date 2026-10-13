@@ -859,6 +859,8 @@ enum Fault {
     #[cfg(feature = "probe-harness")]
     DecisionClick(bool),
     #[cfg(feature = "probe-harness")]
+    DecisionRefresh,
+    #[cfg(feature = "probe-harness")]
     DecisionTargetChanged,
     #[cfg(feature = "probe-harness")]
     Navigation(NavigationFault),
@@ -1079,7 +1081,10 @@ impl AgentBrowserPort for Port {
         let correlation = invocation.correlation();
         assert_eq!(
             correlation.snapshot_generation().get(),
-            if matches!(self.fault, Fault::CompoundFields(_)) {
+            if matches!(
+                self.fault,
+                Fault::CompoundFields(_) | Fault::DecisionRefresh
+            ) {
                 lock(&self.calls).iter().filter(|&&call| call == 3).count() as u64
             } else if matches!(
                 self.fault,
@@ -1182,7 +1187,7 @@ impl AgentBrowserPort for Port {
         #[cfg(feature = "probe-harness")]
         let wire = if matches!(
             self.fault,
-            Fault::DecisionClick(_) | Fault::DecisionTargetChanged
+            Fault::DecisionClick(_) | Fault::DecisionTargetChanged | Fault::DecisionRefresh
         ) {
             let applied = matches!(self.fault, Fault::DecisionClick(true));
             format!(

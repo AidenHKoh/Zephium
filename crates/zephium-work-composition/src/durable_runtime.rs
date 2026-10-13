@@ -167,6 +167,11 @@ impl ReadFailureTrace {
 
     fn report(&mut self, snapshot: &zephium_app::RetainedWorkSnapshot, measure: &ReadMeasure) {
         if let Some(failure) = self.changed_failure(snapshot.failure) {
+            #[cfg(feature = "public-qualification")]
+            eprintln!(
+                "page-failure: cause={failure:?} phase={:?}; content=redacted",
+                snapshot.phase
+            );
             zephium_app::work_trace::record(format_args!(
                 "work: phase=page event=browser_failure cause={failure:?} state={:?} calls={} actions={} snapshots={} inspection_refusals={} navigation_refusals={} action_refusals={} last_action_refusal={:?} last_tool={:?} content=redacted",
                 snapshot.phase,
@@ -2444,6 +2449,10 @@ fn failure_note(failure: AgentWorkFailure) -> &'static str {
         }
         AgentWorkFailure::Browser(_) => "The page could not be read",
         AgentWorkFailure::TaskPhase { .. } => "Work refused the action in this task phase",
+        AgentWorkFailure::DecisionChallenge(_) | AgentWorkFailure::DecisionMoreBelow(_)
+        | AgentWorkFailure::DecisionOperation(_) | AgentWorkFailure::DecisionRead(_) => {
+            "Work could not bind its decision to the current page state; this does not establish a site loading failure"
+        }
         AgentWorkFailure::Contract => "Work could not validate its internal page-task contract",
         AgentWorkFailure::ArtifactPublication(_) => {
             "Work could not preserve the extracted page result"
@@ -2633,6 +2642,19 @@ fn page_failure_outcome(failure: AgentWorkFailure) -> WorkPageOutcomeV1 {
 #[cfg(test)]
 mod closed_result_tests {
     use super::*;
+
+    #[test]
+    fn stale_decisions_are_reported_as_internal_state_failures() {
+        let error = zephium_agentic::DecisionProjectionError::Authority;
+        for failure in [
+            AgentWorkFailure::DecisionChallenge(error),
+            AgentWorkFailure::DecisionMoreBelow(error),
+            AgentWorkFailure::DecisionOperation(error),
+            AgentWorkFailure::DecisionRead(error),
+        ] {
+            assert_eq!(failure_note(failure), "Work could not bind its decision to the current page state; this does not establish a site loading failure");
+        }
+    }
 
     #[test]
     fn malformed_records_are_an_extraction_failure_not_a_site_shortfall() {

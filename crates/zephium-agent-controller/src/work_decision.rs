@@ -65,6 +65,13 @@ impl AgentWorkController {
                 break;
             }
             let actions_only = session.actions_only_decisions();
+            if state
+                .decision_answers
+                .as_ref()
+                .is_some_and(|answers| !answers.matches_observation(&observation, session.account))
+            {
+                state.decision_answers = None;
+            }
             if state.decision_answers.is_none() {
                 if actions_only {
                     if state.task.human_wall(&observation).is_some()

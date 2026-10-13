@@ -2492,7 +2492,7 @@ impl AgentWorkController {
             return Ok(true);
         }
         let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
-        if session.decisions.is_none() {
+        if session.decisions.is_none() || session.actions_only_decisions() {
             return Ok(looks_like_human_challenge(observation));
         }
         state.refresh_account(worker, browser)?;
