@@ -1745,12 +1745,17 @@ impl<'a> SemanticReadBuilder<'a> {
             content,
             states: node.states(),
             provenance,
-            region: page_region(node, snapshot),
+            region: if search_state_fragment(field, node, snapshot) {
+                0
+            } else {
+                page_region(node, snapshot)
+            },
             // Requested addresses and pictures are record values too. Keeping
             // every prose fragment first erased all images on long product pages.
-            rank: if !self.facts_priority
-                && ((field == SemanticReadField::LinkDestination && self.url_sources & 1 != 0)
-                    || (field == SemanticReadField::ImageSource && self.url_sources & 2 != 0))
+            rank: if search_state_fragment(field, node, snapshot)
+                || (!self.facts_priority
+                    && ((field == SemanticReadField::LinkDestination && self.url_sources & 1 != 0)
+                        || (field == SemanticReadField::ImageSource && self.url_sources & 2 != 0)))
             {
                 0
             } else {
@@ -1978,6 +1983,41 @@ fn page_region(node: &SemanticNode, snapshot: &crate::SemanticSnapshot) -> u8 {
     u8::from(has_main && !in_main && !top_level)
 }
 
+// Search controls carry the observed query and settings even when the form
+// lives in the page banner. Menu links and unselected option lists do not.
+fn search_state_fragment(
+    field: SemanticReadField,
+    node: &SemanticNode,
+    snapshot: &crate::SemanticSnapshot,
+) -> bool {
+    if !matches!(
+        field,
+        SemanticReadField::AccessibleName
+            | SemanticReadField::VisibleText
+            | SemanticReadField::TextValue
+    ) || !matches!(
+        node.role(),
+        SemanticRole::Button
+            | SemanticRole::Textbox
+            | SemanticRole::Combobox
+            | SemanticRole::Spinbutton
+    ) {
+        return false;
+    }
+    let mut parent = node.parent();
+    while let Some(ancestor) = parent.and_then(|at| snapshot.nodes().get(usize::from(at))) {
+        match ancestor.landmark_kind() {
+            Some(crate::SemanticLandmarkKind::Search) => return true,
+            Some(
+                crate::SemanticLandmarkKind::Navigation | crate::SemanticLandmarkKind::Contentinfo,
+            ) => return false,
+            _ => {}
+        }
+        parent = ancestor.parent();
+    }
+    false
+}
+
 /// A fragment's usefulness under pressure: its field's and role's, except
 /// that a filter checkbox's state and a bare facet count ("( 858 )") are
 /// shed with the control labels, so a listing keeps its records over them.
@@ -2001,9 +2041,65 @@ fn shed_rank(field: SemanticReadField, role: SemanticRole, content: SemanticRead
     };
     if facet {
         2
+    } else if control_value_label(field, role, content) {
+        0
     } else {
         read_priority(field, role)
     }
+}
+
+// A price/date/time can be the name of a control that opens its details.
+// Retention only: this neither parses a value nor verifies a selected filter.
+fn control_value_label(
+    field: SemanticReadField,
+    role: SemanticRole,
+    content: SemanticReadContent<'_>,
+) -> bool {
+    if !matches!(
+        field,
+        SemanticReadField::AccessibleName | SemanticReadField::VisibleText
+    ) || !matches!(
+        role,
+        SemanticRole::Button | SemanticRole::Combobox | SemanticRole::Spinbutton
+    ) {
+        return false;
+    }
+    let SemanticReadContent::Text(text) = content else {
+        return false;
+    };
+    let text = text.as_str().trim();
+    if !text.chars().any(|ch| ch.is_numeric()) {
+        return false;
+    }
+    let prefix = text
+        .split_once(char::is_numeric)
+        .map(|(prefix, _)| prefix.trim())
+        .unwrap_or(text);
+    if prefix.chars().count() <= 3
+        && prefix.chars().all(|ch| {
+            ch.is_alphabetic()
+                || matches!(
+                    ch,
+                    '$' | '€' | '£' | '¥' | '₹' | '₩' | '₽' | '₺' | '₴' | '₪' | '₫' | '฿'
+                )
+        })
+    {
+        return true;
+    }
+    let mut previous_number = false;
+    let mut separator = false;
+    for ch in text.chars().filter(|ch| !ch.is_whitespace()) {
+        if previous_number && separator && ch.is_numeric() {
+            return true;
+        }
+        if previous_number && matches!(ch, ':' | '/' | '–' | '—' | '-') {
+            separator = true;
+        } else {
+            previous_number = ch.is_numeric();
+            separator = false;
+        }
+    }
+    false
 }
 
 pub(crate) fn read_priority(field: SemanticReadField, role: SemanticRole) -> u8 {
@@ -3169,6 +3265,62 @@ mod tests {
             merged.fragments().len() <= usize::from(SemanticReadBudget::EXTRACTION.max_items())
         );
         assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
+    }
+
+    #[test]
+    fn extraction_keeps_prices_and_selected_dates_in_control_labels_under_pressure() {
+        let mut nodes = vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"button","n":"Check in / Check out Nov 18 – 21","o":1}),
+            json!({"k":3,"p":0,"r":"button","n":"$236 total $236 total, originally $279","o":1}),
+            json!({"k":4,"p":0,"r":"button","n":"zł 218 total zł 218 total, originally zł 249","o":1}),
+            json!({"k":5,"p":0,"r":"button","n":"Depart 09:30","o":1}),
+        ];
+        nodes.push(json!({"k":446,"p":0,"r":"landmark","lm":"banner"}));
+        nodes.push(json!({"k":447,"p":5,"r":"landmark","lm":"search"}));
+        nodes.push(json!({"k":448,"p":6,"r":"button","n":"Location Homes in Lisbon","o":1}));
+        nodes.push(json!({"k":449,"p":6,"r":"button","n":"Guests 2 guests","o":1}));
+        nodes.push(json!({"k":450,"p":6,"r":"button","n":"Selected Nov 18 – 21","o":1}));
+        for key in 6..=165 {
+            nodes.push(
+                json!({"k":key,"p":0,"r":"button","n":format!("Gallery thumbnail {key}"),"o":1}),
+            );
+        }
+        for key in 166..=445 {
+            nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("Catalog detail {key}")}));
+        }
+        let observation = retained_observation(1, json!(nodes));
+        let ack = acknowledgement(&observation);
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+        )
+        .unwrap();
+        assert!(read.omissions().contains(SemanticReadOmission::ItemLimit));
+        for (reference, exact) in [
+            (2, "Check in / Check out Nov 18 – 21"),
+            (3, "$236 total $236 total, originally $279"),
+            (4, "zł 218 total zł 218 total, originally zł 249"),
+            (5, "Depart 09:30"),
+            (448, "Location Homes in Lisbon"),
+            (449, "Guests 2 guests"),
+            (450, "Selected Nov 18 – 21"),
+        ] {
+            let fragment = read
+                .fragments()
+                .iter()
+                .find(|fragment| fragment.provenance().node_key.get() == reference)
+                .expect("observed value in a button must remain extractable");
+            assert_eq!(fragment.content().text().unwrap().as_str(), exact);
+            assert_eq!(fragment.field(), SemanticReadField::AccessibleName);
+        }
+        assert!(!read.fragments().iter().any(|fragment| fragment
+            .content()
+            .text()
+            .is_some_and(|text| text.as_str().starts_with("Gallery thumbnail"))));
     }
 
     #[test]
