@@ -2,6 +2,7 @@ import { commands } from "$shared/ipc/bindings";
 import type {
   WorkModelEntry,
   WorkModelProvider,
+  WorkModelReasoning,
   WorkModelRole,
   WorkModelsFaultV1,
   WorkModelsV1,
@@ -119,6 +120,11 @@ export class ModelsSession {
 
   choose(role: WorkModelRole, id: string | null) {
     return this.act(`choose:${role}`, () => commands.workChooseModel(this.profile, role, id));
+  }
+
+  /** The lead's effort for this profile; null returns it to each model's default. */
+  setEffort(effort: WorkModelReasoning | null) {
+    return this.act("effort", () => commands.workSetModelEffort(this.profile, effort));
   }
 
   /** The key goes straight to Rust, which checks it with the provider first. */
