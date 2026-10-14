@@ -1163,7 +1163,15 @@ const MAX_CLIPS: usize = 24;
 /// Hand-written picks in the shapes models send: a `title` for the name, a
 /// fact without its kind (plain text), a fact as "Label: value".
 fn tidy_picks(data: &mut Value) {
+    // One pick is the recommendation: the first the lead marked.
+    let mut recommended = false;
     items_mut(data, |item| {
+        if item.get("recommended").and_then(Value::as_bool) == Some(true) {
+            if recommended {
+                item.remove("recommended");
+            }
+            recommended = true;
+        }
         if item.get("name").is_none() {
             if let Some(title) = item.remove("title") {
                 item.insert("name".into(), title);
