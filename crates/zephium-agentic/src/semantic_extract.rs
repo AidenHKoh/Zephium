@@ -1942,6 +1942,8 @@ fn admit_value<'a>(
             }
             let mut rows = Vec::with_capacity(items.len());
             let mut refused = None;
+            #[cfg(feature = "probe-harness")]
+            let proposed = items.len();
             for row in items {
                 let kept = (sources.len(), counters.clone());
                 let admitted = if row.fields.is_empty() {
@@ -1976,6 +1978,11 @@ fn admit_value<'a>(
                     Err(error) => return Err(error),
                 }
             }
+            #[cfg(feature = "probe-harness")]
+            crate::probe_evidence_path::trace(format_args!(
+                "extract-rows: proposed={proposed} kept={} first_refusal={refused:?}",
+                rows.len()
+            ));
             // Records were given and none held: the extraction fails with
             // the first record's own reason.
             if let (true, Some(error)) = (rows.is_empty(), refused) {

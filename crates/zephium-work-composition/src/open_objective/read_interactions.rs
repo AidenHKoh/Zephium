@@ -15,7 +15,7 @@ enum Interaction {
 
 /// Dismiss names in preference order: refusing optional cookies first, then
 /// acknowledging. Matched as whole words, English and Polish.
-const CONSENT_REFUSE: [&str; 14] = [
+const CONSENT_REFUSE: [&str; 16] = [
     "reject",
     "reject all",
     "decline",
@@ -30,6 +30,8 @@ const CONSENT_REFUSE: [&str; 14] = [
     "odrzuć",
     "odrzuć wszystkie",
     "tylko niezbędne",
+    "nie zgadzam się",
+    "nie akceptuję",
 ];
 const CONSENT_ACKNOWLEDGE: [&str; 12] = [
     "accept",

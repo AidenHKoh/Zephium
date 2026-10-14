@@ -1080,6 +1080,7 @@ impl NativeWorkComposition {
                         | AgentWorkEventKind::DecisionFallback { .. }
                         | AgentWorkEventKind::RowRead { .. }
                         | AgentWorkEventKind::AppViewOpened
+                        | AgentWorkEventKind::ListingLoaded { .. }
                         | AgentWorkEventKind::ObservationFacts { .. }
                 ) {
                     if let Some(diagnostic) = diagnostics.model_diagnostic {

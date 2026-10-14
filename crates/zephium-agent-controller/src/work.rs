@@ -7005,6 +7005,15 @@ pub enum AgentWorkEventKind {
     },
     /// Rust pressed a daily app's view control to read that view.
     AppViewOpened,
+    /// Rust loaded more of a listing before its read.
+    ListingLoaded {
+        /// Loading steps taken.
+        steps: u8,
+        /// Distinct records seen across the loaded views.
+        records: u16,
+        /// Why the loading stopped.
+        stop: listing::ListingStop,
+    },
     /// Closed size facts of one observation a typed read decides on.
     ObservationFacts {
         /// Nodes across every captured frame.

@@ -6,6 +6,25 @@ use std::collections::BTreeSet;
 const MAX_LOADING_STEPS: usize = 6;
 const MAX_LOADING_MILLIS: u64 = 8_000;
 
+/// Why loading more of a listing stopped, as a closed fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ListingStop {
+    /// The page held as many records as were asked for.
+    Enough,
+    /// The page showed no more records, or none it could count.
+    Exhausted,
+    /// Its time or action budget ran out.
+    Budget,
+    /// A human check, a wall or private content was on the page.
+    Guarded,
+    /// The page had no load-more control and nothing to scroll.
+    NoControl,
+    /// The step did not change the page.
+    Unchanged,
+    /// This task does not load listings.
+    Off,
+}
+
 #[derive(Default)]
 struct ListingProgress {
     identities: BTreeSet<[u8; 32]>,
@@ -13,7 +32,8 @@ struct ListingProgress {
 }
 
 impl ListingProgress {
-    fn observe(&mut self, census: &NativeListingCensus, requested: usize) -> bool {
+    /// Why loading should stop after this census, if it should.
+    fn observe(&mut self, census: &NativeListingCensus, requested: usize) -> Option<ListingStop> {
         let previous = self.identities.len();
         self.identities.extend(census.identities.iter().copied());
         self.unchanged = if self.identities.len() == previous {
@@ -21,10 +41,13 @@ impl ListingProgress {
         } else {
             0
         };
-        !census.limited
-            && !census.identities.is_empty()
-            && self.identities.len() < requested
-            && self.unchanged < 2
+        if self.identities.len() >= requested {
+            Some(ListingStop::Enough)
+        } else if census.limited || census.identities.is_empty() || self.unchanged >= 2 {
+            Some(ListingStop::Exhausted)
+        } else {
+            None
+        }
     }
 }
 
@@ -84,6 +107,13 @@ impl AgentWorkController {
         if !state.actions_before_extraction
             || !(state.progressive_observation || state.navigation_discovery.is_some())
         {
+            state
+                .journal_mut()?
+                .emit(AgentWorkEventKind::ListingLoaded {
+                    steps: 0,
+                    records: 0,
+                    stop: ListingStop::Off,
+                })?;
             return Ok(observation);
         }
         let started = Instant::now();
@@ -98,14 +128,21 @@ impl AgentWorkController {
             observation = Box::pin(Self::observe(state, worker, browser)).await?;
         }
         let mut progress = ListingProgress::default();
-        for _ in 0..MAX_LOADING_STEPS {
+        let mut steps = 0u8;
+        let stop = loop {
+            if usize::from(steps) >= MAX_LOADING_STEPS {
+                break ListingStop::Budget;
+            }
             state.check_task_contract()?;
             state.native.check_control(worker, browser)?;
             let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
             if started.elapsed() >= Duration::from_millis(MAX_LOADING_MILLIS)
                 || session.next_action > session.max_actions
                 || session.turns.saturating_add(1) >= session.max_model_calls
-                || state.task.human_wall(&observation).is_some()
+            {
+                break ListingStop::Budget;
+            }
+            if state.task.human_wall(&observation).is_some()
                 || looks_like_human_challenge(&observation)
                 || observation
                     .frames()
@@ -113,16 +150,16 @@ impl AgentWorkController {
                     .flat_map(|frame| frame.nodes())
                     .any(|node| node.sensitivity() != SemanticSensitivity::Public)
             {
-                break;
+                break ListingStop::Guarded;
             }
             let census = native_listing_census(&observation);
-            if !progress.observe(&census, requested) {
-                break;
+            if let Some(stop) = progress.observe(&census, requested) {
+                break stop;
             }
             // Loading more is a courtesy before the read: a step the action
             // contract refuses ends the loading, never the read.
             let Some(recipe) = load_more(&census) else {
-                break;
+                break ListingStop::NoControl;
             };
             let Some(next) = Box::pin(Self::code_owned_read(
                 state,
@@ -133,10 +170,18 @@ impl AgentWorkController {
             ))
             .await?
             else {
-                break;
+                break ListingStop::Unchanged;
             };
+            steps += 1;
             observation = next;
-        }
+        };
+        state
+            .journal_mut()?
+            .emit(AgentWorkEventKind::ListingLoaded {
+                steps,
+                records: u16::try_from(progress.identities.len()).unwrap_or(u16::MAX),
+                stop,
+            })?;
         Ok(observation)
     }
 }
@@ -242,26 +287,28 @@ mod tests {
     #[test]
     fn virtualized_records_count_once_across_looks_and_loading_stops_at_the_bound() {
         let mut progress = ListingProgress::default();
-        assert!(progress.observe(&census(&[1, 2]), 4));
-        assert!(progress.observe(&census(&[2, 3]), 4));
-        assert!(!progress.observe(&census(&[3, 4]), 4));
+        assert!(progress.observe(&census(&[1, 2]), 4).is_none());
+        assert!(progress.observe(&census(&[2, 3]), 4).is_none());
+        assert!(progress.observe(&census(&[3, 4]), 4).is_some());
         assert_eq!(progress.identities.len(), 4);
     }
 
     #[test]
     fn repeated_candidates_stop_loading_without_claiming_the_requested_count() {
         let mut progress = ListingProgress::default();
-        assert!(progress.observe(&census(&[1, 2]), 3));
-        assert!(progress.observe(&census(&[1, 2]), 3));
-        assert!(!progress.observe(&census(&[2, 1]), 3));
+        assert!(progress.observe(&census(&[1, 2]), 3).is_none());
+        assert!(progress.observe(&census(&[1, 2]), 3).is_none());
+        assert!(progress.observe(&census(&[2, 1]), 3).is_some());
         assert_eq!(progress.identities.len(), 2);
     }
 
     #[test]
     fn no_collection_or_structural_limit_cannot_trigger_loading() {
-        assert!(!ListingProgress::default().observe(&census(&[]), 3));
+        assert!(ListingProgress::default()
+            .observe(&census(&[]), 3)
+            .is_some());
         let mut limited = census(&[1, 2]);
         limited.limited = true;
-        assert!(!ListingProgress::default().observe(&limited, 3));
+        assert!(ListingProgress::default().observe(&limited, 3).is_some());
     }
 }

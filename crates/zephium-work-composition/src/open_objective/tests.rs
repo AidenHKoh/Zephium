@@ -968,6 +968,32 @@ fn a_recorded_specifications_disclosure_in_view_is_toggled_by_recipe() {
 
 #[cfg(feature = "durable-runtime")]
 #[test]
+fn allegros_privacy_dialog_is_refused_by_its_do_not_agree_control() {
+    use serde_json::json;
+    let policy = read_interactions::ReadingInteractionPolicy;
+    let button = |key: u32, name: &str, y: u32| json!({"k":key,"p":0,"r":"button","n":name,"ak":1,"o":9,"fc":true,"b":{"x":10,"y":y,"w":300,"h":40}});
+    // Allegro's consent dialog as seen on 2026-10-14: an alert dialog about
+    // privacy with a language picker, agree, do not agree, and settings.
+    let observation = reading_observation(
+        json!([
+            {"k":1,"r":"dialog","n":"Dbamy o Twoją prywatność","fc":true,"b":{"x":0,"y":0,"w":800,"h":600}},
+            {"k":2,"p":0,"r":"combobox","n":"język","fc":true,"b":{"x":10,"y":20,"w":120,"h":30}},
+            {"k":3,"p":0,"r":"paragraph","t":"Dzięki plikom cookies i technologiom pokrewnym (np. piksele, SDK) oraz przetwarzaniu Twoich danych osobowych możemy zapewnić Ci dopasowany do Ciebie wyświetlane treści.","fc":true},
+            button(4, "Zgadzam się", 500),
+            button(5, "Nie zgadzam się", 500),
+            button(6, "Zmieniam zgody", 500)
+        ]),
+        "complete",
+    );
+    let nodes = observation.frames()[0].nodes();
+    assert_eq!(
+        policy.consent_dismissal(&observation),
+        Some(nodes[4].reference())
+    );
+}
+
+#[cfg(feature = "durable-runtime")]
+#[test]
 fn a_page_in_the_persons_session_is_read_never_dismissed_or_consented() {
     use serde_json::json;
     let policy = read_interactions::SessionReadingPolicy;

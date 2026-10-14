@@ -3101,7 +3101,9 @@ impl AgentBrowserSession {
     ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
         use zephium_agentic::*;
         self.check_live()?;
-        if self.objective.is_none() || self.unverified_local_writes {
+        // `unverified_local_writes` is a site session's mode, not a record of
+        // writes: a read of what loading showed stays a read in either mode.
+        if self.objective.is_none() {
             return Err(crate::continuation!());
         }
         if self.turns >= self.max_model_calls {
