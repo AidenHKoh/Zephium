@@ -539,6 +539,25 @@ impl SemanticExtractionSchema {
             if field.kind() == SemanticExtractionValueKind::Rows && field.max_list_items() == Some(1))
     }
 
+    /// The read ceilings of a terminal mapping: a multi-record listing gets
+    /// the room its many cards need, anything else the single-record budget.
+    pub fn extraction_read_budget(&self) -> crate::SemanticReadBudget {
+        if self.is_row_collection() {
+            crate::SemanticReadBudget::LISTING
+        } else {
+            crate::SemanticReadBudget::EXTRACTION
+        }
+    }
+
+    /// The request encoding ceiling matching `extraction_read_budget`.
+    pub fn extraction_encoding_budget(&self) -> crate::SemanticModelEncodingBudget {
+        if self.is_row_collection() {
+            crate::SemanticModelEncodingBudget::LISTING_PROVIDER_EXACT_CONSERVATIVE
+        } else {
+            crate::SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE
+        }
+    }
+
     /// Facts and records use the larger document budget, including single
     /// products whose identity metadata lies beyond the first viewport.
     pub fn reads_whole_page(&self) -> bool {

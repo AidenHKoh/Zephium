@@ -3412,7 +3412,7 @@ impl AgentWorkController {
                                 SemanticReadAuthority::Acknowledged(checkpoint.baseline()),
                                 captured_at,
                                 SemanticReadSensitivityLimit::PublicOnly,
-                                SemanticReadBudget::EXTRACTION,
+                                schema.extraction_read_budget(),
                                 schema,
                             )
                             .map_err(|error| {
@@ -5459,7 +5459,7 @@ impl AgentWorkController {
                     SemanticReadAuthority::Acknowledged(turn.turn.continuation().baseline()),
                     captured_at,
                     SemanticReadSensitivityLimit::PublicOnly,
-                    SemanticReadBudget::EXTRACTION,
+                    schema.extraction_read_budget(),
                     schema,
                 )
                 .map_err(|error| {

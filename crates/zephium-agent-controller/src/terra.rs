@@ -2872,7 +2872,7 @@ impl AgentBrowserSession {
                 authority,
                 captured_at,
                 SemanticReadSensitivityLimit::PublicOnly,
-                SemanticReadBudget::EXTRACTION,
+                schema.extraction_read_budget(),
                 schema,
             )
         } else {
@@ -2881,7 +2881,7 @@ impl AgentBrowserSession {
                 authority,
                 captured_at,
                 SemanticReadSensitivityLimit::PublicOnly,
-                SemanticReadBudget::EXTRACTION,
+                schema.extraction_read_budget(),
                 schema,
             )
         }
@@ -2903,13 +2903,10 @@ impl AgentBrowserSession {
         if read.fragments().is_empty() && schema.fields().iter().any(|field| field.required()) {
             return Err(AgentBrowserProviderError::NoExtractionEvidence);
         }
-        let payload = encode_semantic_extraction_request(
-            schema,
-            &read,
-            SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
-        )
-        .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
-        .map_err(AgentBrowserProviderError::InitialEncoding)?;
+        let payload =
+            encode_semantic_extraction_request(schema, &read, schema.extraction_encoding_budget())
+                .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+                .map_err(AgentBrowserProviderError::InitialEncoding)?;
         let request = self.next_model_call_request()?;
         let baseline = continuation.baseline().clone();
         let subtree = previous.is_some();
@@ -3009,12 +3006,10 @@ impl AgentBrowserSession {
         let Some(prior) = self.model_receipts.last().map(|(_, input)| *input) else {
             return Err(refused);
         };
-        let Ok(payload) = encode_semantic_extraction_request(
-            schema,
-            read,
-            SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
-        )
-        .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer())) else {
+        let Ok(payload) =
+            encode_semantic_extraction_request(schema, read, schema.extraction_encoding_budget())
+                .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+        else {
             return Err(refused);
         };
         let Ok(request) = self.next_model_call_request() else {
@@ -3119,7 +3114,7 @@ impl AgentBrowserSession {
             SemanticReadAuthority::Acknowledged(&baseline),
             captured_at,
             SemanticReadSensitivityLimit::PublicOnly,
-            SemanticReadBudget::EXTRACTION,
+            schema.extraction_read_budget(),
             schema,
         )
         .map_err(AgentBrowserProviderError::Read)?;
@@ -3132,13 +3127,10 @@ impl AgentBrowserSession {
         if read.fragments().is_empty() {
             return Err(AgentBrowserProviderError::NoExtractionEvidence);
         }
-        let payload = encode_semantic_extraction_request(
-            schema,
-            &read,
-            SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
-        )
-        .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
-        .map_err(AgentBrowserProviderError::InitialEncoding)?;
+        let payload =
+            encode_semantic_extraction_request(schema, &read, schema.extraction_encoding_budget())
+                .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+                .map_err(AgentBrowserProviderError::InitialEncoding)?;
         let request = self.next_model_call_request()?;
         let prepared = AgentProviderExtractionRequestDraft::try_owned_read(
             &self.policy,
@@ -3199,7 +3191,7 @@ impl AgentBrowserSession {
             let payload = encode_semantic_extraction_request(
                 schema,
                 read,
-                SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
+                schema.extraction_encoding_budget(),
             )
             .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
             .map_err(AgentBrowserProviderError::InitialEncoding)?;

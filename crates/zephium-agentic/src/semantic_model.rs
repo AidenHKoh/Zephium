@@ -98,17 +98,24 @@ impl SemanticModelEncodingBudget {
     /// Actual encoded bytes are only a conservative preflight to whole-request
     /// exact counting, never an allocation, charge or token-count claim for
     /// the ceiling itself.
-    pub const EXTRACTION_PROVIDER_EXACT_CONSERVATIVE: Self = Self {
-        max_bytes: 2 * crate::SemanticReadBudget::EXTRACTION.max_bytes()
-            + 128 * crate::SemanticReadBudget::EXTRACTION.max_items() as u32
+    pub const EXTRACTION_PROVIDER_EXACT_CONSERVATIVE: Self =
+        Self::extraction_ceiling(crate::SemanticReadBudget::EXTRACTION);
+
+    /// The same representation contract for a multi-record listing read.
+    pub const LISTING_PROVIDER_EXACT_CONSERVATIVE: Self =
+        Self::extraction_ceiling(crate::SemanticReadBudget::LISTING);
+
+    const fn extraction_ceiling(read: crate::SemanticReadBudget) -> Self {
+        let ceiling = 2 * read.max_bytes()
+            + 128 * read.max_items() as u32
             + INITIAL_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING
-            + 16 * 1024,
-        max_tokens: 2 * crate::SemanticReadBudget::EXTRACTION.max_bytes()
-            + 128 * crate::SemanticReadBudget::EXTRACTION.max_items() as u32
-            + INITIAL_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING
-            + 16 * 1024,
-        token_requirement: SemanticTokenCountRequirement::ConservativeAllowed,
-    };
+            + 16 * 1024;
+        Self {
+            max_bytes: ceiling,
+            max_tokens: ceiling,
+            token_requirement: SemanticTokenCountRequirement::ConservativeAllowed,
+        }
+    }
 
     /// Initial snapshot budget for a provider with an exact counting path.
     pub const INITIAL_EXACT: Self = Self {

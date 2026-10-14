@@ -123,7 +123,7 @@ impl Capture {
 /// requires an explicit committed navigation receipt; retained references
 /// remain historical and can only contribute to terminal extraction.
 ///
-/// Holds at most eight captures and EXTRACTION's fragments and content.
+/// Holds at most eight captures and the read budget's fragments and content.
 /// Under pressure, large captures yield to focused reads; age breaks ties.
 /// Omissions remain explicit. Empty reads never displace useful evidence. This object has no
 /// browser operation, codec, persistence, or provider-disclosure authority.
@@ -133,6 +133,7 @@ pub struct SemanticRetainedReadEvidence {
     context: Option<ContextJoin>,
     roles: Option<SemanticReadRoleSelection>,
     captures: Vec<Capture>,
+    budget: Option<SemanticReadBudget>,
     dropped_stats: SemanticReadStats,
     dropped_omissions: u8,
     last_seen: Option<SemanticObservationAcknowledgement>,
@@ -162,6 +163,7 @@ impl SemanticRetainedReadEvidence {
             context: Some(predecessor.context()),
             roles: self.roles,
             url_sources: self.url_sources,
+            budget: self.budget,
             last_seen: Some(predecessor.clone()),
             ..Self::default()
         };
@@ -187,6 +189,10 @@ impl SemanticRetainedReadEvidence {
         }
         self.context = Some(receipt.operation().context());
         Ok(())
+    }
+
+    fn budget(&self) -> SemanticReadBudget {
+        self.budget.unwrap_or(SemanticReadBudget::EXTRACTION)
     }
 
     /// Safe primitive bytes retained, excluding bounded structural metadata.
@@ -225,8 +231,9 @@ impl SemanticRetainedReadEvidence {
                 .fragments()
                 .iter()
                 .any(|fragment| fragment.provenance().sensitivity() != SemanticSensitivity::Public)
-            || read.stats.items > SemanticReadBudget::EXTRACTION.max_items()
-            || read.stats.content_bytes > SemanticReadBudget::EXTRACTION.max_bytes()
+            || self.budget.is_some_and(|budget| budget != read.budget)
+            || read.stats.items > read.budget.max_items()
+            || read.stats.content_bytes > read.budget.max_bytes()
         {
             return Err(SemanticReadError::AuthorityMismatch);
         }
@@ -240,6 +247,7 @@ impl SemanticRetainedReadEvidence {
         }
         self.context = Some(read.context());
         self.roles = Some(read.source_roles());
+        self.budget = Some(read.budget);
         self.url_sources = Some(read.url_sources());
         if let Some(stats) = self.last_empty.take() {
             merge_omitted_stats(&mut self.dropped_stats, stats);
@@ -313,12 +321,13 @@ impl SemanticRetainedReadEvidence {
         } else {
             self.captures.push(capture);
         }
+        let budget = self.budget();
         while self.captures.len() > MAX_CAPTURES
-            || self.retained_items() > SemanticReadBudget::EXTRACTION.max_items()
-            || self.retained_bytes() > SemanticReadBudget::EXTRACTION.max_bytes()
+            || self.retained_items() > budget.max_items()
+            || self.retained_bytes() > budget.max_bytes()
         {
-            let byte_pressure = self.retained_bytes() > SemanticReadBudget::EXTRACTION.max_bytes();
-            let item_pressure = self.retained_items() > SemanticReadBudget::EXTRACTION.max_items();
+            let byte_pressure = self.retained_bytes() > budget.max_bytes();
+            let item_pressure = self.retained_items() > budget.max_items();
             let index = if byte_pressure || item_pressure {
                 self.captures
                     .iter()
@@ -417,7 +426,8 @@ impl SemanticRetainedReadEvidence {
                     bytes + capture.stats.content_bytes,
                 )
             });
-        let budget = SemanticReadBudget::EXTRACTION;
+        let budget = self.budget.unwrap_or(current.budget);
+        current.budget = budget;
         let item_limit = budget.max_items() - history_items.min(budget.max_items() / 2);
         let byte_limit = budget.max_bytes() - history_bytes.min(budget.max_bytes() / 2);
         while current.stats.items > item_limit || current.stats.content_bytes > byte_limit {
@@ -461,17 +471,16 @@ impl SemanticRetainedReadEvidence {
             for source in &capture.fragments {
                 let content = source.content.borrow();
                 let bytes = content.retained_bytes();
-                if current.stats.items >= SemanticReadBudget::EXTRACTION.max_items()
-                    || current.stats.content_bytes + bytes
-                        > SemanticReadBudget::EXTRACTION.max_bytes()
+                if current.stats.items >= budget.max_items()
+                    || current.stats.content_bytes + bytes > budget.max_bytes()
                 {
-                    current.omissions.insert(
-                        if current.stats.items >= SemanticReadBudget::EXTRACTION.max_items() {
+                    current
+                        .omissions
+                        .insert(if current.stats.items >= budget.max_items() {
                             SemanticReadOmission::ItemLimit
                         } else {
                             SemanticReadOmission::ByteLimit
-                        },
-                    );
+                        });
                     current.stats.omitted_items = current.stats.omitted_items.saturating_add(1);
                     continue;
                 }
