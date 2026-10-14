@@ -47,6 +47,7 @@ impl Shell {
     pub(super) fn forget_profile_roster(&mut self, profile: ProfileId) {
         self.roster.avatars.remove(&profile);
         self.roster.left_at.remove(&profile);
+        self.forget_space_memory(profile);
         self.project_profiles();
     }
 
@@ -170,6 +171,7 @@ impl Shell {
                 id: *id,
                 profile,
                 name: "Space".into(),
+                look: Default::default(),
             })
         });
         if space.is_none() {
@@ -257,7 +259,7 @@ impl Shell {
                 mutation_result(self.commit(effects))
             };
         }
-        let Some(space) = self.spaces.first_for(profile) else {
+        let Some(space) = self.remembered_space(profile) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         };
         if self.work_pane.is_some() {
@@ -266,6 +268,7 @@ impl Shell {
         if let Some(active) = active {
             self.roster.left_at.insert(leaving, active);
         }
+        self.remember_space_left();
         for id in self.items.view_ids() {
             if self.profile_of_item(id) == Some(leaving) {
                 effects.extend(self.items.hibernate(id));

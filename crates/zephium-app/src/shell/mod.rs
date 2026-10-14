@@ -167,6 +167,7 @@ impl AgentLifecycleOwner {
 
 mod browser_pages;
 mod kept_sites;
+mod spaces;
 mod work_pane;
 
 /// Pages a run may queue for a seat in its page group at once.
@@ -224,6 +225,7 @@ pub struct Shell {
     divider: Option<GrabbedDivider>,
     private: Option<private::PrivateSession>,
     roster: profile_roster::RosterState,
+    space_memory: spaces::SpaceMemory,
     /// Sites allowed to open a kind of application link without asking,
     /// for this run only.
     external_apps_allowed: std::collections::HashSet<(ProfileId, String, String)>,
@@ -457,6 +459,7 @@ impl Shell {
             divider: None,
             private: None,
             roster: profile_roster::RosterState::default(),
+            space_memory: spaces::SpaceMemory::default(),
             external_apps_allowed: std::collections::HashSet::new(),
             residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),
@@ -810,6 +813,9 @@ impl Shell {
             }
             Command::TabAction { id, action } => {
                 let _ = self.operation_tab_action(id, action);
+            }
+            Command::Space(command) => {
+                let _ = self.operation_space(*command);
             }
             Command::SetWindowSize(size) => match self.windows.focused_mut() {
                 Some(win) => {

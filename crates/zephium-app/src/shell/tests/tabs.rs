@@ -92,6 +92,7 @@ fn forged_runtime_ids_cannot_cross_the_focused_space_or_profile() {
         id: sibling_space,
         profile,
         name: "Sibling".into(),
+        look: Default::default(),
     }));
     let foreign_profile = ProfileId::from(9002);
     let foreign_space = SpaceId::from(9003);
@@ -104,6 +105,7 @@ fn forged_runtime_ids_cannot_cross_the_focused_space_or_profile() {
         id: foreign_space,
         profile: foreign_profile,
         name: "Foreign".into(),
+        look: Default::default(),
     }));
 
     let sibling = ItemId::from(9004);
@@ -453,7 +455,8 @@ fn native_download_cleanup_survives_a_space_switch() {
     assert!(shell.spaces.insert(Space {
         id: other,
         profile,
-        name: "Other".into()
+        name: "Other".into(),
+        look: Default::default(),
     }));
     let window = shell.windows.focused_mut().unwrap();
     window.space = other;

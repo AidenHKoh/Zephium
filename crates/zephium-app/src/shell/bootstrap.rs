@@ -365,6 +365,7 @@ impl Shell {
                 id,
                 profile,
                 name: "Space".into(),
+                look: Default::default(),
             }) {
                 return Some(id);
             }

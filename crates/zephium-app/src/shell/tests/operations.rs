@@ -386,6 +386,7 @@ fn trusted_extension_page_closure_removes_only_matching_typed_marker() {
         id: other_space,
         profile: other_profile,
         name: "Other".into(),
+        look: Default::default(),
     }));
     let inactive_guest = ItemId::from(903);
     assert!(shell.items.insert_extension_tab(
@@ -1175,6 +1176,7 @@ fn keyboard_selection_walks_the_sidebar_from_favorites_through_pinned_folders() 
                 id: space,
                 profile,
                 name: "Main".into(),
+                look: Default::default(),
             }],
             items: vec![
                 item(

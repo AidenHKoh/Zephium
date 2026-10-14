@@ -369,6 +369,7 @@ fn private_favicon_is_visible_but_never_written_to_persistent_storage() {
         id: space,
         profile,
         name: "Private".into(),
+        look: Default::default(),
     }));
     shell
         .windows

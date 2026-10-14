@@ -206,6 +206,7 @@ mod tests {
                     id: SpaceId::from(*id + 100),
                     profile: ProfileId::from(*id),
                     name: "Space".into(),
+                    look: Default::default(),
                 })
                 .collect(),
             active_space: Some(SpaceId::from(profiles[0].0 + 100)),
@@ -323,6 +324,7 @@ mod tests {
                 id: SpaceId::from(101),
                 profile: ProfileId::from(1),
                 name: "Space".into(),
+                look: Default::default(),
             }],
             active_space: Some(SpaceId::from(101)),
             ..SessionState::default()

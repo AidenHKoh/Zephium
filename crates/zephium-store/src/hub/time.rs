@@ -469,6 +469,7 @@ mod tests {
                 id: SpaceId::from(2),
                 profile,
                 name: "Fixture".into(),
+                look: Default::default(),
             }],
             active_space: Some(SpaceId::from(2)),
             ..SessionState::default()

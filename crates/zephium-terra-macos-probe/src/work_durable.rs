@@ -595,6 +595,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             id: space,
             profile,
             name: "Public research".into(),
+            look: Default::default(),
         }],
         active_space: Some(space),
         ..SessionState::default()

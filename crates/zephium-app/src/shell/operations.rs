@@ -47,6 +47,7 @@ impl Shell {
             Command::Unsplit => self.operation_unsplit(),
             Command::LeaveSplit(id) => self.operation_leave_split(id),
             Command::TabAction { id, action } => self.operation_tab_action(id, action),
+            Command::Space(command) => self.operation_space(*command),
             Command::DropTab { id, x, y } => self.operation_drop_tab(id, x, y),
             Command::DividerRelease { x, y } => self.operation_divider_release(x.zip(y)),
             Command::Run(id) => self.operation_run_command(&id),
@@ -929,6 +930,21 @@ impl Shell {
                     mutation_result(native)
                 },
             ),
+            "space.next" => self.operation_space(crate::SpaceCommand::Step(1)),
+            "space.previous" => self.operation_space(crate::SpaceCommand::Step(-1)),
+            id if id.starts_with("space.select.") => id["space.select.".len()..]
+                .parse::<usize>()
+                .ok()
+                .filter(|position| (1..=9).contains(position))
+                .map_or_else(
+                    || {
+                        operation_result(
+                            OperationOutcome::Rejected,
+                            OperationReason::UnsupportedCommand,
+                        )
+                    },
+                    |position| self.operation_select_space(position),
+                ),
             "tab.select.last" => self.operation_select_tab(None),
             id if id.starts_with("tab.select.") => id["tab.select.".len()..]
                 .parse::<usize>()

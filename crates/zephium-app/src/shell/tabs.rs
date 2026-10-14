@@ -329,7 +329,12 @@ impl Shell {
 
     /// Which tab takes over from a closed active one, by the person's choice.
     /// `at` is where the closed tab stood in the sidebar's order.
-    fn successor(&self, profile: ProfileId, space: SpaceId, at: Option<usize>) -> Option<ItemId> {
+    pub(super) fn successor(
+        &self,
+        profile: ProfileId,
+        space: SpaceId,
+        at: Option<usize>,
+    ) -> Option<ItemId> {
         let tabs = self.keyboard_tabs(profile, space);
         if tabs.is_empty() {
             return None;

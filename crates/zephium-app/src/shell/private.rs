@@ -124,6 +124,7 @@ impl Shell {
                 id: *id,
                 profile,
                 name: "Private".into(),
+                look: Default::default(),
             })
         }) else {
             self.blocker.retire_profile(profile);

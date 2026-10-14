@@ -441,6 +441,7 @@ fn coordinator_with_storage(
                 id: space,
                 profile,
                 name: "Fixture".into(),
+                look: Default::default(),
             }],
             items: vec![],
             active_space: Some(space),

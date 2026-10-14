@@ -161,7 +161,12 @@ impl Hub {
                 let id = SpaceId::parse(&raw)
                     .filter(|id| id.to_string() == raw)
                     .ok_or_else(|| invalid_data("compatibility space has an invalid id"))?;
-                spaces.push(PersistedSpace { id, profile, name });
+                spaces.push(PersistedSpace {
+                    id,
+                    profile,
+                    name,
+                    look: Default::default(),
+                });
             }
             if spaces.len() != space_count as usize {
                 return Err(invalid_data(

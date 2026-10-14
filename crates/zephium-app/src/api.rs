@@ -205,6 +205,35 @@ pub enum TabAction {
     CloseBelow,
 }
 
+/// Space mutations from chrome, menus and keys. The shell checks each
+/// against the focused profile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpaceCommand {
+    Create {
+        name: String,
+        look: zephium_core::spaces::SpaceLook,
+    },
+    Update {
+        id: zephium_core::ids::SpaceId,
+        name: String,
+        look: zephium_core::spaces::SpaceLook,
+    },
+    Delete(zephium_core::ids::SpaceId),
+    Reorder {
+        id: zephium_core::ids::SpaceId,
+        before: Option<zephium_core::ids::SpaceId>,
+    },
+    Switch(zephium_core::ids::SpaceId),
+    /// The next (1) or previous (-1) space, wrapping.
+    Step(i8),
+    MoveTab {
+        tab: ItemId,
+        space: zephium_core::ids::SpaceId,
+    },
+    /// Moves the tab in front, for the menu bar.
+    MoveActive(zephium_core::ids::SpaceId),
+}
+
 /// What the person chose for a page's request to open another application
 /// or a blocked new tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -361,6 +390,8 @@ pub enum Command {
         id: ItemId,
         action: TabAction,
     },
+    /// Something done to the focused profile's spaces.
+    Space(Box<SpaceCommand>),
     SetWindowSize(Size),
     /// Whether the OS can currently present the main window. Minimized
     /// windows hide native content views so the engine can lower their memory

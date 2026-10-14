@@ -1815,6 +1815,7 @@ fn add_inactive_named_profile(shell: &mut Shell, seed: u128) -> ProfileId {
         id: space,
         profile,
         name: "Deletable".into(),
+        look: Default::default(),
     }));
     profile
 }
@@ -1954,6 +1955,7 @@ mod profiles;
 mod projections;
 mod search;
 mod shutdown;
+mod spaces;
 mod tabs;
 mod time;
 mod view_lifecycle;

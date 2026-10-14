@@ -13,7 +13,7 @@ use crate::item::{
 use crate::items::Items;
 use crate::navigation;
 use crate::profiles::{Profile, ProfileKind, Profiles};
-use crate::spaces::{Space, Spaces};
+use crate::spaces::{Space, SpaceLook, Spaces};
 use crate::split::Pane;
 
 pub const MAX_SESSION_PROFILES: usize = 64;
@@ -51,6 +51,9 @@ pub struct PersistedSpace {
     pub id: SpaceId,
     pub profile: ProfileId,
     pub name: String,
+    /// Absent on snapshots from before spaces had looks.
+    #[serde(default, skip_serializing_if = "SpaceLook::is_default")]
+    pub look: SpaceLook,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -151,6 +154,7 @@ pub fn snapshot_with_recently_closed(
             id: space.id,
             profile: space.profile,
             name: space.name.clone(),
+            look: space.look.clone(),
         });
         for section in [
             crate::item::SpaceSection::Pinned,
@@ -277,6 +281,7 @@ pub fn restore(state: SessionState) -> Restored {
                 id: s.id,
                 profile: s.profile,
                 name: bounded_name(&s.name, "Space"),
+                look: s.look.sanitized(),
             });
         }
     }
@@ -500,6 +505,7 @@ mod tests {
             id: space,
             profile,
             name: "Space".into(),
+            look: Default::default(),
         });
         (profiles, spaces, Items::default(), profile, space)
     }
@@ -763,6 +769,7 @@ mod tests {
                 id: space,
                 profile,
                 name: "S".into(),
+                look: Default::default(),
             }],
             items: vec![tab(10, Some(1_700_000_000_000)), tab(11, None)],
             ..SessionState::default()
@@ -797,6 +804,7 @@ mod tests {
                 id: SpaceId::from(2),
                 profile: ProfileId::from(1),
                 name: "Orphan".into(),
+                look: Default::default(),
             }],
             items: vec![PersistedItem {
                 id: ItemId::from(10),
@@ -848,11 +856,13 @@ mod tests {
                     id: space,
                     profile,
                     name: "\u{2066}Work\n".into(),
+                    look: Default::default(),
                 },
                 PersistedSpace {
                     id: private_space,
                     profile: private,
                     name: "Secret".into(),
+                    look: Default::default(),
                 },
             ],
             items: vec![
@@ -936,6 +946,7 @@ mod tests {
             id: sibling_space,
             profile,
             name: "Sibling".into(),
+            look: Default::default(),
         });
         let foreign_profile = ProfileId::from(4);
         let foreign_space = SpaceId::from(5);
@@ -948,6 +959,7 @@ mod tests {
             id: foreign_space,
             profile: foreign_profile,
             name: "Foreign".into(),
+            look: Default::default(),
         });
 
         let local = ItemId::from(10);
@@ -1047,5 +1059,45 @@ mod tests {
         });
 
         assert_eq!(restore(state).splits, None);
+    }
+
+    #[test]
+    fn spaces_keep_order_and_look_and_a_damaged_look_is_sanitized() {
+        use crate::spaces::{SpaceIcon, SpaceTheme};
+        let (profiles, mut spaces, items, profile, space) = seed();
+        let look = SpaceLook {
+            icon: Some(SpaceIcon::Symbol(4)),
+            color: 6,
+            theme: Some(SpaceTheme::Preset("dracula".into())),
+        };
+        assert!(spaces.create(SpaceId::from(3), profile, "Night", look.clone()));
+        assert!(spaces.reorder(SpaceId::from(3), Some(space)));
+        let mut state = snapshot(
+            &profiles,
+            &spaces,
+            &items,
+            Some(SpaceId::from(3)),
+            None,
+            None,
+        );
+        assert_eq!(canonicalize(state.clone()), state);
+        let restored = restore(state.clone());
+        let order: Vec<_> = restored
+            .spaces
+            .iter()
+            .map(|s| (s.id, s.look.clone()))
+            .collect();
+        assert_eq!(
+            order,
+            vec![(SpaceId::from(3), look), (space, SpaceLook::default())]
+        );
+        assert_eq!(restored.active_space, Some(SpaceId::from(3)));
+
+        state.spaces[0].look.color = 200;
+        state.spaces[0].look.theme = Some(SpaceTheme::Custom("{}".into()));
+        let restored = restore(state);
+        let look = &restored.spaces.get(SpaceId::from(3)).unwrap().look;
+        assert_eq!((look.color, &look.theme), (0, &None));
+        assert_eq!(look.icon, Some(SpaceIcon::Symbol(4)));
     }
 }

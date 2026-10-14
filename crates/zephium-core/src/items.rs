@@ -741,6 +741,7 @@ mod tests {
                 id,
                 profile,
                 name: "Space".into(),
+                look: Default::default(),
             }));
         }
 

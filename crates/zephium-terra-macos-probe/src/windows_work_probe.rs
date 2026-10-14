@@ -39,6 +39,7 @@ pub(super) fn run_loopback_site() -> Result<(), ProbeFailure> {
             id: space,
             profile,
             name: "Loopback replicas".into(),
+            look: Default::default(),
         }],
         active_space: Some(space),
         ..SessionState::default()

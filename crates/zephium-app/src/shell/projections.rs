@@ -257,10 +257,7 @@ impl Shell {
         let spaces = spaces
             .iter()
             .filter(|space| space.profile == profile.id)
-            .map(|space| SpaceView {
-                id: space.id.to_string(),
-                name: space.name.clone(),
-            })
+            .map(|space| self.space_view(space))
             .collect();
 
         let mut sidebar = SidebarProjection::default();

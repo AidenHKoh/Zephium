@@ -491,6 +491,7 @@ fn native_split_update_cannot_ratify_a_cross_space_tree() {
         id: foreign_space,
         profile,
         name: "Foreign".into(),
+        look: Default::default(),
     }));
     assert!(shell.items.insert_tab(
         foreign,

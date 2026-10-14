@@ -348,6 +348,37 @@ pub struct ProfilesView {
 pub struct SpaceView {
     pub id: String,
     pub name: String,
+    pub icon: Option<SpaceIconView>,
+    /// An avatar hue, shared with profiles.
+    pub color: u8,
+    /// Overrides the app theme for the whole window while the space is active.
+    pub theme: Option<SpaceThemeView>,
+    /// Pinned and open tabs, which deleting the space closes.
+    pub tabs: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SpaceIconView {
+    /// An index into the frame's curated symbols.
+    Symbol {
+        index: u8,
+    },
+    Emoji {
+        text: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SpaceThemeView {
+    Preset {
+        id: String,
+    },
+    /// Seeds in the shape of `ui.theme-custom`.
+    Custom {
+        seeds: String,
+    },
 }
 
 /// Stable display section for a sidebar node. Children inherit their
