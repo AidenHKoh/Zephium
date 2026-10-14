@@ -5,8 +5,11 @@
   import * as m from "$shared/i18n/messages";
   let {
     bottomInset = 0,
+    onfit,
   }: {
     bottomInset?: number;
+    /** The person asked for the whole picture: a run in progress may follow again. */
+    onfit?: () => void;
   } = $props();
   const flow = useSvelteFlow();
   const viewport = useViewport();
@@ -39,6 +42,7 @@
   let engaged = false;
   const travel = (name: "fast" | "slow") => (reducedMotion() ? 0 : duration(name));
   function fit() {
+    onfit?.();
     void flow.fitView({
       duration: travel("slow"),
       padding:

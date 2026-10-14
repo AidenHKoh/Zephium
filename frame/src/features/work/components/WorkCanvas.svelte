@@ -34,6 +34,13 @@
   import AgentMark from "./AgentMark.svelte";
   import WorkEdge from "./WorkEdge.svelte";
   import { arrivals } from "../lib/arrival";
+  import {
+    followMove,
+    glideMs,
+    settleMove,
+    type CameraMove,
+    type CameraView,
+  } from "../lib/camera-follow";
   import { duration, easing, reducedMotion } from "$shared/lib/motion";
   import { IS_MAC } from "$shared/platform";
   import CanvasControls from "./CanvasControls.svelte";
@@ -243,37 +250,33 @@
     return { x: AIR - rect.x * zoom - over, y: fitTopInset + 40 - rect.y * zoom, zoom };
   }
   /**
-   * The view that sets a result in the middle of what can be seen, at the
-   * zoom `framing` gives it; a result taller than the room starts near the top.
+   * A run that ends while the person follows it: the result's top comes into
+   * view if it is not, with one pan at the zoom they have. Never a re-fit.
    */
-  function centring(rect: { x: number; y: number; width: number; height: number }) {
-    const framed = framing(rect);
-    const zoom = framed.zoom;
-    const top = fitTopInset;
-    const room = canvasHeight - fitBottomInset - top;
-    const width = rect.width * zoom;
-    const height = rect.height * zoom;
-    const x = width <= canvasWidth - AIR * 2 ? (canvasWidth - width) / 2 - rect.x * zoom : framed.x;
-    const y = height <= room - AIR ? top + (room - height) / 2 - rect.y * zoom : framed.y;
-    return { x, y, zoom };
-  }
-  /** Brings a card to the reading place: centred when it fits, as large as its span lets it read whole. */
-  function reveal(id: string, span?: number, tries = 30) {
+  function settle(id: string, span?: number, tries = 30) {
     const node = nodeFor(id);
     // The answer lands a frame or two after its run ends: wait for it rather than for nothing.
     if (!node && tries > 0) {
-      requestAnimationFrame(() => reveal(id, span, tries - 1));
+      requestAnimationFrame(() => settle(id, span, tries - 1));
       return;
     }
     if (!node || !flow) return;
     homed = false;
     const position = absolutePosition(node, nodes);
-    const height = node.height ?? node.measured?.height ?? 320;
-    void flow.setViewport(centring({ ...position, width: span ?? node.width ?? 480, height }), {
-      duration: reducedMotion() ? 0 : duration("page"),
-      ease: curve(easing("emphasized")),
-      interpolate: "linear",
+    const move = settleMove({
+      view: cameraView(),
+      room: cameraRoom(),
+      result: {
+        left: position.x,
+        top: position.y,
+        right: position.x + (span ?? node.width ?? 480),
+        bottom: position.y + (node.height ?? node.measured?.height ?? 320),
+      },
+      following,
+      reduced: reducedMotion(),
+      base: duration("page"),
     });
+    if (move) glide(move);
   }
   const restoredViewport = untrack(() => validViewport(initialView?.viewport));
   let viewport = $state(restoredViewport ?? { x: 0, y: 0, zoom: 1 });
@@ -542,7 +545,7 @@
     placeArea: (area: string, rect: CanvasPosition & CanvasSize) => void;
     center: (id: string) => void;
     focusCard: (id: string) => void;
-    reveal: (id: string, span?: number) => void;
+    settle: (id: string, span?: number) => void;
     followAgent: () => boolean;
     resumeFollow: () => void;
   };
@@ -591,24 +594,38 @@
       placeArea,
       center,
       focusCard: (id: string) => void focusCard(id),
-      reveal,
+      settle,
       followAgent: () => following,
       resumeFollow,
     });
   });
 
-  // Camera follow. While a run is live and its marks walk to stands out of
-  // sight, the view pans (never zooms) to set them in the middle. A manual
-  // pan, zoom or drag pauses it; it resumes on a new request, from the Follow
-  // pill, or once the person has left the canvas alone for a while.
-  const FOLLOW_AIR = 24;
+  // Camera follow. While a run is live and the mark walks out of sight, the
+  // view pans (never zooms) just far enough to bring it back. A manual pan,
+  // zoom or drag ends it: it resumes on a new request, from the Follow pill
+  // or the fit control, never on its own.
   /** The orb and the widest caption it usually carries. */
   const MARK_REACH = { width: 220, height: 24 };
   let flow: ReturnType<typeof useSvelteFlow> | undefined;
   let following = $state(true);
-  /** When the person last moved the canvas themselves. */
-  let touched = 0;
-  const IDLE_RESUME = 5000;
+  /** Where the camera is bound while a glide runs, so a second move starts from it, not from mid-flight. */
+  let aim: CameraView | undefined;
+  const cameraView = () => aim ?? viewport;
+  const cameraRoom = () => ({
+    width: canvasWidth,
+    top: fitTopInset,
+    bottom: canvasHeight - fitBottomInset,
+  });
+  /** The only way the follow moves the camera: one eased glide, which replaces any still running. */
+  function glide(move: CameraMove) {
+    if (!flow) return;
+    aim = move.view;
+    void flow.setViewport(move.view, {
+      duration: move.ms,
+      ease: curve(easing("smooth")),
+      interpolate: "linear",
+    });
+  }
   let fitted = false;
   let requestsSeen = false;
   let stands: Record<string, string> = {};
@@ -616,11 +633,7 @@
   function resumeFollow() {
     following = true;
     const marks = nodes.filter(isAgentNode).filter((node) => !node.class);
-    if (marks.length)
-      followMarks(
-        marks.map((node) => node.position),
-        true,
-      );
+    if (marks.length) followMarks(marks.map((node) => node.position));
   }
   /** A `cubic-bezier()` token as a function of time, for the flow's own tween. */
   function curve(token: string): (t: number) => number {
@@ -651,94 +664,41 @@
       return;
     }
     homed = false;
-    const zoom = viewport.zoom;
+    const zoom = cameraView().zoom;
     const position = absolutePosition(node, nodes);
     const width = (node.width ?? node.measured?.width ?? 320) * zoom;
     const height = (node.height ?? node.measured?.height ?? 80) * zoom;
     const top = fitTopInset;
     const bottom = canvasHeight - fitBottomInset;
-    void flow.setViewport(
-      {
+    glide({
+      view: {
         x: (canvasWidth - width) / 2 - position.x * zoom,
         y: top + (bottom - top - height) / 2 - position.y * zoom,
         zoom,
       },
-      {
-        duration: reducedMotion() ? 0 : duration("page"),
-        ease: curve(easing("emphasized")),
-        interpolate: "linear",
-      },
-    );
+      ms: glideMs(reducedMotion(), duration("page")),
+    });
   }
-  /**
-   * Sets the live marks in the middle of the view when one has walked out of
-   * its calm middle; marks too far apart to share the view, the one that
-   * moved leads.
-   */
-  function followMarks(
-    positions: readonly CanvasPosition[],
-    always = false,
-    lead?: CanvasPosition,
-  ) {
-    if (!positions.length || !flow) return;
-    const zoom = viewport.zoom;
-    const top = fitTopInset;
-    const bottom = canvasHeight - fitBottomInset;
-    const air = FOLLOW_AIR * zoom;
-    const group = {
-      left: Math.min(...positions.map((p) => p.x)),
-      top: Math.min(...positions.map((p) => p.y)),
-      right: Math.max(...positions.map((p) => p.x + MARK_REACH.width)),
-      bottom: Math.max(...positions.map((p) => p.y + MARK_REACH.height)),
-    };
-    const fits =
-      (group.right - group.left) * zoom <= canvasWidth - air * 4 &&
-      (group.bottom - group.top) * zoom <= bottom - top - air * 4;
-    const target = fits
-      ? group
-      : (() => {
-          const p = lead ?? positions.at(-1)!;
-          return {
-            left: p.x,
-            top: p.y,
-            right: p.x + MARK_REACH.width,
-            bottom: p.y + MARK_REACH.height,
-          };
-        })();
-    // The calm middle: inside it, the marks walk and the view stays put.
-    const inset = { x: canvasWidth * 0.18, y: (bottom - top) * 0.18 };
-    const seen = {
-      left: target.left * zoom + viewport.x,
-      top: target.top * zoom + viewport.y,
-      right: target.right * zoom + viewport.x,
-      bottom: target.bottom * zoom + viewport.y,
-    };
-    const calm =
-      seen.left >= inset.x &&
-      seen.right <= canvasWidth - inset.x &&
-      seen.top >= top + inset.y &&
-      seen.bottom <= bottom - inset.y;
-    if (calm && !always) return;
-    const cx = (target.left + target.right) / 2;
-    const cy = (target.top + target.bottom) / 2;
-    void flow.setViewport(
-      { x: canvasWidth / 2 - cx * zoom, y: top + (bottom - top) / 2 - cy * zoom, zoom },
-      {
-        duration: reducedMotion() ? 0 : duration("page"),
-        ease: curve(easing("smooth")),
-        interpolate: "linear",
+  /** Brings the mark that moved into view, by the shortest pan, when it has left it. */
+  function followMarks(positions: readonly CanvasPosition[], lead?: CanvasPosition) {
+    const at = lead ?? positions.at(-1);
+    if (!at || !flow) return;
+    const move = followMove({
+      view: cameraView(),
+      room: cameraRoom(),
+      newest: {
+        left: at.x,
+        top: at.y,
+        right: at.x + MARK_REACH.width,
+        bottom: at.y + MARK_REACH.height,
       },
-    );
+      following,
+      reduced: reducedMotion(),
+      base: duration("page"),
+    });
+    if (move) glide(move);
   }
   const live = $derived(nodes.some((node) => isAgentNode(node) && !node.class));
-  // Left alone for a while during a run, the camera finds the work again.
-  $effect(() => {
-    if (!live || following || still) return;
-    const timer = setInterval(() => {
-      if (Date.now() - touched >= IDLE_RESUME) resumeFollow();
-    }, 1000);
-    return () => clearInterval(timer);
-  });
   $effect(() => {
     const agents = nodes.filter(isAgentNode).filter((node) => !node.class);
     const cards = scene.items.flatMap((item) =>
@@ -771,7 +731,6 @@
       if (moved && fitted && following && !paused)
         followMarks(
           agents.map((node) => node.position),
-          false,
           moved,
         );
     });
@@ -934,27 +893,27 @@
         const current = node.parentId ? node.parentId.slice("area:".length) : null;
         if (area !== current) onareachange?.(node.id, area);
       }}
-      onmoveend={publishView}
+      onmoveend={() => {
+        aim = undefined;
+        publishView();
+      }}
       oninit={() => requestAnimationFrame(() => requestAnimationFrame(() => (fitted = true)))}
       onmovestart={(event) => {
         if (!event) return;
         following = false;
         homed = false;
-        touched = Date.now();
+        aim = undefined;
       }}
-      onmove={(event) => {
-        layers?.engage();
-        if (event) touched = Date.now();
-      }}
+      onmove={() => layers?.engage()}
       onnodedragstart={() => {
         following = false;
         homed = false;
-        touched = Date.now();
+        aim = undefined;
       }}
     >
       <CanvasFlowHandle onready={(handle) => (flow = handle)} />
       <Background patternColor="var(--work-canvas-dot)" gap={20} size={1.5} />
-      <CanvasControls bottomInset={fitBottomInset} />
+      <CanvasControls bottomInset={fitBottomInset} onfit={() => (following = true)} />
       <NodeToolbar
         nodeId={selectedItems}
         isVisible={selectedItems.length > 1 && !dragging && !marquee}
