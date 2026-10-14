@@ -14,7 +14,7 @@
 
   type Notice = { id: string; text: string; replace?: string };
 
-  let sections = $derived(keymapSections(keymap.all(), preferences.aiEnabled()));
+  let sections = $derived(keymapSections(keymap.all(), preferences.commandOffered));
   let anyCustomized = $derived(keymap.all().some((entry) => entry.customized));
   let recordingId = $state<string | null>(null);
   let held = $state<string[]>([]);

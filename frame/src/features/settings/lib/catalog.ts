@@ -493,9 +493,33 @@ export const fields = {
     initial: "",
   },
   "ai.enabled": {
-    section: "work",
-    label: m.ai_switch_title,
-    description: m.ai_switch_on,
+    section: "features",
+    label: m.feature_ai_title,
+    description: m.feature_ai_on,
+    initial: true,
+  },
+  "work.enabled": {
+    section: "features",
+    label: m.feature_work_title,
+    description: m.feature_work_on,
+    initial: true,
+  },
+  "notes.enabled": {
+    section: "features",
+    label: m.feature_notes_title,
+    description: m.feature_notes_on,
+    initial: true,
+  },
+  "tasks.enabled": {
+    section: "features",
+    label: m.feature_tasks_title,
+    description: m.feature_tasks_on,
+    initial: true,
+  },
+  "time.enabled": {
+    section: "features",
+    label: m.feature_time_title,
+    description: m.feature_time_on,
     initial: true,
   },
   "about.updates": {

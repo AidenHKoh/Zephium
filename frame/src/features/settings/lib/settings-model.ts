@@ -21,6 +21,7 @@ import {
   Mortarboard02Icon,
   Brain01Icon,
   Plug01Icon,
+  DashboardSquare02Icon,
 } from "@hugeicons/core-free-icons";
 /** Navigation order: groups in `groups` order, sections within a group as
  *  listed here. Ids are deep-link targets, so a rename changes titles only. */
@@ -131,6 +132,13 @@ const allSections = [
     icon: Plug01Icon,
   },
   {
+    id: "features",
+    group: "app",
+    title: m.section_features,
+    description: m.section_features_description,
+    icon: DashboardSquare02Icon,
+  },
+  {
     id: "shortcuts",
     group: "app",
     title: m.section_shortcuts,
@@ -169,19 +177,27 @@ const previewSections = new Set<SettingsSection>();
 export const sections = allSections.filter(
   (section) => showPreviews || !previewSections.has(section.id),
 );
-/** The Work group's pages past Work itself, which leave with Work and AI. */
-const aiSections = new Set<SettingsSection>(["ai", "skills", "memory", "sites", "mcp"]);
-export const shownSections = (ai = preferences.aiEnabled()) =>
-  ai ? sections : sections.filter((section) => !aiSections.has(section.id));
+/** Pages that leave with their feature's switch. */
+const featureSections: Partial<Record<SettingsSection, () => boolean>> = {
+  work: () => preferences.enabled("work"),
+  focus: () => preferences.enabled("time"),
+  ai: preferences.aiEnabled,
+  skills: preferences.aiEnabled,
+  memory: preferences.aiEnabled,
+  sites: preferences.aiEnabled,
+  mcp: preferences.aiEnabled,
+};
+export const shownSections = () =>
+  sections.filter((section) => featureSections[section.id]?.() ?? true);
 export const groups = [
   { id: "browser", label: m.settings_browser },
   { id: "work", label: m.section_work },
   { id: "app", label: m.settings_application },
 ] as const;
-export function searchSettings(query: string, ai = preferences.aiEnabled()) {
+export function searchSettings(query: string) {
   const words = query.trim().toLocaleLowerCase().split(/\s+/u);
   const matches = (text: string) => words.every((word) => text.toLocaleLowerCase().includes(word));
-  const offered = shownSections(ai);
+  const offered = shownSections();
   const shown = new Set<string>(offered.map((section) => section.id));
   const preferences = Object.entries(fields)
     .filter(
@@ -211,9 +227,9 @@ export function searchSettings(query: string, ai = preferences.aiEnabled()) {
     }));
   return [...destinations, ...preferences];
 }
-export function searchSections(query: string, ai = preferences.aiEnabled()) {
+export function searchSections(query: string) {
   const words = query.trim().toLocaleLowerCase().split(/\s+/u);
-  return shownSections(ai).filter((section) =>
+  return shownSections().filter((section) =>
     words.every((word) =>
       [
         section.title(),

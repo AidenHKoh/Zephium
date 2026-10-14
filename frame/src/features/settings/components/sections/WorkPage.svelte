@@ -5,15 +5,16 @@
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Switch from "$shared/ui/Switch";
-  import WorkSwitch from "../WorkSwitch.svelte";
+  import FeatureSwitch from "../FeatureSwitch.svelte";
   import WorkWebsiteData from "../WorkWebsiteData.svelte";
   import WorkScreenshotSites from "../WorkScreenshotSites.svelte";
+  import * as settings from "../../lib/settings-state.svelte";
   let profile = $derived(tabs.profile());
   let regular = $derived(!!profile && profile.kind !== "incognito");
 </script>
 
-<WorkSwitch />
-{#if preferences.aiEnabled()}
+<FeatureSwitch feature="work" card />
+{#if preferences.enabled("work") && preferences.aiEnabled()}
   <SettingsGroup title={m.settings_work_privacy()}>
     <SettingsRow
       settingId="work.screenshots"
@@ -34,8 +35,27 @@
   </SettingsGroup>
   {#if !regular}<p class="work-note">{m.work_regular_profile()}</p>{/if}
 {/if}
+{#if preferences.enabled("work") && !preferences.aiEnabled()}<p class="work-note">
+    {m.work_ai_off_note()}
+    <button type="button" class="link" onclick={() => settings.select("features")}
+      >{m.work_ai_off_action()}</button
+    >
+  </p>{/if}
 
 <style>
+  .link {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--color-text);
+    font: inherit;
+    font-weight: 500;
+    text-decoration: underline;
+    text-decoration-color: var(--color-faint);
+    text-underline-offset: 2px;
+    cursor: default;
+  }
+
   .work-note {
     margin: 0 16px;
     font-size: var(--text-label);

@@ -162,10 +162,16 @@ impl Shell {
         &mut self,
         page: Option<crate::BrowserPage>,
     ) -> OperationDisposition {
-        if page == Some(crate::BrowserPage::Work)
-            && !zephium_core::preferences::ai_enabled(|key| self.store.app_setting(key))
+        if page
+            .and_then(crate::BrowserPage::feature)
+            .is_some_and(|feature| {
+                !zephium_core::preferences::feature_enabled(
+                    |key| self.store.app_setting(key),
+                    feature,
+                )
+            })
         {
-            return operation_result(OperationOutcome::Rejected, OperationReason::WorkDisabled);
+            return operation_result(OperationOutcome::Rejected, OperationReason::FeatureDisabled);
         }
         if let Some(crate::BrowserPage::Extensions) = page {
             return self.open_extensions_tab();

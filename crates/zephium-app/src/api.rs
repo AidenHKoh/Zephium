@@ -177,6 +177,17 @@ impl BrowserPage {
             Self::Time => "browser.time",
         }
     }
+
+    /// The feature switch the page belongs to, if any.
+    pub fn feature(self) -> Option<&'static str> {
+        match self {
+            Self::Work => Some("work"),
+            Self::Tasks => Some("tasks"),
+            Self::Notes => Some("notes"),
+            Self::Time => Some("time"),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

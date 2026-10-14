@@ -80,13 +80,15 @@ const SECTIONS: { id: string; title: () => string; holds: (entry: KeymapEntry) =
 /** The rebindable commands, in the order Keyboard settings lists them. The
  *  launcher has its own recorder, Work keys are fixed to the pane, and none
  *  of Work's are offered while Work and AI are off. */
-export function keymapSections(entries: readonly KeymapEntry[], ai = true): KeymapSection[] {
+export function keymapSections(
+  entries: readonly KeymapEntry[],
+  offered: (command: string) => boolean = () => true,
+): KeymapSection[] {
   return SECTIONS.map((section) => ({
     id: section.id,
     title: section.title(),
     entries: entries.filter(
-      (entry) =>
-        entry.customizable && section.holds(entry) && (ai || !entry.id.startsWith("work.")),
+      (entry) => entry.customizable && section.holds(entry) && offered(entry.id),
     ),
   })).filter((section) => section.entries.length > 0);
 }

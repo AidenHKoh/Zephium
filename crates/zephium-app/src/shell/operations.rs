@@ -851,11 +851,11 @@ impl Shell {
             format!("preference.{key}={value}")
         };
         (self.emit)(Projection::UiCommand(command));
-        if matches!(key.as_str(), "ai.enabled" | "work.enabled")
-            && value == "false"
-            && self
-                .browser_page
-                .is_some_and(|(_, page)| page == crate::BrowserPage::Work)
+        if value == "false"
+            && self.browser_page.is_some_and(|(_, page)| {
+                page.feature()
+                    .is_some_and(|feature| key.strip_suffix(".enabled") == Some(feature))
+            })
         {
             let _ = self.operation_show_browser_page(None);
         }

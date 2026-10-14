@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { searchSections } from "../lib/settings-model";
 
 describe("settings discovery", () => {
@@ -8,7 +8,7 @@ describe("settings discovery", () => {
     expect(searchSections("download").map((section) => section.id)).toContain("general");
   });
   it("matches every search word and distinguishes no results", () => {
-    expect(searchSections("  ACCENT color  ").map((section) => section.id)).toEqual(["appearance"]);
+    expect(searchSections("  WINDOW tint  ").map((section) => section.id)).toEqual(["appearance"]);
     expect(searchSections("accent downloads")).toEqual([]);
     expect(searchSections("unfindablephrase")).toEqual([]);
   });
@@ -57,7 +57,7 @@ it("groups sections as Browser, Work and App with stable ids", async () => {
     "performance",
   ]);
   expect(listed("work")).toEqual(["work", "ai", "skills", "memory", "sites", "mcp"]);
-  expect(listed("app")).toEqual(["shortcuts", "languages", "about"]);
+  expect(listed("app")).toEqual(["features", "shortcuts", "languages", "about"]);
 });
 
 it("finds every real tab option", async () => {
@@ -72,19 +72,33 @@ it("finds every real tab option", async () => {
   }
 });
 
-it("collapses the Work group to its one page while Work and AI are off", async () => {
+it("takes each feature's pages out of navigation and search while its switch is off", async () => {
+  const off = new Set<string>();
+  vi.resetModules();
+  vi.doMock("$domain/preferences", async (actual) => {
+    const real = (await actual()) as typeof import("$domain/preferences");
+    return {
+      preferences: {
+        ...real.preferences,
+        aiEnabled: () => !off.has("ai"),
+        enabled: (feature: string) => !off.has(feature),
+      },
+    };
+  });
   const { shownSections, searchSettings, searchSections } = await import("../lib/settings-model");
-  const work = (ai: boolean) =>
-    shownSections(ai)
-      .filter((section) => section.group === "work")
-      .map((section) => section.id);
-  expect(work(true)).toEqual(["work", "ai", "skills", "memory", "sites", "mcp"]);
-  expect(work(false)).toEqual(["work"]);
+  const shown = () => shownSections().map((section) => section.id);
+  expect(shown()).toEqual(expect.arrayContaining(["work", "ai", "focus", "features"]));
+  off.add("ai");
   const gone = new Set(["ai", "skills", "memory", "sites", "mcp"]);
+  expect(shown().filter((id) => gone.has(id))).toEqual([]);
+  expect(shown()).toContain("work");
   for (const query of ["models", "skills", "memory", "site access", "MCP", "API key", "dictation"])
-    expect(searchSettings(query, false).some((result) => gone.has(result.section))).toBe(false);
-  expect(searchSections("models", false).some((section) => gone.has(section.id))).toBe(false);
-  expect(searchSettings("Work and AI", false).map((result) => result.target)).toContain(
-    "ai.enabled",
-  );
+    expect(searchSettings(query).some((result) => gone.has(result.section))).toBe(false);
+  expect(searchSections("models").some((section) => gone.has(section.id))).toBe(false);
+  off.add("work");
+  off.add("time");
+  expect(shown()).not.toContain("work");
+  expect(shown()).not.toContain("focus");
+  expect(searchSettings("AI").map((result) => result.target)).toContain("ai.enabled");
+  vi.doUnmock("$domain/preferences");
 });

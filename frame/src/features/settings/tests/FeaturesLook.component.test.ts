@@ -91,24 +91,27 @@ async function shoot(name: string, section: SettingsSection) {
   document.documentElement.dataset.theme = "dark";
 }
 
-test("the Work group with Work and AI on and off, both themes", async () => {
+test("Features, and the Work group as AI and Work go off, both themes", async () => {
   await page.viewport(1280, 1100);
   await preferences.init();
   await render(SettingsLookStage);
   await settle();
+  await shoot("features", "features");
   await shoot("work-on", "work");
   await shoot("models", "ai");
 
-  settings.select("work");
-  await page.getByRole("switch", { name: "Work and AI features" }).click();
+  settings.select("features");
+  await page.getByRole("switch", { name: "AI" }).click();
   await settle();
   for (const theme of ["dark", "light"]) {
     document.documentElement.dataset.theme = theme;
     await settle(250);
-    await page.screenshot({ path: `${shots}/work-confirm-${theme}.png` });
+    await page.screenshot({ path: `${shots}/ai-confirm-${theme}.png` });
   }
   await page.getByRole("button", { name: "Cancel" }).click();
 
   emitNativeEvent("uiCommand", "preference.ai.enabled=false");
-  await shoot("work-off", "work");
+  emitNativeEvent("uiCommand", "preference.notes.enabled=false");
+  await shoot("features-off", "features");
+  await shoot("work-ai-off", "work");
 });

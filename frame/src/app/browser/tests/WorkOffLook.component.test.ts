@@ -37,9 +37,9 @@ afterEach(() => {
 const switchShown = () => document.querySelector(".modes, .mode-switch") !== null;
 
 for (const theme of ["light", "dark"] as const) {
-  test(`the column without Work and AI, every shape, ${theme}`, async () => {
+  test(`the column without Work, every shape, ${theme}`, async () => {
     await page.viewport(1100, 760);
-    native.settings = { appearance: theme, "ai.enabled": "false" };
+    native.settings = { appearance: theme, "work.enabled": "false" };
     document.documentElement.dataset.theme = theme;
     document.documentElement.dataset.material = "liquid_glass";
     document.body.style.background = "transparent";

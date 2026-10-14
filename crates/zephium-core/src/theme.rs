@@ -318,6 +318,30 @@ fn css(rgb: Rgb) -> String {
     format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
 }
 
+/// The stored theme with a new accent in each mode, as `ui.theme-custom`
+/// stores it; a preset is forked, so it remembers where it came from.
+pub fn with_accent(theme: &str, custom: Option<&str>, (light, dark): (Rgb, Rgb)) -> Option<String> {
+    let mut base = match theme {
+        CUSTOM => parse_custom(custom?)?,
+        id => {
+            let preset = preset(id)?;
+            Theme {
+                light: preset.light,
+                dark: preset.dark,
+                from: Some(preset.id.to_owned()),
+            }
+        }
+    };
+    base.light.accent = light;
+    base.dark.accent = dark;
+    let seeds = |seeds: &Seeds| serde_json::json!({ "bg": css(seeds.bg), "fg": css(seeds.fg), "accent": css(seeds.accent) });
+    let mut json = serde_json::json!({ "light": seeds(&base.light), "dark": seeds(&base.dark) });
+    if let Some(from) = base.from {
+        json["from"] = from.into();
+    }
+    Some(json.to_string())
+}
+
 /// The presets as the frame reads them, with the ground native paints for
 /// each at the default contrast so the frame can check its CSS against it.
 pub fn presets_json() -> String {

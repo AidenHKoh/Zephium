@@ -22,7 +22,8 @@
     onTool = () => {},
     onDismiss = () => {},
     onCapture,
-    destinations = launcherDestinations(),
+    hidden = [],
+    destinations = launcherDestinations((kind) => !hidden.includes(kind)),
   }: {
     /** The current presentation. The launcher stays mounted while hidden and
      *  binds each new session as it is shown. */
@@ -31,6 +32,8 @@
     onDismiss?: () => void;
     /** Saves the typed line as a task; resolves to the saved title, or null. */
     onCapture?: (text: string) => Promise<string | null>;
+    /** Destinations whose feature is switched off. */
+    hidden?: readonly string[];
     destinations?: Destination[];
   } = $props();
 

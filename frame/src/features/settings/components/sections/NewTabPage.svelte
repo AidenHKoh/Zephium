@@ -66,16 +66,16 @@
       onchange={(v) => set("ui.newtab-clock-format", v)}
     /></SettingsRow
   >
-  <SettingsRow
-    settingId="ntp.tasks"
-    title={m.pref_ntp_tasks()}
-    description={m.pref_ntp_tasks_help()}
-    ><Switch
-      label={m.pref_ntp_tasks()}
-      labelHidden
-      checked={preferences.value("ui.newtab-tasks") === "true"}
-      disabled={preferences.saving()}
-      onchange={(v) => set("ui.newtab-tasks", String(v))}
-    /></SettingsRow
-  >
+  {#if preferences.enabled("tasks")}<SettingsRow
+      settingId="ntp.tasks"
+      title={m.pref_ntp_tasks()}
+      description={m.pref_ntp_tasks_help()}
+      ><Switch
+        label={m.pref_ntp_tasks()}
+        labelHidden
+        checked={preferences.value("ui.newtab-tasks") === "true"}
+        disabled={preferences.saving()}
+        onchange={(v) => set("ui.newtab-tasks", String(v))}
+      /></SettingsRow
+    >{/if}
 </SettingsGroup>

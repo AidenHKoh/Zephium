@@ -1644,7 +1644,7 @@ export type OperationProcessed = OperationDisposition;
  */
 export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed" |
 /**  Work and AI features are switched off. */
-"work_disabled";
+"feature_disabled";
 
 /**
  *  Process-local reconciliation state for an admitted mutation. Pending and

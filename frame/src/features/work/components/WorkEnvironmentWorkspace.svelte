@@ -55,6 +55,7 @@
     registrableSite,
   } from "./asks/asks";
   import BarTool from "./bar/BarTool.svelte";
+  import { preferences } from "$domain/preferences";
   import NotePanel from "./bar/NotePanel.svelte";
   import TasksPanel from "./bar/TasksPanel.svelte";
   import BlocksPanel, { type BlockKind } from "./bar/BlocksPanel.svelte";
@@ -1931,10 +1932,10 @@
     if (!snapshot || pane || lifted || takeover) return;
     const key = event.key.toLowerCase();
     if (key === "v" || key === "h") setPointerTool(key === "v" ? "select" : "hand");
-    else if (key === "n") openPanel("note", true);
+    else if (key === "n" && preferences.enabled("notes")) openPanel("note", true);
     else if (key === "a") openPanel("media", true);
     else if (key === "b") openPanel("blocks", true);
-    else if (key === "t") openPanel("tasks", true);
+    else if (key === "t" && preferences.enabled("tasks")) openPanel("tasks", true);
     else if (key === "/" && aiEnabled)
       composerElement?.querySelector<HTMLElement>("textarea")?.focus();
     else return;
@@ -2271,26 +2272,26 @@
     onclick={() => setPointerTool(hand ? "select" : "hand")}
   />
   <span class="tool-rule" aria-hidden="true"></span>
-  <BarTool
-    icon={StickyNote03Icon}
-    label={m.work_tool_note()}
-    keys={["N"]}
-    disabled={!snapshot}
-    open={panel === "note"}
-    onopenchange={(open) => openPanel("note", open)}
-    >{#snippet content()}{#if notes}<NotePanel
-          {notes}
-          placed={snapshot?.elements.flatMap((element) =>
-            element.reference.kind === "resource" ? [element.reference.resource] : [],
-          ) ?? []}
-          {busy}
-          oncreate={() => {
-            panel = null;
-            void createNote();
-          }}
-          onpick={(id) => void placeNote(id)}
-        />{/if}{/snippet}</BarTool
-  >
+  {#if preferences.enabled("notes")}<BarTool
+      icon={StickyNote03Icon}
+      label={m.work_tool_note()}
+      keys={["N"]}
+      disabled={!snapshot}
+      open={panel === "note"}
+      onopenchange={(open) => openPanel("note", open)}
+      >{#snippet content()}{#if notes}<NotePanel
+            {notes}
+            placed={snapshot?.elements.flatMap((element) =>
+              element.reference.kind === "resource" ? [element.reference.resource] : [],
+            ) ?? []}
+            {busy}
+            oncreate={() => {
+              panel = null;
+              void createNote();
+            }}
+            onpick={(id) => void placeNote(id)}
+          />{/if}{/snippet}</BarTool
+    >{/if}
   <BarTool
     icon={ShapeCollectionIcon}
     label={m.work_tool_blocks()}
@@ -2303,16 +2304,16 @@
         onpick={(kind) => void createBlock(kind)}
       />{/snippet}</BarTool
   >
-  <BarTool
-    icon={CheckListIcon}
-    label={m.panel_tasks()}
-    keys={["T"]}
-    disabled={!snapshot}
-    wide
-    open={panel === "tasks"}
-    onopenchange={(open) => openPanel("tasks", open)}
-    >{#snippet content()}<TasksPanel profile={session.profile} />{/snippet}</BarTool
-  >
+  {#if preferences.enabled("tasks")}<BarTool
+      icon={CheckListIcon}
+      label={m.panel_tasks()}
+      keys={["T"]}
+      disabled={!snapshot}
+      wide
+      open={panel === "tasks"}
+      onopenchange={(open) => openPanel("tasks", open)}
+      >{#snippet content()}<TasksPanel profile={session.profile} />{/snippet}</BarTool
+    >{/if}
   <BarTool
     icon={PlusSignIcon}
     label={m.work_tool_attach()}

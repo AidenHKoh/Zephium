@@ -24,6 +24,7 @@
     privacy: () => import("./sections/PrivacyPage.svelte"),
     shortcuts: () => import("./sections/KeyboardPage.svelte"),
     languages: () => import("./sections/LanguagesPage.svelte"),
+    features: () => import("./sections/FeaturesPage.svelte"),
     focus: () => import("./sections/FocusPage.svelte"),
     work: () => import("./sections/WorkPage.svelte"),
     ai: () => import("./sections/AiPage.svelte"),

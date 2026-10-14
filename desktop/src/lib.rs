@@ -3341,11 +3341,10 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     if shutdown_started(app) {
         return rejected_operation();
     }
-    // Off, Work and AI have no way in; Work itself is refused by the shell.
-    if matches!(id, "mode.choose" | "work.dictate" | "tool.ai")
-        && !app
-            .try_state::<keymap::Keymap>()
-            .is_none_or(|keymap| keymap.ai_enabled())
+    // A feature switched off has no way in, from any menu, key or launcher.
+    if !app
+        .try_state::<keymap::Keymap>()
+        .is_none_or(|keymap| keymap.offers(id))
     {
         return rejected_operation();
     }
@@ -3843,7 +3842,7 @@ fn menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64) -> b
         return false;
     };
     let keymap = keymap_overrides(&app);
-    let Ok(menu) = build_menu(&app, &keymap, false) else {
+    let Ok(menu) = build_menu(&app, &keymap, false).and_then(|menu| offered_only(&app, menu)) else {
         return false;
     };
     caller.popup_menu_at(&menu, anchor).is_ok()
@@ -4593,7 +4592,7 @@ fn profile_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f
         return false;
     };
     let keymap = keymap_overrides(&app);
-    let Ok(menu) = build_profile_menu(&app, &keymap) else {
+    let Ok(menu) = build_profile_menu(&app, &keymap).and_then(|menu| offered_only(&app, menu)) else {
         return false;
     };
     caller.popup_menu_at(&menu, anchor).is_ok()
@@ -4623,7 +4622,7 @@ fn tools_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64
         return false;
     };
     let keymap = keymap_overrides(&app);
-    let Ok(menu) = build_tools_menu(&app, &keymap) else {
+    let Ok(menu) = build_tools_menu(&app, &keymap).and_then(|menu| offered_only(&app, menu)) else {
         return false;
     };
     caller.popup_menu_at(&menu, anchor).is_ok()
@@ -5160,7 +5159,53 @@ fn install_menu_bar(
     overrides: &std::collections::HashMap<String, String>,
     work_pane: bool,
 ) -> tauri::Result<()> {
-    app.set_menu(build_menu(app, overrides, work_pane)?)?;
+    app.set_menu(offered_only(app, build_menu(app, overrides, work_pane)?)?)?;
+    Ok(())
+}
+
+/// Takes out the items of features switched off, then the separators that
+/// no longer separate anything.
+fn offered_only(
+    handle: &tauri::AppHandle,
+    menu: tauri::menu::Menu<tauri::Wry>,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let Some(keymap) = handle.try_state::<keymap::Keymap>() else {
+        return Ok(menu);
+    };
+    for item in menu.items()? {
+        if let tauri::menu::MenuItemKind::Submenu(submenu) = &item {
+            prune_menu_items(&keymap, submenu.items()?, |item| submenu.remove(item))?;
+        }
+    }
+    prune_menu_items(&keymap, menu.items()?, |item| menu.remove(item))?;
+    Ok(menu)
+}
+
+fn prune_menu_items(
+    keymap: &keymap::Keymap,
+    items: Vec<tauri::menu::MenuItemKind<tauri::Wry>>,
+    remove: impl Fn(&dyn tauri::menu::IsMenuItem<tauri::Wry>) -> tauri::Result<()>,
+) -> tauri::Result<()> {
+    use tauri::menu::MenuItemKind;
+    let separator =
+        |item: &MenuItemKind<tauri::Wry>| matches!(item, MenuItemKind::Predefined(predefined) if predefined.text().is_ok_and(|text| text.is_empty()));
+    let mut kept: Vec<MenuItemKind<tauri::Wry>> = Vec::new();
+    for item in items {
+        if let MenuItemKind::MenuItem(entry) = &item {
+            if !keymap.offers(entry.id().as_ref()) {
+                remove(&item)?;
+                continue;
+            }
+        }
+        if separator(&item) && kept.last().is_none_or(separator) {
+            remove(&item)?;
+            continue;
+        }
+        kept.push(item);
+    }
+    if let Some(last) = kept.last().filter(|last| separator(last)) {
+        remove(last)?;
+    }
     Ok(())
 }
 

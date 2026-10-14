@@ -50,6 +50,9 @@ const defaults = {
   "tabs.archive": "never",
   "tabs.external-position": "new-tab",
   "tabs.close-button": "hover",
+  "notes.enabled": "true",
+  "tasks.enabled": "true",
+  "time.enabled": "true",
 } as const;
 export type PreferenceKey = keyof typeof defaults;
 const values = $state<Record<PreferenceKey, string>>({ ...defaults });
@@ -64,9 +67,30 @@ const versions: Partial<Record<PreferenceKey, number>> = {};
 export const value = (key: PreferenceKey) => values[key];
 export const saving = () => pending !== null;
 export const saveFailed = () => failed;
-/** Work and AI features: off, every Work and AI surface leaves the app. */
-export const aiEnabled = () =>
-  values["ai.enabled"] !== "false" && values["work.enabled"] !== "false";
+/** AI: models, agents and dictation. Off, no AI surface is shown. */
+export const aiEnabled = () => values["ai.enabled"] !== "false";
+export type Feature = "work" | "notes" | "tasks" | "time";
+/** A feature switch: off, the feature leaves the app; its data stays. */
+export const enabled = (feature: Feature) => values[`${feature}.enabled`] !== "false";
+/** The feature a command belongs to. Mirrors `zephium_core::commands::feature_of`. */
+function featureOf(command: string): Feature | "ai" | null {
+  if (["work.dictate", "tool.ai", "mode.choose"].includes(command)) return "ai";
+  if (command === "browser.work" || command === "mode.work" || command.startsWith("work."))
+    return "work";
+  if (["tool.notes", "browser.notes", "note.new"].includes(command)) return "notes";
+  if (command === "tool.tasks" || command === "browser.tasks") return "tasks";
+  if (
+    ["tool.time", "browser.time", "settings.focus"].includes(command) ||
+    command.startsWith("focus.")
+  )
+    return "time";
+  return null;
+}
+/** Whether a command's feature is on, so it is offered at all. */
+export function commandOffered(command: string) {
+  const feature = featureOf(command);
+  return feature === null || (feature === "ai" ? aiEnabled() : enabled(feature));
+}
 function apply(key: PreferenceKey, next: string) {
   values[key] = next;
   versions[key] = (versions[key] ?? 0) + 1;

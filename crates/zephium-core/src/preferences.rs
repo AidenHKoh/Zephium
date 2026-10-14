@@ -50,6 +50,9 @@ pub const KEYS: &[&str] = &[
     "tabs.external-position",
     "tabs.close-button",
     "ui.theme-contrast",
+    "notes.enabled",
+    "tasks.enabled",
+    "time.enabled",
 ];
 
 /// Interface languages a person may choose, by BCP 47 tag. One without a
@@ -78,31 +81,61 @@ pub const CODE_FONTS: &[&str] = &[
 /// Settings from an earlier release carried into their replacements, as the
 /// writes to make. Run once at startup: each retired value is reset as it is
 /// carried, so a second run finds nothing to do.
-pub fn migrations(stored: impl Fn(&str) -> Option<String>) -> Vec<(&'static str, &'static str)> {
+pub fn migrations(stored: impl Fn(&str) -> Option<String>) -> Vec<(&'static str, String)> {
     let mut writes = Vec::new();
     match stored("ui.text-size").as_deref() {
         Some("large") => {
             if stored("ui.font-size").is_none() {
-                writes.push(("ui.font-size", "15"));
+                writes.push(("ui.font-size", "15".to_owned()));
             }
-            writes.push(("ui.text-size", "default"));
+            writes.push(("ui.text-size", "default".to_owned()));
         }
-        Some("small") => writes.push(("ui.text-size", "default")),
+        Some("small") => writes.push(("ui.text-size", "default".to_owned())),
         _ => {}
     }
-    // Work without Work and AI is not a state any more: one switch holds both.
-    if stored("work.enabled").as_deref() == Some("false") {
-        writes.push(("ai.enabled", "false"));
-        writes.push(("work.enabled", "true"));
+    // The quick accents are gone; a chosen one becomes the theme's accent.
+    if let Some(accent) = stored("ui.accent").as_deref().and_then(retired_accent) {
+        let theme = stored("ui.theme").unwrap_or_else(|| crate::theme::DEFAULT.to_owned());
+        let custom = stored("ui.theme-custom");
+        if let Some(carried) = crate::theme::with_accent(&theme, custom.as_deref(), accent) {
+            writes.push(("ui.theme", crate::theme::CUSTOM.to_owned()));
+            writes.push(("ui.theme-custom", carried));
+        }
+        writes.push(("ui.accent", "graphite".to_owned()));
     }
     writes
 }
 
-/// Work and AI features, the one switch that takes every Work and AI surface
-/// out of the app. Off, nothing of Work starts; its data stays.
+/// A retired quick accent as (light, dark) colours.
+fn retired_accent(id: &str) -> Option<(crate::theme::Rgb, crate::theme::Rgb)> {
+    Some(match id {
+        "sky" => ([0x3b, 0x82, 0xe6], [0x7f, 0xb3, 0xf5]),
+        "sage" => ([0x2f, 0x8a, 0x5e], [0x86, 0xc9, 0xa4]),
+        "rose" => ([0xd2, 0x54, 0x5e], [0xee, 0x8f, 0x95]),
+        "amber" => ([0xa5, 0x68, 0x0f], [0xe9, 0xb8, 0x72]),
+        "teal" => ([0x18, 0x8a, 0x84], [0x6f, 0xc6, 0xc1]),
+        "lavender" => ([0x6e, 0x5b, 0xd6], [0xb3, 0xa4, 0xf2]),
+        "orchid" => ([0xb1, 0x4f, 0xa9], [0xdc, 0x9a, 0xd8]),
+        _ => return None,
+    })
+}
+
+/// AI: models, agents and dictation. Off, nothing model-backed runs and
+/// no AI surface is shown; keys and data stay.
 pub fn ai_enabled(stored: impl Fn(&str) -> Option<String>) -> bool {
     stored("ai.enabled").as_deref() != Some("false")
-        && stored("work.enabled").as_deref() != Some("false")
+}
+
+/// Whether a feature switch (`work`, `notes`, `tasks`, `time`) is on.
+pub fn feature_enabled(stored: impl Fn(&str) -> Option<String>, feature: &str) -> bool {
+    match feature {
+        "ai" => ai_enabled(stored),
+        "work" => stored("work.enabled").as_deref() != Some("false"),
+        "notes" => stored("notes.enabled").as_deref() != Some("false"),
+        "tasks" => stored("tasks.enabled").as_deref() != Some("false"),
+        "time" => stored("time.enabled").as_deref() != Some("false"),
+        _ => true,
+    }
 }
 
 pub fn value_allowed(key: &str, value: &str) -> bool {
@@ -183,6 +216,9 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         | "ui.newtab-tasks"
         | "ai.enabled"
         | "work.enabled"
+        | "notes.enabled"
+        | "tasks.enabled"
+        | "time.enabled"
         | "work.screenshots"
         | "ui.contrast"
         | "search.history"
@@ -377,57 +413,92 @@ mod tests {
         assert!(!value_allowed("tabs.close-button", "never"));
     }
 
-    #[test]
-    fn the_retired_text_size_carries_into_the_interface_size_once() {
-        let stored = |pairs: &'static [(&'static str, &'static str)]| {
-            move |key: &str| {
-                pairs
-                    .iter()
-                    .find(|(k, _)| *k == key)
-                    .map(|(_, v)| (*v).to_owned())
-            }
-        };
-        assert_eq!(
-            migrations(stored(&[("ui.text-size", "large")])),
-            [("ui.font-size", "15"), ("ui.text-size", "default")]
-        );
-        assert_eq!(
-            migrations(stored(&[("ui.text-size", "large"), ("ui.font-size", "13")])),
-            [("ui.text-size", "default")]
-        );
-        assert_eq!(
-            migrations(stored(&[("ui.text-size", "small")])),
-            [("ui.text-size", "default")]
-        );
-        assert!(migrations(stored(&[("ui.text-size", "default")])).is_empty());
-        assert!(migrations(stored(&[])).is_empty());
-        for (key, value) in migrations(stored(&[("ui.text-size", "large")])) {
-            assert!(KEYS.contains(&key) && value_allowed(key, value));
+    fn stored(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |key: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| (*v).to_owned())
         }
     }
 
-    #[test]
-    fn work_and_ai_are_one_switch_that_defaults_on() {
-        let stored = |pairs: &'static [(&'static str, &'static str)]| {
-            move |key: &str| {
-                pairs
-                    .iter()
-                    .find(|(k, _)| *k == key)
-                    .map(|(_, v)| (*v).to_owned())
-            }
-        };
-        assert!(KEYS.contains(&"ai.enabled"));
-        assert!(ai_enabled(stored(&[])));
-        assert!(ai_enabled(stored(&[("ai.enabled", "true")])));
-        assert!(!ai_enabled(stored(&[("ai.enabled", "false")])));
-        assert!(!ai_enabled(stored(&[("work.enabled", "false")])));
-        let carried = migrations(stored(&[("work.enabled", "false")]));
-        assert_eq!(carried, [("ai.enabled", "false"), ("work.enabled", "true")]);
-        for (key, value) in carried {
-            assert!(KEYS.contains(&key) && value_allowed(key, value));
+    fn carried(pairs: &'static [(&'static str, &'static str)]) -> Vec<(&'static str, String)> {
+        let writes = migrations(stored(pairs));
+        for (key, value) in &writes {
+            assert!(
+                KEYS.contains(key) && value_allowed(key, value),
+                "{key}={value}"
+            );
         }
-        assert!(
-            migrations(stored(&[("work.enabled", "true"), ("ai.enabled", "false")])).is_empty()
+        writes
+    }
+
+    #[test]
+    fn the_retired_text_size_carries_into_the_interface_size_once() {
+        let w = |pairs: &[(&'static str, &str)]| -> Vec<(&'static str, String)> {
+            pairs.iter().map(|(k, v)| (*k, (*v).to_owned())).collect()
+        };
+        assert_eq!(
+            carried(&[("ui.text-size", "large")]),
+            w(&[("ui.font-size", "15"), ("ui.text-size", "default")])
         );
+        assert_eq!(
+            carried(&[("ui.text-size", "large"), ("ui.font-size", "13")]),
+            w(&[("ui.text-size", "default")])
+        );
+        assert_eq!(
+            carried(&[("ui.text-size", "small")]),
+            w(&[("ui.text-size", "default")])
+        );
+        assert!(carried(&[("ui.text-size", "default")]).is_empty());
+        assert!(carried(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_retired_quick_accent_becomes_the_theme_accent_once() {
+        let writes = carried(&[("ui.accent", "sky")]);
+        assert_eq!(writes[0], ("ui.theme", "custom".to_owned()));
+        let theme = crate::theme::parse_custom(&writes[1].1).expect("a valid custom theme");
+        assert_eq!(theme.light.accent, [0x3b, 0x82, 0xe6]);
+        assert_eq!(theme.dark.accent, [0x7f, 0xb3, 0xf5]);
+        assert_eq!(theme.from.as_deref(), Some("zephium"));
+        assert_eq!(writes[2], ("ui.accent", "graphite".to_owned()));
+
+        let writes = carried(&[
+            ("ui.accent", "rose"),
+            ("ui.theme", "custom"),
+            (
+                "ui.theme-custom",
+                r##"{"light":{"bg":"#ffffff","fg":"#000000","accent":"#111111"},"dark":{"bg":"#000000","fg":"#ffffff","accent":"#222222"}}"##,
+            ),
+        ]);
+        let theme = crate::theme::parse_custom(&writes[1].1).unwrap();
+        assert_eq!(theme.light.bg, [0xff, 0xff, 0xff]);
+        assert_eq!(theme.dark.accent, [0xee, 0x8f, 0x95]);
+
+        assert!(carried(&[("ui.accent", "graphite")]).is_empty());
+        assert!(carried(&[("ui.accent", "graphite"), ("ui.theme", "nord")]).is_empty());
+    }
+
+    #[test]
+    fn every_feature_switch_defaults_on_and_stands_alone() {
+        for feature in ["ai", "work", "notes", "tasks", "time"] {
+            let key: &'static str = Box::leak(format!("{feature}.enabled").into_boxed_str());
+            assert!(KEYS.contains(&key) && value_allowed(key, "false"));
+            assert!(feature_enabled(stored(&[]), feature));
+            let off: &'static [(&'static str, &'static str)] =
+                Box::leak(Box::new([(key, "false")]));
+            assert!(!feature_enabled(stored(off), feature));
+            for other in ["ai", "work", "notes", "tasks", "time"]
+                .iter()
+                .filter(|o| **o != feature)
+            {
+                assert!(
+                    feature_enabled(stored(off), other),
+                    "{feature} off turned {other} off"
+                );
+            }
+        }
+        assert!(carried(&[("work.enabled", "false"), ("ai.enabled", "false")]).is_empty());
     }
 }

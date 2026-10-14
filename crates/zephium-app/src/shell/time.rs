@@ -27,7 +27,10 @@ pub(super) struct TimeState {
     ledger: Ledger,
     app_active: bool,
     awake: bool,
+    /// Recording on: Time & focus is on and `time.track` asks for it.
     enabled: bool,
+    tracked: bool,
+    feature: bool,
     retention_days: i64,
     focus: Option<FocusSession>,
     blocked: Vec<String>,
@@ -52,6 +55,8 @@ impl TimeState {
             app_active: false,
             awake: true,
             enabled: true,
+            tracked: true,
+            feature: true,
             retention_days: DEFAULT_RETENTION_DAYS,
             focus: serde_json::from_str::<FocusSession>(&setting(SESSION_KEY))
                 .ok()
@@ -65,7 +70,12 @@ impl TimeState {
             focus_retry_at: None,
             focus_retry_failures: 0,
         };
-        for key in ["time.track", "time.retention", "focus.blocked"] {
+        for key in [
+            "time.enabled",
+            "time.track",
+            "time.retention",
+            "focus.blocked",
+        ] {
             state.apply_setting(key, &setting(key));
         }
         state
@@ -73,13 +83,15 @@ impl TimeState {
 
     fn apply_setting(&mut self, key: &str, value: &str) {
         match key {
-            "time.track" => self.enabled = value != "false",
+            "time.track" => self.tracked = value != "false",
+            "time.enabled" => self.feature = value != "false",
             "time.retention" => {
                 self.retention_days = value.parse().unwrap_or(DEFAULT_RETENTION_DAYS);
             }
             "focus.blocked" => self.blocked = blocked_sites(value),
             _ => {}
         }
+        self.enabled = self.tracked && self.feature;
     }
 }
 
@@ -235,6 +247,9 @@ impl Shell {
         if was_blocked != self.time.blocked {
             self.sync_focus_gate();
             self.project_focus();
+        }
+        if key == "time.enabled" && !self.time.feature && self.time.focus.is_some() {
+            let _ = self.operation_focus(FocusControl::Stop);
         }
     }
 
@@ -406,6 +421,12 @@ impl Shell {
         }
         let now = utc_now_ms();
         match control {
+            FocusControl::Start { .. } if !self.time.feature => {
+                return operation_result(
+                    OperationOutcome::Rejected,
+                    OperationReason::FeatureDisabled,
+                );
+            }
             FocusControl::Start { minutes, breaks } => {
                 self.flush_pending_focus_records(false);
                 // Reserve capacity for both a replaced running session and

@@ -267,3 +267,30 @@ fn focus_retry_buffer_refuses_new_sessions_at_capacity_and_preserves_every_recor
     assert_eq!(store.recorded_focus.lock().unwrap().len(), 8);
     assert!(!shell.has_unadmitted_time_writes());
 }
+
+#[test]
+fn time_and_focus_off_records_nothing_ends_a_round_and_refuses_new_ones() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    shell.operation_focus(zephium_ipc::FocusControl::Start {
+        minutes: 5,
+        breaks: false,
+    });
+    shell.operation_set_app_setting("time.enabled".into(), "false".into());
+    let ended = shell.operation_focus(zephium_ipc::FocusControl::Stop);
+    assert_eq!(ended.outcome, zephium_ipc::OperationOutcome::NoOp);
+    let refused = shell.operation_focus(zephium_ipc::FocusControl::Start {
+        minutes: 5,
+        breaks: false,
+    });
+    assert_eq!(refused.reason, OperationReason::FeatureDisabled);
+
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "https://github.com/");
+    shell.handle(Command::SetAppActive(true));
+    pause();
+    shell.handle(Command::SetAppActive(false));
+    shell.handle(Command::Tick);
+    assert!(spent(&store).is_empty());
+}

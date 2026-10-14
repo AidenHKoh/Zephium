@@ -461,6 +461,22 @@ pub fn get(id: &str) -> Option<&'static CommandSpec> {
 /// Applies keymap overrides onto the defaults. An override with an empty
 /// string removes the shortcut; unknown ids, fixed commands and overrides
 /// that no longer validate fall back to the default.
+/// The feature switch a command belongs to (`ai`, `work`, `notes`, `tasks`,
+/// `time`), so a command whose feature is off is neither offered nor run.
+/// Mirrored by `commandOffered` in the frame's preferences domain.
+pub fn feature_of(id: &str) -> Option<&'static str> {
+    match id {
+        "work.dictate" | "tool.ai" | "mode.choose" => Some("ai"),
+        "browser.work" | "mode.work" => Some("work"),
+        "tool.notes" | "browser.notes" | "note.new" => Some("notes"),
+        "tool.tasks" | "browser.tasks" => Some("tasks"),
+        "tool.time" | "browser.time" | "settings.focus" => Some("time"),
+        id if id.starts_with("work.") => Some("work"),
+        id if id.starts_with("focus.") => Some("time"),
+        _ => None,
+    }
+}
+
 pub fn resolve(overrides: &HashMap<String, String>) -> Vec<ResolvedCommand> {
     resolve_on(overrides, Platform::CURRENT)
 }
@@ -671,5 +687,23 @@ mod tests {
         assert_eq!(command.title, "Split View…");
         assert_eq!(command.keys, Keys::NONE);
         assert_eq!(command.group, Group::File);
+    }
+
+    #[test]
+    fn every_feature_command_names_its_switch() {
+        assert_eq!(feature_of("work.dictate"), Some("ai"));
+        assert_eq!(feature_of("work.pane.close"), Some("work"));
+        assert_eq!(feature_of("browser.work"), Some("work"));
+        for id in ["tool.notes", "browser.notes", "note.new"] {
+            assert_eq!(feature_of(id), Some("notes"));
+        }
+        for id in ["tool.tasks", "browser.tasks"] {
+            assert_eq!(feature_of(id), Some("tasks"));
+        }
+        for id in ["tool.time", "browser.time"] {
+            assert_eq!(feature_of(id), Some("time"));
+        }
+        assert_eq!(feature_of("tab.new"), None);
+        assert_eq!(feature_of("tool.bookmarks"), None);
     }
 }

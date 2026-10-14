@@ -12,6 +12,7 @@ use zephium_core::commands::{self, Group, KeymapError, ResolvedCommand};
 use zephium_core::ports::engine::Shortcut;
 
 const SETTING: &str = "keymap";
+const FEATURES: [&str; 5] = ["ai", "work", "notes", "tasks", "time"];
 const MAX_ACCELERATOR_BYTES: usize = 64;
 
 type EngineTable = Box<dyn Fn(Vec<Shortcut>) + Send + Sync>;
@@ -20,10 +21,9 @@ type EngineTable = Box<dyn Fn(Vec<Shortcut>) + Send + Sync>;
 pub(crate) struct Keymap {
     overrides: RwLock<HashMap<String, String>>,
     work_pane_shown: AtomicBool,
-    /// The two halves of Work and AI features as stored; either off takes
-    /// every Work key away.
-    ai_off: AtomicBool,
-    work_off: AtomicBool,
+    /// Feature switches as stored, in `FEATURES` order; a feature off takes
+    /// its keys and menu items away.
+    off: [AtomicBool; FEATURES.len()],
     /// Keyboard settings is recording a shortcut: window-level handlers stand
     /// aside so the keys reach the recorder instead of running commands.
     recording: AtomicBool,
@@ -43,11 +43,13 @@ impl Keymap {
     pub(crate) fn load() -> Self {
         let keymap = Self::default();
         if let Some(store) = APP_STORE.get() {
-            let off = |key: &str| store.app_setting(key).as_deref() == Some("false");
-            keymap.ai_off.store(off("ai.enabled"), Ordering::Release);
-            keymap
-                .work_off
-                .store(off("work.enabled"), Ordering::Release);
+            for (flag, feature) in keymap.off.iter().zip(FEATURES) {
+                let key = format!("{feature}.enabled");
+                flag.store(
+                    store.app_setting(&key).as_deref() == Some("false"),
+                    Ordering::Release,
+                );
+            }
         }
         let stored = APP_STORE
             .get()
@@ -86,12 +88,11 @@ impl Keymap {
     /// a bare Escape never leaves an ordinary page.
     fn engine_table(&self) -> Vec<Shortcut> {
         let shown = self.work_pane_shown.load(Ordering::Acquire);
-        let ai = self.ai_enabled();
         self.resolved()
             .iter()
             .filter(|command| command.group != Group::Global)
             .filter(|command| shown || command.group != Group::Work)
-            .filter(|command| ai || !command.id.starts_with("work."))
+            .filter(|command| self.offers(command.id))
             .filter_map(|command| shortcut(command.id, command.accelerator.as_deref()?))
             .collect()
     }
@@ -136,7 +137,7 @@ impl Keymap {
                 .iter()
                 .filter(|_| !recording)
                 .filter(|command| command.group == Group::Keys)
-                .filter(|command| self.ai_enabled() || !command.id.starts_with("work."))
+                .filter(|command| self.offers(command.id))
                 .filter_map(|command| {
                     let accelerator = command.accelerator.as_deref()?;
                     Some((Accelerator::parse(accelerator, Platform::Mac)?, command.id))
@@ -149,21 +150,37 @@ impl Keymap {
         self.work_pane_shown.load(Ordering::Acquire)
     }
 
-    pub(crate) fn ai_enabled(&self) -> bool {
-        !self.ai_off.load(Ordering::Acquire) && !self.work_off.load(Ordering::Acquire)
+    fn feature_on(&self, feature: &str) -> bool {
+        FEATURES
+            .iter()
+            .position(|known| *known == feature)
+            .is_none_or(|index| !self.off[index].load(Ordering::Acquire))
     }
 
-    /// Follows a stored change of Work and AI features: off, Dictate and the
-    /// other Work keys stop matching anywhere.
-    pub(crate) fn follow_preference(&self, key: &str, value: &str) {
-        let flag = match key {
-            "ai.enabled" => &self.ai_off,
-            "work.enabled" => &self.work_off,
-            _ => return,
+    pub(crate) fn ai_enabled(&self) -> bool {
+        self.feature_on("ai")
+    }
+
+    /// Whether a command's feature is on, so it is matched, listed and run.
+    pub(crate) fn offers(&self, command: &str) -> bool {
+        commands::feature_of(command).is_none_or(|feature| self.feature_on(feature))
+    }
+
+    /// Follows a stored feature switch: off, its keys stop matching anywhere.
+    /// Returns whether anything changed, so the menus can be rebuilt.
+    pub(crate) fn follow_preference(&self, key: &str, value: &str) -> bool {
+        let Some(index) = key
+            .strip_suffix(".enabled")
+            .and_then(|feature| FEATURES.iter().position(|known| *known == feature))
+        else {
+            return false;
         };
-        if flag.swap(value == "false", Ordering::AcqRel) != (value == "false") {
+        let changed =
+            self.off[index].swap(value == "false", Ordering::AcqRel) != (value == "false");
+        if changed {
             self.refresh_tables();
         }
+        changed
     }
 
     fn set_recording(&self, recording: bool) {
@@ -172,16 +189,19 @@ impl Keymap {
         }
     }
 
-    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     pub(crate) fn set_work_pane_shown(&self, app: &tauri::AppHandle, shown: bool) {
         if self.work_pane_shown.swap(shown, Ordering::AcqRel) == shown {
             return;
         }
         self.refresh_tables();
-        // Off the main thread a menu setter blocks on the main thread, which
-        // may be waiting on this caller; hand the rebuild over instead. It
-        // reads the state when it runs, so out-of-order flips settle on the
-        // latest one.
+        self.rebuild_menu_bar(app);
+    }
+
+    /// Off the main thread a menu setter blocks on the main thread, which may
+    /// be waiting on this caller; hand the rebuild over instead. It reads the
+    /// state when it runs, so out-of-order changes settle on the latest one.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    pub(crate) fn rebuild_menu_bar(&self, app: &tauri::AppHandle) {
         #[cfg(target_os = "macos")]
         {
             let handle = app.clone();
@@ -191,11 +211,11 @@ impl Keymap {
                 };
                 if install_menu_bar(&handle, &keymap.overrides(), keymap.work_pane_shown()).is_err()
                 {
-                    write_diagnostic(format_args!("menu: work pane items were not applied"));
+                    write_diagnostic(format_args!("menu: menu bar was not rebuilt"));
                 }
             });
             if queued.is_err() {
-                write_diagnostic(format_args!("menu: work pane items were not applied"));
+                write_diagnostic(format_args!("menu: menu bar was not rebuilt"));
             }
         }
     }
@@ -492,21 +512,36 @@ mod tests {
     }
 
     #[test]
-    fn work_keys_leave_every_table_while_work_and_ai_are_off() {
+    fn each_feature_switch_takes_only_its_own_keys() {
+        let keymap = Keymap::default();
+        keymap.follow_preference("notes.enabled", "false");
+        keymap.follow_preference("ai.enabled", "false");
+        assert!(!keymap.offers("tool.notes") && !keymap.offers("note.new"));
+        assert!(!keymap.offers("work.dictate"));
+        assert!(keymap.offers("tool.tasks") && keymap.offers("tool.time"));
+        assert!(keymap.offers("work.pane.close") && keymap.offers("tab.new"));
+        assert!(!keymap.engine_table().iter().any(|s| s.id == "tool.notes"));
+        assert!(!keymap.follow_preference("ui.theme", "nord"));
+    }
+
+    #[test]
+    fn work_keys_leave_every_table_while_work_is_off() {
         let keymap = Keymap::default();
         keymap.work_pane_shown.store(true, Ordering::Release);
-        keymap.follow_preference("ai.enabled", "false");
-        assert!(!keymap.ai_enabled());
+        assert!(keymap.follow_preference("work.enabled", "false"));
+        assert!(!keymap.follow_preference("work.enabled", "false"));
+        assert!(keymap.ai_enabled());
+        assert!(!keymap.offers("work.pane.close"));
         assert!(!keymap
             .engine_table()
             .iter()
-            .any(|s| s.id.starts_with("work.")));
+            .any(|s| s.id.starts_with("work.pane.")));
         #[cfg(target_os = "macos")]
         assert!(!read(&keymap.key_table)
             .iter()
-            .any(|(_, id)| id.starts_with("work.")));
-        keymap.follow_preference("ai.enabled", "true");
-        assert!(keymap.ai_enabled());
+            .any(|(_, id)| id.starts_with("work.pane.")));
+        keymap.follow_preference("work.enabled", "true");
+        assert!(keymap.offers("work.pane.close"));
         assert!(keymap
             .engine_table()
             .iter()

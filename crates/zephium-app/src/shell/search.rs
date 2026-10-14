@@ -447,6 +447,12 @@ impl Shell {
                     .filter(|c| {
                         c.id != "launcher.toggle"
                             && !matches!(c.group, commands::Group::Work | commands::Group::Keys)
+                            && commands::feature_of(c.id).is_none_or(|feature| {
+                                zephium_core::preferences::feature_enabled(
+                                    |key| self.store.app_setting(key),
+                                    feature,
+                                )
+                            })
                     })
                     .filter(|c| c.title.to_lowercase().contains(&needle))
                     .take(3)

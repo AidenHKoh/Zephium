@@ -53,7 +53,10 @@
   let profile = $derived(tabs.profile()?.id ?? null);
   let showGreeting = $derived(preferences.value("ui.newtab-greeting") === "true");
   let showClock = $derived(preferences.value("ui.newtab-clock") === "true");
-  let showDue = $derived(!incognito && preferences.value("ui.newtab-tasks") === "true");
+  let showDue = $derived(
+    !incognito && preferences.enabled("tasks") && preferences.value("ui.newtab-tasks") === "true",
+  );
+  let showFocus = $derived(preferences.enabled("time"));
   let today = $derived(dayKey(now));
 
   let firstName = $derived((tabs.profile()?.name ?? "").trim().split(/\s+/u)[0] ?? "");
@@ -83,7 +86,11 @@
   let figures = $derived(
     incognito
       ? []
-      : [...(blocked === null ? [] : ["trackers"]), "focus", ...(showDue ? ["due"] : [])],
+      : [
+          ...(blocked === null ? [] : ["trackers"]),
+          ...(showFocus ? ["focus"] : []),
+          ...(showDue ? ["due"] : []),
+        ],
   );
 
   // Read when the page opens and with the minute's redraw while it shows, so
@@ -111,7 +118,7 @@
     const owner = profile;
     const day = localDay(now);
     void running?.rounds;
-    if (!owner || incognito) {
+    if (!owner || incognito || !showFocus) {
       focusedBefore = 0;
       return;
     }

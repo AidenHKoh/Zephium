@@ -40,9 +40,10 @@ describe("keymap model", () => {
     expect(sections[2]!.entries.map((e) => e.id)).toEqual(["work.dictate"]);
     expect(commandTitle(sections[2]!.entries[0]!)).toBe("Dictate in Work");
     expect(
-      keymapSections([entry("tab.new", "file"), entry("work.dictate", "keys")], false).map(
-        (section) => section.id,
-      ),
+      keymapSections(
+        [entry("tab.new", "file"), entry("work.dictate", "keys")],
+        (id) => id !== "work.dictate",
+      ).map((section) => section.id),
     ).toEqual(["browser"]);
   });
 });
