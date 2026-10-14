@@ -514,6 +514,8 @@ impl Records {
                         // label-based guess that silently discards another URL.
                         if record.subject.homepage.as_ref() == Some(&text)
                             || record.subject.image_candidates.contains(&text)
+                            || (text.split_whitespace().nth(1).is_some()
+                                && words(&record.subject.name).is_superset(&words(&text)))
                         {
                             continue;
                         }
