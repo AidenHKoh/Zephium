@@ -46,6 +46,9 @@ pub(crate) struct RunScreenshots {
     profile: ProfileId,
     global: zephium_agentic::lead::ModelImageGate,
     entries: Mutex<BTreeMap<String, Arc<Choice>>>,
+    /// Sites the person let this run work in as them: what the run sees
+    /// there is theirs to show it, screenshots included, without asking again.
+    granted: Mutex<Vec<String>>,
 }
 impl RunScreenshots {
     pub(crate) fn new(profile: ProfileId) -> Self {
@@ -53,7 +56,22 @@ impl RunScreenshots {
             profile,
             global: super::gate(),
             entries: Mutex::new(BTreeMap::new()),
+            granted: Mutex::new(Vec::new()),
         }
+    }
+    pub(crate) fn grant_site(&self, site: &str) {
+        if let Ok(mut granted) = self.granted.lock() {
+            if !granted.iter().any(|known| known == site) {
+                granted.push(site.to_owned());
+            }
+        }
+    }
+    fn granted(&self, origin: &str) -> bool {
+        crate::work_sites::site_of(origin).is_some_and(|site| {
+            self.granted
+                .lock()
+                .is_ok_and(|granted| granted.iter().any(|known| *known == site))
+        })
     }
     pub(crate) fn request(
         &self,
@@ -70,6 +88,11 @@ impl RunScreenshots {
         }
         let global = self.global.fence().ok_or(WorkError::Unavailable)?;
         let epoch = super::sites::origin_epoch(self.profile, origin)?;
+        let choice = if self.granted(origin) {
+            ScreenshotChoice::Allowed
+        } else {
+            ScreenshotChoice::Checking
+        };
         entries.insert(
             origin.into(),
             Arc::new(Choice {
@@ -78,7 +101,7 @@ impl RunScreenshots {
                 page,
                 global,
                 state: Mutex::new(State {
-                    choice: ScreenshotChoice::Checking,
+                    choice,
                     claimed: false,
                     remembering: false,
                     question: None,
@@ -86,7 +109,7 @@ impl RunScreenshots {
                 }),
             }),
         );
-        Ok(ScreenshotChoice::Checking)
+        Ok(choice)
     }
     pub(crate) fn choice(&self, origin: &str) -> Option<ScreenshotChoice> {
         self.entries
@@ -295,7 +318,21 @@ mod tests {
             profile: id.into(),
             global: zephium_agentic::lead::ModelImageGate::new(Some(true)),
             entries: Mutex::new(BTreeMap::new()),
+            granted: Mutex::new(Vec::new()),
         }
+    }
+    #[test]
+    fn a_site_the_person_let_the_run_work_in_needs_no_screenshot_question() {
+        let run = run(99002);
+        run.grant_site("linear.app");
+        assert_eq!(
+            run.request("https://linear.app", 1u128.into()).unwrap(),
+            ScreenshotChoice::Allowed
+        );
+        assert_eq!(
+            run.request("https://example.test", 2u128.into()).unwrap(),
+            ScreenshotChoice::Checking
+        );
     }
     #[test]
     fn parallel_same_origin_has_one_lookup_and_one_host_question() {

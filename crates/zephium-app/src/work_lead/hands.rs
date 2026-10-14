@@ -415,20 +415,31 @@ where
             return Err(status);
         }
         // Typing could carry what the run read to a site the person did not
-        // name, so on those sites each field waits for them.
+        // name or let the run work in, so on those sites each field waits.
         let private = self.run.is_private();
-        driver.hold_typing(
-            requests
-                .iter()
-                .filter_map(|request| match &request.kind {
-                    WorkStepKindV1::Read {
-                        url, goal: Some(_), ..
-                    } if private => crate::work_sites::site_of(url),
-                    _ => None,
-                })
-                .filter(|site| !self.run.trusts(site))
-                .collect(),
-        );
+        let held: Vec<String> = requests
+            .iter()
+            .filter_map(|request| match &request.kind {
+                WorkStepKindV1::Read {
+                    url, goal: Some(_), ..
+                } if private => crate::work_sites::site_of(url),
+                _ => None,
+            })
+            .filter(|site| !self.run.trusts(site) && !driver.works_as_person(site))
+            .collect();
+        driver.hold_typing(held);
+        for request in &requests {
+            if let WorkStepKindV1::Read {
+                url, goal: Some(_), ..
+            } = &request.kind
+            {
+                if let Some(site) = crate::work_sites::site_of(url) {
+                    if driver.works_as_person(&site) && self.run.asked_to_save(&site) {
+                        driver.allow_saves(&site);
+                    }
+                }
+            }
+        }
         let mut gate = |probe: WorkAttemptProbe, request: WorkAgentBrowseRequest| {
             let lane = match &request.step {
                 WorkStepKindV1::Read {
@@ -747,6 +758,9 @@ where
                 EntryTurn::Decided(answers) => {
                     for (site, answer) in answers {
                         driver.enter(&site, answer).await;
+                        if driver.works_as_person(&site) {
+                            self.run.trust_site(&site);
+                        }
                     }
                     return None;
                 }

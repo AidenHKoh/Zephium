@@ -2272,7 +2272,10 @@ impl Driver {
     ) -> crate::work_sites::SiteSession {
         use crate::work_sites::*;
         match entry {
-            Entry::Session(session) => session,
+            Entry::Session(session) => {
+                self.probe.screenshot_choices().grant_site(site);
+                session
+            }
             Entry::Private(PrivateBecause::Public) => SiteSession::Private,
             Entry::Private(because) => {
                 self.report(WorkAgentDiagnostic::PrivatePage { because });
@@ -2571,6 +2574,14 @@ impl WorkPartDriver {
     /// Page tasks on these start pages only read what the app's view lists.
     pub(crate) fn view_pages(&mut self, pages: Vec<String>) {
         self.0.views = pages;
+    }
+    /// The person's request covers saving on this site: no question first.
+    pub(crate) fn allow_saves(&mut self, site: &str) {
+        self.0.sites.allow_edits(site);
+    }
+    /// Whether the person let this run work on the site as them.
+    pub(crate) fn works_as_person(&self, site: &str) -> bool {
+        self.0.sites.works_as_person(site)
     }
     pub(crate) fn hold_typing(&mut self, sites: Vec<String>) {
         self.0.typing_held = sites;

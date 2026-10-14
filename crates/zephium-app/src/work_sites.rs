@@ -109,6 +109,11 @@ const VENDORS: &[(&str, &str, Option<&str>)] = &[
     ("asana.com", "Asana", Some("https://app.asana.com/")),
     ("linear.app", "Linear", Some("https://linear.app/login")),
     (
+        "todoist.com",
+        "Todoist",
+        Some("https://app.todoist.com/app"),
+    ),
+    (
         "discord.com",
         "Discord",
         Some("https://discord.com/channels/@me"),
@@ -136,6 +141,34 @@ const VENDORS: &[(&str, &str, Option<&str>)] = &[
         Some("https://outlook.live.com/mail/"),
     ),
 ];
+
+/// The sites of services a person names by their name ("check my Slack and
+/// Todoist"), as if they had named the sites themselves.
+pub fn named_services(text: &str) -> Vec<String> {
+    const ALSO: &[(&str, &str)] = &[("gmail", "google.com"), ("allegro", "allegro.pl")];
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric() && c != '.')
+        .map(|word| word.trim_matches('.').to_lowercase())
+        .collect();
+    let named = |name: &str| {
+        let name = name.to_lowercase();
+        words
+            .iter()
+            .any(|word| *word == name || word.strip_suffix(".com") == Some(&name))
+    };
+    let mut sites: Vec<String> = Vec::new();
+    for (site, name, _) in VENDORS {
+        if named(name) && !sites.iter().any(|known| known == site) {
+            sites.push((*site).to_owned());
+        }
+    }
+    for (name, site) in ALSO {
+        if named(name) && !sites.iter().any(|known| known == site) {
+            sites.push((*site).to_owned());
+        }
+    }
+    sites
+}
 
 pub fn is_sensitive(site: &str) -> bool {
     SENSITIVE_SITES.contains(&site)
@@ -546,6 +579,17 @@ impl RunSites {
             SiteSession::Private
         }
     }
+    /// Whether the person let this run work on the site as them.
+    pub fn works_as_person(&self, site: &str) -> bool {
+        match self.decided.get(site) {
+            Some(decided) => decided.is_some(),
+            None => {
+                !self.private
+                    && !is_sensitive(site)
+                    && self.standing(site) == Some(WorkSiteAccessV1::Always)
+            }
+        }
+    }
     /// The decided sites, for the lead's view.
     pub fn view(&self) -> Vec<(String, &'static str)> {
         self.decided
@@ -631,6 +675,18 @@ mod tests {
         assert!(!allowed.image_entry_blocked("example.com"));
         // False is only absence of this refusal; it creates no screenshot choice.
     }
+    #[test]
+    fn a_service_named_by_name_is_its_site() {
+        assert_eq!(
+            named_services("Open my Slack and Todoist, then my Gmail"),
+            ["slack.com", "todoist.com", "google.com"]
+        );
+        assert!(
+            named_services("a slack rope and linear algebra").contains(&"linear.app".to_owned())
+        );
+        assert!(named_services("Find a flat").is_empty());
+    }
+
     #[test]
     fn work_site_entries_ask_once_and_respect_standing_answers() {
         let mut run = RunSites::new(

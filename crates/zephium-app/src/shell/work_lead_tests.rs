@@ -1275,7 +1275,10 @@ async fn an_object_stands_on_its_first_try_with_long_text_clipped_and_strays_lef
         })
         .unwrap();
     let detail = plan[0].detail.clone().unwrap();
-    assert!(detail.starts_with("word word") && detail.chars().count() <= 280, "{detail}");
+    assert!(
+        detail.starts_with("word word") && detail.chars().count() <= 280,
+        "{detail}"
+    );
     assert_eq!(plan[1].title, "Check in");
     assert_eq!(run.title.as_deref(), Some("Trip to San Francisco"));
 }

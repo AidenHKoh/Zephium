@@ -63,6 +63,10 @@ struct State {
     /// Sites the person named in the request or while it ran, and sites they
     /// let the run open addresses on.
     trusted_sites: Vec<String>,
+    /// What the person asked the run to create or change in their own
+    /// apps: the sites they named, or every site they let it work in when
+    /// they named none ("create the issue").
+    asked_saves: Option<Vec<String>>,
     waits: usize,
     waiting_since: Option<Instant>,
     stopped: Option<WorkCancelCause>,
@@ -147,6 +151,7 @@ impl LeadRun {
                 allowed: Vec::new(),
                 private: false,
                 trusted_sites: Vec::new(),
+                asked_saves: None,
                 waits: 0,
                 waiting_since: None,
                 stopped: None,
@@ -699,6 +704,19 @@ impl LeadRun {
     /// what they add while it runs, never attached text, which can quote
     /// anyone's links.
     pub(crate) fn trust_sites_in(&self, text: &str) {
+        let named = crate::work_sites::named_services(text);
+        if asks_to_save(text) {
+            let mut state = self.state();
+            let asked = state.asked_saves.get_or_insert_with(Vec::new);
+            for site in &named {
+                if !asked.contains(site) {
+                    asked.push(site.clone());
+                }
+            }
+        }
+        for site in named {
+            self.trust_site(&site);
+        }
         for word in
             text.split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '(' | ')'))
         {
@@ -710,6 +728,15 @@ impl LeadRun {
                 }
             }
         }
+    }
+
+    /// Whether the person's own words ask the run to create or change
+    /// something on this site, which they let it work in.
+    pub(crate) fn asked_to_save(&self, site: &str) -> bool {
+        self.state()
+            .asked_saves
+            .as_ref()
+            .is_some_and(|sites| sites.is_empty() || sites.iter().any(|known| known == site))
     }
 
     /// Whether the person named this site or let the run work on it.
@@ -783,6 +810,40 @@ impl LeadRun {
     }
 }
 
+/// Whether a request asks to create or change something: "create an
+/// issue", "add a task", "update the doc". Sending, buying and deleting are
+/// never covered by it; each waits for the person.
+fn asks_to_save(text: &str) -> bool {
+    const VERBS: &[&str] = &[
+        "create",
+        "add",
+        "make",
+        "save",
+        "update",
+        "edit",
+        "rename",
+        "move",
+        "schedule",
+        "assign",
+        "label",
+        "complete",
+        "check off",
+        "mark",
+        "write",
+        "draft",
+        "log",
+        "note",
+        "put",
+        "set",
+    ];
+    let text = format!(
+        " {} ",
+        text.to_lowercase()
+            .replace(|c: char| !c.is_alphanumeric(), " ")
+    );
+    VERBS.iter().any(|verb| text.contains(&format!(" {verb} ")))
+}
+
 /// The registrable site a word of the person's names: a link, or a bare
 /// domain such as "airbnb.com" or "www.lego.com".
 fn named_site(word: &str) -> Option<String> {
@@ -811,4 +872,19 @@ fn home_page(url: &str, site: &str) -> bool {
         && parsed.password().is_none()
         && parsed.port().is_none()
         && (host == site || host.strip_prefix("www.") == Some(site))
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::asks_to_save;
+
+    #[test]
+    fn a_request_to_create_or_change_covers_saving_and_a_question_does_not() {
+        assert!(asks_to_save("Create an issue in Linear about \"Testing the agentic browsing\""));
+        assert!(asks_to_save("Okay, can you please continue and actually create the issue?"));
+        assert!(asks_to_save("add a task to Todoist: call the bank"));
+        assert!(!asks_to_save("Check my Linear as well"));
+        assert!(!asks_to_save("Send Anna a message on Slack"));
+        assert!(!asks_to_save("Delete the old tasks"));
+    }
 }

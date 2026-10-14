@@ -1719,9 +1719,9 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
                 return accept_approved(original);
             }
             // Edits allowed for the run: the approval covers this edit too.
-            if consequence == Consequence::Edit
+            if matches!(consequence, Consequence::Edit | Consequence::Save)
                 && state.allow_edits
-                && confirmed.preview.consequence == Consequence::Edit
+                && confirmed.preview.consequence == consequence
             {
                 if declared != SemanticEffectClass::ExternalWrite {
                     state.confirmed = Some(confirmed);
@@ -1736,7 +1736,9 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             // The page changed since the person decided: that approval is spent.
             state.receipt = Some(Receipt::NotSent);
         }
-        if consequence == Consequence::Edit && state.allow_edits {
+        // Saving or editing what the person asked for in their own app is
+        // the request itself; sending, buying and deleting still wait.
+        if matches!(consequence, Consequence::Edit | Consequence::Save) && state.allow_edits {
             if declared != SemanticEffectClass::ExternalWrite {
                 return Err(AgentWorkFailure::EffectRequired(
                     SemanticEffectClass::ExternalWrite,
