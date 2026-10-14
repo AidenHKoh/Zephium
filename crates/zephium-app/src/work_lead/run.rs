@@ -880,8 +880,12 @@ mod save_tests {
 
     #[test]
     fn a_request_to_create_or_change_covers_saving_and_a_question_does_not() {
-        assert!(asks_to_save("Create an issue in Linear about \"Testing the agentic browsing\""));
-        assert!(asks_to_save("Okay, can you please continue and actually create the issue?"));
+        assert!(asks_to_save(
+            "Create an issue in Linear about \"Testing the agentic browsing\""
+        ));
+        assert!(asks_to_save(
+            "Okay, can you please continue and actually create the issue?"
+        ));
         assert!(asks_to_save("add a task to Todoist: call the bank"));
         assert!(!asks_to_save("Check my Linear as well"));
         assert!(!asks_to_save("Send Anna a message on Slack"));

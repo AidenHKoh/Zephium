@@ -492,6 +492,21 @@ where
             }
         }
         self.settle_need(fact.id, &spec, &mut report).await;
+        // A page that still found the person signed out, though their profile
+        // now holds a session there, met the sign-in they just made before it
+        // settled: it reads again once, as their own "Try again" would.
+        if let Some(WorkPartNeedV1::SignIn { host }) = report.need.clone() {
+            let signed_in = crate::work_context::sessions_present(self.run.profile, vec![host])
+                .await
+                .first()
+                .copied()
+                .flatten()
+                == Some(true);
+            if signed_in && report.state != WorkPartStateV1::Stopped {
+                report = self.helper(fact.id, &spec).await;
+                self.settle_need(fact.id, &spec, &mut report).await;
+            }
+        }
         if let Kit::Registered(helper) = self.kit(spec.helper) {
             let context = LeadToolContext {
                 run: self.run,
