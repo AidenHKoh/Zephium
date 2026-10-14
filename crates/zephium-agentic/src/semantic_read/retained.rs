@@ -77,6 +77,89 @@ struct Fragment {
     rank: u8,
 }
 
+/// What makes two reads the same page content: one field and value of one
+/// document, from one native node or from one record. A record root stays put
+/// while a list re-renders the nodes inside it, so within a record the value is
+/// the identity. Read-local identities never take part.
+#[derive(Clone, Copy)]
+pub(super) struct Signature<'a> {
+    node_key: crate::semantic::SemanticNodeKey,
+    record_root: Option<crate::semantic::SemanticNodeKey>,
+    region: u8,
+    fields_complete: bool,
+    field: SemanticReadField,
+    role: SemanticRole,
+    frame: &'a SemanticFrameJoin,
+    trust: SemanticTrust,
+    content: SemanticReadContent<'a>,
+}
+
+impl Signature<'_> {
+    /// Header, navigation and filters outside any record repeat in every look
+    /// and are identified by what they say; main content is by its node.
+    fn chrome(self) -> bool {
+        self.record_root.is_none() && self.region > 0
+    }
+
+    pub(super) fn same_source(self, other: Signature<'_>) -> bool {
+        (self.node_key == other.node_key
+            || self.record_root.is_some() && self.record_root == other.record_root
+            || self.chrome() && other.chrome() && self.region == other.region)
+            && self.fields_complete == other.fields_complete
+            && self.field == other.field
+            && self.role == other.role
+            && self.frame == other.frame
+            && self.trust == other.trust
+            && self.content == other.content
+    }
+}
+
+impl Fragment {
+    fn signature(&self) -> Signature<'_> {
+        Signature {
+            node_key: self.node_key,
+            record_root: self.record_root,
+            region: self.region,
+            fields_complete: self.fields_complete,
+            field: self.field,
+            role: self.role,
+            frame: &self.frame,
+            trust: self.trust,
+            content: self.content.borrow(),
+        }
+    }
+}
+
+impl SemanticReadFragment<'_> {
+    pub(super) fn signature(&self) -> Signature<'_> {
+        let source = self.provenance;
+        Signature {
+            node_key: source.node_key,
+            record_root: self.record_root,
+            region: self.region,
+            fields_complete: source.fields_complete,
+            field: self.field,
+            role: self.role,
+            frame: source.frame,
+            trust: source.trust,
+            content: self.content,
+        }
+    }
+}
+
+/// Pairs a fragment with a not yet paired equal one, so a value repeated on a
+/// page (two identical labels in one card) is kept as often as it occurs.
+fn take_match<T>(consumed: &mut [bool], pool: &[T], matches: impl Fn(&T) -> bool) -> bool {
+    let found = pool
+        .iter()
+        .enumerate()
+        .position(|(index, candidate)| !consumed[index] && matches(candidate));
+    if let Some(index) = found {
+        consumed[index] = true;
+    }
+    found.is_some()
+}
+
 struct Capture {
     media: Vec<ReadMediaAssociation>,
     focused: bool,
@@ -99,15 +182,10 @@ impl Capture {
     }
 
     fn remove_duplicates(&mut self, preferred: &Self) {
+        let mut consumed = vec![false; preferred.fragments.len()];
         self.fragments.retain(|fragment| {
-            let duplicate = preferred.fragments.iter().any(|other| {
-                fragment.node_key == other.node_key
-                    && fragment.fields_complete == other.fields_complete
-                    && fragment.field == other.field
-                    && fragment.role == other.role
-                    && fragment.frame == other.frame
-                    && fragment.trust == other.trust
-                    && fragment.content.borrow() == other.content.borrow()
+            let duplicate = take_match(&mut consumed, &preferred.fragments, |other| {
+                fragment.signature().same_source(other.signature())
             });
             if duplicate {
                 self.stats.items -= 1;
@@ -460,6 +538,9 @@ impl SemanticRetainedReadEvidence {
             fragment.id =
                 SemanticReadFragmentId::new(index as u16 + 1).expect("bounded nonzero fragment");
         }
+        // The current look wins over the same content seen earlier.
+        let current_len = current.fragments.len();
+        let mut current_taken = vec![false; current_len];
         for capture in self.captures.iter().rev() {
             if current.matches_acknowledgement(&capture.acknowledgement) {
                 continue;
@@ -469,6 +550,13 @@ impl SemanticRetainedReadEvidence {
             current.omissions.0 |= capture.omissions.0;
             merge_omitted_stats(&mut current.stats, capture.stats);
             for source in &capture.fragments {
+                if take_match(
+                    &mut current_taken,
+                    &current.fragments[..current_len],
+                    |held| held.signature().same_source(source.signature()),
+                ) {
+                    continue;
+                }
                 let content = source.content.borrow();
                 let bytes = content.retained_bytes();
                 if current.stats.items >= budget.max_items()
