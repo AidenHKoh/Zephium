@@ -11,6 +11,7 @@
   import { extensions } from "$domain/extensions";
   import { webext } from "$domain/webext";
   import { tabs } from "$domain/tabs";
+  import { surface } from "$domain/surface";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { commands } from "$shared/ipc/bindings";
   import Icon from "$shared/ui/Icon";
@@ -59,7 +60,13 @@
   let draft = $state("");
   let activeUrl = $derived(tabs.activeTab()?.url ?? "");
   let activeContent = $derived(tabs.activeTab()?.content ?? "web");
-  let listedId = $derived(webext.isAvailable() ? extensions.chromeStoreListingId(activeUrl) : null);
+  // Only a store page actually in front, never one behind Settings or another
+  // browser page, offers to install.
+  let listedId = $derived(
+    webext.isAvailable() && surface.currentPage() === null
+      ? extensions.chromeStoreListingId(activeUrl)
+      : null,
+  );
   let listedInstalled = $derived(listedId === null ? null : webext.named(listedId));
   let removing = $state(false);
   $effect(() => {
