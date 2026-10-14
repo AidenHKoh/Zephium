@@ -61,6 +61,9 @@ pub use observation_checkpoint::{
 /// Larger admitted observations remain valid first turns, but cannot mint a
 /// continuation seed and therefore require a fresh full observation later.
 pub const MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES: usize = 32 * 1024;
+/// Initial bytes a terminal extraction call retains: a listing's mapping text
+/// carries many records and is replayed only by that same extraction call.
+pub const MAX_AGENT_PROVIDER_CONTINUATION_EXTRACTION_OBSERVATION_BYTES: usize = 192 * 1024;
 /// Maximum private structured transcript bytes retained by one continuation.
 pub const MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES: usize = 256 * 1024;
 /// Maximum completed tool/result pairs retained by one continuation.
@@ -466,7 +469,11 @@ const _: () = {
     assert!(
         MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES
             >= super::MAX_AGENT_PROVIDER_OBJECTIVE_BYTES
-                + MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES
+                + MAX_AGENT_PROVIDER_CONTINUATION_EXTRACTION_OBSERVATION_BYTES
+    );
+    assert!(
+        MAX_AGENT_PROVIDER_CONTINUATION_EXTRACTION_OBSERVATION_BYTES
+            >= MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES
     );
     assert!(MAX_AGENT_PROVIDER_CONTINUATION_TURNS > 0);
 };
@@ -526,6 +533,20 @@ impl AgentProviderTranscript {
         )
     }
 
+    pub(super) fn try_initial_extraction(
+        objective: Arc<str>,
+        mapping_text: String,
+    ) -> Option<Self> {
+        Self::try_initial_bounded(
+            objective,
+            mapping_text,
+            None,
+            None,
+            None,
+            MAX_AGENT_PROVIDER_CONTINUATION_EXTRACTION_OBSERVATION_BYTES,
+        )
+    }
+
     pub(super) fn try_initial_with_progress(
         objective: Arc<str>,
         initial_observation: String,
@@ -533,8 +554,26 @@ impl AgentProviderTranscript {
         inspection_checkpoint: Option<super::request::AgentProviderInspectionContext>,
         action_progress: Option<AgentActionProgress>,
     ) -> Option<Self> {
+        Self::try_initial_bounded(
+            objective,
+            initial_observation,
+            navigation_checkpoint,
+            inspection_checkpoint,
+            action_progress,
+            MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
+        )
+    }
+
+    fn try_initial_bounded(
+        objective: Arc<str>,
+        initial_observation: String,
+        navigation_checkpoint: Option<super::request::AgentProviderNavigationContext>,
+        inspection_checkpoint: Option<super::request::AgentProviderInspectionContext>,
+        action_progress: Option<AgentActionProgress>,
+        observation_limit: usize,
+    ) -> Option<Self> {
         if objective.len() > super::MAX_AGENT_PROVIDER_OBJECTIVE_BYTES
-            || initial_observation.len() > MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES
+            || initial_observation.len() > observation_limit
             || navigation_checkpoint.as_ref().is_some_and(|checkpoint| {
                 checkpoint.text.len()
                     > super::request::MAX_AGENT_PROVIDER_NAVIGATION_CHECKPOINT_BYTES
@@ -5884,6 +5923,16 @@ mod tests {
         assert!(AgentProviderTranscript::try_initial(
             shared_objective.clone(),
             "x".repeat(MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES + 1),
+        )
+        .is_none());
+        assert!(AgentProviderTranscript::try_initial_extraction(
+            shared_objective.clone(),
+            "x".repeat(MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES + 1),
+        )
+        .is_some());
+        assert!(AgentProviderTranscript::try_initial_extraction(
+            shared_objective.clone(),
+            "x".repeat(MAX_AGENT_PROVIDER_CONTINUATION_EXTRACTION_OBSERVATION_BYTES + 1),
         )
         .is_none());
         assert!(AgentProviderTranscript::try_initial(

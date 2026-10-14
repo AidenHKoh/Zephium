@@ -62,8 +62,9 @@ use super::{
 pub const MAX_AGENT_PROVIDER_OBJECTIVE_BYTES: usize = 8 * 1024;
 /// Maximum exactly measured tokens in one approved browser objective.
 pub const MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS: u32 = 4_096;
-/// Maximum serialized bytes in one provider request body.
-pub const MAX_AGENT_PROVIDER_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+/// Maximum serialized bytes in one provider request body: the largest listing
+/// mapping, escaped in full, beside the base64 viewport image.
+pub const MAX_AGENT_PROVIDER_REQUEST_BYTES: usize = 3 * 1024 * 1024;
 /// Maximum in-memory size of one copyable committed-input metric receipt.
 pub const MAX_AGENT_PROVIDER_INPUT_METRIC_RECEIPT_BYTES: usize = 192;
 /// Maximum canonical PNG bytes admitted to one provider screenshot result.
@@ -3170,7 +3171,7 @@ impl AgentProviderExtractionRequestDraft {
             &bound_extraction_output_schema(schema, Some(read)),
         )?;
         let continuation_transcript =
-            AgentProviderTranscript::try_initial(Arc::from(objective.as_str()), text)
+            AgentProviderTranscript::try_initial_extraction(Arc::from(objective.as_str()), text)
                 .ok_or(AgentProviderRequestError::Encoding)?;
         Ok(Self {
             viewport_image_guard: None,
@@ -3225,7 +3226,7 @@ impl AgentProviderExtractionRequestDraft {
             &bound_extraction_output_schema(schema, Some(read)),
         )?;
         let continuation_transcript =
-            AgentProviderTranscript::try_initial(Arc::from(objective.as_str()), text)
+            AgentProviderTranscript::try_initial_extraction(Arc::from(objective.as_str()), text)
                 .ok_or(AgentProviderRequestError::Encoding)?;
         Ok(Self {
             viewport_image_guard: None,
@@ -3327,7 +3328,7 @@ impl AgentProviderExtractionRequestDraft {
             &bound_extraction_output_schema(schema, Some(read)),
         )?;
         let continuation_transcript =
-            AgentProviderTranscript::try_initial(Arc::from(objective.as_str()), text)
+            AgentProviderTranscript::try_initial_extraction(Arc::from(objective.as_str()), text)
                 .ok_or(AgentProviderRequestError::Encoding)?;
         Ok(Self {
             viewport_image_guard: None,
@@ -7538,9 +7539,8 @@ mod tests {
             + "data:image/png;base64,".len()
             + VIEWPORT_IMAGE_NOTE.len();
         // Every payload byte escaped, plus instructions, schema and framing.
-        let mapping = 2
-            * crate::SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE.max_bytes()
-                as usize
+        let mapping = 2 * crate::SemanticModelEncodingBudget::LISTING_PROVIDER_EXACT_CONSERVATIVE
+            .max_bytes() as usize
             + AGENT_EXTRACTION_INSTRUCTIONS_V1.len()
             + 128 * 1024;
         assert!(image + mapping <= MAX_AGENT_PROVIDER_REQUEST_BYTES);
