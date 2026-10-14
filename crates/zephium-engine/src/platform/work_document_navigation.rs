@@ -1508,13 +1508,20 @@ impl WorkDocumentNavigation {
             state.phase = Phase::Refused;
         }
     }
+    /// The page is still on its document. An app may have moved to a
+    /// fragment of it (Gmail's `#inbox`); that loads nothing.
     pub(crate) fn ready(&self, current: Option<&str>) -> bool {
         self.0.lock().is_ok_and(|state| {
             state.phase == Phase::Ready
-                && state
-                    .effective
-                    .as_ref()
-                    .is_some_and(|target| Some(target.as_url().as_str()) == current)
+                && state.effective.as_ref().is_some_and(|target| {
+                    Some(target.as_url().as_str()) == current
+                        || current
+                            .and_then(|current| ContextNavigationTarget::parse(current).ok())
+                            .is_some_and(|current| {
+                                target.as_url().fragment().is_none()
+                                    && *target == human::without_fragment(&current)
+                            })
+                })
         })
     }
     pub(crate) fn failed(&self) -> bool {

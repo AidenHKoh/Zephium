@@ -22,6 +22,9 @@ static POLLED_DOCUMENT: AtomicUsize = AtomicUsize::new(0);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Scenario {
     SignIn,
+    /// A sign-in that lands on an app routing by its fragment, as Gmail's
+    /// `#inbox`.
+    SignInHash,
     EmailCode,
     Check,
     Unresolved,
@@ -29,8 +32,9 @@ pub(super) enum Scenario {
     StaleDocument,
     LongWait,
 }
-pub(super) const SCENARIOS: [Scenario; 7] = [
+pub(super) const SCENARIOS: [Scenario; 8] = [
     Scenario::SignIn,
+    Scenario::SignInHash,
     Scenario::EmailCode,
     Scenario::Check,
     Scenario::Unresolved,
@@ -42,6 +46,7 @@ impl Scenario {
     fn name(self) -> &'static str {
         match self {
             Self::SignIn => "signin",
+            Self::SignInHash => "signin-hash",
             Self::EmailCode => "email-code",
             Self::Check => "check",
             Self::Unresolved => "unresolved",
@@ -67,7 +72,7 @@ impl Scenario {
     fn resumes(self) -> bool {
         matches!(
             self,
-            Self::SignIn | Self::EmailCode | Self::Check | Self::LongWait
+            Self::SignIn | Self::SignInHash | Self::EmailCode | Self::Check | Self::LongWait
         )
     }
 }
@@ -172,6 +177,7 @@ pub(super) fn response(path: &str) -> String {
     let document = document.parse::<usize>().unwrap_or(0);
     if ![
         "signin",
+        "signin-hash",
         "email-code",
         "check",
         "unresolved",
@@ -200,6 +206,11 @@ pub(super) fn response(path: &str) -> String {
     } else {
         format!("<main><h1>Fixture dashboard</h1><p>{FACT}.</p><p>This dashboard is public synthetic test data. The retained page now exposes its balance and reference without a reload, route change, cookie signal or manual continue command.</p></main>")
     };
+    let routed = if *scenario == "signin-hash" {
+        "location.hash='inbox';"
+    } else {
+        ""
+    };
     let tamper = if *scenario == "email-code" {
         "Object.defineProperty(window,'getComputedStyle',{value(){throw new Error('fixture_page_world_tampered');},configurable:true});"
     } else {
@@ -226,7 +237,7 @@ pub(super) fn response(path: &str) -> String {
    }}
    if(action==='clear'){{
     finished=true;document.title='Fixture dashboard';
-    document.body.innerHTML='{content}';
+    document.body.innerHTML='{content}';{routed}
     await fetch('/human-fixture/ack/'+documentNumber,{{cache:'no-store'}});return;
    }}
   }}catch(_){{}}
@@ -260,11 +271,14 @@ fn advance(session: &mut Session, pages: &[WorkHumanPageV1]) -> Action {
         session.fail("human_page_identity_changed");
         return Action::Cancel;
     }
-    if session.scenario != Scenario::StaleDocument
-        && session
-            .revision
-            .as_ref()
-            .is_some_and(|revision| *revision != page.document_revision)
+    // The app's own route change after sign-in moves the revision on.
+    if !matches!(
+        session.scenario,
+        Scenario::StaleDocument | Scenario::SignInHash
+    ) && session
+        .revision
+        .as_ref()
+        .is_some_and(|revision| *revision != page.document_revision)
     {
         session.fail("same_document_revision_changed");
         return Action::Cancel;
@@ -317,7 +331,11 @@ fn advance(session: &mut Session, pages: &[WorkHumanPageV1]) -> Action {
             }
         }
         match session.scenario {
-            Scenario::SignIn | Scenario::EmailCode | Scenario::Check | Scenario::LongWait => {
+            Scenario::SignIn
+            | Scenario::SignInHash
+            | Scenario::EmailCode
+            | Scenario::Check
+            | Scenario::LongWait => {
                 CONTROL.store(CLEAR_FIRST, Ordering::SeqCst);
                 session.signal_at = Some(Instant::now());
             }

@@ -1607,7 +1607,8 @@ where
             let Some(gate) = work_policy.as_ref() else {
                 return navigation_policy.allows(&target);
             };
-            let human_prepare = gate.human_load_preparation_needed(Some(true));
+            let human_prepare = gate.human_load_preparation_needed(Some(true))
+                && !gate.human_fragment_move(&target);
             let allowed = gate.allows(&target);
             if let Some(destination) = gate.take_redirect_report().filter(|_| !allowed) {
                 policy_redirect(destination);

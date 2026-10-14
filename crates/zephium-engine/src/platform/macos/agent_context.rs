@@ -836,6 +836,7 @@ where
         .with_apple_navigation_action_handler(move |target, action| {
             let prepare_human = work_policy.as_ref().is_some_and(|gate| {
                 gate.human_load_preparation_needed(action.target_is_main_frame)
+                    && !gate.human_fragment_move(&target)
             });
             let allowed = work_policy.as_ref().map_or_else(
                 || navigation_policy.allows(&target),

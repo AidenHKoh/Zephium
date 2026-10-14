@@ -647,6 +647,15 @@ fn is_sensitive_url_parameter_name(value: &str) -> bool {
     )
 }
 
+/// Whether an address's fragment, if any, is an app's own routing rather
+/// than state that could carry a credential.
+pub fn plain_url_fragment(target: &crate::ContextNavigationTarget) -> bool {
+    !target
+        .as_url()
+        .fragment()
+        .is_some_and(fragment_contains_sensitive_data)
+}
+
 fn fragment_contains_sensitive_data(value: &str) -> bool {
     let Some(decoded) = percent_decode_url_component(value) else {
         return true;

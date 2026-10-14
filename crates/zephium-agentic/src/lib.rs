@@ -678,8 +678,8 @@ pub use semantic_verify::{
     MAX_SEMANTIC_SCROLL_COORDINATE,
 };
 pub use semantic_wire::{
-    decode_semantic_snapshot, SemanticDecodeContext, SemanticDecodeError, MAX_SEMANTIC_WIRE_BYTES,
-    SEMANTIC_WIRE_VERSION,
+    decode_semantic_snapshot, plain_url_fragment, SemanticDecodeContext, SemanticDecodeError,
+    MAX_SEMANTIC_WIRE_BYTES, SEMANTIC_WIRE_VERSION,
 };
 pub use sign_in_handoff::{
     ContextSignInHandoff, ContextSignInHandoffBlocker, ContextSignInHandoffCleanup,

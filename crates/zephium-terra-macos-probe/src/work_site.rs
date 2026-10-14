@@ -308,6 +308,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("held") => vec![Check::Held],
         Some("wall") => vec![Check::Wall],
         Some("human-signin") => vec![Check::Human(human_fixture::Scenario::SignIn)],
+        Some("human-signin-hash") => vec![Check::Human(human_fixture::Scenario::SignInHash)],
         Some("human-email-code") => vec![Check::Human(human_fixture::Scenario::EmailCode)],
         Some("human-check") => vec![Check::Human(human_fixture::Scenario::Check)],
         Some("human-long-wait") => vec![Check::Human(human_fixture::Scenario::LongWait)],

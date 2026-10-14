@@ -27,6 +27,60 @@ pub(crate) struct WorkHumanDocumentStamp {
     native_id: wry::NavigationId,
 }
 
+const SIGN_IN_WORDS: &[&str] = &[
+    "login",
+    "signin",
+    "sign-in",
+    "sign_in",
+    "log-in",
+    "logon",
+    "sso",
+    "auth",
+    "oauth",
+    "authorize",
+    "2fa",
+    "mfa",
+    "2sv",
+    "otp",
+    "totp",
+    "two-factor",
+    "two_factor",
+    "twofactor",
+    "verify",
+    "verification",
+    "challenge",
+    "checkpoint",
+    "challenge-platform",
+    "accountchooser",
+    "select-account",
+    "select_account",
+];
+
+fn fragment_move(current: &ContextNavigationTarget, raw: &str) -> bool {
+    ContextNavigationTarget::parse(raw).is_ok_and(|next| {
+        next.as_url().fragment().is_some()
+            && without_fragment(&next).as_url() == without_fragment(current).as_url()
+    })
+}
+
+pub(super) fn without_fragment(target: &ContextNavigationTarget) -> ContextNavigationTarget {
+    // Only an app's route (`#inbox`, `#/projects`) is dropped; a fragment
+    // with state or a sign-in step in it stays part of the address.
+    let route = target.as_url().fragment().is_some_and(|fragment| {
+        !fragment.contains('=')
+            && zephium_agentic::plain_url_fragment(target)
+            && !fragment
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+                .any(|word| SIGN_IN_WORDS.contains(&word.to_ascii_lowercase().as_str()))
+    });
+    if !route {
+        return target.clone();
+    }
+    let mut url = target.as_url().clone();
+    url.set_fragment(None);
+    ContextNavigationTarget::parse(url.as_str()).unwrap_or_else(|_| target.clone())
+}
+
 impl HumanNavigation {
     fn target(&self, raw: &str) -> Option<ContextNavigationTarget> {
         ContextNavigationTarget::parse(raw).ok().filter(|target| {
@@ -42,8 +96,10 @@ impl HumanNavigation {
             && self.loading.is_none()
             // A human may navigate through credential-bearing callback URLs,
             // but the retained actor must never resume on one of those URLs.
+            // An app that routes by its fragment (Gmail's `#inbox`) is back
+            // on its page; the fragment is the app's, not a request.
             && zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
-                .admits_request(&self.current)
+                .admits_request(&without_fragment(&self.current))
             && zephium_agentic::same_work_human_site(&self.source, &self.current)
             && !self.current.as_url().host_str().is_some_and(|host| {
                 [
@@ -65,38 +121,7 @@ impl HumanNavigation {
                     .path_segments()
                     .into_iter()
                     .flatten()
-                    .any(|segment| {
-                        let segment = segment.to_ascii_lowercase();
-                        [
-                            "login",
-                            "signin",
-                            "sign-in",
-                            "sign_in",
-                            "log-in",
-                            "logon",
-                            "sso",
-                            "auth",
-                            "oauth",
-                            "authorize",
-                            "2fa",
-                            "mfa",
-                            "2sv",
-                            "otp",
-                            "totp",
-                            "two-factor",
-                            "two_factor",
-                            "twofactor",
-                            "verify",
-                            "verification",
-                            "challenge",
-                            "checkpoint",
-                            "challenge-platform",
-                            "accountchooser",
-                            "select-account",
-                            "select_account",
-                        ]
-                        .contains(&segment.as_str())
-                    }))
+                    .any(|segment| SIGN_IN_WORDS.contains(&segment.to_ascii_lowercase().as_str())))
     }
     fn invalidate_wall(&mut self) {
         self.wall_clear_samples = 0;
@@ -126,6 +151,11 @@ impl HumanNavigation {
         }
         if self.loading.is_some() {
             return !self.committed;
+        }
+        // Moving to a fragment of the page itself (Gmail's `#inbox`) loads
+        // nothing; `location_changed` records the new address.
+        if fragment_move(&self.current, raw) {
+            return true;
         }
         self.invalidate_wall();
         self.requested = true;
@@ -254,6 +284,16 @@ impl WorkDocumentNavigation {
                         .as_ref()
                         .is_some_and(|human| human.loading.is_none() && !human.requested)
             })
+    }
+    /// The person's page moving to a fragment of itself loads no document,
+    /// so the page reader is not prepared for one.
+    pub(crate) fn human_fragment_move(&self, target: &str) -> bool {
+        self.0.lock().is_ok_and(|state| {
+            state.phase == Phase::Human
+                && state.human.as_ref().is_some_and(|human| {
+                    human.loading.is_none() && fragment_move(&human.current, target)
+                })
+        })
     }
     pub(crate) fn human_verified_wall_clear(&self) -> bool {
         self.0.lock().is_ok_and(|state| {
@@ -393,7 +433,8 @@ impl WorkDocumentNavigation {
         {
             return Err(());
         }
-        let target = human.current.clone();
+        // The app's own fragment is not part of the page the run reads on.
+        let target = without_fragment(&human.current);
         let id = human.native_id;
         let epoch = state.navigation_epoch.checked_add(1).ok_or(())?;
         state.human = None;
@@ -642,6 +683,57 @@ mod tests {
         assert!(gate.human_verified_wall_clear());
         gate.finish_human(back, gate.human_revision().unwrap())
             .unwrap();
+    }
+
+    #[test]
+    fn an_app_moving_to_its_own_fragment_after_sign_in_settles_back_on_its_page() {
+        let gate = ready_gate();
+        let source = ContextNavigationTarget::parse(URL).unwrap();
+        gate.begin_human(&source, Instant::now() + Duration::from_secs(30), true)
+            .unwrap();
+        let back = "https://example.test/mail/u/0/";
+        assert!(gate.allows_apple_action(back, apple_action(T::Other, true)));
+        gate.observe(event(2, E::Started, back)).unwrap();
+        gate.observe(event(2, E::Committed, back)).unwrap();
+        gate.observe(event(2, E::Finished, back)).unwrap();
+        let routed = "https://example.test/mail/u/0/#inbox";
+        assert!(gate.human_fragment_move(routed));
+        assert!(gate.allows_apple_action(routed, apple_action(T::Other, true)));
+        assert!(
+            gate.human_load_preparation_needed(Some(true)),
+            "no load was armed"
+        );
+        gate.location_changed(Some(routed)).unwrap();
+        let stamp = gate.human_wall_probe().unwrap();
+        assert!(gate.record_human_wall_clear(stamp, true));
+        assert!(gate.record_human_wall_clear(stamp, true));
+        assert!(gate.human_verified_wall_clear());
+        let resumed = gate
+            .finish_human(routed, gate.human_revision().unwrap())
+            .unwrap();
+        assert_eq!(resumed.as_url().as_str(), back);
+        assert!(
+            gate.ready(Some(routed)),
+            "the app's fragment stays its page"
+        );
+        assert!(!gate.human_fragment_move("https://example.test/mail/u/0/#inbox"));
+    }
+
+    #[test]
+    fn a_fragment_carrying_a_token_is_never_the_page_signed_in_to() {
+        let gate = ready_gate();
+        let source = ContextNavigationTarget::parse(URL).unwrap();
+        gate.begin_human(&source, Instant::now() + Duration::from_secs(30), true)
+            .unwrap();
+        let back = "https://example.test/home";
+        assert!(gate.allows_apple_action(back, apple_action(T::Other, true)));
+        gate.observe(event(2, E::Started, back)).unwrap();
+        gate.observe(event(2, E::Committed, back)).unwrap();
+        gate.observe(event(2, E::Finished, back)).unwrap();
+        let token = "https://example.test/home#access_token=abc123def456ghi789";
+        gate.location_changed(Some(token)).unwrap();
+        assert!(gate.human_wall_probe().is_none());
+        assert!(!gate.human_verified_wall_clear());
     }
 
     #[test]
