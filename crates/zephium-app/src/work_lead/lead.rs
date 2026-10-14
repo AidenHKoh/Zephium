@@ -810,10 +810,13 @@ where
                                 run: self.run,
                                 part: None,
                             };
+                            let private = super::run::tool_reads_private(&tool_call.name);
                             let outcome = set.call(context, tool_call).await;
                             // Personal, project, computer and connection tools
-                            // all answer with the person's own data.
-                            self.run.mark_private();
+                            // answer with the person's own data.
+                            if private {
+                                self.run.mark_private();
+                            }
                             vec![(index, outcome.content, outcome.is_error)]
                         }))
                     }

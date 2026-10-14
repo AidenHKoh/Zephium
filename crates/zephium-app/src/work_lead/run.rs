@@ -413,7 +413,7 @@ impl LeadRun {
             .map(|_| ())
     }
     pub(crate) async fn input(&self, input: WorkInputFactV1) {
-        if input.kind != WorkInputKindV1::Skill {
+        if reads_private(input.kind) {
             self.mark_private();
         }
         if let Err(error) = self
@@ -810,6 +810,22 @@ impl LeadRun {
     }
 }
 
+/// Whether an input brings in the person's own data. Skills are Work's own
+/// guidance and memory is what the person told Work to use; neither is
+/// content a page could have planted, so neither holds the run's addresses.
+fn reads_private(kind: WorkInputKindV1) -> bool {
+    !matches!(
+        kind,
+        WorkInputKindV1::Skill | WorkInputKindV1::Memory | WorkInputKindV1::Work
+    )
+}
+
+/// Whether a lead tool answers with the person's own data. Remembering and
+/// recalling memory do not.
+pub(crate) fn tool_reads_private(name: &str) -> bool {
+    !matches!(name, "remember" | "recall")
+}
+
 /// Whether a request asks to create or change something: "create an
 /// issue", "add a task", "update the doc". Sending, buying and deleting are
 /// never covered by it; each waits for the person.
@@ -876,7 +892,21 @@ fn home_page(url: &str, site: &str) -> bool {
 
 #[cfg(test)]
 mod save_tests {
-    use super::asks_to_save;
+    use super::{asks_to_save, reads_private, tool_reads_private};
+    use zephium_core::work::parts::WorkInputKindV1;
+
+    #[test]
+    fn memory_and_skills_leave_a_run_free_to_open_and_type_and_the_persons_data_does_not() {
+        assert!(!reads_private(WorkInputKindV1::Memory));
+        assert!(!reads_private(WorkInputKindV1::Skill));
+        assert!(reads_private(WorkInputKindV1::Files));
+        assert!(reads_private(WorkInputKindV1::History));
+        assert!(reads_private(WorkInputKindV1::Connection));
+        assert!(!tool_reads_private("recall"));
+        assert!(!tool_reads_private("remember"));
+        assert!(tool_reads_private("search_history"));
+        assert!(tool_reads_private("read_note"));
+    }
 
     #[test]
     fn a_request_to_create_or_change_covers_saving_and_a_question_does_not() {

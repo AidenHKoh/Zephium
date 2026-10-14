@@ -1162,7 +1162,9 @@ where
                                 part: Some(part),
                             };
                             let outcome = set.call(context, tool_call.clone()).await;
-                            self.run.mark_private();
+                            if super::run::tool_reads_private(&tool_call.name) {
+                                self.run.mark_private();
+                            }
                             if !outcome.is_error {
                                 if let Some(id) = outcome
                                     .content
