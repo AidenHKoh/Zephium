@@ -83,6 +83,42 @@ pub(crate) enum Layout {
     Table,
 }
 
+/// A text's words, folded, for telling whether one fact holds another.
+fn words(text: &str) -> std::collections::BTreeSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Facts with a label that reads as one ("Model specs", not "model_specs"),
+/// each saying something no other fact already says.
+fn said_once(facts: Vec<Value>) -> Vec<Value> {
+    let held: Vec<_> = facts
+        .iter()
+        .map(|fact| words(fact["value"].as_str().unwrap_or_default()))
+        .collect();
+    facts
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            !held.iter().enumerate().any(|(other, more)| {
+                other != *index
+                    && more.is_superset(&held[*index])
+                    && (more.len() > held[*index].len() || other < *index)
+            })
+        })
+        .map(|(_, mut fact)| {
+            let label = fact["label"].as_str().unwrap_or_default().replace('_', " ");
+            let mut chars = label.chars();
+            if let Some(first) = chars.next() {
+                fact["label"] = json!(first.to_uppercase().chain(chars).collect::<String>());
+            }
+            fact
+        })
+        .collect()
+}
+
 impl Selection {
     /// A record the lead chose, read leniently: a bare key, or an object whose
     /// stray fields are dropped. The record's name, price, link and pictures
@@ -451,6 +487,10 @@ impl Records {
                                         && display(&cell.value).is_some()
                                 })
                         })
+                        // A "fact" that only repeats the record's name says nothing.
+                        .filter(|(_, value)| {
+                            !words(&record.subject.name).is_superset(&words(value))
+                        })
                         .map(|(label, value)| json!({"label":label,"value":value,"kind":"text"}))
                         .collect();
                     let mut has_price = false;
@@ -498,6 +538,7 @@ impl Records {
                             facts.push(json!({"label":criterion.name,"value":text,"kind":"text"}));
                         }
                     }
+                    let mut facts = said_once(facts);
                     facts.truncate(zephium_core::work::objects::limit::PICK_FACTS);
                     value["facts"] = json!(facts);
                     items.push(
@@ -620,6 +661,21 @@ fn display(value: &WorkCellValue) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn facts_are_labelled_as_words_and_never_repeat_the_name_or_each_other() {
+        let facts = said_once(vec![
+            json!({"label":"Specs","value":"GDDR6X, 384-bit","kind":"text"}),
+            json!({"label":"model_specs","value":"GeForce RTX 3xxx GDDR6X 1400 MHz 384-bit","kind":"text"}),
+            json!({"label":"condition","value":"Używany","kind":"text"}),
+            json!({"label":"Condition","value":"używany","kind":"text"}),
+        ]);
+        let labels: Vec<_> = facts.iter().map(|f| f["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, ["Model specs", "Condition"]);
+        assert!(
+            words("Karta graficzna MSI RTX 3090 24 GB").is_superset(&words("MSI RTX 3090 24 GB"))
+        );
+    }
     use zephium_core::{ids::ProfileId, work::*};
 
     fn fixture() -> WorkArtifactV1 {

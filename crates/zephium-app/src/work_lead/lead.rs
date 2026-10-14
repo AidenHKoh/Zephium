@@ -1244,6 +1244,7 @@ where
         *self.state().refused.entry(key.to_owned()).or_default() += 1;
         self.run.report(super::WorkLeadDiagnostic::ObjectRefused {
             reason: Some(reason),
+            at: schema_path(&words),
         });
         let words = if matches!(
             reason,
@@ -1721,6 +1722,18 @@ where
         self.run.begin(step, vec![]).await?;
         Ok(WorkAttemptStatus::Succeeded)
     }
+}
+
+/// The schema path a refusal's words lead with, after an optional `kind: `.
+fn schema_path(words: &str) -> Option<super::SchemaPath> {
+    let words = words.split_once(": ").map_or(words, |(_, rest)| rest);
+    let path = words.split_whitespace().next()?;
+    (path.contains(|c: char| c.is_ascii_lowercase())
+        && path
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_.[]".contains(c)))
+    .then(|| super::SchemaPath::new(path))
+    .flatten()
 }
 
 /// Why a run closed without its own finish, as a closed fact.

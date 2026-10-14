@@ -13,7 +13,7 @@ tools: [start_part, web_search, create, finish]
 - Providers for a design already on the canvas: follow system-design's "Comparing providers".
 
 ## Result
-- Products or places: **picks** of the candidates (three to six), each with its own photo or logo, price as shown, up to four facts that differ between them (condition first when offers differ in it), the why line, and one recommended when your sources support it. Never recommend a damaged, parts-only or refurbished-without-warranty offer for a working need; name it in its why line instead.
+- Products or places: **picks** of the candidates (three to six), each with its own photo or logo, price as shown, up to four facts that differ between them (condition first when offers differ in it), the why line, and one recommended when your sources support it. A damaged or parts-only offer is not a candidate for a working need: leave it out of the picks and, if it is notably cheap, say so in one sentence of the reply. Keep to the person's budget when they gave one; at most one pick above it, named as the stretch.
 - Services and providers: one **sheet** and no picks.
 - A **sheet** beside product picks only when there are more than three shared attributes to line up: first column entity with the logo host or image on its row, typed columns (money with currency, rating like 4/5, yes_no), best on the columns where one value wins. No sentences in cells; unknown stays empty.
 - The **reply** names the pick and the reason in one sentence, with the price as a figure.

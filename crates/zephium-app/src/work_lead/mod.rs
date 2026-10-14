@@ -39,6 +39,26 @@ use crate::work_runtime::{
 };
 
 /// Closed loop facts for development logs; never model, page or person text.
+/// A schema path of at most 48 path characters, kept inline so a diagnostic
+/// stays `Copy`.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct SchemaPath([u8; 48], u8);
+
+impl SchemaPath {
+    pub(crate) fn new(path: &str) -> Option<Self> {
+        let bytes = path.as_bytes();
+        let mut inline = [0; 48];
+        inline.get_mut(..bytes.len())?.copy_from_slice(bytes);
+        Some(Self(inline, bytes.len() as u8))
+    }
+}
+
+impl std::fmt::Debug for SchemaPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(std::str::from_utf8(&self.0[..usize::from(self.1)]).unwrap_or("?"))
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum WorkLeadDiagnostic {
     Stopped {
@@ -89,6 +109,9 @@ pub enum WorkLeadDiagnostic {
     },
     ObjectRefused {
         reason: Option<objects::ObjectRefusal>,
+        /// The schema path the refusal names (`steps[3].detail`), when its
+        /// words name one; only path characters, never a value.
+        at: Option<SchemaPath>,
     },
     /// A batch of searches, page reads or file steps settled.
     Fetched {

@@ -502,6 +502,7 @@ where
                     Ok(id) => report.objects.push(id),
                     Err(_) => self.run.report(super::WorkLeadDiagnostic::ObjectRefused {
                         reason: Some(objects::ObjectRefusal::Shape),
+                        at: None,
                     }),
                 }
             }
