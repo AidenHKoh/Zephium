@@ -175,6 +175,10 @@ impl AgentWorkController {
             steps += 1;
             observation = next;
         };
+        // The read is accepted against the look the task judged last.
+        if steps > 0 {
+            state.task_progress(&observation)?;
+        }
         state
             .journal_mut()?
             .emit(AgentWorkEventKind::ListingLoaded {
@@ -204,7 +208,8 @@ fn load_more(census: &NativeListingCensus) -> Option<SemanticActionProposal> {
                 direction: SemanticScrollDirection::Down,
                 amount: SemanticScrollAmount::Page,
             },
-            SemanticWaitCondition::ScrollPositionChanged,
+            // The one wait both a scroll's contract and an owned binding admit.
+            SemanticWaitCondition::Immediate,
             SemanticVerification::ScrollPositionChanged,
         ),
     };
@@ -235,10 +240,16 @@ mod tests {
         let target = SemanticReferenceId::new(3).unwrap();
         let mut scroll = census(&[1]);
         scroll.scroll = Some(target);
-        assert!(load_more(&scroll).is_some(), "a page of scroll");
+        let owned = |recipe: SemanticActionProposal| {
+            matches!(
+                recipe.wait(),
+                SemanticWaitCondition::Immediate | SemanticWaitCondition::MutationQuiet(_)
+            )
+        };
+        assert!(load_more(&scroll).is_some_and(owned), "a page of scroll");
         let mut more = census(&[1]);
         more.continuation = Some(NativeListingContinuation::LoadMore(target));
-        assert!(load_more(&more).is_some(), "a load-more control");
+        assert!(load_more(&more).is_some_and(owned), "a load-more control");
         assert!(load_more(&census(&[1])).is_none());
     }
 

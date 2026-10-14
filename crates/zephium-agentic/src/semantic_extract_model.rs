@@ -441,6 +441,11 @@ pub fn encode_semantic_extraction_request(
     let schema_guard = extraction_schema_guard(schema);
     let request_guard =
         extraction_request_guard(schema_guard, read.read_guard, read.observation_guard);
+    // Probe-only: the exact request a live public read sends, for local review.
+    #[cfg(feature = "probe-harness")]
+    if let Some(path) = std::env::var_os("ZEPHIUM_PROBE_EXTRACTION_DUMP") {
+        let _ = std::fs::write(path, &content);
+    }
     Ok(SemanticEncodedExtractionRequest {
         content,
         budget: read.budget,

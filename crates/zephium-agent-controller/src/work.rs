@@ -4825,6 +4825,8 @@ impl AgentWorkController {
             .collect::<Vec<_>>();
         // The task assesses only the look it last evaluated.
         if state.task_progress(observation)? == AgentWorkTaskProgress::Complete {
+            #[cfg(feature = "probe-harness")]
+            eprintln!("owned-read: none=complete");
             return Ok(None);
         }
         let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
@@ -4838,12 +4840,17 @@ impl AgentWorkController {
         let Ok(proposal) =
             crate::AgentBrowserActionProposal::bind_code_owned(recipe, observation, &frames, batch)
         else {
+            #[cfg(feature = "probe-harness")]
+            eprintln!("owned-read: none=bind");
             return Ok(None);
         };
         let assessment = match state.task.assess_observed(proposal.action(), observation) {
             Ok(assessment) => assessment,
-            Err(AgentWorkFailure::ActionDenied | AgentWorkFailure::EffectRequired(_)) => {
-                return Ok(None)
+            Err(error @ (AgentWorkFailure::ActionDenied | AgentWorkFailure::EffectRequired(_))) => {
+                #[cfg(feature = "probe-harness")]
+                eprintln!("owned-read: none=assess {error:?}");
+                let _ = error;
+                return Ok(None);
             }
             Err(error) => return Err(error),
         };
@@ -4888,6 +4895,8 @@ impl AgentWorkController {
                 {
                     return Err(AgentWorkFailure::Browser(error));
                 }
+                #[cfg(feature = "probe-harness")]
+                eprintln!("owned-read: none=browser {error:?}");
                 Ok(None)
             }
             Err(error) => Err(error),
