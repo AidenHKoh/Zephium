@@ -1,6 +1,36 @@
-<script lang="ts">
+<script module lang="ts">
   import type { WorkModelReasoning } from "$shared/ipc/bindings";
-  import { watchStill } from "$shared/lib/still";
+
+  export const EFFORTS: readonly WorkModelReasoning[] = ["low", "medium", "high", "xhigh", "max"];
+
+  /** The level a model runs `wanted` at: the closest it takes, the stronger on a tie (as Rust). */
+  export function nearestEffort(
+    levels: readonly WorkModelReasoning[],
+    wanted: WorkModelReasoning,
+  ): WorkModelReasoning | null {
+    const rank = EFFORTS.indexOf(wanted);
+    let best: WorkModelReasoning | null = null;
+    for (const level of levels) {
+      const gap = Math.abs(EFFORTS.indexOf(level) - rank);
+      if (best === null || gap <= Math.abs(EFFORTS.indexOf(best) - rank)) best = level;
+    }
+    return best;
+  }
+
+  export function stepEffort(
+    levels: readonly WorkModelReasoning[],
+    from: WorkModelReasoning,
+    step: number,
+  ): WorkModelReasoning | null {
+    const at = levels.indexOf(from);
+    const next = levels[Math.max(0, Math.min(levels.length - 1, at + step))];
+    return next && next !== from ? next : null;
+  }
+</script>
+
+<script lang="ts">
+  import { Orb } from "$shared/ui/presence";
+  import { stillWhenUnseen } from "$shared/lib/still";
   import { effortName } from "$domain/ai";
   import * as m from "$shared/i18n/messages";
 
@@ -8,109 +38,120 @@
     levels,
     value,
     onchange,
-    onclose,
   }: {
     levels: readonly WorkModelReasoning[];
-    value: WorkModelReasoning;
+    /** The level the hero's model runs at; null when it takes none. */
+    value: WorkModelReasoning | null;
     onchange: (level: WorkModelReasoning) => void;
-    /** Escape from the track: the tray folds and focus goes back to its chip. */
-    onclose: () => void;
   } = $props();
 
-  let track = $state<HTMLElement>();
-  let width = $state(0);
-  /** Where a drag has the thumb before it lets go. */
-  let dragging = $state<number | null>(null);
-  const settled = $derived(Math.max(0, levels.indexOf(value)));
-  const index = $derived(dragging ?? settled);
-  const last = $derived(Math.max(1, levels.length - 1));
-  const level = $derived(levels[index] ?? value);
-  /** The strongest level is the agent at full thought: its fill comes alive. */
-  const alive = $derived(index === levels.length - 1 && levels.length > 1);
-  const THUMB = 14;
-  const travel = $derived(Math.max(0, width - THUMB));
-  const at = (step: number) => (step / last) * travel;
+  const HINTS: Record<WorkModelReasoning, () => string> = {
+    low: m.model_effort_low_hint,
+    medium: m.model_effort_medium_hint,
+    high: m.model_effort_high_hint,
+    xhigh: m.model_effort_xhigh_hint,
+    max: m.model_effort_max_hint,
+  };
+  /** How fast the orb turns at each level: it idles at Low and races at Max. */
+  const PACE: Record<WorkModelReasoning, number> = {
+    low: 0.28,
+    medium: 0.5,
+    high: 0.8,
+    xhigh: 1.2,
+    max: 1.75,
+  };
 
-  let still = $state(true);
+  const live = $derived(levels.length > 0 && value !== null);
+  const index = $derived(value ? levels.indexOf(value) : -1);
+  const level = $derived<WorkModelReasoning>(value ?? "low");
+
+  let core = $state<HTMLElement>();
+  let steps = $state<HTMLElement>();
   $effect(() => {
-    const element = track;
-    if (!element || !alive) return;
-    return watchStill(element, (next) => (still = next));
+    const rate = live ? PACE[level] : 0.2;
+    const host = core;
+    if (!host) return;
+    // The orb starts its own turn when it mounts; its pace is set once that exists.
+    const pace = () => {
+      for (const run of host.getAnimations({ subtree: true })) run.updatePlaybackRate(rate);
+    };
+    pace();
+    queueMicrotask(pace);
   });
 
-  function set(step: number) {
-    const next = levels[Math.max(0, Math.min(levels.length - 1, step))];
-    if (next && next !== value) onchange(next);
-  }
-
-  function stepAt(event: PointerEvent) {
-    const box = track!.getBoundingClientRect();
-    const x = event.clientX - box.left - THUMB / 2;
-    const ratio = travel ? x / travel : 0;
-    const rtl = getComputedStyle(track!).direction === "rtl";
-    return Math.round(Math.max(0, Math.min(1, rtl ? 1 - ratio : ratio)) * last);
-  }
-
-  function down(event: PointerEvent) {
-    if (event.button !== 0 || !track) return;
-    event.preventDefault();
-    track.focus();
-    track.setPointerCapture(event.pointerId);
-    dragging = stepAt(event);
-  }
-
-  function move(event: PointerEvent) {
-    if (dragging === null || !track?.hasPointerCapture(event.pointerId)) return;
-    dragging = stepAt(event);
-  }
-
-  function up(event: PointerEvent) {
-    if (dragging === null) return;
-    const step = dragging;
-    dragging = null;
-    if (track?.hasPointerCapture(event.pointerId)) track.releasePointerCapture(event.pointerId);
-    set(step);
-  }
-
   function key(event: KeyboardEvent) {
+    if (!live || !value) return;
+    const rtl = getComputedStyle(event.currentTarget as Element).direction === "rtl";
     const steps: Record<string, number> = {
-      ArrowRight: 1,
+      ArrowRight: rtl ? -1 : 1,
+      ArrowLeft: rtl ? 1 : -1,
       ArrowUp: 1,
-      ArrowLeft: -1,
       ArrowDown: -1,
       PageUp: 1,
       PageDown: -1,
     };
-    if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      onclose();
-      return;
-    }
-    let next: number | null = null;
-    if (event.key === "Home") next = 0;
-    else if (event.key === "End") next = levels.length - 1;
-    else if (event.key in steps) {
-      const rtl = getComputedStyle(event.currentTarget as Element).direction === "rtl";
-      const sideways = event.key === "ArrowLeft" || event.key === "ArrowRight";
-      next = settled + steps[event.key]! * (rtl && sideways ? -1 : 1);
-    }
-    if (next === null) return;
+    let next: WorkModelReasoning | null;
+    if (event.key === "Home") next = levels[0] ?? null;
+    else if (event.key === "End") next = levels.at(-1) ?? null;
+    else if (event.key in steps) next = stepEffort(levels, value, steps[event.key]!);
+    else return;
     event.preventDefault();
     event.stopPropagation();
-    set(next);
+    if (next && next !== value) onchange(next);
+  }
+
+  /** The dot nearest the pointer, while it is over the row of dots. */
+  function scrub(event: PointerEvent) {
+    if (!live || !steps) return;
+    const dots = [...steps.querySelectorAll<HTMLElement>("[data-step]")];
+    const box = steps.getBoundingClientRect();
+    if (event.clientX < box.left - 8 || event.clientX > box.right + 8) return;
+    let best: HTMLElement | undefined;
+    let gap = Infinity;
+    for (const dot of dots) {
+      const rect = dot.getBoundingClientRect();
+      const distance = Math.abs(rect.left + rect.width / 2 - event.clientX);
+      if (distance < gap) [best, gap] = [dot, distance];
+    }
+    const next = best?.dataset.step as WorkModelReasoning | undefined;
+    if (next && next !== value) onchange(next);
+  }
+
+  function down(event: PointerEvent) {
+    if (event.button !== 0 || !live) return;
+    const target = event.currentTarget as HTMLElement;
+    target.setPointerCapture(event.pointerId);
+    scrub(event);
+  }
+
+  function move(event: PointerEvent) {
+    if ((event.currentTarget as HTMLElement).hasPointerCapture(event.pointerId)) scrub(event);
   }
 </script>
 
-<div class="effort" data-alive={alive ? "" : undefined}>
-  <div class="head">
-    <span class="caption">{m.model_effort()}</span>
-    {#key level}<span class="level">{effortName(level)}</span>{/key}
-  </div>
-  <div
-    class="track"
-    bind:this={track}
-    bind:clientWidth={width}
+{#snippet body()}
+  <span class="well" aria-hidden="true" use:stillWhenUnseen>
+    <span class="halo"></span>
+    <span class="core" bind:this={core}><Orb size={36} /></span>
+  </span>
+  <span class="words">
+    {#key live ? level : null}<span class="name"
+        >{live ? effortName(level) : m.model_effort_fixed()}</span
+      ><span class="hint">{live ? HINTS[level]() : m.model_effort_fixed_hint()}</span>{/key}
+  </span>
+  {#if live && levels.length > 1}<span class="steps" bind:this={steps} aria-hidden="true">
+      {#each levels as stop, step (stop)}<span
+          class="step"
+          data-step={stop}
+          data-on={step <= index ? "" : undefined}
+          data-at={step === index ? "" : undefined}
+          style:--d="{5 + EFFORTS.indexOf(stop)}px"
+        ></span>{/each}
+    </span>{/if}
+{/snippet}
+
+{#if live}<div
+    class="effort"
     role="slider"
     tabindex="0"
     aria-label={m.model_effort()}
@@ -118,266 +159,229 @@
     aria-valuemax={levels.length - 1}
     aria-valuenow={index}
     aria-valuetext={effortName(level)}
-    data-dragging={dragging !== null ? "" : undefined}
+    data-level={level}
+    onkeydown={key}
     onpointerdown={down}
     onpointermove={move}
-    onpointerup={up}
-    onpointercancel={() => (dragging = null)}
-    onkeydown={key}
   >
-    <span class="rail" aria-hidden="true">
-      <span
-        class="fill"
-        style:transform="scaleX({travel ? (at(index) + THUMB / 2) / (travel + THUMB) : 0})"
-      ></span>
-      {#if alive}<span
-          class="life"
-          data-still={still ? "" : undefined}
-          style:inline-size="{at(index) + THUMB / 2}px"
-          ><span class="dashes"></span><span class="band"></span></span
-        >{/if}
-    </span>
-    {#each levels as stop, step (stop)}<span
-        class="stop"
-        class:reached={step <= index}
-        aria-hidden="true"
-        style:--x="{at(step) + THUMB / 2 - 2}px"
-      ></span>{/each}
-    <span class="thumb" aria-hidden="true" style:--x="{at(index)}px"></span>
-  </div>
-  <div class="ends" aria-hidden="true">
-    <span>{m.model_faster()}</span>
-    <span>{m.model_smarter()}</span>
-  </div>
-</div>
+    {@render body()}
+  </div>{:else}<div class="effort">{@render body()}</div>{/if}
 
 <style>
   .effort {
+    --alive-a: color-mix(in oklab, var(--color-soft-sky) 66%, var(--color-text));
+    --alive-b: color-mix(in oklab, var(--color-soft-lilac) 66%, var(--color-text));
+
     display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 10px 12px 9px;
-    animation: tray-in var(--motion-base) var(--ease-out);
-  }
-
-  .head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    font-size: var(--text-label);
-    line-height: 16px;
-  }
-
-  .caption {
-    color: var(--color-faint);
-    font-weight: 550;
-    letter-spacing: 0.01em;
-  }
-
-  .level {
-    color: var(--color-text);
-    font-weight: 550;
-    animation: level-in var(--motion-fast) var(--ease-out);
-  }
-
-  [data-alive] .level {
-    color: color-mix(in oklab, var(--color-agent-lead-sheen) 72%, var(--color-text));
-  }
-
-  .track {
-    --dir: 1;
-
-    position: relative;
-    block-size: 22px;
-    border-radius: var(--radius-capsule);
+    align-items: center;
+    gap: 12px;
+    min-block-size: 52px;
+    padding: 6px 14px 6px 8px;
+    border-radius: calc(var(--radius-menu) - var(--menu-pad));
+    background: var(--color-fill);
     outline: none;
     cursor: default;
     touch-action: none;
+    transition: background-color var(--motion-fast) var(--ease-out);
   }
 
-  .rail {
-    position: absolute;
-    inset-inline: 0;
-    inset-block-start: 9px;
-    block-size: 4px;
-    overflow: hidden;
-    border-radius: var(--radius-capsule);
-    background: var(--color-track);
+  .effort[data-level]:hover {
+    background: color-mix(in oklab, var(--color-fill), var(--row-active));
   }
 
-  .fill {
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    background: color-mix(in oklab, var(--color-text) 62%, transparent);
-    transform-origin: left center;
-    transition: transform var(--motion-base) var(--ease-out);
+  .effort:focus-visible {
+    box-shadow: inset 0 0 0 1.5px var(--color-ring);
   }
 
-  .track:dir(rtl) {
-    --dir: -1;
+  .well {
+    position: relative;
+    display: grid;
+    flex: none;
+    inline-size: 40px;
+    block-size: 40px;
+    place-items: center;
   }
 
-  [data-alive] .fill {
-    background: linear-gradient(
-      90deg,
-      color-mix(in oklab, var(--color-agent-lead-sheen) 68%, var(--color-text)),
-      var(--color-agent-lead-sheen)
+  /* The orb gathers itself as the effort rises: dimmer and smaller at Low, full at Max. */
+  .core {
+    --orb-tone: var(--color-text);
+
+    display: grid;
+    place-items: center;
+    opacity: 0.4;
+    transform: scale(0.76);
+    transition:
+      opacity var(--motion-slow) var(--ease-out),
+      transform var(--motion-page) var(--ease-spring);
+  }
+
+  [data-level="medium"] .core {
+    opacity: 0.66;
+    transform: scale(0.84);
+  }
+
+  [data-level="high"] .core {
+    opacity: 0.86;
+    transform: scale(0.92);
+  }
+
+  [data-level="xhigh"] .core,
+  [data-level="max"] .core {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  [data-level="xhigh"] .core {
+    --orb-tone: linear-gradient(
+      180deg,
+      color-mix(in oklab, var(--alive-a) 45%, var(--color-text)),
+      var(--color-text)
     );
   }
 
-  .track:dir(rtl) .fill {
-    transform-origin: right center;
-  }
-
-  /* Full thought: the fill carries the work the way a lead's line does, fine
-     dashes flowing along it under one passing light. */
-  .life {
-    position: absolute;
-    inset-block: 0;
-    inset-inline-start: 0;
-    overflow: hidden;
-    border-radius: inherit;
-  }
-
-  .dashes {
-    position: absolute;
-    inset-block: 0;
-    inset-inline: -8px 0;
-    background: repeating-linear-gradient(
-      90deg,
-      transparent 0,
-      color-mix(in oklab, var(--color-glint) 30%, transparent) 2px 4px,
-      transparent 6px 8px
+  [data-level="max"] .core {
+    --orb-tone: linear-gradient(
+      180deg,
+      var(--color-text) 10%,
+      var(--alive-a) 55%,
+      var(--alive-b) 90%
     );
-    animation: flow 720ms linear infinite;
   }
 
-  .band {
+  .halo {
     position: absolute;
-    inset-block: 0;
-    inset-inline-start: 0;
-    inline-size: 40%;
-    background: linear-gradient(
-      90deg,
-      transparent,
-      color-mix(in oklab, var(--color-glint), var(--color-agent-lead-sheen)),
+    inset: -10px;
+    border-radius: 50%;
+    background: radial-gradient(
+      closest-side,
+      color-mix(in oklab, var(--color-soft-lilac) 36%, transparent),
+      color-mix(in oklab, var(--color-soft-sky) 14%, transparent) 58%,
       transparent
     );
-    animation: band 2.4s linear infinite;
+    opacity: 0;
+    transform: scale(0.6);
+    transition:
+      opacity var(--motion-slow) var(--ease-out),
+      transform var(--motion-page) var(--ease-out);
   }
 
-  [data-still] .dashes,
-  [data-still] .band {
+  [data-level="xhigh"] .halo {
+    opacity: 0.4;
+    transform: scale(0.8);
+  }
+
+  [data-level="max"] .halo {
+    opacity: 1;
+    transform: scale(1);
+    animation: breathe 2.6s var(--ease-in-out) infinite alternate;
+  }
+
+  .well:global([data-still]) .halo {
     animation-play-state: paused;
   }
 
-  [data-still] .band {
-    visibility: hidden;
-  }
-
-  .stop {
-    position: absolute;
-    inset-block-start: 9px;
-    inset-inline-start: 0;
-    inline-size: 4px;
-    block-size: 4px;
-    border-radius: 50%;
-    background: var(--color-faint);
-    opacity: 0.7;
-    transform: translateX(calc(var(--x) * var(--dir)));
-  }
-
-  .stop.reached {
-    opacity: 0;
-  }
-
-  .thumb {
-    position: absolute;
-    inset-block-start: 4px;
-    inset-inline-start: 0;
-    inline-size: 14px;
-    block-size: 14px;
-    border-radius: 50%;
-    background: var(--color-thumb);
-    box-shadow: var(--shadow-thumb);
-    transform: translateX(calc(var(--x) * var(--dir)));
-    transition:
-      transform var(--motion-base) var(--ease-out),
-      box-shadow var(--motion-base) var(--ease-out);
-  }
-
-  [data-alive] .thumb {
-    box-shadow:
-      var(--shadow-thumb),
-      0 0 0 3px color-mix(in oklab, var(--color-agent-lead-sheen) 28%, transparent);
-  }
-
-  .track:focus-visible .thumb {
-    box-shadow:
-      var(--shadow-thumb),
-      0 0 0 2px var(--color-ring);
-  }
-
-  .track[data-dragging] .fill,
-  .track[data-dragging] .thumb {
-    transition-duration: var(--motion-instant);
-  }
-
-  [data-alive] .track:focus-visible .thumb {
-    box-shadow:
-      var(--shadow-thumb),
-      0 0 0 2px var(--color-ring);
-  }
-
-  .ends {
+  .words {
     display: flex;
-    justify-content: space-between;
-    color: var(--color-faint);
+    flex: 1;
+    flex-direction: column;
+    gap: 1px;
+    min-inline-size: 0;
+  }
+
+  .name {
+    color: var(--color-text);
+    font-size: var(--text-body);
+    font-weight: 600;
+    line-height: 17px;
+    letter-spacing: -0.005em;
+    animation: word-in var(--motion-base) var(--ease-out);
+  }
+
+  [data-level="max"] .name {
+    background: linear-gradient(90deg, var(--alive-a), var(--alive-b));
+    background-clip: text;
+    color: transparent;
+  }
+
+  .hint {
+    overflow: hidden;
+    color: var(--color-muted);
     font-size: var(--text-caption);
     line-height: 14px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    animation: word-in var(--motion-base) var(--ease-out) 30ms backwards;
   }
 
-  @keyframes flow {
+  /* Each level's dot is as large as the thought it stands for. */
+  .steps {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 9px;
+    block-size: 28px;
+    padding-inline: 4px;
+  }
+
+  .step {
+    inline-size: var(--d);
+    block-size: var(--d);
+    border-radius: 50%;
+    background: var(--color-text);
+    opacity: 0.16;
+    transition:
+      opacity var(--motion-base) var(--ease-out),
+      transform var(--motion-page) var(--ease-spring);
+  }
+
+  .step[data-on] {
+    opacity: 0.62;
+  }
+
+  .step[data-at] {
+    opacity: 1;
+    transform: scale(1.25);
+  }
+
+  [data-level="max"] .step[data-on] {
+    background: linear-gradient(160deg, var(--alive-a), var(--alive-b));
+    opacity: 1;
+  }
+
+  @keyframes breathe {
+    from {
+      transform: scale(0.9);
+    }
+
     to {
-      transform: translateX(8px);
+      transform: scale(1.08);
     }
   }
 
-  @keyframes band {
-    0% {
-      transform: translateX(-100%);
-    }
-
-    72%,
-    100% {
-      transform: translateX(260%);
-    }
-  }
-
-  @keyframes tray-in {
+  @keyframes word-in {
     from {
       opacity: 0;
-      transform: translateY(4px);
-    }
-  }
-
-  @keyframes level-in {
-    from {
-      opacity: 0;
-      transform: translateY(2px);
+      transform: translateY(3px);
     }
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .effort,
-    .level {
-      animation: none;
+    .core,
+    .halo,
+    .step {
+      transition: none;
     }
 
-    .fill,
-    .thumb {
-      transition: none;
+    .name,
+    .hint,
+    [data-level="max"] .halo {
+      animation: none;
+    }
+  }
+
+  @media (forced-colors: active) {
+    .step[data-on] {
+      background: CanvasText;
     }
   }
 </style>

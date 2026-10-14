@@ -1,5 +1,5 @@
 export { ModelsSession } from "./models.svelte";
-export { effortBars, effortName } from "./effort";
+export { effortName } from "./effort";
 export {
   contextSize,
   dollars,
@@ -9,7 +9,6 @@ export {
   keyedProviders,
   locked,
   pickerGroups,
-  priceTier,
   providerName,
   searchEntries,
   shortName,

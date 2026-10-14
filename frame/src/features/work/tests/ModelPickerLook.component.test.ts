@@ -50,64 +50,64 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 
 const shots = "../../../../../target/look/model-picker";
-const settle = (ms = 450) => new Promise((done) => setTimeout(done, ms));
+const settle = (ms = 600) => new Promise((done) => setTimeout(done, ms));
 const keyed = (lead: string) =>
   models({
     keys: { anthropic: "valid", open_ai: "valid", deep_seek: "valid", google: "invalid" },
     lead,
   });
 
-async function shoot(name: string, materials: readonly string[] = ["none"]) {
+/** Glass is the menus' own material; solid is the opaque policy a Windows sidebar asks for. */
+async function shoot(name: string, materials: readonly ("glass" | "solid")[] = ["glass"]) {
   for (const theme of ["dark", "light"]) {
     for (const material of materials) {
       document.documentElement.dataset.theme = theme;
-      document.documentElement.dataset.material = material;
+      const menu = document.querySelector(".model-menu");
+      if (material === "solid") menu?.setAttribute("data-menu-material", "opaque");
+      else menu?.removeAttribute("data-menu-material");
       await settle();
-      const suffix = materials.length > 1 ? `-${material === "none" ? "solid" : "glass"}` : "";
+      const suffix = materials.length > 1 ? `-${material}` : "";
       await page.screenshot({ path: `${shots}/${name}-${theme}${suffix}.png` });
     }
   }
   document.documentElement.dataset.theme = "dark";
-  document.documentElement.dataset.material = "none";
+  document.querySelector(".model-menu")?.removeAttribute("data-menu-material");
 }
 
 afterEach(() => {
   native.ready = true;
   native.hosted = false;
-  delete document.documentElement.dataset.material;
 });
 
-test("providers, search and the trigger at rest", async () => {
+test("the hero, a preview, a provider without a key, and search", async () => {
   await page.viewport(1100, 700);
   native.view = keyed("anthropic/claude-opus-5-5");
   const screen = await render(ModelPickerStage, { profile: PROFILE });
   await shoot("rest");
   await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
-  await shoot("anthropic", ["none", "liquid_glass"]);
-  await page.getByRole("tab", { name: "OpenAI" }).click();
-  await shoot("openai");
-  await page.getByRole("tab", { name: "DeepSeek" }).click();
-  await shoot("deepseek");
-  await page.getByRole("tab", { name: "Google" }).click();
+  await shoot("hero", ["glass", "solid"]);
+  await userEvent.hover(page.getByRole("option", { name: /Claude Sonnet 5\.5/u }));
+  await shoot("preview");
+  await userEvent.hover(page.getByRole("option", { name: /Google/u }));
   await shoot("needs-key");
-  await page.getByRole("textbox", { name: "Search models" }).click();
-  await userEvent.keyboard("5.5");
+  await userEvent.hover(page.getByRole("option", { name: /DeepSeek V4 Pro/u }));
+  await shoot("deepseek");
+  await userEvent.unhover(page.getByRole("listbox"));
+  await userEvent.keyboard("son");
   await shoot("search");
 });
 
-test("the effort panel at every level", async () => {
+test("the effort at every level, from the keys", async () => {
   await page.viewport(1100, 700);
   native.view = { ...keyed("openai/gpt-6-luna"), effort: "low" };
   const screen = await render(ModelPickerStage, { profile: PROFILE });
   await screen.getByRole("button", { name: /Model: GPT-6 Luna/u }).click();
-  await page.getByRole("button", { name: /^Effort/u }).click();
   const levels = ["low", "medium", "high", "xhigh", "max"];
   for (const [index, level] of levels.entries()) {
     if (index) await userEvent.keyboard("{ArrowRight}");
-    if (!index) await userEvent.hover(page.getByText("Faster"));
-    await shoot(`effort-${level}`);
+    await shoot(`effort-${level}`, level === "max" ? ["glass", "solid"] : ["glass"]);
   }
-  await userEvent.keyboard("{Escape}{Escape}");
+  await userEvent.keyboard("{Escape}");
   await shoot("rest-max");
 });
 
@@ -124,6 +124,6 @@ test("keyless and hosted", async () => {
   native.view = keyed("anthropic/claude-sonnet-5-5");
   const screen = await render(ModelPickerStage, { profile: PROFILE });
   await screen.getByRole("button", { name: /Model: Claude Sonnet 5\.5/u }).click();
-  await page.getByRole("tab", { name: "Zephium AI" }).click();
+  await userEvent.hover(page.getByRole("option", { name: /Zephium AI/u }));
   await shoot("hosted");
 });

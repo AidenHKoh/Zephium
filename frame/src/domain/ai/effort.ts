@@ -12,8 +12,3 @@ const NAMES: Record<WorkModelReasoning, () => string> = {
 export function effortName(level: WorkModelReasoning): string {
   return NAMES[level]();
 }
-
-/** How many of the trigger's three bars an effort fills. */
-export function effortBars(level: WorkModelReasoning): 1 | 2 | 3 {
-  return level === "low" ? 1 : level === "medium" ? 2 : 3;
-}
