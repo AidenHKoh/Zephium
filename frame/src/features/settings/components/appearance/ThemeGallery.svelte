@@ -75,9 +75,7 @@
         style:--accent={card.seeds.accent}
         aria-hidden="true"
       >
-        <span class="glyph">Aa</span>
-        <span class="ink"><i></i><i></i></span>
-        <span class="dot"></span>
+        <span class="glyph">Aa</span><span class="caret"></span>
       </span>
       <span class="name">{card.name}</span>
       {#if card.from}<span class="from">{m.look_based_on({ name: card.from })}</span>{/if}
@@ -88,9 +86,9 @@
 <style>
   .gallery {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
-    gap: 16px 12px;
-    padding: 18px;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 14px 12px;
+    padding: 6px 18px 18px;
     outline: none;
   }
 
@@ -113,21 +111,19 @@
     outline: none;
   }
 
-  /* The theme in its own shape: its ground, a line of its ink and its
-     accent, as the window will wear them. */
+  /* The theme as type: its ink on its ground, and its accent as the caret
+     that would follow what you write. */
   .swatch {
-    position: relative;
-    display: block;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
     box-sizing: border-box;
     width: 100%;
-    aspect-ratio: 1.45;
-    padding: 10px 11px;
-    text-align: start;
+    aspect-ratio: 1.6;
     border-radius: var(--radius-row);
     background: var(--bg);
-    box-shadow:
-      inset 0 0 0 1px color-mix(in oklab, var(--fg) 12%, transparent),
-      0 0 0 0 transparent;
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--fg) 12%, transparent);
     transition:
       box-shadow var(--motion-fast) var(--ease-out),
       scale var(--motion-slow) var(--ease-spring);
@@ -138,48 +134,34 @@
   }
 
   .glyph {
-    display: block;
     color: var(--fg);
-    font-size: 18px;
-    font-weight: 600;
+    font-size: 19px;
+    font-weight: 500;
     line-height: 1;
-    letter-spacing: -0.01em;
+    letter-spacing: -0.02em;
   }
 
-  .ink {
-    position: absolute;
-    inset-inline-start: 10px;
-    inset-block-end: 11px;
-    display: grid;
-    gap: 4px;
-    width: 46%;
-  }
-
-  .ink i {
-    height: 4px;
-    border-radius: 2px;
-    background: var(--fg);
-    opacity: 0.55;
-  }
-
-  .ink i + i {
-    width: 64%;
-    opacity: 0.28;
-  }
-
-  .dot {
-    position: absolute;
-    inset-inline-end: 9px;
-    inset-block-end: 9px;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
+  .caret {
+    width: 2px;
+    height: 20px;
+    border-radius: 1px;
     background: var(--accent);
-    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--fg) 10%, transparent);
   }
 
-  /* Chosen the way a mode picture is: a gap in the card's own colour, then
-     the lit ring, which is ink in light. */
+  @media (prefers-reduced-motion: no-preference) {
+    .card:hover .caret {
+      animation: caret 1.1s steps(1, end) infinite;
+    }
+  }
+
+  @keyframes caret {
+    50% {
+      opacity: 0;
+    }
+  }
+
+  /* Chosen: a gap in the card's own colour, then the lit ring, which is ink
+     in light. */
   .card[aria-checked="true"] .swatch {
     box-shadow:
       inset 0 0 0 1px color-mix(in oklab, var(--fg) 12%, transparent),

@@ -374,7 +374,7 @@ export const fields = {
     initial: false,
   },
   "languages.interface": {
-    section: "languages",
+    section: "general",
     label: m.pref_languages_interface,
     description: m.pref_languages_interface_help,
     initial: "system",

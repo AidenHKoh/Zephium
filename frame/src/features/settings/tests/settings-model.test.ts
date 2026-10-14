@@ -3,7 +3,7 @@ import { searchSections } from "../lib/settings-model";
 
 describe("settings discovery", () => {
   it("finds nested preferences by their localized vocabulary", () => {
-    expect(searchSections("languages").map((section) => section.id)).toContain("languages");
+    expect(searchSections("interface language").map((section) => section.id)).toContain("general");
     expect(searchSections("motion").map((section) => section.id)).toContain("appearance");
     expect(searchSections("download").map((section) => section.id)).toContain("general");
   });
@@ -57,7 +57,7 @@ it("groups sections as Browser, Work and App with stable ids", async () => {
     "performance",
   ]);
   expect(listed("work")).toEqual(["work", "ai", "skills", "memory", "sites", "mcp"]);
-  expect(listed("app")).toEqual(["features", "shortcuts", "languages", "about"]);
+  expect(listed("app")).toEqual(["features", "shortcuts", "about"]);
 });
 
 it("finds every real tab option", async () => {

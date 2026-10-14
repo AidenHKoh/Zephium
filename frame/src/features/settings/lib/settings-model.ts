@@ -17,7 +17,6 @@ import {
   DashboardSpeed01Icon,
   InformationCircleIcon,
   UserMultiple02Icon,
-  TranslateIcon,
   Mortarboard02Icon,
   Brain01Icon,
   Plug01Icon,
@@ -144,13 +143,6 @@ const allSections = [
     title: m.section_shortcuts,
     description: m.section_shortcuts_description,
     icon: KeyboardIcon,
-  },
-  {
-    id: "languages",
-    group: "app",
-    title: m.section_languages,
-    description: m.section_languages_description,
-    icon: TranslateIcon,
   },
   {
     id: "about",

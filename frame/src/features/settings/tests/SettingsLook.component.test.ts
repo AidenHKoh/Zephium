@@ -55,7 +55,6 @@ test("Settings pages in their final shape, both themes", async () => {
   await shoot("tabs", "tabs");
   await shoot("focus", "focus");
   await shoot("about", "about");
-  await shoot("languages", "languages");
   await shoot("appearance", "appearance");
   native.login = { supported: true, enabled: true, needs_approval: true };
   await shoot("general-approval", "general");

@@ -1,6 +1,5 @@
 <script lang="ts">
   import PreferenceSelect from "../PreferenceSelect.svelte";
-  import ModePicker from "../appearance/ModePicker.svelte";
   import ThemeGallery from "../appearance/ThemeGallery.svelte";
   import ThemeColors from "../appearance/ThemeColors.svelte";
   import FontPicker from "../appearance/FontPicker.svelte";
@@ -43,9 +42,6 @@
     observer.observe(root, { attributes: true, attributeFilter: ["data-material", "data-theme"] });
     return () => observer.disconnect();
   });
-
-  // The accessibility switch takes every theme to full contrast.
-  let contrast = $derived(preferences.value("ui.contrast") === "true" ? 100 : editor.contrast);
 
   // What the person may choose here. Windows has one material worth having;
   // a Mac offers the glass, the older vibrancy, or neither.
@@ -103,11 +99,24 @@
   ]);
 </script>
 
-<SettingsGroup title={m.look_mode()}>
-  <ModePicker spec={editor.current} {contrast} material={material === "" ? "none" : material} />
-</SettingsGroup>
-
 <SettingsGroup title={m.look_theme()}>
+  <SettingsRow
+    settingId="appearance.theme"
+    title={m.settings_color_scheme()}
+    description={m.settings_color_scheme_desc()}
+  >
+    <SegmentedControl
+      label={m.settings_color_scheme()}
+      value={preferences.value("appearance")}
+      disabled={preferences.saving()}
+      options={[
+        { value: "light", label: m.theme_light() },
+        { value: "dark", label: m.theme_dark() },
+        { value: "system", label: m.theme_system() },
+      ]}
+      onchange={(v) => void preferences.set("appearance", v)}
+    />
+  </SettingsRow>
   <ThemeGallery {editor} {mode} />
 </SettingsGroup>
 
