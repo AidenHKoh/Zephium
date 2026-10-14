@@ -505,6 +505,10 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         self.account.set(Some(sample));
         Ok(sample)
     }
+    fn judged(&self, observation: &SemanticObservation) -> bool {
+        self.current
+            .is_some_and(|(_, current)| current == observation.request().id())
+    }
     fn accept_extraction(
         &mut self,
         result: &SemanticExtractionResult<'_>,

@@ -119,7 +119,7 @@ impl WorkHumanPresentation {
             self.shape = Some((layer.cornerRadius(), layer.maskedCorners()));
         }
         layer.setCornerRadius(WELL_FOOT_RADIUS);
-        layer.setMaskedCorners(CACornerMask::MinXMinYCorner | CACornerMask::MaxXMinYCorner);
+        layer.setMaskedCorners(CACornerMask::LayerMinXMinYCorner | CACornerMask::LayerMaxXMinYCorner);
     }
     fn restore_shape(&mut self) {
         if let (Some((radius, corners)), Some(layer)) = (self.shape.take(), self.page.layer()) {

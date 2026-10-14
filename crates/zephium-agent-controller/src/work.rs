@@ -345,6 +345,11 @@ pub trait AgentWorkTask: Send {
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
         None
     }
+    /// Whether `observation` is the look this task judged last; one it has
+    /// not judged is judged before a read of it is accepted.
+    fn judged(&self, _: &SemanticObservation) -> bool {
+        true
+    }
     /// Accepts a validated but explicitly model-mapped result against the
     /// trusted task contract. Default refuses; shape alone is not task authority.
     fn accept_extraction(
@@ -5382,6 +5387,9 @@ impl AgentWorkController {
                 AgentBrowserProviderError::NoExtractionEvidence,
             ));
         }
+        if !state.task.judged(observation) {
+            state.task.evaluate(observation)?;
+        }
         if state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete {
             return Err(crate::contract!());
         }
@@ -5685,6 +5693,11 @@ impl AgentWorkController {
             result
         };
         let dropped = result.stats().dropped();
+        // The look a read maps (a whole-page expansion, a fresh look) is the
+        // one the task judges before it accepts what was read there.
+        if !state.task.judged(source) {
+            state.task.evaluate(source)?;
+        }
         if state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete {
             return Err(crate::contract!());
         }
