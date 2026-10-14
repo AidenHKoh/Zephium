@@ -92,6 +92,7 @@ mod login_item;
 mod material;
 mod media;
 mod memory_pressure;
+mod menu_text;
 mod notes;
 mod overlay;
 #[cfg(target_os = "macos")]
@@ -3383,8 +3384,8 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     if id == "mode.choose" {
         use tauri::menu::{Menu, MenuItemBuilder};
         let menu = (|| -> tauri::Result<_> {
-            let browse = MenuItemBuilder::with_id("mode.browse", "Browse").build(app)?;
-            let work = MenuItemBuilder::with_id("mode.work", "Work").build(app)?;
+            let browse = MenuItemBuilder::with_id("mode.browse", menu_text::label("Browse")).build(app)?;
+            let work = MenuItemBuilder::with_id("mode.work", menu_text::label("Work")).build(app)?;
             Menu::with_items(app, &[&browse, &work])
         })();
         return match (app.get_webview_window(MAIN_LABEL), menu) {
@@ -5008,7 +5009,8 @@ fn build_command_menu_item_enabled(
                 "native menu references unregistered command {id}"
             )))
         })?;
-    let mut builder = MenuItemBuilder::with_id(command.id, command.title).enabled(enabled);
+    let mut builder =
+        MenuItemBuilder::with_id(command.id, menu_text::label(command.title)).enabled(enabled);
     if let Some(accelerator) = &command.accelerator {
         builder = builder.accelerator(accelerator);
     }
@@ -5020,7 +5022,7 @@ fn build_quit_menu_item(
 ) -> tauri::Result<tauri::menu::MenuItem<tauri::Wry>> {
     // Native terminate: bypasses Tauri's ExitRequested path on macOS.
     // An ordinary menu event reaches the existing draft/store shutdown barrier.
-    tauri::menu::MenuItemBuilder::with_id("browser.quit", "Quit Zephium")
+    tauri::menu::MenuItemBuilder::with_id("browser.quit", menu_text::label("Quit Zephium"))
         .accelerator("CmdOrCtrl+Q")
         .build(handle)
 }
@@ -5041,20 +5043,20 @@ fn build_menu(
     let resolved = zephium_core::commands::resolve(overrides);
     let item = |id: &str| build_command_menu_item(handle, &resolved, id);
 
-    let app_menu = SubmenuBuilder::new(handle, "Zephium")
-        .about(None)
+    let app_menu = SubmenuBuilder::new(handle, menu_text::label("Zephium"))
+        .about_with_text(menu_text::label("About Zephium"), None)
         .separator()
         .item(&item("browser.settings")?)
         .separator()
-        .services()
+        .services_with_text(menu_text::label("Services"))
         .separator()
-        .hide()
-        .hide_others()
-        .show_all()
+        .hide_with_text(menu_text::label("Hide Zephium"))
+        .hide_others_with_text(menu_text::label("Hide Others"))
+        .show_all_with_text(menu_text::label("Show All"))
         .separator()
         .item(&build_quit_menu_item(handle)?)
         .build()?;
-    let file = SubmenuBuilder::new(handle, "File")
+    let file = SubmenuBuilder::new(handle, menu_text::label("File"))
         .item(&item("tab.new")?)
         .item(&item("window.newPrivate")?)
         .item(&item("note.new")?)
@@ -5064,30 +5066,30 @@ fn build_menu(
         .separator()
         .item(&item("tab.close")?)
         .build()?;
-    let find = SubmenuBuilder::new(handle, "Find")
+    let find = SubmenuBuilder::new(handle, menu_text::label("Find"))
         .item(&item("find.show")?)
         .item(&item("find.next")?)
         .item(&item("find.previous")?)
         .build()?;
     // Standard Edit selectors keep Cmd+C/V/X working inside every webview.
-    let edit = SubmenuBuilder::new(handle, "Edit")
-        .undo()
-        .redo()
+    let edit = SubmenuBuilder::new(handle, menu_text::label("Edit"))
+        .undo_with_text(menu_text::label("Undo"))
+        .redo_with_text(menu_text::label("Redo"))
         .separator()
-        .cut()
-        .copy()
-        .paste()
-        .select_all()
+        .cut_with_text(menu_text::label("Cut"))
+        .copy_with_text(menu_text::label("Copy"))
+        .paste_with_text(menu_text::label("Paste"))
+        .select_all_with_text(menu_text::label("Select All"))
         .separator()
         .item(&find)
         .item(&item("page.copyLink")?)
         .build()?;
-    let appearance = SubmenuBuilder::new(handle, "Appearance")
+    let appearance = SubmenuBuilder::new(handle, menu_text::label("Appearance"))
         .item(&item("theme.system")?)
         .item(&item("theme.light")?)
         .item(&item("theme.dark")?)
         .build()?;
-    let view = SubmenuBuilder::new(handle, "View")
+    let view = SubmenuBuilder::new(handle, menu_text::label("View"))
         .item(&item("nav.reload")?)
         .item(&item("nav.stop")?)
         .separator()
@@ -5110,20 +5112,21 @@ fn build_menu(
         view
     }
     .build()?;
-    let history = SubmenuBuilder::new(handle, "History")
+    let history = SubmenuBuilder::new(handle, menu_text::label("History"))
         .item(&item("nav.back")?)
         .item(&item("nav.forward")?)
         .separator()
         .item(&item("tab.reopen")?)
         .item(&item("browser.history")?)
         .build()?;
-    let bookmarks = SubmenuBuilder::new(handle, "Bookmarks")
+    let bookmarks = SubmenuBuilder::new(handle, menu_text::label("Bookmarks"))
         .item(&item("bookmark.add")?)
         .item(&item("tool.bookmarks")?)
         .build()?;
-    let window = SubmenuBuilder::new(handle, "Window")
-        .minimize()
-        .fullscreen()
+    let spaces = spaces::build_menu_section(handle, overrides)?;
+    let window = SubmenuBuilder::new(handle, menu_text::label("Window"))
+        .minimize_with_text(menu_text::label("Minimize"))
+        .fullscreen_with_text(menu_text::label("Enter Full Screen"))
         .separator()
         .item(&item("tab.next")?)
         .item(&item("tab.previous")?)
@@ -5137,14 +5140,14 @@ fn build_menu(
         .item(&item("browser.notes")?)
         .item(&item("browser.tasks")?)
         .build()?;
-    let help = SubmenuBuilder::new(handle, "Help")
+    let help = SubmenuBuilder::new(handle, menu_text::label("Help"))
         .item(&item("settings.shortcuts")?)
         .build()?;
 
     Menu::with_items(
         handle,
         &[
-            &app_menu, &file, &edit, &view, &history, &bookmarks, &window, &help,
+            &app_menu, &file, &edit, &view, &history, &bookmarks, &spaces, &window, &help,
         ],
     )
 }
@@ -5262,10 +5265,10 @@ fn build_sidebar_menu(
     let protection = match site_protected {
         Some(protected) => Some((
             PredefinedMenuItem::separator(handle)?,
-            CheckMenuItemBuilder::with_id(PROTECTION_SITE_COMMAND, "Block Ads and Trackers")
+            CheckMenuItemBuilder::with_id(PROTECTION_SITE_COMMAND, menu_text::label("Block Ads and Trackers"))
                 .checked(protected)
                 .build(handle)?,
-            MenuItemBuilder::with_id(PROTECTION_HIDE_COMMAND, "Hide Elements…")
+            MenuItemBuilder::with_id(PROTECTION_HIDE_COMMAND, menu_text::label("Hide Elements…"))
                 .enabled(can_hide)
                 .build(handle)?,
         )),
@@ -5290,7 +5293,7 @@ fn build_sidebar_menu(
     }
     let extension_rule = PredefinedMenuItem::separator(handle)?;
     let manage =
-        MenuItemBuilder::with_id("extensions.manage", "Manage Extensions…").build(handle)?;
+        MenuItemBuilder::with_id("extensions.manage", menu_text::label("Manage Extensions…")).build(handle)?;
     let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&back, &forward, &reload];
     if let Some((rule, site, hide)) = &protection {
         items.extend([rule as &dyn IsMenuItem<tauri::Wry>, site, hide]);
@@ -5373,7 +5376,7 @@ fn build_tab_menu(
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
     let item = |index: usize, title: &str, enabled: bool| {
-        MenuItemBuilder::with_id(TAB_MENU_ACTION_IDS[index], title)
+        MenuItemBuilder::with_id(TAB_MENU_ACTION_IDS[index], menu_text::label(title))
             .enabled(enabled)
             .build(handle)
     };
@@ -5419,7 +5422,7 @@ fn build_bookmark_menu(
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
     let item = |index: usize, title: &str| {
-        MenuItemBuilder::with_id(BOOKMARK_MENU_ACTION_IDS[index], title).build(handle)
+        MenuItemBuilder::with_id(BOOKMARK_MENU_ACTION_IDS[index], menu_text::label(title)).build(handle)
     };
     let open = item(0, "Open")?;
     let rename = item(3, "Rename")?;
@@ -5478,12 +5481,12 @@ fn build_profile_menu(
     use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
     let resolved = zephium_core::commands::resolve(overrides);
     let item = |id: &str| build_command_menu_item(handle, &resolved, id);
-    let profile = MenuItemBuilder::with_id("settings.profiles", "Profile…").build(handle)?;
-    let account = MenuItemBuilder::with_id("settings.account", "Account…").build(handle)?;
+    let profile = MenuItemBuilder::with_id("settings.profiles", menu_text::label("Profile…")).build(handle)?;
+    let account = MenuItemBuilder::with_id("settings.account", menu_text::label("Account…")).build(handle)?;
     let first = PredefinedMenuItem::separator(handle)?;
     let new_tab = item("tab.new")?;
     let new_private = item("window.newPrivate")?;
-    let split = MenuItemBuilder::with_id("split.choose", "Split View…").build(handle)?;
+    let split = MenuItemBuilder::with_id("split.choose", menu_text::label("Split View…")).build(handle)?;
     let second = PredefinedMenuItem::separator(handle)?;
     let notes = item("tool.notes")?;
     let tasks = item("tool.tasks")?;
@@ -5491,7 +5494,7 @@ fn build_profile_menu(
     let history = item("tool.history")?;
     let downloads = item("tool.downloads")?;
     let bookmarks = item("tool.bookmarks")?;
-    let extensions = MenuItemBuilder::with_id("extensions.manage", "Extensions…").build(handle)?;
+    let extensions = MenuItemBuilder::with_id("extensions.manage", menu_text::label("Extensions…")).build(handle)?;
     let third = PredefinedMenuItem::separator(handle)?;
     let settings = item("browser.settings")?;
     let quit = build_quit_menu_item(handle)?;
@@ -5826,8 +5829,9 @@ pub fn run() {
                 for (key, value) in
                     zephium_core::preferences::migrations(|key| store.app_setting(key))
                 {
-                    let _ = store.set_app_setting(key.into(), value.into());
+                    let _ = store.set_app_setting(key.into(), value);
                 }
+                menu_text::set_language(store.app_setting("ui.language").as_deref());
                 updates::schedule_native_checks(app.handle());
                 work_models::install(app.handle());
                 account::install(app.handle());
@@ -6250,7 +6254,10 @@ pub fn run() {
                             reinstall_native_materials(&emit_handle);
                         }
                         if let Some(keymap) = emit_handle.try_state::<keymap::Keymap>() {
-                            keymap.follow_preference(key, value);
+                            let language = key == "ui.language" && menu_text::set_language(Some(value));
+                            if keymap.follow_preference(key, value) || language {
+                                keymap.rebuild_menu_bar(&emit_handle);
+                            }
                         }
                     }
                     emit_ui_command(&emit_handle, &id);
@@ -7201,7 +7208,7 @@ mod tests {
             .split("fn handle_run_event")
             .next()
             .unwrap();
-        assert!(native_menu.contains(r#"with_id("split.choose", "Split View…")"#));
+        assert!(native_menu.contains(r#"with_id("split.choose", menu_text::label("Split View…"))"#));
         assert!(native_menu.contains(r#"item("tab.new")"#));
         assert!(sidebar.contains(r#"command.id === "split.choose""#));
         assert!(sidebar.contains("splitting = true"));

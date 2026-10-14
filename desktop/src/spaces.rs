@@ -7,6 +7,8 @@ use tauri::menu::{
     SubmenuBuilder,
 };
 use tauri::{AppHandle, Manager, State, WebviewWindow};
+
+use crate::menu_text;
 use zephium_app::{Command, Handle, SpaceCommand};
 use zephium_core::ids::{ItemId, SpaceId};
 use zephium_core::spaces::{SpaceIcon, SpaceLook, SpaceTheme};
@@ -401,23 +403,23 @@ pub(crate) fn build_menu_section(
     let enabled = !shown.private && !shown.spaces.is_empty();
     let spaces = space_items(handle, overrides, &shown)?;
     let moves = move_items(handle, MOVE_ACTIVE, &shown)?;
-    let move_to = SubmenuBuilder::new(handle, "Move Tab to Space")
+    let move_to = SubmenuBuilder::new(handle, menu_text::label("Move Tab to Space"))
         .items(&refs(&moves))
         .enabled(enabled && !moves.is_empty())
         .build()?;
-    SubmenuBuilder::new(handle, "Spaces")
+    SubmenuBuilder::new(handle, menu_text::label("Spaces"))
         .items(&refs(&spaces))
         .separator()
         .item(&item("space.next")?)
         .item(&item("space.previous")?)
         .separator()
         .item(
-            &MenuItemBuilder::with_id(NEW, "New Space…")
+            &MenuItemBuilder::with_id(NEW, menu_text::label("New Space…"))
                 .enabled(enabled)
                 .build(handle)?,
         )
         .item(
-            &MenuItemBuilder::with_id(EDIT, "Edit Space…")
+            &MenuItemBuilder::with_id(EDIT, menu_text::label("Edit Space…"))
                 .enabled(enabled)
                 .build(handle)?,
         )
@@ -433,10 +435,10 @@ fn build_popup(
     let mut items = space_items(handle, overrides, &shown)?;
     items.push(Box::new(PredefinedMenuItem::separator(handle)?));
     items.push(Box::new(
-        MenuItemBuilder::with_id(NEW, "New Space…").build(handle)?,
+        MenuItemBuilder::with_id(NEW, menu_text::label("New Space…")).build(handle)?,
     ));
     items.push(Box::new(
-        MenuItemBuilder::with_id(EDIT, "Edit Space…").build(handle)?,
+        MenuItemBuilder::with_id(EDIT, menu_text::label("Edit Space…")).build(handle)?,
     ));
     Menu::with_items(handle, &refs(&items))
 }
@@ -454,7 +456,7 @@ pub(crate) fn tab_menu_section(
     if moves.is_empty() {
         return Ok(None);
     }
-    SubmenuBuilder::new(handle, "Move to Space")
+    SubmenuBuilder::new(handle, menu_text::label("Move to Space"))
         .items(&refs(&moves))
         .build()
         .map(Some)
