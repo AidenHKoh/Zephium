@@ -3061,5 +3061,6 @@
   "space_delete_confirm": "Delete Space",
   "space_save_failed": "The space could not be saved. Try again.",
   "space_empty_title": "Nothing open in {name}",
-  "space_empty_body": "Tabs you open here stay with this space."
+  "space_empty_body": "Tabs you open here stay with this space.",
+  "browse_profiles_manage": "Manage Profiles…"
 }

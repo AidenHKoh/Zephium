@@ -1,10 +1,16 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import { onMount } from "svelte";
-  import { Add01Icon, IncognitoIcon, Settings02Icon, UserIcon } from "@hugeicons/core-free-icons";
+  import {
+    IncognitoIcon,
+    Settings02Icon,
+    UserIcon,
+    UserMultipleIcon,
+  } from "@hugeicons/core-free-icons";
   import { commands } from "$shared/ipc/bindings";
   import * as tools from "$session/tools.svelte";
-  import { requestNew } from "$session/profile-sheet.svelte";
+  import type { ToolKind } from "$session/tools.svelte";
+  import { preferences } from "$domain/preferences";
   import { tabs } from "$domain/tabs";
   import { drawn, profiles } from "$domain/profiles";
   import Disclosure from "$shared/ui/Disclosure";
@@ -17,14 +23,10 @@
   import { IS_MAC } from "$shared/platform";
 
   let { compact = false }: { compact?: boolean } = $props();
-  const groups = [SHELF_TOOLS, RECORD_TOOLS] as const;
   onMount(() => {
     void profiles.retain();
     return () => profiles.release();
   });
-  // Settings closes the stack nearest the avatar; the private window opens
-  // it, under the other profiles this window could be.
-  const count = SHELF_TOOLS.length + RECORD_TOOLS.length + 2;
   const name = $derived(tabs.profile()?.name ?? profiles.current()?.name ?? "");
   const others = $derived(profiles.inPrivate() ? [] : profiles.others());
   /** The avatar the person chose; until then the foot is the account glyph. */
@@ -32,11 +34,19 @@
     const current = profiles.inPrivate() ? null : profiles.current();
     return current && current.avatar.revision > 0 ? drawn(current) : null;
   });
-  function newProfile() {
-    requestNew();
-    run("settings.profiles");
-  }
-  function pick(kind: (typeof SHELF_TOOLS)[number] | (typeof RECORD_TOOLS)[number]) {
+  // A tool whose feature is off is not offered here either.
+  const shelf = $derived(SHELF_TOOLS.filter((kind) => preferences.enabled(kind)));
+  const groups = $derived([shelf, RECORD_TOOLS].filter((group) => group.length > 0));
+  // Rows settle in nearest the case first, so each counts from the bottom:
+  // Settings, the tools, Incognito, Manage Profiles, the others, then you.
+  const toolRows = $derived(groups.reduce((sum, group) => sum + group.length, 0));
+  const step = $derived({
+    incognito: toolRows + 1,
+    manage: toolRows + 2,
+    other: (index: number) => toolRows + 3 + others.length - 1 - index,
+    profile: toolRows + 3 + others.length,
+  });
+  function pick(kind: ToolKind) {
     if (tools.activeTool() === kind) tools.close();
     else tools.open(kind);
   }
@@ -108,7 +118,7 @@
           strokeWidth={1.7}
         />{/if}{#if compact}<NoticePip />{/if}{/snippet}
     {#if !compact && name}
-      <div class="shelf-profile" role="presentation" style:--step={count + others.length + 2}>
+      <div class="shelf-profile" role="presentation" style:--step={step.profile}>
         {#if chosen}<ProfileAvatar view={chosen} size={24} />{:else}<span
             class="avatar"
             aria-hidden="true"><Icon icon={UserIcon} size={14} strokeWidth={1.8} /></span
@@ -121,7 +131,7 @@
         type="button"
         role="menuitem"
         class="ui-menu-item shelf-item"
-        style:--step={count + others.length - index}
+        style:--step={step.other(index)}
         title={compact ? m.profiles_menu_label({ name: profile.name }) : undefined}
         aria-label={m.profiles_menu_label({ name: profile.name })}
         onclick={() => void profiles.switchTo(profile.id)}
@@ -130,16 +140,19 @@
         {#if !compact}<span>{profile.name}</span>{/if}
       </button>
     {/each}
-    {@render row(Add01Icon, m.profiles_menu_new(), null, count, newProfile)}
+    {@render row(UserMultipleIcon, m.browse_profiles_manage(), null, step.manage, () =>
+      run("settings.profiles"),
+    )}
     <div class="shelf-rule" role="separator"></div>
     {@render row(
       IncognitoIcon,
       m.profile_incognito(),
       keysFor("window.newPrivate"),
-      count - 1,
+      step.incognito,
       () => run("window.newPrivate"),
     )}
     {#each groups as group, at (at)}
+      {@const before = groups.slice(0, at).reduce((sum, earlier) => sum + earlier.length, 0)}
       <div class="shelf-rule" role="separator"></div>
       {#each group as kind, index (kind)}
         {@const view = toolPresentation(kind)}
@@ -147,7 +160,7 @@
           view.icon,
           view.label(),
           keysFor(`tool.${kind}`),
-          count - 2 - (at === 0 ? index : SHELF_TOOLS.length + index),
+          toolRows - before - index,
           () => pick(kind),
           tools.activeTool() === kind,
         )}

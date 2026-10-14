@@ -61,11 +61,11 @@ test("the rail at rest", async () => {
   const farthest = stack.querySelector<HTMLElement>(".shelf-item")!;
   await expect.poll(() => getComputedStyle(farthest).opacity).toBe("1");
   await expect.poll(() => getComputedStyle(stack).opacity).toBe("1");
-  // Farthest first: making a profile, then a private window, then the tools
+  // Farthest first: managing profiles, then a private window, then the tools
   // in the native menu's order, and Settings last, nearest the case.
   const items = [...stack.querySelectorAll<HTMLElement>(".shelf-item")];
   expect(items.map((item) => item.getAttribute("aria-label"))).toEqual([
-    "New Profile…",
+    "Manage Profiles…",
     "Incognito",
     "Notes",
     "Tasks",
