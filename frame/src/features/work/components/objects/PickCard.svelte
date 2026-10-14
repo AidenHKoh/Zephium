@@ -6,6 +6,8 @@
   import YesNo from "./YesNo.svelte";
   import { Tick02Icon } from "./icons";
   import Star from "./Star.svelte";
+  import Stars from "./Stars.svelte";
+  import { pickDetails } from "../../lib/board/rating";
   import PlayMark from "./PlayMark.svelte";
   import { youtubeId } from "../../lib/link-media";
   import { thumbnail } from "../../lib/frame-thumbs";
@@ -48,7 +50,9 @@
     );
     return fact ? { value: fact.value, fact } : null;
   });
-  const facts = $derived(pick.facts.filter((entry) => entry !== earlier?.fact));
+  /** A rating the page worded as a fact is stars, not a row; a fact that repeats the name is no fact. */
+  const details = $derived(pickDetails(pick));
+  const facts = $derived(details.facts.filter((entry) => entry !== earlier?.fact));
   /** "Top pick" says it once: a tag that repeats it goes. */
   const tags = $derived(
     pick.recommended
@@ -84,14 +88,6 @@
    */
   const hyphenate = $derived(
     !!room && longest * 0.64 * 12 > room && word[0] === word[0]?.toLowerCase(),
-  );
-  const rating = $derived(
-    pick.rating
-      ? new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(pick.rating.value)
-      : "",
-  );
-  const count = $derived(
-    pick.rating?.count ? new Intl.NumberFormat(undefined).format(pick.rating.count) : "",
   );
 </script>
 
@@ -140,11 +136,9 @@
           </p>{/if}
       </div>
     </header>
-    {#if pick.rating || (video && pick.duration && !picture)}
+    {#if details.rating || (video && pick.duration && !picture)}
       <p class="meta">
-        {#if pick.rating}<span class="stars"
-            ><Star size={12} />{rating}{#if count}<span class="count">({count})</span>{/if}</span
-          >{/if}
+        {#if details.rating}<Stars rating={details.rating} />{/if}
         {#if video && pick.duration && !picture}<span>{pick.duration}</span>{/if}
       </p>
     {/if}
@@ -373,21 +367,6 @@
   .meta {
     display: flex;
     gap: 10px;
-  }
-
-  .stars {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-    color: var(--color-text);
-    font-weight: 550;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .count {
-    margin-inline-start: 2px;
-    color: var(--color-muted);
-    font-weight: 400;
   }
 
   .facts {
