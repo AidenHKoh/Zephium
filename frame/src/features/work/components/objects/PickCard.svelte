@@ -8,6 +8,7 @@
   import Star from "./Star.svelte";
   import Stars from "./Stars.svelte";
   import { pickDetails } from "../../lib/board/rating";
+  import { unrepeated } from "../../lib/board/text";
   import PlayMark from "./PlayMark.svelte";
   import { youtubeId } from "../../lib/link-media";
   import { thumbnail } from "../../lib/frame-thumbs";
@@ -34,6 +35,7 @@
   } = $props();
   const tube = $derived(video && !!pick.url && !!youtubeId(pick.url));
   const figureOf = (text: string) => Number(text.replace(/[^\d.]/gu, "")) || 0;
+  const display = $derived(unrepeated(pick.price?.display ?? ""));
   /**
    * The price before a discount: the price's own, else a fact that says what
    * it was ("Original monthly $2,632") when it is higher than the price now.
@@ -41,7 +43,7 @@
   const earlier = $derived.by(() => {
     if (!pick.price) return null;
     if (pick.price.was) return { value: pick.price.was, fact: null };
-    const now = pick.price.amount ?? figureOf(pick.price.display);
+    const now = pick.price.amount ?? figureOf(display);
     const fact = pick.facts.find(
       (entry) =>
         /^(original|was|regular|usual|list|before)\b/iu.test(entry.label.trim()) &&
@@ -69,7 +71,6 @@
   const logo = $derived(!picture && pick.logo && hasMark(pick.logo) ? pick.logo : null);
   /** "$4,350 / month": the figure loud, its period quiet. */
   const price = $derived.by(() => {
-    const display = pick.price?.display ?? "";
     const at = display.search(/\s*(\/|per\b)/u);
     return at > 0
       ? { figure: display.slice(0, at), period: display.slice(at) }

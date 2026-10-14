@@ -41,3 +41,8 @@ export function overlap(a: ReadonlySet<string>, b: ReadonlySet<string>): number 
   for (const word of a) if (b.has(word)) count += 1;
   return count;
 }
+
+/** Words said twice at the start, as a page's price can be ("$2,956 $2,956 monthly"), said once. */
+export function unrepeated(text: string): string {
+  return text.replace(/^\s*(\S+(?:\s+\S+)*?)\s+\1(?=\s|[,;]|$)/u, "$1");
+}

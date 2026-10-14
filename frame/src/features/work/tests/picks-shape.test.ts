@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { comparable } from "../components/objects/centre";
 import { pickCandidates } from "../lib/link-media";
+import { unrepeated } from "../lib/board/text";
 import type { PicksView, PickView } from "../lib/board/types";
 
 const pick = (name: string, extra: Partial<PickView> = {}): PickView => ({
@@ -42,5 +43,18 @@ describe("picks shape", () => {
       pickCandidates({ image_candidates: ["https://a.test/x.jpg"], url: "https://youtu.be/x" }),
     ).toEqual(["https://a.test/x.jpg"]);
     expect(pickCandidates({ url: "https://example.com" })).toEqual([]);
+  });
+});
+
+describe("a pick's price", () => {
+  it("says a figure the page repeated once", () => {
+    expect(unrepeated("$2,956 $2,956 monthly, originally $3,051")).toBe(
+      "$2,956 monthly, originally $3,051",
+    );
+    expect(unrepeated("€32.50 / item €32.50 / item")).toBe("€32.50 / item");
+    expect(unrepeated("$4,446 $4,446")).toBe("$4,446");
+    expect(unrepeated("$1,521 round trip")).toBe("$1,521 round trip");
+    expect(unrepeated("1 1/2 cups")).toBe("1 1/2 cups");
+    expect(unrepeated("$20 $25")).toBe("$20 $25");
   });
 });
