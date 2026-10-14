@@ -5,7 +5,8 @@ import type {
   WorkExecutionFact,
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
-import { onCanvas, pickName, ownedView } from "../lib/board/objects";
+import { filledSheet, onCanvas, pickName, ownedView } from "../lib/board/objects";
+import type { SheetView } from "../lib/board/types";
 import { environmentStages } from "../lib/project-environment-board";
 import { environmentRequests } from "../lib/project-environment-thread";
 import { projection, snapshot } from "./environment-fixtures";
@@ -269,4 +270,55 @@ test("stored record images reach Sheet's subject slot without fetching candidate
   });
   expect(view.rows[1]?.entity?.picture).toBeUndefined();
   expect(view.rows[2]?.entity?.picture).toBeUndefined();
+});
+
+test("a table drops the columns no row fills, and one column left reads as a list", () => {
+  const sheet = (rows: string[][]): SheetView => ({
+    id: "facts",
+    kind: "sheet",
+    title: "Market facts",
+    columns: [
+      { kind: "entity", label: "Company" },
+      { kind: "text", label: "Founded" },
+      { kind: "money", label: "Funding", currency: "USD" },
+    ],
+    rows: rows.map((cells) => ({ cells })),
+    note: "Blanks are intentional.",
+  });
+  const partial = filledSheet(
+    sheet([
+      ["Replit", "", "400000000"],
+      ["Lovable", "—", ""],
+    ]),
+  );
+  expect(partial.kind).toBe("sheet");
+  if (partial.kind !== "sheet") throw new Error("Sheet changed layout");
+  expect(partial.columns.map((column) => column.label)).toEqual(["Company", "Funding"]);
+  expect(partial.rows.map((row) => row.cells)).toEqual([
+    ["Replit", "400000000"],
+    ["Lovable", ""],
+  ]);
+  expect(partial.note).toBe("Blanks are intentional.");
+  expect(
+    filledSheet(
+      sheet([
+        ["Replit", "", ""],
+        ["Lovable", " ", "-"],
+      ]),
+    ),
+  ).toMatchObject({
+    kind: "list",
+    title: "Market facts",
+    items: [{ title: "Replit" }, { title: "Lovable" }],
+  });
+  // The person's own table keeps the columns they have yet to fill.
+  const own = ownedView("own", "Mine", {
+    kind: "sheet",
+    columns: [
+      { kind: "text", label: "Name" },
+      { kind: "text", label: "Notes" },
+    ],
+    rows: [{ cells: ["First", ""] }],
+  });
+  expect(own?.kind === "sheet" && own.columns.length).toBe(2);
 });

@@ -15,6 +15,7 @@ import type {
   Emphasis,
   Entity,
   EntityFacet,
+  ListView,
   ObjectView,
   PickView,
   PicksView,
@@ -262,7 +263,7 @@ function legacyView(block: Block, board: Board): ObjectView | null {
     case "comparison": {
       const content = block.content;
       if (content.kind === "matrix")
-        return {
+        return filledSheet({
           ...base,
           kind: "sheet",
           columns: [
@@ -294,8 +295,8 @@ function legacyView(block: Block, board: Board): ObjectView | null {
               ...(logo ? { entity: { logo } } : {}),
             };
           }),
-        } satisfies SheetView;
-      return {
+        });
+      return filledSheet({
         ...base,
         kind: "sheet",
         columns: [
@@ -305,10 +306,10 @@ function legacyView(block: Block, board: Board): ObjectView | null {
         rows: content.alternatives.map((alternative) => ({
           cells: [alternative.name, ...alternative.values],
         })),
-      } satisfies SheetView;
+      });
     }
     case "table":
-      return {
+      return filledSheet({
         ...base,
         kind: "sheet",
         columns: block.columns.map((column) => ({
@@ -316,7 +317,7 @@ function legacyView(block: Block, board: Board): ObjectView | null {
           kind: COLUMN_KIND[column.type] ?? "text",
         })),
         rows: block.rows.map((cells) => ({ cells: [...cells] })),
-      };
+      });
     case "chart":
       return {
         ...base,
@@ -492,6 +493,35 @@ function namedPictures(
 }
 
 const IMAGE = /\.(png|jpe?g|webp|gif|avif)(\?|$)|image|photo|picture/iu;
+
+const blank = (cell: string | undefined) => !cell?.trim() || /^[-–—]$/u.test(cell.trim());
+
+/**
+ * A table the agent made keeps only the columns some row fills. With one
+ * column left it is no table: its rows read as a list under its title.
+ */
+export function filledSheet(sheet: SheetView): SheetView | ListView {
+  const kept = sheet.columns.flatMap((_, index) =>
+    sheet.rows.some((row) => !blank(row.cells[index])) ? [index] : [],
+  );
+  if (!kept.length || kept.length === sheet.columns.length) return sheet;
+  if (kept.length === 1) {
+    const { columns: _columns, rows, note: _note, ...base } = sheet;
+    return {
+      ...base,
+      kind: "list",
+      style: "reading",
+      items: rows.flatMap((row) =>
+        blank(row.cells[kept[0]!]) ? [] : [{ title: row.cells[kept[0]!]!.trim() }],
+      ),
+    };
+  }
+  return {
+    ...sheet,
+    columns: kept.map((index) => sheet.columns[index]!),
+    rows: sheet.rows.map((row) => ({ ...row, cells: kept.map((index) => row.cells[index] ?? "") })),
+  };
+}
 
 /**
  * A table of things the run pictured is shown as their cards, each with its
@@ -722,36 +752,37 @@ function leadView(
             : {}),
         })),
       };
-    case "sheet":
-      return (
-        pictured(base, data, execution ? namedPictures(execution, fetched) : new Map()) ?? {
-          ...base,
-          kind: "sheet",
-          columns: data.columns.map((column) => ({
-            label: column.label,
-            kind: column.kind,
-            ...(column.unit ? { unit: column.unit } : {}),
-            ...(column.currency ? { currency: column.currency } : {}),
-            ...(column.best ? { best: column.best } : {}),
-          })),
-          rows: data.rows.map((row) => {
-            const media = row.entity?.record_media;
-            const src = media ? recordMediaUrl(media) : null;
-            const entity = {
-              ...(row.entity?.logo_host ? { logo: row.entity.logo_host } : {}),
-              ...(src && media
-                ? { picture: { src, width: media.width, height: media.height } }
-                : {}),
-            };
-            return {
-              cells: row.cells,
-              ...(Object.keys(entity).length ? { entity } : {}),
-              ...cited(row.source),
-            };
-          }),
-          ...(data.note ? { note: data.note } : {}),
-        }
-      );
+    case "sheet": {
+      const shown = pictured(base, data, execution ? namedPictures(execution, fetched) : new Map());
+      if (shown) return shown;
+      const sheet: SheetView = {
+        ...base,
+        kind: "sheet",
+        columns: data.columns.map((column) => ({
+          label: column.label,
+          kind: column.kind,
+          ...(column.unit ? { unit: column.unit } : {}),
+          ...(column.currency ? { currency: column.currency } : {}),
+          ...(column.best ? { best: column.best } : {}),
+        })),
+        rows: data.rows.map((row) => {
+          const media = row.entity?.record_media;
+          const src = media ? recordMediaUrl(media) : null;
+          const entity = {
+            ...(row.entity?.logo_host ? { logo: row.entity.logo_host } : {}),
+            ...(src && media ? { picture: { src, width: media.width, height: media.height } } : {}),
+          };
+          return {
+            cells: row.cells,
+            ...(Object.keys(entity).length ? { entity } : {}),
+            ...cited(row.source),
+          };
+        }),
+        ...(data.note ? { note: data.note } : {}),
+      };
+      // The person's own table keeps the columns they have yet to fill.
+      return execution ? filledSheet(sheet) : sheet;
+    }
     case "plot": {
       const spec: ChartSpec = {
         ...styleSpec(data.style),
