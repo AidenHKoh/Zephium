@@ -69,8 +69,8 @@ test("the rail's switch marks where you are and goes to the other in one click",
   await expect.element(work).toHaveAttribute("aria-pressed", "true");
 });
 
-test("with Work and AI off the column has no switch at either width, and it comes back on", async () => {
-  native.settings["ai.enabled"] = "false";
+test("with Work off the column has no switch at either width, and it comes back on", async () => {
+  native.settings["work.enabled"] = "false";
   await preferences.init();
   await surface.init();
   const wide = await render(ModeTabs);
@@ -79,7 +79,7 @@ test("with Work and AI off the column has no switch at either width, and it come
   await expect.element(rail.getByRole("button", { name: "Work" })).not.toBeInTheDocument();
   expect(wide.container.textContent?.trim()).toBe("");
 
-  emitNativeEvent("uiCommand", "preference.ai.enabled=true");
+  emitNativeEvent("uiCommand", "preference.work.enabled=true");
   await expect.element(wide.getByRole("radio", { name: "Work", exact: true })).toBeVisible();
   await expect.element(rail.getByRole("button", { name: "Work", exact: true })).toBeVisible();
 });
