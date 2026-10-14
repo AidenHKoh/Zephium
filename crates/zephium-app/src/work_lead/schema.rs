@@ -602,6 +602,44 @@ fn prune_at(schema: &Value, value: &mut Value, path: &str, removed: &mut Vec<Str
 /// Leaves out the optional part a fault names: removes a member or an
 /// element, empties a cell, or keeps an array's first elements. False when
 /// the fault names nothing that can go.
+/// Brings text that runs over its limit, or onto a second line, within the
+/// limit: clipped between words, its lines joined. Required text included;
+/// what it says is the lead's own, only shorter.
+pub(crate) fn clip_within(
+    value: &mut Value,
+    fault: &WorkObjectFault,
+    within: impl Fn(&str, usize) -> String,
+) -> bool {
+    let (Some(path), Some(found)) = (fault.path, fault.found) else {
+        return false;
+    };
+    let target = fault.fill(path);
+    let mut at = value;
+    for segment in segments(&target) {
+        let next = match segment {
+            Segment::Key(key) => at.get_mut(key.as_str()),
+            Segment::Index(index) => at.get_mut(index),
+        };
+        match next {
+            Some(next) => at = next,
+            None => return false,
+        }
+    }
+    let Value::String(text) = at else {
+        return false;
+    };
+    let clipped = match (found, fault.limit) {
+        (WorkTextFound::LineBreak, _) => text.split_whitespace().collect::<Vec<_>>().join(" "),
+        (WorkTextFound::Characters(_), Some(limit)) => within(text, limit as usize),
+        _ => return false,
+    };
+    if clipped.is_empty() || clipped == *text {
+        return false;
+    }
+    *text = clipped;
+    true
+}
+
 pub(crate) fn drop(value: &mut Value, fault: &WorkObjectFault) -> bool {
     let Some(drop) = fault.drop else {
         return false;

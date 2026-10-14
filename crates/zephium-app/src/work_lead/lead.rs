@@ -1736,6 +1736,21 @@ fn unquoted_data(args: &Value) -> Value {
     if let Some(data) = parsed {
         args["data"] = data;
     }
+    // The kind's fields given beside `data` rather than in it are its data.
+    if !args.get("data").is_some_and(Value::is_object) {
+        if let Some(map) = args.as_object_mut() {
+            let fields: serde_json::Map<String, Value> = [
+                "items", "records", "steps", "rows", "columns", "headline", "text", "points",
+                "figures", "facet", "nodes", "edges", "series", "language", "code", "calendar",
+            ]
+            .iter()
+            .filter_map(|key| map.remove(*key).map(|value| ((*key).to_owned(), value)))
+            .collect();
+            if !fields.is_empty() {
+                map.insert("data".into(), Value::Object(fields));
+            }
+        }
+    }
     args
 }
 
@@ -2161,6 +2176,8 @@ mod compact_tests {
         assert_eq!(unquoted_data(&args)["data"]["records"][0], "r1");
         let plain = serde_json::json!({"data":"not json"});
         assert_eq!(unquoted_data(&plain), plain);
+        let beside = serde_json::json!({"kind":"picks","title":"Stays","records":["r1"]});
+        assert_eq!(unquoted_data(&beside)["data"]["records"][0], "r1");
         assert_eq!(
             format!(
                 "{:?}",

@@ -1232,29 +1232,19 @@ async fn scripted(
 }
 
 #[tokio::test]
-async fn a_refused_object_stands_on_its_second_try_without_its_optional_excess() {
+async fn an_object_stands_on_its_first_try_with_long_text_clipped_and_strays_left_out() {
     fn turns(turn: usize, seen: &str) -> Vec<WorkModelPart> {
-        let plan = || {
-            call(
+        match turn {
+            0 => vec![call(
                 "p",
                 "create",
                 json!({"kind": "plan", "title": "Your trip", "data": {"steps": [
-                    {"title": "Fly to SFO", "kind": "travel", "detail": "x".repeat(300)},
+                    {"title": "Fly to SFO", "kind": "travel", "detail": "word ".repeat(70)},
                     {"title": "Check in", "kind": "stay", "day": "5 Jan"}]}}),
-            )
-        };
-        match turn {
-            0 => vec![plan()],
+            )],
             1 => {
                 assert!(
-                    seen.contains("plan: steps[1].day is not a field of steps[1]"),
-                    "{seen}"
-                );
-                vec![plan()]
-            }
-            2 => {
-                assert!(
-                    seen.contains("Left out to place it: steps[1].day (not a field of plan); steps[0].detail (300 characters; the limit is 280)"),
+                    seen.contains("Left out to place it: steps[1].day (not a field of plan)"),
                     "{seen}"
                 );
                 vec![
@@ -1271,7 +1261,7 @@ async fn a_refused_object_stands_on_its_second_try_without_its_optional_excess()
                     ),
                 ]
             }
-            _ => panic!("the run finished at turn 2"),
+            _ => panic!("the run finished at turn 1"),
         }
     }
     let run = scripted("Plan my trip", turns).await;
@@ -1284,7 +1274,8 @@ async fn a_refused_object_stands_on_its_second_try_without_its_optional_excess()
             _ => None,
         })
         .unwrap();
-    assert_eq!(plan[0].detail, None);
+    let detail = plan[0].detail.clone().unwrap();
+    assert!(detail.starts_with("word word") && detail.chars().count() <= 280, "{detail}");
     assert_eq!(plan[1].title, "Check in");
     assert_eq!(run.title.as_deref(), Some("Trip to San Francisco"));
 }

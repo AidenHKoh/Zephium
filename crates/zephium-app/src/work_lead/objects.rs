@@ -532,6 +532,9 @@ pub(crate) fn propose(
     };
     map.remove("kind");
     let mut data = Value::Object(map);
+    if kind == "picks" {
+        tidy_picks(&mut data);
+    }
     strip_native_media(&mut data);
     super::schema::strip_schema_words(kind, &mut data);
     let mut left_out: Vec<String> = Vec::new();
@@ -547,10 +550,10 @@ pub(crate) fn propose(
             }
         });
     }
-    if lenient {
-        for path in super::schema::prune(kind, &mut data) {
-            left_out.push(format!("{path} (not a field of {kind})"));
-        }
+    // A field the kind does not have is left out on the first try: the
+    // object stands without it and the lead learns why from its result.
+    for path in super::schema::prune(kind, &mut data) {
+        left_out.push(format!("{path} (not a field of {kind})"));
     }
     if let Some(found) = super::schema::mismatch(kind, &data) {
         return Err((format!("{kind}: {}", found.words), ObjectRefusal::Shape));
@@ -635,6 +638,7 @@ pub(crate) fn propose(
     if let Value::Object(map) = &mut data {
         map.insert("kind".into(), Value::String(kind.to_owned()));
     }
+    let mut clipped = 0;
     let data = loop {
         let parsed: WorkArtifactDataV1 = serde_json::from_value(data.clone()).map_err(|error| {
             (
@@ -645,6 +649,10 @@ pub(crate) fn propose(
         let Some(fault) = parsed.lead_fault(evidence.len()) else {
             break parsed;
         };
+        if clipped < MAX_CLIPS && super::schema::clip_within(&mut data, &fault, words_within) {
+            clipped += 1;
+            continue;
+        }
         if lenient && left_out.len() < MAX_LEFT_OUT && super::schema::drop(&mut data, &fault) {
             left_out.push(left_words(&fault));
             continue;
@@ -1147,6 +1155,35 @@ pub(crate) fn lead_holds<'a>(
             && object.artifact.part.is_none()
             && held * 2 >= names.len()
     })
+}
+
+/// Overlong texts one object may have clipped before it is refused.
+const MAX_CLIPS: usize = 24;
+
+/// Hand-written picks in the shapes models send: a `title` for the name, a
+/// fact without its kind (plain text), a fact as "Label: value".
+fn tidy_picks(data: &mut Value) {
+    items_mut(data, |item| {
+        if item.get("name").is_none() {
+            if let Some(title) = item.remove("title") {
+                item.insert("name".into(), title);
+            }
+        }
+        if let Some(Value::Array(facts)) = item.get_mut("facts") {
+            for fact in facts.iter_mut() {
+                if let Value::String(line) = fact {
+                    if let Some((label, value)) = line.split_once(':') {
+                        *fact = serde_json::json!({"label": label.trim(), "value": value.trim()});
+                    }
+                }
+                if let Value::Object(fact) = fact {
+                    fact.entry("kind")
+                        .or_insert_with(|| Value::String("text".into()));
+                }
+            }
+            facts.retain(Value::is_object);
+        }
+    });
 }
 
 /// Native references never enter or survive the model JSON vocabulary.
