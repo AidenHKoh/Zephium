@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import { boardLayout, type LayoutBlock } from "../lib/board/layout";
 import { RUN, placeRun, type RunInputs } from "../lib/run/layout";
 import { TEXT_LIMIT } from "../lib/canvas-model";
+import { partSize } from "../lib/run/part-size";
 
 const row = (id: string, height: number, phase?: number) => ({
   part: { id, width: 240, height },
@@ -163,5 +164,31 @@ test("every column joins the next and the last joins the result, under the canva
         ).toBe(true);
   });
   expect(place.lines.some((line) => line.kind === "feed")).toBe(true);
+  expect(crossings(place)).toEqual([]);
+});
+
+test("a part with many pages keeps one stack, and nothing it found or that follows lies over it", () => {
+  const pages = (id: string, count: number) => ({
+    part: { id, ...partSize({ kind: "pages", count }) },
+    found: [] as { id: string; width: number; height: number }[],
+    feeds: true,
+    phase: 0,
+  });
+  const rows = [
+    { ...pages("arena", 1), found: [{ id: "arena-board", width: 640, height: 420 }] },
+    { ...pages("dribbble", 8), found: [{ id: "dribbble-board", width: 880, height: 1400 }] },
+    { ...pages("later", 2), phase: 1 },
+  ];
+  const place = placeRun(0, {
+    ...run(rows, 300),
+    sources: { id: "sources", width: 560, height: 240 },
+  });
+  const boxes = Object.entries(place.rects);
+  const hits: string[] = [];
+  for (const [index, [a, ra]] of boxes.entries())
+    for (const [b, rb] of boxes.slice(index + 1))
+      if (crosses({ x: ra.x, y: ra.y }, { x: ra.x + ra.width, y: ra.y + ra.height }, rb))
+        hits.push(`${a} x ${b}`);
+  expect(hits).toEqual([]);
   expect(crossings(place)).toEqual([]);
 });
