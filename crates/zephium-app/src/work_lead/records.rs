@@ -176,6 +176,17 @@ impl Records {
         })
     }
 
+    /// The name of the record a key names, as read.
+    pub fn name_of(&self, key: &str) -> Option<&str> {
+        let index = key
+            .trim()
+            .strip_prefix('r')?
+            .parse::<usize>()
+            .ok()?
+            .checked_sub(1)?;
+        self.rows.get(index).map(|row| row.subject.name.as_str())
+    }
+
     /// The key of the one record this run read under `name`.
     pub fn key_of(&self, name: &str) -> Option<String> {
         let name = name.trim();

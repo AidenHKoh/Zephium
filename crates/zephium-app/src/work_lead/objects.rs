@@ -1115,6 +1115,35 @@ pub(crate) fn part_holds<'a>(
     })
 }
 
+/// The lead's own picks of this run that already hold most of `names`: a
+/// second picks of the same things is an update of the first.
+pub(crate) fn lead_holds<'a>(
+    objects: &'a [CanvasObject],
+    names: &[String],
+) -> Option<&'a CanvasObject> {
+    let names: Vec<String> = names.iter().map(|n| n.trim().to_lowercase()).collect();
+    if names.is_empty() {
+        return None;
+    }
+    objects.iter().find(|object| {
+        let WorkArtifactDataV1::Picks { items, .. } = &object.artifact.data else {
+            return false;
+        };
+        let held = names
+            .iter()
+            .filter(|name| {
+                items
+                    .iter()
+                    .any(|item| item.name.trim().to_lowercase() == **name)
+            })
+            .count();
+        object.current
+            && object.in_this_run
+            && object.artifact.part.is_none()
+            && held * 2 >= names.len()
+    })
+}
+
 /// Native references never enter or survive the model JSON vocabulary.
 pub(crate) fn strip_native_media(value: &mut Value) {
     match value {
@@ -1415,6 +1444,20 @@ mod tests {
             ])
         )
         .is_none());
+        // The lead's own picks of the same stays, picked again, are updated.
+        let mine = [{
+            let mut object = picks(
+                "01M3RV9DBTWYS7770BES8YYKT5",
+                "01M3RV9DBTWYS7770BES8YYKT4",
+                &["Room in Dogpatch", "Room in Potrero Hill", "Guesthouse"],
+            );
+            object.artifact.part = None;
+            object
+        }];
+        let again = names(&["Room in Dogpatch", "Room in Potrero Hill", "Condo in SoMa"]);
+        assert!(lead_holds(&mine, &again).is_some());
+        assert!(lead_holds(&mine, &names(&["Condo in SoMa", "Loft"])).is_none());
+        assert!(lead_holds(&amazon, &names(&["LEGO Technic 42115"])).is_none());
     }
 
     #[test]

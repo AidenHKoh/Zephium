@@ -981,18 +981,9 @@ where
             return self.revise(&with_id(args, placed.artifact.id)).await;
         } else if let Some(held) = (kind == "picks")
             .then(|| {
-                let names: Vec<String> = args
-                    .pointer("/data/items")
-                    .and_then(Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(|item| item.get("name").and_then(Value::as_str))
-                            .map(str::to_owned)
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let names = self.pick_names(args);
                 objects::part_holds(&canvas, &names)
+                    .or_else(|| objects::lead_holds(&canvas, &names))
             })
             .flatten()
         {
@@ -1068,6 +1059,29 @@ where
     /// A hand-written pick or row that restates a record this run read: its
     /// values must come from the record, so it is selected by its r key. A
     /// pick that draws a route (a flight) is the lead's own shape.
+    /// The names a picks call is about: its items' names, or the names of
+    /// the records it selects by key.
+    fn pick_names(&self, args: &Value) -> Vec<String> {
+        if let Some(records) = args.pointer("/data/records").and_then(Value::as_array) {
+            let read = self.run.records.lock().unwrap_or_else(|e| e.into_inner());
+            return records
+                .iter()
+                .filter_map(super::records::Selection::loose)
+                .filter_map(|record| read.name_of(&record.source).map(str::to_owned))
+                .collect();
+        }
+        args.pointer("/data/items")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("name").and_then(Value::as_str))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Hand-written picks or rows that name only records this run read stand
     /// as those records, so their prices, links and pictures are the page's.
     /// The lead's own words about each one are kept as its note.

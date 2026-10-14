@@ -2028,15 +2028,10 @@ fn admit_value<'a>(
                         None => match cited.as_slice() {
                             [] => return Err(SemanticExtractionError::VerbatimMismatch),
                             [(token, exact)] => (*token, field.verbatim_value(exact).to_owned()),
-                            // A value the page splits across lines reads as one.
-                            [(token, _), ..] => (
-                                *token,
-                                cited
-                                    .iter()
-                                    .map(|(_, exact)| exact.trim())
-                                    .collect::<Vec<_>>()
-                                    .join(" "),
-                            ),
+                            // A value the page splits across lines reads as one;
+                            // a fragment another one already holds ("$2,658" beside
+                            // "$2,658 monthly") is said once.
+                            [(token, _), ..] => (*token, joined(&cited)),
                         },
                         Some(value) => {
                             let found = cited.iter().find(|(_, exact)| {
@@ -2334,6 +2329,26 @@ fn citable(fragment: SemanticReadFragment<'_>, limit: SemanticReadSensitivityLim
         SemanticSensitivity::Sensitive => limit == SemanticReadSensitivityLimit::Sensitive,
         SemanticSensitivity::Public => true,
     }
+}
+
+fn joined(cited: &[(&String, &str)]) -> String {
+    let texts: Vec<&str> = cited.iter().map(|(_, exact)| exact.trim()).collect();
+    texts
+        .iter()
+        .enumerate()
+        .filter(|(index, text)| {
+            let held = comparable(text);
+            !held.is_empty()
+                && !texts.iter().enumerate().any(|(other, longer)| {
+                    let longer = comparable(longer);
+                    other != *index
+                        && ((longer.len() > held.len() && longer.contains(&held))
+                            || (longer == held && other < *index))
+                })
+        })
+        .map(|(_, text)| *text)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn fragment_text<'a>(fragment: SemanticReadFragment<'a>) -> Option<&'a str> {
@@ -2934,6 +2949,22 @@ struct RawTextItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_fragments_join_once_without_repeating_what_one_already_holds() {
+        let (short, long, rating) = (
+            "$2,658".to_owned(),
+            "$2,658 monthly, originally $3,410".to_owned(),
+            "4.9".to_owned(),
+        );
+        let cited = [
+            (&short, short.as_str()),
+            (&long, long.as_str()),
+            (&rating, rating.as_str()),
+            (&rating, rating.as_str()),
+        ];
+        assert_eq!(joined(&cited), "$2,658 monthly, originally $3,410 4.9");
+    }
 
     #[test]
     fn a_copy_differing_only_in_quotes_spaces_or_case_still_copies_its_fragment() {
