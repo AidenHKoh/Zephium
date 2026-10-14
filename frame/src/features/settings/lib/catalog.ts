@@ -62,12 +62,6 @@ export const fields = {
     description: m.settings_color_scheme_desc,
     initial: "system",
   },
-  "appearance.accent": {
-    section: "appearance",
-    label: m.settings_accent,
-    description: m.settings_accent_desc,
-    initial: "graphite",
-  },
   "appearance.sidebar": {
     section: "appearance",
     label: m.settings_sidebar,

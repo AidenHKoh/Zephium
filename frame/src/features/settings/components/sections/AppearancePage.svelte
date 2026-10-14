@@ -1,6 +1,5 @@
 <script lang="ts">
   import PreferenceSelect from "../PreferenceSelect.svelte";
-  import MiniWindow from "../appearance/MiniWindow.svelte";
   import ModePicker from "../appearance/ModePicker.svelte";
   import ThemeGallery from "../appearance/ThemeGallery.svelte";
   import ThemeColors from "../appearance/ThemeColors.svelte";
@@ -9,15 +8,13 @@
   import { codeFonts, installedCodeFonts } from "../../lib/code-fonts";
   import * as m from "$shared/i18n/messages";
   import { preferences } from "$domain/preferences";
-  import { palette, type Mode } from "$domain/appearance";
+  import type { Mode } from "$domain/appearance";
   import Select from "$shared/ui/Select";
   import Switch from "$shared/ui/Switch";
   import Slider from "$shared/ui/Slider";
   import SegmentedControl from "$shared/ui/SegmentedControl";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
-  import Icon from "$shared/ui/Icon";
-  import { Tick02Icon } from "@hugeicons/core-free-icons";
   import { onDestroy, onMount } from "svelte";
   import { IS_WINDOWS } from "$shared/platform";
 
@@ -47,19 +44,8 @@
     return () => observer.disconnect();
   });
 
-  const tints = [
-    { id: "sky", label: m.settings_sky },
-    { id: "sage", label: m.settings_sage },
-    { id: "rose", label: m.settings_rose },
-    { id: "amber", label: m.settings_amber },
-    { id: "teal", label: m.settings_teal },
-    { id: "lavender", label: m.settings_lavender },
-    { id: "orchid", label: m.settings_orchid },
-  ];
   // The accessibility switch takes every theme to full contrast.
   let contrast = $derived(preferences.value("ui.contrast") === "true" ? 100 : editor.contrast);
-  let themed = $derived(editor.selected !== palette.DEFAULT_THEME);
-  let graphite = $derived(themed ? m.look_accent_theme() : m.settings_graphite());
 
   // What the person may choose here. Windows has one material worth having;
   // a Mac offers the glass, the older vibrancy, or neither.
@@ -117,46 +103,12 @@
   ]);
 </script>
 
-<div class="preview" role="img" aria-label={m.look_preview()}>
-  <MiniWindow
-    spec={editor.current}
-    {contrast}
-    {mode}
-    material={material === "" ? "none" : material}
-    tint={IS_WINDOWS ? 0 : tint}
-    inheritAccent={preferences.value("ui.accent") !== "graphite" && mode === windowMode}
-  />
-</div>
-
 <SettingsGroup title={m.look_mode()}>
   <ModePicker spec={editor.current} {contrast} material={material === "" ? "none" : material} />
 </SettingsGroup>
 
 <SettingsGroup title={m.look_theme()}>
   <ThemeGallery {editor} {mode} />
-  <SettingsRow
-    settingId="appearance.accent"
-    title={m.settings_accent()}
-    description={m.look_accent_desc()}
-  >
-    <div class="accent-choices" role="group" aria-label={m.settings_accent()}>
-      {#each [{ id: "graphite", label: () => graphite }, ...tints] as choice (choice.id)}
-        {@const chosen = preferences.value("ui.accent") === choice.id}
-        <button
-          class="accent-swatch"
-          style:--swatch={choice.id === "graphite" && themed
-            ? "var(--seed-accent)"
-            : `var(--color-tint-${choice.id})`}
-          aria-label={choice.label()}
-          title={choice.label()}
-          aria-pressed={chosen}
-          disabled={preferences.saving()}
-          onclick={() => void preferences.set("ui.accent", choice.id)}
-          >{#if chosen}<Icon icon={Tick02Icon} size={14} />{/if}</button
-        >
-      {/each}
-    </div>
-  </SettingsRow>
 </SettingsGroup>
 
 <SettingsGroup title={m.look_colors()}>
@@ -268,16 +220,6 @@
 </SettingsGroup>
 
 <style>
-  .preview {
-    height: 272px;
-    margin-block-end: 34px;
-    overflow: hidden;
-    border-radius: var(--radius-card);
-    box-shadow:
-      var(--shadow-card),
-      0 0 0 0.5px var(--color-border);
-  }
-
   .slider {
     width: 240px;
   }
