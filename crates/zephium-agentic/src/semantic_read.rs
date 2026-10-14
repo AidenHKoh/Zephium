@@ -24,9 +24,9 @@ mod retained;
 pub use retained::SemanticRetainedReadEvidence;
 
 /// Process-wide maximum readable fields retained in one result.
-pub const MAX_SEMANTIC_READ_ITEMS: u16 = 256;
+pub const MAX_SEMANTIC_READ_ITEMS: u16 = 768;
 /// Process-wide maximum page-derived UTF-8 bytes retained by one read result.
-pub const MAX_SEMANTIC_READ_BYTES: u32 = 64 * 1024;
+pub const MAX_SEMANTIC_READ_BYTES: u32 = 128 * 1024;
 
 /// Trusted selection of source roles, separate from sensitivity and scope.
 /// It only removes readable fields from an already-authorized observation.
@@ -153,8 +153,16 @@ impl SemanticReadBudget {
     /// A terminal mapping read: a listing page's visible records with their
     /// links and pictures, after control labels are shed.
     pub const EXTRACTION: Self = Self {
-        max_items: MAX_SEMANTIC_READ_ITEMS,
+        max_items: 256,
         max_bytes: 48 * 1024,
+    };
+
+    /// A terminal mapping read of a multi-record listing: one marketplace card
+    /// carries dozens of fragments (title, picture, link, rating, spec pairs,
+    /// price), so a page of offers needs several times a single record's room.
+    pub const LISTING: Self = Self {
+        max_items: MAX_SEMANTIC_READ_ITEMS,
+        max_bytes: MAX_SEMANTIC_READ_BYTES,
     };
 
     /// Validates nonzero ceilings under process-wide hard limits.
@@ -727,6 +735,7 @@ pub struct SemanticReadResult<'a> {
     fragments: Vec<SemanticReadFragment<'a>>,
     omissions: SemanticReadOmissions,
     stats: SemanticReadStats,
+    budget: SemanticReadBudget,
     guard: [u8; 32],
     // Historical read-only sources, never observation/action acknowledgements
     // for the active document. Only the bounded evidence owner constructs this.
@@ -959,6 +968,11 @@ impl<'a> SemanticReadResult<'a> {
                 })
             })
             .collect()
+    }
+
+    /// The ceilings this read was projected under.
+    pub const fn budget(&self) -> SemanticReadBudget {
+        self.budget
     }
 
     /// Immutable trusted role selection for this read.
@@ -1242,7 +1256,7 @@ pub(crate) fn read_located_semantic_observation_at<'a>(
         SemanticReadAuthority::Acknowledged(acknowledgement),
         captured_at,
         SemanticReadSensitivityLimit::PublicOnly,
-        SemanticReadBudget::EXTRACTION,
+        schema.extraction_read_budget(),
         schema.source_roles(),
         schema.url_sources(),
         Some(references),
@@ -1936,6 +1950,7 @@ impl<'a> SemanticReadBuilder<'a> {
             .take(crate::MAX_SEMANTIC_MEDIA)
             .collect();
         SemanticReadResult {
+            budget: self.budget,
             eligible_image_geometry: self
                 .observation
                 .frames()
@@ -3078,6 +3093,105 @@ mod tests {
             SemanticReadBudget::STANDARD
         )
         .is_err());
+    }
+
+    #[test]
+    fn a_listing_read_keeps_its_cards_where_a_single_record_read_keeps_the_old_cap() {
+        const CARDS_PER_LOOK: u16 = 10;
+        const FRAGMENTS_PER_CARD: u16 = 35;
+        // One look holds at most MAX_SEMANTIC_NODES, so a listing's cards
+        // accumulate over several looks.
+        let look = |id: u64, first_card: u16| {
+            let mut nodes = vec![
+                json!({"k":1,"r":"document"}),
+                json!({"k":2,"p":0,"r":"landmark","lm":"main"}),
+            ];
+            let mut key = 3;
+            for card in first_card..first_card + CARDS_PER_LOOK {
+                for fact in 0..FRAGMENTS_PER_CARD {
+                    nodes.push(json!({"k":key,"p":1,"r":"paragraph","t":format!("Card {card} fact {fact}")}));
+                    key += 1;
+                }
+            }
+            retained_observation(id, Value::Array(nodes))
+        };
+        let rows = |max_items| {
+            crate::SemanticExtractionSchema::try_new(
+                crate::SemanticExtractionSchemaId::new(1).unwrap(),
+                vec![crate::SemanticExtractionFieldSchema::try_rows(
+                    "records".into(),
+                    true,
+                    vec![
+                        crate::SemanticExtractionFieldSchema::try_text("name".into(), true, 128)
+                            .unwrap(),
+                    ],
+                    max_items,
+                )
+                .unwrap()],
+            )
+            .unwrap()
+        };
+        let listing = rows(8);
+        let single = rows(1);
+        let total = 2 * CARDS_PER_LOOK * FRAGMENTS_PER_CARD;
+        assert!(total > SemanticReadBudget::EXTRACTION.max_items());
+        assert!(total <= SemanticReadBudget::LISTING.max_items());
+
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        for (id, first_card) in [(1, 0)] {
+            let observation = look(id, first_card);
+            let ack = acknowledgement(&observation);
+            let read = read_semantic_observation_for_schema(
+                &observation,
+                SemanticReadAuthority::Acknowledged(&ack),
+                SemanticCaptureInstant::from_millis(id),
+                SemanticReadSensitivityLimit::PublicOnly,
+                listing.extraction_read_budget(),
+                &listing,
+            )
+            .unwrap();
+            evidence.retain(&read, &ack).unwrap();
+        }
+        let current = look(2, CARDS_PER_LOOK);
+        let ack = acknowledgement(&current);
+        let read = read_semantic_observation_for_schema(
+            &current,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(2),
+            SemanticReadSensitivityLimit::PublicOnly,
+            listing.extraction_read_budget(),
+            &listing,
+        )
+        .unwrap();
+        let merged = evidence.merge_for_extraction(read).unwrap();
+        assert_eq!(merged.budget(), SemanticReadBudget::LISTING);
+        for card in 0..2 * CARDS_PER_LOOK {
+            let label = format!("Card {card} fact {}", FRAGMENTS_PER_CARD - 1);
+            assert!(
+                merged.fragments().iter().any(|fragment| fragment
+                    .content()
+                    .text()
+                    .is_some_and(|text| text.as_str() == label)),
+                "{label}"
+            );
+        }
+
+        let observation = look(3, 0);
+        let ack = acknowledgement(&observation);
+        let capped = read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(3),
+            SemanticReadSensitivityLimit::PublicOnly,
+            single.extraction_read_budget(),
+            &single,
+        )
+        .unwrap();
+        assert_eq!(capped.budget(), SemanticReadBudget::EXTRACTION);
+        assert_eq!(
+            capped.fragments().len(),
+            usize::from(SemanticReadBudget::EXTRACTION.max_items())
+        );
     }
 
     #[test]

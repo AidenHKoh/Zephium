@@ -315,7 +315,7 @@ impl AgentWorkController {
                 SemanticReadAuthority::Acknowledged(continuation.baseline()),
                 captured_at,
                 SemanticReadSensitivityLimit::PublicOnly,
-                SemanticReadBudget::EXTRACTION,
+                schema.extraction_read_budget(),
                 schema,
             )
             .map_err(|error| AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error)))?;
