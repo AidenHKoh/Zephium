@@ -115,7 +115,7 @@
   import { artifactView } from "../lib/project-work";
   import RequestLift from "./lift/RequestLift.svelte";
   import SourcesLift from "./lift/SourcesLift.svelte";
-  import { failureLine, humanPage, regionOf, sameRegion, type HumanPage } from "../lib/work-human";
+  import { failureLine, humanPage, regionOf, type HumanPage } from "../lib/work-human";
   import { openOver, type PaneRect } from "../lib/pane-geometry";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
   import { CanvasPlacing } from "../lib/workspace/placing.svelte";
@@ -748,11 +748,15 @@
       : null;
     // A well Rust would refuse says so rather than waiting on a view forever.
     if (box && !next) takeoverError = failureLine("invalid");
-    if (sameRegion(next, takeoverSent)) return;
-    const sent = takeoverSent;
+    // The page is presented once. Releasing it ends the hand-over, so a well
+    // that moves later is left alone: Rust keeps the page fitted to the window.
+    if (!next || takeoverSent) return;
     takeoverSent = next;
-    if (sent) applyTakeover(() => human.release(current.work, current.page), false);
-    if (next) applyTakeover(() => human.present(current.work, current.page, next), true);
+    applyTakeover(async () => {
+      const failure = await human.present(current.work, current.page, next);
+      if (failure && takeover === current) takeoverSent = null;
+      return failure;
+    }, true);
   }
   /** The person hands the page back; the run goes on without their session. */
   function continueTakeover() {

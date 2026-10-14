@@ -181,6 +181,3 @@ export function regionOf(
   return { x, y, width, height };
 }
 
-/** Two regions are the same placement, so nothing is torn down to rebuild it. */
-export const sameRegion = (a: WorkHumanRegionV1 | null, b: WorkHumanRegionV1 | null) =>
-  !!a && !!b && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;

@@ -6,7 +6,6 @@ import {
   needTitle,
   regionOf,
   remembers,
-  sameRegion,
   MIN_REGION,
 } from "../lib/work-human";
 
@@ -64,14 +63,6 @@ test("a region floors its size, keeps the 8192 extents, and stays inside the par
   });
   expect(regionOf({ x: 300, y: 120, width: 400, height: 720 }, parent)).toBeNull();
   expect(regionOf({ x: 300, y: 120, width: Number.NaN, height: 400 }, parent)).toBeNull();
-});
-
-test("an unchanged placement is not torn down to be rebuilt", () => {
-  const region = { x: 300, y: 120, width: 640, height: 420 };
-  expect(sameRegion(region, { ...region })).toBe(true);
-  expect(sameRegion(region, { ...region, width: 641 })).toBe(false);
-  expect(sameRegion(region, null)).toBe(false);
-  expect(sameRegion(null, null)).toBe(false);
 });
 
 test("a waiting page says what to do and where; only a solved check in Work's own data is kept", () => {

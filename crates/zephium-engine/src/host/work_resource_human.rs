@@ -72,7 +72,7 @@ impl EngineHost {
         {
             return false;
         }
-        eprintln!("human_probe changed_parent_geometry_refused=true");
+        eprintln!("human_probe changed_parent_geometry_kept=true");
         view.view()
             .evaluate_script("location.assign('/verified')")
             .is_ok()
@@ -352,6 +352,9 @@ impl WorkNativeResource {
     }
 
     pub(super) fn progress_human(&mut self, erased: bool) {
+        if let Some(presentation) = self.human_presentation.as_mut() {
+            presentation.refit();
+        }
         let Some(presentation) = self.human_presentation.as_ref() else {
             return;
         };

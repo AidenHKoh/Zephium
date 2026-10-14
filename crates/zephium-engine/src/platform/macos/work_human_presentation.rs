@@ -18,6 +18,7 @@ pub(crate) struct WorkHumanPresentation {
     parent: Retained<NSView>,
     window: Retained<NSWindow>,
     original: NSRect,
+    requested: WorkBrowserHumanRegion,
     region: NSRect,
     parent_geometry: HumanParentGeometry,
     deadline: Instant,
@@ -43,6 +44,7 @@ impl WorkHumanPresentation {
             return None;
         }
         let parent_geometry = HumanParentGeometry::capture(&parent);
+        let requested = region;
         let region = parent_geometry.region(region)?;
         let original = page.frame();
         Some(Self {
@@ -50,6 +52,7 @@ impl WorkHumanPresentation {
             parent,
             window,
             original,
+            requested,
             shape: None,
             region,
             parent_geometry,
@@ -77,14 +80,34 @@ impl WorkHumanPresentation {
         record_cookie_facts(&self.page, "Presented");
         self.current()
     }
+    /// The page is still the person's, in its window. A resized or minimized
+    /// window does not end the hand-over: the person may be looking for a
+    /// password elsewhere, and `refit` keeps the page in its well.
     pub(crate) fn current(&self) -> bool {
         self.presented && !self.retired && Instant::now() < self.deadline
-            && self.window.isVisible() && !self.window.isMiniaturized()
-            && !self.page.isHidden() && self.page.frame() == self.region
-            && self.parent_geometry == HumanParentGeometry::capture(&self.parent)
+            && !self.page.isHidden()
             && self.page.window().is_some_and(|window| std::ptr::eq(&*window, &*self.window))
             // SAFETY: retained native identities on the main thread.
             && unsafe { self.page.superview() }.is_some_and(|parent| std::ptr::eq(&*parent, &*self.parent))
+    }
+    /// Puts the page back over its well after the window changed size: the
+    /// well keeps its place from the top left, moved in only as far as the
+    /// smaller window needs.
+    pub(crate) fn refit(&mut self) {
+        if !self.presented || self.retired {
+            return;
+        }
+        let geometry = HumanParentGeometry::capture(&self.parent);
+        if geometry != self.parent_geometry {
+            let Some(region) = geometry.fit(self.requested) else {
+                return;
+            };
+            self.parent_geometry = geometry;
+            self.region = region;
+        }
+        if self.page.frame() != self.region {
+            self.page.setFrame(self.region);
+        }
     }
     pub(crate) fn visible_for_audit(&self) -> bool {
         !self.page.isHidden()
@@ -101,13 +124,13 @@ impl WorkHumanPresentation {
         let mut resized = bounds;
         resized.size.width += 1.0;
         self.parent.setBounds(resized);
-        let refused_resize = !self.current();
+        let kept_resize = self.current();
         let mut shifted = bounds;
         shifted.origin.y += 1.0;
         self.parent.setBounds(shifted);
-        let refused_shift = !self.current();
+        let kept_shift = self.current();
         self.parent.setBounds(bounds);
-        refused_resize && refused_shift && self.current()
+        kept_resize && kept_shift && self.current()
     }
     /// The page sits in a pane whose foot is rounded, so its own corners
     /// follow: square under the header, the pane's radius at the bottom.
@@ -119,7 +142,9 @@ impl WorkHumanPresentation {
             self.shape = Some((layer.cornerRadius(), layer.maskedCorners()));
         }
         layer.setCornerRadius(WELL_FOOT_RADIUS);
-        layer.setMaskedCorners(CACornerMask::LayerMinXMinYCorner | CACornerMask::LayerMaxXMinYCorner);
+        layer.setMaskedCorners(
+            CACornerMask::LayerMinXMinYCorner | CACornerMask::LayerMaxXMinYCorner,
+        );
     }
     fn restore_shape(&mut self) {
         if let (Some((radius, corners)), Some(layer)) = (self.shape.take(), self.page.layer()) {
@@ -204,6 +229,22 @@ impl HumanParentGeometry {
             NSPoint::new(bounds.origin.x + x, bounds.origin.y + y),
             NSSize::new(width, height),
         ))
+    }
+    /// `region`, shrunk and moved in as far as these bounds need.
+    fn fit(self, region: WorkBrowserHumanRegion) -> Option<NSRect> {
+        let [x, y, width, height] = region.components();
+        let (bounds_width, bounds_height) = (
+            self.bounds.size.width.max(0.0).floor() as u32,
+            self.bounds.size.height.max(0.0).floor() as u32,
+        );
+        let (width, height) = (width.min(bounds_width), height.min(bounds_height));
+        let fitted = WorkBrowserHumanRegion::try_new(
+            x.min(bounds_width - width),
+            y.min(bounds_height - height),
+            width,
+            height,
+        )?;
+        self.region(fitted)
     }
 }
 

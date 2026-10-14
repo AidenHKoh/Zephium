@@ -111,14 +111,16 @@
       /* synthetic pointers have no capture */
     }
   }
+  /** Once the page stands in the well, the well stays where it is. */
+  const fixed = $derived(page.phase !== "waiting_for_human");
   function beginMove(event: PointerEvent) {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || fixed) return;
     if ((event.target as HTMLElement).closest("button, input, a")) return;
     drag = { kind: "move", edge: "", startX: event.clientX, startY: event.clientY, from: rect };
     capture(event);
   }
   function beginResize(event: PointerEvent, edge: string) {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || fixed) return;
     drag = { kind: "resize", edge, startX: event.clientX, startY: event.clientY, from: rect };
     capture(event);
     event.preventDefault();
@@ -209,7 +211,7 @@
   >
     {#if !presented && !handingBack}<p class="placeholder">{m.work_human_opening()}</p>{/if}
   </div>
-  {#each ["n", "e", "s", "w", "ne", "se", "sw", "nw"] as edge (edge)}
+  {#each fixed ? [] : ["n", "e", "s", "w", "ne", "se", "sw", "nw"] as edge (edge)}
     <span
       class={`grip grip-${edge}`}
       role="presentation"

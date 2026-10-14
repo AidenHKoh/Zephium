@@ -655,6 +655,18 @@ impl WorkHumanPresentation {
     pub(crate) fn visible_for_audit(&self) -> bool {
         self.presented && !self.retired
     }
+    /// A resized window does not end the hand-over: the page keeps its place
+    /// from the top left, so only the parent's new size is taken.
+    pub(crate) fn refit(&mut self) {
+        if !self.presented || self.retired {
+            return;
+        }
+        let mut bounds = RECT::default();
+        // SAFETY: exact owned parent HWND and initialized writable rectangle on the owning STA.
+        if unsafe { GetClientRect(self.parent, &mut bounds) }.is_ok() {
+            self.parent_bounds = bounds;
+        }
+    }
     pub(crate) fn retire(&mut self) -> bool {
         if self.retired {
             return true;
