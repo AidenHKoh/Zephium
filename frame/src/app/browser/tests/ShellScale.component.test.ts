@@ -3,7 +3,7 @@ import { afterEach, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { flushSync } from "svelte";
 import { emitNativeEvent } from "$shared/testing/native-events";
-import { tabFixture, revision } from "$shared/testing/fixtures";
+import { tabFixture, revision, spaceFixture } from "$shared/testing/fixtures";
 import { tabs } from "$domain/tabs";
 import { surface } from "$domain/surface";
 import Shell from "../Shell.svelte";
@@ -42,7 +42,7 @@ function state(count: number, active: number, titled = -1, step = 0) {
   return {
     projection_revision: revision(revisionAt),
     profile: { id: "profile", name: "Personal", kind: "default" as const },
-    spaces: [{ id: "space", name: "Home" }],
+    spaces: [spaceFixture("space", "Home")],
     active_space_id: "space",
     nodes: [],
     tabs: list,

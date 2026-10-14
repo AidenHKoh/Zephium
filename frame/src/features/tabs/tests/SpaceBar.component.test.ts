@@ -1,0 +1,188 @@
+import { afterEach, expect, test, vi } from "vitest";
+import { page } from "vitest/browser";
+import { render } from "vitest-browser-svelte";
+import "$styles/global.css";
+import type { ItemsState, SidebarNodeView } from "$shared/ipc/bindings";
+import { emitNativeEvent } from "$shared/testing/native-events";
+import { revision, spaceFixture, tabFixture } from "$shared/testing/fixtures";
+import { tabs } from "$domain/tabs";
+import { uiCommands } from "$domain/ui-commands";
+import SidebarBody from "../components/SidebarBody.svelte";
+import { sidebarTree } from "../lib/sidebar-model";
+
+const native = vi.hoisted(() => ({
+  open: vi.fn(),
+  switchTo: vi.fn(),
+  step: vi.fn(),
+  create: vi.fn(),
+  update: vi.fn(),
+  remove: vi.fn(),
+  reorder: vi.fn(),
+}));
+
+vi.mock("$shared/ipc/bindings", async () => {
+  const { mockBindings } = await import("$shared/testing/bindings");
+  const ok = async () => ({ accepted: true, operation_id: null });
+  return mockBindings({
+    tabsBootstrap: async () => {},
+    tabsOpen: native.open.mockImplementation(ok),
+    spacesSwitch: native.switchTo.mockImplementation(ok),
+    spacesStep: native.step.mockImplementation(ok),
+    spacesCreate: native.create.mockImplementation(ok),
+    spacesUpdate: native.update.mockImplementation(ok),
+    spacesDelete: native.remove.mockImplementation(ok),
+    spacesReorder: native.reorder.mockImplementation(ok),
+    keymapEntries: async () => [],
+  });
+});
+
+const HOME = spaceFixture("home", "Home", {
+  icon: { kind: "symbol", index: 2 },
+  color: 1,
+  tabs: 2,
+});
+const STUDIO = spaceFixture("studio", "Studio", {
+  icon: { kind: "emoji", text: "🎨" },
+  color: 4,
+  theme: { kind: "preset", id: "nord" },
+  tabs: 3,
+});
+
+let projection = 100;
+function project(state: Partial<ItemsState>) {
+  const open = [tabFixture({ id: "a", title: "Alpha" }), tabFixture({ id: "b", title: "Beta" })];
+  const node = (id: string): SidebarNodeView => ({
+    id,
+    parent_id: null,
+    section: "today",
+    kind: { type: "tab", tab_id: id },
+  });
+  emitNativeEvent("itemsChanged", {
+    projection_revision: revision((projection += 1)),
+    profile: { id: "p", name: "Personal", kind: "default" },
+    spaces: [HOME, STUDIO],
+    active_space_id: "home",
+    nodes: open.map((tab) => node(tab.id)),
+    tabs: open,
+    active: "a",
+    split_group: null,
+    ...state,
+  });
+}
+
+async function mount(empty = false) {
+  await page.viewport(420, 760);
+  await tabs.init();
+  await uiCommands.init();
+  project(empty ? { nodes: [], tabs: [], active: null } : {});
+  const tree = sidebarTree(tabs.sidebarNodes(), tabs.tabs());
+  return render(SidebarBody, {
+    pinned: tree.pinned,
+    today: tree.today,
+    splitting: false,
+    onSelect: () => {},
+  });
+}
+
+afterEach(() => {
+  tabs.dispose();
+  uiCommands.dispose();
+  vi.clearAllMocks();
+});
+
+test("the row names the space, its dots switch and its plus opens a tab", async () => {
+  const screen = await mount();
+  await expect.element(screen.getByRole("button", { name: "Spaces — Home" })).toBeVisible();
+  await screen.getByRole("button", { name: "New tab", exact: true }).click();
+  expect(native.open).toHaveBeenCalledOnce();
+  await screen.getByRole("button", { name: "Studio", exact: true }).click();
+  expect(native.switchTo).toHaveBeenCalledWith("studio");
+});
+
+test("the switcher lists every space, checks the one shown and moves to another", async () => {
+  const screen = await mount();
+  await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  const rows = screen.getByRole("menuitemradio");
+  await expect.element(rows.first()).toHaveAttribute("aria-checked", "true");
+  await expect.element(rows.nth(1)).toHaveTextContent("Studio");
+  await rows.nth(1).click();
+  expect(native.switchTo).toHaveBeenCalledWith("studio");
+});
+
+test("a space is edited in place: name, icon, colour and a theme of its own", async () => {
+  const screen = await mount();
+  await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  await screen.getByRole("button", { name: "Edit Studio" }).click();
+  const name = screen.getByRole("textbox", { name: "Name" });
+  await name.fill("Atelier");
+  await screen.getByRole("radio", { name: "Symbol 4" }).click();
+  await screen.getByRole("radio", { name: "Color 7" }).click();
+  await screen.getByRole("radio", { name: "App theme" }).click();
+  await screen.getByRole("button", { name: "Save" }).click();
+  expect(native.update).toHaveBeenCalledWith("studio", "Atelier", {
+    icon: { kind: "symbol", index: 3 },
+    color: 6,
+    theme: null,
+  });
+});
+
+test("deleting asks first and says how many tabs will close", async () => {
+  const screen = await mount();
+  await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  await screen.getByRole("button", { name: "Edit Studio" }).click();
+  await screen.getByRole("button", { name: "Delete…" }).click();
+  await expect.element(screen.getByText("Its 3 tabs will close.")).toBeVisible();
+  expect(native.remove).not.toHaveBeenCalled();
+  await screen.getByRole("button", { name: "Delete Space" }).click();
+  expect(native.remove).toHaveBeenCalledWith("studio");
+});
+
+test("a new space is named and made from the switcher, or from the menu bar", async () => {
+  const screen = await mount();
+  await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  await screen.getByRole("menuitem", { name: "New Space" }).click();
+  await screen.getByRole("textbox", { name: "Name" }).fill("Reading");
+  await screen.getByRole("textbox", { name: "Or type an emoji" }).fill("📚");
+  await screen.getByRole("button", { name: "Create Space" }).click();
+  expect(native.create).toHaveBeenCalledWith("Reading", {
+    icon: { kind: "emoji", text: "📚" },
+    color: 0,
+    theme: null,
+  });
+
+  emitNativeEvent("uiCommand", "space.edit");
+  await expect.element(screen.getByRole("textbox", { name: "Name" })).toBeVisible();
+  await expect
+    .element(screen.getByRole("textbox", { name: "Name" }))
+    .toHaveAttribute("placeholder", "Home");
+});
+
+test("an empty space offers a new tab instead of a blank column", async () => {
+  const screen = await mount(true);
+  await expect.element(screen.getByText("Nothing open in Home")).toBeVisible();
+  await screen.getByRole("button", { name: "New tab", exact: true }).nth(1).click();
+  expect(native.open).toHaveBeenCalledOnce();
+});
+
+test("a sideways swipe over the list moves to the next space, and not past the last", async () => {
+  const screen = await mount();
+  const list = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
+  const swipe = (deltaX: number) => {
+    for (let index = 0; index < 6; index += 1)
+      list.dispatchEvent(new WheelEvent("wheel", { deltaX, deltaY: 0, bubbles: true }));
+  };
+  swipe(-20);
+  expect(native.step).not.toHaveBeenCalled();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  swipe(20);
+  expect(native.step).toHaveBeenCalledExactlyOnceWith(1);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  expect(list.style.translate).toBe("");
+});
+
+test("a private window has one space and no switcher", async () => {
+  const screen = await mount();
+  project({ profile: { id: "x", name: "Private", kind: "incognito" }, spaces: [HOME] });
+  await expect.element(screen.getByRole("button", { name: "New tab" })).toBeVisible();
+  expect(screen.container.querySelector(".space-bar")).toBeNull();
+});

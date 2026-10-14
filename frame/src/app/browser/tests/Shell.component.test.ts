@@ -3,7 +3,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
 import { emitNativeEvent } from "$shared/testing/native-events";
-import { tabFixture, revision } from "$shared/testing/fixtures";
+import { tabFixture, revision, spaceFixture } from "$shared/testing/fixtures";
 import { tabs } from "$domain/tabs";
 import { surface } from "$domain/surface";
 import Shell from "../Shell.svelte";
@@ -56,7 +56,7 @@ test("Work keeps the column as the rail of tabs, and a tab chosen there opens ov
   emitNativeEvent("itemsChanged", {
     projection_revision: revision(20),
     profile: { id: "profile", name: "Personal", kind: "default" },
-    spaces: [{ id: "space", name: "Home" }],
+    spaces: [spaceFixture("space", "Home")],
     active_space_id: "space",
     nodes: [],
     tabs: [tab],
@@ -105,7 +105,7 @@ test("leaving Work or Settings gives back the column the window had", async () =
   const items = {
     projection_revision: revision(30),
     profile: { id: "profile", name: "Personal", kind: "default" as const },
-    spaces: [{ id: "space", name: "Home" }],
+    spaces: [spaceFixture("space", "Home")],
     active_space_id: "space",
     nodes: [],
     tabs: [tab],

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ItemsState, TabView } from "$shared/ipc/bindings";
+import { spaceFixture } from "$shared/testing/fixtures";
 
 const harness = vi.hoisted(() => {
   const order: string[] = [];
@@ -127,7 +128,7 @@ describe("Svelte tab state lifecycle", () => {
     const snapshot = (value: number, tabs: TabView[]): ItemsState => ({
       projection_revision: revision(value),
       profile: { id: "profile-a", name: "Personal", kind: "default" },
-      spaces: [{ id: "space-a", name: "Main" }],
+      spaces: [spaceFixture("space-a", "Main")],
       active_space_id: "space-a",
       nodes: [],
       tabs,
@@ -157,7 +158,7 @@ describe("Svelte tab state lifecycle", () => {
           name: "Personal",
           kind: "default",
         },
-        spaces: [{ id: "space-a", name: "Main" }],
+        spaces: [spaceFixture("space-a", "Main")],
         active_space_id: "space-a",
         nodes: [
           {

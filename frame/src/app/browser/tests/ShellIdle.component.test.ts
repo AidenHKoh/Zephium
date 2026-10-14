@@ -2,7 +2,7 @@ import "$styles/global.css";
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { emitNativeEvent } from "$shared/testing/native-events";
-import { tabFixture, revision } from "$shared/testing/fixtures";
+import { tabFixture, revision, spaceFixture } from "$shared/testing/fixtures";
 import { wakeupCounter } from "$shared/testing/idle";
 import { tabs } from "$domain/tabs";
 import { surface } from "$domain/surface";
@@ -33,7 +33,7 @@ function day(count: number) {
   return {
     projection_revision: revision(1000),
     profile: { id: "profile", name: "Personal", kind: "default" as const },
-    spaces: [{ id: "space", name: "Home" }],
+    spaces: [spaceFixture("space", "Home")],
     active_space_id: "space",
     nodes: [],
     tabs: list,

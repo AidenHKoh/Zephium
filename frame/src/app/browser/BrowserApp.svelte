@@ -31,6 +31,7 @@
   import { findInPage } from "$features/address";
   import { acceleratorFrom } from "$shared/lib/accelerator";
   import { applyLanguage } from "$shared/lib/locale.svelte";
+  import { applySpaceTheme, spaceThemeValues } from "$features/tabs";
   import Shell from "./Shell.svelte";
 
   // Follows the stored preference and nothing else. Adopting reads the
@@ -49,19 +50,34 @@
     );
   });
 
-  $effect(() => {
-    theme.applyCustomization({
+  // A space with a theme of its own dresses the whole window while it is
+  // active. Read as plain values, so a projection that changes nothing about
+  // it does not apply the theme again.
+  const worn = $derived(
+    spaceThemeValues(tabs.activeSpace()?.theme ?? null, {
       theme: preferences.value("ui.theme"),
       custom: preferences.value("ui.theme-custom"),
+    }),
+  );
+  const wornTheme = $derived(worn.theme);
+  const wornCustom = $derived(worn.custom);
+  $effect(() => {
+    const next = {
+      theme: wornTheme,
+      custom: wornCustom,
       level: preferences.value("ui.theme-contrast"),
       contrast: preferences.value("ui.contrast") === "true",
       font: preferences.value("ui.font"),
       fontSize: preferences.value("ui.font-size"),
       codeFont: preferences.value("ui.code-font"),
-    });
+    };
+    const space = tabs.activeSpaceId();
+    untrack(() =>
+      applySpaceTheme(space, `${next.theme} ${next.custom}`, () => theme.applyCustomization(next)),
+    );
   });
 
-  $effect(() => applyLanguage(preferences.value("ui.language")));
+  $effect(() => void applyLanguage(preferences.value("ui.language")));
 
   $effect(() => {
     theme.applyLayout({

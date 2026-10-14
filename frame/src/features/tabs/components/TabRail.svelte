@@ -12,6 +12,13 @@
   import * as tabDrag from "$session/tab-drag.svelte";
   import { RowDrag } from "$session/row-drag.svelte";
   import DragMark from "$shared/ui/DragMark";
+  import { uiCommands as ui } from "$domain/ui-commands";
+  import { surface } from "$domain/surface";
+  import * as tools from "$session/tools.svelte";
+  import { expandBriefly } from "$session/sidebar-mode.svelte";
+  import SpaceGlyph from "./SpaceGlyph.svelte";
+  import * as requests from "../lib/space-requests.svelte";
+  import { arrive, spaceSwipe } from "../lib/space-swipe";
 
   let {
     entries,
@@ -45,6 +52,41 @@
     },
   });
   const motion = new ListMotion({ enter: () => "rise" });
+
+  const space = $derived(tabs.profile()?.kind === "incognito" ? undefined : tabs.activeSpace());
+  const order = $derived(tabs.spaces().map((entry) => entry.id));
+  let scroller = $state<HTMLElement>();
+  function openSpaces(event: MouseEvent) {
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    tabs.openSpaceMenu(rect.left, rect.bottom + 4);
+  }
+  const canStep = (step: 1 | -1) => {
+    const at = order.indexOf(tabs.activeSpaceId() ?? "");
+    return space !== undefined && at !== -1 && at + step >= 0 && at + step < order.length;
+  };
+  let shownSpace: string | null = null;
+  $effect(() => {
+    const next = tabs.activeSpaceId();
+    untrack(() => {
+      const from = shownSpace === null ? -1 : order.indexOf(shownSpace);
+      const to = next === null ? -1 : order.indexOf(next);
+      if (shownSpace !== null && next !== shownSpace && from !== -1 && to !== -1)
+        arrive(scroller, to > from ? 1 : -1);
+      shownSpace = next;
+    });
+  });
+  // Making or editing a space needs the full column: a panel or Settings
+  // beside the rail steps aside, and a compact column opens until it is done.
+  $effect(() => {
+    const command = ui.uiCommand();
+    if (command.id !== "space.new" && command.id !== "space.edit") return;
+    untrack(() => {
+      if (!requests.claim(command.seq) || space === undefined) return;
+      if (tools.activeTool() !== null) tools.close();
+      if (surface.currentPage() !== null) void surface.close();
+      requests.ask(command.id === "space.new" ? "new" : "edit", expandBriefly());
+    });
+  });
   let shape = $derived(entries.map((tab) => tab.id).join(" "));
   $effect.pre(() => {
     void shape;
@@ -68,6 +110,15 @@
 <!-- Like the expanded list, the rail opens with the way to a new tab, which
      stays put while the tabs below it scroll. -->
 <div class="rail-new-slot" data-cascade style:--cascade={0}>
+  {#if space}<button
+      type="button"
+      class="rail-item rail-space"
+      title={space.name}
+      aria-label={m.space_open_switcher({ name: space.name })}
+      aria-haspopup="menu"
+      onclick={openSpaces}
+      ><SpaceGlyph icon={space.icon} color={space.color} name={space.name} size={22} /></button
+    >{/if}
   <button
     type="button"
     class="rail-item rail-new"
@@ -79,6 +130,8 @@
   </button>
 </div>
 <div
+  bind:this={scroller}
+  use:spaceSwipe={{ canStep, step: (step) => void tabs.stepSpace(step) }}
   use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/rail`}
   class="rail-scroller scroll-edges"
   data-glide-scroller
@@ -148,7 +201,9 @@
   .rail-new-slot {
     display: flex;
     flex: none;
-    justify-content: center;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--sidebar-row-gap);
     padding-block: 0 2px;
   }
 

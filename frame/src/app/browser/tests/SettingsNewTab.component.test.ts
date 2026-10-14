@@ -2,7 +2,7 @@ import "$styles/global.css";
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { emitNativeEvent } from "$shared/testing/native-events";
-import { tabFixture, revision } from "$shared/testing/fixtures";
+import { tabFixture, revision, spaceFixture } from "$shared/testing/fixtures";
 import { tabs } from "$domain/tabs";
 import { surface } from "$domain/surface";
 import Shell from "../Shell.svelte";
@@ -23,7 +23,7 @@ test("a new tab opened from Settings over a page shows the new tab", async () =>
   const page = tabFixture();
   const base = {
     profile: { id: "profile", name: "Personal", kind: "default" as const },
-    spaces: [{ id: "space", name: "Home" }],
+    spaces: [spaceFixture("space", "Home")],
     active_space_id: "space",
     nodes: [],
     split_group: null,
