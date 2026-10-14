@@ -1,62 +1,73 @@
 <script lang="ts">
   import Button from "$shared/ui/Button";
   import HostGlyph from "../cards/HostGlyph.svelte";
-  import { cardCountdown, needTitle, type HumanPage } from "../../lib/work-human";
+  import { cardCountdown, needLine, type HumanPage } from "../../lib/work-human";
   import * as m from "$shared/i18n/messages";
 
   /**
-   * A page the run waits on, over its frame: what the person is asked to do
-   * and where, how long the run still waits, and the one action that meets
-   * it. Calm by design: the frame stays visible, only the button is lit.
+   * What a site asks of the person, over its frame or inline under a part's
+   * name: the site, one plain sentence and the one action that meets it. A
+   * waiting page adds how long the run still waits; without one, `reason`
+   * says what the ended part still needs. Calm by design: only the button is lit.
    */
   let {
     page,
+    reason = "challenge",
     host,
     url,
+    pending = 0,
+    inline = false,
     onopen,
     onwait,
   }: {
-    page: HumanPage;
+    page?: HumanPage;
+    reason?: HumanPage["reason"];
     host: string;
     url: string;
+    /** Pages of this site waiting, the one the button opens included. */
+    pending?: number;
+    /** Set in the part's own column instead of lifted over a frame. */
+    inline?: boolean;
     onopen?: () => void;
     onwait?: () => void;
   } = $props();
-  const title = $derived(needTitle(page.reason, host));
-  const left = $derived(cardCountdown(page.remaining));
+  const line = $derived(needLine(page?.reason ?? reason, host));
+  const left = $derived(page ? cardCountdown(page.remaining) : null);
   /** The last stretch says so in the warning tone, never in red: nothing failed yet. */
-  const late = $derived(page.remaining < 20_000);
+  const late = $derived(!!page && page.remaining < 20_000);
 </script>
 
-<div class="needs nodrag nopan" role="group" aria-label={title}>
+<div class="needs nodrag nopan" class:inline role="group" aria-label={line.text}>
   <p class="what">
-    <span class="mark"><HostGlyph {host} {url} size={16} initial={false} /></span>
-    <span class="title">{title}</span>
+    <span class="mark"
+      >{#if !inline}<HostGlyph {host} {url} size={16} initial={false} />{/if}<i class="dot"
+      ></i></span
+    >
+    <span class="title">{line.text}</span>
   </p>
   <div class="row">
+    {#if onopen}<Button
+        size="compact"
+        shape="capsule"
+        variant="primary"
+        onclick={(event: MouseEvent) => {
+          event.stopPropagation();
+          onopen?.();
+        }}>{line.action}</Button
+      >{/if}
+    {#if page?.canExtend && onwait}<Button
+        size="compact"
+        shape="capsule"
+        variant="ghost"
+        title={m.work_human_extend_hint()}
+        onclick={(event: MouseEvent) => {
+          event.stopPropagation();
+          onwait?.();
+        }}>{m.work_human_extend()}</Button
+      >{/if}
     {#if left}<span class="left" class:late role="timer" aria-live="off">{left}</span>{/if}
-    <span class="actions">
-      {#if page.canExtend && onwait}<Button
-          size="compact"
-          shape="capsule"
-          variant="ghost"
-          title={m.work_human_extend_hint()}
-          onclick={(event: MouseEvent) => {
-            event.stopPropagation();
-            onwait?.();
-          }}>{m.work_human_extend()}</Button
-        >{/if}
-      {#if onopen}<Button
-          size="compact"
-          shape="capsule"
-          variant="primary"
-          onclick={(event: MouseEvent) => {
-            event.stopPropagation();
-            onopen?.();
-          }}>{m.work_human_open()}</Button
-        >{/if}
-    </span>
   </div>
+  {#if pending > 1}<p class="more">{m.work_need_pending({ count: pending, host })}</p>{/if}
 </div>
 
 <style>
@@ -83,11 +94,23 @@
   }
 
   .mark {
+    position: relative;
     display: grid;
     flex: none;
     place-items: center;
     inline-size: 16px;
     block-size: 16px;
+  }
+
+  /* The one sign something is asked of the person: small, amber, never red. */
+  .dot {
+    position: absolute;
+    inset-block-start: -2px;
+    inset-inline-end: -3px;
+    inline-size: 6px;
+    block-size: 6px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-warning);
   }
 
   .title {
@@ -102,14 +125,22 @@
 
   .row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
+    gap: 4px 6px;
     min-block-size: var(--control-compact);
+    padding-inline-start: 24px;
+  }
+
+  .more {
+    margin: 0;
+    padding-inline-start: 24px;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    line-height: 16px;
   }
 
   .left {
-    padding-inline-start: 24px;
     color: var(--color-muted);
     font-size: var(--text-label);
     font-variant-numeric: tabular-nums;
@@ -121,12 +152,44 @@
     color: var(--color-warning);
   }
 
-  .actions {
-    display: inline-flex;
-    flex: none;
-    align-items: center;
-    gap: 4px;
-    margin-inline-start: auto;
+  /* In the part's column it belongs to the row: no card, the text column's own indent. */
+  .inline {
+    gap: 6px;
+    padding: 0;
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+    animation: none;
+  }
+
+  .inline .what {
+    align-items: flex-start;
+    gap: 7px;
+  }
+
+  /* The part's own name already carries the site's mark: only the amber dot stands in its gutter. */
+  .inline .mark {
+    inline-size: 16px;
+    block-size: 16px;
+  }
+
+  .inline .dot {
+    inset-block-start: 5px;
+    inset-inline: 3px auto;
+  }
+
+  .inline .title {
+    overflow: visible;
+    font-size: var(--text-label);
+    font-weight: 500;
+    line-height: 16px;
+    text-wrap: pretty;
+    white-space: normal;
+  }
+
+  .inline .row,
+  .inline .more {
+    padding-inline-start: 23px;
   }
 
   @keyframes needs-arrive {

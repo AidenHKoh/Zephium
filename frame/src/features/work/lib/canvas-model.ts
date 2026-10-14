@@ -194,6 +194,8 @@ export type PartView = {
   ask?: { props: Record<string, unknown> };
   /** What the part needs from the person to do its job, and its one action. */
   need?: PartNeed;
+  /** Pages of the site its waiting page is on that wait behind that one, counted with it. */
+  pending?: number;
   /** Notes it handed the lead, read in its opened view. */
   notes?: readonly ObjectView[];
 };
@@ -229,6 +231,8 @@ export type PartPage = {
   live: boolean;
   /** Set while the run is holding this page open for a person. */
   human?: HumanPage;
+  /** The page was read. */
+  read?: boolean;
   /** Read with the person's signed-in session: the host it was granted on. */
   account?: string;
   /** An open tab the request was shown, not read. */

@@ -22,6 +22,7 @@ import type { SourceRow } from "./project-environment-stage";
 import { RUN } from "./run/layout";
 import { pageName } from "./run/sources";
 import { PART } from "./run/part-size";
+import { settleNeeds } from "./run/needs";
 import { fileName } from "./work-files";
 import { linkVideo } from "./link-media";
 import { ownedView } from "./board/objects";
@@ -738,7 +739,7 @@ export function environmentParts(
     const recorded = pages(projection.work.id);
     const waiting = human(projection.work.id);
     const paused = activity(projection.work.id) === "paused";
-    for (const part of stage.parts) {
+    const built = stage.parts.map((part) => {
       const entries = part.pages.map((entry): PartPage => {
         const opened = recorded.filter((page) => entry.steps.some((step) => step.id === page.step));
         const live =
@@ -789,10 +790,23 @@ export function environmentParts(
           frame,
           live,
           ...(held ? { human: humanPage(held) } : {}),
+          ...(succeeded ? { read: true } : {}),
           ...(account ? { account } : {}),
           ...(shown ? { tab: true } : {}),
         };
       });
+      return { part, entries };
+    });
+    const settled = settleNeeds(
+      built.map(({ part, entries }) => ({
+        id: part.id,
+        ...(part.host ? { host: part.host } : {}),
+        ...(part.need ? { need: needView(part.need, part.host) } : {}),
+        pages: entries,
+      })),
+    );
+    for (const { part } of built) {
+      const { pages: entries, need, pending } = settled.get(part.id)!;
       const rect = stage.lane.rects[part.id]!;
       const waitingPage = entries.find((page) => page.human?.phase === "waiting_for_human");
       const needs = !!part.ask || !!waitingPage;
@@ -849,7 +863,8 @@ export function environmentParts(
           ...(part.lines ? { lines: part.lines } : {}),
           ...(part.connection ? { connection: part.connection } : {}),
           ...(part.ask ? { ask: part.ask } : {}),
-          ...(part.need ? { need: needView(part.need, part.host) } : {}),
+          ...(need ? { need } : {}),
+          ...(pending ? { pending } : {}),
           ...(stage.notes.get(part.id)?.length
             ? { notes: stage.notes.get(part.id)!.map((object) => object.view) }
             : {}),

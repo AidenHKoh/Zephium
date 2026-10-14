@@ -58,7 +58,7 @@ test("a page the run is holding says why it needs you, and the countdown only ne
   };
   const screen = await render(PageCard, { item: waiting, selected: false });
   // What to do and where, action first.
-  await expect.element(screen.getByText(/^Sign in to /)).toBeVisible();
+  await expect.element(screen.getByText("shop.example needs you signed in")).toBeVisible();
   expect(screen.container.querySelector(".needs .left")).toBeNull();
   await screen.rerender({
     item: {
