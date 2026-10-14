@@ -248,10 +248,6 @@
     transition: translate var(--motion-base) var(--ease-spring);
   }
 
-  .frame:hover {
-    translate: 0 -2px;
-  }
-
   .frame canvas {
     display: block;
     inline-size: 100%;
@@ -381,5 +377,10 @@
   .quiet:focus-visible {
     outline: 2px solid var(--color-ring);
     outline-offset: 2px;
+  }
+
+  /* The cell lifts its window, so the pointer at its lower edge never drops it and finds it again. */
+  .frames li:hover .frame {
+    translate: 0 -2px;
   }
 </style>

@@ -477,6 +477,14 @@
       translate var(--motion-base) var(--ease-spring);
   }
 
+  /* A lifted window keeps the strip it rose from: at its lower edge the pointer
+     would otherwise fall off it, drop it, meet it again, and flicker. */
+  .fans .page:hover::after {
+    position: absolute;
+    inset: 100% 0 -3px;
+    content: "";
+  }
+
   .count {
     position: absolute;
     inset-block-start: 0;
