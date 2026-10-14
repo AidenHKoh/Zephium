@@ -52,6 +52,22 @@ pub(crate) enum SiteEffect {
     Commit(Consequence),
 }
 
+/// A cart is the person's to change and empty again: putting something in
+/// it saves, it buys nothing. Placing the order or paying is the purchase.
+const CART_WORDS: [&str; 12] = [
+    "add to cart",
+    "add to basket",
+    "add to bag",
+    "add to trolley",
+    "update cart",
+    "dodaj do koszyka",
+    "do koszyka",
+    "in den warenkorb",
+    "ajouter au panier",
+    "añadir al carrito",
+    "aggiungi al carrello",
+    "add to wishlist",
+];
 /// Words on a control or its region, by what they commit. Earlier lists win.
 const PURCHASE_WORDS: [&str; 19] = [
     "buy",
@@ -250,6 +266,7 @@ const DONE_WORDS: [&str; 18] = [
 
 fn commit_words(text: &str) -> Option<Consequence> {
     [
+        (&CART_WORDS[..], Consequence::Save),
         (&PURCHASE_WORDS[..], Consequence::Purchase),
         (&DESTRUCTIVE_WORDS[..], Consequence::Destructive),
         (&COMMUNICATION_WORDS[..], Consequence::Communication),
@@ -2159,6 +2176,14 @@ mod tests {
         assert_eq!(enter(5), SiteEffect::Read);
         assert_eq!(enter(7), SiteEffect::Commit(Consequence::Destructive));
         assert!(matches!(enter(6), SiteEffect::Commit(_)));
+    }
+
+    #[test]
+    fn putting_something_in_a_cart_saves_and_placing_the_order_buys() {
+        assert_eq!(commit_words(" add to cart "), Some(Consequence::Save));
+        assert_eq!(commit_words(" dodaj do koszyka "), Some(Consequence::Save));
+        assert_eq!(commit_words(" place order "), Some(Consequence::Purchase));
+        assert_eq!(commit_words(" buy now "), Some(Consequence::Purchase));
     }
 
     #[test]

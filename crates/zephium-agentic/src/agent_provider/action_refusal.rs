@@ -473,7 +473,7 @@ impl AgentProviderActionRefusal {
             ),
             SemanticActionBindingError::TaskEffectMismatch(_) => (
                 "task_effect_mismatch",
-                "Nothing executed. The proposed effect conflicts with this assignment. The required_effect field is a host constraint, not a claim about arbitrary page handlers. If the intended action fits the assignment, correct its effect using the current ref and supported verification. Otherwise inspect or extract within scope; do not relabel a consequential action to bypass the assignment. The target remains available for a corrected proposal.",
+                "Nothing executed. The host read this control's effect as required_effect (adding to a cart is external_write, placing an order is purchase). If the action is what the goal needs, propose it again now with effect set to required_effect, the same current ref and a supported verification; the host decides whether the person is asked. Otherwise inspect or extract within scope.",
             ),
             SemanticActionBindingError::OutcomeContract => (
                 "outcome_incompatible",

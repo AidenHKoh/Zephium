@@ -1115,7 +1115,12 @@ where
                                         .arguments
                                         .get("mine")
                                         .and_then(Value::as_bool)
-                                        .unwrap_or(false),
+                                        .unwrap_or(false)
+                                        || tool_call
+                                            .arguments
+                                            .get("goal")
+                                            .and_then(Value::as_str)
+                                            .is_some_and(acts_for_person),
                                     view,
                                 })
                             }
@@ -2331,9 +2336,50 @@ fn note_reason(note: Option<&str>, search: bool) -> Option<WorkPartReasonV1> {
     })
 }
 
+/// A goal that acts on the site for the person (a cart, a booking, a form
+/// to send) works in their session: what it changes is theirs.
+fn acts_for_person(goal: &str) -> bool {
+    const ACTS: &[&str] = &[
+        "add to cart",
+        "add it to",
+        "to my cart",
+        "to the cart",
+        "into the cart",
+        "basket",
+        "checkout",
+        "check out",
+        "book ",
+        "reserve",
+        "place the order",
+        "place an order",
+        "fill in",
+        "fill out",
+        "fill the",
+        "submit",
+        "sign up",
+        "register",
+        "apply for",
+        "subscribe",
+        "rsvp",
+    ];
+    let goal = goal.to_lowercase();
+    ACTS.iter().any(|act| goal.contains(act))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_goal_that_acts_for_the_person_works_in_their_session() {
+        assert!(acts_for_person(
+            "Add the Acme Circles T-Shirt in size M to the cart and go to checkout"
+        ));
+        assert!(acts_for_person("Book the 7pm table for two"));
+        assert!(!acts_for_person(
+            "Read the GPU offers on this page: name, price, condition"
+        ));
+    }
 
     #[test]
     fn a_part_gets_the_same_calls_on_a_pricier_model() {

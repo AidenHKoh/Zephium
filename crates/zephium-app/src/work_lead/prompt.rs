@@ -300,7 +300,7 @@ pub(crate) fn browse_tool() -> WorkModelTool {
             json!({
                 "start": {"type": "string", "description": "An https page or a bare site such as airbnb.com."},
                 "goal": {"type": "string", "description": "What to find, open or fill there, with every fact it needs. At most 600 characters."},
-                "mine": {"type": "boolean", "description": "true when the goal is about the person's own account on the site: their inbox, messages, orders, lists, drafts, or acting as them. Public listings, prices and catalogs are false."},
+                "mine": {"type": "boolean", "description": "true when the goal is about the person's own account on the site (inbox, messages, orders, lists, drafts) or acts there for them: adding to a cart, checking out, booking, filling or sending a form. Reading public listings, prices and catalogs is false."},
                 "view": {"type": "boolean", "description": "true when the goal only reads what one of the person's apps lists: what is new in Slack (Activity, DMs) or a channel; the Gmail inbox or a Gmail search; the Calendar day; Linear's Inbox or My issues; Notion's recent pages; GitHub notifications or review requests. start is the app itself (app.slack.com, linear.app, mail.google.com), never a guessed view address: the app opens the person's workspace, the views that list what is new are opened for you, and their rows come back at once."},
                 "records": records_schema()
             }),
