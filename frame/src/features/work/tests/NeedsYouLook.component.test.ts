@@ -63,7 +63,7 @@ test("a bot check the run waits on: the page, the island, keep waiting and open"
   await expect.element(band.getByText("1:12 left")).toBeVisible();
   // The island says the same thing, with the one action that meets it.
   await expect
-    .element(screen.getByRole("button", { name: /^Solve the check on allegro.pl/ }))
+    .element(screen.getByRole("button", { name: /^allegro.pl wants to confirm you’re a person/ }))
     .toBeVisible();
   await both("check-waiting");
 
@@ -85,7 +85,7 @@ test("a bot check the run waits on: the page, the island, keep waiting and open"
   const island = screen.getByRole("region", { name: /agent/i });
   await userEvent.click(island.getByRole("button", { name: "Keep waiting" }));
   expect(onwaitingextend).toHaveBeenCalledWith("page:check");
-  await userEvent.click(island.getByRole("button", { name: "Open page" }));
+  await userEvent.click(island.getByRole("button", { name: "Open allegro.pl" }));
   expect(onwaitingopen).toHaveBeenCalledWith("page:check");
 
   // At the longest wait there is no more time to give.

@@ -160,6 +160,8 @@ export type StageOptions = {
   requests?: ReadonlySet<string>;
   /** Questions waiting on the person, by the work they belong to. */
   asks?: (objective: string) => readonly PartAsk[];
+  /** Whether a page of the request is held for the person (a check, a sign-in). */
+  held?: (objective: string) => boolean;
   /** What a run drew on before it began. */
   inputs?: (runs: readonly WorkExecutionFact[]) => readonly RunInputView[];
   /** The questions a run put to the person and the answers, as the asks read them. */
@@ -441,14 +443,25 @@ export function environmentStages(
       const headId = `head:${draft.card}`;
       const lead = leadEntries(snapshot, projection, draft.executions);
       // While the run waits on the person, the answer's place says so, not that it is coming.
-      const waiting = live ? parts.find((part) => part.ask) : undefined;
+      // A held page belongs to a part whose read is still running.
+      const held = live && !!options.held?.(projection.work.id);
+      const waiting = live
+        ? (parts.find((part) => part.ask) ??
+          (held
+            ? parts.find((part) =>
+                part.pages.some((page) => page.steps.some((step) => step.status === "running")),
+              )
+            : undefined))
+        : undefined;
       const set = runObjects({
         board,
         head: headId,
         live,
         pending: waiting
           ? m.work_board_waiting({ site: siteName(waiting.host ?? waiting.title) })
-          : m.work_board_pending(),
+          : held
+            ? m.work_line_waiting_for_you()
+            : m.work_board_pending(),
         lead: lead.entries,
         ...(options.fetched ? { fetched: options.fetched } : {}),
       });

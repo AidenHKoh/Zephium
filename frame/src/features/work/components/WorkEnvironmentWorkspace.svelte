@@ -944,6 +944,8 @@
               : [],
           requests: openRequests,
           exchange: exchangeOf,
+          held: (objective: string) =>
+            (human.pages.get(objective) ?? []).some((page) => page.phase === "waiting_for_human"),
         })
       : [],
   );

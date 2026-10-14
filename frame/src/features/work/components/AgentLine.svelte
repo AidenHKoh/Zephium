@@ -5,7 +5,7 @@
   import type { WorkHumanReasonV1, WorkModelFaultV1 } from "$shared/ipc/bindings";
   import { currentActivity } from "$domain/work";
   import { agentLine, endingFault, endingNote, isLive } from "../lib/agent-steps";
-  import { cardCountdown, needTitle } from "../lib/work-human";
+  import { cardCountdown, needLine } from "../lib/work-human";
   import type { WorkHumanSession } from "$domain/work-human";
   import RunAsks from "./asks/RunAsks.svelte";
   import { asksOf, openAsks } from "./asks/asks";
@@ -246,7 +246,7 @@
   };
   /** Two or three words while it works; one quiet sentence once it stops. */
   const headline = $derived.by(() => {
-    if (waiting) return needTitle(waiting.reason, waiting.host);
+    if (waiting) return needLine(waiting.reason, waiting.host).text;
     if (intervention) return interventionLabel;
     const refused = failure ?? session.failure;
     if (refused) return refusals[refused]?.() ?? m.work_line_failed();
@@ -696,7 +696,7 @@
                 onclick={() => onwaitingextend?.(waiting.card)}>{m.work_human_extend()}</button
               >{/if}
             <button type="button" class="action" onclick={() => onwaitingopen?.(waiting.card)}
-              >{m.work_human_open()}</button
+              >{needLine(waiting.reason, waiting.host).action}</button
             >
           {:else if proposal}
             <button

@@ -6,7 +6,7 @@ type Page = { url: string; where: string; title: string };
 function trail(url: string): string[] {
   try {
     const parsed = new URL(url);
-    const query = ["q", "query", "search", "k", "keywords"]
+    const query = ["q", "query", "search", "string", "text", "term", "k", "keywords"]
       .map((key) => parsed.searchParams.get(key)?.trim())
       .find(Boolean);
     if (query) return [query];
