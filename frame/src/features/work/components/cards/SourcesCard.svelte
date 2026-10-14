@@ -9,6 +9,7 @@
   import { SOURCE_ROWS } from "../../lib/project-environment-board";
   import { thumbnail } from "../../lib/frame-thumbs";
   import type { RunSource } from "../../lib/run/sources";
+  import { pageLabel, sharedSite } from "../../lib/run/result-label";
   import * as m from "$shared/i18n/messages";
 
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
@@ -30,6 +31,8 @@
   /** The whole list, or the pages that would not open, over the canvas: the card never grows. */
   let sheet = $state<"all" | "looked" | "missed" | null>(null);
   const shown = $derived(rows.slice(0, SOURCE_ROWS));
+  /** All on one site: it is said once above the rows, and the rows are titles. */
+  const site = $derived(sharedSite(rows));
   const toggle = (which: "all" | "looked" | "missed") => (event: MouseEvent) => {
     event.stopPropagation();
     sheet = sheet === which ? null : which;
@@ -87,6 +90,10 @@
             >
           </li>{/each}
       </ul>{/if}
+    {#if site}<p class="site-head">
+        <span class="mark"><HostGlyph host={site} url={rows[0]!.url} size={16} /></span>
+        <span>{m.work_sources_site({ site, count: rows.length })}</span>
+      </p>{/if}
     {#if rows.length}<ul class="rows">
         {#each shown as row (row.key)}<li>
             <button
@@ -98,11 +105,7 @@
                 open(row);
               }}
             >
-              <span class="mark"
-                ><HostGlyph host={row.host} url={row.url} file={!!row.file} size={16} /></span
-              >
-              <span class="site">{row.host}</span>
-              {#if row.title !== row.host}<span class="title">{row.title}</span>{/if}
+              {@render entry(row, !!site)}
             </button>
           </li>{/each}
       </ul>{/if}
@@ -162,16 +165,7 @@
                       title={row.url || row.file?.path}
                       onclick={() => open(row)}
                     >
-                      <span class="mark"
-                        ><HostGlyph
-                          host={row.host}
-                          url={row.url}
-                          file={!!row.file}
-                          size={16}
-                        /></span
-                      >
-                      <span class="site">{row.host}</span>
-                      {#if row.title !== row.host}<span class="title">{row.title}</span>{/if}
+                      {@render entry(row, !!site && sheet === "all")}
                     </button>
                   </li>{/each}{:else}{#each unread as page (page.key)}<li>
                     <button
@@ -192,6 +186,19 @@
       </div>{/if}
   </div>
 </section>
+
+{#snippet entry(row: RunSource, single: boolean)}
+  {@const text = row.file
+    ? row.title === row.host
+      ? ""
+      : row.title
+    : pageLabel({ url: row.url, where: row.host, title: row.title })}
+  <span class="mark"
+    >{#if !single}<HostGlyph host={row.host} url={row.url} file={!!row.file} size={16} />{/if}</span
+  >
+  {#if !single}<span class="site">{row.host}</span>{/if}
+  {#if text && text !== row.host}<span class="title">{text}</span>{/if}
+{/snippet}
 
 <style>
   .sources {
@@ -280,6 +287,20 @@
 
   .row:hover {
     background: var(--color-control-hover);
+  }
+
+  .row:not(:has(.site)) {
+    grid-template-columns: 16px minmax(0, 1fr);
+  }
+
+  .site-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 2px;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    line-height: 24px;
   }
 
   .mark {
