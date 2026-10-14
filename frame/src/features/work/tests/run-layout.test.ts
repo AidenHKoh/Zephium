@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import { boardLayout, type LayoutBlock } from "../lib/board/layout";
 import { RUN, placeRun, type RunInputs } from "../lib/run/layout";
+import { TEXT_LIMIT } from "../lib/canvas-model";
 
 const row = (id: string, height: number, phase?: number) => ({
   part: { id, width: 240, height },
@@ -126,4 +127,41 @@ test("no line crosses a card in a run with inputs, a single column or no parts",
   };
   expect(crossings(placeRun(0, withInputs))).toEqual([]);
   expect(crossings(placeRun(0, run([], 200)))).toEqual([]);
+});
+
+// Ids as a real run names its cards: a request, its parts, and the result.
+const card = "request:01KP3Q4ZK2W8N6V0R4T7Y9B1CD:01KP3Q5A8H0J2M4P6R8T0V2X4Z";
+const partId = (key: string) => `part:${card}:${key}`;
+
+test("every column joins the next and the last joins the result, under the canvas's id limit", () => {
+  const search = partId("search:01KP3Q5A8H0J2M4P6R8T0V2X4Z");
+  const read = partId("lead:01KP3Q5A8H0J2M4P6R8T0V2X4Z");
+  const stay = partId("01KP3Q6B9J1K3N5Q7S9V1W3Y5A");
+  const flights = partId("01KP3Q6B9J1K3N5Q7S9V1W3Y5B");
+  const columns = [[search, read], [stay, flights], [partId("01KP3Q7C0K2M4P6R8T0V2X4Z6B")]];
+  const rows = columns.flatMap((ids, phase) =>
+    ids.map((id, index) => ({
+      ...row(id, 120 + index * 80, phase),
+      found: id === stay ? [found(`object:${id}:1`), found(`object:${id}:2`)] : [],
+    })),
+  );
+  const place = placeRun(0, {
+    ...run(rows, 300),
+    request: { id: card, width: RUN.request, height: 80 },
+  });
+  const owner = (id: string) =>
+    rows.find((entry) => entry.part.id === id || entry.found.some((f) => f.id === id));
+  for (const line of place.lines) expect(line.id.length).toBeLessThanOrEqual(TEXT_LIMIT.id);
+  expect(new Set(place.lines.map((line) => line.id)).size).toBe(place.lines.length);
+  columns.slice(1).forEach((ids, index) => {
+    for (const target of ids)
+      for (const source of columns[index]!)
+        expect(
+          place.lines.some(
+            (line) => owner(line.source)?.part.id === source && line.target === target,
+          ),
+        ).toBe(true);
+  });
+  expect(place.lines.some((line) => line.kind === "feed")).toBe(true);
+  expect(crossings(place)).toEqual([]);
 });

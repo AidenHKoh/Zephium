@@ -41,6 +41,17 @@ export const RUN = {
 
 const snap = (value: number) => Math.ceil(value / 8) * 8;
 
+/**
+ * A short digest of an id. A line between two cards is named by both, and two
+ * full part ids run past the canvas's id limit, which drops the line.
+ */
+function digest(id: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < id.length; index++)
+    hash = Math.imul(hash ^ id.charCodeAt(index), 0x01000193);
+  return (hash >>> 0).toString(36);
+}
+
 type Sized = { id: string; width: number; height: number };
 type RunRow = {
   part: Sized;
@@ -274,7 +285,7 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
     before.ends.forEach((entry, a) => {
       column.ends.forEach((next, b) => {
         lines.push({
-          id: `step:${entry.row.part.id}:${next.row.part.id}`,
+          id: `step:${digest(entry.row.part.id)}:${digest(next.row.part.id)}`,
           kind: "part",
           source: entry.last,
           target: next.row.part.id,
@@ -313,7 +324,7 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
     });
     if (!run.rows.length)
       lines.push({
-        id: `line:${run.request.id}:${resultId}`,
+        id: `line:${run.request.id}:${digest(resultId)}`,
         kind: "part",
         source: run.request.id,
         target: resultId,

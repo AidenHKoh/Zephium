@@ -354,7 +354,7 @@ const validAreaSize = (s: CanvasSize | undefined): s is CanvasSize =>
   s.height <= 8192;
 const CANVAS_ITEM_LIMIT = 500;
 const CANVAS_LINK_LIMIT = 2000;
-const TEXT_LIMIT = { id: 128, title: 512, detail: 2048, kind: 128, status: 256 } as const;
+export const TEXT_LIMIT = { id: 128, title: 512, detail: 2048, kind: 128, status: 256 } as const;
 
 /** Clips to a whole character: a cut never splits a surrogate pair. */
 export function clipText(value: string, max: number): string {
