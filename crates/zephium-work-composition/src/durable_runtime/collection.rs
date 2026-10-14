@@ -568,6 +568,13 @@ fn interface_label(name: &str) -> bool {
         "polecane",
         "trafność",
         "sortuj",
+        "result",
+        "result item",
+        "item",
+        "listing",
+        "product",
+        "card",
+        "offer",
     ];
     let words: String = name
         .split(|c: char| !c.is_alphabetic())
@@ -696,6 +703,7 @@ mod tests {
     fn a_sort_tab_read_as_a_result_is_no_record() {
         assert!(interface_label("Best"));
         assert!(interface_label("Cheapest $1,178"));
+        assert!(interface_label("Result item 2"));
         assert!(!interface_label("10:45 am – 9:28 pm LOT 1 stop"));
         assert!(!interface_label("Best Western Plus Downtown"));
     }
@@ -747,7 +755,7 @@ mod tests {
             "https://example.test/image.png",
         ] {
             let rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([[
-                {"name":"name","value":{"kind":"text","value":"Card","sources":[1]}},
+                {"name":"name","value":{"kind":"text","value":"Wool scarf","sources":[1]}},
                 {"name":"description","value":{"kind":"text","value":"Source-backed text","sources":[2]}},
                 {"name":"image","value":{"kind":"image_url","value":url,"sources":[3]}}
             ]])).unwrap();
