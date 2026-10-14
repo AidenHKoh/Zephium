@@ -58,7 +58,7 @@ test("a bot check the run waits on: the page, the island, keep waiting and open"
   });
   screen.container.style.width = "1440px";
   screen.container.style.height = "820px";
-  const band = screen.getByRole("group", { name: "Solve the check on allegro.pl" });
+  const band = screen.getByRole("group", { name: "allegro.pl wants to confirm you’re a person" });
   await expect.element(band).toBeVisible();
   await expect.element(band.getByText("1:12 left")).toBeVisible();
   // The island says the same thing, with the one action that meets it.
@@ -72,7 +72,7 @@ test("a bot check the run waits on: the page, the island, keep waiting and open"
     expect.stringMatching(/docs/u),
     expect.stringMatching(/^wait:/u),
   );
-  await band.getByRole("button", { name: "Open page" }).click();
+  await band.getByRole("button", { name: "Open allegro.pl", exact: true }).click();
   expect(onaction).toHaveBeenLastCalledWith(
     expect.stringMatching(/docs/u),
     expect.stringMatching(/^page:/u),

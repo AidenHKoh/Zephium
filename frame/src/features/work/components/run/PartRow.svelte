@@ -92,6 +92,16 @@
       return { text: m.work_need_signed_in({ site: need.target }), action: m.work_need_again() };
     return needWords(need, part.title, "row");
   });
+  /** A check or a sign-in the part still needs the person for, as the same card a waiting page gets. */
+  const asked = $derived(
+    (need?.kind === "check" || need?.kind === "sign_in") && !(need.kind === "sign_in" && signing),
+  );
+  function meet() {
+    if (need?.kind === "sign_in" && !signing) {
+      signing = true;
+      onneed?.("meet");
+    } else onneed?.(need?.kind === "sign_in" || need?.kind === "retry" ? "again" : "meet");
+  }
   const board = getContext<BoardActions | undefined>(canvasBoard);
   // The row's own height: the taller of its name and its work, so rows never overlap.
   let labelBody = $state<HTMLElement>();
@@ -142,18 +152,24 @@
       <PartMark {part} />
       <strong>{part.title}</strong>
     </button>
-    {#if needSaid}<p class="summary need-text">{needSaid.text}</p>
-      <button
-        type="button"
-        class="need nodrag nopan"
-        onclick={(event) => {
-          event.stopPropagation();
-          if (need?.kind === "sign_in" && !signing) {
-            signing = true;
-            onneed?.("meet");
-          } else onneed?.(need?.kind === "sign_in" || need?.kind === "retry" ? "again" : "meet");
-        }}>{needSaid.action}</button
-      >
+    {#if waiting?.human}<NeedsYou
+        inline
+        page={waiting.human}
+        host={siteOf(waiting.url)}
+        url={waiting.url}
+        pending={part.pending}
+        onopen={() => onopen(waiting.id)}
+        onwait={onwait ? () => onwait?.(waiting.id) : undefined}
+      />
+    {:else if asked && need}<NeedsYou
+        inline
+        reason={need.kind === "sign_in" ? "sign_in" : "challenge"}
+        host={siteOf(need.address ?? "")}
+        url={need.address ?? ""}
+        onopen={meet}
+      />
+    {:else if needSaid}<p class="summary need-text">{needSaid.text}</p>
+      <button type="button" class="need nodrag nopan" onclick={meet}>{needSaid.action}</button>
     {:else if part.summary}<p class="summary" class:turn={part.state === "waiting"}>
         {keepDots(part.summary)}
       </p>{/if}
@@ -188,6 +204,7 @@
     <div
       class="stack"
       class:fans={shown.length > 1}
+      class:holding={!!waiting?.human}
       style:inset-inline-start="{partLead}px"
       style:inline-size="{stack.width}px"
       style:block-size="{stack.height}px"
@@ -195,19 +212,6 @@
       {#each shown as page, index (page.id)}
         {@render window(page, index)}
       {/each}
-      {#if waiting?.human}<div
-          class="waiting"
-          style:inline-size="{PART.window - 16}px"
-          style:inset-block-end="{stack.height - PART.bar - PART.frame + 8}px"
-        >
-          <NeedsYou
-            page={waiting.human}
-            host={siteOf(waiting.url)}
-            url={waiting.url}
-            onopen={() => onopen(waiting.id)}
-            onwait={onwait ? () => onwait?.(waiting.id) : undefined}
-          />
-        </div>{/if}
       {#if part.pages.length > 1}<span class="count" style:inset-inline-start="{stack.width}px"
           >{part.pages.length}</span
         >{/if}
@@ -488,21 +492,14 @@
     opacity: 0;
   }
 
-  /* Over the front window's foot, outside its button: its actions are its own. */
-  .waiting {
-    position: absolute;
-    inset-inline-start: 8px;
-    z-index: 5;
-  }
-
-  /* The windows stay folded while the run waits: the band speaks for the front one. */
-  .stack:has(.waiting) .page,
-  .stack:has(.waiting) .page:hover {
+  /* The windows stay folded while the run waits: the need in the row speaks for the front one. */
+  .stack.holding .page,
+  .stack.holding .page:hover {
     transform: var(--place);
     translate: none;
   }
 
-  .stack:has(.waiting) .count {
+  .stack.holding .count {
     opacity: 1;
   }
 
