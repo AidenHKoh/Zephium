@@ -4,6 +4,7 @@ import { playwright } from "@vitest/browser-playwright";
 import tailwindcss from "@tailwindcss/vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { alias } from "./aliases";
+import { i18nLocales } from "./i18n-locales";
 import { benchPhotos, webkitFootprint } from "./vitest.bench-commands";
 
 export default defineConfig({
@@ -11,7 +12,7 @@ export default defineConfig({
     projects: [
       {
         resolve: { alias },
-        plugins: [svelte()],
+        plugins: [svelte(), i18nLocales()],
         test: {
           name: "unit",
           environment: "node",
@@ -24,7 +25,7 @@ export default defineConfig({
       },
       {
         resolve: { alias },
-        plugins: [svelte(), tailwindcss()],
+        plugins: [svelte(), tailwindcss(), i18nLocales()],
         optimizeDeps: {
           include: [
             "@xyflow/svelte",

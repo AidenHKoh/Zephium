@@ -167,6 +167,8 @@
           sidebarReady,
         ]);
         if (disposed) return;
+        await applyLanguage(preferences.value("ui.language"));
+        if (disposed) return;
 
         // A hidden native window can suspend animation frames indefinitely.
         // Resolve style/layout synchronously before admitting native reveal.

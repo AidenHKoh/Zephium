@@ -15,7 +15,7 @@
   import WindowControls from "$shared/ui/WindowControls";
   import { applyLanguage } from "$shared/lib/locale.svelte";
 
-  $effect(() => applyLanguage(preferences.value("ui.language")));
+  $effect(() => void applyLanguage(preferences.value("ui.language")));
 
   $effect(() => {
     theme.applyUiPreferences(
