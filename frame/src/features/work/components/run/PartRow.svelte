@@ -18,6 +18,7 @@
   import NeedsYou from "./NeedsYou.svelte";
   import PartMark from "../presence/PartMark.svelte";
   import PartAgent from "../presence/PartAgent.svelte";
+  import { resultLabel } from "../../lib/run/result-label";
   import * as m from "$shared/i18n/messages";
 
   let {
@@ -219,7 +220,8 @@
             <Icon icon={Search01Icon} size={13} /><span class="words">{part.query}</span>
             {#if part.queries}<span class="again">+{part.queries - 1}</span>{/if}
           </li>{/if}
-        {#each cited as row (row.key)}<li>
+        {#each cited as row (row.key)}{@const label = resultLabel(row, part.oneSite)}
+          <li>
             <button
               type="button"
               class="row nodrag"
@@ -234,10 +236,10 @@
               <span class="site-mark"
                 ><HostGlyph host={row.where} url={row.url} size={14} initial={false} /></span
               >
-              <span class="result">{row.title || row.where}</span>
+              <span class="result">{label.text}</span>
               {#if row.opened}<span class="went" aria-label={m.work_part_result_opened()}
                   ><Icon icon={ArrowUpRight01Icon} size={12} /></span
-                >{:else if !part.oneSite}<span class="where">{row.where}</span>{/if}
+                >{:else if label.site}<span class="where">{label.site}</span>{/if}
             </button>
           </li>{:else}{#if working}{#each [0, 1, 2] as index (index)}<li
                 class="pending"
