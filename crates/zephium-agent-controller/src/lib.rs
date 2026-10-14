@@ -35,6 +35,13 @@ macro_rules! contract {
     }};
 }
 pub(crate) use contract;
+macro_rules! continuation {
+    () => {{
+        $crate::mark_contract_site(concat!(file!(), ":", line!()));
+        $crate::AgentBrowserProviderError::Continuation
+    }};
+}
+pub(crate) use continuation;
 
 #[cfg(all(feature = "probe-harness", not(debug_assertions)))]
 compile_error!("the agent controller probe harness is forbidden in optimized builds");

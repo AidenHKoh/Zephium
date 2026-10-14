@@ -3335,9 +3335,7 @@ impl AgentWorkController {
                     .into_parts()
                     .1
                     .refuse_no_progress(&observation, &session.config)
-                    .map_err(|_| {
-                        AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
-                    })?;
+                    .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()))?;
                 turn = Self::provider(
                     &mut state.native,
                     worker,
@@ -3385,9 +3383,7 @@ impl AgentWorkController {
                         .into_parts()
                         .1
                         .refuse_whole_look(&observation, &session.config)
-                        .map_err(|_| {
-                            AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
-                        })?;
+                        .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()))?;
                     turn = Self::provider(
                         &mut state.native,
                         worker,
@@ -3403,9 +3399,7 @@ impl AgentWorkController {
                     .into_parts()
                     .1
                     .resolve_observation(&observation, &session.config)
-                    .map_err(|_| {
-                        AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
-                    })?;
+                    .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()))?;
                 let checkpoint = match resolution {
                     AgentProviderObservationResolution::Capture(checkpoint) => {
                         let checkpoint = *checkpoint;
@@ -3617,9 +3611,7 @@ impl AgentWorkController {
                         .into_parts()
                         .1
                         .into_optional_sign_in_refresh(&observation, &session.config)
-                        .map_err(|_| {
-                            AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
-                        })?;
+                        .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()))?;
                     fruitless.refused(state)?;
                     let next =
                         Self::inspect_current(state, worker, browser, checkpoint, &observation)
@@ -3791,9 +3783,7 @@ impl AgentWorkController {
                     .into_parts()
                     .1
                     .refuse_navigation(&observation, &session.config, reason)
-                    .map_err(|_| {
-                        AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
-                    })?;
+                    .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()))?;
                 turn = Self::provider(
                     &mut state.native,
                     worker,
@@ -3852,9 +3842,7 @@ impl AgentWorkController {
                     .into_parts()
                     .1
                     .into_loading_extract_refresh(&observation, &session.config)
-                    .map_err(|_| {
-                        AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
-                    })?;
+                    .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()))?;
                 let wake = Instant::now() + Duration::from_millis(LOADING_EXTRACT_PAUSE_MILLIS);
                 if wake < state.native.deadline {
                     tokio::select! {
@@ -5546,7 +5534,7 @@ impl AgentWorkController {
                     schema,
                     SemanticObservationBudget::INITIAL_FILTERED,
                 )
-                .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation))?;
+                .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()))?;
             let frame = request
                 .scope()
                 .anchor()

@@ -83,7 +83,7 @@ impl AgentBrowserSession {
     ) -> Result<(), AgentBrowserProviderError> {
         self.check_live()?;
         if self.turns != 0 || self.decisions.is_some() {
-            return Err(AgentBrowserProviderError::Continuation);
+            return Err(crate::continuation!());
         }
         let actions_only = matches!(&provider, AgentBrowserDecisionProvider::TypeSafeActions(_));
         let jev = match provider {
@@ -167,7 +167,7 @@ impl AgentBrowserSession {
         let objective = self
             .objective
             .as_ref()
-            .ok_or(AgentBrowserProviderError::Continuation)?;
+            .ok_or_else(|| crate::continuation!())?;
         let built = project_observation(
             self.actions_only_decisions(),
             observation,
@@ -205,7 +205,7 @@ impl AgentBrowserSession {
         let objective = self
             .objective
             .as_ref()
-            .ok_or(AgentBrowserProviderError::Continuation)?;
+            .ok_or_else(|| crate::continuation!())?;
         let projection = match DecisionObservation::try_for_row_cells(
             observation,
             objective,

@@ -86,7 +86,7 @@ impl AgentWorkController {
                 SemanticObservationId::new(state.native.id()?).ok_or_else(|| crate::contract!())?;
             let request = checkpoint
                 .request(previous, id)
-                .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation))?;
+                .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()))?;
             let [frame] = previous.frames() else {
                 return Err(crate::contract!());
             };
@@ -235,7 +235,7 @@ impl AgentBrowserSession {
         let objective = self
             .objective
             .as_ref()
-            .ok_or(AgentBrowserProviderError::Continuation)?;
+            .ok_or_else(|| crate::continuation!())?;
         let prepared = checkpoint
             .prepare_successor_with_action_authority(
                 &mut self.policy,

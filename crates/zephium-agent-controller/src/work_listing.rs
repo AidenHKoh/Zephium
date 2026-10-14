@@ -119,37 +119,11 @@ impl AgentWorkController {
             if !progress.observe(&census, requested) {
                 break;
             }
-            let (intent, verification) = match census.continuation {
-                Some(
-                    NativeListingContinuation::LoadMore(target)
-                    | NativeListingContinuation::NextPage(target),
-                ) => (
-                    SemanticActionIntent::Click { target },
-                    SemanticVerification::PageChanged,
-                ),
-                None => {
-                    let Some(target) = census.scroll else { break };
-                    (
-                        SemanticActionIntent::Scroll {
-                            target,
-                            direction: SemanticScrollDirection::Down,
-                            amount: SemanticScrollAmount::Page,
-                        },
-                        SemanticVerification::ScrollPositionChanged,
-                    )
-                }
+            // Loading more is a courtesy before the read: a step the action
+            // contract refuses ends the loading, never the read.
+            let Some(recipe) = load_more(&census) else {
+                break;
             };
-            let recipe = SemanticActionProposal::try_new(
-                intent,
-                SemanticEffectClass::Read,
-                SemanticWaitCondition::MutationQuiet(
-                    SemanticMutationQuietPeriod::try_new(250).map_err(|_| crate::contract!())?,
-                ),
-                verification,
-                SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS)
-                    .map_err(|_| crate::contract!())?,
-            )
-            .map_err(|_| crate::contract!())?;
             let Some(next) = Box::pin(Self::code_owned_read(
                 state,
                 worker,
@@ -167,6 +141,38 @@ impl AgentWorkController {
     }
 }
 
+/// The next step that shows more of a listing: its own load-more or next
+/// control, else a page of scroll.
+fn load_more(census: &NativeListingCensus) -> Option<SemanticActionProposal> {
+    let (intent, wait, verification) = match census.continuation {
+        Some(
+            NativeListingContinuation::LoadMore(target)
+            | NativeListingContinuation::NextPage(target),
+        ) => (
+            SemanticActionIntent::Click { target },
+            SemanticWaitCondition::MutationQuiet(SemanticMutationQuietPeriod::try_new(250).ok()?),
+            SemanticVerification::PageChanged,
+        ),
+        None => (
+            SemanticActionIntent::Scroll {
+                target: census.scroll?,
+                direction: SemanticScrollDirection::Down,
+                amount: SemanticScrollAmount::Page,
+            },
+            SemanticWaitCondition::ScrollPositionChanged,
+            SemanticVerification::ScrollPositionChanged,
+        ),
+    };
+    SemanticActionProposal::try_new(
+        intent,
+        SemanticEffectClass::Read,
+        wait,
+        verification,
+        SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS).ok()?,
+    )
+    .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +183,18 @@ mod tests {
             continuation: None,
             limited: false,
         }
+    }
+
+    #[test]
+    fn loading_more_of_a_listing_is_an_action_the_contract_admits() {
+        let target = SemanticReferenceId::new(3).unwrap();
+        let mut scroll = census(&[1]);
+        scroll.scroll = Some(target);
+        assert!(load_more(&scroll).is_some(), "a page of scroll");
+        let mut more = census(&[1]);
+        more.continuation = Some(NativeListingContinuation::LoadMore(target));
+        assert!(load_more(&more).is_some(), "a load-more control");
+        assert!(load_more(&census(&[1])).is_none());
     }
 
     #[cfg(feature = "probe-harness")]

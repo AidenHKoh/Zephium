@@ -370,7 +370,7 @@ impl AgentWorkController {
         } else {
             continuation.retire_for_navigation(observation, &target, &session.config)
         }
-        .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation));
+        .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()));
         let checkpoint = match checkpoint {
             Ok(checkpoint) => checkpoint,
             Err(failure) => {
@@ -803,16 +803,16 @@ impl AgentBrowserSession {
                 &self.config,
                 action_authority,
             )
-            .map_err(|_| AgentBrowserProviderError::Continuation)?;
+            .map_err(|_| crate::continuation!())?;
         self.history_depth = match receipt.kind() {
             AgentNavigationKind::Load => self
                 .history_depth
                 .checked_add(1)
-                .ok_or(AgentBrowserProviderError::Continuation)?,
+                .ok_or_else(|| crate::continuation!())?,
             AgentNavigationKind::HistoryBack => self
                 .history_depth
                 .checked_sub(1)
-                .ok_or(AgentBrowserProviderError::Continuation)?,
+                .ok_or_else(|| crate::continuation!())?,
         };
         self.config = self
             .config
@@ -828,7 +828,7 @@ impl AgentBrowserSession {
         let objective = self
             .objective
             .as_ref()
-            .ok_or(AgentBrowserProviderError::Continuation)?;
+            .ok_or_else(|| crate::continuation!())?;
         let prepared = match action_authority {
             Some(authority) => AgentPreparedObservationRequest::try_openai_for_provider_exact_count_with_action_authority(
                 &mut self.policy,

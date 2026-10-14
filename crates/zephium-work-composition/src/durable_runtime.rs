@@ -174,7 +174,7 @@ impl ReadFailureTrace {
             );
             zephium_app::work_trace::record(format_args!(
                 "work: phase=page event=browser_failure cause={failure:?}{} state={:?} calls={} actions={} snapshots={} inspection_refusals={} navigation_refusals={} action_refusals={} last_action_refusal={:?} last_tool={:?} content=redacted",
-                if format!("{failure:?}") == "Contract" {
+                if matches!(format!("{failure:?}").as_str(), "Contract" | "Browser(Continuation)") {
                     format!(" site={}", zephium_agent_controller::last_contract_site())
                 } else {
                     String::new()

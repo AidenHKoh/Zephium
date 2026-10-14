@@ -2313,7 +2313,7 @@ impl AgentBrowserSession {
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
         self.check_live()?;
         if self.initial_provider_started || self.objective.is_none() {
-            return Err(AgentBrowserProviderError::Continuation);
+            return Err(crate::continuation!());
         }
         let payload = encode_semantic_observation(
             observation,
@@ -2325,7 +2325,7 @@ impl AgentBrowserSession {
         let objective = self
             .objective
             .as_ref()
-            .ok_or(AgentBrowserProviderError::Continuation)?;
+            .ok_or_else(|| crate::continuation!())?;
         let prepared = match action_authority {
             Some(authority) => AgentPreparedObservationRequest::try_openai_for_provider_exact_count_with_action_authority(
                 &mut self.policy,
@@ -2375,7 +2375,7 @@ impl AgentBrowserSession {
         let request = self.next_model_call_request()?;
         let (continuation, result) = transition
             .into_parts()
-            .ok_or(AgentBrowserProviderError::Continuation)?;
+            .ok_or_else(|| crate::continuation!())?;
         let (result, payload) = match result
             .diff()
             .map(|diff| {
@@ -2406,10 +2406,10 @@ impl AgentBrowserSession {
         let Some(diff) = result.diff() else {
             let result = result
                 .action_result()
-                .ok_or(AgentBrowserProviderError::Continuation)?;
+                .ok_or_else(|| crate::continuation!())?;
             let observation = result
                 .fresh_snapshot()
-                .ok_or(AgentBrowserProviderError::Continuation)?;
+                .ok_or_else(|| crate::continuation!())?;
             let payload = encode_semantic_observation(
                 observation,
                 SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
@@ -2430,11 +2430,11 @@ impl AgentBrowserSession {
                 .drive(prepared.into_transport_input(), Some(observation))
                 .await;
         };
-        let payload = payload.ok_or(AgentBrowserProviderError::Continuation)?;
+        let payload = payload.ok_or_else(|| crate::continuation!())?;
         let continuation = match result.action_result() {
             Some(result) => continuation
                 .with_verified_action_progress(result)
-                .map_err(|_| AgentBrowserProviderError::Continuation)?,
+                .map_err(|_| crate::continuation!())?,
             None => continuation,
         };
         let bound = continuation
@@ -2445,9 +2445,9 @@ impl AgentBrowserSession {
                 payload,
                 action_authority,
             )
-            .map_err(|_| AgentBrowserProviderError::Continuation)?;
-        let draft = AgentProviderDiffRequestDraft::try_new(bound)
-            .map_err(|_| AgentBrowserProviderError::Continuation)?;
+            .map_err(|_| crate::continuation!())?;
+        let draft =
+            AgentProviderDiffRequestDraft::try_new(bound).map_err(|_| crate::continuation!())?;
         let prepared = draft
             .try_prepare_for_provider_exact_count(&mut self.policy, request, diff)
             .map_err(AgentBrowserProviderError::from_request)?;
@@ -2521,9 +2521,9 @@ impl AgentBrowserSession {
         let model_request = self.next_model_call_request()?;
         let bound = continuation
             .bind_locate_request(model_request, &self.config, &result, payload)
-            .map_err(|_| AgentBrowserProviderError::Continuation)?;
-        let draft = AgentProviderLocateRequestDraft::try_new(bound)
-            .map_err(|_| AgentBrowserProviderError::Continuation)?;
+            .map_err(|_| crate::continuation!())?;
+        let draft =
+            AgentProviderLocateRequestDraft::try_new(bound).map_err(|_| crate::continuation!())?;
         let prepared = draft
             .try_prepare_for_provider_exact_count(&mut self.policy, model_request, &result)
             .map_err(AgentBrowserProviderError::from_request)?;
@@ -2653,7 +2653,7 @@ impl AgentBrowserSession {
         let request = self.next_model_call_request()?;
         let bound = continuation
             .bind_read_request(request, &self.config, &read, payload)
-            .map_err(|_| AgentBrowserProviderError::Continuation)?;
+            .map_err(|_| crate::continuation!())?;
         let prepared = AgentProviderReadContinuationRequestDraft::try_new(bound)
             .and_then(|draft| {
                 draft.try_prepare_for_provider_exact_count(&mut self.policy, request, &read)
@@ -2694,7 +2694,7 @@ impl AgentBrowserSession {
         let request = self.next_model_call_request()?;
         let bound = continuation
             .bind_screenshot_request(request, &self.config, screenshot)
-            .map_err(|_| AgentBrowserProviderError::Continuation)?;
+            .map_err(|_| crate::continuation!())?;
         let prepared = AgentProviderScreenshotRequestDraft::try_new(bound)
             .and_then(|draft| {
                 draft.try_prepare_for_provider_exact_count(&mut self.policy, request, observation)
@@ -2915,7 +2915,7 @@ impl AgentBrowserSession {
         let subtree = previous.is_some();
         let bound = continuation
             .bind_extraction_request(request, &self.config, schema, &read, payload)
-            .map_err(|_| AgentBrowserProviderError::Continuation)?;
+            .map_err(|_| crate::continuation!())?;
         let prepared = AgentProviderExtractionRequestDraft::try_new(bound)
             .and_then(|draft| match viewport {
                 Some(screenshot) => draft.with_viewport_image(&read, screenshot),
@@ -3084,7 +3084,7 @@ impl AgentBrowserSession {
         schema: &zephium_agentic::SemanticExtractionSchema,
     ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
         if self.initial_provider_started {
-            return Err(AgentBrowserProviderError::Continuation);
+            return Err(crate::continuation!());
         }
         self.extract_owned_observation(observation, captured_at, schema, None)
             .await
@@ -3102,7 +3102,7 @@ impl AgentBrowserSession {
         use zephium_agentic::*;
         self.check_live()?;
         if self.objective.is_none() || self.unverified_local_writes {
-            return Err(AgentBrowserProviderError::Continuation);
+            return Err(crate::continuation!());
         }
         if self.turns >= self.max_model_calls {
             return Err(AgentBrowserProviderError::TurnLimit);
@@ -3148,7 +3148,7 @@ impl AgentBrowserSession {
             &self.config,
             self.objective
                 .as_ref()
-                .ok_or(AgentBrowserProviderError::Continuation)?,
+                .ok_or_else(|| crate::continuation!())?,
             payload,
         )
         .and_then(|draft| {
@@ -3214,7 +3214,7 @@ impl AgentBrowserSession {
                 &self.config,
                 self.objective
                     .as_ref()
-                    .ok_or(AgentBrowserProviderError::Continuation)?,
+                    .ok_or_else(|| crate::continuation!())?,
                 payload,
             )
             .and_then(|draft| {
@@ -3278,7 +3278,7 @@ impl AgentBrowserSession {
                 if self.turns >= self.max_model_calls {
                     return Err(AgentBrowserProviderError::TurnLimit);
                 }
-                let observation = observation.ok_or(AgentBrowserProviderError::Continuation)?;
+                let observation = observation.ok_or_else(|| crate::continuation!())?;
                 let payload = encode_semantic_observation(
                     observation,
                     SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
@@ -4300,7 +4300,7 @@ impl AgentBrowserSession {
             Err(refusal) => {
                 self.action_refusal = Some(refusal);
                 self.failure = Some(AgentBrowserProviderError::Continuation);
-                Err(AgentBrowserProviderError::Continuation)
+                Err(crate::continuation!())
             }
         }
     }
