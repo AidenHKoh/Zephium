@@ -108,7 +108,7 @@ export function objectWidth(view: ObjectView): Range {
     case "diagram": {
       // A diagram reads to the right at its own drawn width: the run grows to hold it.
       const ideal = Math.min(BOARD.reach, diagramWidth(view.diagram));
-      return { min: Math.min(ideal, 720), ideal, max: Math.max(ideal, BOARD.min) };
+      return { min: Math.min(ideal, 720), ideal, max: ideal };
     }
   }
 }
