@@ -52,7 +52,7 @@
   </header>
   {#await identity then { default: SettingsIdentity }}<SettingsIdentity />{/await}
   <div class="settings-sidebar-search">
-    <Icon icon={Search01Icon} size={15} /><input
+    <Icon icon={Search01Icon} size={14} /><input
       type="search"
       aria-label={m.settings_search()}
       placeholder={m.settings_search()}

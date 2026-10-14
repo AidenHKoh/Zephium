@@ -23,7 +23,7 @@
     >
   </div>
 </SettingsGroup>
-<SettingsGroup title={m.time_title()} description={m.time_local_only()}
+<SettingsGroup title={m.time_title()}
   ><PreferenceSwitch id="time.track" preference="time.track" /><PreferenceSelect
     id="time.retention"
     preference="time.retention"

@@ -155,7 +155,7 @@
         >{/if}
     </SettingsRow>
   {/if}
-  <SettingsRow title={m.about_copy_details()} description={m.about_copy_details_help()}>
+  <SettingsRow title={m.pref_about_diagnostics()} description={m.about_copy_details_help()}>
     <Button size="compact" disabled={!about} onclick={() => void copyDetails()}
       >{m.about_copy_details()}</Button
     >
