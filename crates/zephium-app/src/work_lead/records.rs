@@ -119,7 +119,50 @@ fn said_once(facts: Vec<Value>) -> Vec<Value> {
         .collect()
 }
 
+/// Picks a card shows when the lead chose fewer from a read.
+const FOUND_PICKS: usize = 6;
+
+/// An offer no working need can use: damaged, broken or sold for parts.
+fn unusable(row: &Record) -> bool {
+    const WORDS: &[&str] = &[
+        "damaged",
+        "broken",
+        "for parts",
+        "parts only",
+        "faulty",
+        "defective",
+        "uszkodz",
+        "na części",
+        "niesprawn",
+        "defekt",
+        "kaputt",
+        "defectueux",
+    ];
+    row.fields.iter().any(|(_, cell)| {
+        display(&cell.value).is_some_and(|text| {
+            let text = text.to_lowercase();
+            WORDS.iter().any(|word| text.contains(word))
+        })
+    })
+}
+
 impl Selection {
+    fn copied(&self) -> Self {
+        Self {
+            source: self.source.clone(),
+            annotation: self.annotation.clone(),
+            recommended: self.recommended,
+            subtitle: self.subtitle.clone(),
+            facts: self
+                .facts
+                .iter()
+                .map(|fact| Fact {
+                    label: fact.label.clone(),
+                    value: fact.value.clone(),
+                })
+                .collect(),
+        }
+    }
     /// A record the lead chose, read leniently: a bare key, or an object whose
     /// stray fields are dropped. The record's name, price, link and pictures
     /// come from the read, so nothing the lead adds can rewrite them.
@@ -190,6 +233,52 @@ impl Selection {
 }
 
 impl Records {
+    /// Picks the lead chose lead the card; the other offers the same reads
+    /// found follow, up to `FOUND_PICKS`, so the person sees what was found and
+    /// not only the lead's short list. Damaged or parts-only offers never fill.
+    fn with_more_found(&self, request: &Presentation) -> Vec<Selection> {
+        let mut records: Vec<Selection> = request.records.iter().map(Selection::copied).collect();
+        if !matches!(request.layout, Layout::Picks) || records.len() >= FOUND_PICKS {
+            return records;
+        }
+        let index = |key: &str| {
+            key.trim()
+                .strip_prefix('r')
+                .and_then(|s| s.parse::<usize>().ok())
+                .and_then(|i| i.checked_sub(1))
+        };
+        let reads: Vec<WorkArtifactId> = records
+            .iter()
+            .filter_map(|record| self.rows.get(index(&record.source)?))
+            .map(|row| row.artifact)
+            .collect();
+        for (at, row) in self.rows.iter().enumerate() {
+            if records.len() >= FOUND_PICKS {
+                break;
+            }
+            let key = format!("r{}", at + 1);
+            if !reads.contains(&row.artifact)
+                || records
+                    .iter()
+                    .any(|record| index(&record.source) == Some(at))
+                || self.rows[..at]
+                    .iter()
+                    .any(|earlier| earlier.subject.name == row.subject.name)
+                || unusable(row)
+            {
+                continue;
+            }
+            records.push(Selection {
+                source: key,
+                annotation: None,
+                recommended: false,
+                subtitle: None,
+                facts: vec![],
+            });
+        }
+        records
+    }
+
     /// The records a run read, in read order, for a run that stopped before
     /// it chose among them: a stall never hides what was found.
     pub fn read_so_far(&self) -> Option<Presentation> {
@@ -387,7 +476,8 @@ impl Records {
         let mut left_out = Vec::new();
         let mut selected: Vec<(&str, &Record, u16, &Selection)> = Vec::new();
         let mut evidence: Vec<WorkEvidenceLink> = Vec::new();
-        for selection in &request.records {
+        let records = self.with_more_found(request);
+        for selection in &records {
             let key = selection.source.trim();
             if selected.iter().any(|(known, ..)| *known == key) {
                 continue;
@@ -522,7 +612,10 @@ impl Records {
                         if !has_price
                             && super::found::price_rank(&criterion.name.to_lowercase()).is_some()
                         {
-                            let mut price = json!({"display":text});
+                            let mut price = json!({"display": super::objects::words_within(
+                                &text,
+                                zephium_core::work::objects::limit::PICK_PRICE,
+                            )});
                             if let WorkCellValue::Money {
                                 amount, currency, ..
                             } = &cell.value
@@ -962,7 +1055,8 @@ mod tests {
             let WorkArtifactDataV1::Picks { items, .. } = proposed.data else {
                 panic!()
             };
-            assert_eq!(items.len(), 1, "{key}");
+            // The read's other offers follow the one chosen.
+            assert_eq!(items.len(), records.rows.len(), "{key}");
             assert_eq!(items[0].name, records.rows[0].subject.name);
             assert_eq!(proposed.left_out.is_empty(), key == "r1", "{key}");
         }

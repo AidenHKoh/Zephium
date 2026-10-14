@@ -410,6 +410,9 @@ impl WorkBrowseCollectionSchema {
         else {
             return Err(WorkError::Invalid);
         };
+        if interface_label(name) {
+            return Err(WorkError::Invalid);
+        }
         let name_evidence = cite.cite(sources)?;
         let mut subject = WorkSubject {
             name: name.clone(),
@@ -536,6 +539,45 @@ impl WorkBrowseCollectionSchema {
     }
 }
 
+/// A sort tab, filter or heading the page shows above its results ("Best",
+/// "Cheapest"), read as if it were one of them: never a record.
+fn interface_label(name: &str) -> bool {
+    const LABELS: &[&str] = &[
+        "best",
+        "cheapest",
+        "fastest",
+        "quickest",
+        "recommended",
+        "top picks",
+        "sort by",
+        "relevance",
+        "most popular",
+        "popular",
+        "lowest price",
+        "highest rated",
+        "other sort",
+        "all results",
+        "filters",
+        "show more",
+        "load more",
+        "see all",
+        "results",
+        "sponsored",
+        "najtańsze",
+        "najlepsze",
+        "polecane",
+        "trafność",
+        "sortuj",
+    ];
+    let words: String = name
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    LABELS.contains(&words.as_str())
+}
+
 /// Cites archive sources as artifact evidence; a row that does not fit is
 /// rolled back to its mark.
 pub(super) trait Cite {
@@ -648,6 +690,14 @@ mod tests {
         );
         assert!(schema.fields[1].verbatim_text());
         assert_eq!(schema.fields[2].kind(), SemanticExtractionValueKind::Url);
+    }
+
+    #[test]
+    fn a_sort_tab_read_as_a_result_is_no_record() {
+        assert!(interface_label("Best"));
+        assert!(interface_label("Cheapest $1,178"));
+        assert!(!interface_label("10:45 am – 9:28 pm LOT 1 stop"));
+        assert!(!interface_label("Best Western Plus Downtown"));
     }
 
     #[test]

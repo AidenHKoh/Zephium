@@ -341,7 +341,7 @@ fn sentences_within(text: &str, max: usize) -> (String, Vec<String>) {
 }
 
 /// At most `max` characters, cut between words with an ellipsis.
-fn words_within(text: &str, max: usize) -> String {
+pub(crate) fn words_within(text: &str, max: usize) -> String {
     let text = text.trim();
     if text.chars().count() <= max {
         return text.to_owned();
@@ -653,7 +653,9 @@ pub(crate) fn propose(
             clipped += 1;
             continue;
         }
-        if lenient && left_out.len() < MAX_LEFT_OUT && super::schema::drop(&mut data, &fault) {
+        // An optional part outside its limits is left out on the first try,
+        // and the lead reads why in its result.
+        if left_out.len() < MAX_LEFT_OUT && super::schema::drop(&mut data, &fault) {
             left_out.push(left_words(&fault));
             continue;
         }
