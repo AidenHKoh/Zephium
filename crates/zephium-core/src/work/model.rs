@@ -43,12 +43,15 @@ pub enum WorkModelRole {
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkModelReasoning {
     Low,
     Medium,
     High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Max,
 }
 
 /// The wire family a model speaks; Cloud models name their upstream's.

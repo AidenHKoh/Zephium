@@ -81,6 +81,8 @@ export const commands = {
 	workModels: (expectedProfile: string) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_models", { expectedProfile }),
 	workModelsReady: (expectedProfile: string) => __TAURI_INVOKE<WorkModelsReadyV1>("work_models_ready", { expectedProfile }),
 	workChooseModel: (expectedProfile: string, role: WorkModelRole, id: string | null) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_choose_model", { expectedProfile, role, id }),
+	/**  The lead's reasoning effort for this profile; null returns it to each model's default. */
+	workSetModelEffort: (expectedProfile: string, effort: "low" | "medium" | "high" | "xhigh" | "max" | null) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_set_model_effort", { expectedProfile, effort }),
 	workSetProviderKey: (expectedProfile: string, provider: WorkModelProvider, key: string) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_set_provider_key", { expectedProfile, provider, key }),
 	workTestProviderKey: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_test_provider_key", { expectedProfile, provider }),
 	workClearProviderKey: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_clear_provider_key", { expectedProfile, provider }),
@@ -4629,6 +4631,12 @@ export type WorkMemoryV1_Serialize = {
 	used_ms?: string | null,
 };
 
+/**  The efforts one entry takes as the lead, weakest first. */
+export type WorkModelEffortsV1 = {
+	id: string,
+	levels: WorkModelReasoning[],
+};
+
 export type WorkModelEntry = WorkModelEntry_Serialize | WorkModelEntry_Deserialize;
 
 export type WorkModelEntry_Deserialize = {
@@ -4682,6 +4690,8 @@ export type WorkModelProvider = "open_ai" | "anthropic" | "google" | "deep_seek"
 "compatible" |
 /**  Zephium Cloud: the upstream's native body, our base URL and bearer. */
 "cloud";
+
+export type WorkModelReasoning = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type WorkModelRef = {
 	provider: WorkModelProvider,
@@ -4752,6 +4762,10 @@ export type WorkModelsV1_Deserialize = {
 	providers: WorkProviderStatusV1_Deserialize[],
 	cloud: WorkCloudStatusV1,
 	fault: WorkModelsFaultV1 | null,
+	/**  Entries that take an effort; the rest take none. */
+	efforts: WorkModelEffortsV1[],
+	/**  The effort the lead runs at now; null when its model takes none. */
+	effort: WorkModelReasoning | null,
 };
 
 export type WorkModelsV1_Serialize = {
@@ -4765,6 +4779,10 @@ export type WorkModelsV1_Serialize = {
 	providers: WorkProviderStatusV1_Serialize[],
 	cloud: WorkCloudStatusV1,
 	fault: WorkModelsFaultV1 | null,
+	/**  Entries that take an effort; the rest take none. */
+	efforts: WorkModelEffortsV1[],
+	/**  The effort the lead runs at now; null when its model takes none. */
+	effort: WorkModelReasoning | null,
 };
 
 export type WorkMoreModelsV1 = WorkMoreModelsV1_Serialize | WorkMoreModelsV1_Deserialize;

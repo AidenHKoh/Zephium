@@ -13,7 +13,7 @@ const SEARCH_MAX_USES: u32 = 8;
 
 /// Models before adaptive thinking take a token budget instead of effort;
 /// they refuse `adaptive`, and every newer model refuses a budget.
-fn budget_thinking(model: &str) -> bool {
+pub(super) fn budget_thinking(model: &str) -> bool {
     [
         "claude-3",
         "claude-haiku-4",
@@ -160,7 +160,9 @@ pub(super) fn body(
             let budget: u32 = match reasoning {
                 WorkModelReasoning::Low => 2_048,
                 WorkModelReasoning::Medium => 6_000,
-                WorkModelReasoning::High => 16_000,
+                WorkModelReasoning::High | WorkModelReasoning::XHigh | WorkModelReasoning::Max => {
+                    16_000
+                }
             };
             if request.max_output_tokens > 2_048 {
                 let budget = budget.min(request.max_output_tokens - 1_024).max(1_024);
@@ -174,6 +176,8 @@ pub(super) fn body(
                 WorkModelReasoning::Low => "low",
                 WorkModelReasoning::Medium => "medium",
                 WorkModelReasoning::High => "high",
+                WorkModelReasoning::XHigh => "xhigh",
+                WorkModelReasoning::Max => "max",
             };
             body.insert("thinking".into(), json!({"type": "adaptive"}));
             body.insert("output_config".into(), json!({"effort": effort}));

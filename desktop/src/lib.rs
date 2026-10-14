@@ -1583,6 +1583,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_models::work_models,
             work_models::work_models_ready,
             work_models::work_choose_model,
+            work_models::work_set_model_effort,
             work_models::work_set_provider_key,
             work_models::work_test_provider_key,
             work_models::work_clear_provider_key,

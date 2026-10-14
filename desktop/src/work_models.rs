@@ -3,7 +3,9 @@
 //! missing / set / valid / invalid, never a key.
 use super::*;
 use zephium_core::ids::ProfileId;
-use zephium_core::work::model::{WorkModelEntry, WorkModelProvider, WorkModelRole};
+use zephium_core::work::model::{
+    WorkModelEntry, WorkModelProvider, WorkModelReasoning, WorkModelRole,
+};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, specta::Type, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -62,6 +64,13 @@ pub(crate) struct WorkCloudStatusV1 {
     pub(crate) locked: Vec<String>,
 }
 
+/// The efforts one entry takes as the lead, weakest first.
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
+pub(crate) struct WorkModelEffortsV1 {
+    pub(crate) id: String,
+    pub(crate) levels: Vec<WorkModelReasoning>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
 pub(crate) struct WorkModelsV1 {
     pub(crate) version: u32,
@@ -74,6 +83,10 @@ pub(crate) struct WorkModelsV1 {
     pub(crate) providers: Vec<WorkProviderStatusV1>,
     pub(crate) cloud: WorkCloudStatusV1,
     pub(crate) fault: Option<WorkModelsFaultV1>,
+    /// Entries that take an effort; the rest take none.
+    pub(crate) efforts: Vec<WorkModelEffortsV1>,
+    /// The effort the lead runs at now; null when its model takes none.
+    pub(crate) effort: Option<WorkModelReasoning>,
 }
 
 impl WorkModelsV1 {
@@ -87,6 +100,8 @@ impl WorkModelsV1 {
             providers: Vec::new(),
             cloud: WorkCloudStatusV1::default(),
             fault: Some(fault),
+            efforts: Vec::new(),
+            effort: None,
         }
     }
 }
@@ -214,6 +229,12 @@ mod product {
                 locked: view.cloud_locked,
             },
             fault,
+            efforts: view
+                .efforts
+                .into_iter()
+                .map(|(id, levels)| WorkModelEffortsV1 { id, levels })
+                .collect(),
+            effort: view.effort,
         }
     }
 
@@ -225,6 +246,7 @@ mod product {
                 Ok(())
             }
             Action::Choose(role, id) => models::choose(profile, role, id.as_deref()),
+            Action::Effort(effort) => models::set_effort(profile, effort),
             Action::SetKey(provider, secret) => match models::set_key(provider, secret).await {
                 Ok(status) => return checked(profile, provider, status),
                 Err(WorkModelError::BadRequest) => return Some(WorkModelsFaultV1::Invalid),
@@ -256,6 +278,7 @@ mod product {
 pub(crate) enum Action {
     Read,
     Choose(WorkModelRole, Option<String>),
+    Effort(Option<WorkModelReasoning>),
     SetKey(WorkModelProvider, String),
     TestKey(WorkModelProvider),
     ClearKey(WorkModelProvider),
@@ -273,6 +296,7 @@ fn action_name(action: &Action) -> &'static str {
     match action {
         Action::Read => "read",
         Action::Choose(..) => "choose",
+        Action::Effort(..) => "effort",
         Action::SetKey(..) => "set_key",
         Action::TestKey(..) => "test_key",
         Action::ClearKey(..) => "clear_key",
@@ -413,6 +437,23 @@ pub(crate) async fn work_choose_model(
         expected_profile,
         Action::Choose(role, id),
         "work_choose_model",
+    )
+    .await
+}
+
+/// The lead's reasoning effort for this profile; null returns it to each model's default.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_set_model_effort(
+    caller: WebviewWindow,
+    expected_profile: String,
+    effort: Option<WorkModelReasoning>,
+) -> WorkModelsV1 {
+    respond(
+        caller,
+        expected_profile,
+        Action::Effort(effort),
+        "work_set_model_effort",
     )
     .await
 }

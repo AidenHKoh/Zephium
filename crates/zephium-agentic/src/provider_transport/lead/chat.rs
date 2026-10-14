@@ -204,7 +204,9 @@ pub(super) fn body(
             let effort = match reasoning {
                 WorkModelReasoning::Low => "low",
                 WorkModelReasoning::Medium => "medium",
-                WorkModelReasoning::High => "high",
+                WorkModelReasoning::High | WorkModelReasoning::XHigh | WorkModelReasoning::Max => {
+                    "high"
+                }
             };
             body.insert("reasoning_effort".into(), json!(effort));
         }
@@ -212,7 +214,9 @@ pub(super) fn body(
             let effort = match reasoning {
                 WorkModelReasoning::Low => "low",
                 WorkModelReasoning::Medium => "medium",
-                WorkModelReasoning::High => "high",
+                WorkModelReasoning::High | WorkModelReasoning::XHigh | WorkModelReasoning::Max => {
+                    "high"
+                }
             };
             body.insert("reasoning".into(), json!({"effort": effort}));
         }
@@ -226,7 +230,7 @@ pub(super) fn body(
 
 /// Groq takes an effort only for GPT-OSS; Cerebras also for Qwen. Any other
 /// model there refuses the field.
-fn takes_effort(upstream: WorkModelProvider, model: &str) -> bool {
+pub(super) fn takes_effort(upstream: WorkModelProvider, model: &str) -> bool {
     model.contains("gpt-oss")
         || (upstream == WorkModelProvider::Cerebras && model.starts_with("qwen"))
 }

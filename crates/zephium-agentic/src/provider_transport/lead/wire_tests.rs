@@ -847,3 +847,115 @@ fn deepseek_holds_strict_tools_to_their_schemas_on_its_beta_path() {
     let cloud = LeadTarget::cloud(ZEPHIUM_CLOUD_BASE, WorkModelProvider::DeepSeek).unwrap();
     assert!(!cloud.strict_tools(&strict));
 }
+
+#[test]
+fn every_offered_effort_reaches_its_wire_request() {
+    use WorkModelReasoning as E;
+    let at = |provider: WorkModelProvider, wire, model: &str, effort| {
+        let mut call = request(wire, model);
+        call.model.provider = provider;
+        call.reasoning = Some(effort);
+        call.max_output_tokens = 32_000;
+        let target = LeadTarget::direct(provider).unwrap();
+        match wire {
+            WorkModelWire::OpenAiResponses => openai::body(&call, &target),
+            WorkModelWire::AnthropicMessages => anthropic::body(&call, &target),
+            WorkModelWire::Gemini => gemini::body(&call),
+            WorkModelWire::ChatCompletions => chat::body(&call, &target),
+        }
+        .unwrap()
+    };
+    let words = ["low", "medium", "high", "xhigh", "max"];
+    let all = [E::Low, E::Medium, E::High, E::XHigh, E::Max];
+    for (provider, wire, model) in [
+        (
+            WorkModelProvider::OpenAi,
+            WorkModelWire::OpenAiResponses,
+            "gpt-6-luna",
+        ),
+        (
+            WorkModelProvider::XAi,
+            WorkModelWire::OpenAiResponses,
+            "grok-4.7",
+        ),
+    ] {
+        for effort in models::efforts(provider, model) {
+            let body = at(provider, wire, model, effort);
+            assert_eq!(
+                body["reasoning"]["effort"], words[effort as usize],
+                "{model}"
+            );
+        }
+    }
+    let opus = models::efforts(WorkModelProvider::Anthropic, "claude-opus-5-5");
+    assert_eq!(opus, all);
+    for effort in opus {
+        let body = at(
+            WorkModelProvider::Anthropic,
+            WorkModelWire::AnthropicMessages,
+            "claude-opus-5-5",
+            effort,
+        );
+        assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(body["output_config"]["effort"], words[effort as usize]);
+    }
+    let budgets: Vec<_> =
+        models::efforts(WorkModelProvider::Anthropic, "claude-haiku-4-5-20251001")
+            .into_iter()
+            .map(|effort| {
+                at(
+                    WorkModelProvider::Anthropic,
+                    WorkModelWire::AnthropicMessages,
+                    "claude-haiku-4-5-20251001",
+                    effort,
+                )["thinking"]["budget_tokens"]
+                    .clone()
+            })
+            .collect();
+    assert_eq!(budgets, [json!(2_048), json!(6_000), json!(16_000)]);
+    for model in ["gemini-3.1-pro-preview", "gemini-3.8-flash"] {
+        for effort in models::efforts(WorkModelProvider::Google, model) {
+            let body = at(
+                WorkModelProvider::Google,
+                WorkModelWire::Gemini,
+                model,
+                effort,
+            );
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"]["thinkingLevel"], words[effort as usize],
+                "{model}"
+            );
+        }
+    }
+    let deepseek: Vec<_> = models::efforts(WorkModelProvider::DeepSeek, "deepseek-v4-pro")
+        .into_iter()
+        .map(|effort| {
+            at(
+                WorkModelProvider::DeepSeek,
+                WorkModelWire::ChatCompletions,
+                "deepseek-v4-pro",
+                effort,
+            )["reasoning_effort"]
+                .clone()
+        })
+        .collect();
+    assert_eq!(deepseek, [json!("low"), json!("high")]);
+    for effort in models::efforts(WorkModelProvider::Groq, "openai/gpt-oss-120b") {
+        let body = at(
+            WorkModelProvider::Groq,
+            WorkModelWire::ChatCompletions,
+            "openai/gpt-oss-120b",
+            effort,
+        );
+        assert_eq!(body["reasoning_effort"], words[effort as usize]);
+    }
+    for effort in models::efforts(WorkModelProvider::OpenRouter, "openai/gpt-6-luna") {
+        let body = at(
+            WorkModelProvider::OpenRouter,
+            WorkModelWire::ChatCompletions,
+            "openai/gpt-6-luna",
+            effort,
+        );
+        assert_eq!(body["reasoning"]["effort"], words[effort as usize]);
+    }
+}
