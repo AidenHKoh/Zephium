@@ -213,7 +213,7 @@
     ) => void;
     center: (id: string) => void;
     focusCard: (id: string) => void;
-    reveal: (id: string, span?: number) => void;
+    settle: (id: string, span?: number) => void;
     followAgent: () => boolean;
   }>();
   let selectedIds = $state.raw<string[]>([]);
@@ -1012,7 +1012,7 @@
     const box = stages.at(-1)?.lane.box;
     return box ? { x: box.x, y: box.y, width: box.width } : undefined;
   });
-  // A run that ends while the person follows it hands them its result, at reading size.
+  // A run that ends while the person follows it shows them its result's top if it is out of view.
   let wasLive = new Set<string>();
   $effect(() => {
     const now = new Set(stages.filter((stage) => stage.live).map((stage) => stage.card));
@@ -1021,7 +1021,7 @@
         if (now.has(card)) continue;
         const stage = stages.find((entry) => entry.card === card);
         if (stage && canvasRef?.followAgent())
-          canvasRef.reveal(stage.reply?.id ?? stage.column.head ?? card, resultSpan(stage));
+          canvasRef.settle(stage.reply?.id ?? stage.column.head ?? card, resultSpan(stage));
       }
       wasLive = now;
     });
