@@ -783,7 +783,12 @@ fn noun(kind: &str) -> &'static str {
 }
 
 /// Words that say a value was not found or not checked.
-const NOT_FOUND: [&str; 12] = [
+const NOT_FOUND: [&str; 17] = [
+    "not observed",
+    "not shown",
+    "not listed",
+    "not stated",
+    "not specified",
     "not verified",
     "unverified",
     "could not",
