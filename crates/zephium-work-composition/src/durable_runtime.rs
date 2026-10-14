@@ -498,7 +498,11 @@ impl NativeWorkComposition {
             #[cfg(feature = "public-qualification")]
             loopback_anonymous: settings.loopback_anonymous,
         };
-        let admission = probe.admit_read_page(id).await?;
+        let admission = probe.admit_read_page(id).await.inspect_err(|error| {
+            zephium_app::work_trace::record(format_args!(
+                "work: phase=search page_refused=admission error={error:?}"
+            ))
+        })?;
         let invocation = compile_page_step(
             probe,
             request,
@@ -507,7 +511,12 @@ impl NativeWorkComposition {
             None,
             None,
             Some(reader.clone()),
-        )?
+        )
+        .inspect_err(|error| {
+            zephium_app::work_trace::record(format_args!(
+                "work: phase=search page_refused=compile error={error:?}"
+            ))
+        })?
         .with_page_admission(admission);
         let run = self
             .run_retained(
@@ -524,7 +533,12 @@ impl NativeWorkComposition {
                 Some(resume_plan),
                 None,
             )
-            .await?;
+            .await
+            .inspect_err(|error| {
+                zephium_app::work_trace::record(format_args!(
+                    "work: phase=search page_refused=run error={error:?}"
+                ))
+            })?;
         let search = reader.take();
         Ok(WorkBrowserOutcome {
             status: match (&search, run.status) {
@@ -2164,6 +2178,11 @@ impl NativeWorkComposition {
                                 )
                             })
                             .map(|artifact| vec![artifact]),
+                        // A search's results page answers through its reader;
+                        // it places no artifact of its own.
+                        None if resume_plan.as_ref().is_some_and(|plan| plan.results.is_some()) => {
+                            Ok(vec![])
+                        }
                         None => map_archive(attempt.profile(), outputs, &archive),
                     }
                     .map(|artifacts| (WorkAttemptStatus::Succeeded, artifacts)),
