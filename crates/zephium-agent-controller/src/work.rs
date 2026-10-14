@@ -690,7 +690,7 @@ impl AgentWorkRunInput {
             expires_at: self
                 .manifest
                 .plan_node(self.lease.node())
-                .ok_or(crate::contract!())?
+                .ok_or_else(|| crate::contract!())?
                 .expires_at(),
         })
     }
@@ -720,7 +720,9 @@ impl AgentWorkRunInput {
         settings: AgentWorkRunSettings,
         monotonic_now: impl FnOnce() -> Instant,
     ) -> Result<Self, AgentWorkFailure> {
-        let root = manifest.plan_node(lease.node()).ok_or(crate::contract!())?;
+        let root = manifest
+            .plan_node(lease.node())
+            .ok_or_else(|| crate::contract!())?;
         let now = settings.clock.now().map_err(|_| crate::contract!())?;
         // Policy time floors elapsed milliseconds. Sample it first: comparing
         // an earlier, larger wall horizon with a later, smaller policy remainder
@@ -1021,7 +1023,7 @@ impl AgentWorkExtractionTask {
         fields: Vec<SemanticExtractionFieldSchema>,
         account: AgentAccountScope,
     ) -> Result<Self, AgentWorkFailure> {
-        let id = SemanticExtractionSchemaId::new(1).ok_or(crate::contract!())?;
+        let id = SemanticExtractionSchemaId::new(1).ok_or_else(|| crate::contract!())?;
         let schema =
             SemanticExtractionSchema::try_new(id, fields).map_err(|_| crate::contract!())?;
         Ok(Self {
@@ -1145,7 +1147,11 @@ impl AgentWorkRecovery {
         &self,
         owner: AgentWorkIncarnation,
     ) -> Result<AgentWorkJournalMutation, AgentWorkFailure> {
-        let input = self.state.input.as_ref().ok_or(crate::contract!())?;
+        let input = self
+            .state
+            .input
+            .as_ref()
+            .ok_or_else(|| crate::contract!())?;
         input.admission(owner)
     }
     /// Seals the original retained ledger and prepares its exact pending batch,
@@ -1248,7 +1254,7 @@ impl AgentWorkController {
             .state
             .as_ref()
             .and_then(|state| state.input.as_ref())
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .context;
         Ok((context.identity.profile(), context.storage))
     }
@@ -1258,7 +1264,7 @@ impl AgentWorkController {
             .state
             .as_ref()
             .and_then(|state| state.input.as_ref())
-            .ok_or(crate::contract!())?;
+            .ok_or_else(|| crate::contract!())?;
         Ok(input
             .durable_result
             .then_some(input.context.identity.profile()))
@@ -1273,7 +1279,7 @@ impl AgentWorkController {
             .state
             .as_ref()
             .and_then(|state| state.input.as_ref())
-            .ok_or(crate::contract!())?;
+            .ok_or_else(|| crate::contract!())?;
         input.admission(owner)
     }
 
@@ -1283,7 +1289,7 @@ impl AgentWorkController {
             .as_ref()
             .and_then(|state| state.input.as_ref())
             .map(|input| input.manifest.run())
-            .ok_or(crate::contract!())
+            .ok_or_else(|| crate::contract!())
     }
 
     /// Original bounded absolute deadline, never extended by persistence waits.
@@ -1292,7 +1298,7 @@ impl AgentWorkController {
             .as_ref()
             .and_then(|state| state.input.as_ref())
             .map(|input| input.settings.deadline)
-            .ok_or(crate::contract!())
+            .ok_or_else(|| crate::contract!())
     }
 }
 
@@ -1412,7 +1418,7 @@ impl AgentWorkController {
         let approved_route = input
             .manifest
             .plan_node(input.lease.node())
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .navigation_route();
         if navigation_route.as_ref() != approved_route
             || (navigation_target.is_some() && navigation_route.is_some())
@@ -1426,7 +1432,7 @@ impl AgentWorkController {
         let approved_discovery = input
             .manifest
             .plan_node(input.lease.node())
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .navigation_discovery();
         if navigation_discovery.as_ref() != approved_discovery
             || navigation_discovery.as_ref().is_some_and(|scope| {
@@ -1684,13 +1690,13 @@ impl WorkState {
         self.check_task_contract()?;
         self.native.check_control(worker, browser)?;
         let context = self.native.context()?;
-        let session = self.session.as_mut().ok_or(crate::contract!())?;
+        let session = self.session.as_mut().ok_or_else(|| crate::contract!())?;
         session.check_live().map_err(AgentWorkFailure::Browser)?;
         let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
         let account = self.task.attest_account(context, now);
         self.native.check_control(worker, browser)?;
         let account = account?;
-        let session = self.session.as_mut().ok_or(crate::contract!())?;
+        let session = self.session.as_mut().ok_or_else(|| crate::contract!())?;
         session
             .refresh_account(account)
             .map_err(AgentWorkFailure::Browser)?;
@@ -1766,7 +1772,7 @@ impl WorkState {
             }
         }
         let authority = AgentProviderActionAuthority::try_new(observation, &entries)
-            .ok_or(crate::contract!())?;
+            .ok_or_else(|| crate::contract!())?;
         Ok(match self.task.model_action_effect() {
             Some(effect) => authority.with_required_effect(effect),
             None => authority,
@@ -1794,12 +1800,12 @@ impl WorkState {
     }
     fn journal_mut(&mut self) -> Result<&mut WorkJournal, AgentWorkFailure> {
         if let Some(session) = self.session.as_mut() {
-            return session.journal.as_mut().ok_or(crate::contract!());
+            return session.journal.as_mut().ok_or_else(|| crate::contract!());
         }
         if let Some(drained) = self.drained.as_mut() {
-            return drained.journal.as_mut().ok_or(crate::contract!());
+            return drained.journal.as_mut().ok_or_else(|| crate::contract!());
         }
-        self.journal.as_mut().ok_or(crate::contract!())
+        self.journal.as_mut().ok_or_else(|| crate::contract!())
     }
 }
 
@@ -1927,7 +1933,7 @@ impl WorkNative {
 
     fn id(&mut self) -> Result<u64, AgentWorkFailure> {
         let id = self.next;
-        self.next = id.checked_add(1).ok_or(crate::contract!())?;
+        self.next = id.checked_add(1).ok_or_else(|| crate::contract!())?;
         Ok(id)
     }
 
@@ -2017,7 +2023,7 @@ impl WorkNative {
                     if let Some(retained) = health {
                         let result = clock
                             .as_ref()
-                            .ok_or(crate::contract!())
+                            .ok_or_else(|| crate::contract!())
                             .and_then(|clock| clock.now().map_err(|_| crate::contract!()))
                             .and_then(|now| retained.check_health(now));
                         if let Err(error) = result {
@@ -2160,14 +2166,14 @@ impl AgentWorkController {
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
-        let state = self.state.as_mut().ok_or(crate::contract!())?;
+        let state = self.state.as_mut().ok_or_else(|| crate::contract!())?;
         let started = state.native.next_event(worker, browser).await?;
         if !matches!(started, AgentRuntimeEvent::RunStarted(_)) {
             state.native.retain(started)?;
             return Err(AgentWorkFailure::Mailbox);
         }
-        let input = state.input.as_ref().ok_or(crate::contract!())?;
-        let journal = state.journal.as_mut().ok_or(crate::contract!())?;
+        let input = state.input.as_ref().ok_or_else(|| crate::contract!())?;
+        let journal = state.journal.as_mut().ok_or_else(|| crate::contract!())?;
         journal.start(input.settings.ids.attempt)?;
         if state.native.retained.is_some() {
             journal.emit(AgentWorkEventKind::ContextActive)?;
@@ -2188,7 +2194,10 @@ impl AgentWorkController {
         journal
             .supervisor
             .reserve_context(
-                journal.execution.as_ref().ok_or(crate::contract!())?,
+                journal
+                    .execution
+                    .as_ref()
+                    .ok_or_else(|| crate::contract!())?,
                 &input.manifest,
                 state.native.contexts()?,
                 input.context.identity,
@@ -2197,7 +2206,8 @@ impl AgentWorkController {
             .map_err(|_| AgentWorkFailure::Context)?;
         journal.record()?;
         journal.emit(AgentWorkEventKind::ContextActive)?;
-        let lease_id = ContextProfileLeaseId::new(state.native.id()?).ok_or(crate::contract!())?;
+        let lease_id =
+            ContextProfileLeaseId::new(state.native.id()?).ok_or_else(|| crate::contract!())?;
         let lease = state
             .native
             .profiles()?
@@ -2209,7 +2219,7 @@ impl AgentWorkController {
             )
             .map_err(|_| AgentWorkFailure::Context)?;
         state.native.profile = Some(lease);
-        let op = ContextOperationId::new(state.native.id()?).ok_or(crate::contract!())?;
+        let op = ContextOperationId::new(state.native.id()?).ok_or_else(|| crate::contract!())?;
         let operation = state
             .native
             .contexts()?
@@ -2266,13 +2276,13 @@ impl AgentWorkController {
                 return Err(AgentWorkFailure::Mailbox);
             }
         }
-        let op = ContextOperationId::new(state.native.id()?).ok_or(crate::contract!())?;
+        let op = ContextOperationId::new(state.native.id()?).ok_or_else(|| crate::contract!())?;
         let operation = state
             .native
             .contexts()?
             .begin_navigation(id, op)
             .map_err(|_| AgentWorkFailure::Context)?;
-        let input = state.input.as_ref().ok_or(crate::contract!())?;
+        let input = state.input.as_ref().ok_or_else(|| crate::contract!())?;
         let request = ContextNavigationRequest::try_new(operation, input.context.target.clone())
             .map_err(|_| AgentWorkFailure::Context)?;
         state.native.operation = Some(operation);
@@ -2321,8 +2331,8 @@ impl AgentWorkController {
     }
 
     fn start_session(&mut self) -> Result<(), AgentWorkFailure> {
-        let state = self.state.as_mut().ok_or(crate::contract!())?;
-        let mut input = state.input.take().ok_or(crate::contract!())?;
+        let state = self.state.as_mut().ok_or_else(|| crate::contract!())?;
+        let mut input = state.input.take().ok_or_else(|| crate::contract!())?;
         let context = state.native.context()?;
         let now = input.settings.clock.now().map_err(|_| crate::contract!())?;
         let account = state.task.attest_account(context, now)?;
@@ -2339,14 +2349,14 @@ impl AgentWorkController {
             lease: input.lease,
             account,
             observation: SemanticObservationRequest::initial(
-                SemanticObservationId::new(1).ok_or(crate::contract!())?,
+                SemanticObservationId::new(1).ok_or_else(|| crate::contract!())?,
                 context,
                 SemanticObservationBudget::INITIAL_FILTERED,
             ),
             frame,
-            invocation: SemanticInvocationId::new(1).ok_or(crate::contract!())?,
+            invocation: SemanticInvocationId::new(1).ok_or_else(|| crate::contract!())?,
             snapshot_generation: SemanticSnapshotGeneration::INITIAL,
-            objective: input.objective.take().ok_or(crate::contract!())?,
+            objective: input.objective.take().ok_or_else(|| crate::contract!())?,
             ids: input.settings.ids,
             clock: input.settings.clock,
             deadline: input.settings.deadline,
@@ -2356,8 +2366,8 @@ impl AgentWorkController {
         let decision_budget = state.requires_decision_budget();
         let mut session = AgentBrowserSession::try_new_with_transport(
             run,
-            state.transport.take().ok_or(crate::contract!())?,
-            state.access.take().ok_or(crate::contract!())?,
+            state.transport.take().ok_or_else(|| crate::contract!())?,
+            state.access.take().ok_or_else(|| crate::contract!())?,
             input.settings.model,
             state.retention,
         )
@@ -2368,7 +2378,7 @@ impl AgentWorkController {
                 .retained
                 .as_ref()
                 .and_then(|retained| retained.screenshot_source_port())
-                .ok_or(crate::contract!())?;
+                .ok_or_else(|| crate::contract!())?;
             session
                 .policy
                 .bind_model_image_owners(
@@ -2451,7 +2461,7 @@ impl AgentWorkController {
             session.config = session
                 .config
                 .with_decision_budget(
-                    AgentModelCallId::new(session.next_call).ok_or(crate::contract!())?,
+                    AgentModelCallId::new(session.next_call).ok_or_else(|| crate::contract!())?,
                     session.max_model_calls,
                 )
                 .map_err(|_| crate::contract!())?;
@@ -2472,18 +2482,19 @@ impl AgentWorkController {
         if known_check(observation).is_some() {
             return Ok(true);
         }
-        let session = state.session.as_ref().ok_or(crate::contract!())?;
+        let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
         if session.decisions.is_none() || session.actions_only_decisions() {
             return Ok(looks_like_human_challenge(observation));
         }
         state.refresh_account(worker, browser)?;
-        let session = state.session.as_ref().ok_or(crate::contract!())?;
+        let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
         let authority = if session.config.permits_tool(AgentBrowserToolKind::Act) {
             state.action_authority(observation)?
         } else {
-            AgentProviderActionAuthority::try_new(observation, &[]).ok_or(crate::contract!())?
+            AgentProviderActionAuthority::try_new(observation, &[])
+                .ok_or_else(|| crate::contract!())?
         };
-        let session = state.session.as_mut().ok_or(crate::contract!())?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let answers = Self::provider(
             &mut state.native,
             worker,
@@ -2753,7 +2764,7 @@ impl AgentWorkController {
             let capability = state.observation_capability();
             return state.native.observe_retained(worker, capability).await;
         }
-        let session = state.session.as_mut().ok_or(crate::contract!())?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         session.check_live().map_err(AgentWorkFailure::Browser)?;
         let id = state.native.identity.id();
         let context = state
@@ -2771,7 +2782,7 @@ impl AgentWorkController {
         .map_err(|_| AgentWorkFailure::Context)?;
         let next = state.native.id()?;
         let request = SemanticObservationRequest::initial(
-            SemanticObservationId::new(next).ok_or(crate::contract!())?,
+            SemanticObservationId::new(next).ok_or_else(|| crate::contract!())?,
             context,
             SemanticObservationBudget::INITIAL_FILTERED,
         );
@@ -2805,7 +2816,7 @@ impl AgentWorkController {
                 Some(SemanticSnapshotGeneration::INITIAL),
                 SemanticSnapshotGeneration::next,
             )
-            .ok_or(crate::contract!())?;
+            .ok_or_else(|| crate::contract!())?;
         let runtime_budget = if state
             .navigation_discovery
             .as_ref()
@@ -2818,7 +2829,7 @@ impl AgentWorkController {
         let invocation = encode_semantic_runtime_invocation(
             &request,
             frame,
-            SemanticInvocationId::new(next).ok_or(crate::contract!())?,
+            SemanticInvocationId::new(next).ok_or_else(|| crate::contract!())?,
             generation,
             runtime_budget,
         )
@@ -3033,7 +3044,7 @@ impl AgentWorkController {
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
-        let state = self.state.as_mut().ok_or(crate::contract!())?;
+        let state = self.state.as_mut().ok_or_else(|| crate::contract!())?;
         // A whole-page findings or catalog read decides over its whole
         // capture; only the page planner, if it is needed, sees the fitted
         // prefix.
@@ -3157,12 +3168,12 @@ impl AgentWorkController {
         let action_authority = state
             .session
             .as_ref()
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .config
             .permits_tool(AgentBrowserToolKind::Act)
             .then(|| state.action_authority(&observation))
             .transpose()?;
-        let session = state.session.as_mut().ok_or(crate::contract!())?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let mut turn: AgentBrowserProviderTurn = Self::provider(
             &mut state.native,
             worker,
@@ -3221,7 +3232,7 @@ impl AgentWorkController {
             // The last decision was advertised as Extract-only. Independently
             // enforce that narrowing before any native capture, navigation or
             // local inspection can consume the reserved mapping call.
-            let session = state.session.as_ref().ok_or(crate::contract!())?;
+            let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
             if state.requires_decision_budget()
                 && (session.turns.saturating_add(1) >= session.max_model_calls
                     || session
@@ -3293,7 +3304,7 @@ impl AgentWorkController {
                 compound_form_offered = true;
                 state.native.check_control(worker, browser)?;
                 state.refresh_account(worker, browser)?;
-                let session = state.session.as_mut().ok_or(crate::contract!())?;
+                let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
                 let refusal = turn
                     .into_tool_turn()
                     .into_parts()
@@ -3318,7 +3329,7 @@ impl AgentWorkController {
                     .journal_mut()?
                     .emit(AgentWorkEventKind::InspectionRefused)?;
                 fruitless.refused(state)?;
-                let session = state.session.as_mut().ok_or(crate::contract!())?;
+                let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
                 let refusal = turn
                     .into_tool_turn()
                     .into_parts()
@@ -3337,7 +3348,7 @@ impl AgentWorkController {
                 .await?;
                 continue;
             }
-            let session = state.session.as_ref().ok_or(crate::contract!())?;
+            let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
             if turn.turn.proposal().kind() == AgentBrowserToolKind::Snapshot {
                 if session.turns.saturating_add(2) > session.max_model_calls
                     || session
@@ -3368,7 +3379,7 @@ impl AgentWorkController {
                         .journal_mut()?
                         .emit(AgentWorkEventKind::InspectionRefused)?;
                     fruitless.refused(state)?;
-                    let session = state.session.as_mut().ok_or(crate::contract!())?;
+                    let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
                     let refusal = turn
                         .into_tool_turn()
                         .into_parts()
@@ -3399,7 +3410,8 @@ impl AgentWorkController {
                     AgentProviderObservationResolution::Capture(checkpoint) => {
                         let checkpoint = *checkpoint;
                         if let Some(schema) = &state.extraction_schema {
-                            let session = state.session.as_ref().ok_or(crate::contract!())?;
+                            let session =
+                                state.session.as_ref().ok_or_else(|| crate::contract!())?;
                             session.check_live().map_err(AgentWorkFailure::Browser)?;
                             let read = read_semantic_observation_for_schema(
                                 &observation,
@@ -3435,7 +3447,8 @@ impl AgentWorkController {
                         fruitless.refused(state)?;
                         refused_looks = refused_looks.saturating_add(1);
                         let refusal = if refused_looks >= 3 && state.progressive_observation {
-                            let session = state.session.as_ref().ok_or(crate::contract!())?;
+                            let session =
+                                state.session.as_ref().ok_or_else(|| crate::contract!())?;
                             match refusal.into_refresh(&observation, &session.config) {
                                 Ok(checkpoint) => {
                                     refused_looks = 0;
@@ -3481,7 +3494,7 @@ impl AgentWorkController {
                         } else {
                             refusal
                         };
-                        let session = state.session.as_mut().ok_or(crate::contract!())?;
+                        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
                         turn = Self::provider(
                             &mut state.native,
                             worker,
@@ -3523,14 +3536,14 @@ impl AgentWorkController {
                 turn.turn.proposal().kind(),
                 AgentBrowserToolKind::Locate | AgentBrowserToolKind::Read
             ) {
-                let session = state.session.as_ref().ok_or(crate::contract!())?;
+                let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
                 if session.turns >= session.max_model_calls {
                     return Err(AgentWorkFailure::Browser(
                         AgentBrowserProviderError::TurnLimit,
                     ));
                 }
                 state.refresh_account(worker, browser)?;
-                let session = state.session.as_mut().ok_or(crate::contract!())?;
+                let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
                 no_progress.remember(progress_key);
                 turn = Self::provider(
                     &mut state.native,
@@ -3565,7 +3578,7 @@ impl AgentWorkController {
                 }
                 // A picture refused for this look goes back as a fresh text
                 // look rather than ending the page.
-                let session = state.session.as_ref().ok_or(crate::contract!())?;
+                let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
                 let checkpoint = turn
                     .into_tool_turn()
                     .into_parts()
@@ -3598,7 +3611,7 @@ impl AgentWorkController {
             if turn.turn.proposal().kind() == AgentBrowserToolKind::ShowForHuman {
                 if Self::sign_in_optional(state, &turn, &observation) {
                     state.sign_in_refusals = state.sign_in_refusals.saturating_add(1);
-                    let session = state.session.as_ref().ok_or(crate::contract!())?;
+                    let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
                     let checkpoint = turn
                         .into_tool_turn()
                         .into_parts()
@@ -3644,7 +3657,7 @@ impl AgentWorkController {
                     }
                     _ => return Err(crate::contract!()),
                 };
-                let session = state.session.as_ref().ok_or(crate::contract!())?;
+                let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
                 let checkpoint = turn
                     .into_tool_turn()
                     .into_parts()
@@ -3691,7 +3704,7 @@ impl AgentWorkController {
                     // answered with a fresh whole look, as after a section look.
                     Err(unwaited) => {
                         let (unwaited, original) = *unwaited;
-                        let session = state.session.as_ref().ok_or(crate::contract!())?;
+                        let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
                         let checkpoint = unwaited
                             .into_tool_turn()
                             .into_parts()
@@ -3767,7 +3780,7 @@ impl AgentWorkController {
                     .journal_mut()?
                     .emit(AgentWorkEventKind::NavigationRefused(reason))?;
                 fruitless.refused(state)?;
-                let session = state.session.as_mut().ok_or(crate::contract!())?;
+                let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
                 if session.turns.saturating_add(2) > session.max_model_calls {
                     return Err(AgentWorkFailure::Browser(
                         AgentBrowserProviderError::TurnLimit,
@@ -3833,7 +3846,7 @@ impl AgentWorkController {
                     || announces_loading(&observation))
             {
                 state.loading_extract_waits = state.loading_extract_waits.saturating_add(1);
-                let session = state.session.as_ref().ok_or(crate::contract!())?;
+                let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
                 let checkpoint = step
                     .into_tool_turn()
                     .into_parts()
@@ -3953,7 +3966,7 @@ impl AgentWorkController {
                 continue;
             }
             let navigation_incomplete = state.has_navigation() && !state.navigation_complete();
-            let session = state.session.as_mut().ok_or(crate::contract!())?;
+            let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
             let (proposal, assessment) = match step.turn.proposal().kind() {
                 AgentBrowserToolKind::Extract => {
                     if !state.task.terminal_extraction_ready() {
@@ -4021,7 +4034,7 @@ impl AgentWorkController {
                             state.scroll_streak = 0;
                             Err(proposal
                                 .into_refusal(SemanticActionBindingError::AssignmentDenied)
-                                .ok_or(crate::contract!())?
+                                .ok_or_else(|| crate::contract!())?
                                 .scrolled_enough())
                         }
                         crate::action::AgentBrowserActionBinding::Prepared(proposal) => {
@@ -4038,18 +4051,18 @@ impl AgentWorkController {
                             if starved {
                                 Err(proposal
                                     .into_refusal(SemanticActionBindingError::BudgetExhausted)
-                                    .ok_or(crate::contract!())?)
+                                    .ok_or_else(|| crate::contract!())?)
                             } else {
                                 match state.task.assess_observed(proposal.action(), &observation) {
                                     Ok(assessment) => Ok((*proposal, assessment)),
                                     Err(AgentWorkFailure::ActionDenied) => Err(proposal
                                         .into_refusal(SemanticActionBindingError::AssignmentDenied)
-                                        .ok_or(crate::contract!())?),
+                                        .ok_or_else(|| crate::contract!())?),
                                     Err(AgentWorkFailure::EffectRequired(effect)) => Err(proposal
                                         .into_refusal(
                                             SemanticActionBindingError::TaskEffectMismatch(effect),
                                         )
-                                        .ok_or(crate::contract!())?),
+                                        .ok_or_else(|| crate::contract!())?),
                                     Err(failure) => return Err(failure),
                                 }
                             }
@@ -4086,7 +4099,8 @@ impl AgentWorkController {
                                 &frames,
                             )?;
                             let refusal = if stuck && state.progressive_observation {
-                                let session = state.session.as_ref().ok_or(crate::contract!())?;
+                                let session =
+                                    state.session.as_ref().ok_or_else(|| crate::contract!())?;
                                 match refusal.stuck().into_refresh(&observation, &session.config) {
                                     Ok(checkpoint) => {
                                         let next = Self::inspect_current(
@@ -4119,7 +4133,8 @@ impl AgentWorkController {
                             } else {
                                 refusal
                             };
-                            let session = state.session.as_mut().ok_or(crate::contract!())?;
+                            let session =
+                                state.session.as_mut().ok_or_else(|| crate::contract!())?;
                             turn = Self::provider(
                                 &mut state.native,
                                 worker,
@@ -4161,7 +4176,7 @@ impl AgentWorkController {
                         .session
                         .as_mut()
                         .and_then(|session| session.take_rejected_refusal())
-                        .ok_or(crate::contract!())?;
+                        .ok_or_else(|| crate::contract!())?;
                     // The page ran its checks for a step it then refused
                     // (covered, changed): the context needs a fresh look
                     // before the next step, as after any step it ran.
@@ -4229,7 +4244,7 @@ impl AgentWorkController {
                     // The step reached the page: the model gets the page as
                     // it is now with the refusal, not a stale look and a
                     // request to ask for a new one.
-                    let session = state.session.as_ref().ok_or(crate::contract!())?;
+                    let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
                     let refusal = if state.progressive_observation {
                         match refusal.into_refresh(&observation, &session.config) {
                             Ok(checkpoint) => {
@@ -4263,7 +4278,7 @@ impl AgentWorkController {
                     } else {
                         refusal
                     };
-                    let session = state.session.as_mut().ok_or(crate::contract!())?;
+                    let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
                     turn = Self::provider(
                         &mut state.native,
                         worker,
@@ -4277,7 +4292,9 @@ impl AgentWorkController {
                 Err(error) => return Err(error),
             };
             state.task.accept_verified_action(
-                transition.batch_result().ok_or(crate::contract!())?,
+                transition
+                    .batch_result()
+                    .ok_or_else(|| crate::contract!())?,
                 &current,
             )?;
             state.look_streak = 0;
@@ -4292,7 +4309,8 @@ impl AgentWorkController {
                 .take()
                 .and_then(|target| Self::followable(state, target))
             {
-                let (continuation, _) = transition.into_parts().ok_or(crate::contract!())?;
+                let (continuation, _) =
+                    transition.into_parts().ok_or_else(|| crate::contract!())?;
                 let next = Self::navigate_current(
                     state,
                     worker,
@@ -4339,14 +4357,14 @@ impl AgentWorkController {
                     .iter()
                     .map(|snapshot| snapshot.frame().clone()),
             );
-            let session = state.session.as_ref().ok_or(crate::contract!())?;
+            let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
             if session.turns >= session.max_model_calls {
                 return Err(AgentWorkFailure::Browser(
                     AgentBrowserProviderError::TurnLimit,
                 ));
             }
             state.refresh_account(worker, browser)?;
-            let session = state.session.as_mut().ok_or(crate::contract!())?;
+            let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
             turn = Self::provider(
                 &mut state.native,
                 worker,
@@ -4522,7 +4540,10 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
         look: SemanticObservation,
     ) -> Result<(), AgentWorkFailure> {
-        let schema = state.extraction_schema.clone().ok_or(crate::contract!())?;
+        let schema = state
+            .extraction_schema
+            .clone()
+            .ok_or_else(|| crate::contract!())?;
         let cited = state.task.results_page(&look);
         state.refresh_account(worker, browser)?;
         let captured_at = SemanticCaptureInstant::from_millis(
@@ -4533,10 +4554,14 @@ impl AgentWorkController {
                 .map_err(|_| crate::contract!())?
                 .millis(),
         );
-        let account = state.session.as_ref().ok_or(crate::contract!())?.account;
+        let account = state
+            .session
+            .as_ref()
+            .ok_or_else(|| crate::contract!())?
+            .account;
         let located =
             zephium_agentic::read_cited_rows(&look, account, captured_at, &schema, &cited)
-                .ok_or(crate::contract!())?;
+                .ok_or_else(|| crate::contract!())?;
         state.task_progress(&look)?;
         state.journal_mut()?.emit(AgentWorkEventKind::RowRead {
             found: u8::try_from(located.rows_read()).unwrap_or(u8::MAX),
@@ -4616,7 +4641,11 @@ impl AgentWorkController {
                     .map_err(|_| crate::contract!())?
                     .millis(),
             );
-            let account = state.session.as_ref().ok_or(crate::contract!())?.account;
+            let account = state
+                .session
+                .as_ref()
+                .ok_or_else(|| crate::contract!())?
+                .account;
             if let Some(located) =
                 zephium_agentic::read_app_view(&look, account, captured_at, schema, app, last)
             {
@@ -4810,13 +4839,14 @@ impl AgentWorkController {
         if state.task_progress(observation)? == AgentWorkTaskProgress::Complete {
             return Ok(None);
         }
-        let session = state.session.as_mut().ok_or(crate::contract!())?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let account = session.account;
         session
             .policy
             .admit_owned_observation(observation, account)
             .map_err(|_| crate::contract!())?;
-        let batch = SemanticActionBatchId::new(session.next_action).ok_or(crate::contract!())?;
+        let batch =
+            SemanticActionBatchId::new(session.next_action).ok_or_else(|| crate::contract!())?;
         let Ok(proposal) =
             crate::AgentBrowserActionProposal::bind_code_owned(recipe, observation, &frames, batch)
         else {
@@ -4862,7 +4892,7 @@ impl AgentWorkController {
             }
             Err(AgentWorkFailure::Browser(error)) => {
                 let _ = state.follow.take();
-                let session = state.session.as_mut().ok_or(crate::contract!())?;
+                let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
                 let _ = session.take_rejected_refusal();
                 if !session
                     .close_failed_owned_action()
@@ -4951,17 +4981,17 @@ impl AgentWorkController {
         let now = state
             .session
             .as_mut()
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .policy_now()
             .map_err(AgentWorkFailure::Browser)?;
         let requested_at = SemanticCaptureInstant::from_millis(now.millis());
         let deadline = SemanticCaptureInstant::from_millis(
             now.millis()
                 .checked_add(MAX_SEMANTIC_SCREENSHOT_CAPTURE_MILLIS)
-                .ok_or(crate::contract!())?,
+                .ok_or_else(|| crate::contract!())?,
         );
         let prepared = prepare_semantic_screenshot(
-            SemanticScreenshotRequestId::new(u64::MAX).ok_or(crate::contract!())?,
+            SemanticScreenshotRequestId::new(u64::MAX).ok_or_else(|| crate::contract!())?,
             observation,
             turn.turn.continuation().baseline(),
             requested_at,
@@ -5009,7 +5039,7 @@ impl AgentWorkController {
         };
         state.native.check_control(worker, browser)?;
         state.refresh_account(worker, browser)?;
-        let session = state.session.as_mut().ok_or(crate::contract!())?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
         session
             .policy
@@ -5040,7 +5070,7 @@ impl AgentWorkController {
         let now = state
             .session
             .as_mut()
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .policy_now()
             .map_err(AgentWorkFailure::Browser)?;
         let remaining = state
@@ -5057,13 +5087,14 @@ impl AgentWorkController {
         let deadline = SemanticCaptureInstant::from_millis(
             now.millis()
                 .checked_add(window_millis)
-                .ok_or(crate::contract!())?,
+                .ok_or_else(|| crate::contract!())?,
         );
-        let id = SemanticScreenshotRequestId::new(state.native.id()?).ok_or(crate::contract!())?;
+        let id = SemanticScreenshotRequestId::new(state.native.id()?)
+            .ok_or_else(|| crate::contract!())?;
         let origin = observation
             .frames()
             .first()
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .frame()
             .origin()
             .as_url()
@@ -5072,7 +5103,7 @@ impl AgentWorkController {
         let plan = state
             .session
             .as_ref()
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .policy
             .model_image_plan(id, observation.request().context(), &origin, now);
         use zephium_agentic::SemanticModelImagePlan;
@@ -5112,7 +5143,7 @@ impl AgentWorkController {
                 .native
                 .screenshot_pending
                 .take()
-                .ok_or(crate::contract!())?;
+                .ok_or_else(|| crate::contract!())?;
             state
                 .native
                 .screenshots
@@ -5132,7 +5163,7 @@ impl AgentWorkController {
                             .native
                             .screenshot_pending
                             .take()
-                            .ok_or(crate::contract!())?;
+                            .ok_or_else(|| crate::contract!())?;
                         state
                             .native
                             .screenshots
@@ -5145,7 +5176,7 @@ impl AgentWorkController {
                             let next = state
                                 .session
                                 .as_ref()
-                                .ok_or(crate::contract!())?
+                                .ok_or_else(|| crate::contract!())?
                                 .policy
                                 .model_image_consent_required(
                                     observation.request().context(),
@@ -5169,7 +5200,7 @@ impl AgentWorkController {
             .native
             .screenshot_pending
             .take()
-            .ok_or(crate::contract!())?;
+            .ok_or_else(|| crate::contract!())?;
         let context = observation.request().context();
         state
             .native
@@ -5287,11 +5318,11 @@ impl AgentWorkController {
         state.refresh_account(worker, browser)?;
         let action_authority = state.action_authority(result.observation())?;
         let captured_at = {
-            let session = state.session.as_mut().ok_or(crate::contract!())?;
+            let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
             let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
             SemanticCaptureInstant::from_millis(now.millis())
         };
-        let session = state.session.as_mut().ok_or(crate::contract!())?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let cancellation = session.cancellation.clone();
         let (next_turn, observation) = Self::provider(
             &mut state.native,
@@ -5317,8 +5348,11 @@ impl AgentWorkController {
         after_preparation: bool,
     ) -> Result<(), AgentWorkFailure> {
         state.refresh_account(worker, browser)?;
-        let schema = state.extraction_schema.as_ref().ok_or(crate::contract!())?;
-        let session = state.session.as_mut().ok_or(crate::contract!())?;
+        let schema = state
+            .extraction_schema
+            .as_ref()
+            .ok_or_else(|| crate::contract!())?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let crop_account = session.account;
         let crop_config = if state.viewport_screenshot && session.supports_record_crops() {
             session.config.clone().with_viewport_screenshot()
@@ -5326,7 +5360,7 @@ impl AgentWorkController {
             session.config.clone()
         };
         let crop_baseline = SemanticObservationAcknowledgement::whole_page_scope(observation)
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .0;
         let result = Self::provider(
             &mut state.native,
@@ -5386,7 +5420,7 @@ impl AgentWorkController {
         captured_at: SemanticCaptureInstant,
     ) -> Result<Option<SemanticObservation>, AgentWorkFailure> {
         state.check_task_contract()?;
-        let session = state.session.as_ref().ok_or(crate::contract!())?;
+        let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
         session.check_live().map_err(AgentWorkFailure::Browser)?;
         // Keep the original run's capture capability and account authority.
         // Native listing reads bind their newly admitted observation below.
@@ -5419,7 +5453,10 @@ impl AgentWorkController {
                 .and_then(|frame| frame.nodes().first())
                 .is_some_and(|node| node.role() != SemanticRole::Document)
             {
-                let schema = state.extraction_schema.as_ref().ok_or(crate::contract!())?;
+                let schema = state
+                    .extraction_schema
+                    .as_ref()
+                    .ok_or_else(|| crate::contract!())?;
                 let read = read_semantic_observation_for_schema(
                     observation,
                     SemanticReadAuthority::Acknowledged(turn.turn.continuation().baseline()),
@@ -5494,7 +5531,10 @@ impl AgentWorkController {
                 .iter()
                 .map(|frame| frame.frame().clone())
                 .collect::<Vec<_>>();
-            let schema = state.extraction_schema.as_ref().ok_or(crate::contract!())?;
+            let schema = state
+                .extraction_schema
+                .as_ref()
+                .ok_or_else(|| crate::contract!())?;
             let next = state.native.id()?;
             let request = turn
                 .turn
@@ -5502,7 +5542,7 @@ impl AgentWorkController {
                 .begin_extraction_subtree(
                     observation,
                     &frames,
-                    SemanticObservationId::new(next).ok_or(crate::contract!())?,
+                    SemanticObservationId::new(next).ok_or_else(|| crate::contract!())?,
                     schema,
                     SemanticObservationBudget::INITIAL_FILTERED,
                 )
@@ -5510,7 +5550,7 @@ impl AgentWorkController {
             let frame = request
                 .scope()
                 .anchor()
-                .ok_or(crate::contract!())?
+                .ok_or_else(|| crate::contract!())?
                 .frame()
                 .clone();
             state.journal_mut()?.emit(AgentWorkEventKind::Observing)?;
@@ -5588,9 +5628,16 @@ impl AgentWorkController {
         // Freeze the independently verified sample after the existing refresh.
         // That refresh refuses context/account changes; taking its fresh token
         // here preserves exact equality without reauthorizing after closure.
-        let record_crop_account = state.session.as_ref().ok_or(crate::contract!())?.account;
-        let schema = state.extraction_schema.as_ref().ok_or(crate::contract!())?;
-        let session = state.session.as_mut().ok_or(crate::contract!())?;
+        let record_crop_account = state
+            .session
+            .as_ref()
+            .ok_or_else(|| crate::contract!())?
+            .account;
+        let schema = state
+            .extraction_schema
+            .as_ref()
+            .ok_or_else(|| crate::contract!())?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         if let Some(image) = viewport.as_ref() {
             let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
             if session
@@ -5650,7 +5697,7 @@ impl AgentWorkController {
             // Owned extraction already admitted and mapped this exact public
             // observation. This updates source identity, never capture authority.
             SemanticObservationAcknowledgement::whole_page_scope(source)
-                .ok_or(crate::contract!())?
+                .ok_or_else(|| crate::contract!())?
                 .0
         } else {
             record_crop_baseline
@@ -5769,7 +5816,7 @@ impl AgentWorkController {
             return Err(AgentWorkFailure::Context);
         }
         state.native.close_attempted = true;
-        let op = ContextOperationId::new(state.native.id()?).ok_or(crate::contract!())?;
+        let op = ContextOperationId::new(state.native.id()?).ok_or_else(|| crate::contract!())?;
         let operation = state
             .native
             .contexts()?
@@ -5827,7 +5874,7 @@ impl AgentWorkController {
             .as_mut()
             .and_then(|session| session.journal.as_mut())
             .or(state.journal.as_mut())
-            .ok_or(crate::contract!())?;
+            .ok_or_else(|| crate::contract!())?;
         let release = journal
             .supervisor
             .reap_terminal_context(state.native.contexts()?, id)
@@ -5852,7 +5899,8 @@ impl AgentWorkController {
         state.native.close_attempted = true;
         let operation = (|| {
             let id = state.native.identity.id();
-            let op = ContextOperationId::new(state.native.id()?).ok_or(crate::contract!())?;
+            let op =
+                ContextOperationId::new(state.native.id()?).ok_or_else(|| crate::contract!())?;
             state
                 .native
                 .contexts()?
@@ -5881,7 +5929,7 @@ impl AgentWorkController {
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
-        let state = self.state.as_mut().ok_or(crate::contract!())?;
+        let state = self.state.as_mut().ok_or_else(|| crate::contract!())?;
         Self::close_context(state, worker, browser).await?;
         self.close_resources(worker, browser, None).await
     }
@@ -5892,7 +5940,7 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
         deadline: Instant,
     ) -> Result<(), AgentWorkFailure> {
-        let state = self.state.as_ref().ok_or(crate::contract!())?;
+        let state = self.state.as_ref().ok_or_else(|| crate::contract!())?;
         // This is a terminal resource join, not an alternative interpretation
         // of a previous failed close or an acknowledged successful task.
         if state.failure.is_none()
@@ -5923,11 +5971,11 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
         cleanup: Option<Instant>,
     ) -> Result<(), AgentWorkFailure> {
-        let state = self.state.as_mut().ok_or(crate::contract!())?;
+        let state = self.state.as_mut().ok_or_else(|| crate::contract!())?;
         let terminal_intent = match cleanup {
-            Some(_) => {
-                WorkTerminalIntent::ClosedUnsuccessfully(state.failure.ok_or(crate::contract!())?)
-            }
+            Some(_) => WorkTerminalIntent::ClosedUnsuccessfully(
+                state.failure.ok_or_else(|| crate::contract!())?,
+            ),
             None => state.model_human_request.map_or(
                 WorkTerminalIntent::Succeeded,
                 WorkTerminalIntent::WaitingForHuman,
@@ -5955,7 +6003,7 @@ impl AgentWorkController {
             .cookies
             .seal_for_shutdown()
             .map_err(|_| AgentWorkFailure::Shutdown)?;
-        let session = state.session.take().ok_or(crate::contract!())?;
+        let session = state.session.take().ok_or_else(|| crate::contract!())?;
         let unsuccessful = !matches!(terminal_intent, WorkTerminalIntent::Succeeded);
         let finished = if unsuccessful {
             session.try_finish_unsuccessful()
@@ -6021,9 +6069,9 @@ impl AgentWorkController {
             delivery: None,
             scoped_refusal: None,
         });
-        let drained = state.drained.as_mut().ok_or(crate::contract!())?;
+        let drained = state.drained.as_mut().ok_or_else(|| crate::contract!())?;
         match AgentNativeShutdownCoordinator::try_new(
-            drained.resources.take().ok_or(crate::contract!())?,
+            drained.resources.take().ok_or_else(|| crate::contract!())?,
         ) {
             Ok(native) => drained.native = Some(native),
             Err(refusal) => {
@@ -6031,8 +6079,9 @@ impl AgentWorkController {
                 return Err(AgentWorkFailure::Shutdown);
             }
         }
-        let audit = ContextResourceAuditId::new(state.native.id()?).ok_or(crate::contract!())?;
-        let native = drained.native.as_mut().ok_or(crate::contract!())?;
+        let audit =
+            ContextResourceAuditId::new(state.native.id()?).ok_or_else(|| crate::contract!())?;
+        let native = drained.native.as_mut().ok_or_else(|| crate::contract!())?;
         native
             .begin_port_seal(audit)
             .map_err(|_| AgentWorkFailure::Shutdown)?;
@@ -6064,7 +6113,7 @@ impl AgentWorkController {
                 return Err(AgentWorkFailure::Mailbox);
             }
         }
-        let native = drained.native.take().ok_or(crate::contract!())?;
+        let native = drained.native.take().ok_or_else(|| crate::contract!())?;
         match native.finish() {
             Ok(proof) => drained.proof = Some(proof),
             Err(refusal) => {
@@ -6081,10 +6130,10 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
         cleanup: Option<Instant>,
     ) -> Result<(), AgentWorkFailure> {
-        let state = self.state.as_mut().ok_or(crate::contract!())?;
-        let drained = state.drained.as_mut().ok_or(crate::contract!())?;
-        let journal = drained.journal.as_mut().ok_or(crate::contract!())?;
-        let terminal_intent = state.terminal_intent.ok_or(crate::contract!())?;
+        let state = self.state.as_mut().ok_or_else(|| crate::contract!())?;
+        let drained = state.drained.as_mut().ok_or_else(|| crate::contract!())?;
+        let journal = drained.journal.as_mut().ok_or_else(|| crate::contract!())?;
+        let terminal_intent = state.terminal_intent.ok_or_else(|| crate::contract!())?;
         let completion = match terminal_intent {
             WorkTerminalIntent::WaitingForHuman(_) => {
                 AgentSupervisorCompletion::Failed(AgentSupervisorFailure::PolicyDenied)
@@ -6131,7 +6180,7 @@ impl AgentWorkController {
             }
             WorkTerminalIntent::Succeeded => AgentSupervisorCompletion::Succeeded,
         };
-        let execution = journal.execution.take().ok_or(crate::contract!())?;
+        let execution = journal.execution.take().ok_or_else(|| crate::contract!())?;
         journal
             .supervisor
             .complete(execution, completion)
@@ -6151,7 +6200,7 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
         cleanup: Option<Instant>,
     ) -> Result<(), AgentWorkFailure> {
-        let state = self.state.as_mut().ok_or(crate::contract!())?;
+        let state = self.state.as_mut().ok_or_else(|| crate::contract!())?;
         Self::drain_audit(state, worker, browser, cleanup).await?;
         state
             .journal_mut()?
@@ -6228,7 +6277,7 @@ impl AgentWorkController {
         &mut self,
         worker: &mut AgentRuntimeWorker,
     ) -> Result<(), AgentWorkFailure> {
-        let state = self.state.as_mut().ok_or(crate::contract!())?;
+        let state = self.state.as_mut().ok_or_else(|| crate::contract!())?;
         if !state.native.deferred.is_empty()
             || state.native.operation.is_some()
             || state.native.recovery_close.is_some()
@@ -6241,12 +6290,12 @@ impl AgentWorkController {
         {
             return Err(AgentWorkFailure::Mailbox);
         }
-        let drained = state.drained.as_mut().ok_or(crate::contract!())?;
+        let drained = state.drained.as_mut().ok_or_else(|| crate::contract!())?;
         if (drained.proof.is_none() && drained.delivery.is_none()) || drained.provider.is_none() {
             return Err(AgentWorkFailure::Shutdown);
         }
-        let journal = drained.journal.as_ref().ok_or(crate::contract!())?;
-        let terminal_intent = state.terminal_intent.ok_or(crate::contract!())?;
+        let journal = drained.journal.as_ref().ok_or_else(|| crate::contract!())?;
+        let terminal_intent = state.terminal_intent.ok_or_else(|| crate::contract!())?;
         if self.retained_terminal.is_some()
             && matches!(terminal_intent, WorkTerminalIntent::Succeeded)
             && state.extraction.is_none()
@@ -6257,7 +6306,7 @@ impl AgentWorkController {
             drained
                 .policy
                 .as_ref()
-                .ok_or(crate::contract!())?
+                .ok_or_else(|| crate::contract!())?
                 .manifest(),
             &journal.supervisor,
             &journal.accounting,
@@ -6318,8 +6367,8 @@ impl AgentWorkController {
                 });
             }
         };
-        let policy = drained.policy.take().ok_or(crate::contract!())?;
-        let mut journal = drained.journal.take().ok_or(crate::contract!())?;
+        let policy = drained.policy.take().ok_or_else(|| crate::contract!())?;
+        let mut journal = drained.journal.take().ok_or_else(|| crate::contract!())?;
         // The only irreversible boundary is after runtime ingress closes and
         // native/provider proofs already exist. Refusal returns both owners.
         let settlement =
@@ -6376,7 +6425,9 @@ impl AgentWorkController {
                 }
                 WorkTerminalIntent::Succeeded => AgentWorkRetainedOutcome::Accepted {
                     settlement,
-                    extraction: Box::new(state.extraction.take().ok_or(crate::contract!())?),
+                    extraction: Box::new(
+                        state.extraction.take().ok_or_else(|| crate::contract!())?,
+                    ),
                 },
             });
             self.state.take();
@@ -7330,7 +7381,10 @@ impl WorkJournal {
             return Err(AgentWorkFailure::Accounting);
         }
         self.supervisor
-            .record_active_model_call(self.execution.as_ref().ok_or(crate::contract!())?, call)
+            .record_active_model_call(
+                self.execution.as_ref().ok_or_else(|| crate::contract!())?,
+                call,
+            )
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.record()?;
         self.emit(AgentWorkEventKind::ModelActive)
@@ -7342,7 +7396,7 @@ impl WorkJournal {
     ) -> Result<(), AgentWorkFailure> {
         self.supervisor
             .record_human_refusal(
-                self.execution.as_ref().ok_or(crate::contract!())?,
+                self.execution.as_ref().ok_or_else(|| crate::contract!())?,
                 transition,
             )
             .map_err(|_| AgentWorkFailure::Accounting)?;
@@ -7362,7 +7416,10 @@ impl WorkJournal {
             .record(input)
             .map_err(AgentWorkFailure::InputAccounting)?;
         self.supervisor
-            .record_model_call_result(self.execution.as_ref().ok_or(crate::contract!())?, receipt)
+            .record_model_call_result(
+                self.execution.as_ref().ok_or_else(|| crate::contract!())?,
+                receipt,
+            )
             .map_err(AgentWorkFailure::Supervisor)?;
         self.record()?;
         let elapsed_millis = u64::try_from(
@@ -7393,7 +7450,10 @@ impl WorkJournal {
         effect: &AgentActiveEffect,
     ) -> Result<(), AgentWorkFailure> {
         self.supervisor
-            .record_active_effect(self.execution.as_ref().ok_or(crate::contract!())?, effect)
+            .record_active_effect(
+                self.execution.as_ref().ok_or_else(|| crate::contract!())?,
+                effect,
+            )
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.record()?;
         self.emit(AgentWorkEventKind::ActionActive)
@@ -7412,7 +7472,10 @@ impl WorkJournal {
             .record_batch_result(batch)
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.supervisor
-            .record_effect_result(self.execution.as_ref().ok_or(crate::contract!())?, receipt)
+            .record_effect_result(
+                self.execution.as_ref().ok_or_else(|| crate::contract!())?,
+                receipt,
+            )
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.record()?;
         if page_change {
@@ -7452,7 +7515,10 @@ impl WorkJournal {
             .record_batch_result(batch)
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.supervisor
-            .record_effect_result(self.execution.as_ref().ok_or(crate::contract!())?, receipt)
+            .record_effect_result(
+                self.execution.as_ref().ok_or_else(|| crate::contract!())?,
+                receipt,
+            )
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.record()?;
         self.emit(if issued {

@@ -33,7 +33,7 @@ impl AgentWorkController {
         if !state.progressive_observation {
             return Err(crate::contract!());
         }
-        let session = state.session.as_ref().ok_or(crate::contract!())?;
+        let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
         session.check_live().map_err(AgentWorkFailure::Browser)?;
         // Inspection must leave room for the next decision and terminal mapper.
         // It never renews the original model-call or wall-clock budget.
@@ -82,7 +82,8 @@ impl AgentWorkController {
                 Err(error) => return Err(error),
             }
         } else {
-            let id = SemanticObservationId::new(state.native.id()?).ok_or(crate::contract!())?;
+            let id =
+                SemanticObservationId::new(state.native.id()?).ok_or_else(|| crate::contract!())?;
             let request = checkpoint
                 .request(previous, id)
                 .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation))?;
@@ -112,12 +113,12 @@ impl AgentWorkController {
         let action_authority = state
             .session
             .as_ref()
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .config
             .permits_tool(AgentBrowserToolKind::Act)
             .then(|| state.action_authority(&current))
             .transpose()?;
-        let session = state.session.as_mut().ok_or(crate::contract!())?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let next = Self::provider(
             &mut state.native,
             worker,

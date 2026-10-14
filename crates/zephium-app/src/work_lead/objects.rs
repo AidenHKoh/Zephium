@@ -480,23 +480,32 @@ pub(crate) fn propose(
     lenient: bool,
 ) -> Result<Proposed, (String, ObjectRefusal)> {
     if matches!(kind, "picks" | "sheet") && data.get("records").is_some() {
-        let request = serde_json::from_value::<super::records::Presentation>(serde_json::json!({
-            "title": title, "layout": if kind == "picks" { "picks" } else { "table" },
-            "records": data["records"],
-        }))
-        .map_err(|_| {
-            (
-                "each record is source, with optional subtitle, facts, annotation and recommended"
-                    .into(),
-                ObjectRefusal::Shape,
-            )
-        })?;
-        if data.as_object().is_none_or(|fields| fields.len() != 1) {
+        // Records the lead chose stand on what the read returned; any item
+        // values written beside them are dropped, never published.
+        let records: Vec<_> = match &data["records"] {
+            Value::Array(records) => records
+                .iter()
+                .filter_map(super::records::Selection::loose)
+                .collect(),
+            record => super::records::Selection::loose(record)
+                .into_iter()
+                .collect(),
+        };
+        if records.is_empty() {
             return Err((
-                "records cannot be combined with rewritten item values".into(),
+                "records lists r keys from reads, each a key or {source, subtitle, facts, annotation, recommended}".into(),
                 ObjectRefusal::Shape,
             ));
         }
+        let request = super::records::Presentation {
+            title: title.to_owned(),
+            layout: if kind == "picks" {
+                super::records::Layout::Picks
+            } else {
+                super::records::Layout::Table
+            },
+            records,
+        };
         return run
             .records
             .lock()

@@ -224,7 +224,7 @@ impl AgentWorkController {
                 state
                     .current_navigation_target()
                     .cloned()
-                    .ok_or(crate::contract!())?,
+                    .ok_or_else(|| crate::contract!())?,
             )
         };
         if !is_back
@@ -236,7 +236,7 @@ impl AgentWorkController {
         {
             return Err(crate::contract!());
         }
-        let session = state.session.as_ref().ok_or(crate::contract!())?;
+        let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
         // Keep the original total ceiling and reserve the remaining exact route
         // proposals plus final extraction/mapping; no hop receives a new budget.
         let remaining_hops = if discovery.is_some() {
@@ -245,7 +245,7 @@ impl AgentWorkController {
             state
                 .navigation_length()
                 .checked_sub(state.navigation_hops)
-                .ok_or(crate::contract!())?
+                .ok_or_else(|| crate::contract!())?
         };
         if usize::from(session.turns) + remaining_hops + 1 > usize::from(session.max_model_calls)
             || usize::try_from(
@@ -283,7 +283,7 @@ impl AgentWorkController {
             let now = state
                 .session
                 .as_mut()
-                .ok_or(crate::contract!())?
+                .ok_or_else(|| crate::contract!())?
                 .policy_now()
                 .map_err(AgentWorkFailure::Browser)?;
             retained.automation_state(now)?
@@ -295,18 +295,21 @@ impl AgentWorkController {
                 .map_err(|_| AgentWorkFailure::Context)?
         };
         let legacy_operation = if state.native.retained.is_none() {
-            Some(ContextOperationId::new(state.native.id()?).ok_or(crate::contract!())?)
+            Some(ContextOperationId::new(state.native.id()?).ok_or_else(|| crate::contract!())?)
         } else {
             None
         };
-        let session = state.session.as_mut().ok_or(crate::contract!())?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let (continuation, following) = match (turn, follow) {
             (Some(turn), None) => (turn.into_tool_turn().into_parts().1, false),
             (None, Some((continuation, _))) => (continuation, true),
             _ => return Err(crate::contract!()),
         };
         if state.navigation_discovery.is_some() {
-            let schema = state.extraction_schema.as_ref().ok_or(crate::contract!())?;
+            let schema = state
+                .extraction_schema
+                .as_ref()
+                .ok_or_else(|| crate::contract!())?;
             let read = read_semantic_observation_for_schema(
                 observation,
                 SemanticReadAuthority::Acknowledged(continuation.baseline()),
@@ -341,14 +344,14 @@ impl AgentWorkController {
                 authorization,
                 observation,
                 continuation.baseline(),
-                proposed_target.as_ref().ok_or(crate::contract!())?,
+                proposed_target.as_ref().ok_or_else(|| crate::contract!())?,
             )
         } else {
             session.policy.authorize_navigation(
                 authorization,
                 observation,
                 continuation.baseline(),
-                proposed_target.as_ref().ok_or(crate::contract!())?,
+                proposed_target.as_ref().ok_or_else(|| crate::contract!())?,
             )
         }
         .map_err(|error| {
@@ -381,7 +384,7 @@ impl AgentWorkController {
         let prepared = if let Some(retained) = &mut state.native.retained {
             retained.prepare_navigation(automation.context(), now)
         } else {
-            let op = legacy_operation.ok_or(crate::contract!())?;
+            let op = legacy_operation.ok_or_else(|| crate::contract!())?;
             state
                 .native
                 .contexts()?
@@ -394,7 +397,7 @@ impl AgentWorkController {
                 state
                     .session
                     .as_mut()
-                    .ok_or(crate::contract!())?
+                    .ok_or_else(|| crate::contract!())?
                     .policy
                     .cancel_navigation(permit)
                     .map_err(|error| {
@@ -405,7 +408,7 @@ impl AgentWorkController {
         };
         // The old registry join is now irrevocably stale, before native dispatch.
         state.native.snapshot_generation = None;
-        let session = state.session.as_mut().ok_or(crate::contract!())?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let active = session
             .policy
             .dispatch_navigation(permit, operation, now)
@@ -427,7 +430,10 @@ impl AgentWorkController {
             }
         };
         session.navigation = Some(active);
-        let active = session.navigation.as_ref().ok_or(crate::contract!())?;
+        let active = session
+            .navigation
+            .as_ref()
+            .ok_or_else(|| crate::contract!())?;
         state.native.operation = Some(operation);
         let dispatch = if let Some(retained) = &mut state.native.retained {
             if is_back {
@@ -457,7 +463,7 @@ impl AgentWorkController {
         let journal_failure = session
             .journal
             .as_mut()
-            .ok_or(crate::contract!())
+            .ok_or_else(|| crate::contract!())
             .and_then(|journal| journal.navigation_active(active))
             .err();
         if let Some(failure) = refusal {
@@ -472,7 +478,7 @@ impl AgentWorkController {
             let terminal = state
                 .session
                 .as_mut()
-                .ok_or(crate::contract!())?
+                .ok_or_else(|| crate::contract!())?
                 .settle_navigation_refusal();
             let terminal = match terminal {
                 Ok(terminal) => terminal,
@@ -492,7 +498,7 @@ impl AgentWorkController {
                 let result = state
                     .session
                     .as_mut()
-                    .ok_or(crate::contract!())?
+                    .ok_or_else(|| crate::contract!())?
                     .settle_navigation_terminal(&terminal);
                 let terminal_record = match result {
                     Ok(terminal_record) => terminal_record,
@@ -556,7 +562,7 @@ impl AgentWorkController {
         let now = state
             .session
             .as_mut()
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .policy_now()
             .map_err(AgentWorkFailure::Browser)?;
         let account = state.task.attest_account(operation.context(), now);
@@ -564,7 +570,7 @@ impl AgentWorkController {
         state
             .session
             .as_mut()
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .accept_arrival(receipt, account?)
             .map_err(AgentWorkFailure::Browser)?;
         // A move can land on a sign-in, code or bot-check page: the person
@@ -592,7 +598,7 @@ impl AgentWorkController {
         let action_authority = state
             .session
             .as_ref()
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .config
             .permits_tool(AgentBrowserToolKind::Act)
             .then(|| state.action_authority(&fresh))
@@ -600,14 +606,14 @@ impl AgentWorkController {
         let now = state
             .session
             .as_mut()
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .policy_now()
             .map_err(AgentWorkFailure::Browser)?;
         let account = state.task.attest_account(operation.context(), now);
         state.native.check_control(worker, browser)?;
         state.check_task_contract()?;
         let account = account?;
-        let session = state.session.as_mut().ok_or(crate::contract!())?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let turn = Self::provider(
             &mut state.native,
             worker,
@@ -702,7 +708,7 @@ impl AgentBrowserSession {
             return Err(crate::contract!());
         }
         let now = self.policy_now().map_err(AgentWorkFailure::Browser)?;
-        let active = self.navigation.as_ref().ok_or(crate::contract!())?;
+        let active = self.navigation.as_ref().ok_or_else(|| crate::contract!())?;
         let receipt = self
             .policy
             .settle_navigation(active, terminal, now)
@@ -720,7 +726,7 @@ impl AgentBrowserSession {
     pub(super) fn settle_navigation_refusal(
         &mut self,
     ) -> Result<NavigationTerminal, AgentWorkFailure> {
-        let refusal = self.navigation_refusal.ok_or(crate::contract!())?;
+        let refusal = self.navigation_refusal.ok_or_else(|| crate::contract!())?;
         if self
             .navigation
             .as_ref()
@@ -730,7 +736,7 @@ impl AgentBrowserSession {
             return Err(crate::contract!());
         }
         let now = self.policy_now().map_err(AgentWorkFailure::Browser)?;
-        let active = self.navigation.as_ref().ok_or(crate::contract!())?;
+        let active = self.navigation.as_ref().ok_or_else(|| crate::contract!())?;
         let receipt = self
             .policy
             .refuse_navigation_dispatch(active, refusal.failure, now)
@@ -750,7 +756,7 @@ impl AgentBrowserSession {
         let journal_failure = self
             .journal
             .as_mut()
-            .ok_or(crate::contract!())
+            .ok_or_else(|| crate::contract!())
             .and_then(|journal| journal.navigation_settled(receipt))
             .err();
         if journal_failure.is_none() {
@@ -890,7 +896,10 @@ impl WorkJournal {
         active: &AgentActiveNavigation,
     ) -> Result<(), AgentWorkFailure> {
         self.supervisor
-            .record_active_navigation(self.execution.as_ref().ok_or(crate::contract!())?, active)
+            .record_active_navigation(
+                self.execution.as_ref().ok_or_else(|| crate::contract!())?,
+                active,
+            )
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.record()
     }
@@ -903,7 +912,10 @@ impl WorkJournal {
             .record_navigation_receipt(receipt)
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.supervisor
-            .record_navigation_result(self.execution.as_ref().ok_or(crate::contract!())?, receipt)
+            .record_navigation_result(
+                self.execution.as_ref().ok_or_else(|| crate::contract!())?,
+                receipt,
+            )
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.record()
     }

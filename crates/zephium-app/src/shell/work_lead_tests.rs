@@ -2999,7 +2999,7 @@ impl WorkModelClient for NativeRecordFinish {
                         seen.contains(if self.0 == 5 {
                             "140"
                         } else if self.0 == 1 {
-                            "use data.records"
+                            "Placed sheet"
                         } else if self.0 == 4 {
                             "is not a source of this run"
                         } else {
@@ -3103,12 +3103,17 @@ async fn native_record_finish_fixture(mode: u8) {
             _ => None,
         })
         .collect();
+    // Rows naming records stand as those records: the page's price, never
+    // the model's.
+    let stored = serde_json::to_string(&execution.artifacts).unwrap();
     assert!(
-        !execution
-            .artifacts
-            .iter()
-            .any(|a| matches!(a.data, WorkArtifactDataV1::Sheet { .. })),
+        !stored.contains("FREE"),
         "a model rewrite must never reach storage"
+    );
+    assert_eq!(
+        stored.contains("\"sheet\""),
+        mode == 1,
+        "only a sheet of records may stand"
     );
     if mode == 5 {
         // An overlong point is clipped between words; the finish needs no repair.

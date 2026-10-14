@@ -345,7 +345,7 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
     ) -> Result<SemanticOperations, AgentWorkFailure> {
         self.local_actions
             .as_ref()
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .model_action_operations(node, observation)
     }
     fn model_action_effect(&self) -> Option<SemanticEffectClass> {
@@ -369,7 +369,7 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
     ) -> Result<(), AgentWorkFailure> {
         self.local_actions
             .as_mut()
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .accept_verified_action(result, observation)
     }
     fn terminal_extraction_ready(&self) -> bool {
@@ -416,9 +416,15 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         action: &SemanticPreparedAction,
         observation: &SemanticObservation,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
-        let policy = self.local_actions.as_ref().ok_or(crate::contract!())?;
+        let policy = self
+            .local_actions
+            .as_ref()
+            .ok_or_else(|| crate::contract!())?;
         let request = observation.request();
-        let snapshot = observation.frames().first().ok_or(crate::contract!())?;
+        let snapshot = observation
+            .frames()
+            .first()
+            .ok_or_else(|| crate::contract!())?;
         if self.complete
             || self.current != Some((request.context(), request.id()))
             || action.source_observation() != request.id()
@@ -503,7 +509,7 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         &mut self,
         result: &SemanticExtractionResult<'_>,
     ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
-        let (context, observation) = self.current.ok_or(crate::contract!())?;
+        let (context, observation) = self.current.ok_or_else(|| crate::contract!())?;
         if self.complete
             || result.observation() != observation
             || self.account.get().map(|sample| sample.context()) != Some(context)
@@ -766,7 +772,7 @@ mod tests {
     struct Source(Arc<Mutex<Option<AgentContextAccountBinding>>>);
     impl AgentWorkAccountSource for Source {
         fn sample(&self, _: ContextJoin) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
-            self.0.lock().unwrap().ok_or(crate::contract!())
+            self.0.lock().unwrap().ok_or_else(|| crate::contract!())
         }
     }
 

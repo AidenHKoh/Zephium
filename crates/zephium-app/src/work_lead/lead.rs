@@ -1001,10 +1001,10 @@ where
         } else if let Some(existing) = objects::duplicate(&canvas, kind, title, part) {
             return self.revise(&with_id(args, existing.artifact.id)).await;
         }
-        let data = args.get("data").cloned().unwrap_or(Value::Null);
+        let mut data = args.get("data").cloned().unwrap_or(Value::Null);
         let sources = strings(args.get("sources"));
-        if let Some(fault) = self.rewritten_record(kind, &data) {
-            return self.refuse(&key, ObjectRefusal::Source, fault);
+        if let Some(records) = self.as_records(kind, &data) {
+            data = records;
         }
         let mut proposed =
             match objects::propose(self.run, &canvas, kind, title, data, &sources, &[], lenient) {
@@ -1068,30 +1068,45 @@ where
     /// A hand-written pick or row that restates a record this run read: its
     /// values must come from the record, so it is selected by its r key. A
     /// pick that draws a route (a flight) is the lead's own shape.
-    fn rewritten_record(&self, kind: &str, data: &Value) -> Option<String> {
+    /// Hand-written picks or rows that name only records this run read stand
+    /// as those records, so their prices, links and pictures are the page's.
+    /// The lead's own words about each one are kept as its note.
+    fn as_records(&self, kind: &str, data: &Value) -> Option<Value> {
         if data.get("records").is_some() {
             return None;
         }
         let records = self.run.records.lock().unwrap_or_else(|e| e.into_inner());
-        let rewritten = match kind {
-            "picks" => data["items"].as_array().is_some_and(|items| {
-                items.iter().any(|item| {
-                    item.get("route").is_none()
-                        && item["name"]
-                            .as_str()
-                            .is_some_and(|name| records.names(name))
-                })
-            }),
-            "sheet" => data["rows"].as_array().is_some_and(|rows| {
-                rows.iter().any(|row| {
-                    row["cells"][0]
-                        .as_str()
-                        .is_some_and(|name| records.names(name))
-                })
-            }),
-            _ => false,
+        let items = match kind {
+            "picks" => data["items"].as_array()?,
+            "sheet" => data["rows"].as_array()?,
+            _ => return None,
         };
-        rewritten.then(|| "These are records a read returned: use data.records with their r keys in the desired order, and add subtitle, facts and annotation per record. Rust copies names, prices, links and pictures.".into())
+        let chosen = items
+            .iter()
+            .map(|item| {
+                if item.get("route").is_some() {
+                    return None;
+                }
+                let name = if kind == "picks" {
+                    item["name"].as_str()
+                } else {
+                    item["cells"][0].as_str()
+                }?;
+                let mut record = serde_json::json!({ "source": records.key_of(name)? });
+                for (from, to) in [
+                    ("why", "annotation"),
+                    ("subtitle", "subtitle"),
+                    ("facts", "facts"),
+                    ("recommended", "recommended"),
+                ] {
+                    if let Some(value) = item.get(from).filter(|_| record.get(to).is_none()) {
+                        record[to] = value.clone();
+                    }
+                }
+                Some(record)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (!chosen.is_empty()).then(|| serde_json::json!({ "records": chosen }))
     }
 
     async fn revise(&self, args: &Value) -> (String, bool) {
@@ -1612,8 +1627,29 @@ where
     /// the run finishes. A run never dies with nothing to show.
     async fn close(&self, stall: Stall) -> Result<WorkAttemptStatus, WorkError> {
         self.run.report(super::WorkLeadDiagnostic::Closed { stall });
-        let projection = self.run.probe.runtime_projection().await.ok();
         let execution = self.run.probe.execution();
+        let mut projection = self.run.probe.runtime_projection().await.ok();
+        let found_nothing = projection.as_ref().is_some_and(|projection| {
+            !objects::canvas(projection, execution)
+                .iter()
+                .any(|o| o.in_this_run && o.artifact.data.kind_name() != "reply")
+        });
+        if found_nothing {
+            let proposed = {
+                let records = self.run.records.lock().unwrap_or_else(|e| e.into_inner());
+                records
+                    .read_so_far()
+                    .and_then(|request| records.present(&request).ok())
+            };
+            if let Some(proposed) = proposed {
+                if objects::publish(self.run, proposed, None, None)
+                    .await
+                    .is_ok()
+                {
+                    projection = self.run.probe.runtime_projection().await.ok();
+                }
+            }
+        }
         let placed: Vec<String> = projection
             .as_ref()
             .map(|projection| objects::canvas(projection, execution))

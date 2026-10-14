@@ -101,7 +101,7 @@ impl AgentWorkController {
         for _ in 0..MAX_LOADING_STEPS {
             state.check_task_contract()?;
             state.native.check_control(worker, browser)?;
-            let session = state.session.as_ref().ok_or(crate::contract!())?;
+            let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
             if started.elapsed() >= Duration::from_millis(MAX_LOADING_MILLIS)
                 || session.next_action > session.max_actions
                 || session.turns.saturating_add(1) >= session.max_model_calls

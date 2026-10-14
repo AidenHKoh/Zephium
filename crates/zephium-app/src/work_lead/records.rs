@@ -83,13 +83,109 @@ pub(crate) enum Layout {
     Table,
 }
 
+impl Selection {
+    /// A record the lead chose, read leniently: a bare key, or an object whose
+    /// stray fields are dropped. The record's name, price, link and pictures
+    /// come from the read, so nothing the lead adds can rewrite them.
+    pub fn loose(value: &Value) -> Option<Self> {
+        let text = |value: &Value| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned)
+        };
+        if let Some(source) = text(value) {
+            return Some(Self {
+                source,
+                annotation: None,
+                recommended: false,
+                subtitle: None,
+                facts: vec![],
+            });
+        }
+        let map = value.as_object()?;
+        let field = |names: &[&str]| names.iter().find_map(|name| map.get(*name).and_then(text));
+        let fact = |value: &Value| match value {
+            Value::String(line) => line.split_once(':').and_then(|(label, value)| {
+                let (label, value) = (label.trim(), value.trim());
+                (!label.is_empty() && !value.is_empty()).then(|| Fact {
+                    label: label.into(),
+                    value: value.into(),
+                })
+            }),
+            Value::Object(fact) => {
+                let label = ["label", "name", "key"]
+                    .iter()
+                    .find_map(|name| fact.get(*name).and_then(text))?;
+                let value = fact.get("value").and_then(|value| match value {
+                    Value::Number(number) => Some(number.to_string()),
+                    value => text(value),
+                })?;
+                Some(Fact { label, value })
+            }
+            _ => None,
+        };
+        let facts = match map.get("facts") {
+            Some(Value::Array(facts)) => facts.iter().filter_map(fact).collect(),
+            Some(Value::Object(facts)) => facts
+                .iter()
+                .filter_map(|(label, value)| {
+                    Some(Fact {
+                        label: label.trim().to_owned(),
+                        value: text(value)?,
+                    })
+                })
+                .collect(),
+            _ => vec![],
+        };
+        Some(Self {
+            source: field(&["source", "key", "record", "r", "id"])?,
+            annotation: field(&["annotation", "note", "why", "reason"]),
+            recommended: match map.get("recommended").or_else(|| map.get("top_pick")) {
+                Some(Value::Bool(pick)) => *pick,
+                Some(Value::String(pick)) => matches!(pick.trim(), "true" | "yes"),
+                _ => false,
+            },
+            subtitle: field(&["subtitle", "descriptor"]),
+            facts,
+        })
+    }
+}
+
 impl Records {
-    /// Whether `name` is the name of a record this run read.
-    pub fn names(&self, name: &str) -> bool {
-        let name = name.trim();
-        self.rows
+    /// The records a run read, in read order, for a run that stopped before
+    /// it chose among them: a stall never hides what was found.
+    pub fn read_so_far(&self) -> Option<Presentation> {
+        let title = self
+            .rows
             .iter()
-            .any(|row| row.subject.name.trim().eq_ignore_ascii_case(name))
+            .find_map(|row| row.collection.as_ref().map(|c| c.title.clone()))?;
+        Some(Presentation {
+            title,
+            layout: Layout::Picks,
+            records: (1..=self.rows.len().min(MAX_PICKS))
+                .map(|index| Selection {
+                    source: format!("r{index}"),
+                    annotation: None,
+                    recommended: false,
+                    subtitle: None,
+                    facts: vec![],
+                })
+                .collect(),
+        })
+    }
+
+    /// The key of the one record this run read under `name`.
+    pub fn key_of(&self, name: &str) -> Option<String> {
+        let name = name.trim();
+        let mut found = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.subject.name.trim().eq_ignore_ascii_case(name));
+        let (index, _) = found.next()?;
+        found.next().is_none().then(|| format!("r{}", index + 1))
     }
 
     pub fn remember_site(
@@ -804,9 +900,15 @@ mod tests {
         let mut nothing = request("picks");
         nothing.records = vec![serde_json::from_value(json!({"source":"r9"})).unwrap()];
         assert!(records.present(&nothing).is_err());
-        assert!(
-            serde_json::from_value::<Selection>(json!({"source":"r1","price":"free"})).is_err()
-        );
+        let rewrite = Selection::loose(&json!({"source":"r1","price":"free"})).unwrap();
+        assert!(rewrite.facts.is_empty() && rewrite.annotation.is_none());
+        assert_eq!(Selection::loose(&json!(" r2 ")).unwrap().source, "r2");
+        let lead = Selection::loose(&json!({"key":"r3","note":"Like new","recommended":"true",
+            "facts":["VRAM: 24 GB", {"name":"Condition","value":"Used"}, "loose words"]}))
+        .unwrap();
+        assert_eq!((lead.source.as_str(), lead.recommended), ("r3", true));
+        assert_eq!(lead.annotation.as_deref(), Some("Like new"));
+        assert_eq!(lead.facts.len(), 2);
         records.rows[0].subject.name = "界".repeat(200);
         assert!(records.present(&request("picks")).is_ok());
         records.rows[0].subject.name = "界".repeat(201);

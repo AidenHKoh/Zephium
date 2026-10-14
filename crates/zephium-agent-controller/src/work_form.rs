@@ -345,7 +345,7 @@ impl AgentWorkFormTask {
                                 option = Some(node);
                             }
                         }
-                        let option = option.ok_or(crate::contract!())?;
+                        let option = option.ok_or_else(|| crate::contract!())?;
                         if selected > 1 {
                             return Err(crate::contract!());
                         }
@@ -532,7 +532,7 @@ impl AgentWorkTask for AgentWorkFormTask {
         node: &SemanticNode,
         observation: &SemanticObservation,
     ) -> Result<SemanticOperations, AgentWorkFailure> {
-        let baseline = self.baseline.as_ref().ok_or(crate::contract!())?;
+        let baseline = self.baseline.as_ref().ok_or_else(|| crate::contract!())?;
         if self.refused
             || observation.request().id() != baseline.observation
             || observation.request().generation() != baseline.generation
@@ -550,7 +550,7 @@ impl AgentWorkTask for AgentWorkFormTask {
             .phases
             .get(self.phase)
             .and_then(|phase| phase.goals.get(binding.goal))
-            .ok_or(crate::contract!())?;
+            .ok_or_else(|| crate::contract!())?;
         let operation = match goal.kind {
             SemanticActionKind::Fill => SemanticOperationClass::Fill,
             SemanticActionKind::Select => SemanticOperationClass::Select,
@@ -562,8 +562,11 @@ impl AgentWorkTask for AgentWorkFormTask {
         &self,
         action: &SemanticPreparedAction,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
-        let baseline = self.baseline.as_ref().ok_or(crate::contract!())?;
-        let phase = self.phases.get(self.phase).ok_or(crate::contract!())?;
+        let baseline = self.baseline.as_ref().ok_or_else(|| crate::contract!())?;
+        let phase = self
+            .phases
+            .get(self.phase)
+            .ok_or_else(|| crate::contract!())?;
         if self.refused
             || action.source_observation() != baseline.observation
             || action.source_observation_generation() != baseline.generation
@@ -577,7 +580,7 @@ impl AgentWorkTask for AgentWorkFormTask {
             .bindings
             .iter()
             .find(|binding| binding.target == action.target_reference())
-            .ok_or(crate::contract!())?;
+            .ok_or_else(|| crate::contract!())?;
         let goal = &phase.goals[binding.goal];
         if action.kind() != goal.kind
             || action.bound_action().option_reference() != binding.option

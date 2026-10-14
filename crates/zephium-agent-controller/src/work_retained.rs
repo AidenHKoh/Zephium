@@ -448,7 +448,9 @@ impl AgentWorkRetainedController {
         browser: &dyn AgentWorkRetainedBrowser,
     ) -> Result<(), AgentWorkFailure> {
         let prior = waiting.request();
-        let expected_resource = prior.retained_resource().ok_or(crate::contract!())?;
+        let expected_resource = prior
+            .retained_resource()
+            .ok_or_else(|| crate::contract!())?;
         let binding = browser.binding();
         if binding.lease().resource().identity() != expected_resource
             || binding.lease().run() == prior.context().identity().owner()
@@ -601,7 +603,7 @@ impl AgentWorkRetainedController {
                 > input
                     .manifest
                     .plan_node(input.lease.node())
-                    .ok_or(crate::contract!())?
+                    .ok_or_else(|| crate::contract!())?
                     .expires_at()
             || binding.lease().deadline() <= now
         {
@@ -665,8 +667,14 @@ impl zephium_agent_runtime::AgentRuntimeScopedController for AgentWorkRetainedCo
                     controller
                         .state
                         .as_mut()
-                        .ok_or(crate::contract!())
-                        .and_then(|state| state.native.retained.as_mut().ok_or(crate::contract!()))
+                        .ok_or_else(|| crate::contract!())
+                        .and_then(|state| {
+                            state
+                                .native
+                                .retained
+                                .as_mut()
+                                .ok_or_else(|| crate::contract!())
+                        })
                         .and_then(|browser| browser.register_listener(cx.waker().clone())),
                 )
             })
@@ -757,15 +765,19 @@ impl WorkNative {
         // Both operations already own native callback debt. Revoked document
         // health cannot prevent reconciliation of their original terminal.
         self.check_stop(worker, browser)?;
-        let clock = self.clock.as_ref().ok_or(crate::contract!())?.clone();
-        let retained = self.retained.as_mut().ok_or(crate::contract!())?;
+        let clock = self
+            .clock
+            .as_ref()
+            .ok_or_else(|| crate::contract!())?
+            .clone();
+        let retained = self.retained.as_mut().ok_or_else(|| crate::contract!())?;
         let deadline = if let Some(deadline) = action {
             let now = clock.now().map_err(|_| crate::contract!())?;
             Instant::now()
                 .checked_add(Duration::from_millis(
                     deadline.millis().saturating_sub(now.millis()),
                 ))
-                .ok_or(crate::contract!())?
+                .ok_or_else(|| crate::contract!())?
                 .min(self.deadline)
         } else {
             Instant::now()
@@ -833,7 +845,7 @@ impl WorkNative {
             let now = self
                 .clock
                 .as_ref()
-                .ok_or(crate::contract!())?
+                .ok_or_else(|| crate::contract!())?
                 .now()
                 .map_err(|_| crate::contract!())?;
             browser.check_health(now)?;
@@ -861,8 +873,12 @@ impl WorkNative {
         capability: WorkBrowserObservationCapability,
     ) -> Result<SemanticObservation, AgentWorkFailure> {
         self.check_control(worker, &WorkBrowser::Retained)?;
-        let clock = self.clock.as_ref().ok_or(crate::contract!())?.clone();
-        let browser = self.retained.as_mut().ok_or(crate::contract!())?;
+        let clock = self
+            .clock
+            .as_ref()
+            .ok_or_else(|| crate::contract!())?
+            .clone();
+        let browser = self.retained.as_mut().ok_or_else(|| crate::contract!())?;
         let now = clock.now().map_err(|_| crate::contract!())?;
         match expansion {
             Some((previous, acknowledgement, target, kind)) => browser
@@ -1027,14 +1043,14 @@ impl AgentWorkController {
         worker: &mut AgentRuntimeWorker,
         cleanup: Option<Instant>,
     ) -> Result<(), AgentWorkFailure> {
-        let state = self.state.as_mut().ok_or(crate::contract!())?;
+        let state = self.state.as_mut().ok_or_else(|| crate::contract!())?;
         if state.drained.is_some() || state.native.resources.is_some() {
             return Err(crate::contract!());
         }
         let terminal_intent = match cleanup {
-            Some(_) => {
-                WorkTerminalIntent::ClosedUnsuccessfully(state.failure.ok_or(crate::contract!())?)
-            }
+            Some(_) => WorkTerminalIntent::ClosedUnsuccessfully(
+                state.failure.ok_or_else(|| crate::contract!())?,
+            ),
             None => state.model_human_request.map_or(
                 WorkTerminalIntent::Succeeded,
                 WorkTerminalIntent::WaitingForHuman,
@@ -1055,9 +1071,13 @@ impl AgentWorkController {
             .native
             .clock
             .as_ref()
-            .ok_or(crate::contract!())?
+            .ok_or_else(|| crate::contract!())?
             .clone();
-        let browser = state.native.retained.as_mut().ok_or(crate::contract!())?;
+        let browser = state
+            .native
+            .retained
+            .as_mut()
+            .ok_or_else(|| crate::contract!())?;
         if state.native.retained_delivery.is_none() {
             let delivery = tokio::time::timeout_at(
                 tokio::time::Instant::from_std(deadline),
@@ -1077,7 +1097,7 @@ impl AgentWorkController {
             .map_err(|_| AgentWorkFailure::Deadline)??;
             state.native.retained_delivery = Some(delivery);
         }
-        let session = state.session.take().ok_or(crate::contract!())?;
+        let session = state.session.take().ok_or_else(|| crate::contract!())?;
         let terminal = match if !matches!(terminal_intent, WorkTerminalIntent::Succeeded) {
             session.try_finish_unsuccessful()
         } else {

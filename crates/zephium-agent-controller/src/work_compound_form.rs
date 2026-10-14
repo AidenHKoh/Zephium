@@ -104,7 +104,7 @@ impl AgentWorkController {
         turn: AgentBrowserProviderTurn,
         original: &SemanticObservation,
     ) -> Result<PreparedForm, AgentWorkFailure> {
-        let session = state.session.as_ref().ok_or(crate::contract!())?;
+        let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
         let config = session.config.clone();
         let binding = match turn.turn.proposal() {
             AgentBrowserToolProposal::FillForm(form) => turn
@@ -292,12 +292,13 @@ impl AgentWorkController {
             .iter()
             .map(|frame| frame.frame().clone())
             .collect::<Vec<_>>();
-        let session = state.session.as_mut().ok_or(crate::contract!())?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         session
             .policy
             .admit_owned_observation(observation, session.account)
             .map_err(|_| crate::contract!())?;
-        let batch = SemanticActionBatchId::new(session.next_action).ok_or(crate::contract!())?;
+        let batch =
+            SemanticActionBatchId::new(session.next_action).ok_or_else(|| crate::contract!())?;
         let mut admitted = None;
         for _ in 0..2 {
             let Ok(proposal) = crate::AgentBrowserActionProposal::bind_code_owned(
@@ -369,7 +370,7 @@ impl AgentWorkController {
                     failure,
                 )),
             )) if crate::action::refused_before_acting(failure) => {
-                let session = state.session.as_mut().ok_or(crate::contract!())?;
+                let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
                 let _ = session.take_rejected_refusal();
                 if session
                     .close_failed_owned_action()
@@ -390,7 +391,7 @@ impl AgentWorkController {
                             | AgentBrowserProviderError::ActionUnverified
                     ) =>
             {
-                let session = state.session.as_mut().ok_or(crate::contract!())?;
+                let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
                 let _ = session.take_rejected_refusal();
                 if session
                     .close_failed_owned_action()
