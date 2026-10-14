@@ -15,10 +15,9 @@
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
   const board = getContext<BoardActions | undefined>(canvasBoard);
   const all = $derived(item.drawn?.rows ?? []);
-  /** What the run used leads; search results it only looked at fold into one line. */
-  const used = $derived(all.filter((row) => row.used));
-  const rows = $derived(used.length ? used : all);
-  const looked = $derived(used.length ? all.filter((row) => !row.used) : []);
+  /** Only what the run read or cites is listed; search results it only looked at fold into one line. */
+  const rows = $derived(all.filter((row) => row.used));
+  const looked = $derived(all.filter((row) => !row.used));
   const unread = $derived(item.drawn?.unread ?? []);
   /** Pictures of the pages the run read, up to four, one site each before a site's second. */
   const frames = $derived.by(() => {

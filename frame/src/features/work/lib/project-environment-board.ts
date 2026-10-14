@@ -579,8 +579,9 @@ export function environmentStages(
         }));
       const drawn = runSources(runs, recorded);
       const sourcesId = `sources:${draft.card}`;
-      // Sources hold what a run drew on; a block that would only report a failure is not drawn.
-      const sources = drawn.rows.length
+      // Sources hold what a run read or cites: a block of search results it only passed over, or
+      // of failures alone, is not drawn.
+      const sources = drawn.rows.some((row) => row.used)
         ? {
             id: sourcesId,
             width: SOURCES,
@@ -640,9 +641,10 @@ const SOURCES = 560;
 /** Rows the Sources show before Show all. */
 export const SOURCE_ROWS = 6;
 function sourcesHeight(drawn: ReturnType<typeof runSources>): number {
-  const frames = drawn.rows.some((row) => row.frame) ? 84 : 0;
-  const rows = Math.min(SOURCE_ROWS, drawn.rows.length);
-  const more = drawn.rows.length > SOURCE_ROWS ? 32 : 0;
+  const used = drawn.rows.filter((row) => row.used);
+  const frames = used.some((row) => row.frame) ? 84 : 0;
+  const rows = Math.min(SOURCE_ROWS, used.length);
+  const more = used.length > SOURCE_ROWS || used.length < drawn.rows.length ? 32 : 0;
   return 28 + frames + rows * 32 + more + (drawn.unread.length ? 36 : 0);
 }
 

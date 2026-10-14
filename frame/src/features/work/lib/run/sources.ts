@@ -15,7 +15,7 @@ export type RunSource = {
   /** The page's newest captured frame, when the run opened it. */
   frame?: string;
   file?: { record: string; path: string };
-  /** The run's objects cite it or it was read: not just a search result passed over. */
+  /** The run's objects cite it or it was read: not just a search result passed over. Only these are listed. */
   used?: boolean;
 };
 export type RunSources = {
@@ -212,12 +212,20 @@ export function runSources(
       if (!row.file || !LISTINGS.has(row.file.kind))
         admit(
           row.file
-            ? { key: row.key, url: "", host: row.where, title: row.title, file: row.file }
+            ? {
+                key: row.key,
+                url: "",
+                host: row.where,
+                title: row.title,
+                file: row.file,
+                used: true,
+              }
             : {
                 key: row.key,
                 url: row.url,
                 host: row.where.replace(/^www\./u, ""),
                 title: row.title,
+                used: true,
               },
         );
   }
