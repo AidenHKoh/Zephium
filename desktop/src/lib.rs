@@ -103,6 +103,7 @@ mod privileged_runtime_windows;
 mod profiles;
 mod resource_close;
 mod search_providers;
+mod spaces;
 mod startup_alert;
 #[cfg(feature = "work-development-traces")]
 mod startup_styles;
@@ -1689,6 +1690,14 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             profiles::profiles_rename,
             profiles::profiles_set_avatar,
             profiles::profile_avatar_pick,
+            spaces::spaces_create,
+            spaces::spaces_update,
+            spaces::spaces_delete,
+            spaces::spaces_reorder,
+            spaces::spaces_switch,
+            spaces::spaces_step,
+            spaces::spaces_move_tab,
+            spaces::spaces_menu_popup,
             operation_status,
             operations_reconcile,
             operation_acknowledge,
@@ -3460,6 +3469,9 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     if let Some(action) = id.strip_prefix("tabmenu.") {
         return execute_tab_menu_action(app, action);
     }
+    if let Some(admission) = spaces::execute(app, id) {
+        return admission;
+    }
     // Sidebar presentation is privileged-chrome state persisted through the
     // settings allowlist, not an actor mutation. Deliver the intent and let
     // the frame own it.
@@ -3542,6 +3554,9 @@ fn execute_tab_menu_action(
                 axis: Axis::Row,
             },
         ),
+        action if action.starts_with(spaces::TAB_MENU_MOVE) => {
+            spaces::move_tab(app, id, &action[spaces::TAB_MENU_MOVE.len()..])
+        }
         _ => rejected_operation(),
     }
 }
@@ -5377,13 +5392,25 @@ fn build_tab_menu(
     let close = item(7, "Close Tab", true)?;
     let others = item(8, "Close Other Tabs", context.others)?;
     let below = item(9, "Close Tabs Below", context.below)?;
-    Menu::with_items(
-        handle,
-        &[
-            &reload, &duplicate, &copy_link, &bookmark, &first, &keep, &split, &second, &close,
-            &others, &below,
-        ],
-    )
+    // Favorites belong to every space, so only a space's own tab can move.
+    let move_to = if context.essential {
+        None
+    } else {
+        spaces::tab_menu_section(handle, &format!("tabmenu.{}", spaces::TAB_MENU_MOVE))?
+    };
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![
+        &reload, &duplicate, &copy_link, &bookmark, &first, &keep, &split,
+    ];
+    if let Some(move_to) = &move_to {
+        items.push(move_to);
+    }
+    items.extend([
+        &second as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &close,
+        &others,
+        &below,
+    ]);
+    Menu::with_items(handle, &items)
 }
 
 fn build_bookmark_menu(
@@ -6153,6 +6180,7 @@ pub fn run() {
                 ),
                 Projection::PanelOwner(owner) => overlay::update_context(&emit_handle, &owner),
                 Projection::Items(state) => {
+                    spaces::follow(&emit_handle, &state);
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_ITEMS, &state)
                 }
                 Projection::Tab(tab) => {

@@ -313,6 +313,16 @@ export const commands = {
 	profilesSetAvatar: (profile: string, avatar: ProfileAvatarInputV1) => __TAURI_INVOKE<OperationAdmission>("profiles_set_avatar", { profile, avatar }),
 	/**  Picks a picture natively and stages its 256px square copy. */
 	profileAvatarPick: () => typedError<ProfileAvatarPickV1, null>(__TAURI_INVOKE("profile_avatar_pick")),
+	spacesCreate: (name: string, look: SpaceLookInputV1) => __TAURI_INVOKE<OperationAdmission>("spaces_create", { name, look }),
+	spacesUpdate: (space: string, name: string, look: SpaceLookInputV1) => __TAURI_INVOKE<OperationAdmission>("spaces_update", { space, name, look }),
+	spacesDelete: (space: string) => __TAURI_INVOKE<OperationAdmission>("spaces_delete", { space }),
+	spacesReorder: (space: string, before: string | null) => __TAURI_INVOKE<OperationAdmission>("spaces_reorder", { space, before }),
+	spacesSwitch: (space: string) => __TAURI_INVOKE<OperationAdmission>("spaces_switch", { space }),
+	/**  The next (1) or previous (-1) space, for a swipe over the tab list. */
+	spacesStep: (step: number) => __TAURI_INVOKE<OperationAdmission>("spaces_step", { step }),
+	spacesMoveTab: (tab: string, space: string) => __TAURI_INVOKE<OperationAdmission>("spaces_move_tab", { tab, space }),
+	/**  The switcher at rail width, where the column has no room for its own. */
+	spacesMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("spaces_menu_popup", { x, y }),
 	operationStatus: (operationId: string) => __TAURI_INVOKE<OperationStatus>("operation_status", { operationId }),
 	operationsReconcile: () => __TAURI_INVOKE<OperationDisposition[]>("operations_reconcile"),
 	operationAcknowledge: (operationId: string) => __TAURI_INVOKE<boolean>("operation_acknowledge", { operationId }),
@@ -2183,12 +2193,33 @@ export type SiteTimeView = {
 	series: number[],
 };
 
+export type SpaceIconView =
+/**  An index into the frame's curated symbols. */
+{ kind: "symbol"; index: number } | { kind: "emoji"; text: string };
+
 export type SpaceId = string;
+
+export type SpaceLookInputV1 = {
+	icon: SpaceIconView | null,
+	color: number,
+	theme: SpaceThemeView | null,
+};
+
+export type SpaceThemeView = { kind: "preset"; id: string } |
+/**  Seeds in the shape of `ui.theme-custom`. */
+{ kind: "custom"; seeds: string };
 
 /**  One ordered space owned by the focused profile. */
 export type SpaceView = {
 	id: string,
 	name: string,
+	icon: SpaceIconView | null,
+	/**  An avatar hue, shared with profiles. */
+	color: number,
+	/**  Overrides the app theme for the whole window while the space is active. */
+	theme: SpaceThemeView | null,
+	/**  Pinned and open tabs, which deleting the space closes. */
+	tabs: number,
 };
 
 /**

@@ -90,15 +90,21 @@ pub fn theme_changed(key: &str, value: &str) -> bool {
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub fn themed_ground(light: bool) -> Option<[u8; 3]> {
     let theme = THEME.lock().unwrap_or_else(|e| e.into_inner());
-    let id = theme
-        .id
-        .clone()
+    // A themed space paints its own ground while it is active.
+    let space = crate::spaces::theme();
+    let id = space
+        .as_ref()
+        .map(|(id, _)| id.clone())
+        .or_else(|| theme.id.clone())
         .or_else(|| crate::app_setting("ui.theme"))
         .unwrap_or_else(|| zephium_core::theme::DEFAULT.into());
-    let custom = theme
-        .custom
-        .clone()
-        .or_else(|| crate::app_setting("ui.theme-custom"));
+    let custom = match space {
+        Some((_, custom)) => custom,
+        None => theme
+            .custom
+            .clone()
+            .or_else(|| crate::app_setting("ui.theme-custom")),
+    };
     let level = theme
         .level
         .or_else(|| crate::app_setting("ui.theme-contrast").and_then(|value| value.parse().ok()))
