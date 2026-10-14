@@ -32,7 +32,10 @@ test("a tall left side does not move the request or the result down", () => {
   const short = placeRun(100, run([row("a", 120)], 100));
   const tall = placeRun(
     100,
-    run([row("a", 400), row("b", 400), row("c", 400), row("d", 120, 1), row("e", 120, 1)], 100),
+    run(
+      [row("a", 400, 0), row("b", 400, 0), row("c", 400, 0), row("d", 120, 1), row("e", 120, 1)],
+      100,
+    ),
   );
   topped(tall, ["a", "d"]);
   expect(tall.corner.y).toBe(short.corner.y);
@@ -67,4 +70,60 @@ test("a wide object stands at the result's left edge at the width it draws at", 
   const wide = boardLayout([block("wide", "diagram", 1500), block("text", "prose", 640, 680)]);
   expect(wide.at["wide"]).toMatchObject({ x: 0, width: 1500 });
   expect(wide.width).toBe(1500);
+});
+
+test("a row whose column is not known yet stands in the newest column", () => {
+  const rows = [row("a", 120, 0), row("b", 120, 1), row("c", 120)];
+  const place = placeRun(100, run(rows, 100));
+  expect(place.rects["c"]!.x).toBe(place.rects["b"]!.x);
+});
+
+type Box = { x: number; y: number; width: number; height: number };
+// A segment crosses a rect when it passes through its interior.
+const crosses = (a: { x: number; y: number }, b: { x: number; y: number }, r: Box) =>
+  Math.min(a.x, b.x) < r.x + r.width &&
+  Math.max(a.x, b.x) > r.x &&
+  Math.min(a.y, b.y) < r.y + r.height &&
+  Math.max(a.y, b.y) > r.y;
+
+function crossings(place: ReturnType<typeof placeRun>) {
+  const hits: string[] = [];
+  for (const line of place.lines)
+    for (let at = 1; at < line.points.length; at++)
+      for (const [id, rect] of Object.entries(place.rects))
+        if (crosses(line.points[at - 1]!, line.points[at]!, rect)) hits.push(`${line.id} x ${id}`);
+  return hits;
+}
+
+const found = (id: string) => ({ id, width: 280, height: 140 });
+
+test("no line crosses a card, in columns of parallel and sequential work", () => {
+  const rows = [
+    { ...row("a", 220, 0), found: [found("a1"), found("a2")] },
+    row("b", 140, 0),
+    row("c", 300, 1),
+    { ...row("d", 160, 1), found: [found("d1")] },
+    row("e", 120, 1),
+    row("f", 200, 2),
+  ];
+  expect(crossings(placeRun(100, run(rows, 300)))).toEqual([]);
+});
+
+test("no line crosses a card when the last column feeds nothing", () => {
+  const rows = [row("a", 220, 0), row("b", 140, 1), row("c", 200, 1)];
+  const nothing = rows.map((entry) => ({ ...entry, feeds: entry.part.id === "a" }));
+  expect(crossings(placeRun(100, run(nothing, 300)))).toEqual([]);
+  expect(crossings(placeRun(100, run(rows, 300)))).toEqual([]);
+});
+
+test("no line crosses a card in a run with inputs, a single column or no parts", () => {
+  const withInputs = {
+    ...run([row("a", 120), row("b", 300)], 200),
+    inputs: [
+      { id: "i1", width: RUN.inputs, height: 60 },
+      { id: "i2", width: RUN.inputs, height: 60 },
+    ],
+  };
+  expect(crossings(placeRun(0, withInputs))).toEqual([]);
+  expect(crossings(placeRun(0, run([], 200)))).toEqual([]);
 });
