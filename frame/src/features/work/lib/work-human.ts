@@ -61,6 +61,25 @@ export function needTitle(reason: WorkHumanReasonV1, host: string): string {
   }
 }
 
+/** One calm line for what a site asks of the person, and the one button that meets it. */
+export function needLine(
+  reason: WorkHumanReasonV1,
+  host: string,
+): { text: string; action: string } {
+  switch (reason) {
+    case "challenge":
+    case "verification":
+      return { text: m.work_need_wants_check({ host }), action: m.work_need_open_site({ host }) };
+    case "sign_in":
+      return {
+        text: m.work_need_wants_sign_in({ host }),
+        action: m.work_need_sign_in_site({ host }),
+      };
+    default:
+      return { text: needTitle(reason, host), action: m.work_need_open_site({ host }) };
+  }
+}
+
 /** Only a solved check is worth remembering, and only where Work keeps its own website data. */
 export const remembers = (page: Pick<HumanPage, "reason" | "workMemory">) =>
   page.workMemory && (page.reason === "challenge" || page.reason === "verification");
