@@ -2961,6 +2961,165 @@ mod tests {
         assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
     }
 
+    // A scrolling list shows the same cards again with their inner nodes
+    // renumbered, under the same header; `shift` moves the inner keys.
+    fn listing_page(id: u64, cards: &[u64], shift: u64) -> SemanticObservation {
+        let mut nodes = vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"landmark","lm":"main"}),
+            json!({"k":3,"p":0,"r":"landmark","lm":"banner"}),
+            json!({"k":4+shift,"p":2,"r":"link","n":"Home","u":"https://read-private.example.test/"}),
+        ];
+        for card in cards {
+            let group = nodes.len();
+            let root = 100 + card;
+            let inner = 1000 * shift + 10 * card;
+            nodes.push(json!({"k":root,"p":1,"r":"group"}));
+            nodes.push(json!({"k":inner+1,"p":group,"r":"image","n":format!("Photo {card}"),"m":format!("https://read-private.example.test/photo/{card}.webp")}));
+            nodes.push(
+                json!({"k":inner+2,"p":group,"r":"heading","l":3,"n":format!("Offer {card}")}),
+            );
+            nodes.push(json!({"k":inner+3,"p":group,"r":"link","n":format!("Offer {card}"),"u":format!("https://read-private.example.test/offer/{card}")}));
+            nodes.push(json!({"k":inner+4,"p":group,"r":"paragraph","t":format!("{card}99 zł")}));
+        }
+        retained_observation(id, json!(nodes))
+    }
+
+    fn retain_listing(
+        evidence: &mut SemanticRetainedReadEvidence,
+        observation: &SemanticObservation,
+    ) {
+        let ack = acknowledgement(observation);
+        let read = read_projection(
+            observation,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::LISTING,
+            SemanticReadRoleSelection::ALL,
+            3,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        evidence.retain(&read, &ack).unwrap();
+    }
+
+    #[test]
+    fn retained_listing_keeps_each_card_and_the_header_once_across_captures() {
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        retain_listing(&mut evidence, &listing_page(1, &[1, 2, 3], 0));
+        retain_listing(&mut evidence, &listing_page(2, &[2, 3, 4], 1));
+        retain_listing(&mut evidence, &listing_page(3, &[3, 4, 5], 2));
+        let current = listing_page(4, &[5, 6], 3);
+        let ack = acknowledgement(&current);
+        let read = read_projection(
+            &current,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(4),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::LISTING,
+            SemanticReadRoleSelection::ALL,
+            3,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let merged = evidence.merge_for_extraction(read).unwrap();
+        let count = |wanted: &str| {
+            merged
+                .fragments()
+                .iter()
+                .filter(|fragment| {
+                    fragment
+                        .content()
+                        .text()
+                        .is_some_and(|text| text.as_str() == wanted)
+                        || fragment
+                            .content()
+                            .value_preview()
+                            .is_some_and(|value| value.text().ends_with(wanted))
+                })
+                .count()
+        };
+        assert_eq!(count("Home"), 1);
+        for card in 1..=6 {
+            // One heading name, one link name, one price, and the photo and
+            // link addresses each appear once per card.
+            assert_eq!(count(&format!("Offer {card}")), 2, "card {card}");
+            assert_eq!(count(&format!("{card}99 zł")), 1, "card {card}");
+            assert_eq!(count(&format!("photo/{card}.webp")), 1, "card {card}");
+            assert_eq!(count(&format!("offer/{card}")), 1, "card {card}");
+        }
+        assert_eq!(merged.fragments().len(), 1 + 6 * 6 + 1);
+    }
+
+    #[test]
+    fn identical_content_of_another_document_is_never_the_same_source() {
+        let first = listing_page(1, &[1], 0);
+        let other_context = context_with_id(222);
+        let other_frame = SemanticFrameJoin::try_new(
+            other_context,
+            FrameId::MAIN,
+            other_context.frame_generation(),
+            SemanticOrigin::parse("https://read-private.example.test/path").unwrap(),
+            SemanticFrameTrust::SameOrigin,
+        )
+        .unwrap();
+        let other = SemanticObservationAssembler::new(
+            crate::SemanticObservationRequest::initial(
+                SemanticObservationId::new(2).unwrap(),
+                other_context,
+                SemanticObservationBudget::try_new(512, 64 * 1024, 4).unwrap(),
+            ),
+            snapshot(
+                other_frame,
+                2,
+                2,
+                "complete",
+                json!([
+                    {"k":1,"r":"document","o":16},
+                    {"k":2,"p":0,"r":"landmark","lm":"main"},
+                    {"k":3,"p":0,"r":"landmark","lm":"banner"},
+                    {"k":4,"p":2,"r":"link","n":"Home","u":"https://read-private.example.test/"},
+                    {"k":101,"p":1,"r":"group"},
+                    {"k":11,"p":4,"r":"image","n":"Photo 1","m":"https://read-private.example.test/photo/1.webp"},
+                    {"k":12,"p":4,"r":"heading","l":3,"n":"Offer 1"},
+                    {"k":13,"p":4,"r":"link","n":"Offer 1","u":"https://read-private.example.test/offer/1"},
+                    {"k":14,"p":4,"r":"paragraph","t":"199 zł"}
+                ]),
+            ),
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+        fn read(observation: &SemanticObservation) -> SemanticReadResult<'_> {
+            let ack = acknowledgement(observation);
+            read_projection(
+                observation,
+                SemanticReadAuthority::Acknowledged(&ack),
+                SemanticCaptureInstant::from_millis(1),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::LISTING,
+                SemanticReadRoleSelection::ALL,
+                3,
+                None,
+                None,
+                false,
+            )
+            .unwrap()
+        }
+        let (here, there) = (read(&first), read(&other));
+        assert!(!here.fragments().is_empty());
+        assert_eq!(here.fragments().len(), there.fragments().len());
+        for (left, right) in here.fragments().iter().zip(there.fragments()) {
+            assert!(left.signature().same_source(left.signature()));
+            assert!(!left.signature().same_source(right.signature()));
+        }
+    }
+
     #[test]
     fn bare_facet_counts_are_shed_before_the_records_after_them() {
         let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
