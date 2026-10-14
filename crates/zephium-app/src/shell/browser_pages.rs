@@ -29,14 +29,9 @@ fn restored_tab_matches_snapshot(old: &TabView, tab: &TabState) -> bool {
             zephium_core::item::TabContent::ExtensionOwned
         )
     );
-    let same_url = tab.url.as_ref().map(url::Url::as_str) == old.url.as_deref();
-    // A native extension document may publish its title while privileged
-    // chrome is acknowledging the exact tab graph. Its identity, URL-less
-    // owner, profile, active item and split topology still have to match.
-    let guest_title_update = old.content == zephium_ipc::TabContentView::ExtensionOwned
-        && old.url.is_none()
-        && tab.url.is_none();
-    same_owner && same_url && (tab.title == old.title || guest_title_update)
+    // A title is presentation: a page may retitle itself (an unread count)
+    // while chrome acknowledges the tab graph, and its delta follows.
+    same_owner && tab.url.as_ref().map(url::Url::as_str) == old.url.as_deref()
 }
 
 impl Shell {

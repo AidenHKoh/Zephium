@@ -1577,6 +1577,37 @@ fn a_new_tab_opened_from_settings_fills_the_window_with_the_new_tab() {
     assert!(!last_layout.contains(&page.to_string()), "{last_layout}");
 }
 
+#[test]
+fn a_page_retitling_itself_while_settings_closes_still_opens_the_new_tab() {
+    let (mut shell, _engine, chrome, screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    let page = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: page,
+        input: "chat.example".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id: page,
+        url: "https://chat.example/".into(),
+    }));
+    present_committed(&mut shell, page, "https://chat.example/");
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+
+    assert_eq!(
+        shell.handle_operation(Command::Open).outcome,
+        OperationOutcome::Deferred
+    );
+    shell.handle(Command::Engine(EngineEvent::TitleChanged {
+        id: page,
+        title: "(3) Chat".into(),
+    }));
+    let (revision, _) = chrome.complete_browser_return(true);
+    shell.browser_chrome_restored(revision, true);
+
+    assert_ne!(active_id(&screen), page);
+    assert_eq!(shell.active_browser_page(), None);
+}
+
 fn open_page(shell: &mut Shell, screen: &Screen, url: &str) -> ItemId {
     shell.handle(Command::Run("tab.new".into()));
     let id = active_id(screen);
