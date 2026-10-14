@@ -12,6 +12,7 @@ import { leadRun } from "../agent-steps";
 import * as m from "$shared/i18n/messages";
 import { runSources } from "./sources";
 import { hostOf, registrableSite, siteKey, siteName } from "./site";
+import { ulidTime } from "../ulid-time";
 
 /** A question waiting on the person about one part: which part (its id, key or site) and the ask card's props. */
 export type PartAsk = { part: string; props: Record<string, unknown> };
@@ -56,6 +57,8 @@ export type RunPart = {
   /** When it began and ended, in epoch milliseconds, as its facts say: work that overlapped stands in one column. */
   began?: number;
   ended?: number;
+  /** The search whose results it went on to open: it stands under that search, not past it. */
+  follows?: string;
   /** The connection a connection part works through: "github". */
   connection?: string;
   /** What the part came to, in its helper's words: "3 homes". */
@@ -86,18 +89,31 @@ function firstTurn(steps: readonly Step[]): { turn?: number } {
   return turns.length ? { turn: Math.min(...turns) } : {};
 }
 
-/** When a part's facts say it began and ended. */
-function times(fact: { started_ms?: string | null; ended_ms?: string | null }) {
+/**
+ * When a part began and ended. Its id is minted when the lead asks for it, so
+ * a part waiting for its turn already stands with the work begun beside it.
+ */
+function times(fact: { id: string; started_ms?: string | null; ended_ms?: string | null }) {
   const at = (text?: string | null) => {
     const value = text ? Number(text) : NaN;
     return Number.isFinite(value) ? value : undefined;
   };
-  const began = at(fact.started_ms);
+  const began = ulidTime(fact.id)?.getTime() ?? at(fact.started_ms);
   const ended = at(fact.ended_ms);
   return {
     ...(began !== undefined ? { began } : {}),
     ...(ended !== undefined ? { ended } : {}),
   };
+}
+
+/**
+ * When the lead's own steps began, as one moment: a step's id is minted as it
+ * starts, and the lead does one thing at a time, so the next row's start is
+ * this one's end.
+ */
+function stepTimes(steps: readonly Step[]): { began?: number; ended?: number } {
+  const began = steps[0] ? ulidTime(steps[0].id)?.getTime() : undefined;
+  return began === undefined ? {} : { began, ended: began };
 }
 
 /** What a step is doing while it runs, as a live part's row says it. */
@@ -254,7 +270,14 @@ function factParts(
     const searched = leadSearches(card, run, going);
     if (searched) parts.push({ ...searched, order: parts.length });
     const lead = leadReads(card, run, recorded, going);
-    if (lead) parts.push({ ...lead, order: parts.length });
+    // Pages opened from what the search found read as that search's next step.
+    const opened =
+      searched &&
+      lead?.pages.some((page) =>
+        searched.sources.some((row) => samePage(row.url) === samePage(page.url)),
+      );
+    if (lead)
+      parts.push({ ...lead, order: parts.length, ...(opened ? { follows: searched.id } : {}) });
   }
   return parts;
 }
@@ -312,6 +335,7 @@ function leadReads(
     sources: [],
     order: 0,
     ...firstTurn(steps),
+    ...stepTimes(steps),
     ...(reading && nowOf(steps) ? { now: nowOf(steps)! } : {}),
   };
 }
@@ -371,6 +395,7 @@ function leadSearches(card: string, run: WorkExecutionFact, going: boolean): Run
     sources,
     order: 0,
     ...firstTurn(steps),
+    ...stepTimes(steps),
     query: queries.at(-1)!,
     ...(queries.length > 1 ? { queries: queries.length } : {}),
     ...(sources.length ? { summary: m.work_part_results({ count: sources.length }) } : {}),

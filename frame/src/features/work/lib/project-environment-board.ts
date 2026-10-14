@@ -24,7 +24,7 @@ import { objectHeight, objectWidth } from "./board/object-size";
 import { ulidTime } from "./ulid-time";
 import { runTrail } from "./board/trail";
 import type { Picture } from "./board/types";
-import { columnsOf } from "./run/columns";
+import { partColumns } from "./run/columns";
 import { RUN, placeRun } from "./run/layout";
 import { localReads, runParts, type PartAsk, type RunInputView, type RunPart } from "./run/parts";
 import { PART, partSize, rowKey, type PartShape } from "./run/part-size";
@@ -547,14 +547,7 @@ export function environmentStages(
         }),
       );
       // Work that overlapped in time stands in one column; later work, to its right.
-      const phases = columnsOf(
-        parts.map((part) => ({
-          ...(part.turn !== undefined ? { turn: part.turn } : {}),
-          ...(part.began !== undefined ? { began: part.began } : {}),
-          ...(part.ended !== undefined ? { ended: part.ended } : {}),
-          open: !["done", "failed", "stopped"].includes(part.state),
-        })),
-      );
+      const phases = partColumns(parts);
       // In a column, in the order the work began.
       const rows = parts
         .map((part, index) => ({ part, index }))
