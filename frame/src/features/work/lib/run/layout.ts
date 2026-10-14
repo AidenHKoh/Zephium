@@ -5,12 +5,12 @@ import { branch, merge, type Point } from "./lines";
  * A run on the 8 px grid, left to right: the inputs hang left of the request
  * at x = 0, then the run's work in the order it happened, one column per
  * step of the lead (what began together stands together), each 96 past the
- * last, and the result 96 past the last column. A column is centred on the
- * request's line, so parallel work forks from one point, up and down alike;
- * each column's work merges and forks on into the next, and the last merges
- * into the result, whose headline stands level with the topmost row so a
- * long result reads down from the top of the run. Its Sources stand under
- * its result.
+ * last, and the result 96 past the last column. The request, every column
+ * and the result's headline begin level at the run's top and grow downward, so
+ * a tall result never moves the work and tall work never moves the request;
+ * parallel work forks from the request's line, each column's work merges and
+ * forks on into the next, and the last merges into the result. Its Sources
+ * stand under its result.
  */
 export const RUN = {
   inputs: 200,
@@ -165,19 +165,13 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
   const partsX = RUN.request + RUN.fork;
   const phases = [...new Set(run.rows.map((row) => row.phase ?? 0))].sort((a, b) => a - b);
   const groups = phases.map((phase) => run.rows.filter((row) => (row.phase ?? 0) === phase));
-  // Measured once at the top to centre every column on one spine.
+  // Every column and the request begin at the run's top; the result starts there too.
   const first = top + RUN.spine - RUN.labelMid;
-  const middles = groups.map((rows) => {
-    const { labels } = placeColumn(rows, 0, 0);
-    return (labels[0]! + labels.at(-1)!) / 2;
-  });
-  const spine = groups.length
-    ? Math.max(top + RUN.spine, Math.round((first + Math.max(...middles)) / 4) * 4)
-    : top + RUN.spine;
+  const spine = top + RUN.spine;
   const columns: (ReturnType<typeof placeColumn> & { x: number })[] = [];
   let x = partsX;
-  groups.forEach((rows, index) => {
-    const column = placeColumn(rows, x, Math.max(first, Math.round(spine - middles[index]!)));
+  groups.forEach((rows) => {
+    const column = placeColumn(rows, x, first);
     Object.assign(rects, column.rects);
     lines.push(...column.lines);
     columns.push({ ...column, x });

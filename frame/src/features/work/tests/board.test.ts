@@ -257,15 +257,14 @@ describe("the process column", () => {
         new Set([part.key]),
       );
     }
-    // Rows stack 48 apart from the run's top; the request stands at the middle of the fork.
+    // Rows stack 48 apart from the run's top, level with the request, which stands at the top.
     const tops = stage!.parts.map((part) => rects[part.id]!.y);
     expect(tops[0]! + 12).toBe(32);
     for (let index = 1; index < tops.length; index++)
       expect(tops[index]!).toBeGreaterThanOrEqual(
         tops[index - 1]! + rects[stage!.parts[index - 1]!.id]!.height + 48,
       );
-    const middle = (tops[0]! + tops.at(-1)! + 24) / 2;
-    expect(Math.abs(rects[stage!.card]!.y + 32 - middle)).toBeLessThanOrEqual(2);
+    expect(rects[stage!.card]!.y).toBe(0);
     expect(rects[stage!.card]).toMatchObject({ x: 0, width: 320 });
     expect(stage!.lane.board.x % 8).toBe(0);
     for (const part of stage!.parts)
