@@ -66,8 +66,9 @@
   const working = $derived(part.state === "running" || part.state === "waiting");
   const cited = $derived(part.cited ?? []);
   const more = $derived(Math.max(0, (part.citedCount ?? 0) - cited.length));
-  /** A search whose results the run went on to open: the rest it passed over. */
-  const chosen = $derived(cited.some((row) => row.opened));
+  /** Results the run opened already stand as pages beside the list: it names only the rest, and counts those. */
+  const opened = $derived(cited.filter((row) => row.opened).length);
+  const passed = $derived(cited.filter((row) => !row.opened));
   /** Folded, each window behind the front one peeks out right and below it. */
   const placeOf = (index: number) =>
     `translate(${index * PART.behindX}px, ${index * PART.behindY}px)`;
@@ -224,13 +225,16 @@
             <Icon icon={Search01Icon} size={13} /><span class="words">{part.query}</span>
             {#if part.queries}<span class="again">+{part.queries - 1}</span>{/if}
           </li>{/if}
-        {#each cited as row (row.key)}{@const label = resultLabel(row, part.oneSite)}
+        {#if opened}<li class="rest opened-count">
+            <Icon icon={ArrowUpRight01Icon} size={12} />{m.work_part_opened_count({
+              count: opened,
+            })}
+          </li>{/if}
+        {#each passed as row (row.key)}{@const label = resultLabel(row, part.oneSite)}
           <li>
             <button
               type="button"
               class="row nodrag"
-              class:opened={row.opened}
-              class:passed={chosen && !row.opened}
               title={row.title || row.url}
               onclick={(event) => {
                 event.stopPropagation();
@@ -241,11 +245,9 @@
                 ><HostGlyph host={row.where} url={row.url} size={14} initial={false} /></span
               >
               <span class="result">{label.text}</span>
-              {#if row.opened}<span class="went" aria-label={m.work_part_result_opened()}
-                  ><Icon icon={ArrowUpRight01Icon} size={12} /></span
-                >{:else if label.site}<span class="where">{label.site}</span>{/if}
+              {#if label.site}<span class="where">{label.site}</span>{/if}
             </button>
-          </li>{:else}{#if working}{#each [0, 1, 2] as index (index)}<li
+          </li>{:else}{#if working && !opened}{#each [0, 1, 2] as index (index)}<li
                 class="pending"
                 style:inline-size="{100 - index * 18}%"
                 style:--delay="{index * 120}ms"
@@ -538,7 +540,7 @@
     padding-inline-start: 21px;
   }
 
-  /* A search's results: the ones the run opened in full, the ones it passed over quieter. */
+  /* A search's results: the ones the run opened are pages beside it, so only the rest are listed. */
   .results {
     display: flex;
     flex-direction: column;
@@ -599,14 +601,6 @@
     background: var(--color-control-hover);
   }
 
-  .row.passed {
-    opacity: 0.5;
-  }
-
-  .row.passed:hover {
-    opacity: 1;
-  }
-
   .result {
     flex: 1;
     min-inline-size: 0;
@@ -614,10 +608,6 @@
     font-size: var(--text-body);
     white-space: nowrap;
     mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
-  }
-
-  .row.opened .result {
-    font-weight: 600;
   }
 
   .where {
@@ -628,13 +618,6 @@
     font-size: var(--text-label);
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .went {
-    display: grid;
-    flex: none;
-    place-items: center;
-    color: var(--color-muted);
   }
 
   /* Results on their way: quiet bars that breathe until the engine answers. */
@@ -721,5 +704,13 @@
     padding: 4px 6px 0 28px;
     color: var(--color-muted);
     font-size: var(--text-label);
+  }
+
+  .results .opened-count {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-block-end: 2px;
+    padding-inline-start: 6px;
   }
 </style>
