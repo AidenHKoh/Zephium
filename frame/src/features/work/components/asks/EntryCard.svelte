@@ -54,10 +54,15 @@
       <p class="plan"><span class="label">{m.work_ask_plan()}</span>{ask.plan}</p>
     {/if}
     {#snippet actions()}
-      <Button variant="ghost" disabled={busy} onclick={() => onanswer(ASK_WORDS.notNow)}
-        >{m.work_ask_not_now()}</Button
+      <button
+        type="button"
+        class="decline"
+        disabled={busy}
+        onclick={() => onanswer(ASK_WORDS.notNow)}>{m.work_ask_not_now()}</button
       >
-      <Button disabled={busy} onclick={() => onanswer(ask.always)}>{m.work_ask_always()}</Button>
+      <Button variant="ghost" disabled={busy} onclick={() => onanswer(ask.always)}
+        >{m.work_ask_always_for({ name: site ?? ask.name })}</Button
+      >
       <Button variant="primary" pending={busy} onclick={() => onanswer(ASK_WORDS.allow)}
         >{m.work_ask_allow()}</Button
       >
@@ -74,6 +79,24 @@
 {/if}
 
 <style>
+  /* Declining is always there and never loud: a word, not a third button. */
+  .decline {
+    margin-inline-end: auto;
+    padding: 4px 2px;
+    border-radius: var(--radius-control);
+    color: var(--color-faint);
+    font-size: var(--text-label);
+  }
+
+  .decline:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  .decline:hover:not(:disabled) {
+    color: var(--color-text);
+  }
+
   .marks {
     display: inline-flex;
     align-items: center;

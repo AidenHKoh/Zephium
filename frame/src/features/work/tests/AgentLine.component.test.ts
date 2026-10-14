@@ -405,7 +405,7 @@ test("the line says why a page waits for you, in one sentence, and links to its 
     onwaitingpage,
   });
   const link = screen.getByRole("button", {
-    name: /^Sign in to ferry.example/,
+    name: /^Waiting for you on ferry.example/,
   });
   await expect.element(link).toBeVisible();
   // A long wait stays quiet; the countdown belongs to the last minute.
@@ -553,7 +553,7 @@ test("a finished run says its own sentence, never a count, and the line speaks f
   session.dispose();
 });
 
-test("a sign-in wall offers to sign in, and the run goes on by itself once the person has", async () => {
+test("a sign-in wall is only pointed at: the island shows, the card signs in", async () => {
   const session = new WorkSession("profile");
   session.selected = "objective";
   const execution = agentRun("running");
@@ -574,13 +574,12 @@ test("a sign-in wall offers to sign in, and the run goes on by itself once the p
     reason: "sign_in" as const,
     remaining: 150_000,
   };
-  const onsignin = vi.fn();
-  const screen = await render(AgentLine, { session, waiting, onsignin });
-  await expect
-    .element(screen.getByText("Sign in to jobs.example.com", { exact: true }))
-    .toBeVisible();
-  await screen.getByRole("button", { name: "Sign in", exact: true }).click();
-  expect(onsignin).toHaveBeenCalledExactlyOnceWith("page:execution:read-1");
+  const onwaitingpage = vi.fn();
+  const screen = await render(AgentLine, { session, waiting, onwaitingpage });
+  await expect.element(screen.getByText("Waiting for you on jobs.example.com")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Sign in", exact: true }).elements()).toHaveLength(0);
+  await screen.getByRole("button", { name: "Show", exact: true }).click();
+  expect(onwaitingpage).toHaveBeenCalledExactlyOnceWith("page:execution:read-1");
   // No "as me" retry: the run itself resumes after the sign-in.
   expect(screen.container.textContent).not.toContain("Try again as me");
   await screen.unmount();

@@ -32,13 +32,12 @@ function sessionOf(scene: ReturnType<typeof checkScene>) {
   return session;
 }
 
-test("a bot check the run waits on: the page, the island, keep waiting and open", async () => {
+test("a bot check the run waits on: the page, the island, the card holds the actions", async () => {
   await page.viewport(1440, 820);
   const scene = checkScene("waiting");
   const session = sessionOf(scene);
   const onaction = vi.fn();
-  const onwaitingopen = vi.fn();
-  const onwaitingextend = vi.fn();
+  const onwaitingpage = vi.fn();
   const waiting = (remaining: number) => ({
     card: "page:check",
     host: "allegro.pl",
@@ -53,17 +52,16 @@ test("a bot check the run waits on: the page, the island, keep waiting and open"
     waiting: waiting(72_000),
     viewport,
     onaction,
-    onwaitingopen,
-    onwaitingextend,
+    onwaitingpage,
   });
   screen.container.style.width = "1440px";
   screen.container.style.height = "820px";
   const band = screen.getByRole("group", { name: "allegro.pl wants to confirm you’re a person" });
   await expect.element(band).toBeVisible();
   await expect.element(band.getByText("1:12 left")).toBeVisible();
-  // The island says the same thing, with the one action that meets it.
+  // The island only says so, and points at the card: the actions live on the card.
   await expect
-    .element(screen.getByRole("button", { name: /^allegro.pl wants to confirm you’re a person/ }))
+    .element(screen.getByRole("button", { name: /^Waiting for you on allegro.pl/ }))
     .toBeVisible();
   await both("check-waiting");
 
@@ -83,10 +81,14 @@ test("a bot check the run waits on: the page, the island, keep waiting and open"
   await expect.element(band.getByText("0:14 left")).toBeVisible();
   await both("check-late");
   const island = screen.getByRole("region", { name: /agent/i });
-  await userEvent.click(island.getByRole("button", { name: "Keep waiting" }));
-  expect(onwaitingextend).toHaveBeenCalledWith("page:check");
-  await userEvent.click(island.getByRole("button", { name: "Open allegro.pl" }));
-  expect(onwaitingopen).toHaveBeenCalledWith("page:check");
+  await expect
+    .element(island.getByRole("button", { name: "Keep waiting" }))
+    .not.toBeInTheDocument();
+  await expect
+    .element(island.getByRole("button", { name: "Open allegro.pl" }))
+    .not.toBeInTheDocument();
+  await userEvent.click(island.getByRole("button", { name: "Show", exact: true }));
+  expect(onwaitingpage).toHaveBeenCalledWith("page:check");
 
   // At the longest wait there is no more time to give.
   await screen.rerender({ held: [checkPage(30_000, false)], waiting: null });

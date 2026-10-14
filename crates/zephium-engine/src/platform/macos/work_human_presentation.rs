@@ -3,11 +3,17 @@
 use objc2::rc::Retained;
 use objc2_app_kit::{NSView, NSWindow, NSWindowOrderingMode};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+use objc2_quartz_core::CACornerMask;
 use objc2_web_kit::WKWebView;
 use std::time::Instant;
 use zephium_agentic::WorkBrowserHumanRegion;
 
+/// The takeover well's foot: `--radius-card` less the pane's 1px border
+/// (`TakeoverPane.svelte`). Its head is square against the header above it.
+const WELL_FOOT_RADIUS: f64 = 17.0;
+
 pub(crate) struct WorkHumanPresentation {
+    shape: Option<(f64, CACornerMask)>,
     page: Retained<WKWebView>,
     parent: Retained<NSView>,
     window: Retained<NSWindow>,
@@ -44,6 +50,7 @@ impl WorkHumanPresentation {
             parent,
             window,
             original,
+            shape: None,
             region,
             parent_geometry,
             deadline,
@@ -62,6 +69,7 @@ impl WorkHumanPresentation {
         self.parent
             .addSubview_positioned_relativeTo(&self.page, NSWindowOrderingMode::Above, None);
         self.page.setFrame(self.region);
+        self.round_foot();
         super::passive_page::unregister(&self.page);
         self.page.setHidden(false);
         self.presented = true;
@@ -101,6 +109,24 @@ impl WorkHumanPresentation {
         self.parent.setBounds(bounds);
         refused_resize && refused_shift && self.current()
     }
+    /// The page sits in a pane whose foot is rounded, so its own corners
+    /// follow: square under the header, the pane's radius at the bottom.
+    fn round_foot(&mut self) {
+        let Some(layer) = self.page.layer() else {
+            return;
+        };
+        if self.shape.is_none() {
+            self.shape = Some((layer.cornerRadius(), layer.maskedCorners()));
+        }
+        layer.setCornerRadius(WELL_FOOT_RADIUS);
+        layer.setMaskedCorners(CACornerMask::MinXMinYCorner | CACornerMask::MaxXMinYCorner);
+    }
+    fn restore_shape(&mut self) {
+        if let (Some((radius, corners)), Some(layer)) = (self.shape.take(), self.page.layer()) {
+            layer.setCornerRadius(radius);
+            layer.setMaskedCorners(corners);
+        }
+    }
     pub(crate) fn retire(&mut self) -> bool {
         if self.retired {
             return self.page.isHidden();
@@ -130,6 +156,7 @@ impl WorkHumanPresentation {
         });
         let responder_released = !owns_responder || self.window.makeFirstResponder(None);
         self.page.setFrame(self.original);
+        self.restore_shape();
         self.parent
             .addSubview_positioned_relativeTo(&self.page, NSWindowOrderingMode::Below, None);
         self.retired = fenced

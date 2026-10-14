@@ -138,7 +138,7 @@ test("a decided Confirm stays as one line of history", async () => {
 
 test("entry, context and connection questions answer with Rust's own option words", async () => {
   for (const [step, button, answer] of [
-    [f.slackEntry, "Always", "Always for Slack"],
+    [f.slackEntry, "Always for Slack", "Always for Slack"],
     [f.slackEntry, "Allow", "Allow"],
     [f.historyAsk, "Not now", "Not now"],
     [f.githubAsk, "Use the website instead", "Use the website instead"],

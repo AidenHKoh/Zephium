@@ -2,7 +2,7 @@
   import type { WorkSession } from "$domain/work";
   import type { WorkHumanSession } from "$domain/work-human";
   import AskCard from "./AskCard.svelte";
-  import { asksFor, asksOf, openAsks, type Ask } from "./asks";
+  import { askPart, asksFor, asksOf, openAsks, type Ask } from "./asks";
   import { runActions } from "./actions";
 
   /**
@@ -15,6 +15,7 @@
     part = null,
     placement = "island",
     seed = 0,
+    homeless = false,
     onopenpage,
   }: {
     session: WorkSession;
@@ -24,6 +25,8 @@
     part?: string | null;
     placement?: "canvas" | "island";
     seed?: number;
+    /** Only the asks with no card of their own on the canvas. */
+    homeless?: boolean;
     /** Presents the page a step works on: to sign in, or to see what will be sent. */
     onopenpage?: (step: string) => void;
   } = $props();
@@ -35,7 +38,9 @@
     execution
       ? part
         ? asksFor(asksOf(execution, session.pages, held), part)
-        : openAsks(asksOf(execution, session.pages, held))
+        : openAsks(asksOf(execution, session.pages, held)).filter(
+            (ask) => !homeless || !askPart(ask),
+          )
       : [],
   );
   const actions = $derived(
