@@ -1,11 +1,11 @@
 {
   "browser-panel": {
     "browser": {
-      "js": 390452,
+      "js": 390854,
       "css": 107560
     },
     "lazy:app/browser/WorkWorkspace.svelte": {
-      "js": 33699,
+      "js": 37294,
       "css": 366
     },
     "lazy:domain/notes/index.ts": {
@@ -45,7 +45,7 @@
       "css": 0
     },
     "lazy:features/newtab/components/NewTab.svelte": {
-      "js": 40860,
+      "js": 41773,
       "css": 5133
     },
     "lazy:features/notes/components/editor/NoteEditor.svelte": {
@@ -149,8 +149,8 @@
       "css": 8797
     },
     "lazy:features/settings/components/sections/WorkPage.svelte": {
-      "js": 11710,
-      "css": 3563
+      "js": 14940,
+      "css": 3671
     },
     "lazy:features/settings/components/Settings.svelte": {
       "js": 143262,
@@ -177,11 +177,11 @@
       "css": 26782
     },
     "lazy:features/tasks/components/TasksPage.svelte": {
-      "js": 303299,
+      "js": 304212,
       "css": 36820
     },
     "lazy:features/tasks/lib/capture.ts": {
-      "js": 33252,
+      "js": 34165,
       "css": 0
     },
     "lazy:features/time/components/FocusCover.svelte": {
@@ -217,7 +217,7 @@
       "css": 8640
     },
     "lazy:features/tools/components/previews/TasksView.svelte": {
-      "js": 139766,
+      "js": 140679,
       "css": 8402
     },
     "lazy:features/tools/components/previews/TimeView.svelte": {
@@ -241,7 +241,7 @@
       "css": 12961
     },
     "lazy:features/work/components/AgentLine.svelte": {
-      "js": 130629,
+      "js": 197918,
       "css": 26459
     },
     "lazy:features/work/components/bar/ModelPicker.svelte": {
@@ -265,7 +265,7 @@
       "css": 3697
     },
     "lazy:features/work/components/objects/Diagram.svelte": {
-      "js": 80151,
+      "js": 80161,
       "css": 5159
     },
     "lazy:features/work/components/objects/Diff.svelte": {
@@ -293,7 +293,7 @@
       "css": 7455
     },
     "lazy:features/work/components/objects/Media.svelte": {
-      "js": 13003,
+      "js": 12868,
       "css": 3106
     },
     "lazy:features/work/components/objects/Note.svelte": {
@@ -309,12 +309,12 @@
       "css": 2711
     },
     "lazy:features/work/components/objects/Picks.svelte": {
-      "js": 75137,
-      "css": 22224
+      "js": 75155,
+      "css": 22799
     },
     "lazy:features/work/components/objects/Plan.svelte": {
-      "js": 33139,
-      "css": 9819
+      "js": 149885,
+      "css": 16322
     },
     "lazy:features/work/components/objects/Plot.svelte": {
       "js": 5655,
@@ -325,8 +325,8 @@
       "css": 5690
     },
     "lazy:features/work/components/objects/Sheet.svelte": {
-      "js": 38025,
-      "css": 8937
+      "js": 38113,
+      "css": 9134
     },
     "lazy:features/work/components/objects/Subject.svelte": {
       "js": 35260,
@@ -337,7 +337,7 @@
       "css": 2120
     },
     "lazy:features/work/components/pane/TakeoverPane.svelte": {
-      "js": 10876,
+      "js": 11589,
       "css": 3332
     },
     "lazy:features/work/components/parts/ComputerPart.svelte": {
@@ -349,15 +349,15 @@
       "css": 1659
     },
     "lazy:features/work/components/start/WorkStart.svelte": {
-      "js": 38909,
+      "js": 39068,
       "css": 6945
     },
     "lazy:features/work/components/WorkCanvas.svelte": {
-      "js": 629962,
-      "css": 120284
+      "js": 643591,
+      "css": 123468
     },
     "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-      "js": 544975,
+      "js": 562740,
       "css": 46640
     },
     "lazy:features/work/components/WorkFileInspector.svelte": {
@@ -365,15 +365,15 @@
       "css": 3783
     },
     "lazy:features/work/components/WorkResultInspector.svelte": {
-      "js": 117840,
+      "js": 119018,
       "css": 31816
     },
     "lazy:features/work/components/WorkSubjectInspector.svelte": {
-      "js": 62112,
+      "js": 63254,
       "css": 7036
     },
     "lazy:features/work/lib/diagram-worker.ts": {
-      "js": 27969,
+      "js": 27979,
       "css": 0
     },
     "lazy:shared/ui/data/Artifact/WorkChart.svelte": {
@@ -389,13 +389,13 @@
       "css": 2750
     },
     "panel": {
-      "js": 116416,
+      "js": 116818,
       "css": 35853
     }
   },
   "onboarding": {
     "onboarding": {
-      "js": 210018,
+      "js": 210420,
       "css": 107517
     }
   }
