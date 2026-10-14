@@ -248,13 +248,30 @@
     profile_unavailable: m.work_line_unavailable,
     outcome_unknown: m.work_line_unknown,
   };
+  /**
+   * A refused request says why for a moment, then the run's own words return:
+   * it never stands for good over a run that answered. With no run to tell
+   * instead, it stays.
+   */
+  const REFUSAL_MS = 6000;
+  const refusal = $derived(failure ?? session.failure);
+  const refusalKey = $derived(refusal ? `${run?.id ?? ""}:${refusal}` : null);
+  let refusalTold = $state<string | null>(null);
+  $effect(() => {
+    const key = refusalKey;
+    if (!key) return;
+    const timer = setTimeout(() => (refusalTold = key), REFUSAL_MS);
+    return () => clearTimeout(timer);
+  });
+  const refused = $derived(
+    refusalKey && (!execution || refusalTold !== refusalKey) ? refusal : null,
+  );
   /** Two or three words while it works; one quiet sentence once it stops. */
   const headline = $derived.by(() => {
     if (waiting) return m.work_line_waiting_on({ site: waiting.host });
     if (askedOnCanvas?.host) return m.work_line_waiting_on({ site: askedOnCanvas.host });
     if (askedOnCanvas) return m.work_line_waiting_for_you();
     if (intervention) return interventionLabel;
-    const refused = failure ?? session.failure;
     if (refused) return refusals[refused]?.() ?? m.work_line_failed();
     if (interrupted) return m.work_line_interrupted();
     if (stoppedQuestion) return m.work_line_waiting_for_you();

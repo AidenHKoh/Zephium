@@ -645,3 +645,38 @@ test("a run stopped by spent Zephium AI usage says so and offers the fix", async
   await screen.unmount();
   session.dispose();
 });
+
+test("a refused request says so for a moment, then the finished run's own sentence returns", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const session = new WorkSession("profile");
+    session.selected = "objective";
+    const done = agentRun("completed");
+    done.steps = [
+      ...done.steps!,
+      {
+        id: "finish",
+        turn: 2,
+        kind: { kind: "finish", followups: [] },
+        status: "succeeded",
+        note: "Planned the trip around the window.",
+      },
+    ];
+    session.projection = { ...structuredClone(projection), executions: [done] };
+    vi.spyOn(session.operations, "latest").mockReturnValue({
+      id: "again",
+      state: { kind: "refused", error: "unavailable" },
+    } as ReturnType<typeof session.operations.latest>);
+    const screen = await render(AgentLine, { session });
+    await Promise.resolve();
+    expect(screen.container.textContent).toContain("not available right now");
+    vi.advanceTimersByTime(6000);
+    await Promise.resolve();
+    expect(screen.container.textContent).toContain("Planned the trip around the window.");
+    expect(screen.container.textContent).not.toContain("not available right now");
+    await screen.unmount();
+    session.dispose();
+  } finally {
+    vi.useRealTimers();
+  }
+});
