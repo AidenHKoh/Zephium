@@ -2134,10 +2134,13 @@ impl NativeWorkComposition {
                     }),
                 );
                 // A signed-in page's title never leaves the page.
+                // A search's results page reads as a Read but its step is the
+                // search's, which has no page title of its own.
                 if disposition == Some(AgentWorkDisposition::Succeeded)
                     && signed_in.is_none()
                     && resume_plan.as_ref().is_some_and(|plan| {
                         matches!(plan.request.step, WorkStepKindV1::Read { .. })
+                            && plan.results.is_none()
                     })
                 {
                     if let (Some((step, _)), Some(title)) = (
