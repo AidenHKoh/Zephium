@@ -753,7 +753,7 @@ where
                     Err(fault) => answers[index] = Some((fault, true)),
                 },
                 "create" => {
-                    let args = args.clone();
+                    let args = unquoted_data(args);
                     pending.push(Box::pin(async move {
                         let part = args
                             .get("part")
@@ -764,7 +764,7 @@ where
                     }))
                 }
                 "revise" => {
-                    let args = args.clone();
+                    let args = unquoted_data(args);
                     pending.push(Box::pin(async move {
                         let (content, error) = self.revise(&args).await;
                         vec![(index, content, error)]
@@ -1724,6 +1724,21 @@ where
     }
 }
 
+/// Call arguments whose `data` came as JSON text, as models sometimes send
+/// it, with that text read as the object it spells.
+fn unquoted_data(args: &Value) -> Value {
+    let mut args = args.clone();
+    let parsed = args
+        .get("data")
+        .and_then(Value::as_str)
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .filter(Value::is_object);
+    if let Some(data) = parsed {
+        args["data"] = data;
+    }
+    args
+}
+
 /// The schema path a refusal's words lead with, after an optional `kind: `.
 fn schema_path(words: &str) -> Option<super::SchemaPath> {
     let words = words.split_once(": ").map_or(words, |(_, rest)| rest);
@@ -2139,6 +2154,22 @@ mod compact_tests {
     use zephium_core::work::model::{
         WorkModelProvider, WorkModelRef, WorkModelSupports, WorkModelWire,
     };
+
+    #[test]
+    fn data_sent_as_json_text_is_read_as_its_object_and_a_refusal_names_its_path() {
+        let args = serde_json::json!({"kind":"picks","data":"{\"records\":[\"r1\"]}"});
+        assert_eq!(unquoted_data(&args)["data"]["records"][0], "r1");
+        let plain = serde_json::json!({"data":"not json"});
+        assert_eq!(unquoted_data(&plain), plain);
+        assert_eq!(
+            format!(
+                "{:?}",
+                schema_path("plan: steps[3].detail is 300 characters").unwrap()
+            ),
+            "steps[3].detail"
+        );
+        assert!(schema_path("The canvas could not be read").is_none());
+    }
 
     fn entry(context_window: u32) -> WorkModelEntry {
         WorkModelEntry {
