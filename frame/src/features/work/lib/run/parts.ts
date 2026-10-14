@@ -53,6 +53,9 @@ export type RunPart = {
   order: number;
   /** The lead's turn that started it: work begun later stands to the right of what it built on. */
   turn?: number;
+  /** When it began and ended, in epoch milliseconds, as its facts say: work that overlapped stands in one column. */
+  began?: number;
+  ended?: number;
   /** The connection a connection part works through: "github". */
   connection?: string;
   /** What the part came to, in its helper's words: "3 homes". */
@@ -81,6 +84,20 @@ export type RunPart = {
 function firstTurn(steps: readonly Step[]): { turn?: number } {
   const turns = steps.map((step) => step.turn).filter((turn) => typeof turn === "number");
   return turns.length ? { turn: Math.min(...turns) } : {};
+}
+
+/** When a part's facts say it began and ended. */
+function times(fact: { started_ms?: string | null; ended_ms?: string | null }) {
+  const at = (text?: string | null) => {
+    const value = text ? Number(text) : NaN;
+    return Number.isFinite(value) ? value : undefined;
+  };
+  const began = at(fact.started_ms);
+  const ended = at(fact.ended_ms);
+  return {
+    ...(began !== undefined ? { began } : {}),
+    ...(ended !== undefined ? { ended } : {}),
+  };
 }
 
 /** What a step is doing while it runs, as a live part's row says it. */
@@ -211,6 +228,7 @@ function factParts(
             : [],
         order: parts.length,
         ...firstTurn(steps),
+        ...times(fact),
         ...(fact.summary ? { summary: fact.summary } : {}),
         ...(fact.goal?.trim() ? { goal: fact.goal.trim() } : {}),
         ...(going && state === "running" && nowOf(steps) ? { now: nowOf(steps)! } : {}),

@@ -806,7 +806,15 @@ export function environmentParts(
       })),
     );
     for (const { part } of built) {
-      const { pages: entries, need, pending } = settled.get(part.id)!;
+      const { pages: entries, need: offered, pending } = settled.get(part.id)!;
+      // A settled run's ended part tells a check or a sign-in as past.
+      const need =
+        offered &&
+        !stage.live &&
+        ["done", "failed", "stopped"].includes(part.state) &&
+        (offered.kind === "check" || offered.kind === "sign_in")
+          ? { ...offered, past: true as const }
+          : offered;
       const rect = stage.lane.rects[part.id]!;
       const waitingPage = entries.find((page) => page.human?.phase === "waiting_for_human");
       const needs = !!part.ask || !!waitingPage;

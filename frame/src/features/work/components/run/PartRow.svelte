@@ -90,19 +90,22 @@
   const needSaid = $derived.by(() => {
     if (!need) return null;
     // A sign-in opened: what is left is to run the part again.
-    if (need.kind === "sign_in" && signing)
+    if (need.kind === "sign_in" && !need.past && signing)
       return { text: m.work_need_signed_in({ site: need.target }), action: m.work_need_again() };
     return needWords(need, part.title, "row");
   });
   /** A check or a sign-in the part still needs the person for, as the same card a waiting page gets. */
   const asked = $derived(
-    (need?.kind === "check" || need?.kind === "sign_in") && !(need.kind === "sign_in" && signing),
+    (need?.kind === "check" || need?.kind === "sign_in") &&
+      !need.past &&
+      !(need.kind === "sign_in" && signing),
   );
   function meet() {
-    if (need?.kind === "sign_in" && !signing) {
+    if (need?.kind === "sign_in" && !need.past && !signing) {
       signing = true;
       onneed?.("meet");
-    } else onneed?.(need?.kind === "sign_in" || need?.kind === "retry" ? "again" : "meet");
+    } else
+      onneed?.(need?.kind === "sign_in" || need?.kind === "retry" || need?.past ? "again" : "meet");
   }
   const board = getContext<BoardActions | undefined>(canvasBoard);
   // The row's own height: the taller of its name and its work, so rows never overlap.

@@ -24,6 +24,7 @@ import { objectHeight, objectWidth } from "./board/object-size";
 import { ulidTime } from "./ulid-time";
 import { runTrail } from "./board/trail";
 import type { Picture } from "./board/types";
+import { columnsOf } from "./run/columns";
 import { RUN, placeRun } from "./run/layout";
 import { localReads, runParts, type PartAsk, type RunInputView, type RunPart } from "./run/parts";
 import { PART, partSize, rowKey, type PartShape } from "./run/part-size";
@@ -545,26 +546,44 @@ export function environmentStages(
           return [[object.id, { ...pin, width, height: sized(object, width, false) }] as const];
         }),
       );
-      // Work the lead began in a later turn stands in a column further right.
-      const begun = [...new Set(parts.map((part) => part.turn ?? 0))].sort((a, b) => a - b);
-      const rows = parts.map((part) => ({
-        phase: begun.indexOf(part.turn ?? 0),
-        part: {
-          id: part.id,
-          ...partSize(
-            partShape(part, projection),
-            measured.get(measureKey(rowKey(part.id), 0, false)),
-          ),
-        },
-        found: objects.flatMap((object) => {
-          if (found.get(object.id) !== part.id || pinned.has(object.id)) return [];
-          const width = Math.round(Math.min(FOUND, range(object).ideal));
-          return [{ id: object.id, width, height: sized(object, width, object.id === open) }];
-        }),
-        feeds:
-          part.state === "done" &&
-          (part.pages.length > 0 || part.sources.length > 0 || !!part.lines?.length),
-      }));
+      // Work that overlapped in time stands in one column; later work, to its right.
+      const phases = columnsOf(
+        parts.map((part) => ({
+          ...(part.turn !== undefined ? { turn: part.turn } : {}),
+          ...(part.began !== undefined ? { began: part.began } : {}),
+          ...(part.ended !== undefined ? { ended: part.ended } : {}),
+          open: !["done", "failed", "stopped"].includes(part.state),
+        })),
+      );
+      // In a column, in the order the work began.
+      const rows = parts
+        .map((part, index) => ({ part, index }))
+        .sort(
+          (a, b) =>
+            phases[a.index]! - phases[b.index]! ||
+            (a.part.began !== undefined && b.part.began !== undefined
+              ? a.part.began - b.part.began
+              : 0) ||
+            a.index - b.index,
+        )
+        .map(({ part, index }) => ({
+          phase: phases[index]!,
+          part: {
+            id: part.id,
+            ...partSize(
+              partShape(part, projection),
+              measured.get(measureKey(rowKey(part.id), 0, false)),
+            ),
+          },
+          found: objects.flatMap((object) => {
+            if (found.get(object.id) !== part.id || pinned.has(object.id)) return [];
+            const width = Math.round(Math.min(FOUND, range(object).ideal));
+            return [{ id: object.id, width, height: sized(object, width, object.id === open) }];
+          }),
+          feeds:
+            part.state === "done" &&
+            (part.pages.length > 0 || part.sources.length > 0 || !!part.lines?.length),
+        }));
       const drawn = runSources(runs, recorded);
       const sourcesId = `sources:${draft.card}`;
       // Sources hold what a run drew on; a block that would only report a failure is not drawn.

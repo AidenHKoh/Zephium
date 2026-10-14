@@ -219,6 +219,8 @@ export type PartNeed = {
     "couldnt_read" | "signed_out" | "blocked_by_check" | "not_found" | "site_error" | "no_answer";
   /** The site a connection would stand in for, as a person names it. */
   site?: string;
+  /** The run has settled: a check or a sign-in is told as what happened, not as what it waits on. */
+  past?: true;
 };
 /** One page of a part, as its row shows it. */
 export type PartPage = {

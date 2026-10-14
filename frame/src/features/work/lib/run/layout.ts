@@ -4,7 +4,7 @@ import { branch, merge, type Point } from "./lines";
 /**
  * A run on the 8 px grid, left to right: the inputs hang left of the request
  * at x = 0, then the run's work in the order it happened, one column per
- * step of the lead (what began together stands together), each 96 past the
+ * stretch of time (work that overlapped stands together), each 96 past the
  * last, and the result 96 past the last column. The request, every column
  * and the result's headline begin level at the run's top and grow downward, so
  * a tall result never moves the work and tall work never moves the request;
@@ -48,7 +48,7 @@ type RunRow = {
   found: readonly Sized[];
   /** The part's work reaches the result. */
   feeds: boolean;
-  /** Which step of the run began it: later work stands in a column further right. */
+  /** Its column: later work stands further right; one not yet placed stands in the newest. */
   phase?: number;
 };
 export type RunInputs = {
@@ -163,8 +163,12 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
   const rects: Record<string, Rect> = {};
   const lines: RunLine[] = [];
   const partsX = RUN.request + RUN.fork;
-  const phases = [...new Set(run.rows.map((row) => row.phase ?? 0))].sort((a, b) => a - b);
-  const groups = phases.map((phase) => run.rows.filter((row) => (row.phase ?? 0) === phase));
+  const known = run.rows.flatMap((row) => (row.phase === undefined ? [] : [row.phase]));
+  // A row whose column is not known yet stands in the newest, never back at the first.
+  const newest = known.length ? Math.max(...known) : 0;
+  const phaseOf = (row: RunRow) => row.phase ?? newest;
+  const phases = [...new Set(run.rows.map(phaseOf))].sort((a, b) => a - b);
+  const groups = phases.map((phase) => run.rows.filter((row) => phaseOf(row) === phase));
   // Every column and the request begin at the run's top; the result starts there too.
   const first = top + RUN.spine - RUN.labelMid;
   const spine = top + RUN.spine;
@@ -177,7 +181,6 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
     columns.push({ ...column, x });
     x = snap(x + column.width + RUN.fork);
   });
-  const rowEnds = columns.flatMap((column) => column.ends);
   const labels = columns.flatMap((column) => column.labels);
   const partsBottom = columns.length ? Math.max(...columns.map((column) => column.bottom)) : top;
   const lastColumn = columns.at(-1);
@@ -289,7 +292,8 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
     const to = { x: -RUN.air, y: into.y - result.y };
     // The last column's work reaches the result; earlier columns reach it through the later ones.
     const last = lastColumn?.ends.filter((entry) => entry.row.feeds) ?? [];
-    const feeding = last.length ? last : rowEnds.filter((entry) => entry.row.feeds);
+    // A line never runs level through a column to reach an earlier one's work, so a last column that feeds nothing stands for the run's end.
+    const feeding = last.length ? last : (lastColumn?.ends ?? []);
     const ends = feeding.map((entry) => entry.end);
     merge(ends, resultX - RUN.feed / 2, into).forEach((points, index) => {
       const entry = feeding[index]!;

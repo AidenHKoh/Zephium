@@ -54,6 +54,12 @@ export function needWords(
 ): { text: string; action: string } {
   const said = (site: string, reason: PartNeed["reason"]) =>
     where === "row" ? siteReason(site || part, reason) : partReason(part, reason);
+  // A run that moved on no longer waits at the site: one quiet line, and to try again.
+  if (need.past && (need.kind === "sign_in" || need.kind === "check"))
+    return {
+      text: said(need.target, need.kind === "check" ? "blocked_by_check" : "signed_out"),
+      action: m.work_need_again(),
+    };
   switch (need.kind) {
     case "sign_in":
       return {

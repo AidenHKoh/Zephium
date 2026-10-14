@@ -41,3 +41,14 @@ test("a missing folder offers the native picker without an invented location", (
     action: "Choose folder…",
   });
 });
+
+test("a check or a sign-in the settled run moved past is told as past, with one try again", () => {
+  expect(needWords({ kind: "check", target: "state.gov", past: true }, "Entry", "row")).toEqual({
+    text: "state.gov asked for a human check",
+    action: "Try again",
+  });
+  expect(needWords({ kind: "sign_in", target: "Airbnb", past: true }, "Stay", "row")).toEqual({
+    text: "Signed out of Airbnb",
+    action: "Try again",
+  });
+});

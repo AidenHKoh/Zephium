@@ -1119,7 +1119,7 @@
     const need = item?.part?.need;
     if (!item || !need) return null;
     const said = needWords(need, item.part!.title, "island");
-    const how = need.kind === "retry" ? "again" : "meet";
+    const how = need.kind === "retry" || need.past ? "again" : "meet";
     return { text: said.text, action: said.action, onact: () => meetNeed(item.id, how) };
   });
   const dressOf = $derived(requestDress(stages));

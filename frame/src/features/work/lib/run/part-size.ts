@@ -15,6 +15,8 @@ export const PART = {
   behindX: 14,
   behindY: 10,
   shown: 3,
+  /** The count of pages hangs past the stack's right edge: a line leaves clear of it. */
+  badge: 12,
   sources: 320,
   sourceRow: 28,
   sourceRows: 3,
@@ -62,7 +64,10 @@ export function partSize(shape: PartShape, measured?: number): { width: number; 
   switch (shape.kind) {
     case "pages": {
       const stack = stackSize(shape.count);
-      return { width: lead + stack.width, height: Math.max(stack.height, measured ?? 0) };
+      return {
+        width: lead + stack.width + PART.badge,
+        height: Math.max(stack.height, measured ?? 0),
+      };
     }
     case "sources":
       return {
