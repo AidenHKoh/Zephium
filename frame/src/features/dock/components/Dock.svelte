@@ -28,12 +28,14 @@
 -->
 <!-- The base of the column settles last, once the list above it has. -->
 <footer class="dock" data-compact={compact} data-cascade style:--cascade={8}>
-  {#if above}{@render above()}{/if}
+  {#if above}<div class="dock-above" data-under-panel>{@render above()}</div>{/if}
   <!-- In the row the profile leads; down the rail it closes the column. -->
   <div class="dock-base">
     {#if tools && !compact}<ToolShelf />
       <span class="dock-rule" aria-hidden="true"></span>{/if}
-    {#if sites}<div class="dock-sites-slot">{@render sites()}</div>{/if}
+    {#if sites}<div class="dock-sites-slot" data-under-panel={compact || undefined}>
+        {@render sites()}
+      </div>{/if}
     {#if tools && compact}<span class="dock-rule" aria-hidden="true"></span><ToolShelf
         compact
       />{/if}
@@ -49,6 +51,16 @@
     gap: var(--dock-gap);
     margin-block-start: 8px;
     padding: 0 var(--sidebar-inset) var(--sidebar-inset);
+  }
+
+  .dock-above {
+    display: flex;
+    flex-direction: column;
+    gap: var(--dock-gap);
+  }
+
+  .dock-above:not(:has(> :not([hidden]))) {
+    display: none;
   }
 
   .dock-base {

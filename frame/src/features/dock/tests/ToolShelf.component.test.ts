@@ -12,6 +12,7 @@ const native = vi.hoisted(() => ({
   run: vi.fn(async () => ({ accepted: true, operation_id: null })),
   toolsMenu: vi.fn(async () => true),
   profiles: vi.fn(async () => ({ status: "ok" as const, data: null as ProfilesView | null })),
+  switchTo: vi.fn(async () => ({ accepted: true, operation_id: null })),
 }));
 
 const names = (root: HTMLElement) =>
@@ -35,6 +36,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     runCommand: native.run,
     toolsMenuPopup: native.toolsMenu,
     profilesGet: native.profiles,
+    profilesSwitch: native.switchTo,
     settingGet: async () => null,
     sidebarSetWidth: vi.fn(async () => undefined),
   });
@@ -69,7 +71,7 @@ test("the tools stay out of reach until the case is pressed", async () => {
     .toHaveAttribute("aria-current", "true");
 });
 
-test("the profile opens on who you are, the other profiles and the way to manage them, then the tools", async () => {
+test("the profile opens on a switcher of who you are, then the tools", async () => {
   native.profiles.mockResolvedValueOnce({ status: "ok" as const, data: ROSTER });
   await page.viewport(1200, 800);
   const screen = await render(ToolShelf);
@@ -77,34 +79,49 @@ test("the profile opens on who you are, the other profiles and the way to manage
   const tools = screen.getByRole("button", { name: /^Tools/ });
   await expect.element(tools).toHaveAttribute("aria-haspopup", "menu");
   await expect
-    .poll(() => screen.container.querySelector(".shelf-profile-name")?.textContent)
+    .poll(() => screen.container.querySelector(".shelf-me-name")?.textContent)
     .toBe("Personal");
-  await expect
-    .poll(() => names(screen.container))
-    .toEqual([
-      "Work",
-      "Manage Profiles…",
-      "Incognito",
-      "Notes",
-      "Tasks",
-      "Time",
-      "History",
-      "Downloads",
-      "Bookmarks",
-      "Settings",
-    ]);
+  expect(names(screen.container)).toEqual([
+    "Notes",
+    "Tasks",
+    "Time",
+    "History",
+    "Downloads",
+    "Bookmarks",
+    "Settings",
+  ]);
   // Nearest the case settles first, so each row's step counts from the foot.
-  const steps = [...screen.container.querySelectorAll<HTMLElement>(".shelf-item")].map((item) =>
-    Number(item.style.getPropertyValue("--step")),
+  const steps = [...screen.container.querySelectorAll<HTMLElement>(".shelf-item, .shelf-head")].map(
+    (item) => Number(item.style.getPropertyValue("--step")),
   );
-  expect(steps).toEqual([9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
+  expect(steps).toEqual([7, 6, 5, 4, 3, 2, 1, 0]);
+  expect(screen.container.textContent).not.toContain("Manage Profiles");
 
   await tools.click();
-  await screen.getByRole("menuitem", { name: "Manage Profiles…" }).click();
-  expect(native.run).toHaveBeenCalledWith("settings.profiles");
+  await screen.getByRole("menuitem", { name: "Switch to Work" }).click();
+  expect(native.switchTo).toHaveBeenCalledWith("p2");
+  await tools.click();
+  await screen.getByRole("menuitem", { name: "New Incognito Window" }).click();
+  expect(native.run).toHaveBeenLastCalledWith("window.newPrivate");
+  await tools.click();
+  await screen.getByRole("menuitem", { name: /^Personal — / }).click();
+  expect(native.run).toHaveBeenLastCalledWith("settings.profiles");
 
   await tools.click({ button: "right" });
   expect(native.toolsMenu).toHaveBeenCalledOnce();
+});
+
+test("with one profile the head is you alone, and a private window beside you", async () => {
+  native.profiles.mockResolvedValueOnce({
+    status: "ok" as const,
+    data: { ...ROSTER, profiles: ROSTER.profiles.slice(0, 1) },
+  });
+  const screen = await render(ToolShelf);
+  await expect
+    .poll(() => screen.container.querySelector(".shelf-me-name")?.textContent)
+    .toBe("Personal");
+  const chips = [...screen.container.querySelectorAll(".shelf-chip")];
+  expect(chips.map((chip) => chip.getAttribute("aria-label"))).toEqual(["New Incognito Window"]);
 });
 
 test("a feature switched off takes its tool out, and an empty group its rule", async () => {
@@ -113,9 +130,9 @@ test("a feature switched off takes its tool out, and an empty group its rule", a
   for (const feature of ["notes", "tasks", "time"])
     emitNativeEvent("uiCommand", `preference.${feature}.enabled=false`);
   await expect
-    .poll(() => names(screen.container).slice(-6))
-    .toEqual(["Manage Profiles…", "Incognito", "History", "Downloads", "Bookmarks", "Settings"]);
-  expect(screen.container.querySelectorAll(".shelf-rule")).toHaveLength(3);
+    .poll(() => names(screen.container))
+    .toEqual(["History", "Downloads", "Bookmarks", "Settings"]);
+  expect(screen.container.querySelectorAll(".shelf-rule")).toHaveLength(2);
   for (const feature of ["notes", "tasks", "time"])
     emitNativeEvent("uiCommand", `preference.${feature}.enabled=true`);
   preferences.dispose();

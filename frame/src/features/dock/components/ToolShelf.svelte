@@ -1,12 +1,7 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import { onMount } from "svelte";
-  import {
-    IncognitoIcon,
-    Settings02Icon,
-    UserIcon,
-    UserMultipleIcon,
-  } from "@hugeicons/core-free-icons";
+  import { IncognitoIcon, Settings02Icon, UserIcon } from "@hugeicons/core-free-icons";
   import { commands } from "$shared/ipc/bindings";
   import * as tools from "$session/tools.svelte";
   import type { ToolKind } from "$session/tools.svelte";
@@ -29,6 +24,7 @@
   });
   const name = $derived(tabs.profile()?.name ?? profiles.current()?.name ?? "");
   const others = $derived(profiles.inPrivate() ? [] : profiles.others());
+  const privately = $derived(profiles.inPrivate() || tabs.profile()?.kind === "incognito");
   /** The avatar the person chose; until then the foot is the account glyph. */
   const chosen = $derived.by(() => {
     const current = profiles.inPrivate() ? null : profiles.current();
@@ -38,14 +34,9 @@
   const shelf = $derived(SHELF_TOOLS.filter((kind) => preferences.enabled(kind)));
   const groups = $derived([shelf, RECORD_TOOLS].filter((group) => group.length > 0));
   // Rows settle in nearest the case first, so each counts from the bottom:
-  // Settings, the tools, Incognito, Manage Profiles, the others, then you.
+  // Settings, the tools, then who you are.
   const toolRows = $derived(groups.reduce((sum, group) => sum + group.length, 0));
-  const step = $derived({
-    incognito: toolRows + 1,
-    manage: toolRows + 2,
-    other: (index: number) => toolRows + 3 + others.length - 1 - index,
-    profile: toolRows + 3 + others.length,
-  });
+  const headStep = $derived(toolRows + 1);
   function pick(kind: ToolKind) {
     if (tools.activeTool() === kind) tools.close();
     else tools.open(kind);
@@ -89,12 +80,21 @@
   </button>
 {/snippet}
 
+{#snippet me(size: number)}{#if chosen}<ProfileAvatar view={chosen} {size} />{:else}<span
+      class="avatar"
+      style:--size={`${size}px`}
+      aria-hidden="true"
+      ><Icon icon={UserIcon} size={Math.round(size * 0.58)} strokeWidth={1.8} /></span
+    >{/if}{/snippet}
+
 <!--
   The foot of the column is you: the profile this window browses as, opening
   onto what belongs to it, stacked on demand. A click opens the stack rising
   out of the avatar, nearest first, the way a stack opens from the Dock;
-  nothing opens on hover. At rail width a name has nowhere to go, so the
-  stack is glyphs, each named by its tooltip.
+  nothing opens on hover. Its head is a switcher: you, which opens your
+  profiles in Settings, and the others beside you, one click away, with a
+  private window last. At rail width the stack is glyphs, each named by its
+  tooltip.
 -->
 <div
   class="shelf"
@@ -107,7 +107,7 @@
     label={name ? `${m.dock_tools()} — ${name}` : m.dock_tools()}
     menu
     triggerClass={["case", tools.activeTool() !== null && "case-lit"].filter(Boolean).join(" ")}
-    panelClass="shelf-stack"
+    panelClass="shelf-stack sidebar-softens"
   >
     {#snippet trigger()}{#if chosen}<ProfileAvatar
           view={chosen}
@@ -117,40 +117,42 @@
           size={compact ? 16 : 17}
           strokeWidth={1.7}
         />{/if}{#if compact}<NoticePip />{/if}{/snippet}
-    {#if !compact && name}
-      <div class="shelf-profile" role="presentation" style:--step={step.profile}>
-        {#if chosen}<ProfileAvatar view={chosen} size={24} />{:else}<span
-            class="avatar"
-            aria-hidden="true"><Icon icon={UserIcon} size={14} strokeWidth={1.8} /></span
-          >{/if}
-        <span class="shelf-profile-name">{name}</span>
-      </div>
-    {/if}
-    {#each others as profile, index (profile.id)}
+    <div class="shelf-head" role="presentation" style:--step={headStep}>
       <button
         type="button"
         role="menuitem"
-        class="ui-menu-item shelf-item"
-        style:--step={step.other(index)}
-        title={compact ? m.profiles_menu_label({ name: profile.name }) : undefined}
-        aria-label={m.profiles_menu_label({ name: profile.name })}
-        onclick={() => void profiles.switchTo(profile.id)}
+        class="ui-menu-item shelf-me"
+        title={compact ? `${name} — ${m.browse_profile_settings()}` : m.browse_profile_settings()}
+        aria-label={`${name} — ${m.browse_profile_settings()}`}
+        onclick={() => run("settings.profiles")}
       >
-        <span class="ui-menu-icon"><ProfileAvatar view={drawn(profile)} size={20} /></span>
-        {#if !compact}<span>{profile.name}</span>{/if}
+        {@render me(compact ? 24 : 22)}
+        {#if !compact}<span class="shelf-me-name">{name}</span>{/if}
       </button>
-    {/each}
-    {@render row(UserMultipleIcon, m.browse_profiles_manage(), null, step.manage, () =>
-      run("settings.profiles"),
-    )}
-    <div class="shelf-rule" role="separator"></div>
-    {@render row(
-      IncognitoIcon,
-      m.profile_incognito(),
-      keysFor("window.newPrivate"),
-      step.incognito,
-      () => run("window.newPrivate"),
-    )}
+      {#if others.length > 0 || !privately}<div class="shelf-chips" role="presentation">
+          {#each others as profile (profile.id)}
+            <button
+              type="button"
+              role="menuitem"
+              class="shelf-chip"
+              title={profile.name}
+              aria-label={m.profiles_menu_label({ name: profile.name })}
+              onclick={() => void profiles.switchTo(profile.id)}
+              ><ProfileAvatar view={drawn(profile)} size={20} /></button
+            >
+          {/each}
+          {#if !privately}<button
+              type="button"
+              role="menuitem"
+              class="shelf-chip shelf-private"
+              data-after-others={others.length > 0 || undefined}
+              title={named(m.browse_incognito_window(), keysFor("window.newPrivate"))}
+              aria-label={m.browse_incognito_window()}
+              onclick={() => run("window.newPrivate")}
+              ><Icon icon={IncognitoIcon} size={16} strokeWidth={1.7} /></button
+            >{/if}
+        </div>{/if}
+    </div>
     {#each groups as group, at (at)}
       {@const before = groups.slice(0, at).reduce((sum, earlier) => sum + earlier.length, 0)}
       <div class="shelf-rule" role="separator"></div>
@@ -228,12 +230,12 @@
     pointer-events: none;
   }
 
-  /* The same, small, beside the profile's name. */
+  /* The account glyph where no picture has been chosen, small. */
   .avatar {
     display: grid;
     flex: none;
-    width: 24px;
-    height: 24px;
+    width: var(--size);
+    height: var(--size);
     border-radius: var(--radius-capsule);
     background: var(--row-active);
     box-shadow: var(--shine-top);
@@ -241,28 +243,15 @@
     place-items: center;
   }
 
-  /* Whose menu this is, above everything it holds. */
-  .shelf-profile {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 6px var(--menu-item-inset) 6px;
-  }
-
-  .shelf-profile-name {
-    overflow: hidden;
-    color: var(--color-text);
-    font-size: var(--text-body);
-    font-weight: 600;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  /* The stack rises out of the case rather than dropping from it. */
+  /* The stack rises out of the case rather than dropping from it, and never
+     past the window: a short one scrolls its rows instead. */
   .shelf :global(.shelf-stack) {
     top: auto;
     bottom: calc(100% + 8px);
-    min-width: 236px;
+    min-width: 232px;
+    max-height: calc(100vh - 120px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
     transform-origin: bottom left;
   }
 
@@ -270,8 +259,93 @@
     translate: 0 6px;
   }
 
+  /* Who you are, and who else you could be. */
+  .shelf-head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .shelf-me {
+    flex: 1;
+    min-width: 0;
+    min-height: 34px;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    text-align: start;
+  }
+
+  .shelf-me-name {
+    overflow: hidden;
+    color: var(--color-text);
+    font-size: var(--text-body);
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .shelf-chips {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 2px;
+    padding-inline-end: 2px;
+  }
+
+  .shelf-chip {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--color-muted);
+    cursor: default;
+    outline: none;
+    place-items: center;
+    transition:
+      background-color var(--motion-instant) var(--ease-smooth),
+      color var(--motion-instant) var(--ease-smooth),
+      scale var(--motion-base) var(--ease-spring);
+  }
+
+  .shelf-chip:hover,
+  .shelf-chip:focus-visible {
+    background: var(--row-active);
+    color: var(--color-text);
+  }
+
+  .shelf-chip:focus-visible {
+    box-shadow: inset 0 0 0 1.5px var(--color-text);
+  }
+
+  .shelf-chip:active {
+    scale: 0.92;
+    background: var(--row-pressed);
+  }
+
+  /* A private window is not another of your profiles: a hairline keeps it
+     apart from them. */
+  .shelf-private[data-after-others] {
+    position: relative;
+    margin-inline-start: 7px;
+  }
+
+  .shelf-private[data-after-others]::before {
+    position: absolute;
+    width: 1px;
+    height: 14px;
+    background: var(--color-border);
+    content: "";
+    inset-inline-start: -5px;
+  }
+
   .shelf :global(.shelf-item) {
-    min-height: 36px;
+    min-height: 32px;
+    padding-block: 4px;
     width: 100%;
     border: 0;
     background: transparent;
@@ -297,13 +371,13 @@
     color: var(--color-muted);
   }
 
-  .shelf :global(.shelf-item:hover),
-  .shelf :global(.shelf-item:focus-visible) {
+  .shelf :global(:is(.shelf-item, .shelf-me):hover),
+  .shelf :global(:is(.shelf-item, .shelf-me):focus-visible) {
     outline: none;
     background: var(--row-active);
   }
 
-  .shelf :global(.shelf-item:active) {
+  .shelf :global(:is(.shelf-item, .shelf-me):active) {
     background: var(--row-pressed);
   }
 
@@ -313,9 +387,9 @@
 
   /* Each row settles in behind the one below it, so the stack reads as
      unfolding from the case instead of arriving as a block. */
-  .shelf :global(.shelf-stack[data-open="true"] :is(.shelf-item, .shelf-profile)) {
+  .shelf :global(.shelf-stack[data-open="true"] :is(.shelf-item, .shelf-head)) {
     animation: shelf-item-in var(--motion-slow) var(--ease-out) both;
-    animation-delay: calc(var(--step) * 16ms);
+    animation-delay: calc(var(--step) * 14ms);
   }
 
   /* stylelint-disable-next-line keyframes-name-pattern -- Svelte's global prefix. */
@@ -328,12 +402,12 @@
 
   .shelf-rule {
     height: 1px;
-    margin: 5px var(--menu-item-inset);
-    background: var(--color-menu-separator);
+    margin: 4px var(--menu-item-inset);
+    background: var(--color-border);
   }
 
   /* At rail width: a square plate like every other rail item, and a stack
-     of glyphs just wide enough for them. */
+     of glyphs just wide enough for them, you and the others first. */
   .shelf[data-compact="true"] :global(.case) {
     width: 36px;
     height: 36px;
@@ -345,6 +419,37 @@
     inset-inline-start: -4px;
     min-width: 0;
     width: 48px;
+  }
+
+  .shelf[data-compact="true"] .shelf-head,
+  .shelf[data-compact="true"] .shelf-chips {
+    flex-direction: column;
+    gap: 2px;
+    padding: 0;
+  }
+
+  .shelf[data-compact="true"] .shelf-me {
+    flex: none;
+    justify-content: center;
+    width: 100%;
+    padding-inline: 0;
+  }
+
+  .shelf[data-compact="true"] .shelf-chip {
+    width: 36px;
+    height: 32px;
+    border-radius: calc(var(--radius-menu) - var(--menu-pad));
+  }
+
+  .shelf[data-compact="true"] .shelf-private[data-after-others] {
+    margin: 7px 0 0;
+  }
+
+  .shelf[data-compact="true"] .shelf-private[data-after-others]::before {
+    width: 14px;
+    height: 1px;
+    inset-block-start: -4px;
+    inset-inline-start: 11px;
   }
 
   .shelf[data-compact="true"] :global(.shelf-item) {

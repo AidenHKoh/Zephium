@@ -61,12 +61,13 @@ test("the rail at rest", async () => {
   const farthest = stack.querySelector<HTMLElement>(".shelf-item")!;
   await expect.poll(() => getComputedStyle(farthest).opacity).toBe("1");
   await expect.poll(() => getComputedStyle(stack).opacity).toBe("1");
-  // Farthest first: managing profiles, then a private window, then the tools
-  // in the native menu's order, and Settings last, nearest the case.
+  // You and a private window head the stack as glyphs; then the tools in the
+  // native menu's order, and Settings last, nearest the case.
+  await expect
+    .element(page.getByRole("menuitem", { name: "New Incognito Window" }))
+    .toBeInTheDocument();
   const items = [...stack.querySelectorAll<HTMLElement>(".shelf-item")];
   expect(items.map((item) => item.getAttribute("aria-label"))).toEqual([
-    "Manage Profiles…",
-    "Incognito",
     "Notes",
     "Tasks",
     "Time",
