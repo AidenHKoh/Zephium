@@ -13,8 +13,7 @@
     ended = null,
     viewport,
     onaction,
-    onwaitingopen,
-    onwaitingextend,
+    onwaitingpage,
   }: {
     scene: BoardScene;
     session: WorkSession;
@@ -29,15 +28,14 @@
     ended?: { text: string; action: string; onact: () => void } | null;
     viewport: { x: number; y: number; zoom: number };
     onaction?: (id: string, action?: string) => void;
-    onwaitingopen?: (card: string) => void;
-    onwaitingextend?: (card: string) => void;
+    onwaitingpage?: (card: string) => void;
   } = $props();
 </script>
 
 <div class="stage">
   <PartsCanvas {scene} {viewport} {held} {onaction} />
   <div class="island">
-    <AgentLine {session} {waiting} {ended} {onwaitingopen} {onwaitingextend} />
+    <AgentLine {session} {waiting} {ended} {onwaitingpage} />
   </div>
 </div>
 

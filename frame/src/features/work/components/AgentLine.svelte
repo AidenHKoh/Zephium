@@ -5,10 +5,10 @@
   import type { WorkHumanReasonV1, WorkModelFaultV1 } from "$shared/ipc/bindings";
   import { currentActivity } from "$domain/work";
   import { agentLine, endingFault, endingNote, isLive } from "../lib/agent-steps";
-  import { cardCountdown, needLine } from "../lib/work-human";
+  import { cardCountdown } from "../lib/work-human";
   import type { WorkHumanSession } from "$domain/work-human";
   import RunAsks from "./asks/RunAsks.svelte";
-  import { asksOf, openAsks } from "./asks/asks";
+  import { askPart, asksOf, openAsks } from "./asks/asks";
   import { fileName } from "../lib/work-files";
   import { effected } from "../lib/run/parts";
   import type { CanvasItem } from "../lib/canvas-model";
@@ -34,11 +34,8 @@
     writeup,
     onfocusagent,
     onwaitingpage,
-    onwaitingopen,
-    onwaitingextend,
     onreview,
     onsteered,
-    onsignin,
     human = null,
     onopenstep,
     working = [],
@@ -78,16 +75,10 @@
     onfocusagent?: (id: string) => void;
     /** Pans to the waiting page card and focuses it. */
     onwaitingpage?: (card: string) => void;
-    /** Opens the waiting page for the person to take over. */
-    onwaitingopen?: (card: string) => void;
-    /** Keeps the run waiting on the page a while longer. */
-    onwaitingextend?: (card: string) => void;
     /** Opens the change the run is proposing, so the person can read it whole. */
     onreview?: (step: string) => void;
     /** The draft was handed to the agent or queued; clear the composer. */
     onsteered?: () => void;
-    /** A read met a sign-in wall: stop there and open the page to sign in. */
-    onsignin?: (card: string) => void;
     /** The work's held pages, for the asks a sign-in wall puts. */
     human?: WorkHumanSession | null;
     /** Opens the page an ask is about, in the centre. */
@@ -192,11 +183,24 @@
       return undefined;
     return { id: step.id, prompt: step.kind.prompt, options: step.kind.options };
   });
-  /** The run's open asks stand in the island as cards; the line's own question gives way. */
-  const asking = $derived.by(() => {
-    if (!execution || !work) return false;
+  const openNow = $derived.by(() => {
+    if (!execution || !work) return [];
     const held = human ? (human.pages.get(work.id) ?? []) : [];
-    return openAsks(asksOf(execution, session.pages, held)).length > 0;
+    return openAsks(asksOf(execution, session.pages, held));
+  });
+  /** An ask with no place on the canvas stands in the island as a card; the line's own question gives way. */
+  const asking = $derived(openNow.some((ask) => !askPart(ask)));
+  /**
+   * An ask on a site's card is answered there and only there; the island just
+   * says so and points at it.
+   */
+  const askedOnCanvas = $derived.by(() => {
+    for (const ask of openNow) {
+      const card = askPart(ask);
+      if (card)
+        return { card, host: "host" in ask ? ask.host : "site" in ask ? ask.site : undefined };
+    }
+    return null;
   });
   const question = $derived(asking ? undefined : (questions.at(-1) ?? stoppedQuestion));
   const failure = $derived(
@@ -246,7 +250,9 @@
   };
   /** Two or three words while it works; one quiet sentence once it stops. */
   const headline = $derived.by(() => {
-    if (waiting) return needLine(waiting.reason, waiting.host).text;
+    if (waiting) return m.work_line_waiting_on({ site: waiting.host });
+    if (askedOnCanvas?.host) return m.work_line_waiting_on({ site: askedOnCanvas.host });
+    if (askedOnCanvas) return m.work_line_waiting_for_you();
     if (intervention) return interventionLabel;
     const refused = failure ?? session.failure;
     if (refused) return refusals[refused]?.() ?? m.work_line_failed();
@@ -336,7 +342,7 @@
     return null;
   });
   const mark = $derived(
-    waiting || question || proposal || asking
+    waiting || question || proposal || asking || askedOnCanvas
       ? ("waiting" as const)
       : live
         ? ("live" as const)
@@ -405,9 +411,6 @@
     computer: "working",
     connection: "working",
   };
-  /** The island offers more time only once the wait is nearly over; the card always does. */
-  const EXTEND_OFFER = 45_000;
-  const signInWall = $derived(waiting?.reason === "sign_in" && !!onsignin);
   const followups = $derived(settled && newest ? session.followups.slice(0, 3) : []);
   const writeupOffer = $derived(settled && newest ? writeup : undefined);
   const nextRows = $derived(followups.length > 0 || !!writeupOffer);
@@ -610,6 +613,7 @@
             {human}
             placement="island"
             seed={agents[0]?.agent?.seed ?? 0}
+            homeless
             onopenpage={(step) => onopenstep?.(step)}
           />
         </div>{/if}
@@ -681,22 +685,12 @@
               title={m.work_line_steer_hint()}
               onclick={() => void steer()}>{m.work_line_steer()}</button
             >
-          {:else if signInWall && waiting}
+          {:else if waiting || askedOnCanvas}
             <button
               type="button"
               class="action"
-              disabled={blocked}
-              onclick={() => onsignin?.(waiting.card)}>{m.work_ask_sign_in()}</button
-            >
-          {:else if waiting && onwaitingopen}
-            {#if waiting.canExtend && onwaitingextend && waiting.remaining < EXTEND_OFFER}<button
-                type="button"
-                class="action second"
-                title={m.work_human_extend_hint()}
-                onclick={() => onwaitingextend?.(waiting.card)}>{m.work_human_extend()}</button
-              >{/if}
-            <button type="button" class="action" onclick={() => onwaitingopen?.(waiting.card)}
-              >{needLine(waiting.reason, waiting.host).action}</button
+              onclick={() => onwaitingpage?.(waiting?.card ?? askedOnCanvas?.card ?? "")}
+              >{m.work_line_show()}</button
             >
           {:else if proposal}
             <button
@@ -1008,16 +1002,6 @@
 
   .action:hover:not(:disabled) {
     background: var(--color-lit-hover);
-  }
-
-  /* A second choice beside the lit one: present, never competing with it. */
-  .action.second {
-    background: var(--color-control);
-    color: var(--color-text);
-  }
-
-  .action.second:hover:not(:disabled) {
-    background: var(--color-control-hover);
   }
 
   /* Next opens the capsule upward: its chevron points where the rows will be. */

@@ -1956,14 +1956,6 @@
           element.reference.objective === objectiveSession?.selected,
       ),
   );
-  /**
-   * A read that met a sign-in wall: the page opens over the canvas for the
-   * person to sign in; the run notices and goes on by itself.
-   */
-  function signIn(card: string) {
-    const url = pageEntries.get(card)?.page.url;
-    if (url) openPane({ kind: "url", url }, card);
-  }
   /** One field, one meaning: the first message starts the work, the rest continue it. */
   let blockSaveFailed = $state(false);
   async function send() {
@@ -2373,9 +2365,6 @@
         }}
         onfocusagent={(id) => canvasRef?.center(id)}
         onsteered={() => (session.composer = "")}
-        onsignin={(card: string) => signIn(card)}
-        onwaitingopen={(card: string) => openTakeover(card)}
-        onwaitingextend={(card: string) => extendWait(card)}
         {human}
         onopenstep={openStep}
       />{/snippet}</LazyView
