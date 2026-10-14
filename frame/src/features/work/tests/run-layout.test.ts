@@ -139,30 +139,40 @@ test("every column joins the next and the last joins the result, under the canva
   const read = partId("lead:01KP3Q5A8H0J2M4P6R8T0V2X4Z");
   const stay = partId("01KP3Q6B9J1K3N5Q7S9V1W3Y5A");
   const flights = partId("01KP3Q6B9J1K3N5Q7S9V1W3Y5B");
-  const columns = [[search, read], [stay, flights], [partId("01KP3Q7C0K2M4P6R8T0V2X4Z6B")]];
-  const rows = columns.flatMap((ids, phase) =>
-    ids.map((id, index) => ({
-      ...row(id, 120 + index * 80, phase),
-      found: id === stay ? [found(`object:${id}:1`), found(`object:${id}:2`)] : [],
-    })),
-  );
+  const last = partId("01KP3Q7C0K2M4P6R8T0V2X4Z6B");
+  // The page opened from the search stands under it and carries its work on.
+  const columns = [[read], [stay, flights], [last]];
+  const rows = [
+    row(search, 160, 0),
+    { ...row(read, 240, 0), after: search },
+    { ...row(stay, 120, 1), found: [found(`object:${stay}:1`), found(`object:${stay}:2`)] },
+    row(flights, 200, 1),
+    row(last, 120, 2),
+  ];
   const place = placeRun(0, {
     ...run(rows, 300),
     request: { id: card, width: RUN.request, height: 80 },
   });
   const owner = (id: string) =>
     rows.find((entry) => entry.part.id === id || entry.found.some((f) => f.id === id));
+  const joins = (source: string, target: string) =>
+    place.lines.some(
+      (line) => (owner(line.source)?.part.id ?? line.source) === source && line.target === target,
+    );
   for (const line of place.lines) expect(line.id.length).toBeLessThanOrEqual(TEXT_LIMIT.id);
   expect(new Set(place.lines.map((line) => line.id)).size).toBe(place.lines.length);
+  expect(joins(card, search)).toBe(true);
+  expect(joins(card, read)).toBe(false);
+  expect(joins(search, read)).toBe(true);
+  expect(place.rects[read]!.x).toBe(place.rects[search]!.x);
+  expect(place.rects[read]!.y).toBeGreaterThan(place.rects[search]!.y + 160);
   columns.slice(1).forEach((ids, index) => {
     for (const target of ids)
-      for (const source of columns[index]!)
-        expect(
-          place.lines.some(
-            (line) => owner(line.source)?.part.id === source && line.target === target,
-          ),
-        ).toBe(true);
+      for (const source of columns[index]!) expect(joins(source, target)).toBe(true);
   });
+  expect(
+    place.lines.some((line) => line.target === stay && owner(line.source)?.part.id === search),
+  ).toBe(false);
   expect(place.lines.some((line) => line.kind === "feed")).toBe(true);
   expect(crossings(place)).toEqual([]);
 });

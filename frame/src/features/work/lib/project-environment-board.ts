@@ -561,6 +561,10 @@ export function environmentStages(
         )
         .map(({ part, index }) => ({
           phase: phases[index]!,
+          ...(part.follows &&
+          phases[parts.findIndex((other) => other.id === part.follows)] === phases[index]
+            ? { after: part.follows }
+            : {}),
           part: {
             id: part.id,
             ...partSize(
