@@ -18,7 +18,7 @@
   label={m.utilities()}
   menu
   triggerClass="utilities-trigger"
-  panelClass="utilities-panel"
+  panelClass="utilities-panel sidebar-softens"
   align="end"
 >
   {#snippet trigger()}<Icon icon={Settings05Icon} size={15} />{/snippet}

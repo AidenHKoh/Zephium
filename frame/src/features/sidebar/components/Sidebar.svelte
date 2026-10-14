@@ -221,3 +221,25 @@
       </div>{/if}
   </div>
 </aside>
+
+<style>
+  /* A panel open in the column (the space switcher, the tray on the address,
+     the profile's stack) is the one thing to read: whatever it lies over
+     steps back under it, and comes forward again when it closes. */
+  :global([data-under-panel]) {
+    transition: opacity var(--motion-base) var(--ease-out);
+  }
+
+  :global(
+    .browser-sidebar:has(.sidebar-softens[data-open="true"])
+      [data-under-panel]:not(:has(.sidebar-softens[data-open="true"]))
+  ) {
+    opacity: 0.18;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :global([data-under-panel]) {
+      transition: none;
+    }
+  }
+</style>
