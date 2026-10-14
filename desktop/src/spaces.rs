@@ -481,6 +481,12 @@ mod tests {
         assert_eq!(look.icon, Some(SpaceIcon::Emoji("🌿".into())));
         assert_eq!(look.theme, Some(SpaceTheme::Preset("nord".into())));
         assert!(input(10, None).look().is_none());
+        let bare = SpaceLookInputV1 {
+            icon: None,
+            color: 2,
+            theme: None,
+        };
+        assert_eq!(bare.look().map(|look| look.icon), Some(None));
         assert!(
             input(0, Some(SpaceThemeView::Custom { seeds: "{}".into() }))
                 .look()

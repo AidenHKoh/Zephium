@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from "vitest";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import "$styles/global.css";
 import type { ItemsState, SidebarNodeView } from "$shared/ipc/bindings";
@@ -109,21 +109,50 @@ test("the switcher lists every space, checks the one shown and moves to another"
   expect(native.switchTo).toHaveBeenCalledWith("studio");
 });
 
-test("a space is edited in place: name, icon, colour and a theme of its own", async () => {
+test("a space changes as it is edited, and Done keeps it", async () => {
   const screen = await mount();
   await screen.getByRole("button", { name: "Spaces — Home" }).click();
   await screen.getByRole("button", { name: "Edit Studio" }).click();
-  const name = screen.getByRole("textbox", { name: "Name" });
-  await name.fill("Atelier");
+  const look = {
+    icon: { kind: "emoji", text: "🎨" },
+    color: 4,
+    theme: { kind: "preset", id: "nord" },
+  };
+  await screen.getByRole("textbox", { name: "Name" }).fill("Atelier");
+  await expect.poll(() => native.update.mock.calls.at(-1)).toEqual(["studio", "Atelier", look]);
   await screen.getByRole("radio", { name: "Symbol 4" }).click();
-  await screen.getByRole("radio", { name: "Color 7" }).click();
-  await screen.getByRole("radio", { name: "App theme" }).click();
-  await screen.getByRole("button", { name: "Save" }).click();
-  expect(native.update).toHaveBeenCalledWith("studio", "Atelier", {
+  expect(native.update).toHaveBeenLastCalledWith("studio", "Atelier", {
+    ...look,
     icon: { kind: "symbol", index: 3 },
-    color: 6,
-    theme: null,
   });
+  await screen.getByRole("radio", { name: "No icon" }).click();
+  await screen.getByRole("radio", { name: "Color 7" }).click();
+  await screen.getByRole("radio", { name: "None", exact: true }).click();
+  await expect
+    .poll(() => native.update.mock.calls.at(-1))
+    .toEqual(["studio", "Atelier", { icon: null, color: 6, theme: null }]);
+  await screen.getByRole("button", { name: "Done" }).click();
+  await expect
+    .element(screen.getByRole("button", { name: "Spaces — Home" }))
+    .toHaveAttribute("aria-expanded", "false");
+});
+
+test("Escape puts the space back as it was", async () => {
+  const screen = await mount();
+  await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  await screen.getByRole("button", { name: "Edit Studio" }).click();
+  await screen.getByRole("radio", { name: "Color 7" }).click();
+  await screen.getByRole("radio", { name: "No icon" }).click();
+  await userEvent.keyboard("{Escape}");
+  await expect
+    .poll(() => native.update.mock.calls.at(-1))
+    .toEqual([
+      "studio",
+      "Studio",
+      { icon: { kind: "emoji", text: "🎨" }, color: 4, theme: { kind: "preset", id: "nord" } },
+    ]);
+  // Opened from the list, so Escape steps back to it.
+  await expect.element(screen.getByRole("menuitemradio").first()).toBeVisible();
 });
 
 test("deleting asks first and says how many tabs will close", async () => {
@@ -137,24 +166,23 @@ test("deleting asks first and says how many tabs will close", async () => {
   expect(native.remove).toHaveBeenCalledWith("studio");
 });
 
-test("a new space is named and made from the switcher, or from the menu bar", async () => {
+test("New Space makes one at once, with no icon, and opens it to be named", async () => {
   const screen = await mount();
   await screen.getByRole("button", { name: "Spaces — Home" }).click();
   await screen.getByRole("menuitem", { name: "New Space" }).click();
-  await screen.getByRole("textbox", { name: "Name" }).fill("Reading");
-  await screen.getByRole("textbox", { name: "Or type an emoji" }).fill("📚");
-  await screen.getByRole("button", { name: "Create Space" }).click();
-  expect(native.create).toHaveBeenCalledWith("Reading", {
-    icon: { kind: "emoji", text: "📚" },
-    color: 0,
-    theme: null,
+  expect(native.create).toHaveBeenCalledWith("", { icon: null, color: 2, theme: null });
+  project({
+    spaces: [HOME, STUDIO, spaceFixture("made", "Space 3", { color: 2, tabs: 1 })],
+    active_space_id: "made",
   });
+  const name = screen.getByRole("textbox", { name: "Name" });
+  await expect.element(name).toHaveValue("Space 3");
+  await expect.element(name).toHaveFocus();
+  await userEvent.keyboard("Reading{Enter}");
+  await expect.poll(() => native.update.mock.calls.at(-1)?.[1]).toBe("Reading");
 
   emitNativeEvent("uiCommand", "space.edit");
-  await expect.element(screen.getByRole("textbox", { name: "Name" })).toBeVisible();
-  await expect
-    .element(screen.getByRole("textbox", { name: "Name" }))
-    .toHaveAttribute("placeholder", "Home");
+  await expect.element(screen.getByRole("textbox", { name: "Name" })).toHaveValue("Space 3");
 });
 
 test("an empty space offers a new tab instead of a blank column", async () => {

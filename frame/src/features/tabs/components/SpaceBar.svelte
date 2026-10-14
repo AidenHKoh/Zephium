@@ -2,7 +2,6 @@
   import "$shared/ui/Menu/surface.css";
   import * as m from "$shared/i18n/messages";
   import { Add01Icon, ArrowDown01Icon } from "@hugeicons/core-free-icons";
-  import type { SpaceView } from "$shared/ipc/bindings";
   import { tabs } from "$domain/tabs";
   import { uiCommands as ui } from "$domain/ui-commands";
   import Icon from "$shared/ui/Icon";
@@ -12,37 +11,80 @@
   const loadSwitcher = () => import("./SpaceSwitcher.svelte");
   import SpaceGlyph from "./SpaceGlyph.svelte";
   import * as requests from "../lib/space-requests.svelte";
+  import { freshLook } from "../lib/space-look";
 
   const spaces = $derived(tabs.spaces());
   const active = $derived(tabs.activeSpace());
   let open = $state(false);
-  /** Null lists the spaces; a space or "new" edits one. */
-  let editing = $state<SpaceView | "new" | null>(null);
+  /** The space being edited; null lists them. */
+  let editingId = $state<string | null>(null);
+  const editing = $derived(spaces.find((space) => space.id === editingId) ?? null);
+  /** Made a moment ago, so its name waits to be typed over. */
+  let fresh = $state(false);
+  /** The spaces there were before one was asked for, until it appears. */
+  let making = $state.raw<Set<string> | null>(null);
+  let makeFailed = $state(false);
   let release: (() => void) | null = null;
   /** The editor was opened from the list, so going back returns to it. */
   let fromList = false;
   let root = $state<HTMLElement>();
   let chip = $state<HTMLButtonElement>();
 
-  function show(next: SpaceView | "new" | null = null) {
-    editing = next;
+  function show(id: string | null = null) {
+    editingId = id;
+    fresh = false;
     fromList = false;
     open = true;
   }
 
-  function edit(next: SpaceView | "new") {
-    editing = next;
+  function edit(id: string) {
+    editingId = id;
+    fresh = false;
     fromList = true;
   }
 
   function dismiss(restore = false) {
     if (!open) return;
     open = false;
-    editing = null;
+    editingId = null;
+    making = null;
+    makeFailed = false;
     release?.();
     release = null;
     if (restore) chip?.focus();
   }
+
+  // A new space is made at once, named in order, and its editor opens on it
+  // with the name ready to be typed over.
+  async function make() {
+    if (making) return;
+    open = true;
+    makeFailed = false;
+    making = new Set(spaces.map((space) => space.id));
+    const result = await tabs.createSpace("", freshLook(spaces));
+    if (result.outcome === "failed" || result.outcome === "rejected") {
+      making = null;
+      makeFailed = true;
+    }
+  }
+
+  $effect(() => {
+    const before = making;
+    if (!before) return;
+    const made = spaces.find((space) => !before.has(space.id));
+    if (!made) return;
+    untrack(() => {
+      making = null;
+      editingId = made.id;
+      fresh = true;
+      fromList = false;
+    });
+  });
+
+  // A space deleted from under its editor leaves the panel.
+  $effect(() => {
+    if (editingId !== null && editing === null && making === null) untrack(() => dismiss());
+  });
 
   // A menu asked for this before the column had room for it.
   $effect(() => {
@@ -51,7 +93,10 @@
     untrack(() => {
       requests.take();
       release = request.release;
-      show(request.kind === "new" ? "new" : active);
+      if (request.kind === "new") {
+        show();
+        void make();
+      } else show(active.id);
     });
   });
 
@@ -70,11 +115,20 @@
       if (!(event.target instanceof Node) || !root?.contains(event.target)) dismiss();
     };
     const away = () => dismiss();
+    // WebKit does not focus a pressed button, so Escape is heard window-wide.
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing) return;
+      event.stopPropagation();
+      if (editingId !== null && fromList) editingId = null;
+      else dismiss(true);
+    };
     window.addEventListener("pointerdown", outside, true);
     window.addEventListener("blur", away);
+    window.addEventListener("keydown", escape);
     return () => {
       window.removeEventListener("pointerdown", outside, true);
       window.removeEventListener("blur", away);
+      window.removeEventListener("keydown", escape);
     };
   });
 
@@ -85,23 +139,17 @@
 </script>
 
 <!--
-  The head of the tab list names the space it holds: its mark and name open
-  the switcher, the dots beside them are every space at a glance (and where a
-  swipe will land), and the plus opens a tab in it.
+  The head of the tab list names the space it holds: its name, with its mark
+  when it has one, opens the switcher; the points beside it are every space
+  at a glance (and where a swipe will land), and the plus opens a tab in it.
 -->
 <div
   class="space-bar"
   data-cascade
+  data-under-panel
   style:--cascade={0}
   bind:this={root}
   role="presentation"
-  onkeydown={(event) => {
-    if (event.key === "Escape" && open) {
-      event.stopPropagation();
-      if (editing !== null) editing = null;
-      else dismiss(true);
-    }
-  }}
 >
   <button
     bind:this={chip}
@@ -123,7 +171,7 @@
         <button
           type="button"
           class="space-dot"
-          data-color={space.color}
+          data-space-hue={space.color}
           aria-current={space.id === active?.id ? "true" : undefined}
           title={space.name}
           aria-label={space.name}
@@ -140,30 +188,33 @@
     onclick={tabs.open}><Icon icon={Add01Icon} size={16} /></button
   >
   <div
-    class="ui-menu ui-disclosure-panel ui-popover space-panel"
+    class="ui-menu ui-disclosure-panel ui-popover space-panel sidebar-softens"
     role="dialog"
-    aria-label={m.space_switcher()}
+    aria-label={editing ? m.space_edit_label({ name: editing.name }) : m.space_switcher()}
     data-open={open}
     data-editing={editing !== null || undefined}
     inert={!open}
   >
-    {#if open}<div class="space-panel-scroll">
+    {#if open}<div class="space-panel-body">
         {#if editing !== null}
-          {#key editing}{#await loadEditor() then { default: SpaceEditor }}<SpaceEditor
-                space={editing === "new" ? null : editing}
-                {spaces}
+          {#key editing.id}{#await loadEditor() then { default: SpaceEditor }}<SpaceEditor
+                space={editing}
+                {fresh}
+                deletable={spaces.length > 1}
                 onclose={(done) => {
                   if (done || !fromList) dismiss(true);
-                  else editing = null;
+                  else editingId = null;
                 }}
               />{/await}{/key}
         {:else}
           {#await loadSwitcher() then { default: SpaceSwitcher }}<SpaceSwitcher
               {spaces}
               active={active?.id ?? null}
+              making={making !== null}
+              failed={makeFailed}
               onchoose={choose}
-              onedit={edit}
-              onnew={() => edit("new")}
+              onedit={(space) => edit(space.id)}
+              onnew={make}
             />{/await}
         {/if}
       </div>{/if}
@@ -186,10 +237,10 @@
     display: flex;
     flex: 0 1 auto;
     align-items: center;
-    gap: 9px;
+    gap: 8px;
     min-width: 0;
-    height: var(--row-sidebar);
-    padding-inline: 8px 6px;
+    height: 30px;
+    padding-inline: 10px 7px;
     border: 0;
     border-radius: var(--radius-row);
     background: transparent;
@@ -197,7 +248,7 @@
     font: inherit;
     font-size: var(--sidebar-row-text);
     font-weight: 600;
-    letter-spacing: -0.005em;
+    letter-spacing: -0.01em;
     cursor: default;
     outline: none;
     transition:
@@ -226,6 +277,7 @@
   .space-chevron {
     display: grid;
     flex: none;
+    margin-inline-start: -3px;
     color: var(--color-faint);
     place-items: center;
     transition: rotate var(--motion-base) var(--ease-out);
@@ -244,15 +296,14 @@
   }
 
   .space-dot {
-    --dot: var(--avatar-0-top);
-
     display: grid;
-    width: 14px;
+    width: 12px;
     height: 24px;
     padding: 0;
     border: 0;
     background: transparent;
     place-items: center;
+    transition: width var(--motion-base) var(--ease-spring);
   }
 
   .space-dot i {
@@ -260,7 +311,7 @@
     height: 5px;
     border-radius: var(--radius-capsule);
     background: var(--color-faint);
-    opacity: 0.6;
+    opacity: 0.55;
     scale: 0.36 1;
     transition:
       scale var(--motion-base) var(--ease-spring),
@@ -269,17 +320,17 @@
   }
 
   .space-dot:hover i {
-    background: var(--dot);
+    background: var(--space-hue);
     opacity: 1;
   }
 
   .space-dot[aria-current="true"] {
-    width: 22px;
+    width: 20px;
   }
 
   .space-dot[aria-current="true"] i {
     scale: 1;
-    background: var(--dot);
+    background: var(--space-hue);
     opacity: 1;
   }
 
@@ -295,8 +346,8 @@
   .space-new-tab {
     display: grid;
     flex: none;
-    width: 32px;
-    height: 32px;
+    width: 30px;
+    height: 30px;
     margin-inline-start: auto;
     padding: 0;
     border: 0;
@@ -312,7 +363,7 @@
   }
 
   .space-dots + .space-new-tab {
-    margin-inline-start: 2px;
+    margin-inline-start: 4px;
   }
 
   .space-new-tab:hover,
@@ -332,56 +383,25 @@
     padding: 0;
   }
 
-  /* The material stays still while a long editor scrolls inside it. */
-  .space-panel-scroll {
-    max-height: min(600px, calc(100vh - 220px));
+  /* The list scrolls inside the still material when it runs long; the
+     editor keeps its own actions in view and scrolls only its body. */
+  .space-panel-body {
+    display: flex;
+    flex-direction: column;
+    max-height: min(560px, calc(100vh - 200px));
     overflow-y: auto;
     overscroll-behavior: contain;
     padding: var(--menu-pad);
   }
 
-  .space-panel[data-editing] .space-panel-scroll {
-    padding: 12px;
-  }
-
-  .space-dot[data-color="1"] {
-    --dot: var(--avatar-1-top);
-  }
-
-  .space-dot[data-color="2"] {
-    --dot: var(--avatar-2-top);
-  }
-
-  .space-dot[data-color="3"] {
-    --dot: var(--avatar-3-top);
-  }
-
-  .space-dot[data-color="4"] {
-    --dot: var(--avatar-4-top);
-  }
-
-  .space-dot[data-color="5"] {
-    --dot: var(--avatar-5-top);
-  }
-
-  .space-dot[data-color="6"] {
-    --dot: var(--avatar-6-top);
-  }
-
-  .space-dot[data-color="7"] {
-    --dot: var(--avatar-7-top);
-  }
-
-  .space-dot[data-color="8"] {
-    --dot: var(--avatar-8-top);
-  }
-
-  .space-dot[data-color="9"] {
-    --dot: var(--avatar-9-top);
+  .space-panel[data-editing] .space-panel-body {
+    overflow: hidden;
+    padding: 0;
   }
 
   @media (prefers-reduced-motion: reduce) {
     .space-chevron,
+    .space-dot,
     .space-dot i {
       transition: none;
     }

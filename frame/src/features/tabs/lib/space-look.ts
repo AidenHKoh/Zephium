@@ -48,15 +48,12 @@ export const SPACE_SYMBOLS = [
 /** Avatar hues, shared with profiles. */
 export const SPACE_COLORS = 10;
 
-/** A new space takes the first hue its siblings are not already wearing. */
+/** A new space has no icon, and takes the first hue its siblings are not
+ *  already wearing, past graphite. */
 export function freshLook(spaces: SpaceView[]): SpaceLookInputV1 {
   const used = new Set(spaces.map((space) => space.color));
-  const color = [...Array(SPACE_COLORS).keys()].find((hue) => !used.has(hue)) ?? 0;
-  return {
-    icon: { kind: "symbol", index: (spaces.length + 1) % SPACE_SYMBOLS.length },
-    color,
-    theme: null,
-  };
+  const color = [...Array(SPACE_COLORS).keys()].find((hue) => hue > 0 && !used.has(hue)) ?? 0;
+  return { icon: null, color, theme: null };
 }
 
 /** One emoji as typed or pasted, or null when the text is not one. */

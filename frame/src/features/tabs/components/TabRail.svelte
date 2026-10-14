@@ -55,6 +55,8 @@
 
   const space = $derived(tabs.profile()?.kind === "incognito" ? undefined : tabs.activeSpace());
   const order = $derived(tabs.spaces().map((entry) => entry.id));
+  // One space has nothing to switch to, so the rail spends no mark on it.
+  const marked = $derived(space !== undefined && order.length > 1);
   let scroller = $state<HTMLElement>();
   function openSpaces(event: MouseEvent) {
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
@@ -110,14 +112,24 @@
 <!-- Like the expanded list, the rail opens with the way to a new tab, which
      stays put while the tabs below it scroll. -->
 <div class="rail-new-slot" data-cascade style:--cascade={0}>
-  {#if space}<button
+  {#if marked && space}<button
       type="button"
       class="rail-item rail-space"
       title={space.name}
       aria-label={m.space_open_switcher({ name: space.name })}
       aria-haspopup="menu"
       onclick={openSpaces}
-      ><SpaceGlyph icon={space.icon} color={space.color} name={space.name} size={22} /></button
+      ><SpaceGlyph
+        icon={space.icon}
+        color={space.color}
+        name={space.name}
+        fallback="monogram"
+      />{#if order.length <= 6}<span class="rail-space-dots" aria-hidden="true"
+          >{#each tabs.spaces() as entry (entry.id)}<i
+              data-space-hue={entry.color}
+              data-current={entry.id === space.id || undefined}
+            ></i>{/each}</span
+        >{/if}</button
     >{/if}
   <button
     type="button"
@@ -134,6 +146,7 @@
   use:spaceSwipe={{ canStep, step: (step) => void tabs.stepSpace(step) }}
   use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/rail`}
   class="rail-scroller scroll-edges"
+  data-under-panel
   data-glide-scroller
 >
   <ul bind:this={list} class="rail-list" data-tabs-drop role="list" aria-label={m.open_tabs()}>
@@ -205,6 +218,35 @@
     align-items: center;
     gap: var(--sidebar-row-gap);
     padding-block: 0 2px;
+  }
+
+  /* The space shown, by its mark, over a point for each space with its own
+     drawn out long: which one, and where a swipe goes next. */
+  .rail-space {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    justify-content: center;
+    height: 40px;
+  }
+
+  .rail-space-dots {
+    display: flex;
+    gap: 2px;
+  }
+
+  .rail-space-dots i {
+    width: 3px;
+    height: 3px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-faint);
+    opacity: 0.6;
+  }
+
+  .rail-space-dots i[data-current] {
+    width: 8px;
+    background: var(--space-hue);
+    opacity: 1;
   }
 
   .rail-scroller {

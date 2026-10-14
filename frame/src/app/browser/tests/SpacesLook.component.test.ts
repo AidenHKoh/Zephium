@@ -2,7 +2,7 @@ import { afterEach, test, vi } from "vitest";
 import { page } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import "$styles/global.css";
-import type { SpaceView } from "$shared/ipc/bindings";
+import type { ProfileEntryView, ProfilesView, SpaceView } from "$shared/ipc/bindings";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import { revision, spaceFixture, tabFixture } from "$shared/testing/fixtures";
 import { favicons } from "$domain/favicons";
@@ -14,7 +14,10 @@ import * as sidebar from "$session/sidebar-mode.svelte";
 import Shell from "../Shell.svelte";
 import { paint, settle, themed, wallpaper } from "./look-bench";
 
-const native = vi.hoisted(() => ({ settings: { appearance: "light" } as Record<string, string> }));
+const native = vi.hoisted(() => ({
+  settings: { appearance: "light" } as Record<string, string>,
+  profiles: null as ProfilesView | null,
+}));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   const ok = async () => ({ accepted: true, operation_id: null });
@@ -27,7 +30,61 @@ vi.mock("$shared/ipc/bindings", async () => {
     settingSet: ok,
     spacesSwitch: ok,
     spacesStep: ok,
-    profilesGet: async () => ({ status: "ok" as const, data: null }),
+    spacesUpdate: ok,
+    blockerStatus: async () => ({
+      status: "ok" as const,
+      data: {
+        site: {
+          context: { profile: "p", tab: "github", site: "github.example", revision: "a" },
+          paused: false,
+          private_session: false,
+          ready: true,
+          busy: false,
+          hides: [],
+        },
+        projection_revision: "0000000000000000000000000000000a",
+        protection: "active" as const,
+        phase: "ready" as const,
+        preference: "authoritative" as const,
+        config_revision: null,
+        desired_enabled: true,
+        applied_enabled: true,
+        desired_generation: null,
+        retained_generation: null,
+        failure: null,
+        retryable: false,
+        retries_remaining: 0,
+        applied_coverage: null,
+        runtime_diagnostics: null,
+        source_phase: "not_configured" as const,
+        source_failure: null,
+        source_package_revision: null,
+        source_installed_revision: null,
+        source_package_provenance: null,
+        source_installed_provenance: null,
+        source_identities: null,
+        source_package_created_unix: null,
+        source_package_expires_unix: null,
+        source_package_stale: null,
+        source_refresh_due: false,
+        source_count: null,
+        source_bytes: null,
+        source_activation_pending: false,
+        source_material_repair_pending: false,
+        source_material_repair_retry_pending: false,
+        source_repair_retry_pending: false,
+        source_last_refresh_attempt_unix: null,
+        source_refresh_operation: null,
+        can_enable: true,
+        can_refresh_sources: false,
+      },
+    }),
+    blockerStats: async () => ({
+      status: "ok" as const,
+      data: { today: 128, last7Days: 1460, days: [] },
+    }),
+    spacesCreate: ok,
+    profilesGet: async () => ({ status: "ok" as const, data: native.profiles }),
     keymapEntries: async () =>
       [
         ["tool.notes", "Cmd+Shift+E"],
@@ -54,7 +111,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 
 const SPACES: SpaceView[] = [
-  spaceFixture("home", "Personal", { icon: { kind: "symbol", index: 2 }, color: 1, tabs: 4 }),
+  spaceFixture("home", "Personal", { color: 1, tabs: 4 }),
   spaceFixture("work", "Studio", {
     icon: { kind: "emoji", text: "🎨" },
     color: 4,
@@ -109,8 +166,26 @@ const shot = (name: string) =>
 const crop = (name: string) =>
   page.screenshot({
     path: `../../../../../target/look/spaces/${name}.png`,
-    clip: { x: 0, y: 0, width: 300, height: 760 },
+    clip: { x: 0, y: 0, width: 300, height: 720 },
   } as Parameters<typeof page.screenshot>[0]);
+
+const ID = (n: number) => `01J${String(n).padStart(23, "0")}`;
+const person = (n: number, name: string, color: number, revision = 1): ProfileEntryView => ({
+  id: ID(n),
+  name,
+  kind: n === 1 ? "default" : "named",
+  avatar: { style: n === 3 ? "symbol" : "initials", color, symbol: 4, revision },
+});
+const ONE: ProfilesView = {
+  current: ID(1),
+  private: false,
+  profiles: [person(1, "Personal", 0, 0)],
+};
+const THREE: ProfilesView = {
+  current: ID(1),
+  private: false,
+  profiles: [person(1, "Personal", 0, 0), person(2, "Work", 1), person(3, "Side Project", 8)],
+};
 
 afterEach(() => {
   sidebar.adoptMode("default");
@@ -122,24 +197,31 @@ afterEach(() => {
   document.getElementById("wallpaper")?.remove();
 });
 
+async function stage(theme: "light" | "dark") {
+  await page.viewport(1100, 720);
+  native.settings = { appearance: theme };
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.dataset.material = "liquid_glass";
+  document.body.style.background = "transparent";
+  await paint();
+  await keymap.init();
+  spaced("home");
+  const screen = await render(Shell);
+  wallpaper("violet", theme, theme === "light" ? "#ffffff" : "#0d1117");
+  await settle();
+  return screen;
+}
+
+const away = () => document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+
 for (const theme of ["light", "dark"] as const) {
   test(`spaces in the column, ${theme}`, async () => {
-    await page.viewport(1100, 760);
-    native.settings = { appearance: theme };
-    document.documentElement.dataset.theme = theme;
-    document.documentElement.dataset.material = "liquid_glass";
-    document.body.style.background = "transparent";
-    await paint();
-    await keymap.init();
-    spaced("home");
-    const screen = await render(Shell);
-    wallpaper("violet", theme, theme === "light" ? "#ffffff" : "#0d1117");
-    await settle();
+    const screen = await stage(theme);
     await shot(`${theme}-expanded`);
-    await screen.getByRole("button", { name: /^Tools/ }).click();
+    spaced("read");
     await settle();
-    await shot(`${theme}-profile-menu`);
-    await screen.getByRole("button", { name: /^Tools/ }).click();
+    await crop(`${theme}-expanded-icon`);
+    spaced("home");
 
     await screen.getByRole("button", { name: "Spaces — Personal" }).click();
     await settle();
@@ -147,28 +229,80 @@ for (const theme of ["light", "dark"] as const) {
     await screen.getByRole("button", { name: "Edit Studio" }).click();
     await settle();
     await crop(`${theme}-editor`);
-    document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    away();
 
     // The space with a theme of its own wears it over the whole window.
     themed("rose-pine");
     spaced("work");
     await settle();
     await shot(`${theme}-themed-space`);
+    await screen.getByRole("button", { name: "Spaces — Studio" }).click();
+    await settle();
+    await crop(`${theme}-themed-switcher`);
+    away();
 
     themed("zephium");
     spaced("side", true);
     await settle();
     await crop(`${theme}-empty`);
 
-    spaced("home");
+    spaced("read");
     sidebar.adoptMode("compact");
     await settle();
     await crop(`${theme}-rail`);
+    spaced("home");
+    await settle();
+    await crop(`${theme}-rail-no-icon`);
     sidebar.adoptMode("default");
+    await settle();
+
+    // The tray on the address steps the column back under it, as the
+    // switcher does.
+    await screen.getByRole("button", { name: "Utilities" }).click();
+    await settle();
+    await crop(`${theme}-site-info`);
+    away();
 
     emitNativeEvent("uiCommand", "browser.settings");
     await settle();
     await settle();
     await shot(`${theme}-beside-settings`);
+  });
+
+  test(`the profile menu, ${theme}`, async () => {
+    for (const [count, roster] of [
+      [1, ONE],
+      [3, THREE],
+    ] as const) {
+      native.profiles = roster;
+      const screen = await stage(theme);
+      emitNativeEvent("profilesChanged", roster);
+      await screen.getByRole("button", { name: /^Tools/ }).click();
+      await settle();
+      await crop(`${theme}-profile-menu-${count}`);
+      away();
+
+      sidebar.adoptMode("compact");
+      await settle();
+      emitNativeEvent("profilesChanged", roster);
+      await screen.getByRole("button", { name: /^Tools/ }).click();
+      await settle();
+      await crop(`${theme}-profile-rail-${count}`);
+      away();
+
+      // Back from the rail, the stack opens whole again.
+      sidebar.adoptMode("default");
+      await settle();
+      await screen.getByRole("button", { name: /^Tools/ }).click();
+      await settle();
+      await crop(`${theme}-profile-after-rail-${count}`);
+      away();
+      await screen.unmount();
+      sidebar.adoptMode("default");
+      favicons.dispose();
+      surface.dispose();
+      tabs.dispose();
+      preferences.dispose();
+    }
   });
 }

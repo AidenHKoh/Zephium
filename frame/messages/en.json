@@ -3206,5 +3206,12 @@
   "native_toggle_launcher": "Toggle Launcher",
   "native_appearance_system": "Appearance: System",
   "native_appearance_light": "Appearance: Light",
-  "native_appearance_dark": "Appearance: Dark"
+  "native_appearance_dark": "Appearance: Dark",
+  "space_icon_none": "No icon",
+  "space_theme_none": "None",
+  "space_emoji_short": "Emoji",
+  "space_done": "Done",
+  "space_new_failed": "A new space could not be made. Try again.",
+  "browse_profile_settings": "Profile Settings",
+  "browse_incognito_window": "New Incognito Window"
 }

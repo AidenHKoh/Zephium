@@ -67,6 +67,7 @@
   bind:this={scroller}
   use:spaceSwipe={{ canStep, step: (step) => void tabs.stepSpace(step) }}
   data-tabs-drop
+  data-under-panel
   use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/tabs`}
   class="tab-scroller scroll-edges"
   data-glide-scroller
@@ -96,7 +97,7 @@
   {#if empty && spaced}
     {@const space = tabs.activeSpace()!}
     <div class="space-empty">
-      <SpaceGlyph icon={space.icon} color={space.color} name={space.name} size={36} />
+      <SpaceGlyph icon={space.icon} color={space.color} name={space.name} size={28} />
       <p class="space-empty-title">{m.space_empty_title({ name: space.name })}</p>
       <p class="space-empty-body">{m.space_empty_body()}</p>
       <button type="button" class="space-empty-open" onclick={tabs.open}>
@@ -114,12 +115,6 @@
     overflow-y: auto;
     overscroll-behavior: contain;
     padding-block-end: 4px;
-    transition: opacity var(--motion-base) var(--ease-out);
-  }
-
-  /* While the switcher is open the list it governs steps back under it. */
-  :global(.space-bar:has(.space-panel[data-open="true"])) ~ .tab-scroller {
-    opacity: 0.18;
   }
 
   .tab-divider {

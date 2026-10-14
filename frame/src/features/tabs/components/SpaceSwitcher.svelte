@@ -13,11 +13,16 @@
     spaces,
     active,
     onchoose,
+    making = false,
+    failed = false,
     onedit,
     onnew,
   }: {
     spaces: SpaceView[];
     active: string | null;
+    /** A new space was asked for and has not appeared yet. */
+    making?: boolean;
+    failed?: boolean;
     onchoose: (id: string) => void;
     onedit: (space: SpaceView) => void;
     onnew: () => void;
@@ -106,7 +111,14 @@
         onkeydown={(event) => keydown(event, index)}
         onclick={() => choose(space.id)}
       >
-        <SpaceGlyph icon={space.icon} color={space.color} name={space.name} size={22} />
+        <span class="switch-glyph"
+          ><SpaceGlyph
+            icon={space.icon}
+            color={space.color}
+            name={space.name}
+            fallback="dot"
+          /></span
+        >
         <span class="switch-name">{space.name}</span>
         {#if keys}<span class="switch-keys">{keys}</span>{/if}
         <span class="switch-mark"
@@ -118,15 +130,22 @@
         class="switch-edit"
         title={m.space_edit_label({ name: space.name })}
         aria-label={m.space_edit_label({ name: space.name })}
-        onclick={() => onedit(space)}><Icon icon={PencilEdit02Icon} size={13} /></button
+        onclick={() => onedit(space)}><Icon icon={PencilEdit02Icon} size={14} /></button
       >
     </div>
   {/each}
   <div class="switch-rule" role="separator"></div>
-  <button type="button" role="menuitem" class="ui-menu-item switch-new" onclick={onnew}>
-    <span class="switch-new-glyph"><Icon icon={Add01Icon} size={13} strokeWidth={2} /></span>
+  <button
+    type="button"
+    role="menuitem"
+    class="ui-menu-item switch-new"
+    aria-disabled={making || undefined}
+    onclick={() => !making && onnew()}
+  >
+    <span class="switch-glyph"><Icon icon={Add01Icon} size={15} strokeWidth={1.8} /></span>
     <span>{m.space_new()}</span>
   </button>
+  {#if failed}<p class="switch-error" role="alert">{m.space_new_failed()}</p>{/if}
 </div>
 
 <style>
@@ -147,7 +166,8 @@
     flex: 1;
     min-width: 0;
     width: 100%;
-    min-height: 36px;
+    min-height: 32px;
+    padding-block: 4px;
     border: 0;
     background: transparent;
     font: inherit;
@@ -157,6 +177,10 @@
 
   .switch-new {
     color: var(--color-muted);
+  }
+
+  .switch-new[aria-disabled] {
+    opacity: 0.55;
   }
 
   .switch-pick:hover,
@@ -170,6 +194,18 @@
   .switch-pick:active,
   .switch-new:active {
     background: var(--row-pressed);
+  }
+
+  /* One column for every mark, so names line up whatever a space wears. */
+  .switch-glyph {
+    display: grid;
+    flex: none;
+    width: 18px;
+    place-items: center;
+  }
+
+  .switch-new .switch-glyph {
+    color: var(--color-faint);
   }
 
   .switch-name {
@@ -204,37 +240,35 @@
   .switch-edit {
     position: absolute;
     display: grid;
-    width: 24px;
-    height: 24px;
+    width: 26px;
+    height: 26px;
     padding: 0;
     border: 0;
     border-radius: 50%;
-    background: var(--color-float);
-    box-shadow: var(--shadow-badge);
+    background: transparent;
     color: var(--color-muted);
     opacity: 0;
     place-items: center;
-    inset-inline-end: 30px;
+    inset-inline-end: 26px;
     pointer-events: none;
-    scale: 0.85;
     transition:
       opacity var(--motion-fast) var(--ease-out),
-      scale var(--motion-base) var(--ease-spring);
+      background-color var(--motion-instant) var(--ease-out),
+      color var(--motion-instant) var(--ease-out);
   }
 
   .switch-edit:hover,
   .switch-edit:focus-visible {
     outline: none;
+    background: var(--row-pressed);
     color: var(--color-text);
     opacity: 1;
     pointer-events: auto;
-    scale: 1;
   }
 
   .switch-row:hover .switch-edit {
     opacity: 1;
     pointer-events: auto;
-    scale: 1;
   }
 
   .switch-row:hover .switch-keys {
@@ -265,17 +299,15 @@
 
   .switch-rule {
     height: 1px;
-    margin: 5px var(--menu-item-inset);
-    background: var(--color-menu-separator);
+    margin: 4px var(--menu-item-inset);
+    background: var(--color-border);
   }
 
-  .switch-new-glyph {
-    display: grid;
-    width: 22px;
-    height: 22px;
-    border-radius: var(--radius-inset);
-    box-shadow: inset 0 0 0 1px var(--color-border);
-    place-items: center;
+  .switch-error {
+    padding: 2px var(--menu-item-inset) 4px;
+    color: var(--color-danger);
+    font-size: var(--text-label);
+    line-height: 16px;
   }
 
   @media (prefers-reduced-motion: reduce) {

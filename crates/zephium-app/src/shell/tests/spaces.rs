@@ -201,6 +201,33 @@ fn spaces_are_edited_reordered_and_kept_across_a_restart() {
     assert_eq!(state.spaces[1].tabs, 1);
 }
 
+#[test]
+fn a_space_starts_without_an_icon_and_an_icon_can_be_taken_away() {
+    let (mut shell, _engine, screen, store) = browsed();
+    assert_eq!(last(&screen).spaces[0].icon, None);
+    let studio = create(&mut shell, "Studio", studio_look());
+    assert!(last(&screen).spaces[1].icon.is_some());
+    let bare = SpaceLook {
+        icon: None,
+        ..studio_look()
+    };
+    let cleared = space_op(
+        &mut shell,
+        SpaceCommand::Update {
+            id: studio,
+            name: "Studio".into(),
+            look: bare.clone(),
+        },
+    );
+    assert_eq!(cleared.outcome, OperationOutcome::Applied);
+    let state = last(&screen);
+    assert_eq!(state.spaces[1].icon, None);
+    assert_eq!(state.spaces[1].color, 2);
+    shell.persist();
+    let saved = store.saved.lock().unwrap().clone().unwrap();
+    assert_eq!(saved.spaces[1].look, bare);
+}
+
 fn studio_look() -> SpaceLook {
     SpaceLook {
         icon: Some(SpaceIcon::Symbol(7)),
