@@ -122,6 +122,15 @@ fn said_once(facts: Vec<Value>) -> Vec<Value> {
 /// Picks a card shows when the lead chose fewer from a read.
 const FOUND_PICKS: usize = 6;
 
+/// Whether the read showed the record's price: an offer filled in beside
+/// the lead's choice needs one to be compared.
+fn priced(row: &Record) -> bool {
+    row.fields.iter().any(|(criterion, cell)| {
+        super::found::price_rank(&criterion.name.to_lowercase()).is_some()
+            && display(&cell.value).is_some()
+    })
+}
+
 /// An offer no working need can use: damaged, broken or sold for parts.
 fn unusable(row: &Record) -> bool {
     const WORDS: &[&str] = &[
@@ -265,6 +274,7 @@ impl Records {
                     .iter()
                     .any(|earlier| earlier.subject.name == row.subject.name)
                 || unusable(row)
+                || !priced(row)
             {
                 continue;
             }
