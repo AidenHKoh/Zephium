@@ -84,6 +84,8 @@ vi.mock("$shared/ipc/bindings", async () => {
       data: { today: 128, last7Days: 1460, days: [] },
     }),
     spacesCreate: ok,
+    tabDragOver: async () => undefined,
+    tabDrop: ok,
     profilesGet: async () => ({ status: "ok" as const, data: native.profiles }),
     keymapEntries: async () =>
       [
@@ -169,6 +171,14 @@ const crop = (name: string) =>
     clip: { x: 0, y: 0, width: 300, height: 720 },
   } as Parameters<typeof page.screenshot>[0]);
 
+const wide = (name: string) =>
+  page.screenshot({
+    path: `../../../../../target/look/spaces/${name}.png`,
+    clip: { x: 0, y: 0, width: 420, height: 720 },
+  } as Parameters<typeof page.screenshot>[0]);
+
+const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+
 const ID = (n: number) => `01J${String(n).padStart(23, "0")}`;
 const person = (n: number, name: string, color: number, revision = 1): ProfileEntryView => ({
   id: ID(n),
@@ -250,6 +260,15 @@ for (const theme of ["light", "dark"] as const) {
     sidebar.adoptMode("compact");
     await settle();
     await crop(`${theme}-rail`);
+    await screen.getByRole("button", { name: "Spaces — Reading" }).click();
+    await settle();
+    await settle();
+    await wide(`${theme}-rail-switcher`);
+    await screen.getByRole("button", { name: "Edit Studio" }).click();
+    await settle();
+    await wide(`${theme}-rail-editor`);
+    await screen.getByRole("button", { name: "Done" }).click();
+    await settle();
     spaced("home");
     await settle();
     await crop(`${theme}-rail-no-icon`);
@@ -267,6 +286,32 @@ for (const theme of ["light", "dark"] as const) {
     await settle();
     await settle();
     await shot(`${theme}-beside-settings`);
+  });
+
+  test(`a tab carried across the column, ${theme}`, async () => {
+    await stage(theme);
+    const row = document.querySelector<HTMLElement>(`[data-zephium-tab-id="spotify"] .tab-open`)!;
+    const from = row.getBoundingClientRect();
+    const init = { bubbles: true, pointerId: 1, button: 0, isPrimary: true };
+    const at = (x: number, y: number) => ({ ...init, clientX: x, clientY: y });
+    row.dispatchEvent(new PointerEvent("pointerdown", at(from.left + 60, from.top + 20)));
+    row.dispatchEvent(new PointerEvent("pointermove", at(from.left + 70, from.top + 30)));
+    row.dispatchEvent(new PointerEvent("pointermove", at(from.left + 120, 600)));
+    await frame();
+    await settle();
+    await crop(`${theme}-drag-below`);
+    row.dispatchEvent(new PointerEvent("pointermove", at(800, 300)));
+    await frame();
+    await settle();
+    await crop(`${theme}-drag-page`);
+    row.dispatchEvent(new PointerEvent("pointercancel", at(800, 300)));
+    row.dispatchEvent(new PointerEvent("pointerdown", at(from.left + 60, from.top + 20)));
+    row.dispatchEvent(new PointerEvent("pointermove", at(from.left + 60, from.top + 30)));
+    row.dispatchEvent(new PointerEvent("pointermove", at(from.left + 60, from.top + 100)));
+    await frame();
+    await settle();
+    await crop(`${theme}-drag-reorder`);
+    row.dispatchEvent(new PointerEvent("pointercancel", at(from.left + 60, from.top + 100)));
   });
 
   test(`the profile menu, ${theme}`, async () => {

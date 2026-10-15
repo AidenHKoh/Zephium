@@ -90,13 +90,13 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-test("the row names the space, its dots switch and its plus opens a tab", async () => {
+test("the row names the space and its plus opens a tab, with no pager beside them", async () => {
   const screen = await mount();
   await expect.element(screen.getByRole("button", { name: "Spaces — Home" })).toBeVisible();
   await screen.getByRole("button", { name: "New tab", exact: true }).click();
   expect(native.open).toHaveBeenCalledOnce();
-  await screen.getByRole("button", { name: "Studio", exact: true }).click();
-  expect(native.switchTo).toHaveBeenCalledWith("studio");
+  expect(screen.container.querySelector(".space-dots, .space-dot")).toBeNull();
+  expect(screen.container.querySelectorAll(".space-bar button")).toHaveLength(2);
 });
 
 test("the switcher lists every space, checks the one shown and moves to another", async () => {
@@ -192,20 +192,48 @@ test("an empty space offers a new tab instead of a blank column", async () => {
   expect(native.open).toHaveBeenCalledOnce();
 });
 
-test("a sideways swipe over the list moves to the next space, and not past the last", async () => {
+test("a sideways swipe over the list follows the fingers, then moves to the next space once", async () => {
   const screen = await mount();
   const list = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
-  const swipe = (deltaX: number) => {
-    for (let index = 0; index < 6; index += 1)
-      list.dispatchEvent(new WheelEvent("wheel", { deltaX, deltaY: 0, bubbles: true }));
+  const natural = true;
+  const swipe = (deltaX: number, count = 6, deltaY = 0) => {
+    for (let index = 0; index < count; index += 1) {
+      const wheel = new WheelEvent("wheel", { deltaX, deltaY, bubbles: true });
+      Object.defineProperty(wheel, "webkitDirectionInvertedFromDevice", { value: natural });
+      list.dispatchEvent(wheel);
+    }
   };
-  swipe(-20);
+  // Fingers to the right on the first space: the list resists and comes back.
+  swipe(-6, 4);
   expect(native.step).not.toHaveBeenCalled();
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  swipe(20);
-  expect(native.step).toHaveBeenCalledExactlyOnceWith(1);
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  expect(Number.parseFloat(list.style.translate)).toBeGreaterThan(0);
+  await expect.poll(() => list.style.translate, { timeout: 1000 }).toBe("");
+
+  // Mostly vertical: not ours.
+  swipe(3, 6, 20);
   expect(list.style.translate).toBe("");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  swipe(30);
+  expect(native.step).toHaveBeenCalledExactlyOnceWith(1);
+
+  expect(list.style.translate).toBe("");
+  expect(
+    list
+      .getAnimations()
+      .some((animation) => (animation.effect as KeyframeEffect).getKeyframes().length === 2),
+  ).toBe(true);
+});
+
+test("the fingers decide the direction whichever way the wheel is set to run", async () => {
+  const screen = await mount();
+  const list = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
+  for (let index = 0; index < 6; index += 1) {
+    const wheel = new WheelEvent("wheel", { deltaX: -30, bubbles: true });
+    Object.defineProperty(wheel, "webkitDirectionInvertedFromDevice", { value: false });
+    list.dispatchEvent(wheel);
+  }
+  expect(native.step).toHaveBeenCalledExactlyOnceWith(1);
 });
 
 test("a private window has one space and no switcher", async () => {

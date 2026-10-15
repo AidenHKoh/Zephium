@@ -15,10 +15,9 @@
   import { uiCommands as ui } from "$domain/ui-commands";
   import { surface } from "$domain/surface";
   import * as tools from "$session/tools.svelte";
-  import { expandBriefly } from "$session/sidebar-mode.svelte";
   import SpaceGlyph from "./SpaceGlyph.svelte";
   import * as requests from "../lib/space-requests.svelte";
-  import { arrive, spaceSwipe } from "../lib/space-swipe";
+  import { arrive, spaceSwipe, stepSpace } from "../lib/space-swipe";
 
   let {
     entries,
@@ -40,6 +39,7 @@
   // sites and the tab is kept, anywhere else and native decides (a page).
   const drag = new RowDrag({
     list: () => list,
+    region: () => scroller,
     reorder: () => ({ essential: false }),
     drop: ({ id, x, y, over, before }) => {
       const essential = !!over?.closest("[data-essentials-drop]");
@@ -55,13 +55,7 @@
 
   const space = $derived(tabs.profile()?.kind === "incognito" ? undefined : tabs.activeSpace());
   const order = $derived(tabs.spaces().map((entry) => entry.id));
-  // One space has nothing to switch to, so the rail spends no mark on it.
-  const marked = $derived(space !== undefined && order.length > 1);
   let scroller = $state<HTMLElement>();
-  function openSpaces(event: MouseEvent) {
-    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    tabs.openSpaceMenu(rect.left, rect.bottom + 4);
-  }
   const canStep = (step: 1 | -1) => {
     const at = order.indexOf(tabs.activeSpaceId() ?? "");
     return space !== undefined && at !== -1 && at + step >= 0 && at + step < order.length;
@@ -77,16 +71,16 @@
       shownSpace = next;
     });
   });
-  // Making or editing a space needs the full column: a panel or Settings
-  // beside the rail steps aside, and a compact column opens until it is done.
+  // Making or editing a space opens its panel beside the rail; Settings or a
+  // tool there steps aside for it.
   $effect(() => {
     const command = ui.uiCommand();
     if (command.id !== "space.new" && command.id !== "space.edit") return;
     untrack(() => {
       if (!requests.claim(command.seq) || space === undefined) return;
-      if (tools.activeTool() !== null) tools.close();
       if (surface.currentPage() !== null) void surface.close();
-      requests.ask(command.id === "space.new" ? "new" : "edit", expandBriefly());
+      requests.ask(command.id === "space.new" ? "new" : "edit");
+      tools.openSpaces();
     });
   });
   let shape = $derived(entries.map((tab) => tab.id).join(" "));
@@ -112,24 +106,22 @@
 <!-- Like the expanded list, the rail opens with the way to a new tab, which
      stays put while the tabs below it scroll. -->
 <div class="rail-new-slot" data-cascade style:--cascade={0}>
-  {#if marked && space}<button
+  {#if space}<button
       type="button"
       class="rail-item rail-space"
       title={space.name}
       aria-label={m.space_open_switcher({ name: space.name })}
-      aria-haspopup="menu"
-      onclick={openSpaces}
+      aria-haspopup="dialog"
+      aria-expanded={tools.spacesOpen()}
+      data-open={tools.spacesOpen() || undefined}
+      onclick={() => (tools.spacesOpen() ? tools.closeSpaces() : tools.openSpaces())}
       ><SpaceGlyph
         icon={space.icon}
         color={space.color}
         name={space.name}
+        size={18}
         fallback="monogram"
-      />{#if order.length <= 6}<span class="rail-space-dots" aria-hidden="true"
-          >{#each tabs.spaces() as entry (entry.id)}<i
-              data-space-hue={entry.color}
-              data-current={entry.id === space.id || undefined}
-            ></i>{/each}</span
-        >{/if}</button
+      /></button
     >{/if}
   <button
     type="button"
@@ -143,7 +135,7 @@
 </div>
 <div
   bind:this={scroller}
-  use:spaceSwipe={{ canStep, step: (step) => void tabs.stepSpace(step) }}
+  use:spaceSwipe={{ canStep, step: stepSpace }}
   use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/rail`}
   class="rail-scroller scroll-edges"
   data-under-panel
@@ -206,6 +198,7 @@
     y={drag.ghost.y}
     image={favicons.image(held?.icon)}
     tone={favicons.tone(held?.icon)}
+    title={held?.title}
   />{/if}
 
 <style>
@@ -220,33 +213,10 @@
     padding-block: 0 2px;
   }
 
-  /* The space shown, by its mark, over a point for each space with its own
-     drawn out long: which one, and where a swipe goes next. */
-  .rail-space {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    justify-content: center;
-    height: 40px;
-  }
-
-  .rail-space-dots {
-    display: flex;
-    gap: 2px;
-  }
-
-  .rail-space-dots i {
-    width: 3px;
-    height: 3px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-faint);
-    opacity: 0.6;
-  }
-
-  .rail-space-dots i[data-current] {
-    width: 8px;
-    background: var(--space-hue);
-    opacity: 1;
+  /* The space shown, by its mark: it opens the spaces beside the rail. */
+  .rail-space[data-open] {
+    background: var(--row-active);
+    box-shadow: var(--row-rim);
   }
 
   .rail-scroller {

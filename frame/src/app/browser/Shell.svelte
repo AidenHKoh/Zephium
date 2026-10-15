@@ -23,7 +23,7 @@
   import { sidebarTree } from "$features/tabs";
   import { SidebarBody } from "$features/tabs";
   import { TabList } from "$features/tabs";
-  import { TabRail } from "$features/tabs";
+  import { TabRail, SpacePanel } from "$features/tabs";
   import { loadNavigationError, loadTabCapacityState } from "$features/tabs";
   import { selectionGlide } from "$features/tabs";
   import * as tabDrag from "$session/tab-drag.svelte";
@@ -120,7 +120,9 @@
   let inWork = $derived(browserPage.currentPage() === "work");
   // Settings stands beside the rail the way a tool panel does.
   let paneled = $derived(
-    toolHost.activeTool() !== null || browserPage.currentPage() === "settings",
+    toolHost.activeTool() !== null ||
+      toolHost.spacesOpen() ||
+      browserPage.currentPage() === "settings",
   );
   let incognito = $derived(tabs.profile()?.kind === "incognito");
   // The column's body settles in only when the environment changes, never on launch.
@@ -396,7 +398,7 @@
               </p>{/if}
           {/snippet}
         </Dock>{/if}{/snippet}{#snippet settingsNavigation()}<SettingsNavigation
-      />{/snippet}{#snippet toolPanel(kind)}<LazyView
+      />{/snippet}{#snippet spacePanel()}<SpacePanel />{/snippet}{#snippet toolPanel(kind)}<LazyView
         loader={loadToolSlot}
         loadingLabel={m.surface_loading()}
         failureLabel={m.surface_render_failed()}

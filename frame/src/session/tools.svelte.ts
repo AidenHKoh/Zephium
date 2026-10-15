@@ -3,12 +3,28 @@ import { setPanelExtent } from "./sidebar-mode.svelte";
 import { events } from "$shared/ipc/native-events";
 export type ToolKind = "notes" | "tasks" | "ai" | "time" | "history" | "downloads" | "bookmarks";
 let tool = $state<ToolKind | null>(null);
+let spaces = $state(false);
 let queued: ToolKind | null = null;
 let stop: (() => void) | null = null;
 let generation = 0;
 let initialized = false;
 let initializing: Promise<void> | null = null;
 export const activeTool = () => tool;
+/** The spaces panel stands beside the rail the way a tool does. */
+export const spacesOpen = () => spaces;
+const SPACES_EXTENT = 264;
+export function openSpaces() {
+  if (spaces) return;
+  tool = null;
+  queued = null;
+  spaces = true;
+  setPanelExtent(SPACES_EXTENT);
+}
+export function closeSpaces() {
+  if (!spaces) return;
+  spaces = false;
+  setPanelExtent(0);
+}
 export function open(kind: ToolKind) {
   // Work keeps the column, so a tool opens beside its canvas; any other page gives way to Browse.
   const page = browser.currentPage();
@@ -23,11 +39,13 @@ export function open(kind: ToolKind) {
   }
   // The column widens at once; native slides the page aside to make room.
   tool = kind;
+  spaces = false;
   setPanelExtent(336);
 }
 export function close() {
   queued = null;
   tool = null;
+  spaces = false;
   setPanelExtent(0);
 }
 async function initialize(owner: number) {
@@ -56,6 +74,7 @@ async function initialize(owner: number) {
       ].includes(payload)
     ) {
       tool = null;
+      spaces = false;
       setPanelExtent(0);
       queued = null;
     }
@@ -90,4 +109,5 @@ export function dispose() {
   stop?.();
   stop = null;
   tool = null;
+  spaces = false;
 }

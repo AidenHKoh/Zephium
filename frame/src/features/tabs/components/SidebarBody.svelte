@@ -8,7 +8,7 @@
   import TabList from "./TabList.svelte";
   import SpaceBar from "./SpaceBar.svelte";
   import SpaceGlyph from "./SpaceGlyph.svelte";
-  import { arrive, spaceSwipe } from "../lib/space-swipe";
+  import { arrive, spaceSwipe, stepSpace } from "../lib/space-swipe";
   import { untrack } from "svelte";
 
   let {
@@ -65,7 +65,7 @@
 
 <div
   bind:this={scroller}
-  use:spaceSwipe={{ canStep, step: (step) => void tabs.stepSpace(step) }}
+  use:spaceSwipe={{ canStep, step: stepSpace }}
   data-tabs-drop
   data-under-panel
   use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/tabs`}

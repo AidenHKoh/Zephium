@@ -25,11 +25,14 @@
     toolPanel,
     browserBody,
     dock,
+    spacePanel,
   }: {
     settingsNavigation: Snippet;
     toolPanel: Snippet<[tools.ToolKind]>;
     browserBody: Snippet<[boolean]>;
     dock: Snippet<[boolean]>;
+    /** The spaces, standing beside the rail when it asks for them. */
+    spacePanel?: Snippet;
   } = $props();
   let settings = $derived(browserPage.currentPage() === "settings");
   const SETTINGS_PANEL = 264;
@@ -47,6 +50,7 @@
     const tool = tools.activeTool();
     const work = inWork;
     untrack(() => {
+      if (work) tools.closeSpaces();
       if (work && tool !== null) {
         tools.close();
         if (settledInWork)
@@ -60,8 +64,11 @@
   // Notes are part of browsing too: a tab is one click away and choosing it
   // returns to that page.
   let navigating = $derived(settings);
-  let paneled = $derived(settings || tools.activeTool() !== null);
-  let compact = $derived(navigating || railPage || isCompact() || tools.activeTool() !== null);
+  let spaced = $derived(tools.spacesOpen());
+  let paneled = $derived(settings || tools.activeTool() !== null || spaced);
+  let compact = $derived(
+    navigating || railPage || isCompact() || tools.activeTool() !== null || spaced,
+  );
 
   // A change of shape is one continuous change: every mark travels from the
   // old shape into the new one while native slides the page to match. Not
@@ -133,7 +140,7 @@
   let width = $derived(
     navigating
       ? COMPACT_WIDTH + PANEL_GAP + SETTINGS_PANEL
-      : railPage && tools.activeTool() === null
+      : railPage && tools.activeTool() === null && !spaced
         ? COMPACT_WIDTH
         : effectiveWidth(),
   );
@@ -171,7 +178,7 @@
   });
 
   function toggleShape() {
-    if (tools.activeTool() !== null) tools.close();
+    if (tools.activeTool() !== null || spaced) tools.close();
     else toggleMode();
   }
 </script>
@@ -190,7 +197,7 @@
   onpointerleave={() => (pointerIn = false)}
   class="browser-sidebar relative flex shrink-0 flex-col text-text select-none"
 >
-  {#if !navigating && !railPage && tools.activeTool() === null}<SidebarResizeHandle
+  {#if !navigating && !railPage && tools.activeTool() === null && !spaced}<SidebarResizeHandle
       {width}
       disabled={reshaping}
     />{/if}
@@ -218,6 +225,8 @@
         {@render settingsNavigation()}
       </div>{:else if tools.activeTool() !== null}<div class="sidebar-tool-host">
         {@render toolPanel(tools.activeTool()!)}
+      </div>{:else if spaced && spacePanel}<div class="sidebar-tool-host">
+        {@render spacePanel()}
       </div>{/if}
   </div>
 </aside>

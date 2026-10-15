@@ -3239,5 +3239,6 @@
   "model_server_needed": "Connect a server of your own, such as Ollama or LM Studio, to use its models here.",
   "model_add_server": "Connect a server",
   "model_search_clear": "Clear search",
-  "model_empty": "No models to choose from here yet."
+  "model_empty": "No models to choose from here yet.",
+  "browse_spaces_close": "Close Spaces"
 }

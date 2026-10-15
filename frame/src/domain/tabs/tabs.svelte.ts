@@ -216,5 +216,3 @@ export const reorderSpace = (id: string, before: string | null) =>
   settle(commands.spacesReorder(id, before));
 export const moveTabToSpace = (tab: string, space: string) =>
   settle(commands.spacesMoveTab(tab, space));
-/** The switcher at rail width is native: the column has no room for its own. */
-export const openSpaceMenu = (x: number, y: number) => void commands.spacesMenuPopup(x, y);
