@@ -771,3 +771,126 @@ fn an_essential_never_opened_is_given_its_icon_from_the_store_or_the_network() {
     assert!(delivered_origins(&icons).contains(&"https://kept.example".to_owned()));
     assert_eq!(probed.lock().unwrap().as_slice(), ["https://bare.example"]);
 }
+
+#[derive(Default)]
+struct Surface {
+    owner: Option<String>,
+    held: std::collections::HashSet<(String, String)>,
+}
+
+impl Surface {
+    fn replay(icons: &IconLog) -> Self {
+        let mut surface = Self::default();
+        for view in icons
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|view| view.surface == zephium_ipc::IconSurface::Chrome)
+        {
+            surface.owner = Some(view.profile_id.clone());
+            for entry in &view.entries {
+                surface
+                    .held
+                    .insert((entry.origin.clone(), entry.revision.clone()));
+            }
+        }
+        surface
+    }
+
+    fn draws(&self, state: &ItemsState) -> bool {
+        let icons: Vec<_> = state
+            .tabs
+            .iter()
+            .filter_map(|tab| tab.icon.as_ref())
+            .collect();
+        !icons.is_empty()
+            && icons.iter().all(|icon| {
+                self.held
+                    .contains(&(icon.origin.clone(), icon.revision.clone()))
+            })
+    }
+}
+
+fn paint(shell: &mut Shell, id: ItemId, host: &str, fill: u8) {
+    navigate_and_commit(shell, id, host);
+    shell.handle(Command::Engine(EngineEvent::FaviconPixels {
+        id,
+        page_url: format!("https://{host}/"),
+        rgba: vec![fill; zephium_core::icon::RGBA32_BYTES],
+    }));
+}
+
+#[test]
+fn icons_survive_switching_profiles_and_coming_back() {
+    let (mut shell, _engine, screen, icons) = setup_with_icon_log(Arc::new(FakeStore::default()));
+    shell.handle(Command::Bootstrap);
+    let personal = shell.windows.focused().unwrap().profile;
+    paint(&mut shell, active_id(&screen), "shared.example", 21);
+
+    shell.handle_operation(Command::CreateProfile {
+        name: "Work".into(),
+        avatar: zephium_core::profiles::ProfileAvatar {
+            style: zephium_core::profiles::ProfileAvatarStyle::Symbol,
+            color: 2,
+            symbol: 5,
+            revision: 0,
+        },
+        photo: None,
+        switch: false,
+    });
+    let work = shell
+        .profiles
+        .iter()
+        .map(|profile| profile.id)
+        .find(|id| *id != personal)
+        .unwrap();
+    shell.handle_operation(Command::SwitchProfile(work));
+    paint(&mut shell, active_id(&screen), "shared.example", 99);
+    let surface = Surface::replay(&icons);
+    assert_eq!(surface.owner.as_deref(), Some(&*work.to_string()));
+    assert!(surface.draws(&last(&screen)));
+
+    shell.handle_operation(Command::SwitchProfile(personal));
+    let surface = Surface::replay(&icons);
+    assert_eq!(surface.owner.as_deref(), Some(&*personal.to_string()));
+    assert!(surface.draws(&last(&screen)));
+
+    shell.handle_operation(Command::SwitchProfile(work));
+    shell.handle_operation(Command::SwitchProfile(personal));
+    assert!(Surface::replay(&icons).draws(&last(&screen)));
+}
+
+#[test]
+fn a_returning_profile_is_announced_even_when_every_icon_is_already_held() {
+    let (mut shell, _engine, screen, icons) = setup_with_icon_log(Arc::new(FakeStore::default()));
+    shell.handle(Command::Bootstrap);
+    let personal = shell.windows.focused().unwrap().profile;
+    paint(&mut shell, active_id(&screen), "home.example", 5);
+    let work = {
+        shell.handle_operation(Command::CreateProfile {
+            name: "Work".into(),
+            avatar: zephium_core::profiles::ProfileAvatar {
+                style: zephium_core::profiles::ProfileAvatarStyle::Symbol,
+                color: 2,
+                symbol: 5,
+                revision: 0,
+            },
+            photo: None,
+            switch: false,
+        });
+        shell
+            .profiles
+            .iter()
+            .map(|profile| profile.id)
+            .find(|id| *id != personal)
+            .unwrap()
+    };
+    shell.handle_operation(Command::SwitchProfile(work));
+    let before = icons.lock().unwrap().len();
+    shell.handle_operation(Command::SwitchProfile(personal));
+    let views = icons.lock().unwrap();
+    let announced = views[before..]
+        .iter()
+        .any(|view| view.profile_id == personal.to_string() && view.entries.is_empty());
+    assert!(announced);
+}

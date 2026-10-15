@@ -8,9 +8,11 @@ const BYTE_LENGTH = SIDE * SIDE * 4;
 const BASE64_LENGTH = Math.ceil(BYTE_LENGTH / 3) * 4;
 
 // Native tracks which rasters this surface holds and sends only what it has
-// not delivered. Evicting below its own bound would strand an origin whose
-// pixels are never resent, so this capacity must not drop below it.
-const CAPACITY = 512;
+// not delivered, and it never learns of an eviction here. Raster keys here are
+// content-addressed, so a surface never drops an icon on a profile change;
+// twice native's own bound of 512 keeps every icon it still believes
+// delivered, since at most that many rasters can come and go meanwhile.
+const CAPACITY = 1024;
 
 /** How a mark sits against a surface. A near-neutral icon the colour of the
  *  chrome behind it reads as an empty square; a coloured one never does,
@@ -21,13 +23,16 @@ const DARK_LUMINANCE = 70;
 const LIGHT_LUMINANCE = 200;
 const NEUTRAL_CHROMA = 40;
 
-type Entry = { revision: string; image: ImageData; tone: IconTone };
+type Entry = { image: ImageData; tone: IconTone };
 
+/** Keyed by origin and revision. A revision names exact pixels, so profiles
+ *  holding different icons for one site never collide, and a profile that
+ *  comes back finds what native will not resend. */
 const rasters = new SvelteMap<string, Entry>();
-/** Native caches per profile and the reference carries only an origin, so two
- *  profiles holding different icons for one site would collide here. A surface
- *  shows one profile at a time; adopting a new one starts from empty. */
-let owner: string | null = null;
+/** The raster each profile last received for a site, for addresses that carry
+ *  no reference of their own. Lookups use the profile the surface is showing. */
+const sites = new SvelteMap<string, string>();
+let owner = $state<string | null>(null);
 const lifecycle = createLifecycle();
 let initializing: Promise<void> | null = null;
 let unlisten: Unlisten | null = null;
@@ -71,32 +76,40 @@ function toneOf(image: ImageData): IconTone {
   return meanLuminance > LIGHT_LUMINANCE ? "light" : "mid";
 }
 
-function accept(profile: string, entries: readonly FaviconEntry[]) {
-  if (profile !== owner) {
-    owner = profile;
-    rasters.clear();
-  }
-  for (const entry of entries) {
-    const image = decode(entry.rgba);
-    if (!image) continue;
-    rasters.delete(entry.origin);
-    rasters.set(entry.origin, { revision: entry.revision, image, tone: toneOf(image) });
-  }
-  while (rasters.size > CAPACITY) {
-    const oldest = rasters.keys().next();
+const refKey = (origin: string, revision: string) => `${origin}\u0000${revision}`;
+const siteKey = (profile: string, origin: string) => `${profile}\u0000${origin}`;
+
+function trim(map: SvelteMap<string, unknown>) {
+  while (map.size > CAPACITY) {
+    const oldest = map.keys().next();
     if (oldest.done) break;
-    rasters.delete(oldest.value);
+    map.delete(oldest.value);
   }
+}
+
+function accept(profile: string, entries: readonly FaviconEntry[]) {
+  owner = profile;
+  for (const entry of entries) {
+    const key = refKey(entry.origin, entry.revision);
+    const held = rasters.get(key);
+    const image = held ? held.image : decode(entry.rgba);
+    if (!image) continue;
+    rasters.delete(key);
+    rasters.set(key, held ?? { image, tone: toneOf(image) });
+    sites.delete(siteKey(profile, entry.origin));
+    sites.set(siteKey(profile, entry.origin), key);
+  }
+  trim(rasters);
+  trim(sites);
 }
 
 /** The pixels behind a projected reference, or null until they arrive. */
 export function image(ref: IconRef | null | undefined): ImageData | null {
   if (!ref) return null;
-  const entry = rasters.get(ref.origin);
-  return entry?.revision === ref.revision ? entry.image : null;
+  return rasters.get(refKey(ref.origin, ref.revision))?.image ?? null;
 }
 
-/** Whatever raster this surface already holds for a page's site, at any
+/** Whatever raster the shown profile already holds for a page's site, at any
  *  revision. For a stored address with no live reference of its own, such as a
  *  task's linked page; it asks native for nothing, so it may be null. */
 export function forPage(url: string): { image: ImageData; tone: IconTone } | null {
@@ -104,7 +117,9 @@ export function forPage(url: string): { image: ImageData; tone: IconTone } | nul
   if (!parts) return null;
   const scheme = parts[1]!.toLowerCase();
   const port = parts[3] && parts[3] !== (scheme === "https" ? "443" : "80") ? `:${parts[3]}` : "";
-  const entry = rasters.get(`${scheme}://${parts[2]!.toLowerCase()}${port}`);
+  if (owner === null) return null;
+  const key = sites.get(siteKey(owner, `${scheme}://${parts[2]!.toLowerCase()}${port}`));
+  const entry = key === undefined ? undefined : rasters.get(key);
   return entry ? { image: entry.image, tone: entry.tone } : null;
 }
 
@@ -122,8 +137,7 @@ export function mark(
 
 export function tone(ref: IconRef | null | undefined): IconTone {
   if (!ref) return "mid";
-  const entry = rasters.get(ref.origin);
-  return entry?.revision === ref.revision ? entry.tone : "mid";
+  return rasters.get(refKey(ref.origin, ref.revision))?.tone ?? "mid";
 }
 
 export function init(): Promise<void> {
@@ -159,4 +173,5 @@ export function dispose() {
   unlisten = null;
   owner = null;
   rasters.clear();
+  sites.clear();
 }
