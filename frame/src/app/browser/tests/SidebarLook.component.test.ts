@@ -92,6 +92,6 @@ test("in Work the rail ends in the account, where Browse keeps its tools", async
     .elementLocator(screen.container)
     .screenshot({ path: "../../../../../target/rail-work-dark.png" });
   await screen.getByRole("button", { name: "Account" }).click();
-  await expect.element(page.getByRole("menuitem", { name: "Settings" })).toBeVisible();
+  await expect.element(page.getByRole("menuitem", { name: "Settings", exact: true })).toBeVisible();
   await page.screenshot({ path: "../../../../../target/rail-work-menu.png" });
 });
