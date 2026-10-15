@@ -17,6 +17,7 @@
   import Disclosure from "$shared/ui/Disclosure";
   import Icon from "$shared/ui/Icon";
   import ProfileAvatar from "$shared/ui/ProfileAvatar";
+  import "$shared/ui/Shine/shine.css";
 
   /** The profile's name until the window's own profile is known. */
   let { name = "" }: { name?: string } = $props();
@@ -32,7 +33,8 @@
 
   const account = $derived(accountSession.account());
   const signedIn = $derived(account?.signed_in === true);
-  const who = $derived(tabs.profile()?.name ?? profiles.current()?.name ?? name);
+  const who = $derived(tabs.profile()?.name || profiles.current()?.name || name);
+  const shown = $derived(who || m.browse_profile_settings());
   const others = $derived(profiles.others());
   const chosen = $derived.by(() => {
     const current = profiles.current();
@@ -89,7 +91,7 @@
   label={m.account_menu()}
   menu
   triggerClass="work-case"
-  panelClass="work-menu sidebar-softens"
+  panelClass="work-menu ui-shine-sheet sidebar-softens"
 >
   {#snippet trigger()}{#if chosen}<ProfileAvatar view={chosen} size={36} />{:else}<Icon
         icon={UserIcon}
@@ -102,12 +104,12 @@
       type="button"
       role="menuitem"
       class="ui-menu-item me"
-      aria-label={`${who} — ${m.browse_profile_settings()}`}
+      aria-label={`${shown} — ${m.browse_profile_settings()}`}
       title={m.browse_profile_settings()}
       onclick={() => run("settings.profiles")}
     >
       {@render face(22)}
-      <span class="me-name">{who}</span>
+      <span class="me-name">{shown}</span>
     </button>
     {#if others.length > 0}<div class="chips" role="presentation">
         {#each others as profile (profile.id)}
@@ -126,7 +128,7 @@
   <div class="rule" role="separator"></div>
   {#if account?.available}
     {@render row(
-      AccountSetting01Icon,
+      signedIn ? AccountSetting01Icon : UserIcon,
       signedIn ? m.account_menu() : m.ai_cloud_sign_in(),
       standing,
       2,
@@ -142,18 +144,19 @@
 </Disclosure>
 
 <style>
-  /* Out of the rail, beside it, its foot level with the trigger's. */
+  /* Up out of the trigger, clear of it and of the window's foot, the way the
+     tool stack rises from Browse's: fully on screen at any rail or column width. */
   :global(.work-menu.ui-disclosure-panel) {
     top: auto;
-    bottom: 0;
-    inset-inline-start: calc(100% + 18px);
+    bottom: calc(100% + 12px);
+    inset-inline-start: 0;
     min-width: 232px;
     max-width: 320px;
-    max-height: calc(100vh - 120px);
+    max-height: calc(100vh - 140px);
     overflow-y: auto;
     overscroll-behavior: contain;
     transform-origin: bottom left;
-    translate: -4px 0;
+    translate: 0 6px;
   }
 
   :global(.work-menu.ui-disclosure-panel[data-open="true"]) {
