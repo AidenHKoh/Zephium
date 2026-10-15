@@ -11,6 +11,9 @@
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Button from "$shared/ui/Button";
+  import ZephiumTile from "$shared/ui/ZephiumTile";
+  import AboutLinks from "../about/AboutLinks.svelte";
+  import { WEBSITE } from "../../lib/links";
   import PreferenceSwitch from "../PreferenceSwitch.svelte";
 
   let about = $state<AboutInfo | null>(null);
@@ -84,15 +87,12 @@
   }
 </script>
 
-<div class="settings-about hero">
-  <span class="zephium-wordmark" role="img" aria-label="Zephium"></span>
-  <p class="tagline">
-    <span>{m.settings_about_body()}</span><span>{m.about_tagline_work()}</span>
-  </p>
-</div>
-<SettingsGroup title={m.settings_about()}>
-  <SettingsRow title={m.settings_version()} description={platform}>
-    <div class="actions">
+<header class="settings-about hero">
+  <ZephiumTile size={88} />
+  <div class="identity">
+    <span class="zephium-wordmark" role="img" aria-label="Zephium"></span>
+    <p class="meta">
+      <span class="version">{about ? m.about_version({ version: about.version }) : ""}</span>
       {#if updatable && about}<Button
           size="compact"
           variant="ghost"
@@ -100,9 +100,15 @@
             void commands.browserOpenUrl(releaseNotesUrl(about!.version), true).catch(() => {})}
           >{m.update_release_notes()}</Button
         >{/if}
-      <span class="settings-value">{about?.version ?? ""}</span>
-    </div>
-  </SettingsRow>
+    </p>
+    <p class="platform">{platform}</p>
+  </div>
+  <p class="tagline">
+    <span>{m.settings_about_body()}</span><span>{m.about_tagline_work()}</span>
+  </p>
+  <AboutLinks />
+</header>
+<SettingsGroup title={m.about_group_software()}>
   <SettingsRow settingId="about.updates" title={m.pref_about_updates()} description={updateLine}>
     {#if update.state === "ready" || update.state === "installing"}
       <Button
@@ -124,7 +130,7 @@
         <Button size="compact" onclick={() => void updates.check()}>{m.update_check_now()}</Button>
         <Button
           size="compact"
-          onclick={() => void commands.browserOpenUrl("https://zephium.app", true).catch(() => {})}
+          onclick={() => void commands.browserOpenUrl(WEBSITE, true).catch(() => {})}
           >{m.update_download_latest()}</Button
         >
       </div>
@@ -202,8 +208,36 @@
 
 <style>
   .hero {
-    gap: 22px;
-    padding-block: 12px 48px;
+    gap: 20px;
+    padding-block: 18px 40px;
+  }
+
+  .identity {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .zephium-wordmark {
+    inline-size: 150px;
+    block-size: 22px;
+  }
+
+  .meta,
+  .platform {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin: 0;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    line-height: 1.4;
+  }
+
+  .version {
+    color: var(--color-label-secondary);
+    font-weight: 500;
   }
 
   .tagline {

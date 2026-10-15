@@ -33,6 +33,7 @@ vi.mock("$domain/preferences", () => ({
   preferences: {
     value: (key: string) => ({ "updates.auto-check": "true" })[key],
     aiEnabled: () => true,
+    enabled: () => true,
     saving: () => false,
     saveFailed: () => false,
     set: vi.fn().mockResolvedValue(undefined),
@@ -52,7 +53,7 @@ test("updates are checked, downloaded and relaunched from About", async () => {
   native.status = { state: "upToDate" };
   const screen = await render(AboutPage);
   await expect.element(screen.getByText("Zephium is up to date")).toBeVisible();
-  await expect.element(screen.getByText("1.0.1", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("Version 1.0.1")).toBeVisible();
 
   await screen.getByRole("button", { name: "Check now" }).click();
   expect(native.check).toHaveBeenCalledOnce();
@@ -145,4 +146,20 @@ test("a postponed update remains ready with its failure explained", async () => 
   const screen = await render(AboutPage);
   await expect.element(screen.getByText(native.status.retry_reason!)).toBeVisible();
   await expect.element(screen.getByRole("button", { name: "Relaunch to update" })).toBeEnabled();
+});
+
+test("the links open Zephium's own pages in a tab", async () => {
+  native.status = { state: "upToDate" };
+  const screen = await render(AboutPage);
+  const links = screen.getByRole("navigation", { name: "Zephium on the web" });
+  for (const [name, url] of [
+    ["Website", "https://zephium.app"],
+    ["Docs", "https://zephium.app/docs"],
+    ["GitHub", "https://github.com/zephium-browser/Zephium"],
+    ["Discord", "https://discord.gg/tyveTUyEp7"],
+    ["YouTube", "https://www.youtube.com/@crynta"],
+  ] as const) {
+    await links.getByRole("link", { name }).click();
+    expect(native.openUrl).toHaveBeenLastCalledWith(url, true);
+  }
 });

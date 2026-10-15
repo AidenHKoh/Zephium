@@ -3240,5 +3240,10 @@
   "model_add_server": "Connect a server",
   "model_search_clear": "Clear search",
   "model_empty": "No models to choose from here yet.",
-  "browse_spaces_close": "Close Spaces"
+  "browse_spaces_close": "Close Spaces",
+  "about_link_website": "Website",
+  "about_link_docs": "Docs",
+  "about_links": "Zephium on the web",
+  "about_version": "Version {version}",
+  "about_group_software": "Software"
 }
