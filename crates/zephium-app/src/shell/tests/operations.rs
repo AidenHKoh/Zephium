@@ -112,6 +112,55 @@ fn history_operations_distinguish_noop_from_scheduled_dispatch() {
 }
 
 #[test]
+fn keys_and_menu_refuse_history_the_tab_does_not_have() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "only-page.example");
+
+    for command in ["nav.back", "nav.forward"] {
+        let refused = shell.handle_operation(Command::Run(command.into()));
+        assert_eq!(refused.outcome, OperationOutcome::NoOp, "{command}");
+        assert_eq!(
+            refused.reason,
+            OperationReason::HistoryUnavailable,
+            "{command}"
+        );
+    }
+    assert!(!engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("back") || call.starts_with("forward")));
+
+    shell.handle(Command::Engine(EngineEvent::NavState {
+        id,
+        can_go_back: true,
+        can_go_forward: true,
+    }));
+    for command in ["nav.back", "nav.forward"] {
+        let admitted = shell.handle_operation(Command::Run(command.into()));
+        assert_eq!(admitted.outcome, OperationOutcome::Deferred, "{command}");
+    }
+    assert!(engine.calls().iter().any(|call| call.starts_with("back")));
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("forward")));
+
+    shell.handle(Command::Engine(EngineEvent::NavState {
+        id,
+        can_go_back: false,
+        can_go_forward: false,
+    }));
+    let state = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .unwrap();
+    assert!(!state.can_go_back && !state.can_go_forward);
+}
+
+#[test]
 fn navigation_waits_for_exact_inflight_discard_instead_of_claiming_success() {
     let (mut shell, _engine, screen) = setup();
     shell.handle(Command::Bootstrap);

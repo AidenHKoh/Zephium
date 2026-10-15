@@ -290,10 +290,7 @@ impl EngineHost {
                 return false;
             }
             let url = crate::platform::imp::current_url(view);
-            let history = match (view.can_go_back(), view.can_go_forward()) {
-                (Ok(can_go_back), Ok(can_go_forward)) => Some((can_go_back, can_go_forward)),
-                _ => None,
-            };
+            let history = crate::platform::imp::history_state(view);
             (
                 view.event_permit.clone(),
                 view.navigation.clone(),

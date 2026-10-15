@@ -239,6 +239,28 @@ pub fn current_url(view: &wry::WebView) -> Option<String> {
     bounded_current_url(view).ok()
 }
 
+/// Back and forward as the person would count them. A warm spare is adopted
+/// from an about:blank load that stays in WebKit's list, so its own answer
+/// offers a "back" to nothing; the swipe is held off in that state too.
+pub fn history_state(view: &wry::WebView) -> Option<(bool, bool)> {
+    let page = native::webkit(view);
+    let (back, forward) = unsafe { (page.canGoBack(), page.canGoForward()) };
+    let previous = back
+        .then(|| unsafe { page.backForwardList().backItem() })
+        .flatten()
+        .and_then(|item| unsafe { item.URL() }.absoluteString())
+        .map(|url| url.to_string());
+    let (back, swipe) = history_availability(back, previous.as_deref());
+    unsafe { page.setAllowsBackForwardNavigationGestures(swipe) };
+    Some((back, forward))
+}
+
+/// The availability of going back, and whether the swipe may start.
+fn history_availability(back: bool, previous: Option<&str>) -> (bool, bool) {
+    let real = back && previous != Some("about:blank");
+    (real, real || !back)
+}
+
 #[derive(Clone, Copy)]
 enum CurrentUrlUnavailable {
     MissingNativeUrl,
@@ -624,6 +646,14 @@ fn initialize_data_store_enumeration() -> Result<(), &'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_blank_bootstrap_is_not_a_page_to_go_back_to() {
+        assert_eq!(history_availability(false, None), (false, true));
+        assert_eq!(history_availability(true, Some("about:blank")), (false, false));
+        assert_eq!(history_availability(true, Some("https://example.com/")), (true, true));
+        assert_eq!(history_availability(true, None), (true, true));
+    }
+
     #[test]
     fn current_url_reader_preserves_exact_utf16_and_utf8_bounds() {
         use super::*;
