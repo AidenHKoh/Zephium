@@ -3232,6 +3232,9 @@
   "model_offer_sign_in": "Sign in to use",
   "model_offers": "More providers",
   "model_type_to_search": "Type to search",
+  "native_zephium_help": "Zephium Help",
+  "native_release_notes": "Release Notes",
+  "native_report_an_issue_more": "Report an Issue…",
   "model_rail_key": "{provider}, needs a key",
   "model_rail_refused": "{provider}, key refused",
   "model_rail_sign_in": "{provider}, sign in to use",
@@ -3240,10 +3243,10 @@
   "model_add_server": "Connect a server",
   "model_search_clear": "Clear search",
   "model_empty": "No models to choose from here yet.",
-  "browse_spaces_close": "Close Spaces",
   "about_link_website": "Website",
   "about_link_docs": "Docs",
   "about_links": "Zephium on the web",
   "about_version": "Version {version}",
-  "about_group_software": "Software"
+  "about_group_software": "Software",
+  "browse_spaces_close": "Close Spaces"
 }

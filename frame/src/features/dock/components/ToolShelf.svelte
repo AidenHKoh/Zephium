@@ -1,7 +1,12 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import { onMount } from "svelte";
-  import { IncognitoIcon, Settings02Icon, UserIcon } from "@hugeicons/core-free-icons";
+  import {
+    HelpCircleIcon,
+    IncognitoIcon,
+    Settings02Icon,
+    UserIcon,
+  } from "@hugeicons/core-free-icons";
   import { commands } from "$shared/ipc/bindings";
   import * as tools from "$session/tools.svelte";
   import type { ToolKind } from "$session/tools.svelte";
@@ -15,7 +20,7 @@
   import NoticePip from "./NoticePip.svelte";
   import { keymap } from "$domain/keymap";
   import { acceleratorKeys } from "$shared/lib/accelerator";
-  import { IS_MAC } from "$shared/platform";
+  import { IS_MAC, IS_WINDOWS } from "$shared/platform";
 
   let { compact = false }: { compact?: boolean } = $props();
   onMount(() => {
@@ -36,7 +41,9 @@
   // Rows settle in nearest the case first, so each counts from the bottom:
   // Settings, the tools, then who you are.
   const toolRows = $derived(groups.reduce((sum, group) => sum + group.length, 0));
-  const headStep = $derived(toolRows + 1);
+  // Windows has no menu bar to hold Help, so it stands beneath Settings.
+  const below = IS_WINDOWS ? 1 : 0;
+  const headStep = $derived(toolRows + 1 + below);
   function pick(kind: ToolKind) {
     if (tools.activeTool() === kind) tools.close();
     else tools.open(kind);
@@ -162,16 +169,23 @@
           view.icon,
           view.label(),
           keysFor(`tool.${kind}`),
-          toolRows - before - index,
+          toolRows - before - index + below,
           () => pick(kind),
           tools.activeTool() === kind,
         )}
       {/each}
     {/each}
     <div class="shelf-rule" role="separator"></div>
-    {@render row(Settings02Icon, m.command_browser_settings(), keysFor("browser.settings"), 0, () =>
-      run("browser.settings"),
+    {@render row(
+      Settings02Icon,
+      m.command_browser_settings(),
+      keysFor("browser.settings"),
+      below,
+      () => run("browser.settings"),
     )}
+    {#if IS_WINDOWS}{@render row(HelpCircleIcon, m.native_help(), null, 0, () =>
+        run("help.menu"),
+      )}{/if}
   </Disclosure>
 </div>
 

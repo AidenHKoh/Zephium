@@ -137,7 +137,11 @@ mod tests {
     fn every_native_label_has_an_english_message_to_translate() {
         let english: HashMap<String, String> =
             serde_json::from_str(include_str!("../../frame/messages/en.json")).unwrap();
-        let sources = [include_str!("lib.rs"), include_str!("spaces.rs")];
+        let sources = [
+            include_str!("lib.rs"),
+            include_str!("spaces.rs"),
+            include_str!("help.rs"),
+        ];
         let labels = sources.iter().flat_map(|source| {
             source
                 .split("menu_text::label(\"")

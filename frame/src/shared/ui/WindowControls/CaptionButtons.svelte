@@ -3,29 +3,24 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
 
-  let maximized = $state(false);
-  let focused = $state(true);
+  type WindowState = { maximized: boolean; focused: boolean };
+  const EVENT = "zephium:window-state";
+
+  // Native pushes the state; the chrome is not granted the window's own queries.
+  const pushed = () => (globalThis as { __zephiumWindow?: WindowState }).__zephiumWindow;
+  let maximized = $state(pushed()?.maximized ?? false);
+  let focused = $state(pushed()?.focused ?? true);
 
   onMount(() => {
-    const current = getCurrentWindow();
-    let disposed = false;
-    const stops: (() => void)[] = [];
-    const sync = () =>
-      void current.isMaximized().then((value) => {
-        if (!disposed) maximized = value;
-      });
-    sync();
-    void current.onResized(sync).then((stop) => (disposed ? stop() : stops.push(stop)));
-    void current
-      .onFocusChanged(({ payload }) => (focused = payload))
-      .then((stop) => (disposed ? stop() : stops.push(stop)));
-    return () => {
-      disposed = true;
-      for (const stop of stops) stop();
+    const sync = () => {
+      maximized = pushed()?.maximized ?? false;
+      focused = pushed()?.focused ?? true;
     };
+    window.addEventListener(EVENT, sync);
+    return () => window.removeEventListener(EVENT, sync);
   });
 
-  const window = () => getCurrentWindow();
+  const current = () => getCurrentWindow();
 </script>
 
 <!--
@@ -38,20 +33,20 @@
     type="button"
     aria-label={m.window_minimize()}
     title={m.window_minimize()}
-    onclick={() => void window().minimize()}>&#xE921;</button
+    onclick={() => void current().minimize()}>&#xE921;</button
   >
   <button
     type="button"
     aria-label={maximized ? m.window_restore() : m.window_maximize()}
     title={maximized ? m.window_restore() : m.window_maximize()}
-    onclick={() => void window().toggleMaximize()}>{maximized ? "" : ""}</button
+    onclick={() => void current().toggleMaximize()}>{maximized ? "" : ""}</button
   >
   <button
     type="button"
     class="close"
     aria-label={m.window_close()}
     title={m.window_close()}
-    onclick={() => void window().close()}>&#xE8BB;</button
+    onclick={() => void current().close()}>&#xE8BB;</button
   >
 </div>
 

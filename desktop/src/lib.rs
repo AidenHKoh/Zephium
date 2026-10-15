@@ -78,6 +78,7 @@ mod external_links;
 mod favicon_probe;
 mod focus_alerts;
 mod haptics;
+mod help;
 mod intro_sound;
 mod keymap;
 mod launcher_trigger;
@@ -3328,6 +3329,16 @@ fn apply_native_theme(app: &tauri::AppHandle, mode: &str) {
     reinstall_native_materials(app);
 }
 
+/// The title band's caption buttons draw from this; the chrome is not granted
+/// the window state commands or event listening.
+#[cfg(target_os = "windows")]
+fn publish_window_state(window: &WebviewWindow, focused: bool) {
+    let maximized = window.is_maximized().unwrap_or(false);
+    let _ = window.eval(format!(
+        "window.__zephiumWindow={{maximized:{maximized},focused:{focused}}};window.dispatchEvent(new CustomEvent('zephium:window-state'))"
+    ));
+}
+
 fn accepted_ui_operation() -> zephium_ipc::OperationAdmission {
     zephium_ipc::OperationAdmission {
         operation_id: None,
@@ -3353,6 +3364,7 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     if matches!(
         id,
         "settings.profiles"
+            | "settings.about"
             | "settings.account"
             | "settings.newtab"
             | "settings.ai"
@@ -3362,6 +3374,29 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
         let section = id.replacen("settings.", "settings.section.", 1);
         let _ = try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &section);
         return execute_command(app, "browser.settings");
+    }
+    if id == help::MENU {
+        let resolved = zephium_core::commands::resolve(&keymap_overrides(app));
+        let menu = build_command_menu_item(app, &resolved, "settings.shortcuts")
+            .and_then(|shortcuts| help::build_popup(app, &shortcuts));
+        return match (app.get_webview_window(MAIN_LABEL), menu) {
+            (Some(window), Ok(menu)) if window.popup_menu(&menu).is_ok() => accepted_ui_operation(),
+            _ => rejected_operation(),
+        };
+    }
+    if let Some(url) = help::url(id) {
+        return app
+            .try_state::<Handle>()
+            .map_or_else(rejected_operation, |shell| {
+                dispatch_operation(
+                    app,
+                    &shell,
+                    Command::OpenUrl {
+                        input: url.into(),
+                        new_tab: true,
+                    },
+                )
+            });
     }
     if id == "settings.connections" || id.starts_with("settings.connections.") {
         let section = id.replacen("settings.", "settings.section.", 1);
@@ -5044,19 +5079,26 @@ fn build_menu(
     let resolved = zephium_core::commands::resolve(overrides);
     let item = |id: &str| build_command_menu_item(handle, &resolved, id);
 
+    // About is Settings' About page: the system panel cannot open links in a tab.
+    let about = tauri::menu::MenuItemBuilder::with_id(
+        help::ABOUT,
+        menu_text::label("About Zephium"),
+    )
+    .build(handle)?;
     let app_menu = SubmenuBuilder::new(handle, menu_text::label("Zephium"))
-        .about_with_text(menu_text::label("About Zephium"), None)
+        .item(&about)
         .separator()
         .item(&item("browser.settings")?)
-        .separator()
+        .separator();
+    #[cfg(target_os = "macos")]
+    let app_menu = app_menu
         .services_with_text(menu_text::label("Services"))
         .separator()
         .hide_with_text(menu_text::label("Hide Zephium"))
         .hide_others_with_text(menu_text::label("Hide Others"))
         .show_all_with_text(menu_text::label("Show All"))
-        .separator()
-        .item(&build_quit_menu_item(handle)?)
-        .build()?;
+        .separator();
+    let app_menu = app_menu.item(&build_quit_menu_item(handle)?).build()?;
     let file = SubmenuBuilder::new(handle, menu_text::label("File"))
         .item(&item("tab.new")?)
         .item(&item("window.newPrivate")?)
@@ -5126,8 +5168,10 @@ fn build_menu(
         .build()?;
     let spaces = spaces::build_menu_section(handle, overrides)?;
     let window = SubmenuBuilder::new(handle, menu_text::label("Window"))
-        .minimize_with_text(menu_text::label("Minimize"))
-        .fullscreen_with_text(menu_text::label("Enter Full Screen"))
+        .minimize_with_text(menu_text::label("Minimize"));
+    #[cfg(target_os = "macos")]
+    let window = window.fullscreen_with_text(menu_text::label("Enter Full Screen"));
+    let window = window
         .separator()
         .item(&item("tab.next")?)
         .item(&item("tab.previous")?)
@@ -5141,9 +5185,7 @@ fn build_menu(
         .item(&item("browser.notes")?)
         .item(&item("browser.tasks")?)
         .build()?;
-    let help = SubmenuBuilder::new(handle, menu_text::label("Help"))
-        .item(&item("settings.shortcuts")?)
-        .build()?;
+    let help = help::build_menu(handle, &item("settings.shortcuts")?)?;
 
     Menu::with_items(
         handle,
@@ -6555,6 +6597,8 @@ pub fn run() {
                         if minimized {
                             return;
                         }
+                        #[cfg(target_os = "windows")]
+                        publish_window_state(&resize_window, resize_window.is_focused().unwrap_or(true));
                         let size = platform::imp::content_size(&resize_window)
                             .unwrap_or_else(|| inner_logical(&resize_window));
                         resize_shell.dispatch(Command::SetWindowSize(size));
@@ -6648,6 +6692,8 @@ pub fn run() {
                         }
                     }
                     tauri::WindowEvent::Focused(true) => {
+                        #[cfg(target_os = "windows")]
+                        publish_window_state(&resize_window, true);
                         resize_shell.dispatch(Command::SetWindowFocused(true));
                         // Some window managers restore without a distinct
                         // resize notification. Wake content before it can be
@@ -6659,6 +6705,8 @@ pub fn run() {
                     // background work: audio and timers must continue. Only
                     // an OS-minimized window hides all content views.
                     tauri::WindowEvent::Focused(false) => {
+                        #[cfg(target_os = "windows")]
+                        publish_window_state(&resize_window, false);
                         resize_shell.dispatch(Command::SetWindowFocused(false));
                         voice::window_blurred(resize_window.app_handle());
                         if resize_window.is_minimized().unwrap_or(false) {
@@ -7025,6 +7073,15 @@ mod tests {
         ] {
             assert_eq!(menu.matches(&format!("item(\"{id}\")")).count(), 1, "{id}");
         }
+    }
+
+    #[test]
+    fn about_and_help_go_through_the_command_router() {
+        let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!source.contains("about_with_text"));
+        assert!(source.contains("| \"settings.about\""));
+        assert!(source.contains("help::url(id)"));
+        assert!(source.contains("id == help::MENU"));
     }
 
     #[test]
