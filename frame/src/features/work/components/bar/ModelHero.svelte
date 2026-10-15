@@ -1,21 +1,17 @@
 <script module lang="ts">
-  import type { WorkModelEntry, WorkModelProvider, WorkModelReasoning } from "$shared/ipc/bindings";
+  import type { WorkModelEntry, WorkModelReasoning } from "$shared/ipc/bindings";
   import type { Tier } from "./ModelTier.svelte";
 
-  export type Offer = "key" | "refused" | "sign_in";
-  export type HeroSubject =
-    | {
-        kind: "model";
-        entry: WorkModelEntry;
-        tier: Tier | null;
-        levels: readonly WorkModelReasoning[];
-        effort: WorkModelReasoning | null;
-      }
-    | { kind: "offer"; provider: WorkModelProvider; offer: Offer };
+  export type HeroSubject = {
+    entry: WorkModelEntry;
+    tier: Tier | null;
+    levels: readonly WorkModelReasoning[];
+    effort: WorkModelReasoning | null;
+  };
 </script>
 
 <script lang="ts">
-  import { contextSize, dollars, providerName } from "$domain/ai";
+  import { contextSize, dollars } from "$domain/ai";
   import ProviderMark from "$shared/ui/ProviderMark";
   import * as m from "$shared/i18n/messages";
   import ModelEffort from "./ModelEffort.svelte";
@@ -37,26 +33,11 @@
     flagship: m.model_character_flagship,
   };
 
-  const provider = $derived(
-    subject.kind === "model" ? subject.entry.model.provider : subject.provider,
-  );
-  const key = $derived(subject.kind === "model" ? subject.entry.id : `offer:${subject.provider}`);
-  const name = $derived(
-    subject.kind === "model"
-      ? subject.entry.display_name
-      : subject.provider === "cloud"
-        ? m.ai_cloud_title()
-        : providerName(subject.provider),
-  );
+  const provider = $derived(subject.entry.model.provider);
+  const name = $derived(subject.entry.display_name);
 
   /** What the model is like, then only what limits it. */
   const character = $derived.by(() => {
-    if (subject.kind === "offer")
-      return subject.offer === "sign_in"
-        ? m.model_offer_sign_in()
-        : subject.offer === "refused"
-          ? m.work_model_key_refused()
-          : m.work_model_needs_key();
     const { entry, tier } = subject;
     const words: string[] = [];
     if (tier) words.push(CHARACTERS[tier]());
@@ -68,7 +49,7 @@
   });
 
   const price = $derived(
-    subject.kind === "model" && subject.entry.price
+    subject.entry.price
       ? m.model_price({
           input: dollars(subject.entry.price.input),
           output: dollars(subject.entry.price.output),
@@ -78,27 +59,17 @@
 </script>
 
 <section class="hero" aria-label={name}>
-  {#key key}<div class="identity" aria-hidden="true">
+  {#key subject.entry.id}<div class="identity" aria-hidden="true">
       <span class="tile"><ProviderMark {provider} size={22} /></span>
       <span class="who">
         <span class="name">{name}</span>
         {#if character}<span class="character">{character}</span>{/if}
       </span>
-      {#if subject.kind === "model" && subject.tier}<span class="tier" title={price}
+      {#if subject.tier}<span class="tier" title={price}
           ><ModelTier tier={subject.tier} /><span>{TIER_NAMES[subject.tier]()}</span></span
         >{/if}
     </div>{/key}
-  {#if subject.kind === "model"}<ModelEffort
-      levels={subject.levels}
-      value={subject.effort}
-      onchange={onEffort}
-    />{:else}<p class="offer">
-      {subject.offer === "sign_in"
-        ? m.model_hosted()
-        : subject.offer === "refused"
-          ? m.model_key_refused({ provider: name })
-          : m.model_key_needed({ provider: name })}
-    </p>{/if}
+  <ModelEffort levels={subject.levels} value={subject.effort} onchange={onEffort} />
 </section>
 
 <style>
@@ -171,20 +142,6 @@
     font-weight: 550;
     line-height: 14px;
     letter-spacing: 0.01em;
-  }
-
-  .offer {
-    display: flex;
-    align-items: center;
-    min-block-size: 48px;
-    box-sizing: border-box;
-    margin: 0;
-    padding: 8px 12px;
-    border-radius: calc(var(--radius-menu) - var(--menu-pad));
-    background: var(--color-fill);
-    color: var(--color-muted);
-    font-size: var(--text-label);
-    line-height: 16px;
   }
 
   @keyframes hero-in {

@@ -3231,5 +3231,13 @@
   "model_no_images": "Text only",
   "model_offer_sign_in": "Sign in to use",
   "model_offers": "More providers",
-  "model_type_to_search": "Type to search"
+  "model_type_to_search": "Type to search",
+  "model_rail_key": "{provider}, needs a key",
+  "model_rail_refused": "{provider}, key refused",
+  "model_rail_sign_in": "{provider}, sign in to use",
+  "model_rail_server": "{provider}, connect a server",
+  "model_server_needed": "Connect a server of your own, such as Ollama or LM Studio, to use its models here.",
+  "model_add_server": "Connect a server",
+  "model_search_clear": "Clear search",
+  "model_empty": "No models to choose from here yet."
 }

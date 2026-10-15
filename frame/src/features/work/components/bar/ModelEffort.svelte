@@ -1,7 +1,7 @@
 <script module lang="ts">
   import type { WorkModelReasoning } from "$shared/ipc/bindings";
 
-  export const EFFORTS: readonly WorkModelReasoning[] = ["low", "medium", "high", "xhigh", "max"];
+  const EFFORTS: readonly WorkModelReasoning[] = ["low", "medium", "high", "xhigh", "max"];
 
   /** The level a model runs `wanted` at: the closest it takes, the stronger on a tie (as Rust). */
   export function nearestEffort(
@@ -64,9 +64,10 @@
   const live = $derived(levels.length > 0 && value !== null);
   const index = $derived(value ? levels.indexOf(value) : -1);
   const level = $derived<WorkModelReasoning>(value ?? "low");
+  const reach = $derived(levels.length > 1 ? Math.max(0, index) / (levels.length - 1) : 0);
 
   let core = $state<HTMLElement>();
-  let steps = $state<HTMLElement>();
+  let track = $state<HTMLElement>();
   $effect(() => {
     const rate = live ? PACE[level] : 0.2;
     const host = core;
@@ -100,27 +101,22 @@
     if (next && next !== value) onchange(next);
   }
 
-  /** The dot nearest the pointer, while it is over the row of dots. */
+  const THUMB = 16;
+
+  /** The stop nearest the pointer along the track; the thumb is as wide as its margin. */
   function scrub(event: PointerEvent) {
-    if (!live || !steps) return;
-    const dots = [...steps.querySelectorAll<HTMLElement>("[data-step]")];
-    const box = steps.getBoundingClientRect();
-    if (event.clientX < box.left - 8 || event.clientX > box.right + 8) return;
-    let best: HTMLElement | undefined;
-    let gap = Infinity;
-    for (const dot of dots) {
-      const rect = dot.getBoundingClientRect();
-      const distance = Math.abs(rect.left + rect.width / 2 - event.clientX);
-      if (distance < gap) [best, gap] = [dot, distance];
-    }
-    const next = best?.dataset.step as WorkModelReasoning | undefined;
+    if (!live || !track) return;
+    const box = track.getBoundingClientRect();
+    const span = Math.max(1, box.width - THUMB);
+    let fraction = (event.clientX - box.left - THUMB / 2) / span;
+    if (getComputedStyle(track).direction === "rtl") fraction = 1 - fraction;
+    const next = levels[Math.round(Math.max(0, Math.min(1, fraction)) * (levels.length - 1))];
     if (next && next !== value) onchange(next);
   }
 
   function down(event: PointerEvent) {
     if (event.button !== 0 || !live) return;
-    const target = event.currentTarget as HTMLElement;
-    target.setPointerCapture(event.pointerId);
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
     scrub(event);
   }
 
@@ -129,7 +125,7 @@
   }
 </script>
 
-{#snippet body()}
+<div class="effort" data-level={value ?? undefined}>
   <span class="well" aria-hidden="true" use:stillWhenUnseen>
     <span class="halo"></span>
     <span class="core" bind:this={core}><Orb size={36} /></span>
@@ -139,33 +135,33 @@
         >{live ? effortName(level) : m.model_effort_fixed()}</span
       ><span class="hint">{live ? HINTS[level]() : m.model_effort_fixed_hint()}</span>{/key}
   </span>
-  {#if live && levels.length > 1}<span class="steps" bind:this={steps} aria-hidden="true">
-      {#each levels as stop, step (stop)}<span
-          class="step"
-          data-step={stop}
-          data-on={step <= index ? "" : undefined}
-          data-at={step === index ? "" : undefined}
-          style:--d="{5 + EFFORTS.indexOf(stop)}px"
-        ></span>{/each}
-    </span>{/if}
-{/snippet}
-
-{#if live}<div
-    class="effort"
-    role="slider"
-    tabindex="0"
-    aria-label={m.model_effort()}
-    aria-valuemin={0}
-    aria-valuemax={levels.length - 1}
-    aria-valuenow={index}
-    aria-valuetext={effortName(level)}
-    data-level={level}
-    onkeydown={key}
-    onpointerdown={down}
-    onpointermove={move}
-  >
-    {@render body()}
-  </div>{:else}<div class="effort">{@render body()}</div>{/if}
+  {#if live && levels.length > 1}<div
+      class="track"
+      bind:this={track}
+      role="slider"
+      tabindex="0"
+      aria-label={m.model_effort()}
+      aria-valuemin={0}
+      aria-valuemax={levels.length - 1}
+      aria-valuenow={index}
+      aria-valuetext={effortName(level)}
+      style:--reach={reach}
+      onkeydown={key}
+      onpointerdown={down}
+      onpointermove={move}
+    >
+      <span class="groove">
+        <span class="fill"></span>
+      </span>
+      <span class="ticks">
+        {#each levels as stop, step (stop)}<span
+            class="tick"
+            data-on={step <= index ? "" : undefined}
+          ></span>{/each}
+      </span>
+      <span class="thumb"></span>
+    </div>{/if}
+</div>
 
 <style>
   .effort {
@@ -175,22 +171,10 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    min-block-size: 52px;
-    padding: 6px 14px 6px 8px;
+    min-block-size: 56px;
+    padding: 6px 8px;
     border-radius: calc(var(--radius-menu) - var(--menu-pad));
     background: var(--color-fill);
-    outline: none;
-    cursor: default;
-    touch-action: none;
-    transition: background-color var(--motion-fast) var(--ease-out);
-  }
-
-  .effort[data-level]:hover {
-    background: color-mix(in oklab, var(--color-fill), var(--row-active));
-  }
-
-  .effort:focus-visible {
-    box-shadow: inset 0 0 0 1.5px var(--color-ring);
   }
 
   .well {
@@ -313,39 +297,99 @@
     animation: word-in var(--motion-base) var(--ease-out) 30ms backwards;
   }
 
-  /* Each level's dot is as large as the thought it stands for. */
-  .steps {
-    display: flex;
+  /* A groove with a bead on it: one detent for each level the model takes. */
+  .track {
+    --thumb: 16px;
+
+    position: relative;
     flex: none;
-    align-items: center;
-    gap: 9px;
-    block-size: 28px;
-    padding-inline: 4px;
+    inline-size: 116px;
+    block-size: 36px;
+    margin-inline-end: 4px;
+    outline: none;
+    cursor: default;
+    touch-action: none;
   }
 
-  .step {
-    inline-size: var(--d);
-    block-size: var(--d);
+  .groove {
+    position: absolute;
+    inset-block-start: 14px;
+    inset-inline: 0;
+    block-size: 6px;
+    overflow: hidden;
+    border-radius: var(--radius-capsule);
+    background: color-mix(in oklab, var(--color-text) 11%, transparent);
+    box-shadow: inset 0 0.5px 1px color-mix(in oklab, black 22%, transparent);
+  }
+
+  .fill {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: 0;
+    inline-size: calc(var(--thumb) / 2 + var(--reach) * (100% - var(--thumb)));
+    border-radius: inherit;
+    background: color-mix(in oklab, var(--color-text) 58%, transparent);
+    transition: inline-size var(--motion-base) var(--ease-out);
+  }
+
+  [data-level="max"] .fill {
+    background: linear-gradient(90deg, var(--alive-a), var(--alive-b));
+  }
+
+  .ticks {
+    position: absolute;
+    inset-block-start: 25px;
+    inset-inline: calc(var(--thumb) / 2 - 0.75px);
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .tick {
+    inline-size: 1.5px;
+    block-size: 4px;
+    border-radius: 1px;
+    background: var(--color-text);
+    opacity: 0.2;
+    transition: opacity var(--motion-base) var(--ease-out);
+  }
+
+  .tick[data-on] {
+    opacity: 0.42;
+  }
+
+  .thumb {
+    position: absolute;
+    inset-block-start: 10px;
+    inset-inline-start: calc(var(--reach) * (100% - var(--thumb)));
+    inline-size: var(--thumb);
+    block-size: var(--thumb);
     border-radius: 50%;
     background: var(--color-text);
-    opacity: 0.16;
+    box-shadow:
+      0 0 0 3px color-mix(in oklab, var(--color-fill) 100%, transparent),
+      0 1px 3px color-mix(in oklab, black 36%, transparent);
     transition:
-      opacity var(--motion-base) var(--ease-out),
-      transform var(--motion-page) var(--ease-spring);
+      inset-inline-start var(--motion-base) var(--ease-out),
+      scale var(--motion-fast) var(--ease-out);
   }
 
-  .step[data-on] {
-    opacity: 0.62;
+  [data-level="max"] .thumb {
+    background: linear-gradient(150deg, var(--alive-a), var(--alive-b));
+    box-shadow:
+      0 0 0 3px color-mix(in oklab, var(--color-fill) 100%, transparent),
+      0 0 0 5px color-mix(in oklab, var(--alive-b) 24%, transparent);
   }
 
-  .step[data-at] {
-    opacity: 1;
-    transform: scale(1.25);
+  .track:hover .thumb {
+    scale: 1.08;
   }
 
-  [data-level="max"] .step[data-on] {
-    background: linear-gradient(160deg, var(--alive-a), var(--alive-b));
-    opacity: 1;
+  .track:active .thumb {
+    scale: 0.94;
+  }
+
+  .track:focus-visible .groove {
+    box-shadow: 0 0 0 1.5px var(--color-ring);
   }
 
   @keyframes breathe {
@@ -368,7 +412,9 @@
   @media (prefers-reduced-motion: reduce) {
     .core,
     .halo,
-    .step {
+    .fill,
+    .thumb,
+    .tick {
       transition: none;
     }
 
@@ -380,8 +426,13 @@
   }
 
   @media (forced-colors: active) {
-    .step[data-on] {
+    .thumb,
+    .tick[data-on] {
       background: CanvasText;
+    }
+
+    .fill {
+      background: Highlight;
     }
   }
 </style>

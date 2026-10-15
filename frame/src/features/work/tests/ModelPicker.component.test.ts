@@ -55,14 +55,12 @@ test("the trigger names the running model and its effort, and the menu changes t
   native.ready.mockImplementation(ready(true));
   native.read.mockResolvedValue(view("anthropic/claude-opus-5-5"));
   native.choose.mockResolvedValue(view("openai/gpt-6-sol", "openai/gpt-6-sol"));
-  const onsettings = vi.fn();
-  const screen = await render(ModelPicker, { profile: PROFILE, onsettings });
+  const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
 
   const trigger = screen.getByRole("button", { name: "Model: Claude Opus 5.5, Medium effort" });
   await expect.element(trigger).toHaveTextContent("Opus 5.5");
   await trigger.click();
 
-  // The search waits, unseen, for the first key; the running model is the hero.
   await expect.element(page.getByRole("combobox", { name: "Search models" })).toHaveFocus();
   const hero = page.getByRole("region", { name: "Claude Opus 5.5" });
   await expect.element(hero).toHaveTextContent(/Deepest reasoning/u);
@@ -70,26 +68,79 @@ test("the trigger names the running model and its effort, and the menu changes t
   await expect
     .element(page.getByRole("option", { name: /Claude Opus 5\.5/u }))
     .toHaveAttribute("aria-selected", "true");
-  // Providers are sections of one list, not a rail of tabs.
-  expect(page.getByRole("tab").query()).toBeNull();
-  await expect.element(page.getByRole("group", { name: "OpenAI" })).toBeVisible();
+  await expect
+    .element(page.getByRole("tab", { name: "Anthropic" }))
+    .toHaveAttribute("aria-selected", "true");
+  // Only the running model's provider is listed until another is chosen.
+  expect(page.getByRole("option", { name: /GPT-6 Sol/u }).query()).toBeNull();
 
+  await page.getByRole("tab", { name: "OpenAI" }).click();
   await page.getByRole("option", { name: /GPT-6 Sol/u }).click();
   expect(native.choose).toHaveBeenCalledWith(PROFILE, "lead", "openai/gpt-6-sol");
   await expect.element(screen.getByRole("button", { name: /Model: GPT-6 Sol/u })).toBeVisible();
-
-  await screen.getByRole("button", { name: /Model: GPT-6 Sol/u }).click();
-  // Google has no key: it waits among the providers, one quiet step from Settings.
-  const google = page.getByRole("option", { name: /Google/u });
-  await userEvent.hover(google);
-  await expect
-    .element(page.getByRole("region", { name: "Google" }))
-    .toHaveTextContent(/Add your Google key/u);
-  await google.click();
-  expect(onsettings).toHaveBeenCalledTimes(1);
 });
 
-test("arrowing previews a model in the hero, and Enter takes it", async () => {
+test("the rail holds every provider, each with its own state", async () => {
+  await page.viewport(1200, 800);
+  native.ready.mockImplementation(ready(true));
+  native.read.mockResolvedValue(view("anthropic/claude-opus-5-5"));
+  const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
+  await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
+
+  const names = page
+    .getByRole("tab")
+    .all()
+    .map((tab) => tab.element().getAttribute("aria-label"));
+  expect(names).toEqual([
+    "Anthropic",
+    "OpenAI",
+    "OpenRouter",
+    "Google, needs a key",
+    "xAI, needs a key",
+    "Mistral, needs a key",
+    "DeepSeek, needs a key",
+    "Groq, needs a key",
+    "Cerebras, needs a key",
+    "Custom server, connect a server",
+  ]);
+});
+
+test("a provider without a key leads to adding one", async () => {
+  await page.viewport(1200, 800);
+  native.ready.mockImplementation(ready(true));
+  native.read.mockResolvedValue(view("anthropic/claude-opus-5-5"));
+  const onsettings = vi.fn();
+  const screen = await render(ModelPicker, { profile: PROFILE, onsettings });
+  await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
+
+  await page.getByRole("tab", { name: "Google, needs a key" }).click();
+  await expect.element(page.getByText("Add your Google key", { exact: false })).toBeVisible();
+  expect(page.getByRole("option").query()).toBeNull();
+  await page.getByRole("button", { name: "Add key" }).click();
+  expect(onsettings).toHaveBeenCalledTimes(1);
+
+  await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
+  await page.getByRole("tab", { name: "Custom server, connect a server" }).click();
+  await expect
+    .element(page.getByText("Connect a server of your own", { exact: false }))
+    .toBeVisible();
+  await userEvent.keyboard("{Enter}");
+  expect(onsettings).toHaveBeenCalledTimes(2);
+});
+
+test("a provider whose key is refused says so", async () => {
+  await page.viewport(1200, 800);
+  native.ready.mockImplementation(ready(true));
+  native.read.mockResolvedValue(
+    models({ keys: { anthropic: "valid", google: "invalid" }, lead: "anthropic/claude-opus-5-5" }),
+  );
+  const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
+  await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
+  await page.getByRole("tab", { name: "Google, key refused" }).click();
+  await expect.element(page.getByText("Google refused the key", { exact: false })).toBeVisible();
+});
+
+test("the rail moves with the arrow keys, and arrowing the list previews a model in the hero", async () => {
   await page.viewport(1200, 800);
   native.choose.mockClear();
   native.ready.mockImplementation(ready(true));
@@ -102,6 +153,17 @@ test("arrowing previews a model in the hero, and Enter takes it", async () => {
   const field = page.getByRole("combobox", { name: "Search models" });
   await expect.element(field).toHaveFocus();
 
+  await userEvent.keyboard("{Shift>}{Tab}{/Shift}");
+  const anthropic = page.getByRole("tab", { name: "Anthropic" });
+  await expect.element(anthropic).toHaveFocus();
+  await userEvent.keyboard("{ArrowDown}");
+  await expect.element(page.getByRole("tab", { name: "OpenAI" })).toHaveFocus();
+  await expect.element(page.getByRole("option", { name: /GPT-6 Sol/u })).toBeVisible();
+  await userEvent.keyboard("{ArrowUp}");
+  await expect.element(anthropic).toHaveFocus();
+  await expect.element(page.getByRole("option", { name: /Claude Sonnet 5\.5/u })).toBeVisible();
+
+  (field.element() as HTMLElement).focus();
   await userEvent.keyboard("{ArrowDown}");
   const sonnet = page
     .getByRole("group", { name: "Anthropic" })
@@ -138,6 +200,19 @@ test("typing filters every provider, Enter takes the first match, Escape clears 
 
   await userEvent.keyboard("sonnet{Enter}");
   expect(native.choose).toHaveBeenCalledWith(PROFILE, "lead", "anthropic/claude-sonnet-5-5");
+});
+
+test("the clear button empties the search and returns to the provider's list", async () => {
+  await page.viewport(1200, 800);
+  native.ready.mockImplementation(ready(true));
+  native.read.mockResolvedValue(view("openai/gpt-6-luna"));
+  const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
+  await screen.getByRole("button", { name: /Model: GPT-6 Luna/u }).click();
+  await userEvent.keyboard("zzz");
+  await expect.element(page.getByText("No model matches")).toBeVisible();
+  await page.getByRole("button", { name: "Clear search" }).click();
+  await expect.element(page.getByRole("combobox", { name: "Search models" })).toHaveValue("");
+  await expect.element(page.getByRole("option", { name: /GPT-6 Sol/u })).toBeVisible();
 });
 
 test("left and right step the effort through the model's own levels, and the orb speeds up", async () => {
@@ -244,7 +319,9 @@ test("signed out where hosted models exist, Zephium AI is one sign-in away", asy
   native.ready.mockImplementation(ready(true));
   const screen = await render(ModelPicker, { profile: PROFILE });
   await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
-  await page.getByRole("option", { name: /Zephium AI/u }).click();
+  await page.getByRole("tab", { name: "Zephium AI, sign in to use" }).click();
+  await expect.element(page.getByText("hosted models", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "Sign in" }).click();
   expect(native.command).toHaveBeenCalledWith("settings.account");
 });
 

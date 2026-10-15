@@ -50,10 +50,16 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 
 const shots = "../../../../../target/look/model-picker";
-const settle = (ms = 600) => new Promise((done) => setTimeout(done, ms));
+const settle = (ms = 450) => new Promise((done) => setTimeout(done, ms));
 const keyed = (lead: string) =>
   models({
-    keys: { anthropic: "valid", open_ai: "valid", deep_seek: "valid", google: "invalid" },
+    keys: {
+      anthropic: "valid",
+      open_ai: "valid",
+      deep_seek: "valid",
+      open_router: "valid",
+      google: "invalid",
+    },
     lead,
   });
 
@@ -79,23 +85,39 @@ afterEach(() => {
   native.hosted = false;
 });
 
-test("the hero, a preview, a provider without a key, and search", async () => {
-  await page.viewport(1100, 700);
-  native.view = keyed("anthropic/claude-opus-5-5");
-  const screen = await render(ModelPickerStage, { profile: PROFILE });
-  await shoot("rest");
-  await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
-  await shoot("hero", ["glass", "solid"]);
-  await userEvent.hover(page.getByRole("option", { name: /Claude Sonnet 5\.5/u }));
-  await shoot("preview");
-  await userEvent.hover(page.getByRole("option", { name: /Google/u }));
-  await shoot("needs-key");
-  await userEvent.hover(page.getByRole("option", { name: /DeepSeek V4 Pro/u }));
-  await shoot("deepseek");
-  await userEvent.unhover(page.getByRole("listbox"));
-  await userEvent.keyboard("son");
-  await shoot("search");
-});
+const rail = (name: RegExp) => page.getByRole("tab", { name });
+
+test(
+  "the rail, the hero, a preview, search, and the providers that wait on a step",
+  { timeout: 60_000 },
+  async () => {
+    await page.viewport(1100, 700);
+    native.hosted = true;
+    native.view = keyed("anthropic/claude-opus-5-5");
+    const screen = await render(ModelPickerStage, { profile: PROFILE });
+    await shoot("rest");
+    await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
+    await shoot("hero", ["glass", "solid"]);
+    await userEvent.hover(page.getByRole("option", { name: /Claude Sonnet 5\.5/u }));
+    await shoot("preview");
+    await userEvent.unhover(page.getByRole("listbox"));
+    await rail(/^OpenAI/u).click();
+    await shoot("openai");
+    await rail(/^DeepSeek/u).click();
+    await shoot("deepseek-key");
+    await rail(/^Google/u).click();
+    await shoot("google-refused");
+    await rail(/^Custom/u).click();
+    await shoot("server");
+    await rail(/^Zephium AI/u).click();
+    await shoot("hosted");
+    await rail(/^OpenRouter/u).click();
+    await userEvent.keyboard("son");
+    await shoot("search");
+    await userEvent.keyboard("zzz");
+    await shoot("search-empty");
+  },
+);
 
 test("the effort at every level, from the keys", async () => {
   await page.viewport(1100, 700);
@@ -111,19 +133,37 @@ test("the effort at every level, from the keys", async () => {
   await shoot("rest-max");
 });
 
-test("keyless and hosted", async () => {
+test("a model with two efforts, and one with none", async () => {
+  await page.viewport(1100, 700);
+  native.view = keyed("deepseek/deepseek-v4-pro");
+  const screen = await render(ModelPickerStage, { profile: PROFILE });
+  await screen.getByRole("button", { name: /Model: DeepSeek V4 Pro/u }).click();
+  await shoot("two-levels");
+  await userEvent.keyboard("{ArrowRight}");
+  await shoot("two-levels-high");
+  await userEvent.keyboard("{Escape}");
+  await screen.unmount();
+
+  native.view = models({
+    keys: { mistral: "valid" },
+    lead: "mistral/mistral-medium-3-5",
+  });
+  native.view.entries.push({
+    ...native.view.entries[0]!,
+    id: "mistral/mistral-medium-3-5",
+    model: { provider: "mistral", wire: "chat_completions", model: "mistral-medium-3-5" },
+    display_name: "Mistral Medium 3.5",
+  });
+  const plain = await render(ModelPickerStage, { profile: PROFILE });
+  await plain.getByRole("button", { name: /Model: Mistral Medium 3\.5/u }).click();
+  await shoot("no-effort");
+});
+
+test("keyless", async () => {
   await page.viewport(1100, 700);
   native.view = models({});
   native.ready = false;
   const keyless = await render(ModelPickerStage, { profile: PROFILE });
   await shoot("keyless");
   await keyless.unmount();
-
-  native.ready = true;
-  native.hosted = true;
-  native.view = keyed("anthropic/claude-sonnet-5-5");
-  const screen = await render(ModelPickerStage, { profile: PROFILE });
-  await screen.getByRole("button", { name: /Model: Claude Sonnet 5\.5/u }).click();
-  await userEvent.hover(page.getByRole("option", { name: /Zephium AI/u }));
-  await shoot("hosted");
 });
