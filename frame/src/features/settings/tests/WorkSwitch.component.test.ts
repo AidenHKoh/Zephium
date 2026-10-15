@@ -42,12 +42,12 @@ afterEach(() => {
 
 const nav = () => page.getByRole("navigation", { name: "Settings" });
 
-test("turning Work and AI off asks first, and Settings keeps only the Work page", async () => {
+test("turning AI off in Features asks first, and Settings keeps only the Work page", async () => {
   await page.viewport(1280, 860);
   await preferences.init();
-  settings.select("work");
+  settings.select("features");
   const screen = await render(SettingsLookStage);
-  const toggle = screen.getByRole("switch", { name: "Work and AI features" });
+  const toggle = screen.getByRole("switch", { name: "AI", exact: true });
   await expect.element(toggle).toHaveAttribute("aria-checked", "true");
   await expect.element(nav().getByRole("button", { name: "Models" })).toBeVisible();
 
@@ -76,7 +76,7 @@ test("turning Work and AI off asks first, and Settings keeps only the Work page"
   // A section that left with Work opens the Work page instead.
   settings.select("ai");
   await expect.element(screen.getByRole("heading", { level: 1, name: "Work" })).toBeVisible();
-  settings.select("work");
+  settings.select("features");
 
   await toggle.click();
   await expect.element(toggle).toHaveAttribute("aria-checked", "true");
