@@ -12,6 +12,7 @@ mod diagnostics;
 mod erasure;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod fullscreen;
+mod haptics;
 mod host;
 mod layout_queue;
 #[cfg(any(target_os = "windows", test))]
@@ -21,6 +22,8 @@ mod pane_geometry;
 mod platform;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod work_website_data;
+
+pub use haptics::{haptic, Haptic};
 
 #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
 pub use platform::windows::{install_work_rendering_backing, remove_work_rendering_backing};

@@ -77,6 +77,7 @@ mod external_links;
 #[cfg(feature = "work-product")]
 mod favicon_probe;
 mod focus_alerts;
+mod haptics;
 mod intro_sound;
 mod keymap;
 mod launcher_trigger;
@@ -1756,6 +1757,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             login_item::login_item_status,
             login_item::login_item_set,
             login_item::login_item_open_settings,
+            haptics::haptic,
             bookmark_call,
             time_call,
             focus_control,

@@ -1148,6 +1148,12 @@ impl EngineHost {
                 }
                 if admitted {
                     replay.observe(&target, action);
+                    if action.navigation_type == wry::AppleNavigationType::BackForward
+                        && action.target_is_main_frame == Some(true)
+                        && frame_navigation.current_committed().is_some()
+                    {
+                        crate::haptic(crate::Haptic::Level);
+                    }
                 }
                 admitted
             });

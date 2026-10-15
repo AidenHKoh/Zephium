@@ -499,6 +499,7 @@ export const commands = {
 	loginItemSet: (enabled: boolean) => __TAURI_INVOKE<LoginItemStatus>("login_item_set", { enabled }),
 	/**  Opens Login Items in System Settings, where a pending approval is given. */
 	loginItemOpenSettings: () => __TAURI_INVOKE<boolean>("login_item_open_settings"),
+	haptic: (kind: HapticKind) => __TAURI_INVOKE<void>("haptic", { kind }),
 	/**  The Bookmarks panel's reads and writes, scoped to the focused profile. */
 	bookmarkCall: (expectedProfile: string, call: BookmarkCall) => __TAURI_INVOKE<BookmarkResponse>("bookmark_call", { expectedProfile, call }),
 	timeCall: (expectedProfile: string, call: TimeCall) => __TAURI_INVOKE<TimeResponse>("time_call", { expectedProfile, call }),
@@ -1253,6 +1254,8 @@ export type FocusView = {
 	/**  Sites let through for a moment. */
 	allowed: string[],
 };
+
+export type HapticKind = "align" | "level";
 
 /**
  *  One request from a history surface. Reads and deletions share one bounded
