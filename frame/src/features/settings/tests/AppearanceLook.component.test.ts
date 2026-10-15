@@ -146,3 +146,39 @@ test("contrast works on top of a preset and never forks it", async () => {
   await settle();
   await shoot("nord-dark-contrast-80");
 });
+
+test("the mode pictures choose the mode by click and by arrow keys", async () => {
+  await page.viewport(1100, 1200);
+  native.settings = { appearance: "light", "ui.theme": "nord", "ui.material": "liquid_glass" };
+  document.documentElement.dataset.theme = "light";
+  document.documentElement.dataset.material = "liquid_glass";
+  await preferences.init();
+  const screen = await render(AppearanceStage);
+  const modes = screen.getByRole("radiogroup", { name: "Appearance" });
+  const dark = modes.getByRole("radio", { name: "Dark" });
+  await dark.click();
+  await expect.poll(() => native.settings.appearance).toBe("dark");
+  await expect.element(dark).toBeChecked();
+  const press = (key: string) =>
+    (dark.element() as HTMLElement).dispatchEvent(
+      new KeyboardEvent("keydown", { key, bubbles: true }),
+    );
+  press("ArrowRight");
+  await expect.poll(() => native.settings.appearance).toBe("system");
+  await expect.element(modes.getByRole("radio", { name: "System" })).toBeChecked();
+  press("ArrowRight");
+  await expect.poll(() => native.settings.appearance).toBe("light");
+  await settle();
+  await page.screenshot({ path: `${shots}/mode-nord-light-glass.png` });
+});
+
+test("the mode pictures fit a narrow window", async () => {
+  await page.viewport(520, 900);
+  native.settings = { appearance: "system", "ui.theme": "gruvbox", "ui.material": "none" };
+  document.documentElement.dataset.theme = "dark";
+  document.documentElement.dataset.material = "none";
+  await preferences.init();
+  await render(AppearanceStage);
+  await settle();
+  await page.screenshot({ path: `${shots}/mode-gruvbox-system-narrow.png` });
+});

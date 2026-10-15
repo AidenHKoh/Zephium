@@ -86,9 +86,9 @@
 <style>
   .gallery {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
     gap: 14px 12px;
-    padding: 6px 18px 18px;
+    padding: 18px;
     outline: none;
   }
 

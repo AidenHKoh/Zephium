@@ -1,5 +1,6 @@
 <script lang="ts">
   import PreferenceSelect from "../PreferenceSelect.svelte";
+  import ModePicker from "../appearance/ModePicker.svelte";
   import ThemeGallery from "../appearance/ThemeGallery.svelte";
   import ThemeColors from "../appearance/ThemeColors.svelte";
   import FontPicker from "../appearance/FontPicker.svelte";
@@ -99,24 +100,16 @@
   ]);
 </script>
 
-<SettingsGroup title={m.look_theme()}>
-  <SettingsRow
-    settingId="appearance.theme"
-    title={m.settings_color_scheme()}
-    description={m.settings_color_scheme_desc()}
-  >
-    <SegmentedControl
-      label={m.settings_color_scheme()}
-      value={preferences.value("appearance")}
-      disabled={preferences.saving()}
-      options={[
-        { value: "light", label: m.theme_light() },
-        { value: "dark", label: m.theme_dark() },
-        { value: "system", label: m.theme_system() },
-      ]}
-      onchange={(v) => void preferences.set("appearance", v)}
-    />
-  </SettingsRow>
+<SettingsGroup title={m.look_mode()}>
+  <ModePicker
+    spec={editor.current}
+    contrast={preferences.value("ui.contrast") === "true" ? 100 : editor.contrast}
+    glass={material !== "none" && material !== ""}
+    tint={IS_WINDOWS ? 0 : tint}
+  />
+</SettingsGroup>
+
+<SettingsGroup title={m.look_theme()} description={m.look_theme_desc()}>
   <ThemeGallery {editor} {mode} />
 </SettingsGroup>
 
