@@ -19,19 +19,26 @@ export class Reorder {
   #index: number;
   #startY: number;
   #step: number;
+  #reach: number;
   #inside = false;
 
-  private constructor(slots: Slot[], from: number, startY: number, step: number) {
+  private constructor(slots: Slot[], from: number, startY: number, step: number, reach: number) {
     this.#slots = slots;
     this.#from = from;
     this.#index = from;
     this.#startY = startY;
     this.#step = step;
+    this.#reach = reach;
   }
 
   /** Starts a reorder of the direct row `key` in `list`, or declines when
    *  the row is not one the list can reorder by itself. */
-  static begin(list: HTMLElement | undefined, key: string, pointerY: number): Reorder | null {
+  static begin(
+    list: HTMLElement | undefined,
+    key: string,
+    pointerY: number,
+    region?: HTMLElement,
+  ): Reorder | null {
     if (!list) return null;
     const slots = [...list.querySelectorAll<HTMLElement>(`:scope > [${KEY}]`)]
       .filter((element) => element.getClientRects().length > 0)
@@ -54,7 +61,9 @@ export class Reorder {
     }
     const dragged = slots[from]!.element;
     dragged.dataset.lifted = "";
-    return new Reorder(slots, from, pointerY, Math.abs(step));
+    // Past the last row the list's own space still means the end of it.
+    const reach = Math.max(slots.at(-1)!.rect.bottom, region?.getBoundingClientRect().bottom ?? 0);
+    return new Reorder(slots, from, pointerY, Math.abs(step), reach);
   }
 
   /** Follows the pointer. Returns whether it is over the list, where a drop
@@ -66,7 +75,7 @@ export class Reorder {
       x >= first.left - 12 &&
       x <= first.right + 12 &&
       y >= first.top - this.#step / 2 &&
-      y <= last.bottom + this.#step / 2;
+      y <= Math.max(last.bottom + this.#step / 2, this.#reach);
     const dragged = this.#slots[this.#from]!;
     if (!inside) {
       if (this.#inside) this.#rest();
@@ -101,6 +110,11 @@ export class Reorder {
       slot.element.style.transform = shift === 0 ? "" : `translateY(${shift}px)`;
     }
     return true;
+  }
+
+  /** The slot the dragged row would take. */
+  get slot() {
+    return this.#index;
   }
 
   /** Where the drop lands: whether anything moved, and the tab it goes before. */

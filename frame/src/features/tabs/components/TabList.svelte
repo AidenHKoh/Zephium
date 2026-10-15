@@ -17,6 +17,8 @@
   import { untrack } from "svelte";
   import { ListMotion } from "$shared/lib/list-motion";
   import { RowDrag } from "$session/row-drag.svelte";
+  import { favicons } from "$domain/favicons";
+  import DragMark from "$shared/ui/DragMark";
 
   let {
     entries,
@@ -48,6 +50,7 @@
 
   const drag = new RowDrag({
     list: () => list,
+    region: () => list?.closest<HTMLElement>("[data-tabs-drop]") ?? undefined,
     // Only open tabs reorder in place; native places anything dropped in
     // this list among them.
     reorder: () => (variant === "list" && section === "today" ? { essential: false } : null),
@@ -79,9 +82,6 @@
   const handlePointerMove = (event: PointerEvent) => drag.move(event);
   const handlePointerUp = (event: PointerEvent) => drag.up(event);
   const handlePointerCancel = (event: PointerEvent) => drag.cancel(event);
-  let ghostTitle = $derived(
-    drag.ghost ? (tabs.tabs().find((tab) => tab.id === drag.ghost?.id)?.title ?? "") : "",
-  );
 
   // Motion follows the list's shape, not its content: a title or a loading
   // state changing moves nothing, so only a change of order or membership
@@ -225,16 +225,15 @@
   </ul>
 </nav>
 
-{#if drag.ghost !== null}
-  <div
-    class="pointer-events-none fixed z-50 max-w-52 truncate rounded-control bg-raised px-3 py-2 text-[13px] text-text shadow-overlay"
-    style:left={`${drag.ghost.x + 12}px`}
-    style:top={`${drag.ghost.y + 8}px`}
-    aria-hidden="true"
-  >
-    {ghostTitle}
-  </div>
-{/if}
+{#if drag.ghost !== null}{@const held = tabs
+    .tabs()
+    .find((tab) => tab.id === drag.ghost?.id)}<DragMark
+    x={drag.ghost.x}
+    y={drag.ghost.y}
+    image={favicons.image(held?.icon)}
+    tone={favicons.tone(held?.icon)}
+    title={held?.title}
+  />{/if}
 
 <style>
   .tab-list {

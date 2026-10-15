@@ -116,6 +116,7 @@
     y={drag.ghost.y}
     image={favicons.image(held?.icon)}
     tone={favicons.tone(held?.icon)}
+    title={held?.title}
   />{/if}
 
 <style>

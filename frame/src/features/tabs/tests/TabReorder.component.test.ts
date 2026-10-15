@@ -37,13 +37,13 @@ afterEach(() => {
 
 const open = ["a", "b", "c", "d"].map((id) => tabFixture({ id, title: `Tab ${id}` }));
 
-async function list() {
+async function list(section: "today" | "pinned" = "today") {
   await page.viewport(400, 400);
   await tabs.init();
   const nodes: SidebarNodeView[] = open.map((tab) => ({
     id: tab.id,
     parent_id: null,
-    section: "today",
+    section,
     kind: { type: "tab", tab_id: tab.id },
   }));
   emitNativeEvent("itemsChanged", {
@@ -59,15 +59,18 @@ async function list() {
   flushSync();
   const tree = sidebarTree(nodes, open);
   const screen = await render(TabList, {
-    entries: tree.today,
-    section: "today",
+    entries: tree[section],
+    section,
     label: "Open tabs",
     splitting: false,
     onSelect: () => {},
   });
   const row = (id: string) =>
     screen.container.querySelector<HTMLElement>(`.browse-tab[data-zephium-tab-id="${id}"]`)!;
-  return { row };
+  // The sidebar's scroller, whose room past the last row is still the list's.
+  screen.container.setAttribute("data-tabs-drop", "");
+  screen.container.style.height = "380px";
+  return { row, screen };
 }
 
 function drag(handle: HTMLElement, to: { x: number; y: number }) {
@@ -98,7 +101,7 @@ test("dragging a row down its list opens a slot and drops it there", async () =>
   expect(row("b").style.transform).toContain("translateY(-");
   expect(row("c").style.transform).toContain("translateY(-");
   expect(row("d").style.transform).toBe("");
-  expect(document.querySelector(".pointer-events-none.fixed")).toBeNull();
+  expect(document.querySelector(".drag-card")).toBeNull();
 
   handle.dispatchEvent(
     new PointerEvent("pointerup", {
@@ -124,4 +127,48 @@ test("letting go where it started moves nothing and puts every row back", async 
   expect(native.setEssential).not.toHaveBeenCalled();
   await expect.poll(() => row("b").hasAttribute("data-lifted")).toBe(false);
   await expect.poll(() => row("b").style.transform).toBe("");
+});
+
+test("letting go in the room below the last row drops the tab at the end", async () => {
+  const { row, screen } = await list();
+  const handle = row("a").querySelector<HTMLElement>(".tab-open")!;
+  const room = screen.container.getBoundingClientRect();
+  const to = { x: room.left + 40, y: room.bottom - 8 };
+  const { init } = drag(handle, to);
+  await frame();
+  expect(row("b").style.transform).toContain("translateY(-");
+  expect(row("d").style.transform).toContain("translateY(-");
+
+  handle.dispatchEvent(new PointerEvent("pointerup", { ...init, clientX: to.x, clientY: to.y }));
+  await expect.poll(() => native.setEssential.mock.calls.length).toBe(1);
+  expect(native.setEssential).toHaveBeenCalledWith("a", false, null);
+});
+
+test("a tab carried out of its list shows a card with its title, and the far half of the last row means after it", async () => {
+  const { row } = await list("pinned");
+  const handle = row("a").querySelector<HTMLElement>(".tab-open")!;
+  const last = row("d").getBoundingClientRect();
+  const upper = { x: last.left + 40, y: last.top + 4 };
+  const { init } = drag(handle, upper);
+  await frame();
+  const card = document.querySelector<HTMLElement>(".drag-card");
+  expect(card?.textContent).toContain("Tab a");
+  const held = card!.getBoundingClientRect();
+  expect(held.left).toBeGreaterThanOrEqual(0);
+  expect(held.top).toBeGreaterThanOrEqual(0);
+
+  handle.dispatchEvent(
+    new PointerEvent("pointerup", { ...init, clientX: upper.x, clientY: upper.y }),
+  );
+  await expect.poll(() => native.setEssential.mock.calls.length).toBe(1);
+  expect(native.setEssential).toHaveBeenLastCalledWith("a", false, "d");
+
+  const lower = { x: last.left + 40, y: last.bottom - 4 };
+  drag(handle, lower);
+  await frame();
+  handle.dispatchEvent(
+    new PointerEvent("pointerup", { ...init, clientX: lower.x, clientY: lower.y }),
+  );
+  await expect.poll(() => native.setEssential.mock.calls.length).toBe(2);
+  expect(native.setEssential).toHaveBeenLastCalledWith("a", false, null);
 });
