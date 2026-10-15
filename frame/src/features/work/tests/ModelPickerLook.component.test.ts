@@ -101,6 +101,9 @@ test(
     await userEvent.hover(page.getByRole("option", { name: /Claude Sonnet 5\.5/u }));
     await shoot("preview");
     await userEvent.unhover(page.getByRole("listbox"));
+    await page.getByRole("button", { name: /^Effort: Medium/u }).click();
+    await shoot("effort-open");
+    await userEvent.keyboard("{Escape}");
     await rail(/^OpenAI/u).click();
     await shoot("openai");
     await rail(/^DeepSeek/u).click();

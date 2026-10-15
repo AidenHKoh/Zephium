@@ -7,6 +7,7 @@
 </script>
 
 <script lang="ts">
+  import { untrack } from "svelte";
   import { providerName } from "$domain/ai";
   import ProviderMark from "$shared/ui/ProviderMark";
   import ZephiumTile from "$shared/ui/ZephiumTile";
@@ -29,8 +30,6 @@
   } = $props();
 
   const uid = $props.id();
-  /** The hairline, and its margins, between what is ready and what is not. */
-  const RULE = 9;
 
   /** Brand colour for the marks that are a single ink; the rest carry their own. */
   const INKS: Partial<Record<WorkModelProvider, string>> = {
@@ -67,10 +66,20 @@
       seats.findIndex((seat) => seat.provider === current),
     ),
   );
-  const split = $derived(seats.findIndex((seat) => seat.standing !== "ready"));
-  const gap = $derived(split > 0 && at >= split ? RULE : 0);
+  /** Zephium's own seat leads and stands apart; then what is ready; then what waits on a step. */
+  const own = $derived(seats[0]?.provider === "cloud");
+  const split = $derived(seats.findIndex((seat, index) => index > 0 && seat.standing !== "ready"));
 
   let list = $state<HTMLElement>();
+  let plate = $state<{ y: number; h: number; glide: boolean } | null>(null);
+  $effect(() => {
+    void seats;
+    const host = list;
+    const seat = host?.querySelectorAll<HTMLElement>('[role="tab"]')[at];
+    if (!host || !seat) return;
+    const before = untrack(() => plate);
+    plate = { y: seat.offsetTop, h: seat.offsetHeight, glide: !!before };
+  });
 
   function key(event: KeyboardEvent) {
     const steps: Record<string, number> = { ArrowDown: 1, ArrowUp: -1 };
@@ -96,13 +105,20 @@
   aria-label={m.model_providers()}
   tabindex="-1"
   onkeydown={key}
-  style:--at={at}
-  style:--gap="{gap}px"
   data-search={hits ? "" : undefined}
 >
-  <span class="plate" aria-hidden="true"></span>
+  {#if plate}<span
+      class="plate"
+      data-glide={plate.glide ? "" : undefined}
+      aria-hidden="true"
+      style:transform="translateY({plate.y}px)"
+      style:block-size="{plate.h}px"
+    ></span>{/if}
   {#each seats as seat, index (seat.provider)}
-    {#if index === split && split > 0}<span class="rule" role="presentation"></span>{/if}
+    {#if (own && index === 1) || (index === split && split > 0 && !(own && split === 1))}<span
+        class="rule"
+        role="presentation"
+      ></span>{/if}
     <button
       type="button"
       role="tab"
@@ -115,35 +131,36 @@
       tabindex={seat.provider === current ? 0 : -1}
       data-provider={seat.provider}
       data-standing={seat.standing}
+      data-own={seat.provider === "cloud" ? "" : undefined}
       data-miss={hits && !hits.has(seat.provider) ? "" : undefined}
       style:--ink={INKS[seat.provider]}
       onpointerdown={(event) => event.preventDefault()}
       onclick={() => onpick(seat.provider)}
     >
       <span class="mark" aria-hidden="true"
-        >{#if seat.provider === "cloud"}<ZephiumTile size={21} />{:else}<ProviderMark
+        >{#if seat.provider === "cloud"}<ZephiumTile size={26} />{:else}<ProviderMark
             provider={seat.provider}
             size={20}
           />{/if}</span
       >
-      {#if seat.standing !== "ready"}<span class="badge" aria-hidden="true"></span>{/if}
+      {#if seat.standing === "refused"}<span class="badge" aria-hidden="true"></span>{/if}
     </button>
   {/each}
 </div>
 
 <style>
   .rail {
-    --pitch: 38px;
-
     position: relative;
     display: flex;
     flex: none;
     flex-direction: column;
     gap: 2px;
     box-sizing: border-box;
-    inline-size: 48px;
-    margin: 6px 0 6px 6px;
+    inline-size: 52px;
+    margin: 8px 0 8px 8px;
     padding: 4px;
+    align-self: stretch;
+    contain: size;
     overflow-y: auto;
     overscroll-behavior: contain;
     border-radius: calc(var(--radius-menu) - var(--menu-pad));
@@ -154,17 +171,18 @@
 
   .plate {
     position: absolute;
-    inset-block-start: 4px;
+    inset-block-start: 0;
     inset-inline: 4px;
-    block-size: 36px;
     border-radius: var(--radius-row);
     background: var(--row-active);
     box-shadow: var(--shine-top);
     pointer-events: none;
-    transform: translateY(calc(var(--at) * var(--pitch) + var(--gap)));
+  }
+
+  .plate[data-glide] {
     transition:
       transform var(--motion-page) var(--ease-spring),
-      opacity var(--motion-base) var(--ease-out);
+      block-size var(--motion-base) var(--ease-out);
   }
 
   .rail[data-search] .plate {
@@ -175,8 +193,8 @@
     position: relative;
     display: grid;
     flex: none;
-    inline-size: 40px;
-    block-size: 36px;
+    inline-size: 44px;
+    block-size: 32px;
     padding: 0;
     border: 0;
     border-radius: var(--radius-row);
@@ -187,7 +205,15 @@
     place-items: center;
     transition:
       opacity var(--motion-fast) var(--ease-out),
+      background-color var(--motion-fast) var(--ease-out),
       scale var(--motion-base) var(--ease-spring);
+  }
+
+  /* Zephium's own: a taller plate that is lit even when another seat is chosen. */
+  .seat[data-own] {
+    block-size: 40px;
+    box-shadow: var(--shine-top);
+    background: color-mix(in oklab, var(--row-active) 60%, transparent);
   }
 
   .seat:active {
@@ -202,6 +228,10 @@
     background: color-mix(in oklab, var(--row-active) 55%, transparent);
   }
 
+  .seat[data-own][aria-selected="true"] {
+    background: transparent;
+  }
+
   .seat[data-miss] {
     opacity: 0.3;
   }
@@ -211,28 +241,30 @@
     place-items: center;
   }
 
-  /* A step still to take, quietly: the mark keeps its colour and a hollow dot says it is not connected. */
+  /* A step still to take is a softer mark, in its own colour; only a refused key is an alert. */
+  .seat:not([data-standing="ready"]) .mark {
+    opacity: 0.6;
+    transition: opacity var(--motion-fast) var(--ease-out);
+  }
+
+  .seat:not([data-standing="ready"]):is(:hover, [aria-selected="true"]) .mark {
+    opacity: 1;
+  }
+
   .badge {
     position: absolute;
     inset-block-end: 5px;
-    inset-inline-end: 4px;
+    inset-inline-end: 5px;
     inline-size: 6px;
     block-size: 6px;
-    box-sizing: border-box;
-    border: 1.2px solid var(--color-faint);
     border-radius: 50%;
-    background: var(--color-float);
-  }
-
-  .seat[data-standing="refused"] .badge {
-    border-color: var(--color-danger);
     background: var(--color-danger);
   }
 
   .rule {
     flex: none;
     block-size: 1px;
-    margin: 4px 8px;
+    margin: 4px 10px;
     background: var(--color-border);
   }
 

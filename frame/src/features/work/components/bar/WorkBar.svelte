@@ -279,7 +279,7 @@
 
     /* Solid, like the island: a blur would be redrawn from the canvas under it every frame a pan moves. */
     background: color-mix(in srgb, var(--color-float) var(--wash-raised), var(--color-canvas));
-    box-shadow: var(--shadow-sheet);
+    box-shadow: var(--shadow-sheet), var(--shine-top);
     transition: grid-template-columns var(--motion-slow) var(--ease-emphasized);
   }
 

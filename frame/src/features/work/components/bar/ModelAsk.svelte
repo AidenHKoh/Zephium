@@ -2,6 +2,9 @@
   import type { WorkModelProvider } from "$shared/ipc/bindings";
   import ProviderMark from "$shared/ui/ProviderMark";
   import ZephiumTile from "$shared/ui/ZephiumTile";
+  import Icon from "$shared/ui/Icon";
+  import "$shared/ui/Shine/shine.css";
+  import { Key01Icon, UserIcon } from "../../lib/icons";
   import * as m from "$shared/i18n/messages";
   import type { Standing } from "./ModelRail.svelte";
 
@@ -36,14 +39,20 @@
 </script>
 
 <div class="ask">
-  <span class="tile" aria-hidden="true"
+  <span class="tile ui-shine" aria-hidden="true"
     >{#if provider === "cloud"}<ZephiumTile size={30} />{:else}<ProviderMark
         {provider}
         size={26}
       />{/if}</span
   >
   <p class="body" data-refused={standing === "refused" ? "" : undefined}>{body}</p>
-  <button type="button" class="act" onclick={onact}>{action}</button>
+  <button type="button" class="act ui-shine ui-shine-press" onclick={onact}
+    ><Icon
+      icon={standing === "sign_in" ? UserIcon : Key01Icon}
+      size={14}
+      strokeWidth={1.8}
+    />{action}</button
+  >
 </div>
 
 <style>
@@ -59,13 +68,12 @@
   }
 
   .tile {
+    --shine-radius: var(--radius-control-large);
+
     display: grid;
-    inline-size: 52px;
-    block-size: 52px;
+    inline-size: 56px;
+    block-size: 56px;
     place-items: center;
-    border-radius: var(--radius-control-large);
-    background: var(--row-active);
-    box-shadow: var(--shine-top);
   }
 
   .body {
@@ -82,38 +90,17 @@
   }
 
   .act {
-    block-size: 30px;
-    padding-inline: 16px;
+    --shine-radius: var(--radius-capsule);
+
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    block-size: 32px;
+    padding-inline: 14px 16px;
     border: 0;
-    border-radius: var(--radius-capsule);
-    background: var(--row-active);
-    box-shadow: var(--shine-top);
     color: var(--color-text);
-    cursor: default;
     font: inherit;
     font-size: var(--text-label);
     font-weight: 550;
-    transition:
-      background-color var(--motion-fast) var(--ease-out),
-      scale var(--motion-base) var(--ease-spring);
-  }
-
-  .act:hover {
-    background: var(--row-pressed);
-  }
-
-  .act:active {
-    scale: 0.96;
-  }
-
-  .act:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: 2px;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .act {
-      transition: none;
-    }
   }
 </style>

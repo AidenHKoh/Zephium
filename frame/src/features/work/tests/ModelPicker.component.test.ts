@@ -64,7 +64,6 @@ test("the trigger names the running model and its effort, and the menu changes t
   await expect.element(page.getByRole("combobox", { name: "Search models" })).toHaveFocus();
   const hero = page.getByRole("region", { name: "Claude Opus 5.5" });
   await expect.element(hero).toHaveTextContent(/Deepest reasoning/u);
-  await expect.element(hero).toHaveTextContent(/Flagship/u);
   await expect
     .element(page.getByRole("option", { name: /Claude Opus 5\.5/u }))
     .toHaveAttribute("aria-selected", "true");
@@ -215,7 +214,7 @@ test("the clear button empties the search and returns to the provider's list", a
   await expect.element(page.getByRole("option", { name: /GPT-6 Sol/u })).toBeVisible();
 });
 
-test("left and right step the effort through the model's own levels, and the orb speeds up", async () => {
+test("the effort shows compactly, steps from the keys, and opens in place to be set", async () => {
   await page.viewport(1200, 800);
   native.ready.mockImplementation(ready(true));
   native.read.mockResolvedValue(view("openai/gpt-6-luna"));
@@ -225,9 +224,20 @@ test("left and right step the effort through the model's own levels, and the orb
   const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
   await screen.getByRole("button", { name: /Model: GPT-6 Luna, Medium effort/u }).click();
 
+  // At rest the model shows its effort in a word, and the control is not there.
+  const pill = page.getByRole("button", { name: "Effort: Medium" });
+  await expect.element(pill).toHaveAttribute("aria-expanded", "false");
+  expect(page.getByRole("slider").query()).toBeNull();
+  expect(document.querySelector(".model-menu .core")).toBeNull();
+
+  await userEvent.keyboard("{ArrowRight}");
+  await expect.element(page.getByRole("button", { name: "Effort: High" })).toBeVisible();
+  expect(native.effort).toHaveBeenLastCalledWith(PROFILE, "high");
+
+  await page.getByRole("button", { name: "Effort: High" }).click();
   const effort = page.getByRole("slider", { name: "Effort" });
   await expect.element(effort).toHaveAttribute("aria-valuemax", "4");
-  await expect.element(effort).toHaveAttribute("aria-valuetext", "Medium");
+  await expect.element(effort).toHaveAttribute("aria-valuetext", "High");
   const pace = () =>
     document
       .querySelector(".model-menu .core")!
@@ -235,10 +245,6 @@ test("left and right step the effort through the model's own levels, and the orb
       .map((run) => run.playbackRate)[0];
   await expect.poll(pace).toBeGreaterThan(0);
   const calm = pace()!;
-
-  await userEvent.keyboard("{ArrowRight}");
-  await expect.element(effort).toHaveAttribute("aria-valuetext", "High");
-  expect(native.effort).toHaveBeenLastCalledWith(PROFILE, "high");
 
   (effort.element() as HTMLElement).focus();
   await userEvent.keyboard("{End}");
@@ -249,8 +255,28 @@ test("left and right step the effort through the model's own levels, and the orb
     .element(screen.getByRole("button", { name: /Model: GPT-6 Luna, Max effort/u }))
     .toBeInTheDocument();
 
-  await userEvent.keyboard("{Escape}");
+  // Used, it folds away and hands the keys back to the button that opened it.
   await expect.element(effort).not.toBeInTheDocument();
+  await expect.element(page.getByRole("button", { name: "Effort: Max" })).toHaveFocus();
+  expect(document.querySelector(".model-menu .core")).toBeNull();
+});
+
+test("Escape folds the open effort first, and only then the menu", async () => {
+  await page.viewport(1200, 800);
+  native.ready.mockImplementation(ready(true));
+  native.read.mockResolvedValue(view("openai/gpt-6-luna"));
+  const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
+  const trigger = screen.getByRole("button", { name: /Model: GPT-6 Luna/u });
+  await trigger.click();
+  await page.getByRole("button", { name: "Effort: Medium" }).click();
+  await expect.element(page.getByRole("slider", { name: "Effort" })).toBeVisible();
+  await userEvent.keyboard("{Escape}");
+  await expect
+    .element(page.getByRole("button", { name: "Effort: Medium" }))
+    .toHaveAttribute("aria-expanded", "false");
+  await expect.element(page.getByRole("region", { name: "GPT-6 Luna" })).toBeVisible();
+  await userEvent.keyboard("{Escape}");
+  await expect.element(page.getByRole("region", { name: "GPT-6 Luna" })).not.toBeInTheDocument();
 });
 
 test("a model whose wire sets no effort shows no effort control", async () => {
@@ -319,6 +345,10 @@ test("signed out where hosted models exist, Zephium AI is one sign-in away", asy
   native.ready.mockImplementation(ready(true));
   const screen = await render(ModelPicker, { profile: PROFILE });
   await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
+  // Zephium's own is pinned above every provider, ready or not.
+  const rail = page.getByRole("tab").all();
+  expect(rail[0]!.element().getAttribute("aria-label")).toBe("Zephium AI, sign in to use");
+  expect(rail[1]!.element().getAttribute("aria-label")).toBe("Anthropic");
   await page.getByRole("tab", { name: "Zephium AI, sign in to use" }).click();
   await expect.element(page.getByText("hosted models", { exact: false })).toBeVisible();
   await page.getByRole("button", { name: "Sign in" }).click();

@@ -6,6 +6,7 @@
   import Icon from "$shared/ui/Icon";
   import { File01Icon, Image01Icon, Pdf01Icon, Upload01Icon } from "../lib/icons";
   import * as m from "$shared/i18n/messages";
+  import "./bar/pick.css";
   let {
     profile,
     kind = "document",
@@ -101,6 +102,7 @@
         <label class="row">
           <input
             type="checkbox"
+            class="pick-check"
             checked={eligible.includes(item.id)}
             disabled={pending || attachedIds.includes(item.id)}
             onchange={() => toggle(item.id)}
@@ -124,7 +126,11 @@
   </ul>
   {#if failure}<p role="alert">{failure}</p>{/if}
   <footer>
-    <Button size="compact" disabled={pending || importing} onclick={() => void importFile()}
+    <Button
+      size="compact"
+      variant="ghost"
+      disabled={pending || importing}
+      onclick={() => void importFile()}
       ><Icon icon={Upload01Icon} size={13} />{importing
         ? m.work_media_importing()
         : m.work_media_import()}</Button
@@ -159,12 +165,14 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 6px 8px;
-    border-radius: var(--radius-row);
+    min-block-size: 38px;
+    padding: 4px 10px;
+    border-radius: var(--radius-control);
+    transition: background-color var(--motion-fast) var(--ease-smooth);
   }
 
   .row:hover {
-    background: var(--color-fill);
+    background: var(--row-active);
   }
 
   .glyph {
@@ -178,7 +186,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: var(--text-caption);
+    font-size: var(--text-body);
   }
 
   .attached,

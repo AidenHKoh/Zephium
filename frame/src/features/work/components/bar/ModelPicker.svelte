@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Popover } from "bits-ui";
-  import { onMount, tick, untrack } from "svelte";
+  import { onDestroy, onMount, tick, untrack } from "svelte";
   import { accountSession } from "$domain/account";
   import type { WorkModelEntry, WorkModelProvider, WorkModelReasoning } from "$shared/ipc/bindings";
   import { commands } from "$shared/ipc/bindings";
@@ -22,15 +22,22 @@
   import Icon from "$shared/ui/Icon";
   import ProviderMark from "$shared/ui/ProviderMark";
   import { menuMaterialFor } from "$shared/ui/Menu/material";
-  import { Cancel01Icon, Key01Icon, Search01Icon, Tick02Icon } from "../../lib/icons";
+  import {
+    ArrowRight01Icon,
+    Cancel01Icon,
+    Key01Icon,
+    Search01Icon,
+    Tick02Icon,
+  } from "../../lib/icons";
   import * as m from "$shared/i18n/messages";
   import { nearestEffort, stepEffort } from "./ModelEffort.svelte";
   import ModelAsk from "./ModelAsk.svelte";
-  import ModelGauge from "./ModelGauge.svelte";
+  import ModelEffortMark from "./ModelEffortMark.svelte";
   import ModelHero, { type HeroSubject } from "./ModelHero.svelte";
   import ModelRail, { type Seat } from "./ModelRail.svelte";
-  import ModelTier, { tiers, type Tier } from "./ModelTier.svelte";
+  import { tiers, type Tier } from "./model-tier";
   import "$shared/ui/Menu/popover.css";
+  import "$shared/ui/Shine/shine.css";
 
   let {
     profile,
@@ -83,17 +90,19 @@
         ? m.ai_custom_name()
         : providerName(provider);
 
-  /** Every provider Settings offers: the ready ones first, then each with the one step that readies it. */
+  /** Every provider Settings offers: Zephium's own first, then the ready ones, then each with the one step that readies it. */
   const seats = $derived.by<Seat[]>(() => {
+    const own: Seat[] = [];
     const ready: Seat[] = [];
     const rest: Seat[] = [];
     for (const provider of ["cloud", ...keyedProviders] as const) {
-      if (usable(models, provider)) ready.push({ provider, standing: "ready" });
-      else if (provider === "cloud") {
-        if (account?.signed_in) ready.push({ provider, standing: "ready" });
+      if (provider === "cloud") {
+        if (usable(models, provider) || account?.signed_in)
+          own.push({ provider, standing: "ready" });
         else if (account?.available && account.hosted_models === true)
-          rest.push({ provider, standing: "sign_in" });
-      } else
+          own.push({ provider, standing: "sign_in" });
+      } else if (usable(models, provider)) ready.push({ provider, standing: "ready" });
+      else
         rest.push({
           provider,
           standing:
@@ -105,7 +114,16 @@
                 : "key",
         });
     }
-    return [...ready, ...rest];
+    return [...own, ...ready, ...rest];
+  });
+
+  /** The sheet is as tall as its longest list needs, so it holds still as providers are chosen and searched. */
+  const sheetHeight = $derived.by(() => {
+    const rows = Math.max(0, ...groups.ready.map((group) => group.entries.length));
+    const own = seats[0]?.provider === "cloud";
+    // The rail's own height: its padding, Zephium's seat and rule, then a seat and a gap for each other.
+    const rail = 16 + (own ? 51 : 0) + (seats.length - (own ? 1 : 0)) * 34 + 20;
+    return Math.min(520, Math.max(rail, 214 + 34 * rows));
   });
 
   const allKeyed = $derived(seats.every((row) => row.standing === "ready"));
@@ -197,11 +215,49 @@
   /** No model can run yet: the one thing to do is add a key, so the control is that, not a menu. */
   const keyless = $derived(!!models && leadMissing);
 
+  /** The effort control stands open under the model until it is used or put away. */
+  let effortOpen = $state(false);
+  let pill = $state<HTMLElement>();
+  let fold: ReturnType<typeof setTimeout> | undefined;
+  let held = false;
+  let moved = false;
+
+  function putAway() {
+    clearTimeout(fold);
+    moved = false;
+    if (!effortOpen) return;
+    effortOpen = false;
+    if (document.activeElement?.closest(".reveal")) pill?.focus();
+  }
+
+  /** Left open a moment after a change so the new level is seen, then folded. */
+  const foldSoon = () => {
+    clearTimeout(fold);
+    fold = setTimeout(putAway, 900);
+  };
+
+  function toggleEffort() {
+    clearTimeout(fold);
+    effortOpen = !effortOpen;
+  }
+
+  function chose(level: WorkModelReasoning) {
+    void setEffort(level);
+    moved = true;
+    clearTimeout(fold);
+    if (!held) foldSoon();
+  }
+
+  onDestroy(() => clearTimeout(fold));
+
   function reset() {
     query = "";
     active = null;
     intent = null;
     picked = null;
+    clearTimeout(fold);
+    effortOpen = false;
+    moved = false;
   }
 
   async function opened(next: boolean) {
@@ -352,6 +408,11 @@
   }
 
   function escape(event: KeyboardEvent) {
+    if (effortOpen) {
+      event.preventDefault();
+      putAway();
+      return;
+    }
     if (!query) return;
     event.preventDefault();
     query = "";
@@ -392,18 +453,16 @@
 
 {#snippet tierMark(tier: Tier | undefined)}
   {#if tier}<span class="row-tier"
-      ><ModelTier {tier} /><span class="sr"
-        >{tier === "light"
-          ? m.model_tier_light()
-          : tier === "balanced"
-            ? m.model_tier_balanced()
-            : m.model_tier_flagship()}</span
-      ></span
+      >{tier === "light"
+        ? m.model_tier_light()
+        : tier === "balanced"
+          ? m.model_tier_balanced()
+          : m.model_tier_flagship()}</span
     >{/if}
 {/snippet}
 
 {#if keyless}
-  <button type="button" class="model-trigger add-key" onclick={settings}>
+  <button type="button" class="model-trigger add-key ui-shine ui-shine-press" onclick={settings}>
     <span class="trigger-mark" aria-hidden="true"><Icon icon={Key01Icon} size={14} /></span>
     <span class="trigger-name"
       >{hostedOffer ? m.work_model_start() : m.work_model_add_model_key()}</span
@@ -412,7 +471,7 @@
 {:else}<Popover.Root {open} onOpenChange={(next) => void opened(next)}>
     <Popover.Trigger
       bind:ref={trigger}
-      class="model-trigger"
+      class="model-trigger ui-shine ui-shine-press"
       aria-label={triggerLabel}
       disabled={!models}
     >
@@ -421,17 +480,23 @@
           ><ProviderMark provider={current.model.provider} size={15} /></span
         >
         <span class="trigger-name">{shortName(current)}</span>
-        {#if effort && levels.length > 1}<ModelGauge {levels} level={effort} />{/if}
+        {#if effort && levels.length > 1}<span class="trigger-effort" data-level={effort}
+            ><ModelEffortMark {levels} level={effort} /><span class="trigger-level"
+              >{effortName(effort)}</span
+            ></span
+          >{/if}
       {:else}
         <span class="trigger-name empty">{m.work_model_none()}</span>
       {/if}
     </Popover.Trigger>
     <Popover.Portal>
       <Popover.Content
-        class="ui-menu model-menu"
+        class="ui-menu model-menu ui-shine-sheet"
         data-menu-material={material}
+        style={`--sheet: ${sheetHeight}px`}
         side="top"
         align="end"
+        customAnchor={trigger?.closest<HTMLElement>(".surface") ?? undefined}
         sideOffset={10}
         collisionPadding={12}
         aria-label={m.work_model_label()}
@@ -446,10 +511,10 @@
           role="tabpanel"
           aria-label={searching ? m.model_search() : shown ? nameOf(shown) : m.work_model_label()}
         >
-          <div class="find">
+          <div class="find ui-shine-field">
             <label class="find-row">
               <span class="find-icon" aria-hidden="true"
-                ><Icon icon={Search01Icon} size={14} strokeWidth={2} /></span
+                ><Icon icon={Search01Icon} size={15} strokeWidth={2} /></span
               >
               <input
                 bind:this={field}
@@ -481,7 +546,17 @@
                 >{/if}
             </label>
           </div>
-          {#if hero}<ModelHero subject={hero} onEffort={(level) => void setEffort(level)} />{/if}
+          {#if hero}
+            <div class="hero-host" onpointerdowncapture={() => (held = true)}>
+              <ModelHero
+                subject={hero}
+                expanded={effortOpen}
+                region="{uid}-effort"
+                bind:pill
+                ontoggle={toggleEffort}
+                onEffort={chose}
+              />
+            </div>{/if}
           {#if seat && seat.standing !== "ready" && !searching}
             <ModelAsk
               provider={seat.provider}
@@ -561,55 +636,53 @@
           {#if session?.fault?.action === "effort"}<p class="note failure" role="alert">
               {m.model_effort_failed()}
             </p>{/if}
-          <div class="foot">
-            <button type="button" class="link" onclick={settings}
-              >{allKeyed ? m.work_model_manage() : m.work_model_add_key()}</button
-            >
-          </div>
+          {#if searching || seat?.standing === "ready"}<div class="foot">
+              <button type="button" class="foot-action" onclick={settings}
+                ><span class="foot-icon" aria-hidden="true"
+                  ><Icon icon={Key01Icon} size={14} strokeWidth={1.8} /></span
+                ><span class="foot-label"
+                  >{allKeyed ? m.work_model_manage() : m.work_model_add_key()}</span
+                ><span class="foot-go" aria-hidden="true"
+                  ><Icon icon={ArrowRight01Icon} size={13} strokeWidth={2} /></span
+                ></button
+              >
+            </div>{/if}
         </div>
       </Popover.Content>
     </Popover.Portal>
   </Popover.Root>{/if}
 
-<style>
-  /* Calm, not an alarm: the model's place, asking for the key it needs. */
-  .add-key {
-    color: var(--color-label-secondary);
-  }
+<svelte:window
+  onpointerup={() => {
+    held = false;
+    if (moved && effortOpen) foldSoon();
+  }}
+/>
 
+<style>
+  /* The chip: the shine plate, round like the + and the send button beside it. */
   :global(.model-trigger) {
+    --shine-radius: var(--radius-capsule);
+
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    max-inline-size: 220px;
-    block-size: 28px;
-    margin-block: 3px;
-    padding-inline: 8px 9px;
+    gap: 7px;
+    max-inline-size: 300px;
+    block-size: 32px;
+    margin-block: 1px;
+    padding-inline: 10px 12px;
     border: 0;
-    border-radius: var(--radius-control);
-    background: transparent;
-    color: var(--color-muted);
+    color: var(--color-text);
     font: inherit;
     font-size: var(--text-label);
-    cursor: default;
-    transition:
-      background-color var(--motion-fast) var(--ease-out),
-      color var(--motion-fast) var(--ease-out);
-  }
-
-  :global(.model-trigger:hover:not(:disabled)),
-  :global(.model-trigger[data-state="open"]) {
-    background: var(--color-fill-hover);
-    color: var(--color-text);
-  }
-
-  :global(.model-trigger:focus-visible) {
-    outline: 2px solid var(--color-ring);
-    outline-offset: 1px;
   }
 
   :global(.model-trigger:disabled) {
     opacity: 0;
+  }
+
+  .add-key {
+    color: var(--color-label-secondary);
   }
 
   .trigger-mark {
@@ -620,7 +693,7 @@
 
   .trigger-name {
     overflow: hidden;
-    font-weight: 500;
+    font-weight: 550;
     letter-spacing: -0.003em;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -630,11 +703,43 @@
     font-weight: 450;
   }
 
+  /* The effort in words and in small, after a hairline: it reads at a glance and says what it is. */
+  .trigger-effort {
+    --alive-a: color-mix(in oklab, var(--color-soft-sky) 66%, var(--color-text));
+    --alive-b: color-mix(in oklab, var(--color-soft-lilac) 66%, var(--color-text));
+
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: 7px;
+    margin-inline-start: 2px;
+    padding-inline-start: 10px;
+    border-inline-start: 1px solid var(--color-border);
+    color: var(--color-muted);
+    transition: color var(--motion-fast) var(--ease-out);
+  }
+
+  :global(.model-trigger:hover) .trigger-effort,
+  :global(.model-trigger[data-state="open"]) .trigger-effort {
+    color: var(--color-text);
+  }
+
+  .trigger-level {
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .trigger-effort[data-level="max"] .trigger-level {
+    background: linear-gradient(90deg, var(--alive-a), var(--alive-b));
+    background-clip: text;
+    color: transparent;
+  }
+
   :global(.ui-menu.model-menu) {
     display: flex;
     flex-direction: row;
-    inline-size: 476px;
-    block-size: min(468px, var(--bits-floating-available-height, 468px));
+    inline-size: 500px;
+    block-size: min(var(--sheet, 400px), var(--bits-floating-available-height, 520px));
     max-block-size: none;
     padding: 0;
     transform-origin: var(--bits-floating-transform-origin, bottom right);
@@ -657,31 +762,21 @@
 
   .find {
     flex: none;
-    margin: 6px 6px 0;
+    margin: 8px 8px 0;
   }
 
   .find-row {
     display: flex;
     align-items: center;
-    gap: 8px;
-    block-size: 34px;
+    gap: 9px;
+    block-size: 36px;
     box-sizing: border-box;
-    padding-inline: 11px 6px;
-    border-radius: var(--radius-control);
-    background: var(--color-field);
+    padding-inline: 12px 7px;
     color: var(--color-faint);
-    transition:
-      background-color var(--motion-fast) var(--ease-out),
-      box-shadow var(--motion-fast) var(--ease-out);
+    transition: color var(--motion-fast) var(--ease-out);
   }
 
-  .find-row:hover {
-    background: var(--color-field-hover);
-  }
-
-  .find-row:focus-within {
-    background: var(--color-field-hover);
-    box-shadow: inset 0 0 0 1px var(--color-field-ring);
+  .find:focus-within .find-row {
     color: var(--color-muted);
   }
 
@@ -733,11 +828,15 @@
     outline: 2px solid var(--color-ring);
   }
 
+  .hero-host {
+    display: contents;
+  }
+
   .list {
     position: relative;
     flex: 1;
     min-block-size: 0;
-    padding: 4px 6px 12px;
+    padding: 4px 8px 12px;
     overflow-y: auto;
     overscroll-behavior: contain;
     outline: none;
@@ -748,7 +847,7 @@
   .plate {
     position: absolute;
     inset-block-start: 0;
-    inset-inline: 6px;
+    inset-inline: 8px;
     border-radius: calc(var(--radius-menu) - var(--menu-pad));
     background: var(--row-active);
     pointer-events: none;
@@ -768,7 +867,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 10px 4px;
+    padding: 8px 12px 4px;
     color: var(--color-faint);
     font-size: var(--text-caption);
     font-weight: 550;
@@ -787,9 +886,9 @@
     position: relative;
     display: flex;
     align-items: center;
-    gap: 8px;
-    min-block-size: 32px;
-    padding-inline: 10px 12px;
+    gap: 10px;
+    min-block-size: 34px;
+    padding-inline: 12px;
     cursor: default;
   }
 
@@ -835,10 +934,12 @@
   }
 
   .row-tier {
-    display: grid;
     flex: none;
-    place-items: center;
+    min-inline-size: 68px;
     color: var(--color-faint);
+    font-size: var(--text-caption);
+    line-height: 14px;
+    text-align: end;
     transition: color var(--motion-fast) var(--ease-out);
   }
 
@@ -849,7 +950,7 @@
   .empty,
   .note {
     margin: 0;
-    padding: 10px 16px;
+    padding: 10px 20px;
     color: var(--color-faint);
     font-size: var(--text-label);
     line-height: 16px;
@@ -863,44 +964,68 @@
     color: var(--color-danger);
   }
 
+  /* Keys have a place of their own: the foot of the list, a row with the list's own grid. */
   .foot {
-    display: flex;
     flex: none;
-    align-items: center;
-    padding: 2px 8px 8px;
+    padding: 6px 8px 8px;
+    box-shadow: inset 0 1px 0 var(--color-border);
   }
 
-  .link {
-    block-size: 26px;
-    padding-inline: 8px;
+  .foot-action {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    inline-size: 100%;
+    block-size: 34px;
+    padding-inline: 12px;
     border: 0;
-    border-radius: var(--radius-control);
+    border-radius: calc(var(--radius-menu) - var(--menu-pad));
     background: transparent;
-    color: var(--color-faint);
+    color: var(--color-muted);
     font: inherit;
     font-size: var(--text-label);
+    text-align: start;
     cursor: default;
     transition:
       color var(--motion-fast) var(--ease-out),
       background-color var(--motion-fast) var(--ease-out);
   }
 
-  .link:hover {
+  .foot-icon,
+  .foot-go {
+    display: grid;
+    flex: none;
+    place-items: center;
+  }
+
+  .foot-icon {
+    inline-size: 14px;
+  }
+
+  .foot-label {
+    flex: 1;
+  }
+
+  .foot-go {
+    opacity: 0.6;
+    transition:
+      translate var(--motion-base) var(--ease-out),
+      opacity var(--motion-fast) var(--ease-out);
+  }
+
+  .foot-action:hover {
+    background: var(--row-active);
     color: var(--color-text);
   }
 
-  .link:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: -1px;
+  .foot-action:hover .foot-go {
+    opacity: 1;
+    translate: 2px 0;
   }
 
-  .sr {
-    position: absolute;
-    inline-size: 1px;
-    block-size: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
+  .foot-action:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: -2px;
   }
 
   /* stylelint-disable-next-line keyframes-name-pattern -- Svelte's global prefix. */
@@ -923,8 +1048,8 @@
       animation: ui-menu-fade var(--motion-instant) linear;
     }
 
-    .find-row,
-    .plate[data-glide] {
+    .plate[data-glide],
+    .foot-go {
       transition: none;
     }
 

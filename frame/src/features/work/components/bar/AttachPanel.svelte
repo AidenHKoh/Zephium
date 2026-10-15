@@ -6,6 +6,7 @@
   import type { Snippet } from "svelte";
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
+  import "$shared/ui/Shine/shine.css";
   import { BrowserIcon, File01Icon, FolderAddIcon, Image01Icon, Link04Icon } from "../../lib/icons";
   import * as m from "$shared/i18n/messages";
 
@@ -67,10 +68,14 @@
       <button
         type="button"
         class="segment"
+        class:ui-shine={kind === segment.key}
+        title={segment.label()}
         aria-pressed={kind === segment.key}
         onclick={() => (kind = segment.key)}
       >
-        <Icon icon={segment.icon} size={14} /><span>{segment.label()}</span>
+        <Icon icon={segment.icon} size={15} strokeWidth={1.7} /><span class="name"
+          ><span>{segment.label()}</span></span
+        >
       </button>
     {/each}
   </div>
@@ -78,7 +83,7 @@
     {@render picker()}
   {:else if kind === "folder"}
     <form
-      class="create"
+      class="create ui-shine-field"
       onsubmit={(event) => {
         event.preventDefault();
         void addFolder();
@@ -103,7 +108,7 @@
     <p class="note">{m.work_env_folder_hint()}</p>
   {:else if kind === "link"}
     <form
-      class="create"
+      class="create ui-shine-field"
       onsubmit={(event) => {
         event.preventDefault();
         void addLink();
@@ -132,47 +137,42 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+    min-block-size: 156px;
     min-inline-size: 0;
   }
 
+  /* The kinds of thing to add: the chosen one opens into its name, the rest stay glyphs. */
   .segments {
     display: flex;
     gap: 2px;
-    padding: 2px;
-    border-radius: var(--radius-control-compact);
+    padding: 3px;
+    border-radius: calc(var(--radius-menu) - var(--menu-pad));
     background: var(--color-fill);
   }
 
   .segment {
+    --shine-radius: var(--radius-control);
+
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 5px;
-    flex: 1;
+    flex: 1 1 0;
     min-inline-size: 0;
-    block-size: 28px;
-    padding-inline: 6px;
+    block-size: 32px;
+    padding-inline: 0;
     overflow: hidden;
     white-space: nowrap;
     border: 0;
-    border-radius: var(--radius-inset);
     background: transparent;
     color: var(--color-muted);
     font: inherit;
     font-size: var(--text-label);
+    font-weight: 500;
     cursor: default;
     transition:
+      flex-grow var(--motion-slow) var(--ease-emphasized),
       background-color var(--motion-fast) var(--ease-out),
       color var(--motion-fast) var(--ease-out);
-  }
-
-  .segment span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .segment:hover {
-    color: var(--color-text);
   }
 
   .segment:focus-visible {
@@ -181,18 +181,51 @@
   }
 
   .segment[aria-pressed="true"] {
+    flex-grow: 2.6;
     background: var(--row-active);
-    box-shadow: var(--row-rim);
     color: var(--color-text);
   }
 
+  .segment:not([aria-pressed="true"]):hover {
+    background: color-mix(in oklab, var(--row-active) 55%, transparent);
+    color: var(--color-text);
+  }
+
+  .name {
+    display: grid;
+    grid-template-columns: 0fr;
+    transition: grid-template-columns var(--motion-slow) var(--ease-emphasized);
+  }
+
+  .name > span {
+    min-inline-size: 0;
+    overflow: hidden;
+    padding-inline-start: 0;
+    opacity: 0;
+    transition:
+      opacity var(--motion-fast) var(--ease-exit),
+      padding-inline-start var(--motion-slow) var(--ease-emphasized);
+  }
+
+  .segment[aria-pressed="true"] .name {
+    grid-template-columns: 1fr;
+  }
+
+  .segment[aria-pressed="true"] .name > span {
+    padding-inline-start: 7px;
+    opacity: 1;
+    transition:
+      opacity var(--motion-base) var(--ease-out) 80ms,
+      padding-inline-start var(--motion-slow) var(--ease-emphasized);
+  }
+
   .create {
+    --shine-radius: var(--radius-control);
+
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 4px 4px 4px 10px;
-    border-radius: var(--radius-control-compact);
-    background: var(--color-field);
+    padding: 4px 4px 4px 12px;
   }
 
   .create input {
@@ -203,6 +236,10 @@
     color: var(--color-text);
     font: inherit;
     outline: none;
+  }
+
+  .create input::placeholder {
+    color: var(--color-faint);
   }
 
   .glyph {
@@ -221,8 +258,16 @@
 
   .note {
     margin: 0;
-    padding: 0 10px 4px;
+    padding: 0 4px 4px;
     color: var(--color-muted);
     font-size: var(--text-caption);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .segment,
+    .name,
+    .name > span {
+      transition: none;
+    }
   }
 </style>

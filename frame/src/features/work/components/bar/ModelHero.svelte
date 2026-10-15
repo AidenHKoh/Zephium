@@ -1,6 +1,6 @@
 <script module lang="ts">
   import type { WorkModelEntry, WorkModelReasoning } from "$shared/ipc/bindings";
-  import type { Tier } from "./ModelTier.svelte";
+  import type { Tier } from "./model-tier";
 
   export type HeroSubject = {
     entry: WorkModelEntry;
@@ -11,29 +11,39 @@
 </script>
 
 <script lang="ts">
-  import { contextSize, dollars } from "$domain/ai";
+  import { contextSize, dollars, effortName } from "$domain/ai";
+  import Icon from "$shared/ui/Icon";
   import ProviderMark from "$shared/ui/ProviderMark";
   import * as m from "$shared/i18n/messages";
+  import { ArrowDown01Icon } from "../../lib/icons";
   import ModelEffort from "./ModelEffort.svelte";
-  import ModelTier from "./ModelTier.svelte";
+  import ModelEffortMark from "./ModelEffortMark.svelte";
+  import "$shared/ui/Shine/shine.css";
 
   let {
     subject,
+    expanded,
+    region,
+    ontoggle,
     onEffort,
-  }: { subject: HeroSubject; onEffort: (level: WorkModelReasoning) => void } = $props();
+    pill = $bindable(),
+  }: {
+    subject: HeroSubject;
+    /** The effort control is open in place under the model. */
+    expanded: boolean;
+    /** The id of the region the effort button opens. */
+    region: string;
+    ontoggle: () => void;
+    onEffort: (level: WorkModelReasoning) => void;
+    pill?: HTMLElement;
+  } = $props();
 
-  const TIER_NAMES: Record<Tier, () => string> = {
-    light: m.model_tier_light,
-    balanced: m.model_tier_balanced,
-    flagship: m.model_tier_flagship,
-  };
   const CHARACTERS: Record<Tier, () => string> = {
     light: m.model_character_light,
     balanced: m.model_character_balanced,
     flagship: m.model_character_flagship,
   };
 
-  const provider = $derived(subject.entry.model.provider);
   const name = $derived(subject.entry.display_name);
 
   /** What the model is like, then only what limits it. */
@@ -56,20 +66,61 @@
         })
       : undefined,
   );
+
+  const live = $derived(subject.levels.length > 1 && subject.effort !== null);
+
+  /** The control is built while it is open and for the moment it folds away, so its orb never turns unseen. */
+  let built = $state(false);
+  $effect(() => {
+    if (expanded) {
+      built = true;
+      return;
+    }
+    const timer = setTimeout(() => (built = false), 360);
+    return () => clearTimeout(timer);
+  });
 </script>
 
 <section class="hero" aria-label={name}>
-  {#key subject.entry.id}<div class="identity" aria-hidden="true">
-      <span class="tile"><ProviderMark {provider} size={22} /></span>
-      <span class="who">
-        <span class="name">{name}</span>
-        {#if character}<span class="character">{character}</span>{/if}
-      </span>
-      {#if subject.tier}<span class="tier" title={price}
-          ><ModelTier tier={subject.tier} /><span>{TIER_NAMES[subject.tier]()}</span></span
-        >{/if}
-    </div>{/key}
-  <ModelEffort levels={subject.levels} value={subject.effort} onchange={onEffort} />
+  <div class="top">
+    {#key subject.entry.id}<div class="identity" aria-hidden="true">
+        <span class="tile ui-shine"
+          ><ProviderMark provider={subject.entry.model.provider} size={22} /></span
+        >
+        <span class="who">
+          <span class="name" title={price}>{name}</span>
+          {#if character}<span class="character">{character}</span>{/if}
+        </span>
+      </div>{/key}
+    {#if live && subject.effort}<button
+        bind:this={pill}
+        type="button"
+        class="pill ui-shine ui-shine-press"
+        aria-expanded={expanded}
+        aria-controls={region}
+        aria-label={m.model_effort_choose({ level: effortName(subject.effort) })}
+        onclick={ontoggle}
+      >
+        <span class="pill-mark"
+          ><ModelEffortMark levels={subject.levels} level={subject.effort} /></span
+        >
+        <span class="pill-label" data-level={subject.effort}>{effortName(subject.effort)}</span>
+        <span class="pill-chevron" data-open={expanded}
+          ><Icon icon={ArrowDown01Icon} size={12} strokeWidth={2.2} /></span
+        >
+      </button>{:else}<span class="fixed">{m.model_effort_fixed()}</span>{/if}
+  </div>
+  <div class="reveal" id={region} data-open={expanded}>
+    <div class="reveal-inner" inert={!expanded}>
+      <div class="reveal-body">
+        {#if built}<ModelEffort
+            levels={subject.levels}
+            value={subject.effort}
+            onchange={onEffort}
+          />{/if}
+      </div>
+    </div>
+  </div>
 </section>
 
 <style>
@@ -77,28 +128,33 @@
     display: flex;
     flex: none;
     flex-direction: column;
+    padding: 14px 8px 8px;
+  }
+
+  .top {
+    display: flex;
+    align-items: center;
     gap: 10px;
-    padding: 8px 6px 4px;
+    min-block-size: 40px;
   }
 
   .identity {
     display: flex;
+    flex: 1;
     align-items: center;
     gap: 12px;
-    min-block-size: 40px;
-    padding-inline: 4px 6px;
+    min-inline-size: 0;
     animation: hero-in var(--motion-base) var(--ease-out);
   }
 
   .tile {
+    --shine-radius: var(--radius-row);
+
     display: grid;
     flex: none;
     inline-size: 40px;
     block-size: 40px;
     place-items: center;
-    border-radius: var(--radius-row);
-    background: var(--row-active);
-    box-shadow: var(--shine-top);
     animation: tile-in var(--motion-page) var(--ease-spring);
   }
 
@@ -130,18 +186,88 @@
     white-space: nowrap;
   }
 
-  .tier {
+  .pill {
+    --shine-radius: var(--radius-capsule);
+    --alive-a: color-mix(in oklab, var(--color-soft-sky) 66%, var(--color-text));
+    --alive-b: color-mix(in oklab, var(--color-soft-lilac) 66%, var(--color-text));
+
     display: inline-flex;
     flex: none;
     align-items: center;
-    gap: 5px;
-    align-self: flex-start;
-    margin-block-start: 3px;
+    gap: 8px;
+    block-size: 30px;
+    padding-inline: 11px 9px;
+    border: 0;
+    color: var(--color-muted);
+    font: inherit;
+    font-size: var(--text-label);
+  }
+
+  .pill:hover,
+  .pill[aria-expanded="true"] {
+    color: var(--color-text);
+  }
+
+  .pill-mark {
+    display: grid;
+    place-items: center;
+  }
+
+  .pill-label {
+    color: var(--color-text);
+    font-weight: 550;
+    letter-spacing: -0.003em;
+    white-space: nowrap;
+  }
+
+  .pill-label[data-level="max"] {
+    background: linear-gradient(90deg, var(--alive-a), var(--alive-b));
+    background-clip: text;
+    color: transparent;
+  }
+
+  .pill-chevron {
+    display: grid;
+    place-items: center;
+    transition: rotate var(--motion-base) var(--ease-out);
+  }
+
+  .pill-chevron[data-open="true"] {
+    rotate: 180deg;
+  }
+
+  .fixed {
+    flex: none;
+    padding-inline: 4px;
     color: var(--color-faint);
     font-size: var(--text-caption);
-    font-weight: 550;
-    line-height: 14px;
-    letter-spacing: 0.01em;
+  }
+
+  /* The effort control opens in place: the rows below it give way as it grows. */
+  .reveal {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows var(--motion-slow) var(--ease-emphasized);
+  }
+
+  .reveal[data-open="true"] {
+    grid-template-rows: 1fr;
+  }
+
+  .reveal-inner {
+    min-block-size: 0;
+    overflow: hidden;
+    opacity: 0;
+    transition: opacity var(--motion-fast) var(--ease-exit);
+  }
+
+  .reveal-body {
+    padding-block-start: 10px;
+  }
+
+  .reveal[data-open="true"] .reveal-inner {
+    opacity: 1;
+    transition: opacity var(--motion-base) var(--ease-out) 60ms;
   }
 
   @keyframes hero-in {
@@ -161,6 +287,12 @@
     .identity,
     .tile {
       animation: none;
+    }
+
+    .reveal,
+    .reveal-inner,
+    .pill-chevron {
+      transition: none;
     }
   }
 </style>
