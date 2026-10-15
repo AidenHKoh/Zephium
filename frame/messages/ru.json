@@ -3229,5 +3229,22 @@
   "model_no_images": "Только текст",
   "model_offer_sign_in": "Войдите, чтобы использовать",
   "model_offers": "Другие провайдеры",
-  "model_type_to_search": "Введите для поиска"
+  "model_type_to_search": "Введите для поиска",
+  "native_zephium_help": "Справка Zephium",
+  "native_release_notes": "Примечания к выпуску",
+  "native_report_an_issue_more": "Сообщить о проблеме…",
+  "model_rail_key": "{provider}, нужен ключ",
+  "model_rail_refused": "{provider}, ключ отклонён",
+  "model_rail_sign_in": "{provider}, войдите, чтобы использовать",
+  "model_rail_server": "{provider}, подключите сервер",
+  "model_server_needed": "Подключите свой сервер, например Ollama или LM Studio, чтобы использовать его модели здесь.",
+  "model_add_server": "Подключить сервер",
+  "model_search_clear": "Очистить поиск",
+  "model_empty": "Здесь пока нет моделей для выбора.",
+  "about_link_website": "Сайт",
+  "about_link_docs": "Документация",
+  "about_links": "Zephium в сети",
+  "about_version": "Версия {version}",
+  "about_group_software": "ПО",
+  "browse_spaces_close": "Закрыть Пространства"
 }

@@ -3229,5 +3229,22 @@
   "model_no_images": "僅文字",
   "model_offer_sign_in": "登入後使用",
   "model_offers": "更多供應商",
-  "model_type_to_search": "輸入以搜尋"
+  "model_type_to_search": "輸入以搜尋",
+  "native_zephium_help": "Zephium 說明",
+  "native_release_notes": "版本說明",
+  "native_report_an_issue_more": "回報問題…",
+  "model_rail_key": "{provider}，需要金鑰",
+  "model_rail_refused": "{provider}，金鑰遭拒",
+  "model_rail_sign_in": "{provider}，需要登入才能使用",
+  "model_rail_server": "{provider}，連接伺服器",
+  "model_server_needed": "連接您自己的伺服器（例如 Ollama 或 LM Studio），即可在此使用其中的模型。",
+  "model_add_server": "連接伺服器",
+  "model_search_clear": "清除搜尋",
+  "model_empty": "這裡還沒有可以選擇的模型。",
+  "about_link_website": "網站",
+  "about_link_docs": "說明文件",
+  "about_links": "Zephium 網路連結",
+  "about_version": "版本 {version}",
+  "about_group_software": "軟體",
+  "browse_spaces_close": "關閉空間"
 }

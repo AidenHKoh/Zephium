@@ -3229,5 +3229,22 @@
   "model_no_images": "Yalnızca metin",
   "model_offer_sign_in": "Kullanmak için oturum açın",
   "model_offers": "Diğer sağlayıcılar",
-  "model_type_to_search": "Aramak için yazın"
+  "model_type_to_search": "Aramak için yazın",
+  "native_zephium_help": "Zephium Yardımı",
+  "native_release_notes": "Sürüm Notları",
+  "native_report_an_issue_more": "Sorun Bildir…",
+  "model_rail_key": "{provider}, anahtar gerekli",
+  "model_rail_refused": "{provider}, anahtar reddedildi",
+  "model_rail_sign_in": "{provider}, kullanmak için oturum aç",
+  "model_rail_server": "{provider}, bir sunucu bağla",
+  "model_server_needed": "Burada bu modelleri kullanmak için Ollama veya LM Studio gibi kendi sunucunuzu bağlayın.",
+  "model_add_server": "Sunucu bağla",
+  "model_search_clear": "Aramayı temizle",
+  "model_empty": "Henüz seçilecek model yok.",
+  "about_link_website": "Web Sitesi",
+  "about_link_docs": "Belgeler",
+  "about_links": "Zephium web'de",
+  "about_version": "Sürüm {version}",
+  "about_group_software": "Yazılım",
+  "browse_spaces_close": "Alanları kapat"
 }

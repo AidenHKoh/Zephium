@@ -3229,5 +3229,22 @@
   "model_no_images": "仅文本",
   "model_offer_sign_in": "登录后使用",
   "model_offers": "更多服务提供商",
-  "model_type_to_search": "输入以搜索"
+  "model_type_to_search": "输入以搜索",
+  "native_zephium_help": "Zephium 帮助",
+  "native_release_notes": "发行说明",
+  "native_report_an_issue_more": "报告问题…",
+  "model_rail_key": "{provider}，需要密钥",
+  "model_rail_refused": "{provider}，密钥被拒绝",
+  "model_rail_sign_in": "{provider}，需要登录才能使用",
+  "model_rail_server": "{provider}，连接服务器",
+  "model_server_needed": "连接你自己的服务器（例如 Ollama 或 LM Studio），即可在此使用其中的模型。",
+  "model_add_server": "连接服务器",
+  "model_search_clear": "清除搜索",
+  "model_empty": "这里还没有可供选择的模型。",
+  "about_link_website": "网站",
+  "about_link_docs": "文档",
+  "about_links": "Zephium 网络链接",
+  "about_version": "版本 {version}",
+  "about_group_software": "软件",
+  "browse_spaces_close": "关闭空间"
 }

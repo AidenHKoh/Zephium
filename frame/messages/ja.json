@@ -3229,5 +3229,22 @@
   "model_no_images": "テキストのみ",
   "model_offer_sign_in": "サインインして利用",
   "model_offers": "その他のプロバイダ",
-  "model_type_to_search": "入力して検索"
+  "model_type_to_search": "入力して検索",
+  "native_zephium_help": "Zephium ヘルプ",
+  "native_release_notes": "リリースノート",
+  "native_report_an_issue_more": "問題を報告…",
+  "model_rail_key": "{provider}、キーが必要",
+  "model_rail_refused": "{provider}、キーが拒否されました",
+  "model_rail_sign_in": "{provider}、利用するにはサインイン",
+  "model_rail_server": "{provider}、サーバに接続",
+  "model_server_needed": "ここでモデルを使うには、Ollama や LM Studio などご自身のサーバを接続してください。",
+  "model_add_server": "サーバを接続",
+  "model_search_clear": "検索をクリア",
+  "model_empty": "ここにはまだ選択できるモデルがありません。",
+  "about_link_website": "ウェブサイト",
+  "about_link_docs": "ドキュメント",
+  "about_links": "ウェブ上の Zephium",
+  "about_version": "バージョン {version}",
+  "about_group_software": "ソフトウェア",
+  "browse_spaces_close": "スペースを閉じる"
 }

@@ -3229,5 +3229,22 @@
   "model_no_images": "Texte uniquement",
   "model_offer_sign_in": "Connectez-vous pour l'utiliser",
   "model_offers": "Autres fournisseurs",
-  "model_type_to_search": "Saisissez pour rechercher"
+  "model_type_to_search": "Saisissez pour rechercher",
+  "native_zephium_help": "Aide de Zephium",
+  "native_release_notes": "Notes de version",
+  "native_report_an_issue_more": "Signaler un problème…",
+  "model_rail_key": "{provider}, clé requise",
+  "model_rail_refused": "{provider}, clé refusée",
+  "model_rail_sign_in": "{provider}, connexion requise",
+  "model_rail_server": "{provider}, connecter un serveur",
+  "model_server_needed": "Connectez un serveur à vous, comme Ollama ou LM Studio, pour utiliser ses modèles ici.",
+  "model_add_server": "Connecter un serveur",
+  "model_search_clear": "Effacer la recherche",
+  "model_empty": "Aucun modèle à choisir ici pour le moment.",
+  "about_link_website": "Site web",
+  "about_link_docs": "Documentation",
+  "about_links": "Zephium sur le Web",
+  "about_version": "Version {version}",
+  "about_group_software": "Logiciel",
+  "browse_spaces_close": "Fermer les espaces"
 }
