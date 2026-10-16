@@ -4482,7 +4482,16 @@ impl AgentWorkController {
             .retained
             .as_ref()
             .is_some_and(|browser| browser.binding().document() == &target);
+        // A load the run's own ledger would refuse (a destination visited its
+        // limit) is not followed: the page stays and the model goes on.
+        let refused = state.session.as_ref().is_none_or(|session| {
+            session
+                .policy
+                .navigation_ledger_refusal(session.lease.lease(), &target)
+                .is_some()
+        });
         (!here
+            && !refused
             && scope.admits(&target)
             && zephium_agentic::WorkBrowserDocumentPolicy::SiteSession.admits_request(&target))
         .then_some(target)
