@@ -209,6 +209,8 @@ const AGENT_EXTRACTION_INSTRUCTIONS_V1: &str = concat!(
     "tokens in each value's sources array, in strictly increasing numeric order, for every ",
     "scalar, text_list collection, and text_list item. For a field marked copy=one_exact_source_fragment, return only k=text and one sources ref; Rust copies its complete text or form value. Choose the precise value fragment, not its label or a container of unrelated values. For url and image_url, return only k and a sources array containing exactly one ref: link_destination for url, image_source for image_url. Do not include a value property; the host copies the exact observed URL, preserving its query and fragment. Money requires proven complete source fields, amount as a plain decimal string and an adjacent explicit currency code in the same cited text fragment; never infer currency from a symbol or locale, or an ambiguous separator. For rows, S parent lines define each record: ",
     "cite each field separately, omit unsupported optional fields, and use an empty items array when no records are supported. ",
+    "Name each record by its own content (a product title, a carrier with its times), never by a container's generic label such as 'Result item 2' or a sort tab such as 'Best'. ",
+    "Take a price, rating or date as the page prints it ('$412', '4.5'), citing that short text, not a sentence written for screen readers around it. ",
     "Printed inline markers are not citations: put all ",
     "supporting refs in sources, and split claims into list items when they need different ",
     "evidence. Every factual assertion in a value, including a summary or list item, must ",
