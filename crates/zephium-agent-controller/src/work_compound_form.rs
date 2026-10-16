@@ -128,6 +128,9 @@ impl AgentWorkController {
         let deadline = Instant::now() + Duration::from_millis(MAX_FORM_MILLIS);
         let mut actions = 0usize;
         let mut committed_choices = [false; MAX_AGENT_BROWSER_FORM_FIELDS];
+        // A text field whose own popup offered exactly the typed value, and
+        // whose suggestion was clicked: its shown value is the site's now.
+        let mut chosen_suggestions = [false; MAX_AGENT_BROWSER_FORM_FIELDS];
         let mut completed = 0u8;
         let mut failure = None;
         'fields: for index in 0..binding.field_count() {
@@ -142,7 +145,9 @@ impl AgentWorkController {
                     });
                     break 'fields;
                 }
-                if committed_choices[index] && binding.value_matches(index, &current) {
+                if chosen_suggestions[index]
+                    || (committed_choices[index] && binding.value_matches(index, &current))
+                {
                     completed += 1;
                     break;
                 }
@@ -173,6 +178,15 @@ impl AgentWorkController {
                         {
                             return Ok(PreparedForm::Ready(Box::new(current)));
                         }
+                        let (next, outcome) = Box::pin(Self::choose_suggestion(
+                            state, worker, browser, &binding, index, current, false,
+                        ))
+                        .await?;
+                        current = next;
+                        if outcome == Some(true) {
+                            actions += 1;
+                            chosen_suggestions[index] = true;
+                        }
                         continue;
                     }
                     Err(error) => {
@@ -192,6 +206,7 @@ impl AgentWorkController {
                             }),
                         _ => false,
                     };
+                let typed = matches!(recipe.intent(), SemanticActionIntent::Fill { .. });
                 let next = Box::pin(Self::form_primitive(
                     state, worker, browser, &current, recipe, false,
                 ))
@@ -215,13 +230,37 @@ impl AgentWorkController {
                 if committed {
                     committed_choices[index] = true;
                 }
+                if typed && !binding.is_choice(index) {
+                    let (next, outcome) = Box::pin(Self::choose_suggestion(
+                        state, worker, browser, &binding, index, current, true,
+                    ))
+                    .await?;
+                    current = next;
+                    match outcome {
+                        Some(true) => {
+                            actions += 1;
+                            chosen_suggestions[index] = true;
+                        }
+                        // Submitting typed text the site still wants
+                        // chosen searched the wrong place.
+                        Some(false) => {
+                            failure = Some(AgentBrowserFormError {
+                                field: Some((index + 1) as u8),
+                                fault: AgentBrowserFormFault::AmbiguousOption,
+                            });
+                            break 'fields;
+                        }
+                        None => {}
+                    }
+                }
             }
         }
         // Dependent widgets can clear an earlier field. Recheck every value
         // before submission; successful earlier typing is not enough.
         if failure.is_none() {
             for index in 0..binding.field_count() {
-                if !(committed_choices[index] && binding.value_matches(index, &current))
+                if !chosen_suggestions[index]
+                    && !(committed_choices[index] && binding.value_matches(index, &current))
                     && !matches!(binding.field_action(index, &current), Ok(None))
                 {
                     failure = Some(AgentBrowserFormError {
@@ -407,6 +446,71 @@ impl AgentWorkController {
             state.task.accept_verified_action(batch, &current)?;
         }
         Ok(Ok(current))
+    }
+}
+
+impl AgentWorkController {
+    /// Clicks the one suggestion a field's popup offers for the value typed
+    /// into it, when one clearly matches. With `late`, a popup not drawn yet
+    /// is given a moment. Returns the latest page and Some(true) when one was
+    /// chosen, Some(false) when the popup offers only several or none that
+    /// match, None when no popup opened.
+    #[allow(clippy::too_many_arguments)]
+    async fn choose_suggestion(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        binding: &AgentBrowserFormBinding,
+        index: usize,
+        mut current: SemanticObservation,
+        late: bool,
+    ) -> Result<(SemanticObservation, Option<bool>), AgentWorkFailure> {
+        // A popup the field opened can be drawn before its suggestions are.
+        if late
+            && zephium_agentic::semantic_typed_choices(&current).is_empty()
+            && current
+                .frames()
+                .iter()
+                .flat_map(|frame| frame.nodes())
+                .any(|node| matches!(node.role(), SemanticRole::Dialog | SemanticRole::Listbox))
+        {
+            let wake = (Instant::now() + Duration::from_millis(400)).min(state.native.deadline);
+            tokio::select! {
+                biased;
+                event = state.native.next_event(worker, browser) => {
+                    state.native.retain(event?)?;
+                    return Err(AgentWorkFailure::Mailbox);
+                }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+            }
+            current = Box::pin(Self::observe(state, worker, browser)).await?;
+        }
+        if zephium_agentic::semantic_typed_choices(&current).is_empty() {
+            return Ok((current, None));
+        }
+        let Some(choice) = binding
+            .field_value(index)
+            .and_then(|value| zephium_agentic::semantic_sole_choice(&current, value))
+        else {
+            return Ok((current, Some(false)));
+        };
+        let click = SemanticActionProposal::try_new(
+            SemanticActionIntent::Click { target: choice },
+            SemanticEffectClass::LocalWrite,
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::PageChanged,
+            SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS)
+                .map_err(|_| crate::contract!())?,
+        )
+        .map_err(|_| crate::contract!())?;
+        match Box::pin(Self::form_primitive(
+            state, worker, browser, &current, click, false,
+        ))
+        .await?
+        {
+            Ok(next) => Ok((next, Some(true))),
+            Err(_) => Ok((current, Some(false))),
+        }
     }
 }
 

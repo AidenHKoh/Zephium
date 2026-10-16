@@ -161,6 +161,7 @@ mod semantic_runtime;
 mod semantic_screenshot;
 mod semantic_settle;
 mod semantic_settle_coordinator;
+mod semantic_suggestion;
 mod semantic_verify;
 mod semantic_wait;
 mod semantic_wire;
@@ -668,6 +669,7 @@ pub use semantic_settle_coordinator::{
     SemanticActionSettlementTerminal, SemanticActionSettlementUpdate,
     MAX_PENDING_SEMANTIC_ACTION_SETTLEMENTS,
 };
+pub use semantic_suggestion::{semantic_sole_choice, semantic_typed_choices};
 #[cfg(test)]
 pub(crate) use semantic_verify::verify_semantic_action;
 pub use semantic_verify::{

@@ -1,7 +1,7 @@
 use super::*;
 
 const MAX_RESULTS: usize = 8;
-const MAX_BYTES: usize = 4096;
+const MAX_BYTES: usize = 6144;
 
 pub(in crate::agent_provider) struct AgentActionProgress {
     context: crate::ContextJoin,
@@ -76,6 +76,9 @@ impl AgentActionProgress {
             "batch_ordinal": verified.ordinal(),
             "observation": observation.get(),
         });
+        if let Some(role) = result.target_role() {
+            entry["target_role"] = serde_json::json!(role);
+        }
         if let Some((direction, amount)) = verified.scroll {
             entry["scroll"] = serde_json::json!({"direction": format!("{direction:?}"), "amount": format!("{amount:?}")});
         }
@@ -96,7 +99,7 @@ impl AgentActionProgress {
                 "verified_results": progress.total,
                 "omitted_older_results": progress.total.saturating_sub(progress.recent.len() as u64),
                 "recent": progress.recent,
-                "guidance": "Each recorded action already ran once and satisfied its named page postcondition. Do not repeat it just to check whether it worked. Read the current state and extract when the task is complete. A page change alone does not prove a business outcome."
+                "guidance": "Your own steps on this page, oldest first, each already run once and verified. Do not repeat one to check it or start over: continue from the last. Extract when the task is complete. A page change alone does not prove a business outcome."
             })
         );
         if progress.encoded.len() > MAX_BYTES {

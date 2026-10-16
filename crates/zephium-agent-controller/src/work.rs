@@ -4158,6 +4158,14 @@ impl AgentWorkController {
             Self::retain_action_read_evidence(state, &proposal, &observation, captured_at)?;
             let link = Self::clicked_link(state, proposal.action(), &observation);
             let scrolled = proposal.action().kind() == SemanticActionKind::Scroll;
+            let typed = (proposal.action().kind() == SemanticActionKind::Fill)
+                .then(|| {
+                    proposal
+                        .action()
+                        .fill_text()
+                        .map(|text| text.as_str().to_owned())
+                })
+                .flatten();
             let (current, current_at, transition) = match Self::execute_prepared_action(
                 state,
                 worker,
@@ -4335,6 +4343,41 @@ impl AgentWorkController {
                     captured_at,
                     progress,
                 )
+                .await?;
+                fruitless.progressed();
+                let next_turn;
+                (observation, captured_at, progress, next_turn) = next;
+                let Some(next_turn) = next_turn else {
+                    state.observation = Some(observation);
+                    return Ok(());
+                };
+                turn = next_turn;
+                frames.clear();
+                frames.extend(
+                    observation
+                        .frames()
+                        .iter()
+                        .map(|snapshot| snapshot.frame().clone()),
+                );
+                continue;
+            }
+            // The one suggestion that clearly is what was typed is chosen
+            // with the fill: planners typed JFK and scrolled on, leaving the
+            // field unset.
+            if let Some(choice) = typed
+                .as_deref()
+                .and_then(|typed| zephium_agentic::semantic_sole_choice(&current, typed))
+                .filter(|_| state.progressive_observation)
+            {
+                let next = Box::pin(Self::commit_suggestion(
+                    state,
+                    worker,
+                    browser,
+                    transition,
+                    &observation,
+                    current,
+                    choice,
+                ))
                 .await?;
                 fruitless.progressed();
                 let next_turn;
@@ -4806,6 +4849,60 @@ impl AgentWorkController {
                 Self::fit_model_observation(Box::pin(Self::observe(state, worker, browser)).await?)
             }
         }
+    }
+
+    /// Clicks the suggestion a verified fill opened, then answers the fill
+    /// with a fresh look taken after it.
+    async fn commit_suggestion(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        transition: crate::AgentBrowserVerifiedTransition,
+        proposed_on: &SemanticObservation,
+        filled: SemanticObservation,
+        choice: SemanticReferenceId,
+    ) -> Result<
+        (
+            SemanticObservation,
+            SemanticCaptureInstant,
+            AgentWorkTaskProgress,
+            Option<AgentBrowserProviderTurn>,
+        ),
+        AgentWorkFailure,
+    > {
+        let (continuation, verified) = transition.into_parts().ok_or_else(|| crate::contract!())?;
+        let crate::action::AgentBrowserVerifiedState::Accounted(result) = verified else {
+            return Err(crate::contract!());
+        };
+        let continuation = continuation
+            .with_verified_action_progress(&result)
+            .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()))?;
+        let click = SemanticActionProposal::try_new(
+            SemanticActionIntent::Click { target: choice },
+            SemanticEffectClass::Read,
+            SemanticWaitCondition::MutationQuiet(
+                SemanticMutationQuietPeriod::try_new(100).map_err(|_| crate::contract!())?,
+            ),
+            SemanticVerification::PageChanged,
+            SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS)
+                .map_err(|_| crate::contract!())?,
+        )
+        .map_err(|_| crate::contract!())?;
+        let chosen = Box::pin(Self::code_owned_read(
+            state, worker, browser, &filled, click,
+        ))
+        .await?
+        .is_some();
+        let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
+        let note = if chosen {
+            "suggestion_chosen: your fill matched exactly one of the suggestions the field opened, and the host clicked it. This fresh look shows the field afterwards: check it shows your choice, then go on with the next field."
+        } else {
+            "suggestion_not_chosen: your fill matched one of the field's suggestions, but clicking it did not change the page. This is a fresh look: choose the suggestion yourself if it is still listed."
+        };
+        let checkpoint = continuation
+            .into_post_action_refresh(proposed_on, &session.config, note)
+            .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()))?;
+        Self::inspect_current(state, worker, browser, checkpoint, proposed_on).await
     }
 
     async fn close_overlay(

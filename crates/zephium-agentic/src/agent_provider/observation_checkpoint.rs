@@ -184,6 +184,27 @@ impl AgentProviderContinuation {
         ))
     }
 
+    /// A verified step the host carried on itself (the one suggestion that
+    /// matched a fill) is answered with a fresh look taken after it, told so.
+    /// `observation` is the look the step was proposed on.
+    pub fn into_post_action_refresh(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+        note: &str,
+    ) -> Result<AgentProviderObservationCheckpoint, Box<Self>> {
+        if config != &self.config
+            || self.correlation.kind() != AgentBrowserToolKind::Act
+            || !AgentProviderObservationCheckpoint::refreshable(&self, observation)
+        {
+            return Err(Box::new(self));
+        }
+        Ok(AgentProviderObservationCheckpoint::refresh(
+            self,
+            note.to_owned(),
+        ))
+    }
+
     /// A decision asked of the person while the page holds no step for them
     /// is the planner's own, answered with a fresh look and told so.
     pub fn into_own_decision_refresh(
@@ -612,19 +633,32 @@ impl AgentProviderObservationRefusal {
         }
         let (code, guidance) = match self.1 {
             InspectionRefusal::PreferForm => ("compound_form_available", "Nothing ran. This form or numeric group has several editable fields. Use fill_form with ALL requested values, including visible date/time segments, and its observed final control in one call. Native code commits options and verifies values; the final control keeps its normal policy and may require a separate approved action. Do not handle each station or date segment in separate Act turns. For an explicitly preparation-only request, repeat the original Act."),
-            InspectionRefusal::NoProgress => ("no_progress", "Nothing executed. This same operation left the observed page unchanged and is barred on this state. Choose a different action, target or query; wait for a real change if still loading, or extract the evidence already available. Changing only verification or timeout does not make a different action."),
+            InspectionRefusal::NoProgress => ("no_progress", "Nothing executed. This same operation left the observed page unchanged and is barred on this state. Do something else that moves the goal on: controls lists the page's fields, filled or still empty, and any choices a field opened; fill, choose or run the form with its own button, or extract the evidence already available. Changing only verification or timeout does not make a different action."),
             InspectionRefusal::Limit => ("inspection_budget_exhausted", "The inspection budget for this document is exhausted. No capture occurred; current refs and retained evidence remain available. Read or extract available evidence, or navigate through an admitted observed link when the remaining navigation budget allows. Do not request another snapshot of this document."),
             InspectionRefusal::Repeated => ("repeated_snapshot_scope", "This scope and query were already inspected. No capture occurred and current refs remain valid. Inspect a different region, use text_search within a current eligible boundary, or follow an observed detail link when allowed. Extract only the evidence actually available; repeating this subtree does not advance truncated content. A button you expected options under (a filter or section heading such as Price) shows them only once clicked: click it (effect read, verification page_changed) instead of looking again."),
-            InspectionRefusal::Unchanged => ("page_unchanged", "No capture occurred: you already took a whole look at this page and nothing was done since, so another initial snapshot shows the same page. The look you hold lists every control the page shows now (forms, fields, pickers, buttons): when the goal needs a form filled or a choice made, act on those refs now instead of looking again. Every look you took on this page stays evidence for extract, so you never need one back in view: if the requested values appeared in any of them, extract now. If the look shows a dialog or banner over the page (a sign-in offer, a cookie notice, a promotion), close it with its close, dismiss or reject control first. Options under a filter or section heading (Price, Guest Rating) appear only after you click that heading. If the look shows next to nothing (a blank, blocked or rate-limited page), another look will not fill it: go back, open another address of the site, or extract what earlier pages showed. To see more of the page, scroll the document (act scroll on the document ref, direction down, amount page) or a list region, then look at what it shows; inspect a landmark or list with snapshot(subtree); or wait for a semantic change when the page is still loading."),
+            InspectionRefusal::Unchanged => ("page_unchanged", "Nothing changed since your last look, so no new look was taken: the look below is the page as it is now and its refs work. Act on it now. controls lists its fields, filled or still empty, and any choices a field opened: fill what the goal still needs, click the matching choice, then run the form with its own button. If the values you need are already in any look you took, extract now. A dialog or banner over the page closes with its close, dismiss or reject control. To see further down, scroll the document a page."),
             InspectionRefusal::Streak => ("looked_enough", "No capture occurred. You took whole looks at this page several times in a row with nothing done between them; another shows the same page. Every look you took stays evidence for extract: if the requested values appeared in any of them, extract now. Otherwise take a narrower look or act: snapshot text_search on the document ref for the words or figures you need, snapshot subtree of the one list, table or region that holds the records, scroll the document down a page, or use a search, filter, sort or next-page control. Do not ask for the whole page again."),
             InspectionRefusal::Invalid => ("invalid_snapshot_scope", "No capture occurred; this observation and its refs remain current. text_search and region require a current document/landmark/group/dialog ref. A heading is only eligible for surrounding_text or subtree; its subtree excludes following prose. If no eligible search boundary exists here, snapshot(initial) can restore current viewport anchors. You may extract retained evidence instead. Choose another operation within the remaining budget; do not repeat the rejected scope."),
         };
-        let result = serde_json::json!({
-            "status": if matches!(self.1, InspectionRefusal::PreferForm) { "form_plan_needed" } else { "refused" }, "code": code, "executed": false,
+        let mut result = serde_json::json!({
+            "status": match self.1 {
+                InspectionRefusal::PreferForm => "form_plan_needed",
+                InspectionRefusal::Unchanged => "current_look",
+                _ => "refused",
+            },
+            "code": code, "executed": false,
             "guidance": guidance,
             "observation_unchanged": true,
-        })
-        .to_string();
+        });
+        if matches!(
+            self.1,
+            InspectionRefusal::Unchanged
+                | InspectionRefusal::Streak
+                | InspectionRefusal::NoProgress
+        ) {
+            result["controls"] = held_controls(observation);
+        }
+        let result = result.to_string();
         let (call, _, _, correlation, mut transcript) = self.0.into_parts();
         let mut action_targets = transcript.take_action_targets();
         if matches!(
@@ -656,6 +690,54 @@ impl AgentProviderObservationRefusal {
         }
         Ok((call, transcript.try_bind(correlation, result)?))
     }
+}
+
+/// The fields of a look the planner keeps asking to see again, empty ones
+/// first, and any choices a field opened: what it can act on now.
+pub(super) fn held_controls(observation: &SemanticObservation) -> serde_json::Value {
+    const MAX_FIELDS: usize = 12;
+    let mut fields = observation
+        .frames()
+        .iter()
+        .flat_map(|frame| frame.nodes())
+        .filter(|node| {
+            matches!(
+                node.role(),
+                SemanticRole::Textbox
+                    | SemanticRole::Searchbox
+                    | SemanticRole::Combobox
+                    | SemanticRole::Spinbutton
+            ) && node.geometry().is_some()
+                && node.sensitivity() == crate::SemanticSensitivity::Public
+                && node
+                    .operations()
+                    .contains(crate::SemanticOperationClass::Fill)
+        })
+        .map(|node| {
+            let value = match node.value() {
+                Some(crate::SemanticValueSummary::Text(text)) => Some(text.preview().text()),
+                _ => None,
+            };
+            let mut field = serde_json::json!({
+                "ref": node.reference().model_token(),
+                "role": crate::semantic_model::role_label(node.role()),
+                "name": node.name().map_or("", |name| name.as_str()),
+            });
+            match value {
+                Some(value) if !value.is_empty() => field["value"] = serde_json::json!(value),
+                _ => field["empty"] = serde_json::json!(true),
+            }
+            field
+        })
+        .collect::<Vec<_>>();
+    fields.sort_by_key(|field| field.get("empty").is_none());
+    fields.truncate(MAX_FIELDS);
+    let choices = crate::semantic_typed_choices(observation)
+        .into_iter()
+        .take(MAX_FIELDS)
+        .map(|node| node.reference().model_token())
+        .collect::<Vec<_>>();
+    serde_json::json!({"fields": fields, "choices": choices})
 }
 
 impl fmt::Debug for AgentProviderObservationRefusal {
