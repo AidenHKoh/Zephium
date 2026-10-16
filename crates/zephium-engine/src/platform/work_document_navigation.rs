@@ -74,6 +74,9 @@ struct State {
     /// no action of the model's in flight, for the controller to follow as
     /// its own navigation; handed over with the run's first action.
     page_loads: Option<zephium_agentic::SemanticActionFollow>,
+    /// A site-session page Back is loading exactly: once it is ready it is
+    /// a site-session page again, routes and actions' loads included.
+    back_policy: Option<zephium_agentic::WorkBrowserDocumentPolicy>,
     #[cfg(target_os = "windows")]
     write_dispatched: bool,
     #[cfg(target_os = "windows")]
@@ -229,6 +232,7 @@ impl Default for WorkDocumentNavigation {
             redirect_reported: false,
             follow: None,
             page_loads: None,
+            back_policy: None,
             #[cfg(target_os = "windows")]
             write_dispatched: false,
             #[cfg(target_os = "windows")]
@@ -797,6 +801,7 @@ impl WorkDocumentNavigation {
             return Err(());
         }
         state.follow = None;
+        state.back_policy = None;
         state.operation = Some(request.operation());
         state.first_document = true;
         state.page_loads_unstarted = 0;
@@ -862,6 +867,9 @@ impl WorkDocumentNavigation {
             return Err(());
         }
         state.follow = None;
+        state.back_policy = (state.policy
+            == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession)
+            .then_some(state.policy);
         state.operation = Some(operation);
         state.first_document = true;
         state.page_loads_unstarted = 0;
@@ -1354,6 +1362,9 @@ impl WorkDocumentNavigation {
                 }
                 state.phase = if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::Exact {
                     state.effective = state.target.clone();
+                    if let Some(policy) = state.back_policy.take() {
+                        state.policy = policy;
+                    }
                     Phase::Ready
                 } else {
                     Phase::Finalizing
@@ -1407,7 +1418,10 @@ impl WorkDocumentNavigation {
                     | zephium_agentic::WorkBrowserDocumentPolicy::PublicResultsPage
                     | zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
             ) && state.native_id.is_some()
-                && state.operation.is_none()
+                // A site page that arrived routes itself before the host has
+                // taken its arrival; the arrival is still that document.
+                && (state.operation.is_none()
+                    || state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession)
             {
                 let observed = current.and_then(|raw| {
                     ContextNavigationTarget::parse(raw)
@@ -1802,6 +1816,28 @@ mod tests {
             assert!(gate.allows_apple_action(target, apple_action(T::Other, true)));
             assert!(!gate.allows_apple_action(target, apple_action(T::Other, true)));
         }
+    }
+    #[test]
+    fn a_site_page_back_reached_is_a_site_page_again_once_ready() {
+        let gate = armed_policy(zephium_agentic::WorkBrowserDocumentPolicy::SiteSession);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, URL)).unwrap();
+        }
+        settle(&gate, URL);
+        let (source, request) = next_request();
+        let back = request.target().as_url().as_str();
+        gate.arm_history_back(source, request.operation(), request.target().clone())
+            .unwrap();
+        assert!(gate.allows(back));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(2, phase, back)).unwrap();
+        }
+        assert_eq!(
+            gate.location_changed(Some("https://example.test/next?sort=price")),
+            Ok(false)
+        );
+        assert!(gate.ready(Some("https://example.test/next?sort=price")));
+        assert!(!gate.failed());
     }
     fn site_gate(url: &str) -> WorkDocumentNavigation {
         let gate = WorkDocumentNavigation::default();

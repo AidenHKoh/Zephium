@@ -516,7 +516,14 @@ impl WorkNativeResource {
                     .as_ref()
                     .and_then(|pending| pending.task.request())
                     .map(|request| request.target().clone());
-                if actual != operation || outcome.as_ref().ok() != expected.as_ref() {
+                // A site page Back reached may already have routed itself
+                // within its document; it is still the page Back loaded.
+                let arrived = expected.filter(|expected| {
+                    outcome.as_ref().is_ok_and(|target| {
+                        target == expected || zephium_agentic::same_work_site(expected, target)
+                    })
+                });
+                if actual != operation || arrived.is_none() {
                     Some(Err(ContextPortFailure::NativeRefused))
                 } else {
                     let current = self
@@ -529,22 +536,21 @@ impl WorkNativeResource {
                         .and_then(|view| view.work_navigation())
                         .is_some_and(|gate| gate.ready(current.as_deref()));
                     let ticket = self.history_back.as_ref().map(|pending| pending.ticket);
-                    let settled = match (ticket, outcome.as_ref()) {
+                    let settled = match (ticket, arrived.clone()) {
                         (Some(Some(ticket)), _) if ready => self
                             .view
                             .as_mut()
                             .is_some_and(|view| view.settle_history_back(ticket).is_ok()),
                         #[cfg(target_os = "macos")]
-                        (Some(None), Ok(target)) if ready => {
-                            let target = target.clone();
+                        (Some(None), Some(target)) if ready => {
                             self.view.as_mut().is_some_and(|view| {
                                 view.enroll_current_work_history_get(target).is_ok()
                             })
                         }
                         _ => false,
                     };
-                    if settled {
-                        Some(outcome)
+                    if let (true, Some(arrived)) = (settled, arrived) {
+                        Some(Ok(arrived))
                     } else {
                         Some(Err(ContextPortFailure::NativeRefused))
                     }
