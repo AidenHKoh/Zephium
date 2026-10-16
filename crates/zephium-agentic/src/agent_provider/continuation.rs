@@ -2618,43 +2618,12 @@ fn opened_field(look: &SemanticObservation) -> Option<String> {
         .map(|node| node.reference().model_token())
 }
 
-/// On-screen choices a typed field opened: a listbox's options, or the
-/// buttons of a list or calendar grid in a popup (Expedia's airports, a
-/// date picker's days).
 fn typed_choices(look: &SemanticObservation) -> Vec<String> {
-    use crate::SemanticRole as Role;
-    let mut choices = Vec::new();
-    for frame in look.frames() {
-        let nodes = frame.nodes();
-        let within = |node: &crate::SemanticNode, roles: &[Role]| {
-            let mut parent = node.parent();
-            while let Some(index) = parent {
-                let Some(ancestor) = nodes.get(usize::from(index)) else {
-                    return false;
-                };
-                if roles.contains(&ancestor.role()) {
-                    return true;
-                }
-                parent = ancestor.parent();
-            }
-            false
-        };
-        for node in nodes {
-            let choice = node.geometry().is_some()
-                && node
-                    .operations()
-                    .contains(crate::SemanticOperationClass::Click)
-                && (node.role() == Role::Option
-                    || (matches!(node.role(), Role::Button | Role::Link | Role::Cell)
-                        && (within(node, &[Role::Listbox])
-                            || (within(node, &[Role::Dialog])
-                                && within(node, &[Role::List, Role::Table])))));
-            if choice && choices.len() < 12 {
-                choices.push(node.reference().model_token());
-            }
-        }
-    }
-    choices
+    crate::semantic_typed_choices(look)
+        .into_iter()
+        .take(12)
+        .map(|node| node.reference().model_token())
+        .collect()
 }
 
 #[cfg(test)]
@@ -3573,6 +3542,100 @@ mod tests {
         );
         assert_eq!(typed_choices(&picker), vec!["@a5", "@a7"]);
         assert_eq!(opened_field(&picker).as_deref(), Some("@a2"));
+    }
+
+    #[test]
+    fn an_unchanged_look_answers_with_its_fields_empty_ones_first() {
+        let at = json!({"x": 10, "y": 10, "w": 80, "h": 20});
+        let form = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"textbox","n":"Leaving from","o":11,"b":at,"v":{"k":"text","value":"Warsaw"}},
+                {"k":3,"p":0,"r":"textbox","n":"Going to","o":11,"b":at,"v":{"k":"text","value":""}},
+                {"k":4,"p":0,"r":"button","n":"Search","o":1,"b":at}
+            ]),
+        );
+        let controls = super::observation_checkpoint::held_controls(&form);
+        assert_eq!(
+            controls["fields"],
+            json!([
+                {"ref":"@a3","role":"textbox","name":"Going to","empty":true},
+                {"ref":"@a2","role":"textbox","name":"Leaving from","value":"Warsaw"}
+            ])
+        );
+        assert_eq!(controls["choices"], json!([]));
+    }
+
+    #[test]
+    fn only_a_choice_that_clearly_is_what_was_typed_is_taken() {
+        let at = json!({"x": 10, "y": 10, "w": 80, "h": 20});
+        let airports = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"listbox","n":"Airports"},
+                {"k":3,"p":1,"r":"option","n":"JFK","t":"JFK New York-Kennedy, NY","o":1,"b":at},
+                {"k":4,"p":1,"r":"option","n":"NYC","t":"NYC New York City Area Airports, NY","o":1,"b":at},
+                {"k":5,"p":0,"r":"dialog","n":"More details"},
+                {"k":6,"p":4,"r":"list"},
+                {"k":7,"p":5,"r":"button","n":"New York (LGA - LaGuardia)","o":1,"b":at},
+                {"k":8,"p":5,"r":"button","n":"Newark (EWR - Newark Liberty Intl.)","o":1,"b":at},
+                {"k":9,"p":5,"r":"button","n":"New York (NYC - All Airports)","o":1,"b":at}
+            ]),
+        );
+        let reference = |key: usize| airports.frames()[0].nodes()[key - 1].reference();
+        assert_eq!(
+            crate::semantic_sole_choice(&airports, "JFK"),
+            Some(reference(3))
+        );
+        assert_eq!(
+            crate::semantic_sole_choice(&airports, "lga"),
+            Some(reference(7))
+        );
+        assert_eq!(
+            crate::semantic_sole_choice(&airports, "Newark"),
+            Some(reference(8))
+        );
+        // An exact name wins over another choice that only mentions it.
+        assert_eq!(
+            crate::semantic_sole_choice(&airports, "NYC"),
+            Some(reference(4))
+        );
+        assert_eq!(crate::semantic_sole_choice(&airports, "New York"), None);
+        assert_eq!(crate::semantic_sole_choice(&airports, "J"), None);
+
+        let calendar = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"dialog","n":"Choose dates"},
+                {"k":3,"p":1,"r":"table","n":"November 2026"},
+                {"k":4,"p":2,"r":"button","n":"Tuesday, November 10, 2026","o":1,"b":at},
+                {"k":5,"p":2,"r":"button","n":"Wednesday, November 11, 2026","o":1,"b":at},
+                {"k":6,"p":1,"r":"table","n":"December 2026"},
+                {"k":7,"p":5,"r":"button","n":"Thursday, December 10, 2026","o":1,"b":at}
+            ]),
+        );
+        let day = |key: usize| calendar.frames()[0].nodes()[key - 1].reference();
+        assert_eq!(
+            crate::semantic_sole_choice(&calendar, "2026-11-10"),
+            Some(day(4))
+        );
+        assert_eq!(
+            crate::semantic_sole_choice(&calendar, "12/10/2026"),
+            Some(day(7))
+        );
+        assert_eq!(crate::semantic_sole_choice(&calendar, "2027-11-10"), None);
     }
 
     #[test]
