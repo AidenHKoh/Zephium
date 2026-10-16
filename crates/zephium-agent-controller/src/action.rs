@@ -780,10 +780,6 @@ impl AgentBrowserAction {
     pub(crate) const fn applied_on_page_change(&self) -> bool {
         self.applied_on_page_change
     }
-    /// A navigation-like read, or any click proven by the page changing (an
-    /// add to cart whose badge or toast follows the site's request), whose
-    /// page has not changed yet while its settle window is still open: the
-    /// page is looked at again before it is verified.
     /// A click that changed its own document while its settle window is
     /// still open: what it opened (a tab's panel, a filter sheet) may still
     /// be drawing, so the page is looked at again until two looks agree.
@@ -809,6 +805,10 @@ impl AgentBrowserAction {
                 .is_some_and(|snapshot| !action.page_unchanged(snapshot))
     }
 
+    /// A navigation-like read, or any click proven by the page changing (an
+    /// add to cart whose badge or toast follows the site's request), whose
+    /// page has not changed yet while its settle window is still open: the
+    /// page is looked at again before it is verified.
     pub(crate) fn awaits_page_change(
         &self,
         current: &SemanticObservation,
