@@ -137,6 +137,11 @@ impl AgentRunPolicy {
         self.image_owners
             .as_ref()
             .map_or(SemanticModelImagePlan::Unavailable, |owners| {
+                // A page in Work's own website data holds nothing of the
+                // person's: it goes on without a picture rather than asking.
+                if owners.anonymous.is_some() {
+                    return SemanticModelImagePlan::Unavailable;
+                }
                 owners.host.require_consent(context, origin)
             })
     }
