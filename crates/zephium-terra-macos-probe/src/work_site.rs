@@ -63,6 +63,8 @@ const DESIGN_FACT: &str = "Mira shipped the new onboarding flow";
 const AGENDA_FACT: &str = "Design review at 14:30";
 const BOARD_FACT: &str = "Ticket ZP-42 is due Thursday";
 const DAY_FACT: &str = "Standup at 09:15";
+const SHELF_FACT: &str = "Shelf total is 9 products";
+const KETTLE_FACT: &str = "Kettle price is 37 credits";
 /// The vault's own sign-in, kept by the server: a tab sign-in stands for it.
 static VAULT_OPEN: AtomicBool = AtomicBool::new(false);
 static JOURNEY_FIELDS: AtomicUsize = AtomicUsize::new(0);
@@ -119,6 +121,9 @@ enum Check {
     /// A single-page app whose sidebar re-renders its rows on every click,
     /// like Slack: opening a channel reads without a refusal loop.
     Spa,
+    /// A product page that rewrites its address on load, then Back to the
+    /// list it was opened from.
+    Back,
     /// A heavy calendar whose script holds the page for seconds after load:
     /// its first look waits for it and the day reads.
     Heavy,
@@ -338,6 +343,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("freeze") => vec![Check::Freeze],
         Some("consent") => vec![Check::Consent],
         Some("spa") => vec![Check::Spa],
+        Some("back") => vec![Check::Back],
         Some("heavy") => vec![Check::Heavy],
         Some("webmail") => vec![Check::Webmail],
         Some("apps") => vec![Check::Apps],
@@ -762,6 +768,22 @@ const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.
             "200 OK",
             String::new(),
             page("Vault", &format!("<h1>Vault</h1><p>{VAULT_FACT}.</p>")),
+        ),
+        (Site::Account, _, "/shelf") => (
+            "200 OK",
+            String::new(),
+            page(
+                "Shelf",
+                &format!("<h1>Shelf</h1><p>{SHELF_FACT}.</p><ul><li><a href=\"/shelf/item-1\">Toaster</a></li><li><a href=\"/shelf/item-2\">Kettle</a></li></ul>"),
+            ),
+        ),
+        (Site::Account, _, path) if path.starts_with("/shelf/item-") => (
+            "200 OK",
+            String::new(),
+            page(
+                "Product",
+                &format!("<h1>Product</h1><p>{KETTLE_FACT}.</p><script>history.pushState({{}}, '', location.pathname + '?view=full');</script>"),
+            ),
         ),
         (Site::Account, _, "/find") => (
             "200 OK",
@@ -2458,6 +2480,29 @@ pub(super) async fn workflow(
                 ));
                 last = run.state;
                 content && loads >= 2 && run.asked.is_empty()
+            }
+            Check::Back => {
+                let run = context
+                    .run(
+                        "Shelf",
+                        false,
+                        "Allow",
+                        vec![vec![browse(
+                            "/shelf",
+                            "Open the Kettle product and note its price, then press Back to return to the shelf and report the shelf total and the kettle price",
+                        )]],
+                    )
+                    .await?;
+                let read = says(&run, SHELF_FACT) || mentions(&run, &["9 products"]);
+                let price = says(&run, KETTLE_FACT) || mentions(&run, &["37"]);
+                line(format!(
+                    "check=back read={read} price={price} shelf_loads={} pages=[{}]",
+                    context.sites.hits(Site::Account, "/shelf").len()
+                        - context.sites.hits(Site::Account, "/shelf/").len(),
+                    pages_of(&run)
+                ));
+                last = run.state;
+                read && price
             }
             Check::Spa => {
                 let run = context
