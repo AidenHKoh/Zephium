@@ -4880,6 +4880,8 @@ impl AgentWorkController {
         AgentWorkFailure,
     > {
         let (continuation, verified) = transition.into_parts().ok_or_else(|| crate::contract!())?;
+        // Only the probe build has another verified state.
+        #[allow(irrefutable_let_patterns)]
         let crate::action::AgentBrowserVerifiedState::Accounted(result) = verified else {
             return Err(crate::contract!());
         };
