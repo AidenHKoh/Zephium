@@ -590,6 +590,8 @@ impl EngineHost {
         };
         let lease = request.lease().clone();
         let operation = request.operation();
+        #[cfg(target_os = "macos")]
+        let expected = request.target().clone();
         let Some(resource) = self
             .work_resources
             .get_mut(&guard.resource().identity().context())
@@ -627,6 +629,13 @@ impl EngineHost {
             return;
         };
         let ticket = match view.prepare_history_back() {
+            // The ledger's predecessor is not the one the run recorded (a
+            // navigation that landed back on its own page): load that one.
+            #[cfg(target_os = "macos")]
+            Ok(ticket) if view.history_destination(ticket) != Some(&expected) => {
+                let _ = view.refuse_history_back(ticket);
+                None
+            }
             Ok(ticket) => Some(ticket),
             #[cfg(target_os = "macos")]
             Err(()) => None,

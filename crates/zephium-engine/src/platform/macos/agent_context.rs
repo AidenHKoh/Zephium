@@ -379,6 +379,13 @@ impl AgentOwnedView {
         )
     }
 
+    pub(crate) fn history_destination(
+        &self,
+        ticket: super::agent_history::AgentHistoryBackTicket,
+    ) -> Option<&zephium_agentic::ContextNavigationTarget> {
+        self.history.destination_target(ticket)
+    }
+
     pub(crate) fn reactivate_history_destination(
         &mut self,
         ticket: super::agent_history::AgentHistoryBackTicket,
