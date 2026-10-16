@@ -2,11 +2,10 @@
   import { untrack } from "svelte";
   import {
     ArrowLeft01Icon,
+    ArrowRight01Icon,
     Bookmark02Icon,
-    BookmarkAdd02Icon,
     Delete02Icon,
     Folder01Icon,
-    FolderAddIcon,
     Globe02Icon,
     PencilEdit02Icon,
   } from "@hugeicons/core-free-icons";
@@ -26,6 +25,7 @@
   import IconButton from "$shared/ui/IconButton";
   import * as m from "$shared/i18n/messages";
   import { BookmarksSession } from "../lib/bookmarks-session.svelte";
+  import * as compose from "../lib/compose.svelte";
   import * as reveal from "../lib/reveal.svelte";
 
   let { profile, query }: { profile: string; query: string } = $props();
@@ -132,6 +132,16 @@
     untrack(() => {
       const wanted = reveal.take();
       if (wanted) void session.reveal(wanted);
+    });
+  });
+
+  // What the header's Add menu asked for.
+  $effect(() => {
+    if (compose.requested() === null) return;
+    untrack(() => {
+      const kind = compose.take();
+      if (kind === "link") openAdd();
+      else if (kind === "folder") void addFolder();
     });
   });
 
@@ -282,24 +292,21 @@
 </script>
 
 <div class="bookmarks">
-  {#if !session.searching}
+  {#if !session.searching && session.folder !== null}
     <div class="place">
-      {#if session.folder !== null}
-        <IconButton
-          icon={ArrowLeft01Icon}
-          label={m.bookmarks_back()}
-          size={14}
-          buttonSize={24}
-          onclick={() => void session.open(session.path.at(-2)?.id ?? null)}
-        />
-      {/if}
+      <IconButton
+        icon={ArrowLeft01Icon}
+        label={m.bookmarks_back()}
+        size={14}
+        buttonSize={24}
+        onclick={() => void session.open(session.path.at(-2)?.id ?? null)}
+      />
       <nav class="crumbs" aria-label={m.bookmarks_location()}>
         <button
           type="button"
           class="crumb"
           data-bookmark-crumb=""
           data-landing={landing?.kind === "into" && landing.folder === null}
-          aria-current={session.folder === null ? "location" : undefined}
           onclick={() => void session.open(null)}>{m.tool_bookmarks()}</button
         >
         {#each session.path as crumb (crumb.id)}
@@ -314,20 +321,6 @@
           >
         {/each}
       </nav>
-      <IconButton
-        icon={BookmarkAdd02Icon}
-        label={m.bookmarks_add()}
-        size={15}
-        buttonSize={24}
-        onclick={openAdd}
-      />
-      <IconButton
-        icon={FolderAddIcon}
-        label={m.bookmarks_new_folder()}
-        size={15}
-        buttonSize={24}
-        onclick={() => void addFolder()}
-      />
     </div>
   {/if}
 
@@ -445,7 +438,7 @@
             <button
               type="button"
               class="open"
-              title={item.url ?? undefined}
+              title={item.url ?? m.bookmarks_folder_count({ count: item.children })}
               onclick={(event) => activate(item, event)}
               onauxclick={(event) => {
                 if (event.button === 1) activate(item, event);
@@ -466,11 +459,9 @@
                   />{/if}</span
               >
               <span class="title">{item.title}</span>
-              <span class="detail"
-                >{folder
-                  ? m.bookmarks_folder_count({ count: item.children })
-                  : hostOf(item.url ?? "")}</span
-              >
+              {#if folder}<span class="chevron" aria-hidden="true"
+                  ><Icon icon={ArrowRight01Icon} size={13} /></span
+                >{:else}<span class="detail">{hostOf(item.url ?? "")}</span>{/if}
             </button>
             {#if confirming === item.id}
               <!-- Escape only backs out of the question. -->
@@ -553,7 +544,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    padding: 6px 8px 2px 10px;
+    padding: 0 12px 2px 10px;
   }
 
   .crumbs {
@@ -607,7 +598,7 @@
     flex: 1;
     min-height: 0;
     margin: 0;
-    padding: 6px 8px 12px;
+    padding: 2px 8px 12px;
     overflow-y: auto;
     list-style: none;
   }
@@ -682,9 +673,10 @@
   /* Present but faded until the row is in hand, so revealing them never
      moves what the pointer is on and the keyboard can still reach them. */
   .actions {
+    position: absolute;
+    inset-inline-end: 6px;
     display: flex;
     gap: 2px;
-    padding-inline-end: 6px;
     opacity: 0;
   }
 
@@ -693,8 +685,16 @@
     opacity: 1;
   }
 
+  .chevron {
+    display: grid;
+    place-items: center;
+    color: var(--color-faint);
+  }
+
   .row:hover .detail,
-  .row:focus-within .detail {
+  .row:focus-within .detail,
+  .row:hover .chevron,
+  .row:focus-within .chevron {
     visibility: hidden;
   }
 
@@ -707,7 +707,7 @@
     padding-inline-end: 4px;
   }
 
-  .row:has(.confirm) .detail {
+  .row:has(.confirm) :is(.detail, .chevron) {
     display: none;
   }
 
@@ -761,7 +761,7 @@
     background: var(--color-field);
     color: var(--color-text);
     font: inherit;
-    font-size: var(--text-label);
+    font-size: var(--text-body);
     outline: none;
     user-select: text;
     transition:
@@ -770,7 +770,7 @@
   }
 
   .field {
-    height: 30px;
+    height: var(--field-height);
   }
 
   .field::placeholder {
