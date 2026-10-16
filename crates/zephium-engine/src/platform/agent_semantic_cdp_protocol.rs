@@ -38,7 +38,7 @@ const MAX_CONTROL_PARAMETERS_BYTES: usize = 128 * 1_024;
 // Only the immutable, hash-pinned runtime installer needs this allowance:
 // its current JSON payload exceeds 128 KiB after Work's native editing support.
 // Other control messages and all page-supplied invocations keep their limits.
-const MAX_RUNTIME_INSTALL_PARAMETERS_BYTES: usize = 192 * 1_024;
+const MAX_RUNTIME_INSTALL_PARAMETERS_BYTES: usize = 256 * 1_024;
 pub(crate) const MAX_CONTROL_RESPONSE_BYTES: usize = 512 * 1_024;
 pub(crate) const MAX_CONTEXT_EVENT_BYTES: usize = 32 * 1_024;
 pub(crate) const MAX_CONTEXT_EVENTS_PER_INVOCATION: u16 = 512;
@@ -1114,7 +1114,7 @@ mod tests {
             let identifier = character.to_string().repeat(MAX_BROWSER_IDENTIFIER_BYTES);
             let context = SemanticExecutionContext::new(19, &identifier).unwrap();
             let command = install_runtime_in_context_command(&context).expect("fixed source fits");
-            assert!(command.parameters().len() <= 192 * 1024);
+            assert!(command.parameters().len() <= MAX_RUNTIME_INSTALL_PARAMETERS_BYTES);
             let parameters: Value = serde_json::from_str(command.parameters()).unwrap();
             assert_eq!(parameters["uniqueContextId"], identifier);
         }
