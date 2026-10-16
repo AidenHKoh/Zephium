@@ -5530,7 +5530,11 @@ impl AgentWorkController {
                 observation.clone(),
             ))
             .await?;
-            (loaded != *observation).then_some(loaded)
+            // A look rooted inside a modal sheet (a filter drawer) is no whole
+            // page to map records from on its own: the model's look is mapped.
+            (loaded != *observation
+                && SemanticObservationAcknowledgement::whole_page_scope(&loaded).is_some())
+            .then_some(loaded)
         } else {
             None
         };
