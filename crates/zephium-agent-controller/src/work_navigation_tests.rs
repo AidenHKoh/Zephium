@@ -857,7 +857,15 @@ impl NavigationFault {
                 assert_eq!(result["call_id"], format!("call_{turns}"));
                 let error: serde_json::Value =
                     serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
-                assert_eq!(error["code"], "invalid_snapshot_scope");
+                // A third look in a row is no longer offered: refused as such.
+                assert_eq!(
+                    error["code"],
+                    if turns == 4 {
+                        "snapshot_unavailable"
+                    } else {
+                        "invalid_snapshot_scope"
+                    }
+                );
                 assert_eq!(error["executed"], false);
                 assert_eq!(error["observation_unchanged"], true);
                 assert!(error.get("observation").is_none());

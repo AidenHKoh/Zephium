@@ -3347,6 +3347,8 @@ impl AgentWorkController {
                 .await?;
                 continue;
             }
+            let unoffered_look = turn.turn.proposal().kind() == AgentBrowserToolKind::Snapshot
+                && state.look_run.withheld();
             if turn.turn.proposal().kind() == AgentBrowserToolKind::Snapshot {
                 state.looked();
             }
@@ -3395,7 +3397,7 @@ impl AgentWorkController {
                 // calls (sidebar-heavy listings): a third whole look in a
                 // row with nothing done between is refused unrun, once per
                 // streak, and pointed at narrower looks, extract or acting.
-                if whole && state.look_streak >= 2 {
+                if unoffered_look || (whole && state.look_streak >= 2) {
                     state.look_streak = 0;
                     state.native.check_control(worker, browser)?;
                     state.refresh_account(worker, browser)?;
@@ -3407,12 +3409,13 @@ impl AgentWorkController {
                         .emit(AgentWorkEventKind::InspectionRefused)?;
                     fruitless.refused(state)?;
                     let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
-                    let refusal = turn
-                        .into_tool_turn()
-                        .into_parts()
-                        .1
-                        .refuse_whole_look(&observation, &session.config)
-                        .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()))?;
+                    let continuation = turn.into_tool_turn().into_parts().1;
+                    let refusal = if unoffered_look {
+                        continuation.refuse_withheld_look(&observation, &session.config)
+                    } else {
+                        continuation.refuse_whole_look(&observation, &session.config)
+                    }
+                    .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()))?;
                     turn = Self::provider(
                         &mut state.native,
                         worker,
@@ -4910,7 +4913,8 @@ impl AgentWorkController {
         let (continuation, verified) = transition.into_parts().ok_or_else(|| crate::contract!())?;
         // Only the probe build has another verified state.
         #[allow(irrefutable_let_patterns)]
-        let crate::action::AgentBrowserVerifiedState::Accounted(result) = verified else {
+        let crate::action::AgentBrowserVerifiedState::Accounted(result) = verified
+        else {
             return Err(crate::contract!());
         };
         let continuation = continuation
@@ -6978,6 +6982,9 @@ impl LookRun {
         self.0 = self.0.saturating_add(1);
         self.0 >= 2
     }
+    fn withheld(&self) -> bool {
+        self.0 >= 2
+    }
     fn reset(&mut self) {
         self.0 = 0;
     }
@@ -7021,10 +7028,13 @@ mod fruitless_tests {
     #[test]
     fn a_second_look_in_a_row_withholds_snapshot_until_something_is_done() {
         let mut run = LookRun::default();
+        assert!(!run.withheld());
         assert!(!run.looked());
         assert!(run.looked());
+        assert!(run.withheld());
         assert!(run.looked());
         run.reset();
+        assert!(!run.withheld());
         assert!(!run.looked());
         assert!(run.looked());
     }

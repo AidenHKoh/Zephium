@@ -452,6 +452,24 @@ impl AgentProviderContinuation {
         ))
     }
 
+    /// Answers a snapshot the model called although it is no longer offered.
+    pub fn refuse_withheld_look(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderObservationRefusal, Box<Self>> {
+        if config != &self.config
+            || self.correlation.kind() != AgentBrowserToolKind::Snapshot
+            || !self.baseline.matches(observation)
+        {
+            return Err(Box::new(self));
+        }
+        Ok(AgentProviderObservationRefusal(
+            self,
+            InspectionRefusal::Withheld,
+        ))
+    }
+
     /// Refuses an unchanged-page repetition before any native operation.
     pub fn refuse_no_progress(
         self,
@@ -533,6 +551,7 @@ enum InspectionRefusal {
     Limit,
     Unchanged,
     Streak,
+    Withheld,
     NoProgress,
 }
 
@@ -638,6 +657,7 @@ impl AgentProviderObservationRefusal {
             InspectionRefusal::Repeated => ("repeated_snapshot_scope", "This scope and query were already inspected. No capture occurred and current refs remain valid. Inspect a different region, use text_search within a current eligible boundary, or follow an observed detail link when allowed. Extract only the evidence actually available; repeating this subtree does not advance truncated content. A button you expected options under (a filter or section heading such as Price) shows them only once clicked: click it (effect read, verification page_changed) instead of looking again."),
             InspectionRefusal::Unchanged => ("page_unchanged", "Nothing changed since your last look, so no new look was taken: the look below is the page as it is now and its refs work. Act on it now. controls lists its fields, filled or still empty, and any choices a field opened: fill what the goal still needs, click the matching choice, then run the form with its own button. If the values you need are already in any look you took, extract now. A dialog or banner over the page closes with its close, dismiss or reject control. To see further down, scroll the document a page."),
             InspectionRefusal::Streak => ("looked_enough", "No capture occurred. You took whole looks at this page several times in a row with nothing done between them; another shows the same page. Every look you took stays evidence for extract: if the requested values appeared in any of them, extract now. Otherwise take a narrower look or act: snapshot text_search on the document ref for the words or figures you need, snapshot subtree of the one list, table or region that holds the records, scroll the document down a page, or use a search, filter, sort or next-page control. Do not ask for the whole page again."),
+            InspectionRefusal::Withheld => ("snapshot_unavailable", "No capture occurred and snapshot is not available now: you have looked enough. Every look you took stays evidence for extract. controls lists the page's fields, filled or still empty, and any choices a field opened: act on them, navigate, or extract what the looks already show."),
             InspectionRefusal::Invalid => ("invalid_snapshot_scope", "No capture occurred; this observation and its refs remain current. text_search and region require a current document/landmark/group/dialog ref. A heading is only eligible for surrounding_text or subtree; its subtree excludes following prose. If no eligible search boundary exists here, snapshot(initial) can restore current viewport anchors. You may extract retained evidence instead. Choose another operation within the remaining budget; do not repeat the rejected scope."),
         };
         let mut result = serde_json::json!({
@@ -654,6 +674,7 @@ impl AgentProviderObservationRefusal {
             self.1,
             InspectionRefusal::Unchanged
                 | InspectionRefusal::Streak
+                | InspectionRefusal::Withheld
                 | InspectionRefusal::NoProgress
         ) {
             result["controls"] = held_controls(observation);
@@ -663,7 +684,7 @@ impl AgentProviderObservationRefusal {
         let mut action_targets = transcript.take_action_targets();
         if matches!(
             self.1,
-            InspectionRefusal::Unchanged | InspectionRefusal::Streak
+            InspectionRefusal::Unchanged | InspectionRefusal::Streak | InspectionRefusal::Withheld
         ) {
             if let Some(targets) = &mut action_targets {
                 targets.initial_snapshot_refused = true;
@@ -1376,6 +1397,15 @@ mod action_history_tests {
         assert!(result["guidance"].as_str().is_some_and(|guidance| guidance
             .contains("text_search")
             && guidance.contains("extract")));
+        let withheld = look("snapshot", r#"{"scope":{"kind":"initial"}}"#)
+            .refuse_withheld_look(observation, &config)
+            .unwrap();
+        let (_, bound) = withheld
+            .bind(observation, &config, "current observation".into())
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_str(bound.latest().tool_result()).unwrap();
+        assert_eq!(result["code"], "snapshot_unavailable");
+        assert!(result.get("controls").is_some());
         // Only a look can be refused as one.
         assert!(look(
             "act",
