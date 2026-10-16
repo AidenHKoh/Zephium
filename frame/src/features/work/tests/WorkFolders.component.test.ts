@@ -133,7 +133,7 @@ test("a Finder drop admits its folders, keeps quiet about the files beside them,
     .toBe(1);
   await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
   await screen.getByRole("button", { name: "Open", exact: true }).click();
-  await screen.getByRole("button", { name: "Reveal in Finder", exact: true }).click();
+  await screen.getByRole("button", { name: "Show in Folder", exact: true }).click();
   await expect.poll(() => native.reveal.mock.calls).toEqual([[profile, "/Users/reader/Papers"]]);
   await screen.unmount();
   session.dispose();

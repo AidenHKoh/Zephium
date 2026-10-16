@@ -189,7 +189,7 @@ test("a model server already running here is one click away", async () => {
   ]);
   native.endpoint.mockResolvedValue(models({ base: "http://localhost:11434/v1" }));
   const screen = await render(AiPage);
-  await screen.getByRole("button", { name: "Use Ollama on this Mac" }).click();
+  await screen.getByRole("button", { name: "Use Ollama on this computer" }).click();
   expect(native.endpoint).toHaveBeenCalledWith(PROFILE, "http://localhost:11434/v1");
   await expect
     .element(screen.getByText("Set OLLAMA_CONTEXT_LENGTH", { exact: false }))

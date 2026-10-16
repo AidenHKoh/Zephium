@@ -51,7 +51,7 @@ test("Voice lists only usable engines and says where audio goes, in both themes"
   native.status.mockResolvedValue(status());
   const screen = await render(VoiceRowStage);
   await expect
-    .element(page.getByText("Private and works offline. Your voice never leaves this Mac."))
+    .element(page.getByText("Private and works offline. Your voice never leaves this device."))
     .toBeVisible();
   await shoot("on-device");
 
@@ -64,7 +64,7 @@ test("Voice lists only usable engines and says where audio goes, in both themes"
   await expect
     .element(
       page.getByText(
-        "This Mac can’t recognize Polish (Poland), so dictation in it uses Zephium AI.",
+        "This device can’t recognize Polish (Poland), so dictation in it uses Zephium AI.",
       ),
     )
     .toBeVisible();

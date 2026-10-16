@@ -103,9 +103,6 @@
     </p>
     <p class="platform">{platform}</p>
   </div>
-  <p class="tagline">
-    <span>{m.settings_about_body()}</span><span>{m.about_tagline_work()}</span>
-  </p>
   <AboutLinks />
 </header>
 <SettingsGroup title={m.about_group_software()}>
@@ -237,23 +234,6 @@
 
   .version {
     color: var(--color-label-secondary);
-    font-weight: 500;
-  }
-
-  .tagline {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    max-inline-size: 460px;
-    color: var(--color-label-secondary);
-    font-size: 15px;
-    line-height: 1.5;
-    letter-spacing: -0.01em;
-    text-wrap: balance;
-  }
-
-  .tagline > span:first-child {
-    color: var(--color-text);
     font-weight: 500;
   }
 
