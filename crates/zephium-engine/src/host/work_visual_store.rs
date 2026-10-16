@@ -20,6 +20,7 @@ pub(crate) struct FreshStoreLoss {
 impl FreshNativeStore {
     // Only the actual native allocator, after new-store pointer checks, can
     // construct this type. Session metadata alone cannot do so.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) fn after_native_allocation(session: &WorkBrowserSession) -> Option<Self> {
         if !session.visual_lineage_untouched() {
             return None;

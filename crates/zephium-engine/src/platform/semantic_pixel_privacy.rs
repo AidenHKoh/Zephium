@@ -1,4 +1,5 @@
 //! Content-free native pixel fence shared by both platform capture adapters.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 use std::{
     cell::RefCell,
     rc::Rc,

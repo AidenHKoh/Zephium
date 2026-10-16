@@ -658,6 +658,7 @@ impl WorkDocumentNavigation {
     /// page start (a saved consent, a confirmed commit): reads and actions
     /// of the old document end without leaving the resource uncertain.
     /// The settled document's own address, whatever is armed after it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn settled_target(&self) -> Option<ContextNavigationTarget> {
         let state = self.0.lock().ok()?;
         state.effective.clone()
