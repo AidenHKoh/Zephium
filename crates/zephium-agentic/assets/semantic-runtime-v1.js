@@ -1638,7 +1638,8 @@
     }
   }
 
-  function flatText(root, state, limit) {
+  // A referenced label names its control even when aria-hidden itself.
+  function flatText(root, state, limit, referenced) {
     const chunks = [];
     let bytes = 0;
     const stack = [{ node: root }];
@@ -1664,7 +1665,7 @@
         if (normalized.truncated) mark(state, "field_limit", false);
         continue;
       }
-      if (type === 1 && shouldSkipSubtree(current)) continue;
+      if (type === 1 && shouldSkipSubtree(current) && !(referenced && current === root)) continue;
       if (type === 1 || type === 9 || type === 11) pushChildren(stack, current, {}, state);
     }
     if (stack.length !== 0 && bytes >= limit) mark(state, "field_limit", false);
@@ -1683,7 +1684,7 @@
         if (identifier.length > 128) { mark(state, "field_limit", false); continue; }
         const target = apply(documentGetElementById, document, [identifier]);
         if (target !== null) {
-          const text = flatText(target, state, MAX_NAME_BYTES);
+          const text = flatText(target, state, MAX_NAME_BYTES, true);
           if (text !== "") labels.push(text);
         }
       }
