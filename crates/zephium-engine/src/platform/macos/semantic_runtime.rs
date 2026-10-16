@@ -2064,8 +2064,9 @@ impl AgentSemanticRuntimeRegistration {
                     ) {
                         return false;
                     }
+                    // Only the newest documents can be returned to by Back.
                     if epochs.parked.len() >= super::agent_history::MAX_AGENT_HISTORY_ENTRIES {
-                        return false;
+                        epochs.parked.remove(0);
                     }
                     epochs.parked.push((runtime, active));
                     true
