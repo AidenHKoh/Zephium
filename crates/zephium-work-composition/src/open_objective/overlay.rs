@@ -6,7 +6,7 @@
 use super::*;
 
 /// Names of a control that only closes the dialog it sits in.
-const CLOSE: [&str; 20] = [
+const CLOSE: [&str; 22] = [
     "close",
     "close dialog",
     "close modal",
@@ -17,6 +17,8 @@ const CLOSE: [&str; 20] = [
     "not now",
     "maybe later",
     "skip",
+    "continue shopping",
+    "got it",
     "x",
     "×",
     "zamknij",
@@ -207,6 +209,8 @@ mod tests {
             ("Close", true),
             ("×", true),
             ("No thanks", true),
+            ("Continue shopping", true),
+            ("Change address", false),
             ("Close account", false),
             ("Close and delete my data", false),
             ("Close this window and continue to checkout now", false),
