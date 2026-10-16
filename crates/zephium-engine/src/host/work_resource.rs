@@ -203,7 +203,6 @@ pub(super) struct WorkNativeResource {
     frame_in_flight: Arc<std::sync::atomic::AtomicBool>,
     frame_rendering_pending: Arc<std::sync::atomic::AtomicBool>,
     frame_schedule: frame_schedule::WorkFrameSchedule,
-    #[cfg(target_os = "windows")]
     frame_initial_requested: bool,
     frame_wake: Option<crate::platform::imp::ContentPolicyTimeout>,
     navigation: Option<navigation::WorkNavigation>,
@@ -306,7 +305,6 @@ impl WorkNativeResource {
             frame_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             frame_rendering_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             frame_schedule: frame_schedule::WorkFrameSchedule::default(),
-            #[cfg(target_os = "windows")]
             frame_initial_requested: false,
             frame_wake: None,
             navigation: None,
@@ -682,7 +680,6 @@ impl WorkNativeResource {
         self.progress_frame_capture();
     }
 
-    #[cfg(target_os = "windows")]
     fn request_initial_frame(&mut self) {
         if self.frame_initial_requested
             || self.construction.is_none()
@@ -721,7 +718,6 @@ impl WorkNativeResource {
             self.frame_schedule.discard();
             self.frame_wake = None;
         }
-        #[cfg(target_os = "windows")]
         if self.construction.is_some()
             && !in_flight
             && self.ready()
@@ -802,10 +798,7 @@ impl WorkNativeResource {
                 .store(in_flight, Ordering::Release);
             return;
         };
-        #[cfg(target_os = "windows")]
         let stamp = gate.preview_document_stamp();
-        #[cfg(not(target_os = "windows"))]
-        let stamp = gate.document_stamp();
         let Some(stamp) = stamp else {
             self.frame_rendering_pending
                 .store(in_flight, Ordering::Release);
@@ -837,10 +830,7 @@ impl WorkNativeResource {
             view.diagnose_work_cookie_disk();
         }
         let dispatched = crate::platform::imp::capture_work_frame(view.view(), move |encoded| {
-            #[cfg(target_os = "windows")]
             let document_current = gate.preview_document_stamp() == Some(stamp);
-            #[cfg(not(target_os = "windows"))]
-            let document_current = gate.document_stamp() == Some(stamp);
             #[cfg(target_os = "windows")]
             let projection_current = guard.frame_projection_current();
             #[cfg(not(target_os = "windows"))]
@@ -1424,7 +1414,6 @@ impl EngineHost {
             frame_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             frame_rendering_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             frame_schedule: frame_schedule::WorkFrameSchedule::default(),
-            #[cfg(target_os = "windows")]
             frame_initial_requested: false,
             frame_wake: None,
             navigation: None,
@@ -1610,7 +1599,6 @@ impl EngineHost {
         resource.progress_history_back(self.erasure_tombstones.contains(&resource.profile()));
         resource.progress_human(self.erasure_tombstones.contains(&resource.profile()));
         resource.progress_hand_on();
-        #[cfg(target_os = "windows")]
         resource.request_initial_frame();
         resource.progress_frame_capture();
         if resource

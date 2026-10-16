@@ -166,7 +166,6 @@ pub(crate) struct WorkDocumentStamp {
 /// Visual projection of an admitted native document, including its loading
 /// paint. This stamp cannot authorize semantic observations or input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg(any(test, target_os = "windows"))]
 pub(crate) struct WorkPreviewDocumentStamp {
     native_id: wry::NavigationId,
     epoch: u64,
@@ -730,7 +729,10 @@ impl WorkDocumentNavigation {
             })
     }
 
-    #[cfg(any(test, not(target_os = "windows")))]
+    #[cfg(any(
+        test,
+        all(target_os = "macos", feature = "native-agentic-semantic-probe")
+    ))]
     pub(crate) fn document_stamp(&self) -> Option<WorkDocumentStamp> {
         let state = self.0.lock().ok()?;
         if state.phase != Phase::Ready {
@@ -741,7 +743,6 @@ impl WorkDocumentNavigation {
             epoch: state.navigation_epoch,
         })
     }
-    #[cfg(any(test, target_os = "windows"))]
     pub(crate) fn preview_document_stamp(&self) -> Option<WorkPreviewDocumentStamp> {
         let state = self.0.lock().ok()?;
         if !matches!(
