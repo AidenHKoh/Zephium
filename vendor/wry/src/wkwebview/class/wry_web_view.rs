@@ -6,9 +6,11 @@ use std::{collections::HashMap, sync::Mutex};
 
 #[cfg(target_os = "macos")]
 use objc2::runtime::ProtocolObject;
-use objc2::{define_class, rc::Retained, runtime::Bool, DeclaredClass};
+use objc2::{define_class, rc::Retained, runtime::Bool, DeclaredClass, Message};
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSDraggingDestination, NSEvent, NSMenu};
+use objc2_app_kit::{NSDraggingDestination, NSEvent, NSMenu, NSTrackingArea, NSView};
+#[cfg(target_os = "macos")]
+use objc2_foundation::NSPoint;
 use objc2_foundation::{NSObjectProtocol, NSUUID};
 
 #[cfg(not(target_os = "macos"))]
@@ -38,6 +40,10 @@ pub struct WryWebViewIvars {
     Option<Box<dyn Fn(&NSEvent, Option<Retained<NSMenu>>) -> Option<Retained<NSMenu>>>>,
   #[cfg(target_os = "ios")]
   pub(crate) input_accessory_view_builder: Option<Box<crate::InputAccessoryViewBuilder>>,
+  /// `Some` while the view is pointer-inert: the tracking areas WebKit
+  /// installed (and any it adds meanwhile), held out of the view.
+  #[cfg(target_os = "macos")]
+  pub(crate) parked_tracking: std::cell::RefCell<Option<Vec<Retained<NSTrackingArea>>>>,
   pub(crate) custom_protocol_task_ids: Mutex<HashMap<usize, Retained<NSUUID>>>,
   /// One in-flight scope per registered scheme, by protocol index: a slow IPC
   /// call never holds back the app's own assets, nor they it.
@@ -82,6 +88,36 @@ define_class!(
         Bool::NO
       } else {
         unsafe { objc2::msg_send![super(self), performKeyEquivalent: event] }
+      }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[unsafe(method_id(hitTest:))]
+    fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
+      if self.ivars().parked_tracking.borrow().is_some() {
+        None
+      } else {
+        unsafe { objc2::msg_send![super(self), hitTest: point] }
+      }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[unsafe(method(addTrackingArea:))]
+    fn add_tracking_area(&self, area: &NSTrackingArea) {
+      if let Some(parked) = self.ivars().parked_tracking.borrow_mut().as_mut() {
+        parked.push(area.retain());
+      } else {
+        unsafe { objc2::msg_send![super(self), addTrackingArea: area] }
+      }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[unsafe(method(removeTrackingArea:))]
+    fn remove_tracking_area(&self, area: &NSTrackingArea) {
+      if let Some(parked) = self.ivars().parked_tracking.borrow_mut().as_mut() {
+        parked.retain(|held| !std::ptr::eq(&**held, area));
+      } else {
+        unsafe { objc2::msg_send![super(self), removeTrackingArea: area] }
       }
     }
 
@@ -165,6 +201,31 @@ define_class!(
     }
   }
 );
+
+#[cfg(target_os = "macos")]
+impl WryWebView {
+  /// While inert the view takes no mouse input at all: it is skipped by
+  /// hit-testing and holds no tracking areas, which AppKit delivers to even
+  /// when another view covers this one (they set the cursor under the cover).
+  /// Turning it off gives WebKit's areas back.
+  pub fn set_pointer_inert(&self, inert: bool) {
+    if inert == self.ivars().parked_tracking.borrow().is_some() {
+      return;
+    }
+    if inert {
+      let areas: Vec<_> = self.trackingAreas().iter().collect();
+      *self.ivars().parked_tracking.borrow_mut() = Some(areas.clone());
+      for area in &areas {
+        unsafe { objc2::msg_send![super(self), removeTrackingArea: &**area] }
+      }
+    } else {
+      let areas = self.ivars().parked_tracking.borrow_mut().take();
+      for area in areas.into_iter().flatten() {
+        unsafe { objc2::msg_send![super(self), addTrackingArea: &*area] }
+      }
+    }
+  }
+}
 
 // Custom Protocol Task Checker
 impl WryWebView {
