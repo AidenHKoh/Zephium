@@ -65,6 +65,7 @@ const BOARD_FACT: &str = "Ticket ZP-42 is due Thursday";
 const DAY_FACT: &str = "Standup at 09:15";
 const SHELF_FACT: &str = "Shelf total is 9 products";
 const KETTLE_FACT: &str = "Kettle price is 37 credits";
+const DESK_FACT: &str = "Desk bell rings twice at noon";
 /// The vault's own sign-in, kept by the server: a tab sign-in stands for it.
 static VAULT_OPEN: AtomicBool = AtomicBool::new(false);
 static JOURNEY_FIELDS: AtomicUsize = AtomicUsize::new(0);
@@ -124,6 +125,8 @@ enum Check {
     /// A product page that rewrites its address on load, then Back to the
     /// list it was opened from.
     Back,
+    /// A page that reloads itself once on arrival, then a link on it.
+    Reloaded,
     /// A heavy calendar whose script holds the page for seconds after load:
     /// its first look waits for it and the day reads.
     Heavy,
@@ -344,6 +347,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("consent") => vec![Check::Consent],
         Some("spa") => vec![Check::Spa],
         Some("back") => vec![Check::Back],
+        Some("reloaded") => vec![Check::Reloaded],
         Some("heavy") => vec![Check::Heavy],
         Some("webmail") => vec![Check::Webmail],
         Some("apps") => vec![Check::Apps],
@@ -768,6 +772,19 @@ const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.
             "200 OK",
             String::new(),
             page("Vault", &format!("<h1>Vault</h1><p>{VAULT_FACT}.</p>")),
+        ),
+        (Site::Account, _, "/lobby") => (
+            "200 OK",
+            String::new(),
+            page(
+                "Lobby",
+                "<h1>Lobby</h1><p><a href=\"/lobby/desk\">Front desk</a></p><script>if(!sessionStorage.getItem('r')){sessionStorage.setItem('r','1');setTimeout(function(){location.reload();},200);}</script>",
+            ),
+        ),
+        (Site::Account, _, "/lobby/desk") => (
+            "200 OK",
+            String::new(),
+            page("Desk", &format!("<h1>Front desk</h1><p>{DESK_FACT}.</p>")),
         ),
         (Site::Account, _, "/shelf") => (
             "200 OK",
@@ -2503,6 +2520,28 @@ pub(super) async fn workflow(
                 ));
                 last = run.state;
                 read && price
+            }
+            Check::Reloaded => {
+                let run = context
+                    .run(
+                        "Desk",
+                        false,
+                        "Allow",
+                        vec![vec![browse(
+                            "/lobby",
+                            "Open the Front desk link and report what the desk page says",
+                        )]],
+                    )
+                    .await?;
+                let read = says(&run, DESK_FACT) || mentions(&run, &["bell"]);
+                line(format!(
+                    "check=reloaded read={read} lobby_loads={} pages=[{}]",
+                    context.sites.hits(Site::Account, "/lobby").len()
+                        - context.sites.hits(Site::Account, "/lobby/").len(),
+                    pages_of(&run)
+                ));
+                last = run.state;
+                read
             }
             Check::Spa => {
                 let run = context
