@@ -410,9 +410,25 @@ impl WorkBrowseCollectionSchema {
         else {
             return Err(WorkError::Invalid);
         };
-        if interface_label(name) {
+        // A result the page labels only by its position (Kayak's "Result
+        // item 2") is named by its own first text; a sort tab is no record.
+        let (name, sources) = if placeholder(name) {
+            row.iter()
+                .skip(1)
+                .find_map(|cell| match cell.value() {
+                    ArchivedValue::Text { value, sources }
+                        if !interface_label(value) && value.chars().any(char::is_alphabetic) =>
+                    {
+                        Some((value, sources))
+                    }
+                    _ => None,
+                })
+                .ok_or(WorkError::Invalid)?
+        } else if interface_label(name) {
             return Err(WorkError::Invalid);
-        }
+        } else {
+            (name, sources)
+        };
         let name_evidence = cite.cite(sources)?;
         let mut subject = WorkSubject {
             name: name.clone(),
@@ -568,6 +584,14 @@ fn interface_label(name: &str) -> bool {
         "polecane",
         "trafność",
         "sortuj",
+    ];
+    LABELS.contains(&letters(name).as_str()) || placeholder(name)
+}
+
+/// A container's generic name for a result ("Result item 2", "Card"): the
+/// record is real, its name is not.
+fn placeholder(name: &str) -> bool {
+    const PLACEHOLDERS: &[&str] = &[
         "result",
         "result item",
         "item",
@@ -576,13 +600,15 @@ fn interface_label(name: &str) -> bool {
         "card",
         "offer",
     ];
-    let words: String = name
-        .split(|c: char| !c.is_alphabetic())
+    PLACEHOLDERS.contains(&letters(name).as_str())
+}
+
+fn letters(name: &str) -> String {
+    name.split(|c: char| !c.is_alphabetic())
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
-        .to_lowercase();
-    LABELS.contains(&words.as_str())
+        .to_lowercase()
 }
 
 /// Cites archive sources as artifact evidence; a row that does not fit is
@@ -706,6 +732,40 @@ mod tests {
         assert!(interface_label("Result item 2"));
         assert!(!interface_label("10:45 am – 9:28 pm LOT 1 stop"));
         assert!(!interface_label("Best Western Plus Downtown"));
+    }
+
+    #[test]
+    fn a_result_named_only_by_its_position_is_named_by_its_own_text() {
+        let request: WorkBrowseCollection = serde_json::from_value(serde_json::json!({
+            "title":"Flights", "max_items":4, "columns":[
+                {"name":"route","required":false,"value":{"kind":"text"}},
+                {"name":"price","required":false,"value":{"kind":"text"}}
+            ]
+        }))
+        .unwrap();
+        let schema = WorkBrowseCollectionSchema::try_from(&request).unwrap();
+        let rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([
+            [{"name":"name","value":{"kind":"text","value":"Result item 1","sources":[1]}},
+             {"name":"route","value":{"kind":"text","value":"6:05 am – 11:45 am KLM 1 stop","sources":[2]}},
+             {"name":"price","value":{"kind":"text","value":"$1,384","sources":[3]}}],
+            [{"name":"name","value":{"kind":"text","value":"Cheapest","sources":[4]}},
+             {"name":"price","value":{"kind":"text","value":"$1,110","sources":[5]}}],
+            [{"name":"name","value":{"kind":"text","value":"Result item 3","sources":[6]}},
+             {"name":"price","value":{"kind":"text","value":"$990","sources":[7]}}]
+        ]))
+        .unwrap();
+        let data = schema
+            .comparison(&rows, &mut |ids: &[u16]| Ok(ids.to_vec()))
+            .unwrap();
+        let WorkArtifactDataV1::ComparisonMatrix {
+            subjects, cells, ..
+        } = data
+        else {
+            panic!("comparison");
+        };
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0].name, "6:05 am – 11:45 am KLM 1 stop");
+        assert_eq!(cells[0][0].evidence, vec![2]);
     }
 
     #[test]
