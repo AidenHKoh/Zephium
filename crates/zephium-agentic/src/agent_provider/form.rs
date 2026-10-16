@@ -123,6 +123,13 @@ impl FormBinding {
     pub fn field_count(&self) -> usize {
         self.fields.len()
     }
+    /// The value the planner asked for in this field.
+    pub fn field_value(&self, index: usize) -> Option<&str> {
+        self.proposal
+            .fields
+            .get(index)
+            .map(|field| field.value.as_str())
+    }
     /// Whether this field requires a committed option rather than typed text.
     pub fn is_choice(&self, index: usize) -> bool {
         self.fields.get(index).is_some_and(|field| {
