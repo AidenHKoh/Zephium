@@ -433,8 +433,11 @@ where
                 url, goal: Some(_), ..
             } = &request.kind
             {
+                // A save the person asked for goes ahead in their session once
+                // they let the run in, and always in Work's own website data,
+                // where nothing of theirs is touched.
                 if let Some(site) = crate::work_sites::site_of(url) {
-                    if driver.works_as_person(&site) && self.run.asked_to_save(&site) {
+                    if self.run.asked_to_save(&site) {
                         driver.allow_saves(&site);
                     }
                 }
