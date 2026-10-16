@@ -823,6 +823,28 @@ impl WorkDocumentNavigation {
         operation: ContextOperationJoin,
         target: ContextNavigationTarget,
     ) -> Result<(), ()> {
+        self.arm_back(source, operation, target, AdmissionKind::HistoryBackGet)
+    }
+
+    /// Back as a fresh load of the predecessor's address, for a page whose
+    /// own history no longer joins the run's ledger.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn arm_history_reload(
+        &self,
+        source: ContextJoin,
+        operation: ContextOperationJoin,
+        target: ContextNavigationTarget,
+    ) -> Result<(), ()> {
+        self.arm_back(source, operation, target, AdmissionKind::ProgrammaticGet)
+    }
+
+    fn arm_back(
+        &self,
+        source: ContextJoin,
+        operation: ContextOperationJoin,
+        target: ContextNavigationTarget,
+        admission: AdmissionKind,
+    ) -> Result<(), ()> {
         let mut state = self.0.lock().map_err(|_| ())?;
         let next = operation.context();
         if state.phase != Phase::Ready
@@ -848,7 +870,7 @@ impl WorkDocumentNavigation {
         state.policy = zephium_agentic::WorkBrowserDocumentPolicy::Exact;
         state.native_id = None;
         state.requested = false;
-        state.admission_kind = Some(AdmissionKind::HistoryBackGet);
+        state.admission_kind = Some(admission);
         state.finalization_generation = state.finalization_generation.checked_add(1).ok_or(())?;
         state.clear_write_navigation();
         state.location_revision = 0;
@@ -1770,6 +1792,16 @@ mod tests {
             assert!(!gate.allows_apple_action(target, apple_action(kind, is_get)));
         }
         assert!(gate.allows_apple_action(target, apple_action(T::Other, true)));
+
+        #[cfg(target_os = "macos")]
+        {
+            let gate = ready_gate();
+            gate.arm_history_reload(source, request.operation(), request.target().clone())
+                .unwrap();
+            assert!(!gate.allows_apple_action(target, apple_action(T::BackForward, true)));
+            assert!(gate.allows_apple_action(target, apple_action(T::Other, true)));
+            assert!(!gate.allows_apple_action(target, apple_action(T::Other, true)));
+        }
     }
     fn site_gate(url: &str) -> WorkDocumentNavigation {
         let gate = WorkDocumentNavigation::default();

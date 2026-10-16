@@ -32,7 +32,9 @@ pub(super) struct WorkHistoryBack {
     task: WorkHistoryBackTask,
     timer: Option<crate::platform::imp::ContentPolicyTimeout>,
     deadline: Instant,
-    ticket: crate::platform::imp::AgentHistoryBackTicket,
+    /// None: the page's history no longer joins the ledger (it pushed its
+    /// own entries), so Back loads the predecessor's address afresh.
+    ticket: Option<crate::platform::imp::AgentHistoryBackTicket>,
     stage: WorkNavigationStage,
 }
 impl WorkHistoryBack {
@@ -400,6 +402,25 @@ impl WorkNativeResource {
                 .as_ref()
                 .and_then(|view| view.work_navigation())
                 .cloned();
+            let Some(ticket) = ticket else {
+                #[cfg(target_os = "macos")]
+                let dispatched = self.view.as_mut().is_some_and(|view| {
+                    view.prepare_semantic_document_load().is_ok()
+                        && gate.as_ref().is_some_and(|gate| {
+                            gate.arm_history_reload(source, operation, expected.clone())
+                                .is_ok()
+                        })
+                        && view.view().load_url(expected.as_url().as_str()).is_ok()
+                });
+                #[cfg(not(target_os = "macos"))]
+                let dispatched = false;
+                if !dispatched {
+                    self.finish_history_back(Err(ContextPortFailure::NativeRefused));
+                } else if let Some(pending) = self.history_back.as_mut() {
+                    pending.stage = WorkNavigationStage::Navigating;
+                }
+                return;
+            };
             let dispatched = self.view.as_mut().is_some_and(|view| {
                 view.reactivate_history_destination(ticket)
                     .is_ok_and(|target| target == expected)
@@ -465,6 +486,7 @@ impl WorkNativeResource {
                 self.guard.fail();
                 return;
             };
+            let reload = pending.ticket.is_none();
             if self
                 .view
                 .as_ref()
@@ -472,11 +494,13 @@ impl WorkNativeResource {
                 .is_none_or(|gate| gate.failed())
             {
                 Some(Err(ContextPortFailure::NativeRefused))
-            } else if !self
-                .view
-                .as_ref()
-                .is_some_and(|view| view.semantic_runtime_ready_for_history())
-            {
+            } else if !self.view.as_ref().is_some_and(|view| {
+                if reload {
+                    view.semantic_pending_for_audit() == Some(false)
+                } else {
+                    view.semantic_runtime_ready_for_history()
+                }
+            }) {
                 return;
             } else {
                 let terminal = self
@@ -505,11 +529,18 @@ impl WorkNativeResource {
                         .and_then(|view| view.work_navigation())
                         .is_some_and(|gate| gate.ready(current.as_deref()));
                     let ticket = self.history_back.as_ref().map(|pending| pending.ticket);
-                    let settled = match ticket {
-                        Some(ticket) if ready => self
+                    let settled = match (ticket, outcome.as_ref()) {
+                        (Some(Some(ticket)), _) if ready => self
                             .view
                             .as_mut()
                             .is_some_and(|view| view.settle_history_back(ticket).is_ok()),
+                        #[cfg(target_os = "macos")]
+                        (Some(None), Ok(target)) if ready => {
+                            let target = target.clone();
+                            self.view.as_mut().is_some_and(|view| {
+                                view.enroll_current_work_history_get(target).is_ok()
+                            })
+                        }
                         _ => false,
                     };
                     if settled {
@@ -521,21 +552,32 @@ impl WorkNativeResource {
             }
         };
         if let Some(outcome) = outcome {
-            if outcome.is_err() {
-                self.guard.fail();
-                if let Some(ticket) = self.history_back.as_ref().map(|pending| pending.ticket) {
-                    if let Some(view) = self.view.as_mut() {
-                        let _ = view.refuse_history_back(ticket);
-                    }
-                }
-                if let Some(gate) = self.view.as_ref().and_then(|view| view.work_navigation()) {
-                    gate.refuse();
+            self.finish_history_back(outcome);
+        }
+    }
+
+    fn finish_history_back(
+        &mut self,
+        outcome: Result<zephium_agentic::ContextNavigationTarget, ContextPortFailure>,
+    ) {
+        if outcome.is_err() {
+            self.guard.fail();
+            if let Some(ticket) = self
+                .history_back
+                .as_ref()
+                .and_then(|pending| pending.ticket)
+            {
+                if let Some(view) = self.view.as_mut() {
+                    let _ = view.refuse_history_back(ticket);
                 }
             }
-            if let Some(mut pending) = self.history_back.take() {
-                pending.timer = None;
-                pending.task.complete(outcome);
+            if let Some(gate) = self.view.as_ref().and_then(|view| view.work_navigation()) {
+                gate.refuse();
             }
+        }
+        if let Some(mut pending) = self.history_back.take() {
+            pending.timer = None;
+            pending.task.complete(outcome);
         }
     }
 }
@@ -584,9 +626,15 @@ impl EngineHost {
             task.complete(Err(ContextPortFailure::Stale));
             return;
         };
-        let Ok(ticket) = view.prepare_history_back() else {
-            task.complete(Err(ContextPortFailure::NativeRefused));
-            return;
+        let ticket = match view.prepare_history_back() {
+            Ok(ticket) => Some(ticket),
+            #[cfg(target_os = "macos")]
+            Err(()) => None,
+            #[cfg(not(target_os = "macos"))]
+            Err(()) => {
+                task.complete(Err(ContextPortFailure::NativeRefused));
+                return;
+            }
         };
         let timeout_guard = guard.clone();
         let timer = crate::platform::imp::schedule_content_policy_timeout(duration, move || {
