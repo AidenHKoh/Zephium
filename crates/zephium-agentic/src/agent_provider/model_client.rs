@@ -208,12 +208,18 @@ pub(crate) fn translate(
                         Some("input_image") if role == Some("user") => {
                             parts.push(input_image(content, vision, &mut images)?);
                         }
+                        Some("output_text") if role == Some("assistant") => {
+                            parts.push(WorkModelPart::Text(string(content, "text")?));
+                        }
                         _ => return Err(invalid()),
                     }
                 }
                 match role {
                     Some("user" | "developer") if !parts.is_empty() => {
                         push(&mut messages, WorkModelMessage::User(parts));
+                    }
+                    Some("assistant") if !parts.is_empty() => {
+                        push(&mut messages, WorkModelMessage::Assistant(parts));
                     }
                     _ => return Err(invalid()),
                 }

@@ -2252,6 +2252,9 @@ impl AgentPreparedObservationRequest {
         let body = encode_action_progress(
             body,
             action_progress.as_ref().map(|progress| progress.text()),
+            action_progress
+                .as_ref()
+                .and_then(|progress| progress.steps()),
         )?;
         let body = encode_decision_budget(
             body,
@@ -4764,6 +4767,13 @@ fn append_act_targets(
             Value::String(super::continuation::effect_label(effect).into()),
         );
     }
+    // Planners filled a flight or guest form one field per call.
+    if config.permits_tool(AgentBrowserToolKind::FillForm) {
+        fact.insert(
+            "fill_form".into(),
+            Value::String("When the goal gives values for two or more fields here, set them all in one fill_form call with the form's own submit button: the host types each value and picks its one matching suggestion or calendar day. A button that opens a picker (an airport or a date) is a field too: give it the value to choose. Use act only for a single field.".into()),
+        );
+    }
     let text = format!("ZEPHIUM_HOST_ACT_TARGETS_V1\n{}", Value::Object(fact));
     let mut wire: Value =
         serde_json::from_slice(&body).map_err(|_| AgentProviderRequestError::Encoding)?;
@@ -4888,16 +4898,22 @@ fn encode_native_action_budget(
 fn encode_action_progress(
     body: Vec<u8>,
     progress: Option<&str>,
+    steps: Option<String>,
 ) -> Result<Vec<u8>, AgentProviderRequestError> {
     let Some(progress) = progress else {
         return Ok(body);
     };
     let mut wire: Value =
         serde_json::from_slice(&body).map_err(|_| AgentProviderRequestError::Encoding)?;
-    wire["input"]
+    let input = wire["input"]
         .as_array_mut()
-        .ok_or(AgentProviderRequestError::Encoding)?
-        .push(json!({"role":"developer", "content":[{"type":"input_text", "text":progress}]}));
+        .ok_or(AgentProviderRequestError::Encoding)?;
+    // The planner's own earlier calls, in its own voice; the host record
+    // beside them stays content-free.
+    if let Some(steps) = steps {
+        input.push(json!({"role":"assistant", "content":[{"type":"output_text", "text":steps}]}));
+    }
+    input.push(json!({"role":"developer", "content":[{"type":"input_text", "text":progress}]}));
     encode_bounded_provider_body(&wire)
 }
 
@@ -5075,6 +5091,7 @@ pub(in crate::agent_provider) fn encode_openai_continuation_body(
             transcript.action_targets(),
         )?,
         transcript.action_progress(),
+        transcript.action_steps(),
     )
 }
 
@@ -5272,6 +5289,7 @@ fn encode_openai_screenshot_continuation_body(
             transcript.action_targets(),
         )?,
         transcript.action_progress(),
+        transcript.action_steps(),
     )
 }
 

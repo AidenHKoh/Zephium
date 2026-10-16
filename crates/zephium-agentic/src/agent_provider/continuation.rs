@@ -703,6 +703,12 @@ impl AgentProviderTranscript {
         self.action_progress.as_ref().map(AgentActionProgress::text)
     }
 
+    pub(super) fn action_steps(&self) -> Option<String> {
+        self.action_progress
+            .as_ref()
+            .and_then(AgentActionProgress::steps)
+    }
+
     pub(super) fn navigation_checkpoint(&self) -> Option<&str> {
         self.navigation_checkpoint
             .as_ref()
@@ -766,6 +772,10 @@ impl AgentProviderBoundTranscript {
 
     pub(super) fn action_progress(&self) -> Option<&str> {
         self.prior.action_progress()
+    }
+
+    pub(super) fn action_steps(&self) -> Option<String> {
+        self.prior.action_steps()
     }
 
     pub(super) fn navigation_checkpoint(&self) -> Option<&str> {
@@ -1295,7 +1305,8 @@ impl AgentProviderContinuation {
         self.transcript.retained_bytes()
     }
 
-    /// Carries only content-free independently verified outcomes across observation refreshes.
+    /// Carries independently verified outcomes across observation refreshes:
+    /// a content-free host record, and the planner's own call replayed to it.
     pub fn with_verified_action_progress(
         mut self,
         result: &crate::SemanticActionResult,
@@ -1308,8 +1319,12 @@ impl AgentProviderContinuation {
             .transcript
             .action_progress
             .as_ref()
-            .map_or(0, |p| p.text().len());
-        let progress = AgentActionProgress::record(self.transcript.action_progress.take(), result)?;
+            .map_or(0, AgentActionProgress::retained_len);
+        let progress = AgentActionProgress::record(
+            self.transcript.action_progress.take(),
+            result,
+            Some(("act", self.correlation.arguments.as_str())),
+        )?;
         let retired_inspection_bytes = self
             .transcript
             .inspection_checkpoint
@@ -1322,7 +1337,7 @@ impl AgentProviderContinuation {
             .retained_bytes
             .checked_sub(previous_bytes)
             .and_then(|bytes| bytes.checked_sub(retired_inspection_bytes))
-            .and_then(|bytes| bytes.checked_add(progress.text().len()))
+            .and_then(|bytes| bytes.checked_add(progress.retained_len()))
             .filter(|bytes| *bytes <= MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES)
             .ok_or(AgentProviderContinuationError::TranscriptLimit)?;
         self.transcript.action_progress = Some(progress);
@@ -3636,6 +3651,25 @@ mod tests {
             Some(day(7))
         );
         assert_eq!(crate::semantic_sole_choice(&calendar, "2027-11-10"), None);
+        assert_eq!(
+            crate::semantic_picker_values("2026-11-10 - 2026-12-10"),
+            vec!["2026-11-10", "2026-12-10"]
+        );
+        assert_eq!(crate::semantic_picker_values("JFK - LAX"), vec!["JFK - LAX"]);
+
+        let set = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"button","n":"Origin, JFK, New York-Kennedy, NY","o":1,"b":at}
+            ]),
+        );
+        let origin = set.frames()[0].nodes()[1].reference();
+        assert!(crate::semantic_shows_value(&set, origin, "jfk"));
+        assert!(!crate::semantic_shows_value(&set, origin, "LAX"));
     }
 
     #[test]
@@ -6217,7 +6251,8 @@ mod tests {
         let (mut shared, mut total) = (0, 0);
         for id in 1..=8 {
             let result = crate::semantic_action_result::tests::scroll_provider_fixture(id, true);
-            progress = Some(AgentActionProgress::record(progress, &result).expect("progress"));
+            progress =
+                Some(AgentActionProgress::record(progress, &result, None).expect("progress"));
             retained.action_progress = progress.take();
             let bound = retained
                 .try_bind_for_test(openai_correlation("{}"), diff.clone())
