@@ -3655,7 +3655,10 @@ mod tests {
             crate::semantic_picker_values("2026-11-10 - 2026-12-10"),
             vec!["2026-11-10", "2026-12-10"]
         );
-        assert_eq!(crate::semantic_picker_values("JFK - LAX"), vec!["JFK - LAX"]);
+        assert_eq!(
+            crate::semantic_picker_values("JFK - LAX"),
+            vec!["JFK - LAX"]
+        );
 
         let set = observation_with_nodes(
             context(),

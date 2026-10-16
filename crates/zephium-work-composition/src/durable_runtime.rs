@@ -4293,7 +4293,7 @@ mod page_objective_tests {
         let note = apps::note("www.airbnb.com").expect("airbnb note");
         let step = step("Find a monthly stay near the YC office for one adult");
         // A follow-up's request carries the earlier turns: well past the room.
-        let overall = "Plan my trip from Warsaw to SF for the YC batch — ".repeat(60);
+        let overall = "Plan my trip from Warsaw to SF for the YC batch — ".repeat(160);
         assert!(!admitted(&format!(
             "{OVERALL_OBJECTIVE}{overall}{step}{note}"
         )));

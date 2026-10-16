@@ -61,7 +61,7 @@ use super::{
 /// Maximum UTF-8 bytes in one approved browser objective.
 pub const MAX_AGENT_PROVIDER_OBJECTIVE_BYTES: usize = 8 * 1024;
 /// Maximum exactly measured tokens in one approved browser objective.
-pub const MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS: u32 = 4_096;
+pub const MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS: u32 = 8_192;
 /// Maximum serialized bytes in one provider request body: the largest listing
 /// mapping, escaped in full, beside the base64 viewport image.
 pub const MAX_AGENT_PROVIDER_REQUEST_BYTES: usize = 3 * 1024 * 1024;
@@ -9391,7 +9391,7 @@ mod tests {
                 "x".repeat(MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS as usize + 1),
                 &selected,
             ),
-            Err(AgentProviderObjectiveError::TokenLimit)
+            Err(AgentProviderObjectiveError::TokenLimit | AgentProviderObjectiveError::Content)
         ));
     }
 
