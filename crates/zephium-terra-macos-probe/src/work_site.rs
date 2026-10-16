@@ -34,6 +34,9 @@ mod media_fixture;
 #[path = "work_site_journey.rs"]
 mod journey_fixture;
 
+#[path = "work_site_load.rs"]
+mod load_fixture;
+
 /// The person's site as the Work contract sees it, and another site.
 const ACCOUNT: &str = "https://account.probe.test";
 const OTHER: &str = "https://other.probe.test";
@@ -119,6 +122,9 @@ enum Check {
     /// A heavy calendar whose script holds the page for seconds after load:
     /// its first look waits for it and the day reads.
     Heavy,
+    /// A mail app that redirects, sets `#inbox` and never finishes loading
+    /// still reads once its document is committed.
+    Webmail,
     /// Three signed-in apps read by three parts of one lead run: one entry
     /// question names all three and every page opens in the session.
     Apps,
@@ -333,6 +339,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("consent") => vec![Check::Consent],
         Some("spa") => vec![Check::Spa],
         Some("heavy") => vec![Check::Heavy],
+        Some("webmail") => vec![Check::Webmail],
         Some("apps") => vec![Check::Apps],
         Some("views") => vec![Check::Views],
         Some("memory") => vec![Check::Memory],
@@ -553,6 +560,13 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
             cookie: cookie.clone(),
         });
     }
+    if site == Site::Account && method == "GET" && load_fixture::never(&path) {
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(300));
+            drop(stream);
+        });
+        return;
+    }
     if site == Site::Account
         && method == "GET"
         && media_fixture::serve(&mut stream, &path, signed_in)
@@ -615,6 +629,9 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
                 "<h1>Signed in</h1><p>Welcome back to the account site.</p>",
             ),
         ),
+        (Site::Account, "GET", path) if load_fixture::response(path).is_some() => {
+            load_fixture::response(path).unwrap_or_default()
+        }
         (Site::Account, _, "/leave") => (
             "302 Found",
             format!("Location: http://localhost:{}/landing\r\n", ports.1),
@@ -2474,6 +2491,26 @@ pub(super) async fn workflow(
                 let read = says(&run, AGENDA_FACT) || mentions(&run, &["14:30"]);
                 line(format!(
                     "check=heavy read={read} pages=[{}]",
+                    pages_of(&run)
+                ));
+                last = run.state;
+                read
+            }
+            Check::Webmail => {
+                let run = context
+                    .run(
+                        "My mail",
+                        false,
+                        "Allow",
+                        vec![vec![browse(
+                            load_fixture::START,
+                            "Report the newest message in the inbox",
+                        )]],
+                    )
+                    .await?;
+                let read = says(&run, INBOX_FACT) || mentions(&run, &["Quarterly"]);
+                line(format!(
+                    "check=webmail read={read} pages=[{}]",
                     pages_of(&run)
                 ));
                 last = run.state;
