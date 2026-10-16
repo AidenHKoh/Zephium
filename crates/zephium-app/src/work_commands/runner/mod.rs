@@ -43,6 +43,7 @@ pub(crate) enum Failure {
     Sensitive,
     PythonUnavailable,
     GitHubUnavailable,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     CustodyUnavailable,
     CleanupPending,
     WorkerBusy,

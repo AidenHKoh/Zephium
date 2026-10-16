@@ -424,6 +424,7 @@ impl WorkResourceGuard {
             line: caller.line(),
         });
     }
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn bind_fresh_native_store(
         &self,
         proof: crate::host::FreshNativeStore,

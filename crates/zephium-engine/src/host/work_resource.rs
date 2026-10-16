@@ -39,6 +39,9 @@ const DOCUMENT_FINALIZATION_QUIET_PERIOD: Duration = Duration::from_millis(500);
 /// A page an action's admitted load committed but never reported loaded is
 /// taken as loaded after this long.
 const HAND_ON_COMMITTED_SETTLE: Duration = Duration::from_secs(4);
+/// A site's first document that committed but keeps loading (a mail app with
+/// a loading screen and open channels) is taken as loaded after this long.
+const INITIAL_COMMITTED_SETTLE: Duration = Duration::from_secs(6);
 
 struct DocumentFinalizationWake {
     timer: Option<crate::platform::imp::ContentPolicyTimeout>,
@@ -441,7 +444,7 @@ impl WorkNativeResource {
     /// is taken as loaded after a short wait, then the quiet period and the
     /// location sample make it ready.
     fn progress_hand_on(&mut self) {
-        if self.construction.is_some() || self.navigation.is_some() || self.history_back_pending() {
+        if self.navigation.is_some() || self.history_back_pending() {
             return;
         }
         let Some(gate) = self
@@ -452,16 +455,25 @@ impl WorkNativeResource {
         else {
             return;
         };
-        if !gate.handed_on() {
+        // The construction's own load is finalized by the construction; only
+        // its committed-but-never-finished wait is settled here.
+        let constructing = self.construction.is_some();
+        if !constructing && !gate.handed_on() {
             return;
         }
-        if let Some(since) = gate.hand_on_committed_since() {
-            if since.elapsed() >= HAND_ON_COMMITTED_SETTLE {
+        let (committed, settle) = if constructing {
+            (gate.committed_unfinished_since(), INITIAL_COMMITTED_SETTLE)
+        } else {
+            (gate.hand_on_committed_since(), HAND_ON_COMMITTED_SETTLE)
+        };
+        if let Some(since) = committed {
+            if since.elapsed() >= settle {
                 gate.accept_committed_load();
+                self.hand_on_wake = None;
             } else if self.hand_on_wake.is_none() {
                 let guard = self.guard.clone();
                 self.hand_on_wake = crate::platform::imp::schedule_content_policy_timeout(
-                    HAND_ON_COMMITTED_SETTLE.saturating_sub(since.elapsed()),
+                    settle.saturating_sub(since.elapsed()) + Duration::from_millis(100),
                     move || {
                         let rejected = guard.clone();
                         if !crate::host::try_with_agent_context_terminal(move |host| {
@@ -473,7 +485,7 @@ impl WorkNativeResource {
                 );
             }
         }
-        if gate.finalization_pending() {
+        if !constructing && gate.finalization_pending() {
             self.hand_on_wake = None;
             match self.progress_document_finalization(&gate) {
                 DocumentFinalizationProgress::Ready(_) | DocumentFinalizationProgress::Pending => {}

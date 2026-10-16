@@ -56,7 +56,7 @@ const SIGN_IN_WORDS: &[&str] = &[
     "select_account",
 ];
 
-fn fragment_move(current: &ContextNavigationTarget, raw: &str) -> bool {
+pub(super) fn fragment_move(current: &ContextNavigationTarget, raw: &str) -> bool {
     ContextNavigationTarget::parse(raw).is_ok_and(|next| {
         next.as_url().fragment().is_some()
             && without_fragment(&next).as_url() == without_fragment(current).as_url()

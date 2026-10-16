@@ -1,5 +1,6 @@
 //! One native owner's capture receipt. Only a private, bracketed native capture
 //! can populate the slot; read-only image metadata cannot mint this receipt.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 use super::*;
 use crate::platform::semantic_pixel_privacy::ModelCapture;
 use zephium_agentic::{

@@ -889,6 +889,7 @@ impl AgentOwnedView {
         Some((dispatch, capture, privacy))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn dispatch_screenshot(
         &self,
         request: SemanticScreenshotNativeRequest,

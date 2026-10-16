@@ -62,6 +62,8 @@ struct State {
     page_loads_unstarted: u8,
     /// When the current load committed.
     committed_at: Option<Instant>,
+    /// The committed main document's address, before any route fragment.
+    document: Option<ContextNavigationTarget>,
     /// A public first load's refused redirect, safe to admit as a new read.
     redirect: Option<ContextNavigationTarget>,
     /// The redirect's failure was already handed to the resource owner.
@@ -223,6 +225,7 @@ impl Default for WorkDocumentNavigation {
             hand_on_pending: false,
             page_loads_unstarted: 0,
             committed_at: None,
+            document: None,
             redirect: None,
             redirect_reported: false,
             follow: None,
@@ -437,6 +440,21 @@ impl State {
 }
 
 impl State {
+    /// A move to a fragment of the committed document itself (a script's
+    /// `#inbox`, an app's hash route) loads nothing: it is admitted in place
+    /// and `location_changed` records the new address.
+    fn route_move(&self, raw: &str) -> bool {
+        self.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+            && matches!(
+                self.phase,
+                Phase::Committed | Phase::Finalizing | Phase::Sampling | Phase::Ready
+            )
+            && self.operation.is_none()
+            && self
+                .document
+                .as_ref()
+                .is_some_and(|document| human::fragment_move(document, raw))
+    }
     /// A same-site GET a ready site-session page starts by itself (a bot
     /// check that cleared, a timed refresh, a script redirect) while no
     /// action of the model's runs: cancelled, and kept for the controller,
@@ -640,12 +658,23 @@ impl WorkDocumentNavigation {
     /// page start (a saved consent, a confirmed commit): reads and actions
     /// of the old document end without leaving the resource uncertain.
     /// The settled document's own address, whatever is armed after it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn settled_target(&self) -> Option<ContextNavigationTarget> {
         let state = self.0.lock().ok()?;
         state.effective.clone()
     }
     pub(crate) fn handed_on(&self) -> bool {
         self.0.lock().is_ok_and(|state| state.handed_on)
+    }
+    /// When a site-session document committed without reporting its load
+    /// finished: a page that keeps loading while it is already usable.
+    pub(crate) fn committed_unfinished_since(&self) -> Option<Instant> {
+        let state = self.0.lock().ok()?;
+        (state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+            && state.phase == Phase::Committed
+            && state.native_id.is_some())
+        .then_some(state.committed_at)
+        .flatten()
     }
     /// When the document an admitted hand-on load committed did so, while it
     /// has not reported its load finished.
@@ -923,6 +952,9 @@ impl WorkDocumentNavigation {
             state.requested = true;
             return true;
         }
+        if state.route_move(target) {
+            return true;
+        }
         #[cfg(target_os = "windows")]
         if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
             && state.phase == Phase::Ready
@@ -1052,6 +1084,9 @@ impl WorkDocumentNavigation {
                     | Phase::Ready
             )
         {
+            return true;
+        }
+        if action.target_is_main_frame == Some(true) && action.is_get && state.route_move(target) {
             return true;
         }
         if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
@@ -1278,7 +1313,12 @@ impl WorkDocumentNavigation {
                 }
                 state.phase = Phase::Committed;
                 state.committed_at = Some(Instant::now());
-                Ok((true, false))
+                state.document = ContextNavigationTarget::parse(&event.url).ok();
+                // The host schedules the wait for a load that never finishes.
+                Ok((
+                    true,
+                    state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession,
+                ))
             }
             (Phase::Committed, E::Finished) if exact && state.native_id == Some(event.id) => {
                 #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
@@ -2259,6 +2299,24 @@ mod tests {
         assert!(!gate.accept_committed_load());
         settle(&gate, start);
         assert!(gate.ready(Some(start)) && !gate.failed());
+    }
+    #[test]
+    fn a_route_of_the_committed_document_is_no_new_load_and_a_load_that_never_ends_still_settles() {
+        let start = "https://mail.example.test/mail/u/0/";
+        let routed = "https://mail.example.test/mail/u/0/#inbox";
+        let gate = site_gate(start);
+        gate.observe(event(1, E::Started, start)).unwrap();
+        assert!(gate.committed_unfinished_since().is_none());
+        gate.observe(event(1, E::Committed, start)).unwrap();
+        assert!(gate.committed_unfinished_since().is_some());
+        assert!(gate.allows(routed));
+        assert!(!gate.failed());
+        assert_eq!(gate.location_changed(Some(routed)), Ok(false));
+        assert!(gate.accept_committed_load());
+        settle(&gate, routed);
+        assert!(gate.ready(Some(routed)) && !gate.failed());
+        assert!(gate.allows("https://mail.example.test/mail/u/0/#sent"));
+        assert!(!gate.allows("https://mail.example.test/mail/u/1/"));
     }
     #[cfg(target_os = "windows")]
     #[test]
