@@ -553,7 +553,13 @@ impl AgentProviderActionRefusal {
             (code, guidance)
         };
         let guidance = format!("{guidance}{}", hint.unwrap_or_default());
-        let guidance = if self.repeated {
+        // The same control is what the planner should propose again, with
+        // the effect named in the guidance itself: told only by reference
+        // to a field, it repeated `purchase` for an add to cart.
+        let guidance = if let SemanticActionBindingError::TaskEffectMismatch(expected) = self.error
+        {
+            guidance.replace("required_effect", effect_label(expected))
+        } else if self.repeated {
             format!("{guidance} This control was already refused on an earlier look, so trying it again will not work: change approach. Navigate to another address on this site that shows what you need (a link's destination, or the site's own search results address with your query), use the site's search or filter box, close what covers the page, or scroll and read what it already shows.")
         } else {
             guidance.to_owned()
