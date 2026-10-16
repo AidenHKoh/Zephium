@@ -1393,32 +1393,27 @@ impl AgentProviderContinuation {
             return Err(AgentProviderContinuationError::Payload);
         }
         let self_with_progress = self.with_verified_action_progress(result)?;
-        let suggestions = current
-            .frames()
-            .iter()
-            .flat_map(|frame| frame.nodes())
-            .filter(|node| {
-                node.role() == crate::SemanticRole::Option
-                    && node.geometry().is_some()
-                    && node
-                        .operations()
-                        .contains(crate::SemanticOperationClass::Click)
-            })
-            .take(8)
-            .map(|node| node.reference().model_token())
-            .collect::<Vec<_>>();
+        let suggestions = typed_choices(current);
         let suggested;
         let guidance = if result.verified().kind == crate::SemanticActionKind::Fill
             && !suggestions.is_empty()
         {
             // An airport or place field took the typed text but chose
             // nothing: the planner scrolled on and searched the old value.
-            suggested = format!("The prior action was independently verified: the text is in the field, and the page now lists suggestions for it ({}). Typing alone chooses nothing: your next step is a click on the suggestion that matches what you meant (effect read, verification page_changed); they are already on screen, so do not scroll or look again first. The field is set only when the page then shows your choice in it. This is the fresh post-action viewport. All prior semantic refs are retired. Use only current refs.", suggestions.join(", "));
+            suggested = format!("The prior action was independently verified: the text is in the field, and the page now shows choices for it ({}): suggestions, or a calendar's days. Typing alone chooses nothing: your next step is a click on the one that matches what you meant (effect read, verification page_changed); they are already on screen, so do not scroll or look again first. The field is set only when the page then shows your choice in it. This is the fresh post-action viewport. All prior semantic refs are retired. Use only current refs.", suggestions.join(", "));
+            suggested.as_str()
+        } else if let Some(field) = (result.verified().kind == crate::SemanticActionKind::Click)
+            .then(|| opened_field(current))
+            .flatten()
+        {
+            // Delta's origin button opens a picker whose focused field sits
+            // at the end of the look; planners scrolled past it.
+            suggested = format!("The prior action was independently verified. It opened a field the page focused for typing, {field}: if you clicked to choose a value (a place, a date, a search), fill {field} next, then pick the matching suggestion. This is the fresh post-action viewport. All prior semantic refs are retired. Use only current refs.");
             suggested.as_str()
         } else if result.verified().kind == crate::SemanticActionKind::Fill {
             // Planners typed a query and then scrolled or looked again,
             // never running it.
-            "The prior action was independently verified: the text is in the field. If the field searches or filters, run it now with press Enter in it (effect read, verification page_changed) or a click on its search button; do not scroll or look again first. This is the fresh post-action viewport. All prior semantic refs are retired. Use only current refs."
+            "The prior action was independently verified: the text is in the field. If it is a place, airport or date field whose suggestions are still loading, take one fresh look (snapshot initial) and click the matching suggestion. If the field searches or filters, run it now with press Enter in it (effect read, verification page_changed) or a click on its search button; do not scroll or look again first. This is the fresh post-action viewport. All prior semantic refs are retired. Use only current refs."
         } else {
             "The prior action was independently verified. This is the fresh post-action viewport: inspect it directly; another snapshot is only needed for missing details. All prior semantic refs are retired. Use only current refs. Truncation does not mean omitted content is absent."
         };
@@ -2603,6 +2598,65 @@ impl fmt::Debug for AgentProviderBoundScreenshotContinuation {
     }
 }
 
+/// The focused public text field a click left on screen.
+fn opened_field(look: &SemanticObservation) -> Option<String> {
+    use crate::SemanticRole as Role;
+    look.frames()
+        .iter()
+        .flat_map(|frame| frame.nodes())
+        .find(|node| {
+            matches!(
+                node.role(),
+                Role::Textbox | Role::Searchbox | Role::Combobox
+            ) && node.states().contains(crate::SemanticState::Focused)
+                && node.geometry().is_some()
+                && node.sensitivity() == crate::SemanticSensitivity::Public
+                && node
+                    .operations()
+                    .contains(crate::SemanticOperationClass::Fill)
+        })
+        .map(|node| node.reference().model_token())
+}
+
+/// On-screen choices a typed field opened: a listbox's options, or the
+/// buttons of a list or calendar grid in a popup (Expedia's airports, a
+/// date picker's days).
+fn typed_choices(look: &SemanticObservation) -> Vec<String> {
+    use crate::SemanticRole as Role;
+    let mut choices = Vec::new();
+    for frame in look.frames() {
+        let nodes = frame.nodes();
+        let within = |node: &crate::SemanticNode, roles: &[Role]| {
+            let mut parent = node.parent();
+            while let Some(index) = parent {
+                let Some(ancestor) = nodes.get(usize::from(index)) else {
+                    return false;
+                };
+                if roles.contains(&ancestor.role()) {
+                    return true;
+                }
+                parent = ancestor.parent();
+            }
+            false
+        };
+        for node in nodes {
+            let choice = node.geometry().is_some()
+                && node
+                    .operations()
+                    .contains(crate::SemanticOperationClass::Click)
+                && (node.role() == Role::Option
+                    || (matches!(node.role(), Role::Button | Role::Link | Role::Cell)
+                        && (within(node, &[Role::Listbox])
+                            || (within(node, &[Role::Dialog])
+                                && within(node, &[Role::List, Role::Table])))));
+            if choice && choices.len() < 12 {
+                choices.push(node.reference().model_token());
+            }
+        }
+    }
+    choices
+}
+
 #[cfg(test)]
 mod tests {
     // Fixture constructors live with the tests so production stays panic-free.
@@ -3494,6 +3548,31 @@ mod tests {
         .join_terminal_tool(completion(prior, arguments.len() as u32), correlation)
         .unwrap();
         super::super::AgentProviderSettledToolTurn::for_test(proposal, continuation)
+    }
+
+    #[test]
+    fn a_typed_fields_suggestions_and_calendar_days_are_named_as_its_choices() {
+        let at = json!({"x": 10, "y": 10, "w": 80, "h": 20});
+        let picker = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"textbox","n":"Leaving from","o":11,"s":64,"b":at,"v":{"k":"text","value":"New York"}},
+                {"k":3,"p":0,"r":"dialog","n":"More details"},
+                {"k":4,"p":2,"r":"list"},
+                {"k":5,"p":3,"r":"button","n":"New York (JFK)","o":1,"b":at},
+                {"k":6,"p":0,"r":"listbox","n":"Airports"},
+                {"k":7,"p":5,"r":"option","n":"LGA","o":1,"b":at},
+                {"k":8,"p":0,"r":"dialog","n":"Cookies"},
+                {"k":9,"p":7,"r":"button","n":"Reject all","o":1,"b":at},
+                {"k":10,"p":0,"r":"button","n":"Search","o":1,"b":at}
+            ]),
+        );
+        assert_eq!(typed_choices(&picker), vec!["@a5", "@a7"]);
+        assert_eq!(opened_field(&picker).as_deref(), Some("@a2"));
     }
 
     #[test]
