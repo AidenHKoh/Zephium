@@ -4059,6 +4059,11 @@ impl AgentWorkController {
                                             SemanticActionBindingError::TaskEffectMismatch(effect),
                                         )
                                         .ok_or_else(|| crate::contract!())?),
+                                    Err(AgentWorkFailure::AlreadyDone) => Err(proposal
+                                        .into_refusal(
+                                            SemanticActionBindingError::OutcomeAlreadySatisfied,
+                                        )
+                                        .ok_or_else(|| crate::contract!())?),
                                     Err(failure) => return Err(failure),
                                 }
                             }
@@ -4868,7 +4873,11 @@ impl AgentWorkController {
         };
         let assessment = match state.task.assess_observed(proposal.action(), observation) {
             Ok(assessment) => assessment,
-            Err(error @ (AgentWorkFailure::ActionDenied | AgentWorkFailure::EffectRequired(_))) => {
+            Err(
+                error @ (AgentWorkFailure::ActionDenied
+                | AgentWorkFailure::EffectRequired(_)
+                | AgentWorkFailure::AlreadyDone),
+            ) => {
                 #[cfg(feature = "probe-harness")]
                 eprintln!("owned-read: none=assess {error:?}");
                 let _ = error;
@@ -7265,6 +7274,9 @@ pub enum AgentWorkFailure {
     ActionDenied,
     /// The proposal must declare this effect, which the page shows it has.
     EffectRequired(SemanticEffectClass),
+    /// The proposal repeats a commitment this page already made (a second
+    /// add to cart of the same item); nothing is issued.
+    AlreadyDone,
 }
 
 pub(super) struct WorkEvents {

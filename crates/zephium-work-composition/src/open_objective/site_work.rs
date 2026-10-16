@@ -1153,6 +1153,8 @@ struct GateState {
     receipt: Option<Receipt>,
     verified_approval: bool,
     declined: Vec<[u8; 32]>,
+    /// Add-to-cart controls already pressed: a second press adds a second item.
+    carted: Vec<[u8; 32]>,
     /// Status lines seen before the last step, for the commit detector.
     status_before: Vec<String>,
     unconfirmed: Option<String>,
@@ -1380,6 +1382,26 @@ fn status_lines(observation: &SemanticObservation) -> Vec<String> {
         .map(|node| clip(&label(node), MAX_LINE))
         .filter(|line| !line.is_empty())
         .collect()
+}
+
+/// One item's add-to-cart control: the control and the page's own title
+/// and main heading, so another product's button is another item.
+fn cart_item(fingerprint: &Fingerprint, snapshot: &SemanticSnapshot) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(fingerprint.structure);
+    let nodes = snapshot.nodes();
+    let title = nodes.iter().find(|node| {
+        node.name()
+            .is_some_and(|name| name.as_str() == "Page title")
+    });
+    let heading = nodes
+        .iter()
+        .find(|node| node.role() == SemanticRole::Heading);
+    for node in [title, heading].into_iter().flatten() {
+        hasher.update(label(node).as_bytes());
+        hasher.update([0]);
+    }
+    hasher.finalize().into()
 }
 
 pub(crate) struct SiteWorkPolicy {
@@ -1760,6 +1782,15 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
                 return Err(AgentWorkFailure::EffectRequired(
                     SemanticEffectClass::ExternalWrite,
                 ));
+            }
+            // The planner pressed Add to cart again after the page said it
+            // was added, putting the item in three times.
+            if names_any(&label(node), &CART_WORDS) {
+                let item = cart_item(&fingerprint, snapshot);
+                if state.carted.contains(&item) {
+                    return Err(AgentWorkFailure::AlreadyDone);
+                }
+                state.carted.push(item);
             }
             state.status_before = status_lines(observation);
             return accept_approved(current_binding);
@@ -2184,6 +2215,29 @@ mod tests {
         assert_eq!(commit_words(" dodaj do koszyka "), Some(Consequence::Save));
         assert_eq!(commit_words(" place order "), Some(Consequence::Purchase));
         assert_eq!(commit_words(" buy now "), Some(Consequence::Purchase));
+    }
+
+    #[test]
+    fn an_item_already_added_to_the_cart_is_not_added_again() {
+        let product = |name: &str| {
+            page(vec![
+                json!({"k":1,"r":"document","o":16}),
+                json!({"k":2,"p":0,"r":"heading","l":1,"n":name}),
+                json!({"k":3,"p":0,"r":"button","n":"Add to cart","o":1,"ak":1,"b":{"x":1,"y":1,"w":80,"h":30}}),
+            ])
+        };
+        let policy = SiteWorkPolicy {
+            gate: Arc::new(SiteGate::new("shop.example".into(), true, false)),
+            asks: true,
+        };
+        let pliers = product("Combination Pliers");
+        let add = |look: &SemanticObservation| {
+            policy.assess(&click(look, 3, SemanticEffectClass::ExternalWrite), look)
+        };
+        assert!(add(&pliers).is_ok());
+        assert_eq!(add(&pliers).err(), Some(AgentWorkFailure::AlreadyDone));
+        // Another product's button is another item.
+        assert!(add(&product("Slip Joint Pliers")).is_ok());
     }
 
     #[test]
