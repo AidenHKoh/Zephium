@@ -1,6 +1,6 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
-  import { Add01Icon, PencilEdit02Icon, Tick02Icon } from "@hugeicons/core-free-icons";
+  import { Add01Icon, PencilEdit02Icon } from "@hugeicons/core-free-icons";
   import type { SpaceView } from "$shared/ipc/bindings";
   import { tabs } from "$domain/tabs";
   import { keymap } from "$domain/keymap";
@@ -27,6 +27,13 @@
     onedit: (space: SpaceView) => void;
     onnew: () => void;
   } = $props();
+
+  const countOf = (count: number) =>
+    count === 0
+      ? m.space_tabs_none()
+      : count === 1
+        ? m.space_tabs_one()
+        : m.space_tabs_other({ count });
 
   function keysFor(index: number) {
     const accelerator = keymap
@@ -93,11 +100,13 @@
     <div
       class="switch-row"
       data-space-row
+      data-current={current || undefined}
       data-held={held?.id === space.id && moved ? "" : undefined}
       data-drop-before={held && moved && held.to === index && held.from !== index ? "" : undefined}
       data-drop-after={held && moved && held.to === spaces.length && index === spaces.length - 1
         ? ""
         : undefined}
+      style:--step={index}
     >
       <button
         type="button"
@@ -111,19 +120,20 @@
         onkeydown={(event) => keydown(event, index)}
         onclick={() => choose(space.id)}
       >
-        <span class="switch-glyph"
+        <span class="switch-tile" data-space-hue={space.color}
           ><SpaceGlyph
             icon={space.icon}
             color={space.color}
             name={space.name}
-            fallback="dot"
+            size={16}
+            fallback="monogram"
           /></span
         >
-        <span class="switch-name">{space.name}</span>
+        <span class="switch-text">
+          <span class="switch-name">{space.name}</span>
+          <span class="switch-count">{countOf(space.tabs)}</span>
+        </span>
         {#if keys}<span class="switch-keys">{keys}</span>{/if}
-        <span class="switch-mark"
-          >{#if current}<Icon icon={Tick02Icon} size={14} strokeWidth={2} />{/if}</span
-        >
       </button>
       <button
         type="button"
@@ -139,11 +149,14 @@
     type="button"
     role="menuitem"
     class="ui-menu-item switch-new"
+    style:--step={spaces.length}
     aria-disabled={making || undefined}
     onclick={() => !making && onnew()}
   >
-    <span class="switch-glyph"><Icon icon={Add01Icon} size={15} strokeWidth={1.8} /></span>
-    <span>{m.space_new()}</span>
+    <span class="switch-tile switch-tile-new"
+      ><Icon icon={Add01Icon} size={15} strokeWidth={1.8} /></span
+    >
+    <span class="switch-name">{m.space_new()}</span>
   </button>
   {#if failed}<p class="switch-error" role="alert">{m.space_new_failed()}</p>{/if}
 </div>
@@ -152,6 +165,7 @@
   .switcher {
     display: flex;
     flex-direction: column;
+    gap: 2px;
     min-width: 0;
   }
 
@@ -159,6 +173,14 @@
     position: relative;
     display: flex;
     align-items: center;
+    border-radius: calc(var(--radius-menu) - var(--menu-pad));
+    animation: switch-in var(--motion-slow) var(--ease-out) both;
+    animation-delay: calc(var(--step) * 16ms);
+  }
+
+  .switch-row[data-current] {
+    background: var(--row-active);
+    box-shadow: var(--row-rim);
   }
 
   .switch-pick,
@@ -166,8 +188,8 @@
     flex: 1;
     min-width: 0;
     width: 100%;
-    min-height: 32px;
-    padding-block: 4px;
+    min-height: 46px;
+    padding: 5px 10px 5px 8px;
     border: 0;
     background: transparent;
     font: inherit;
@@ -176,7 +198,10 @@
   }
 
   .switch-new {
+    min-height: 40px;
     color: var(--color-muted);
+    animation: switch-in var(--motion-slow) var(--ease-out) both;
+    animation-delay: calc(var(--step) * 16ms);
   }
 
   .switch-new[aria-disabled] {
@@ -189,6 +214,7 @@
   .switch-new:focus-visible {
     outline: none;
     background: var(--row-active);
+    color: var(--color-text);
   }
 
   .switch-pick:active,
@@ -196,28 +222,80 @@
     background: var(--row-pressed);
   }
 
-  /* One column for every mark, so names line up whatever a space wears. */
-  .switch-glyph {
-    display: grid;
-    flex: none;
-    width: 18px;
-    place-items: center;
+  .switch-row[data-current] .switch-pick:hover {
+    background: transparent;
   }
 
-  .switch-new .switch-glyph {
+  /* The space's own colour in a tile, one column for every mark so names line
+     up whatever a space wears. The one in front is filled solid. */
+  .switch-tile {
+    display: grid;
+    flex: none;
+    inline-size: 30px;
+    block-size: 30px;
+    border-radius: var(--radius-inset);
+    background: color-mix(in srgb, var(--space-hue) 17%, transparent);
+    place-items: center;
+    transition: background-color var(--motion-fast) var(--ease-out);
+  }
+
+  .switch-row[data-current] .switch-tile {
+    background: var(--space-hue);
+    box-shadow: var(--shine-top);
+  }
+
+  .switch-row[data-current] .switch-tile :global(.space-glyph) {
+    color: var(--color-on-accent);
+  }
+
+  .switch-tile[data-space-hue="0"] {
+    background: var(--color-fill);
+  }
+
+  .switch-row[data-current] .switch-tile[data-space-hue="0"] {
+    background: var(--color-fill-hover);
+  }
+
+  .switch-row[data-current] .switch-tile[data-space-hue="0"] :global(.space-glyph) {
+    color: var(--color-text);
+  }
+
+  .switch-tile-new {
+    border: 1px dashed var(--color-border);
+    background: transparent;
     color: var(--color-faint);
   }
 
-  .switch-name {
+  .switch-new:hover .switch-tile-new,
+  .switch-new:focus-visible .switch-tile-new {
+    border-style: solid;
+    color: var(--color-text);
+  }
+
+  .switch-text {
+    display: flex;
     flex: 1;
+    flex-direction: column;
+    gap: 1px;
     min-width: 0;
+  }
+
+  .switch-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    line-height: 18px;
   }
 
   .switch-pick[aria-checked="true"] .switch-name {
     font-weight: 600;
+  }
+
+  .switch-count {
+    color: var(--color-faint);
+    font-size: var(--text-label);
+    font-variant-numeric: tabular-nums;
+    line-height: 14px;
   }
 
   .switch-keys {
@@ -228,28 +306,20 @@
     transition: opacity var(--motion-instant) var(--ease-out);
   }
 
-  .switch-mark {
-    display: grid;
-    flex: none;
-    width: 14px;
-    color: var(--color-text);
-    place-items: center;
-  }
-
-  /* Edit waits at the row's end and stands in for its key on approach. */
+  /* Edit stands where the key does and takes its place on approach. */
   .switch-edit {
     position: absolute;
     display: grid;
-    width: 26px;
-    height: 26px;
+    width: 30px;
+    height: 30px;
     padding: 0;
     border: 0;
-    border-radius: 50%;
+    border-radius: var(--radius-inset);
     background: transparent;
     color: var(--color-muted);
     opacity: 0;
     place-items: center;
-    inset-inline-end: 26px;
+    inset-inline-end: 6px;
     pointer-events: none;
     transition:
       opacity var(--motion-fast) var(--ease-out),
@@ -266,12 +336,14 @@
     pointer-events: auto;
   }
 
-  .switch-row:hover .switch-edit {
+  .switch-row:hover .switch-edit,
+  .switch-row:focus-within .switch-edit {
     opacity: 1;
     pointer-events: auto;
   }
 
-  .switch-row:hover .switch-keys {
+  .switch-row:hover .switch-keys,
+  .switch-row:focus-within .switch-keys {
     opacity: 0;
   }
 
@@ -290,11 +362,11 @@
   }
 
   .switch-row[data-drop-before]::before {
-    inset-block-start: -1px;
+    inset-block-start: -2px;
   }
 
   .switch-row[data-drop-after]::after {
-    inset-block-end: -1px;
+    inset-block-end: -2px;
   }
 
   .switch-rule {
@@ -310,9 +382,22 @@
     line-height: 16px;
   }
 
+  @keyframes switch-in {
+    from {
+      opacity: 0;
+      translate: 0 -5px;
+    }
+  }
+
   @media (prefers-reduced-motion: reduce) {
-    .switch-edit {
+    .switch-edit,
+    .switch-tile {
       transition: none;
+    }
+
+    .switch-row,
+    .switch-new {
+      animation: none;
     }
   }
 </style>

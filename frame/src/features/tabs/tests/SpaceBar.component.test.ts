@@ -192,47 +192,109 @@ test("an empty space offers a new tab instead of a blank column", async () => {
   expect(native.open).toHaveBeenCalledOnce();
 });
 
-test("a sideways swipe over the list follows the fingers, then moves to the next space once", async () => {
+const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+const sheetOf = (screen: { container: HTMLElement }) =>
+  screen.container.querySelector<HTMLElement>(".space-sheet")!;
+const swipe = (target: HTMLElement, deltaX: number, count = 6, deltaY = 0, natural = true) => {
+  for (let index = 0; index < count; index += 1) {
+    const wheel = new WheelEvent("wheel", { deltaX, deltaY, bubbles: true });
+    Object.defineProperty(wheel, "webkitDirectionInvertedFromDevice", { value: natural });
+    target.dispatchEvent(wheel);
+  }
+};
+
+test("a sideways swipe moves the spaces as one sheet and settles on the next one", async () => {
   const screen = await mount();
   const list = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
-  const natural = true;
-  const swipe = (deltaX: number, count = 6, deltaY = 0) => {
-    for (let index = 0; index < count; index += 1) {
-      const wheel = new WheelEvent("wheel", { deltaX, deltaY, bubbles: true });
-      Object.defineProperty(wheel, "webkitDirectionInvertedFromDevice", { value: natural });
-      list.dispatchEvent(wheel);
-    }
-  };
-  // Fingers to the right on the first space: the list resists and comes back.
-  swipe(-6, 4);
+  const sheet = sheetOf(screen);
+  // Fingers to the right on the first space: nothing to go to, so the sheet
+  // resists and comes back.
+  swipe(list, -6, 4);
+  await frame();
   expect(native.step).not.toHaveBeenCalled();
-  expect(Number.parseFloat(list.style.translate)).toBeGreaterThan(0);
-  await expect.poll(() => list.style.translate, { timeout: 1000 }).toBe("");
+  expect(sheet.style.transform).toMatch(/^translate3d\(\d/);
+  await expect.poll(() => sheet.style.transform, { timeout: 2000 }).toBe("");
+  await expect.poll(() => screen.container.querySelector(".peek")).toBeNull();
 
   // Mostly vertical: not ours.
-  swipe(3, 6, 20);
-  expect(list.style.translate).toBe("");
+  swipe(list, 3, 6, 20);
+  await frame();
+  expect(sheet.style.transform).toBe("");
   await new Promise((resolve) => setTimeout(resolve, 200));
 
-  swipe(30);
+  // Fingers to the left: the next space is already there, arriving from the edge.
+  swipe(list, 30);
   expect(native.step).toHaveBeenCalledExactlyOnceWith(1);
+  await frame();
+  await frame();
+  expect(sheet.style.transform).toMatch(/^translate3d\(-/);
+  const next = screen.container.querySelector<HTMLElement>('.peek[data-sheet="next"]');
+  expect(next).not.toBeNull();
+  // The one being left steps back; the one arriving is brighter than it.
+  expect(Number.parseFloat(list.style.opacity)).toBeLessThan(1);
 
-  expect(list.style.translate).toBe("");
-  expect(
-    list
-      .getAnimations()
-      .some((animation) => (animation.effect as KeyframeEffect).getKeyframes().length === 2),
-  ).toBe(true);
+  // Native has moved: the sheet carries on from where it is and rests.
+  project({ spaces: [HOME, STUDIO], active_space_id: "studio" });
+  await expect.poll(() => sheet.style.transform, { timeout: 2000 }).toBe("");
+  expect(list.style.opacity).toBe("");
+  await expect.poll(() => screen.container.querySelector(".peek")).toBeNull();
+});
+
+test("a neighbour the window has shown is drawn as it was, its own tab lit", async () => {
+  const screen = await mount();
+  const list = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
+  const studioTabs = [
+    tabFixture({ id: "s1", title: "Moodboard" }),
+    tabFixture({ id: "s2", title: "Palette" }),
+  ];
+  const node = (id: string): SidebarNodeView => ({
+    id,
+    parent_id: null,
+    section: "today",
+    kind: { type: "tab", tab_id: id },
+  });
+  project({
+    active_space_id: "studio",
+    nodes: studioTabs.map((tab) => node(tab.id)),
+    tabs: studioTabs,
+    active: "s2",
+  });
+  await frame();
+  project({});
+  await frame();
+  swipe(list, 30);
+  await frame();
+  await frame();
+  const next = screen.container.querySelector<HTMLElement>('.peek[data-sheet="next"]')!;
+  expect(next.textContent).toContain("Moodboard");
+  expect(next.querySelector('[data-selected="true"]')?.textContent).toContain("Palette");
+  // A drawn copy is never a tab to native: it carries none of its markers.
+  expect(next.querySelector("[data-zephium-tab-id]")).toBeNull();
+  expect(next.inert).toBe(true);
+});
+
+test("a swipe the native side refuses brings the sheet back", async () => {
+  native.step.mockImplementationOnce(async () => ({ accepted: false, operation_id: null }));
+  const screen = await mount();
+  const list = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
+  swipe(list, 30);
+  await frame();
+  await expect.poll(() => sheetOf(screen).style.transform, { timeout: 2000 }).toBe("");
+});
+
+test("a space something else switched to slides in without a sheet", async () => {
+  const screen = await mount();
+  project({ active_space_id: "studio" });
+  await frame();
+  expect(sheetOf(screen).style.transform).toMatch(/^translate3d\(/);
+  expect(screen.container.querySelector(".peek")).toBeNull();
+  await expect.poll(() => sheetOf(screen).style.transform, { timeout: 2000 }).toBe("");
 });
 
 test("the fingers decide the direction whichever way the wheel is set to run", async () => {
   const screen = await mount();
   const list = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
-  for (let index = 0; index < 6; index += 1) {
-    const wheel = new WheelEvent("wheel", { deltaX: -30, bubbles: true });
-    Object.defineProperty(wheel, "webkitDirectionInvertedFromDevice", { value: false });
-    list.dispatchEvent(wheel);
-  }
+  swipe(list, -30, 6, 0, false);
   expect(native.step).toHaveBeenCalledExactlyOnceWith(1);
 });
 

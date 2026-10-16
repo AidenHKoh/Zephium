@@ -1,19 +1,29 @@
 import { tabs } from "$domain/tabs";
 import { haptic } from "$shared/lib/haptic";
-import { duration, easing, reducedMotion } from "$shared/lib/motion";
+import { reducedMotion } from "$shared/lib/motion";
 import { SwipeTracker, type Reading, type SwipeStep } from "./swipe-track";
+import { advance, atRest, launch, type Motion } from "./sheet-spring";
 
 /** Wheel events stop arriving this long after the fingers lift and momentum fades. */
 const IDLE = 90;
-/** How long a committed list waits for its space to arrive before coming back. */
+/** How long a committed sheet waits for its space to arrive before coming back. */
 const ARRIVAL = 700;
-/** How far the list leaves and enters, as a share of its width. */
-const REACH = 0.5;
+/** The room between one space's sheet and the next. */
+const SHEET_GAP = 12;
+/** How far a space that something else switched to slides in. */
+const SOFT = 56;
+/** What a sheet gives up as it leaves the middle: light, and a little size. */
+const DIM = 0.5;
+const SHRINK = 0.03;
 
 type Options = {
   canStep: (step: SwipeStep) => boolean;
   /** Resolves false when native refused the step. */
   step: (step: SwipeStep) => Promise<boolean> | void;
+  /** The group of sheets that moves as one: the neighbours either side of the current list. */
+  sheet: () => HTMLElement | undefined;
+  /** Whether the neighbours need drawing: true from the first sideways travel until the sheet is home. */
+  peek: (on: boolean) => void;
 };
 
 type Wheel = WheelEvent & { webkitDirectionInvertedFromDevice?: boolean };
@@ -28,92 +38,147 @@ export async function stepSpace(step: SwipeStep): Promise<boolean> {
 
 const controls = new WeakMap<HTMLElement, Control>();
 
-const translateX = (node: HTMLElement) => {
-  const value = getComputedStyle(node).translate;
-  return value === "none" ? 0 : Number.parseFloat(value) || 0;
-};
-
 /**
- * A two-finger sideways swipe over the list moves to the neighbouring space:
- * the list follows the fingers, leaves when it commits and the next space
- * arrives from the other side; a short one springs back. See SwipeTracker for
- * what counts as a swipe. A timer runs only while the fingers are down, and a
- * second only while a committed list waits for its space.
+ * A two-finger sideways swipe over the column moves to the neighbouring space.
+ * The spaces are laid side by side as one sheet that follows the fingers one
+ * to one: the neighbour is already there, arriving from the edge, and the
+ * space being left steps back a little. Past the distance it takes over and
+ * a spring carries it the rest of the way from the speed the fingers had; a
+ * short one springs home. Everything that moves is a transform or an opacity,
+ * written by one frame callback that only exists while something is moving.
+ * See SwipeTracker for what counts as a swipe.
  */
 export function spaceSwipe(node: HTMLElement, options: Options) {
   let current = options;
+  // Over the whole column, not only the list: the pointer is on the sidebar.
+  const host = node.closest<HTMLElement>(".sidebar-browser-column") ?? node;
   const tracker = new SwipeTracker({
     extent: () => node.clientWidth || 240,
     canStep: (step) => current.canStep(step),
   });
+  const motion: Motion = { x: 0, v: 0 };
+  let mode: "rest" | "track" | "spring" = "rest";
+  let target = 0;
+  let pending = 0;
+  let base = 0;
+  let heard = 0;
+  let last = 0;
+  let frame = 0;
+  /** The step this sheet has committed to and is still waiting for. */
+  let held: SwipeStep | 0 = 0;
+  let soft = false;
+  let peeking = false;
   let idle: ReturnType<typeof setTimeout> | undefined;
   let waiting: ReturnType<typeof setTimeout> | undefined;
-  let heard = 0;
-  let base = 0;
-  let settling: Animation | undefined;
-  let leaving: Animation | undefined;
-  let leftBy: SwipeStep = 1;
 
-  const extent = () => node.clientWidth || 240;
-  const place = (offset: number) => {
-    node.style.translate = offset === 0 ? "" : `${offset}px 0`;
+  const spread = () => (node.clientWidth || 240) + SHEET_GAP;
+  const part = (sheet: HTMLElement, which: string) =>
+    sheet.querySelector<HTMLElement>(`[data-sheet="${which}"]`);
+
+  function depth(element: HTMLElement | null, away: number, span: number) {
+    if (!element) return;
+    const t = Math.min(1, Math.abs(away) / span);
+    element.style.opacity = t < 0.002 ? "" : (1 - DIM * t).toFixed(3);
+    element.style.scale = t < 0.002 ? "" : (1 - SHRINK * t).toFixed(4);
+  }
+
+  function paint() {
+    const sheet = current.sheet();
+    if (!sheet) return;
+    const x = motion.x;
+    sheet.style.transform = x === 0 ? "" : `translate3d(${x}px, 0, 0)`;
+    if (soft) {
+      depth(part(sheet, "current"), x, SOFT);
+      return;
+    }
+    const reach = spread();
+    depth(part(sheet, "prev"), x - reach, reach);
+    depth(part(sheet, "current"), x, reach);
+    depth(part(sheet, "next"), x + reach, reach);
+  }
+
+  function clear() {
+    const sheet = current.sheet();
+    if (!sheet) return;
+    sheet.style.transform = "";
+    sheet.style.willChange = "";
+    for (const which of ["prev", "current", "next"]) {
+      const element = part(sheet, which);
+      if (element) {
+        element.style.opacity = "";
+        element.style.scale = "";
+      }
+    }
+  }
+
+  function home() {
+    mode = "rest";
+    soft = false;
+    motion.x = 0;
+    motion.v = 0;
+    clear();
+    if (peeking) {
+      peeking = false;
+      current.peek(false);
+    }
+  }
+
+  function tick(now: number) {
+    frame = 0;
+    if (mode === "track") {
+      motion.x = pending;
+      paint();
+      return;
+    }
+    if (mode !== "spring") return;
+    advance(motion, target, now - last);
+    last = now;
+    if (atRest(motion, target)) {
+      motion.x = target;
+      motion.v = 0;
+      paint();
+      // A committed sheet stays where it has arrived until its space does.
+      if (held === 0) home();
+      return;
+    }
+    paint();
+    frame = requestAnimationFrame(tick);
+  }
+
+  function run(to: number) {
+    target = to;
+    mode = "spring";
+    last = performance.now();
+    if (!frame) frame = requestAnimationFrame(tick);
+  }
+
+  const wake = () => {
+    if (peeking) return;
+    peeking = true;
+    current.peek(true);
   };
 
-  function release() {
-    node.style.willChange = "";
-    node.style.translate = "";
-  }
-
-  function spring(from: number) {
-    settling?.cancel();
-    release();
-    if (from === 0 || typeof node.animate !== "function") return;
-    settling = node.animate([{ translate: `${from}px 0` }, { translate: "0 0" }], {
-      duration: duration("slow"),
-      easing: easing("spring"),
-    });
-  }
-
-  function leave(step: SwipeStep, from: number, velocity: number) {
-    release();
-    leftBy = step;
-    if (reducedMotion() || typeof node.animate !== "function") return;
-    const to = (step === 1 ? -1 : 1) * extent() * REACH;
-    const travel = Math.abs(to - from);
-    const ms = Math.min(190, Math.max(90, travel / Math.max(Math.abs(velocity), 0.9)));
-    leaving = node.animate(
-      [
-        { translate: `${from}px 0`, opacity: 1 },
-        { translate: `${to}px 0`, opacity: 0 },
-      ],
-      { duration: ms, easing: easing("out"), fill: "forwards" },
-    );
-  }
-
+  /** Back to the space it was in: the one thing a refused or late step leaves to do. */
   function recover() {
     clearTimeout(waiting);
     waiting = undefined;
-    if (!leaving) return;
-    const from = (leftBy === 1 ? -1 : 1) * extent() * REACH;
-    leaving.cancel();
-    leaving = undefined;
-    if (typeof node.animate !== "function") return;
-    settling = node.animate(
-      [
-        { translate: `${from}px 0`, opacity: 0 },
-        { translate: "0 0", opacity: 1 },
-      ],
-      { duration: duration("slow"), easing: easing("spring") },
-    );
+    if (held === 0) return;
+    held = 0;
+    run(0);
   }
 
   function commit(reading: Extract<Reading, { kind: "commit" }>) {
     clearTimeout(idle);
     idle = undefined;
     haptic("level");
-    leave(reading.step, base + reading.offset, reading.velocity);
-    base = 0;
-    if (leaving) waiting = setTimeout(recover, ARRIVAL);
+    if (!reducedMotion()) {
+      wake();
+      motion.x = Math.max(-spread(), Math.min(spread(), base + reading.offset));
+      motion.v = launch(reading.velocity);
+      held = reading.step;
+      run(-reading.step * spread());
+      waiting = setTimeout(recover, ARRIVAL);
+    }
     void Promise.resolve(current.step(reading.step)).then((accepted) => {
       if (accepted === false) recover();
     });
@@ -122,15 +187,22 @@ export function spaceSwipe(node: HTMLElement, options: Options) {
   function apply(reading: Reading) {
     if (reading.kind === "track") {
       if (reducedMotion()) return;
-      settling?.cancel();
-      settling = undefined;
-      node.style.willChange = "translate";
-      place(base + reading.offset);
+      wake();
+      if (mode !== "track") {
+        mode = "track";
+        soft = false;
+        motion.v = 0;
+      }
+      const reach = spread();
+      pending = Math.max(-reach, Math.min(reach, base + reading.offset));
+      current.sheet()?.style.setProperty("will-change", "transform");
+      if (!frame) frame = requestAnimationFrame(tick);
     } else if (reading.kind === "commit") commit(reading);
     else if (reading.kind === "cancel") {
-      if (!reducedMotion()) spring(base + reading.offset);
-      else release();
-      base = 0;
+      if (reducedMotion() || mode !== "track") return;
+      motion.x = pending;
+      motion.v = 0;
+      run(0);
     }
   }
 
@@ -148,11 +220,13 @@ export function spaceSwipe(node: HTMLElement, options: Options) {
   }
 
   function onwheel(event: Wheel) {
-    if (event.ctrlKey || event.deltaMode !== 0 || leaving) return;
+    if (event.ctrlKey || event.deltaMode !== 0 || held !== 0) return;
+    if (event.target instanceof Element && event.target.closest("input, textarea, select")) return;
     heard = performance.now();
     const natural = event.webkitDirectionInvertedFromDevice !== false;
     const fingers = natural ? -event.deltaX : event.deltaX;
-    if (!tracker.tracking) base = settling ? translateX(node) : 0;
+    // A sheet still settling is taken up from where it is.
+    if (!tracker.tracking) base = mode === "spring" ? motion.x : 0;
     apply(tracker.wheel(fingers, event.deltaY, heard));
     watch();
   }
@@ -161,23 +235,26 @@ export function spaceSwipe(node: HTMLElement, options: Options) {
     arrive(side) {
       clearTimeout(waiting);
       waiting = undefined;
-      const wasLeaving = leaving !== undefined;
-      leaving?.cancel();
-      leaving = undefined;
-      if (reducedMotion() || typeof node.animate !== "function") return;
-      const from = wasLeaving ? side * extent() * REACH : side * 28;
-      settling?.cancel();
-      settling = node.animate(
-        [
-          { translate: `${from}px 0`, opacity: 0 },
-          { translate: "0 0", opacity: 1 },
-        ],
-        { duration: duration(wasLeaving ? "slow" : "base"), easing: easing("spring") },
-      );
+      if (held !== 0) {
+        // The space this sheet was carried to has come: it is the current
+        // list now, and the one left behind is its neighbour.
+        motion.x += held * spread();
+        held = 0;
+        paint();
+        run(0);
+        return;
+      }
+      if (reducedMotion() || mode === "track") return;
+      tracker.reset();
+      soft = true;
+      motion.x = side * SOFT;
+      motion.v = 0;
+      paint();
+      run(0);
     },
   });
 
-  node.addEventListener("wheel", onwheel, { passive: true });
+  host.addEventListener("wheel", onwheel, { passive: true });
   return {
     update(next: Options) {
       current = next;
@@ -185,18 +262,17 @@ export function spaceSwipe(node: HTMLElement, options: Options) {
     destroy() {
       clearTimeout(idle);
       clearTimeout(waiting);
-      settling?.cancel();
-      leaving?.cancel();
-      release();
+      if (frame) cancelAnimationFrame(frame);
+      home();
       tracker.reset();
       controls.delete(node);
-      node.removeEventListener("wheel", onwheel);
+      host.removeEventListener("wheel", onwheel);
     },
   };
 }
 
-/** The list arriving from the side its space stands on: from where a swipe
- *  sent the last one, or a short slide when something else moved the window. */
+/** The list arriving from the side its space stands on, when something other
+ *  than a swipe moved the window there. A swipe's own sheet is already on its way. */
 export function arrive(node: HTMLElement | undefined, side: SwipeStep) {
   if (!node) return;
   controls.get(node)?.arrive(side);

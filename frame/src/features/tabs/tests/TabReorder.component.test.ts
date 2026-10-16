@@ -96,12 +96,14 @@ test("dragging a row down its list opens a slot and drops it there", async () =>
   const { init } = drag(handle, { x: target.left + 20, y: target.bottom - 4 });
   await frame();
 
-  // The row itself follows; the rows it passed have moved up to make room.
+  // The row waits in the slot its drop would take, a card of it is with the
+  // pointer, and the rows it passed have moved up to make room.
   expect(row("a").hasAttribute("data-lifted")).toBe(true);
+  expect(row("a").style.transform).toContain("translateY(");
   expect(row("b").style.transform).toContain("translateY(-");
   expect(row("c").style.transform).toContain("translateY(-");
   expect(row("d").style.transform).toBe("");
-  expect(document.querySelector(".drag-card")).toBeNull();
+  expect(document.querySelector(".drag-card")).not.toBeNull();
 
   handle.dispatchEvent(
     new PointerEvent("pointerup", {

@@ -1,6 +1,10 @@
-/** "New Space…" or "Edit Space…" asked for from a menu, waiting for the
- *  switcher, with the release of a column expanded only to show it. */
-type Request = { kind: "new" | "edit"; release: (() => void) | null };
+import { surface } from "$domain/surface";
+import { expandBriefly } from "$session/sidebar-mode.svelte";
+import * as tools from "$session/tools.svelte";
+
+/** The spaces list, "New Space…" or "Edit Space…" asked for from a menu,
+ *  waiting for the switcher, with the release of a column expanded only to show it. */
+type Request = { kind: "list" | "new" | "edit"; release: (() => void) | null };
 
 let request = $state.raw<Request | null>(null);
 let handled = 0;
@@ -20,4 +24,12 @@ export function claim(seq: number): boolean {
   if (seq <= handled) return false;
   handled = seq;
   return true;
+}
+
+/** The full spaces flow asked for from the rail: the column opens to its full
+ *  shape in place, shows it, and closes back to the rail when it is done. */
+export function openInColumn(kind: Request["kind"]) {
+  tools.close();
+  if (surface.currentPage() !== null) void surface.close();
+  ask(kind, expandBriefly());
 }

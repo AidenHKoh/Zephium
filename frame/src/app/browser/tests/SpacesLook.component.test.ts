@@ -260,7 +260,12 @@ for (const theme of ["light", "dark"] as const) {
     sidebar.adoptMode("compact");
     await settle();
     await crop(`${theme}-rail`);
-    await screen.getByRole("button", { name: "Spaces — Reading" }).click();
+    // The rail has no spaces control of its own: they live in its menu, and
+    // the full flow opens the column in place.
+    await screen.getByRole("button", { name: /^Tools/ }).click();
+    await settle();
+    await crop(`${theme}-rail-menu`);
+    await screen.getByRole("menuitem", { name: "All Spaces" }).click();
     await settle();
     await settle();
     await wide(`${theme}-rail-switcher`);
@@ -269,6 +274,8 @@ for (const theme of ["light", "dark"] as const) {
     await wide(`${theme}-rail-editor`);
     await screen.getByRole("button", { name: "Done" }).click();
     await settle();
+    await settle();
+    await crop(`${theme}-rail-after`);
     spaced("home");
     await settle();
     await crop(`${theme}-rail-no-icon`);
@@ -286,6 +293,28 @@ for (const theme of ["light", "dark"] as const) {
     await settle();
     await settle();
     await shot(`${theme}-beside-settings`);
+  });
+
+  test(`the spaces as one sheet mid-swipe, ${theme}`, async () => {
+    await stage(theme);
+    spaced("work");
+    await settle();
+    spaced("read");
+    await settle();
+    const list = document.querySelector<HTMLElement>(".tab-scroller")!;
+    const wheel = (deltaX: number) => {
+      const event = new WheelEvent("wheel", { deltaX, bubbles: true });
+      Object.defineProperty(event, "webkitDirectionInvertedFromDevice", { value: true });
+      list.dispatchEvent(event);
+    };
+    for (let step = 0; step < 14; step += 1) wheel(-8);
+    await frame();
+    await frame();
+    await crop(`${theme}-swipe-mid`);
+    for (let step = 0; step < 24; step += 1) wheel(8);
+    await frame();
+    await frame();
+    await crop(`${theme}-swipe-back`);
   });
 
   test(`a tab carried across the column, ${theme}`, async () => {

@@ -23,7 +23,7 @@
   import { sidebarTree } from "$features/tabs";
   import { SidebarBody } from "$features/tabs";
   import { TabList } from "$features/tabs";
-  import { TabRail, SpacePanel } from "$features/tabs";
+  import { TabRail, SpaceShelf } from "$features/tabs";
   import { loadNavigationError, loadTabCapacityState } from "$features/tabs";
   import { selectionGlide } from "$features/tabs";
   import * as tabDrag from "$session/tab-drag.svelte";
@@ -120,9 +120,7 @@
   let inWork = $derived(browserPage.currentPage() === "work");
   // Settings stands beside the rail the way a tool panel does.
   let paneled = $derived(
-    toolHost.activeTool() !== null ||
-      toolHost.spacesOpen() ||
-      browserPage.currentPage() === "settings",
+    toolHost.activeTool() !== null || browserPage.currentPage() === "settings",
   );
   let incognito = $derived(tabs.profile()?.kind === "incognito");
   // The column's body settles in only when the environment changes, never on launch.
@@ -154,21 +152,32 @@
 
   // The current tab's plate travels to the next current tab. Measured before
   // the change lands and played after it, across every list in the column.
+  // Another space's list is a different sheet, so a plate never crosses to it:
+  // the new space simply shows its own current tab.
   let shownActive: string | null = null;
+  let shownSpace: string | null = null;
   let glideFrom: ReturnType<typeof selectionGlide.capture> = null;
   $effect.pre(() => {
     const next = tabs.activeId();
+    const space = tabs.activeSpaceId();
     untrack(() => {
-      if (next !== shownActive) glideFrom = selectionGlide.capture(shownActive);
+      if (next === shownActive) return;
+      const origin = selectionGlide.capture(shownActive);
+      glideFrom = space === shownSpace ? origin : null;
     });
   });
   $effect(() => {
     const next = tabs.activeId();
+    const space = tabs.activeSpaceId();
     untrack(() => {
-      if (next === shownActive) return;
+      if (next === shownActive) {
+        shownSpace = space;
+        return;
+      }
       selectionGlide.play(glideFrom, next);
       glideFrom = null;
       shownActive = next;
+      shownSpace = space;
     });
   });
   let tree = $derived(sidebarTree(tabs.sidebarNodes(), tabs.tabs()));
@@ -332,9 +341,9 @@
             <UpdateNotice view="cards" />
           {/if}
         </div>{/key}
-    {/snippet}{#snippet dock(
-      compact,
-    )}{#snippet accountFoot()}{#await loadAccountButton() then { default: AccountButton }}<AccountButton
+    {/snippet}{#snippet dock(compact)}{#snippet railSpaces(step: number)}<SpaceShelf
+          {step}
+        />{/snippet}{#snippet accountFoot()}{#await loadAccountButton() then { default: AccountButton }}<AccountButton
             name={tabs.profile()?.name ?? ""}
           />{/await}{/snippet}{#if compact && incognito}<PrivateBar
           compact
@@ -344,6 +353,7 @@
           compact
           tools={!inWork}
           foot={inWork ? accountFoot : undefined}
+          spaces={railSpaces}
         >
           {#snippet sites()}<EssentialsRail
               entries={railEssentials}
@@ -398,7 +408,7 @@
               </p>{/if}
           {/snippet}
         </Dock>{/if}{/snippet}{#snippet settingsNavigation()}<SettingsNavigation
-      />{/snippet}{#snippet spacePanel()}<SpacePanel />{/snippet}{#snippet toolPanel(kind)}<LazyView
+      />{/snippet}{#snippet toolPanel(kind)}<LazyView
         loader={loadToolSlot}
         loadingLabel={m.surface_loading()}
         failureLabel={m.surface_render_failed()}

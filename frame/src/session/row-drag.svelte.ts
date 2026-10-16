@@ -47,13 +47,14 @@ function placeBefore(over: Element | null, x: number, y: number, dragged: string
 /**
  * One drag gesture for every list of tabs: the sidebar's rows, the rail, the
  * kept sites. A press becomes a drag only past a small movement, so a click
- * stays a click; the pointer is captured, followed once per frame, and over
- * the list's own rows the row itself travels (see reorder.ts) while anywhere
- * else a stand-in follows it. Letting go inside the list reorders it; letting
- * go anywhere else is the list's to interpret.
+ * stays a click; the pointer is captured and followed once per frame by a
+ * card of the tab, whatever the list is. Over the list's own rows the row
+ * itself waits in the slot a drop would take (see reorder.ts). Letting go
+ * inside the list reorders it; letting go anywhere else is the list's to
+ * interpret.
  */
 export class RowDrag {
-  /** The stand-in, while the pointer is away from the list's own rows. */
+  /** The card that follows the pointer, wherever it is and whatever the list does with the row. */
   ghost = $state<{ id: string; x: number; y: number } | null>(null);
 
   #options: Options;
@@ -121,7 +122,7 @@ export class RowDrag {
       const { x, y } = this.#pointer;
       const inPlace = this.#reorder?.update(x, y) ?? false;
       this.#feel(inPlace, x);
-      this.ghost = inPlace ? null : { id: this.#id, x, y };
+      this.ghost = { id: this.#id, x, y };
       tabDrag.hover(x, y);
       tabs.dragOver(x, y);
     });

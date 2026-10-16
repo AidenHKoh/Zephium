@@ -704,13 +704,11 @@
   box-shadow: none !important;
 }
 
-/* A row being dragged to a new place in its list: lifted off the column,
-   the one thing in it that casts a shadow, until it is set down. */
-.browse-tab[data-lifted][data-lifted] {
-  z-index: 2;
-  scale: 1.02;
-  background: var(--row-active);
-  box-shadow: var(--shadow-float);
+/* A row being dragged to a new place in its list: it waits in the slot a drop
+   would take, dimmed, while its card is with the pointer. */
+.browse-tab[data-lifted][data-lifted],
+.rail-list > li[data-lifted] {
+  opacity: 0.38;
 }
 
 /* The dock's site row. */

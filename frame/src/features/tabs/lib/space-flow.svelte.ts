@@ -60,7 +60,7 @@ export class SpaceFlow {
         if (request.kind === "new") {
           this.show();
           void this.make();
-        } else this.show(this.active?.id ?? null);
+        } else this.show(request.kind === "edit" ? (this.active?.id ?? null) : null);
       });
     });
   }

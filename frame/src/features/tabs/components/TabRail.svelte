@@ -12,10 +12,9 @@
   import * as tabDrag from "$session/tab-drag.svelte";
   import { RowDrag } from "$session/row-drag.svelte";
   import DragMark from "$shared/ui/DragMark";
+  import SpacePeek from "./SpacePeek.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
-  import { surface } from "$domain/surface";
-  import * as tools from "$session/tools.svelte";
-  import SpaceGlyph from "./SpaceGlyph.svelte";
+  import { remember } from "../lib/space-memory";
   import * as requests from "../lib/space-requests.svelte";
   import { arrive, spaceSwipe, stepSpace } from "../lib/space-swipe";
 
@@ -56,6 +55,20 @@
   const space = $derived(tabs.profile()?.kind === "incognito" ? undefined : tabs.activeSpace());
   const order = $derived(tabs.spaces().map((entry) => entry.id));
   let scroller = $state<HTMLElement>();
+  let stage = $state<HTMLElement>();
+  let sheet = $state<HTMLElement>();
+  let peeking = $state(false);
+  const at = $derived(order.indexOf(tabs.activeSpaceId() ?? ""));
+  const before = $derived(at > 0 ? tabs.spaces()[at - 1] : undefined);
+  const after = $derived(at !== -1 ? tabs.spaces()[at + 1] : undefined);
+  $effect(() => {
+    const id = tabs.activeSpaceId();
+    const nodes = tabs.sidebarNodes();
+    const all = tabs.tabs();
+    const active = tabs.activeId();
+    const spaces = tabs.spaces();
+    if (id) untrack(() => remember(id, { nodes, tabs: all, active }, spaces));
+  });
   const canStep = (step: 1 | -1) => {
     const at = order.indexOf(tabs.activeSpaceId() ?? "");
     return space !== undefined && at !== -1 && at + step >= 0 && at + step < order.length;
@@ -67,20 +80,17 @@
       const from = shownSpace === null ? -1 : order.indexOf(shownSpace);
       const to = next === null ? -1 : order.indexOf(next);
       if (shownSpace !== null && next !== shownSpace && from !== -1 && to !== -1)
-        arrive(scroller, to > from ? 1 : -1);
+        arrive(stage, to > from ? 1 : -1);
       shownSpace = next;
     });
   });
-  // Making or editing a space opens its panel beside the rail; Settings or a
-  // tool there steps aside for it.
+  // Making or editing a space from a menu opens the column in place for it.
   $effect(() => {
     const command = ui.uiCommand();
     if (command.id !== "space.new" && command.id !== "space.edit") return;
     untrack(() => {
       if (!requests.claim(command.seq) || space === undefined) return;
-      if (surface.currentPage() !== null) void surface.close();
-      requests.ask(command.id === "space.new" ? "new" : "edit");
-      tools.openSpaces();
+      requests.openInColumn(command.id === "space.new" ? "new" : "edit");
     });
   });
   let shape = $derived(entries.map((tab) => tab.id).join(" "));
@@ -106,23 +116,6 @@
 <!-- Like the expanded list, the rail opens with the way to a new tab, which
      stays put while the tabs below it scroll. -->
 <div class="rail-new-slot" data-cascade style:--cascade={0}>
-  {#if space}<button
-      type="button"
-      class="rail-item rail-space"
-      title={space.name}
-      aria-label={m.space_open_switcher({ name: space.name })}
-      aria-haspopup="dialog"
-      aria-expanded={tools.spacesOpen()}
-      data-open={tools.spacesOpen() || undefined}
-      onclick={() => (tools.spacesOpen() ? tools.closeSpaces() : tools.openSpaces())}
-      ><SpaceGlyph
-        icon={space.icon}
-        color={space.color}
-        name={space.name}
-        size={18}
-        fallback="monogram"
-      /></button
-    >{/if}
   <button
     type="button"
     class="rail-item rail-new"
@@ -134,63 +127,73 @@
   </button>
 </div>
 <div
-  bind:this={scroller}
-  use:spaceSwipe={{ canStep, step: stepSpace }}
-  use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/rail`}
-  class="rail-scroller scroll-edges"
-  data-under-panel
-  data-glide-scroller
+  bind:this={stage}
+  class="rail-stage"
+  use:spaceSwipe={{ canStep, step: stepSpace, sheet: () => sheet, peek: (on) => (peeking = on) }}
 >
-  <ul bind:this={list} class="rail-list" data-tabs-drop role="list" aria-label={m.open_tabs()}>
-    {#each entries as tab, index (tab.id)}
-      {@const active = tab.id === tabs.activeId()}
-      <li
-        data-cascade
-        style:--cascade={index + 1}
-        data-motion-key={`tab:${tab.id}`}
-        data-zephium-tab-id={tab.id}
-        data-zephium-tab-url={tab.url ?? ""}
-        data-zephium-projection-revision={tab.projection_revision}
-      >
-        <button
-          type="button"
-          class="rail-item"
-          data-plate
-          title={tab.title || m.untitled_tab()}
-          aria-current={active ? "page" : undefined}
-          aria-label={tab.title || m.untitled_tab()}
-          oncontextmenu={(event) => handleContextMenu(event, tab)}
-          onpointerdown={(event) => drag.down(event, tab.id)}
-          onpointermove={(event) => drag.move(event)}
-          onpointerup={(event) => drag.up(event)}
-          onpointercancel={(event) => drag.cancel(event)}
-          onclick={() => !drag.swallowClick() && onSelect(tab.id)}
-        >
-          <FavIcon
-            image={favicons.image(tab.icon)}
-            tone={favicons.tone(tab.icon)}
-            loading={tab.loading}
-            lit={active}
-            size={16}
-            fallback={tab.content === "extensions" || tab.content === "extension_owned"
-              ? PuzzleIcon
-              : Globe02Icon}
-          />
-          <span data-zephium-tab-label class="sr-only">{tab.title}</span>
-        </button>
-        <!-- A rail has no row to put a close control in, so it rides the
+  <div bind:this={sheet} class="rail-sheet">
+    {#if peeking && before}<SpacePeek space={before} side="prev" rail />{/if}
+    <div
+      bind:this={scroller}
+      data-sheet="current"
+      use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/rail`}
+      class="rail-scroller scroll-edges"
+      data-under-panel
+      data-glide-scroller
+    >
+      <ul bind:this={list} class="rail-list" data-tabs-drop role="list" aria-label={m.open_tabs()}>
+        {#each entries as tab, index (tab.id)}
+          {@const active = tab.id === tabs.activeId()}
+          <li
+            data-cascade
+            style:--cascade={index + 1}
+            data-motion-key={`tab:${tab.id}`}
+            data-zephium-tab-id={tab.id}
+            data-zephium-tab-url={tab.url ?? ""}
+            data-zephium-projection-revision={tab.projection_revision}
+          >
+            <button
+              type="button"
+              class="rail-item"
+              data-plate
+              title={tab.title || m.untitled_tab()}
+              aria-current={active ? "page" : undefined}
+              aria-label={tab.title || m.untitled_tab()}
+              oncontextmenu={(event) => handleContextMenu(event, tab)}
+              onpointerdown={(event) => drag.down(event, tab.id)}
+              onpointermove={(event) => drag.move(event)}
+              onpointerup={(event) => drag.up(event)}
+              onpointercancel={(event) => drag.cancel(event)}
+              onclick={() => !drag.swallowClick() && onSelect(tab.id)}
+            >
+              <FavIcon
+                image={favicons.image(tab.icon)}
+                tone={favicons.tone(tab.icon)}
+                loading={tab.loading}
+                lit={active}
+                size={16}
+                fallback={tab.content === "extensions" || tab.content === "extension_owned"
+                  ? PuzzleIcon
+                  : Globe02Icon}
+              />
+              <span data-zephium-tab-label class="sr-only">{tab.title}</span>
+            </button>
+            <!-- A rail has no row to put a close control in, so it rides the
              mark's corner, the way a notification's does. -->
-        {#if !tabs.loneNewTab(tab.id)}<button
-            type="button"
-            class="rail-close"
-            title={m.close_tab()}
-            aria-label={m.close_named_tab({ title: tab.title || m.untitled_tab() })}
-            onclick={() => tabs.close(tab.id)}
-            ><Icon icon={Cancel01Icon} size={8} strokeWidth={2.4} /></button
-          >{/if}
-      </li>
-    {/each}
-  </ul>
+            {#if !tabs.loneNewTab(tab.id)}<button
+                type="button"
+                class="rail-close"
+                title={m.close_tab()}
+                aria-label={m.close_named_tab({ title: tab.title || m.untitled_tab() })}
+                onclick={() => tabs.close(tab.id)}
+                ><Icon icon={Cancel01Icon} size={8} strokeWidth={2.4} /></button
+              >{/if}
+          </li>
+        {/each}
+      </ul>
+    </div>
+    {#if peeking && after}<SpacePeek space={after} side="next" rail />{/if}
+  </div>
 </div>
 
 {#if drag.ghost}{@const held = tabs.tabs().find((tab) => tab.id === drag.ghost?.id)}<DragMark
@@ -213,10 +216,21 @@
     padding-block: 0 2px;
   }
 
-  /* The space shown, by its mark: it opens the spaces beside the rail. */
-  .rail-space[data-open] {
-    background: var(--row-active);
-    box-shadow: var(--row-rim);
+  .rail-stage {
+    position: relative;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    overflow: clip;
+  }
+
+  .rail-sheet {
+    position: relative;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
   }
 
   .rail-scroller {

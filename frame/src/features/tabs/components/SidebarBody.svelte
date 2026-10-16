@@ -7,7 +7,9 @@
   import type { SidebarEntry } from "../lib/sidebar-model";
   import TabList from "./TabList.svelte";
   import SpaceBar from "./SpaceBar.svelte";
-  import SpaceGlyph from "./SpaceGlyph.svelte";
+  import SpaceEmpty from "./SpaceEmpty.svelte";
+  import SpacePeek from "./SpacePeek.svelte";
+  import { remember } from "../lib/space-memory";
   import { arrive, spaceSwipe, stepSpace } from "../lib/space-swipe";
   import { untrack } from "svelte";
 
@@ -27,7 +29,22 @@
   const spaced = $derived(tabs.profile()?.kind !== "incognito" && tabs.activeSpace() !== undefined);
   const order = $derived(tabs.spaces().map((space) => space.id));
   const empty = $derived(pinned.length === 0 && today.length === 0);
-  let scroller = $state<HTMLElement>();
+  let stage = $state<HTMLElement>();
+  let sheet = $state<HTMLElement>();
+  // The neighbours are drawn only while a swipe has them in view.
+  let peeking = $state(false);
+  const at = $derived(order.indexOf(tabs.activeSpaceId() ?? ""));
+  const before = $derived(at > 0 ? tabs.spaces()[at - 1] : undefined);
+  const after = $derived(at !== -1 ? tabs.spaces()[at + 1] : undefined);
+  // What a space shows is kept, so that it can be drawn beside the next one.
+  $effect(() => {
+    const id = tabs.activeSpaceId();
+    const nodes = tabs.sidebarNodes();
+    const all = tabs.tabs();
+    const active = tabs.activeId();
+    const spaces = tabs.spaces();
+    if (id) untrack(() => remember(id, { nodes, tabs: all, active }, spaces));
+  });
   const canStep = (step: 1 | -1) => {
     const at = order.indexOf(tabs.activeSpaceId() ?? "");
     return spaced && at !== -1 && at + step >= 0 && at + step < order.length;
@@ -41,7 +58,7 @@
       const from = shownSpace === null ? -1 : order.indexOf(shownSpace);
       const to = next === null ? -1 : order.indexOf(next);
       if (shownSpace !== null && next !== shownSpace && from !== -1 && to !== -1)
-        arrive(scroller, to > from ? 1 : -1);
+        arrive(stage, to > from ? 1 : -1);
       shownSpace = next;
     });
   });
@@ -64,51 +81,67 @@
   </div>{/if}
 
 <div
-  bind:this={scroller}
-  use:spaceSwipe={{ canStep, step: stepSpace }}
-  data-tabs-drop
-  data-under-panel
-  use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/tabs`}
-  class="tab-scroller scroll-edges"
-  data-glide-scroller
+  bind:this={stage}
+  class="space-stage"
+  use:spaceSwipe={{ canStep, step: stepSpace, sheet: () => sheet, peek: (on) => (peeking = on) }}
 >
-  <TabList
-    entries={pinned}
-    section="pinned"
-    label={m.pinned_tabs()}
-    cascadeFrom={1}
-    {splitting}
-    {onSelect}
-  />
+  <div bind:this={sheet} class="space-sheet">
+    {#if peeking && before}<SpacePeek space={before} side="prev" />{/if}
+    <div
+      data-sheet="current"
+      data-tabs-drop
+      data-under-panel
+      use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/tabs`}
+      class="tab-scroller scroll-edges"
+      data-glide-scroller
+    >
+      <TabList
+        entries={pinned}
+        section="pinned"
+        label={m.pinned_tabs()}
+        cascadeFrom={1}
+        {splitting}
+        {onSelect}
+      />
 
-  {#if pinned.length > 0}
-    <div class="tab-divider" aria-hidden="true"></div>
-  {/if}
+      {#if pinned.length > 0}
+        <div class="tab-divider" aria-hidden="true"></div>
+      {/if}
 
-  <TabList
-    entries={today}
-    section="today"
-    label={m.open_tabs()}
-    cascadeFrom={pinned.length + 1}
-    {splitting}
-    {onSelect}
-  />
+      <TabList
+        entries={today}
+        section="today"
+        label={m.open_tabs()}
+        cascadeFrom={pinned.length + 1}
+        {splitting}
+        {onSelect}
+      />
 
-  {#if empty && spaced}
-    {@const space = tabs.activeSpace()!}
-    <div class="space-empty">
-      <SpaceGlyph icon={space.icon} color={space.color} name={space.name} size={28} />
-      <p class="space-empty-title">{m.space_empty_title({ name: space.name })}</p>
-      <p class="space-empty-body">{m.space_empty_body()}</p>
-      <button type="button" class="space-empty-open" onclick={tabs.open}>
-        <Icon icon={Add01Icon} size={14} />
-        <span>{m.new_tab()}</span>
-      </button>
+      {#if empty && spaced}<SpaceEmpty space={tabs.activeSpace()!} onopen={tabs.open} />{/if}
     </div>
-  {/if}
+    {#if peeking && after}<SpacePeek space={after} side="next" />{/if}
+  </div>
 </div>
 
 <style>
+  /* The spaces side by side as one sheet; only the middle one is the list. */
+  .space-stage {
+    position: relative;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    overflow: clip;
+  }
+
+  .space-sheet {
+    position: relative;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+  }
+
   .tab-scroller {
     min-height: 0;
     flex: 1;
@@ -150,53 +183,6 @@
     transition:
       background-color var(--motion-fast) var(--ease-out),
       color var(--motion-fast) var(--ease-out);
-  }
-
-  .space-empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    padding: 28px 16px 12px;
-    text-align: center;
-  }
-
-  .space-empty-title {
-    margin-block-start: 6px;
-    color: var(--color-label-secondary);
-    font-size: var(--text-body);
-    font-weight: 600;
-  }
-
-  .space-empty-body {
-    max-width: 200px;
-    color: var(--color-faint);
-    font-size: var(--text-label);
-    line-height: 16px;
-  }
-
-  .space-empty-open {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-block-start: 8px;
-    padding: 6px 12px;
-    border: 0;
-    border-radius: var(--radius-capsule);
-    background: var(--row-active);
-    box-shadow: var(--shine-top);
-    color: var(--color-text);
-    font: inherit;
-    font-size: var(--text-label);
-    font-weight: 500;
-    cursor: default;
-    transition: background-color var(--motion-fast) var(--ease-out);
-  }
-
-  .space-empty-open:hover,
-  .space-empty-open:focus-visible {
-    outline: none;
-    background: var(--row-pressed);
   }
 
   .new-tab:hover {

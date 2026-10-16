@@ -11,7 +11,7 @@
   import * as requests from "../lib/space-requests.svelte";
   import { SpaceFlow } from "../lib/space-flow.svelte";
 
-  let root = $state<HTMLElement>();
+  let panel = $state<HTMLElement>();
   let chip = $state<HTMLButtonElement>();
   const flow = new SpaceFlow((restore) => {
     if (restore) chip?.focus();
@@ -25,11 +25,14 @@
     });
   });
 
-  // Closing on the press, as every panel in the column does.
+  // Closing on the press, as every panel in the column does: a press anywhere
+  // but the panel and the chip that toggles it, the rest of the bar included.
   $effect(() => {
     if (!flow.open) return;
     const outside = (event: PointerEvent) => {
-      if (!(event.target instanceof Node) || !root?.contains(event.target)) flow.dismiss();
+      const target = event.target;
+      if (!(target instanceof Node) || !(panel?.contains(target) || chip?.contains(target)))
+        flow.dismiss();
     };
     const away = () => flow.dismiss();
     // WebKit does not focus a pressed button, so Escape is heard window-wide.
@@ -53,14 +56,7 @@
   The head of the tab list names the space it holds: its name, with its mark
   when it has one, opens the switcher, and the plus opens a tab in it.
 -->
-<div
-  class="space-bar"
-  data-cascade
-  data-under-panel
-  style:--cascade={0}
-  bind:this={root}
-  role="presentation"
->
+<div class="space-bar" data-cascade data-under-panel style:--cascade={0} role="presentation">
   <button
     bind:this={chip}
     type="button"
@@ -87,6 +83,7 @@
     onclick={tabs.open}><Icon icon={Add01Icon} size={16} /></button
   >
   <div
+    bind:this={panel}
     class="ui-menu ui-disclosure-panel ui-popover space-panel sidebar-softens"
     role="dialog"
     aria-label={flow.editing ? m.space_edit_label({ name: flow.editing.name }) : m.space_switcher()}
@@ -194,10 +191,15 @@
     scale: 0.92;
   }
 
+  /* Opens out of the chip it hangs from. */
   .space-panel {
     inset-inline: var(--sidebar-inset);
     min-width: 0;
     padding: 0;
+    transform-origin: 44px -10px;
+
+    /* It lies over the list's text: near-solid, so nothing under it reads. */
+    background: color-mix(in srgb, var(--color-float) 96%, transparent);
   }
 
   /* The list scrolls inside the still material when it runs long; the
