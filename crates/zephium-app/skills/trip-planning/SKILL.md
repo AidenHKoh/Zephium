@@ -15,6 +15,7 @@ tools: [ask, start_part, create, finish]
 - **Flights** — browser part on kayak.com (Google Flights as the second choice), with `search` {from, to, depart, return, adults, cabin}, airports as IATA codes (WAW, SFO) and dates as YYYY-MM-DD; omit return for one way. Its records are one itinerary each, named by carriers and times ("LOT · 10:45 → 21:28, 1 stop"), never the page's sort tabs (Best, Cheapest). It returns three to four flights as picks with the route drawn (from, to, times, stops, carrier with its host such as lot.com), price and duration; mark the one you would book as recommended.
 - **Entry** — research part: visa or ESTA, passport validity, what to carry, for the traveller's nationality when known. It returns a short list (requirements), each item with its source.
 - Add a part only for a real need the request names (a conference ticket, a car, a restaurant).
+- One part per need: what Stay and Flights return is the result, provisional prices included. Never start a second part for the same flights or homes; a part that found nothing is retried from its row.
 
 ## Result
 - One **plan** from the flight out to the flight back: travel steps for each flight (pick pointing at its flight pick), the stay (pick pointing at its home pick), the event days, entry steps before departure (kind task, with the deadline in when), and the flight home. Advice goes on the step it belongs to ("BART from SFO, about $10, 30 min"). Include a total (flights + stay + known fixed costs) with its label, such as "Estimated total".
