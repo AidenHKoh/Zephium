@@ -184,6 +184,25 @@ impl AgentProviderContinuation {
         ))
     }
 
+    /// A decision asked of the person while the page holds no step for them
+    /// is the planner's own, answered with a fresh look and told so.
+    pub fn into_own_decision_refresh(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderObservationCheckpoint, Box<Self>> {
+        if config != &self.config
+            || self.correlation.kind() != AgentBrowserToolKind::ShowForHuman
+            || !AgentProviderObservationCheckpoint::refreshable(&self, observation)
+        {
+            return Err(Box::new(self));
+        }
+        Ok(AgentProviderObservationCheckpoint::refresh(
+            self,
+            "decision_is_yours: nobody was asked. The goal already says what to do, and nothing on this page waits for the person: the host itself stops before any payment, order or message. A choice the goal leaves open is yours: take the option already selected or the first available one that fits the goal (a variant, size, quantity, shipping or pickup option), close an added-to-cart or upsell sheet with its own continue or close control, and carry on from this fresh look. Ask only when the goal names something the page does not offer.".to_owned(),
+        ))
+    }
+
     /// A wait asked for while the planner holds a look of one section has
     /// no whole page to compare: it is answered with a fresh whole look
     /// taken a moment later, told so.
@@ -595,8 +614,8 @@ impl AgentProviderObservationRefusal {
             InspectionRefusal::PreferForm => ("compound_form_available", "Nothing ran. This form or numeric group has several editable fields. Use fill_form with ALL requested values, including visible date/time segments, and its observed final control in one call. Native code commits options and verifies values; the final control keeps its normal policy and may require a separate approved action. Do not handle each station or date segment in separate Act turns. For an explicitly preparation-only request, repeat the original Act."),
             InspectionRefusal::NoProgress => ("no_progress", "Nothing executed. This same operation left the observed page unchanged and is barred on this state. Choose a different action, target or query; wait for a real change if still loading, or extract the evidence already available. Changing only verification or timeout does not make a different action."),
             InspectionRefusal::Limit => ("inspection_budget_exhausted", "The inspection budget for this document is exhausted. No capture occurred; current refs and retained evidence remain available. Read or extract available evidence, or navigate through an admitted observed link when the remaining navigation budget allows. Do not request another snapshot of this document."),
-            InspectionRefusal::Repeated => ("repeated_snapshot_scope", "This scope and query were already inspected. No capture occurred and current refs remain valid. Inspect a different region, use text_search within a current eligible boundary, or follow an observed detail link when allowed. Extract only the evidence actually available; repeating this subtree does not advance truncated content."),
-            InspectionRefusal::Unchanged => ("page_unchanged", "No capture occurred: you already took a whole look at this page and nothing was done since, so another initial snapshot shows the same page. Every look you took on this page stays evidence for extract, so you never need one back in view: if the requested values appeared in any of them, extract now. If the look shows a dialog or banner over the page (a sign-in offer, a cookie notice, a promotion), close it with its close, dismiss or reject control first. If the look shows next to nothing (a blank, blocked or rate-limited page), another look will not fill it: go back, open another address of the site, or extract what earlier pages showed. To see more of the page, scroll the document (act scroll on the document ref, direction down, amount page) or a list region, then look at what it shows; inspect a landmark or list with snapshot(subtree); or wait for a semantic change when the page is still loading."),
+            InspectionRefusal::Repeated => ("repeated_snapshot_scope", "This scope and query were already inspected. No capture occurred and current refs remain valid. Inspect a different region, use text_search within a current eligible boundary, or follow an observed detail link when allowed. Extract only the evidence actually available; repeating this subtree does not advance truncated content. A button you expected options under (a filter or section heading such as Price) shows them only once clicked: click it (effect read, verification page_changed) instead of looking again."),
+            InspectionRefusal::Unchanged => ("page_unchanged", "No capture occurred: you already took a whole look at this page and nothing was done since, so another initial snapshot shows the same page. Every look you took on this page stays evidence for extract, so you never need one back in view: if the requested values appeared in any of them, extract now. If the look shows a dialog or banner over the page (a sign-in offer, a cookie notice, a promotion), close it with its close, dismiss or reject control first. Options under a filter or section heading (Price, Guest Rating) appear only after you click that heading. If the look shows next to nothing (a blank, blocked or rate-limited page), another look will not fill it: go back, open another address of the site, or extract what earlier pages showed. To see more of the page, scroll the document (act scroll on the document ref, direction down, amount page) or a list region, then look at what it shows; inspect a landmark or list with snapshot(subtree); or wait for a semantic change when the page is still loading."),
             InspectionRefusal::Streak => ("looked_enough", "No capture occurred. You took whole looks at this page several times in a row with nothing done between them; another shows the same page. Every look you took stays evidence for extract: if the requested values appeared in any of them, extract now. Otherwise take a narrower look or act: snapshot text_search on the document ref for the words or figures you need, snapshot subtree of the one list, table or region that holds the records, scroll the document down a page, or use a search, filter, sort or next-page control. Do not ask for the whole page again."),
             InspectionRefusal::Invalid => ("invalid_snapshot_scope", "No capture occurred; this observation and its refs remain current. text_search and region require a current document/landmark/group/dialog ref. A heading is only eligible for surrounding_text or subtree; its subtree excludes following prose. If no eligible search boundary exists here, snapshot(initial) can restore current viewport anchors. You may extract retained evidence instead. Choose another operation within the remaining budget; do not repeat the rejected scope."),
         };

@@ -61,7 +61,7 @@ pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// diagnostics, covered-target centring and the page's structured-data facts,
 /// re-rendered target rebinding, settle quiet and custom listbox choice,
 /// guarded native number-key defaults and ARIA-owned listboxes, with an explicit installation bound per platform.
-pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 206 * 1024;
+pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 207 * 1024;
 /// Sole fixed isolated-world global installed by the production runtime.
 pub const SEMANTIC_RUNTIME_GLOBAL_NAME: &str = "__zephiumSemanticRuntimeV1";
 /// Sole fixed native message handler visible in the production isolated world.
@@ -89,8 +89,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0x2e, 0x9d, 0xb6, 0x41, 0x67, 0xd8, 0xe7, 0x2f, 0xd6, 0xb2, 0xca, 0x4d, 0xba, 0x2c, 0xc5, 0x5d,
-    0x6e, 0x4f, 0xa9, 0x88, 0x93, 0xfb, 0x8a, 0xe2, 0xb8, 0x8b, 0xef, 0xb4, 0xfc, 0x01, 0x14, 0x3d,
+    0x9b, 0xef, 0x08, 0x96, 0x44, 0x6c, 0x8d, 0xe1, 0xeb, 0xd6, 0x26, 0x9b, 0x3c, 0xab, 0xae, 0x5b,
+    0x77, 0x25, 0x1a, 0x07, 0x54, 0x04, 0x99, 0x00, 0xf8, 0x5d, 0xc8, 0x67, 0xde, 0x1b, 0x25, 0x32,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.

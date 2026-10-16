@@ -1393,7 +1393,29 @@ impl AgentProviderContinuation {
             return Err(AgentProviderContinuationError::Payload);
         }
         let self_with_progress = self.with_verified_action_progress(result)?;
-        let guidance = if result.verified().kind == crate::SemanticActionKind::Fill {
+        let suggestions = current
+            .frames()
+            .iter()
+            .flat_map(|frame| frame.nodes())
+            .filter(|node| {
+                node.role() == crate::SemanticRole::Option
+                    && node.geometry().is_some()
+                    && node
+                        .operations()
+                        .contains(crate::SemanticOperationClass::Click)
+            })
+            .take(8)
+            .map(|node| node.reference().model_token())
+            .collect::<Vec<_>>();
+        let suggested;
+        let guidance = if result.verified().kind == crate::SemanticActionKind::Fill
+            && !suggestions.is_empty()
+        {
+            // An airport or place field took the typed text but chose
+            // nothing: the planner scrolled on and searched the old value.
+            suggested = format!("The prior action was independently verified: the text is in the field, and the page now lists suggestions for it ({}). Typing alone chooses nothing: your next step is a click on the suggestion that matches what you meant (effect read, verification page_changed); they are already on screen, so do not scroll or look again first. The field is set only when the page then shows your choice in it. This is the fresh post-action viewport. All prior semantic refs are retired. Use only current refs.", suggestions.join(", "));
+            suggested.as_str()
+        } else if result.verified().kind == crate::SemanticActionKind::Fill {
             // Planners typed a query and then scrolled or looked again,
             // never running it.
             "The prior action was independently verified: the text is in the field. If the field searches or filters, run it now with press Enter in it (effect read, verification page_changed) or a click on its search button; do not scroll or look again first. This is the fresh post-action viewport. All prior semantic refs are retired. Use only current refs."
@@ -3603,6 +3625,10 @@ mod tests {
         assert_eq!(result["executed"], false);
         assert_eq!(result["required_effect"], "read");
         assert_eq!(result["code"], "task_effect_mismatch");
+        let guidance = result["guidance"].as_str().unwrap();
+        assert!(
+            guidance.contains("with effect set to read") && !guidance.contains("required_effect")
+        );
         let targets = bound.prior.take_action_targets().unwrap();
         assert_eq!(targets.exclusion_count(), 0);
         assert_eq!(targets.required_effect(), Some(SemanticEffectClass::Read));
