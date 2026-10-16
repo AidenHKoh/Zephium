@@ -556,6 +556,7 @@ impl AgentWorkController {
         state.covered_controls.clear();
         state.scroll_streak = 0;
         state.look_streak = 0;
+        state.moved_on();
         let fresh = Self::fit_model_observation(
             Box::pin(Self::observe_after_navigation(state, worker, browser)).await?,
         )?;

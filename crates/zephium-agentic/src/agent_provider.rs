@@ -817,8 +817,22 @@ pub struct AgentProviderCallConfig {
     navigation_available: bool,
     history_back: bool,
     history_back_available: bool,
+    snapshot_withheld: WithheldSnapshot,
     decision_budget: Option<(AgentModelCallId, u8)>,
 }
+
+/// Per-turn narrowing of the vocabulary. It only removes `snapshot`, so it
+/// never changes whether two configs bind the same lineage.
+#[derive(Clone, Copy, Debug, Default)]
+struct WithheldSnapshot(bool);
+
+impl PartialEq for WithheldSnapshot {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for WithheldSnapshot {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BrowserToolProfile {
@@ -890,6 +904,7 @@ impl AgentProviderCallConfig {
             navigation_available: true,
             history_back: false,
             history_back_available: false,
+            snapshot_withheld: WithheldSnapshot(false),
             decision_budget: None,
         })
     }
@@ -941,7 +956,17 @@ impl AgentProviderCallConfig {
     }
 
     pub(super) fn adds_progressive_observation(&self) -> bool {
-        self.progressive_observation && self.tools != BrowserToolProfile::Full
+        self.progressive_observation
+            && !self.snapshot_withheld.0
+            && self.tools != BrowserToolProfile::Full
+    }
+
+    /// Stops offering `snapshot` on the next turns, or offers it again. A
+    /// planner that only looked turn after turn is left with tools that move
+    /// the task on.
+    pub fn with_snapshot_withheld(mut self, withheld: bool) -> Self {
+        self.snapshot_withheld = WithheldSnapshot(withheld);
+        self
     }
 
     /// Enables one bounded viewport capture of the exact acknowledged semantic
@@ -1125,7 +1150,7 @@ impl AgentProviderCallConfig {
             return true;
         }
         if self.progressive_observation && kind == AgentBrowserToolKind::Snapshot {
-            return true;
+            return !self.snapshot_withheld.0;
         }
         if self.viewport_screenshot && kind == AgentBrowserToolKind::Screenshot {
             return true;

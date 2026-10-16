@@ -8443,6 +8443,29 @@ mod tests {
                 .filter(|tool| tool["name"] == "snapshot")
                 .collect();
             assert_eq!(snapshots.len(), 1);
+            let withheld = progressive.clone().with_snapshot_withheld(true);
+            assert_eq!(withheld, progressive);
+            assert!(!withheld.permits_tool(AgentBrowserToolKind::Snapshot));
+            let withheld_body = match provider {
+                AgentProviderKind::OpenAiResponses => {
+                    encode_openai_body(&withheld, "objective", "observation")
+                }
+                AgentProviderKind::AnthropicMessages => {
+                    encode_anthropic_body(&withheld, "objective", "observation")
+                }
+            }
+            .unwrap();
+            let withheld_wire: Value = serde_json::from_slice(&withheld_body).unwrap();
+            let offered: Vec<_> = withheld_wire["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect();
+            assert!(!offered.contains(&"snapshot") && offered.contains(&"extract"));
+            assert!(withheld
+                .with_snapshot_withheld(false)
+                .permits_tool(AgentBrowserToolKind::Snapshot));
             let parameters = if provider == AgentProviderKind::OpenAiResponses {
                 &snapshots[0]["parameters"]
             } else {

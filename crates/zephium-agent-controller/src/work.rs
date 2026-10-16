@@ -1524,6 +1524,7 @@ impl AgentWorkController {
                     no_progress: NoProgress::default(),
                     scroll_streak: 0,
                     look_streak: 0,
+                    look_run: LookRun::default(),
                     sign_in_refusals: 0,
                     loading_extract_waits: 0,
                     failure: None,
@@ -1558,6 +1559,8 @@ struct WorkState {
     scroll_streak: u8,
     /// Whole looks of this page in a row with nothing done between them.
     look_streak: u8,
+    /// Turns in a row that only asked for a look, refused or not.
+    look_run: LookRun,
     /// Requests that the person sign in refused on pages with no sign-in form.
     sign_in_refusals: u8,
     /// Extractions answered with a later look because the page still loaded.
@@ -1609,6 +1612,23 @@ enum WorkTerminalIntent {
 }
 
 impl WorkState {
+    fn looked(&mut self) {
+        if self.look_run.looked() {
+            self.withhold_snapshot(true);
+        }
+    }
+
+    fn moved_on(&mut self) {
+        self.look_run.reset();
+        self.withhold_snapshot(false);
+    }
+
+    fn withhold_snapshot(&mut self, withheld: bool) {
+        if let Some(session) = self.session.as_mut() {
+            session.config = session.config.clone().with_snapshot_withheld(withheld);
+        }
+    }
+
     fn record_failure(&mut self, failure: AgentWorkFailure) {
         let failure = if failure == AgentWorkFailure::Browser(AgentBrowserProviderError::Journal) {
             self.journal_mut()
@@ -3327,6 +3347,9 @@ impl AgentWorkController {
                 .await?;
                 continue;
             }
+            if turn.turn.proposal().kind() == AgentBrowserToolKind::Snapshot {
+                state.looked();
+            }
             let progress_key = turn.turn.proposal().progress_fingerprint(&observation);
             if no_progress.refuses(progress_key) {
                 state.native.check_control(worker, browser)?;
@@ -3895,8 +3918,12 @@ impl AgentWorkController {
                 ))
                 .await?;
                 let checkpoint = match prepared {
-                    compound_form::PreparedForm::Refresh(checkpoint) => checkpoint,
+                    compound_form::PreparedForm::Refresh(checkpoint) => {
+                        state.moved_on();
+                        checkpoint
+                    }
                     compound_form::PreparedForm::Follow(follow) => {
+                        state.moved_on();
                         let next = Self::navigate_current(
                             state,
                             worker,
@@ -4321,6 +4348,7 @@ impl AgentWorkController {
                 &current,
             )?;
             state.look_streak = 0;
+            state.moved_on();
             state.scroll_streak = if scrolled {
                 state.scroll_streak.saturating_add(1)
             } else {
@@ -6940,6 +6968,21 @@ impl NoProgress {
     }
 }
 
+/// Turns in a row that only asked for a look, refused or not. From the
+/// second, `snapshot` is not offered until an action or move happens.
+#[derive(Default)]
+struct LookRun(u8);
+
+impl LookRun {
+    fn looked(&mut self) -> bool {
+        self.0 = self.0.saturating_add(1);
+        self.0 >= 2
+    }
+    fn reset(&mut self) {
+        self.0 = 0;
+    }
+}
+
 /// Counts refusals since the page last moved forward.
 #[derive(Default)]
 struct Fruitless(u8);
@@ -6974,6 +7017,17 @@ impl Fruitless {
 #[cfg(test)]
 mod fruitless_tests {
     use super::*;
+
+    #[test]
+    fn a_second_look_in_a_row_withholds_snapshot_until_something_is_done() {
+        let mut run = LookRun::default();
+        assert!(!run.looked());
+        assert!(run.looked());
+        assert!(run.looked());
+        run.reset();
+        assert!(!run.looked());
+        assert!(run.looked());
+    }
 
     #[test]
     fn unchanged_operations_are_barred_before_a_second_dispatch_but_real_changes_are_allowed() {
