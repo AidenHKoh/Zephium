@@ -3189,6 +3189,7 @@ impl AgentWorkController {
         .await?;
         if turn.turn.proposal().kind() == AgentBrowserToolKind::ShowForHuman
             && !Self::sign_in_optional(state, &turn, &observation)
+            && !Self::own_decision(state, &turn, &observation)
         {
             Self::accept_model_human_request(state, turn, &observation)?;
             state.observation = Some(observation);
@@ -3608,15 +3609,17 @@ impl AgentWorkController {
                 continue;
             }
             if turn.turn.proposal().kind() == AgentBrowserToolKind::ShowForHuman {
-                if Self::sign_in_optional(state, &turn, &observation) {
+                let sign_in = Self::sign_in_optional(state, &turn, &observation);
+                if sign_in || Self::own_decision(state, &turn, &observation) {
                     state.sign_in_refusals = state.sign_in_refusals.saturating_add(1);
                     let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
-                    let checkpoint = turn
-                        .into_tool_turn()
-                        .into_parts()
-                        .1
-                        .into_optional_sign_in_refresh(&observation, &session.config)
-                        .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()))?;
+                    let continuation = turn.into_tool_turn().into_parts().1;
+                    let checkpoint = if sign_in {
+                        continuation.into_optional_sign_in_refresh(&observation, &session.config)
+                    } else {
+                        continuation.into_own_decision_refresh(&observation, &session.config)
+                    }
+                    .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()))?;
                     fruitless.refused(state)?;
                     let next =
                         Self::inspect_current(state, worker, browser, checkpoint, &observation)
@@ -4180,7 +4183,21 @@ impl AgentWorkController {
                         )
                     ) {
                         state.refresh_account(worker, browser)?;
-                        let _ = Box::pin(Self::observe(state, worker, browser)).await?;
+                        // A step that ran unverified may have left for
+                        // another document still loading.
+                        match Box::pin(Self::observe(state, worker, browser)).await {
+                            Err(AgentWorkFailure::Observation(
+                                SemanticRuntimePortFailure::NotReady
+                                | SemanticRuntimePortFailure::Stale
+                                | SemanticRuntimePortFailure::DocumentReplaced,
+                            )) => {
+                                Box::pin(Self::observe_initial_ready(state, worker, browser))
+                                    .await?;
+                            }
+                            look => {
+                                look?;
+                            }
+                        }
                     }
                     // A link whose click went nowhere (a new-window link, a
                     // covered or script-only one) is followed to its observed
@@ -4922,6 +4939,23 @@ impl AgentWorkController {
         ) && state.actions_before_extraction
             && state.sign_in_refusals < MAX_SIGN_IN_REFUSALS
             && state.task.sign_in_optional(observation)
+    }
+
+    /// A page agent's request for the person's decision while the page
+    /// holds no step for them: the goal already says what to do, and a
+    /// choice it leaves open (a variant, a fulfillment option, an
+    /// added-to-cart sheet) is the agent's own, refused a couple of times.
+    fn own_decision(
+        state: &WorkState,
+        turn: &AgentBrowserProviderTurn,
+        observation: &SemanticObservation,
+    ) -> bool {
+        matches!(
+            turn.turn.proposal(),
+            AgentBrowserToolProposal::ShowForHuman(AgentBrowserHumanReason::UserDecision)
+        ) && state.actions_before_extraction
+            && state.sign_in_refusals < MAX_SIGN_IN_REFUSALS
+            && state.task.human_wall(observation).is_none()
     }
 
     fn accept_model_human_request(

@@ -582,6 +582,20 @@ impl AgentWorkController {
         } else {
             (fresh, false)
         };
+        // An offer the site laid over the page it moved to (a location or
+        // newsletter popover) is closed as on the first page.
+        let fresh = match (held, state.task.overlay_dismissal(&fresh)) {
+            (false, Some(target))
+                if state.actions_before_extraction
+                    && state
+                        .navigation_discovery
+                        .as_ref()
+                        .is_some_and(AgentNavigationDiscovery::is_site_session) =>
+            {
+                Box::pin(Self::close_overlay(state, worker, browser, fresh, target)).await?
+            }
+            _ => fresh,
+        };
         let captured_at = SemanticCaptureInstant::from_millis(
             state
                 .journal_mut()?

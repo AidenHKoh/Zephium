@@ -615,21 +615,18 @@ impl AgentBrowserAction {
     }
     /// An action the page refused before it acted (its target covered, out
     /// of view, changed or gone): nothing was pressed or typed, so a read or
-    /// a draft keeps its continuation and the model hears why. With
-    /// `rewritable`, a fill or choice into a field that commits nothing,
-    /// which ran but whose value the page did not keep as typed (an
-    /// autocomplete that rewrote it), is handed back the same way.
+    /// a draft keeps its continuation and the model hears why. A read that
+    /// ran but could not be verified (the page moved on to a check or another
+    /// document under it) commits nothing either and is handed back the same
+    /// way, as is, with `rewritable`, a fill or choice into a field that
+    /// commits nothing whose value the page did not keep as typed.
     pub(crate) fn into_covered_refusal(
         self,
         rewritable: bool,
     ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
         let effect = self.proposal.action.effect();
-        let rewritten = rewritable
-            && self.native_unverified
-            && matches!(
-                self.proposal.action.kind(),
-                SemanticActionKind::Fill | SemanticActionKind::Select
-            );
+        let rewritten = self.native_unverified
+            && unverified_hands_back(effect, self.proposal.action.kind(), rewritable);
         if !self.finished
             || self.native.is_some()
             || self.pending.is_some()
@@ -783,16 +780,43 @@ impl AgentBrowserAction {
     pub(crate) const fn applied_on_page_change(&self) -> bool {
         self.applied_on_page_change
     }
-    /// A navigation-like read whose page has not changed yet while its settle
-    /// window is still open: a single-page app may draw the view it opened a
-    /// moment later, so the page is looked at again before it is verified.
+    /// A navigation-like read, or any click proven by the page changing (an
+    /// add to cart whose badge or toast follows the site's request), whose
+    /// page has not changed yet while its settle window is still open: the
+    /// page is looked at again before it is verified.
+    /// A click that changed its own document while its settle window is
+    /// still open: what it opened (a tab's panel, a filter sheet) may still
+    /// be drawing, so the page is looked at again until two looks agree.
+    pub(crate) fn may_still_draw(
+        &self,
+        current: &SemanticObservation,
+        now: SemanticSettleInstant,
+    ) -> bool {
+        let action = &self.proposal.action;
+        action.kind() == SemanticActionKind::Click
+            && self.terminal.as_ref().is_some_and(|terminal| {
+                terminal
+                    .tracker()
+                    .deadline()
+                    .millis()
+                    .saturating_sub(now.millis())
+                    > 2 * PAGE_CHANGE_LOOK_MILLIS
+            })
+            && current
+                .frames()
+                .iter()
+                .find(|snapshot| snapshot.frame() == action.frame())
+                .is_some_and(|snapshot| !action.page_unchanged(snapshot))
+    }
+
     pub(crate) fn awaits_page_change(
         &self,
         current: &SemanticObservation,
         now: SemanticSettleInstant,
     ) -> bool {
         let action = &self.proposal.action;
-        action.effect() == SemanticEffectClass::Read
+        (action.effect() == SemanticEffectClass::Read
+            || action.verification() == SemanticVerification::PageChanged)
             && matches!(
                 action.kind(),
                 SemanticActionKind::Click | SemanticActionKind::Press | SemanticActionKind::Select
@@ -1125,6 +1149,18 @@ pub(crate) const fn refused_before_acting(failure: SemanticActionFailure) -> boo
     )
 }
 
+/// A step that ran but could not be verified and still commits nothing.
+fn unverified_hands_back(
+    effect: SemanticEffectClass,
+    kind: SemanticActionKind,
+    rewritable: bool,
+) -> bool {
+    effect == SemanticEffectClass::Read
+        || (rewritable
+            && effect == SemanticEffectClass::LocalWrite
+            && matches!(kind, SemanticActionKind::Fill | SemanticActionKind::Select))
+}
+
 // Recovery is disposal of an accounted failure, never permission to replay.
 fn owned_failure_may_close(effect: SemanticEffectClass, failure: SemanticActionFailure) -> bool {
     effect == SemanticEffectClass::Read
@@ -1134,6 +1170,37 @@ fn owned_failure_may_close(effect: SemanticEffectClass, failure: SemanticActionF
 #[cfg(test)]
 mod owned_failure_tests {
     use super::*;
+
+    #[test]
+    fn an_unverified_read_goes_back_to_the_model_and_an_unverified_commit_never_does() {
+        // A search or link click whose page moved on to a check page.
+        assert!(unverified_hands_back(
+            SemanticEffectClass::Read,
+            SemanticActionKind::Click,
+            false
+        ));
+        assert!(unverified_hands_back(
+            SemanticEffectClass::LocalWrite,
+            SemanticActionKind::Fill,
+            true
+        ));
+        assert!(!unverified_hands_back(
+            SemanticEffectClass::LocalWrite,
+            SemanticActionKind::Fill,
+            false
+        ));
+        for effect in [
+            SemanticEffectClass::ExternalWrite,
+            SemanticEffectClass::Purchase,
+            SemanticEffectClass::Communication,
+        ] {
+            assert!(!unverified_hands_back(
+                effect,
+                SemanticActionKind::Click,
+                true
+            ));
+        }
+    }
     #[test]
     fn preflight_failure_closes_local_work_but_never_uncertain_or_external_writes() {
         assert!(owned_failure_may_close(

@@ -937,6 +937,36 @@ impl AgentWorkController {
             }
             current = Self::observe(state, worker, browser).await?;
         }
+        // A tab's panel or a sheet a click opened can still be drawing when
+        // the click is proven: Expedia's flight form was not there yet.
+        for _ in 0..if site_app { 3 } else { 0 } {
+            let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
+            let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
+            if !session
+                .action_may_still_draw(&current, SemanticSettleInstant::from_millis(now.millis()))
+            {
+                break;
+            }
+            let wake =
+                Instant::now() + Duration::from_millis(crate::action::PAGE_CHANGE_LOOK_MILLIS);
+            if wake >= state.native.deadline {
+                break;
+            }
+            tokio::select! {
+                biased;
+                event = state.native.next_event(worker, browser) => {
+                    state.native.retain(event?)?;
+                    return Err(AgentWorkFailure::Mailbox);
+                }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+            }
+            let next = Self::observe(state, worker, browser).await?;
+            let settled = look_digest(&next) == look_digest(&current);
+            current = next;
+            if settled {
+                break;
+            }
+        }
         // The model is shown the page an action opened up (a filter panel, a
         // long results list) by its leading part, as a first look is, and the
         // action is verified on that same look.
@@ -956,4 +986,17 @@ impl AgentWorkController {
             transition,
         ))
     }
+}
+
+/// What a look shows, by role, name, text and value: two equal digests are
+/// the same page drawn twice.
+fn look_digest(observation: &SemanticObservation) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for node in observation.frames().iter().flat_map(|frame| frame.nodes()) {
+        format!("{:?}{:?}", node.role(), node.states()).hash(&mut hasher);
+        node.name().map(|name| name.as_str()).hash(&mut hasher);
+        node.text().map(|text| text.as_str()).hash(&mut hasher);
+    }
+    hasher.finish()
 }

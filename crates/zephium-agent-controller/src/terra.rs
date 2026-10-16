@@ -3976,6 +3976,16 @@ impl AgentBrowserSession {
             .is_some_and(|action| action.awaits_page_change(current, now))
     }
 
+    pub(crate) fn action_may_still_draw(
+        &self,
+        current: &zephium_agentic::SemanticObservation,
+        now: zephium_agentic::SemanticSettleInstant,
+    ) -> bool {
+        self.action
+            .as_ref()
+            .is_some_and(|action| action.may_still_draw(current, now))
+    }
+
     /// Independently verifies and accounts the pending action before continuation.
     pub fn settle_action(
         &mut self,
@@ -4040,8 +4050,7 @@ impl AgentBrowserSession {
         match result {
             Err(error @ crate::AgentBrowserActionError::Failed(failure))
                 if crate::action::refused_before_acting(failure)
-                    || (self.rewritable_fill
-                        && failure == zephium_agentic::SemanticActionFailure::NeedsHuman) =>
+                    || failure == zephium_agentic::SemanticActionFailure::NeedsHuman =>
             {
                 if let Some(refusal) = self.covered_refusal()? {
                     self.rejected_refusal = Some(refusal);
