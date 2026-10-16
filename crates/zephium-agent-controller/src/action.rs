@@ -538,13 +538,16 @@ impl AgentBrowserAction {
         self.into_failed_batch()
     }
 
-    /// A rejected read-effect batch keeps its continuation: the model hears
-    /// the refusal and chooses again on a fresh observation.
+    /// A rejected read or local-write batch never ran and keeps its
+    /// continuation: the model hears the refusal and chooses again on a
+    /// fresh observation.
     pub(crate) fn into_rejected_refusal(
         self,
     ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
-        if self.proposal.action.effect() != SemanticEffectClass::Read
-            || self.proposal.continuation.is_none()
+        if !matches!(
+            self.proposal.action.effect(),
+            SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
+        ) || self.proposal.continuation.is_none()
         {
             return Err(Box::new(self));
         }

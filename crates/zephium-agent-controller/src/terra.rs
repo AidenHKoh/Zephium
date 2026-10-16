@@ -3950,8 +3950,9 @@ impl AgentBrowserSession {
             return Err(AgentBrowserProviderError::Journal);
         }
         self.action_terminal.take();
-        // A rejected read never ran: the model may choose again on a fresh
-        // observation. Any other rejection closes its debt and stays fatal.
+        // A rejected read or local write never ran: the model may choose
+        // again on a fresh observation. Any other rejection closes its debt
+        // and stays fatal.
         if let Some(refusal) = refusal {
             self.failure = None;
             self.rejected_refusal = Some(refusal);
