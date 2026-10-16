@@ -41,6 +41,56 @@ pub fn semantic_typed_choices(look: &SemanticObservation) -> Vec<&SemanticNode> 
     choices
 }
 
+/// Whether a picker or dropdown already shows this value in its own name
+/// ("Origin, JFK, New York-Kennedy, NY" for JFK; "Trip Type, Round Trip").
+pub fn semantic_shows_value(
+    look: &SemanticObservation,
+    control: SemanticReferenceId,
+    value: &str,
+) -> bool {
+    let value = words(value);
+    !value.is_empty()
+        && look
+            .frames()
+            .iter()
+            .flat_map(|frame| frame.nodes())
+            .find(|node| node.reference() == control)
+            .and_then(|node| node.name())
+            .is_some_and(|name| {
+                format!(" {} ", words(name.as_str())).contains(&format!(" {value} "))
+            })
+}
+
+/// A picker value naming two days, "2026-11-10 - 2026-11-15" or "… to …",
+/// split into its dates; any other value is itself.
+pub fn semantic_picker_values(value: &str) -> Vec<String> {
+    for separator in [" - ", " to ", " – ", " — "] {
+        if let Some((from, to)) = value.split_once(separator) {
+            if typed_date(from).is_some() && typed_date(to).is_some() {
+                return vec![from.trim().to_owned(), to.trim().to_owned()];
+            }
+        }
+    }
+    vec![value.to_owned()]
+}
+
+/// The focused public text box a picker opened for typing.
+pub fn semantic_focused_text_field(look: &SemanticObservation) -> Option<SemanticReferenceId> {
+    look.frames()
+        .iter()
+        .flat_map(|frame| frame.nodes())
+        .find(|node| {
+            matches!(
+                node.role(),
+                SemanticRole::Textbox | SemanticRole::Searchbox | SemanticRole::Combobox
+            ) && node.states().contains(crate::SemanticState::Focused)
+                && node.geometry().is_some()
+                && node.sensitivity() == crate::SemanticSensitivity::Public
+                && node.operations().contains(SemanticOperationClass::Fill)
+        })
+        .map(SemanticNode::reference)
+}
+
 /// The one choice that clearly is what was typed: named exactly so, or the
 /// only one led by it or holding it as a whole word ("JFK" in "New York
 /// (JFK - John F. Kennedy Intl.)"). Several candidates are the model's to

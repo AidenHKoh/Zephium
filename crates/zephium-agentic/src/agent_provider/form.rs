@@ -130,6 +130,13 @@ impl FormBinding {
             .get(index)
             .map(|field| field.value.as_str())
     }
+    /// Whether this field is a picker's button: clicked open, its value is
+    /// typed into the box it opens or found among the choices it shows.
+    pub fn is_picker(&self, index: usize) -> bool {
+        self.fields
+            .get(index)
+            .is_some_and(|field| field.role == crate::SemanticRole::Button)
+    }
     /// Whether this field requires a committed option rather than typed text.
     pub fn is_choice(&self, index: usize) -> bool {
         self.fields.get(index).is_some_and(|field| {
@@ -269,10 +276,16 @@ impl FormBinding {
         }
         let exact = matches!(target.value(), Some(crate::SemanticValueSummary::Text(value))
             if value.as_str() == field.value.as_str());
-        let make = |intent, verification| {
+        // Opening a dropdown or choosing its option commits nothing.
+        let make = |intent: Intent, verification| {
+            let effect = if matches!(intent, Intent::Click { .. }) {
+                Effect::Read
+            } else {
+                Effect::LocalWrite
+            };
             crate::SemanticActionProposal::try_new(
                 intent,
-                Effect::LocalWrite,
+                effect,
                 Wait::Immediate,
                 verification,
                 crate::SemanticSettleBudget::try_new(
@@ -485,6 +498,9 @@ impl FormProposal {
                 target.allowed.contains(Action::Fill.operation())
                     || target.allowed.contains(Action::Select.operation())
                     || target.allowed.contains(Action::Click.operation())
+            } else if node.role() == Role::Button {
+                // A picker: its button opens a text box or a calendar.
+                target.allowed.contains(Action::Click.operation()) && !field.value.is_empty()
             } else {
                 matches!(
                     node.role(),

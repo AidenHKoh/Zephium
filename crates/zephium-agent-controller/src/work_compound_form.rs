@@ -151,6 +151,40 @@ impl AgentWorkController {
                     completed += 1;
                     break;
                 }
+                // A picker or dropdown already showing the value is set.
+                let shown = |kind| {
+                    binding
+                        .field_reference(index, kind, &current)
+                        .ok()
+                        .zip(binding.field_value(index))
+                        .is_some_and(|(control, value)| {
+                            zephium_agentic::semantic_shows_value(&current, control, value)
+                        })
+                };
+                if (binding.is_picker(index) || binding.is_choice(index))
+                    && shown(SemanticActionKind::Click)
+                {
+                    completed += 1;
+                    chosen_suggestions[index] = true;
+                    break;
+                }
+                if binding.is_picker(index) {
+                    let (next, chosen) = Box::pin(Self::fill_picker(
+                        state, worker, browser, &binding, index, current,
+                    ))
+                    .await?;
+                    current = next;
+                    actions += 3;
+                    if !chosen {
+                        failure = Some(AgentBrowserFormError {
+                            field: Some((index + 1) as u8),
+                            fault: AgentBrowserFormFault::AmbiguousOption,
+                        });
+                        break 'fields;
+                    }
+                    chosen_suggestions[index] = true;
+                    continue;
+                }
                 let recipe = match binding.field_action(index, &current) {
                     Ok(None) => {
                         completed += 1;
@@ -390,6 +424,9 @@ impl AgentWorkController {
         let Some((proposal, assessment)) = admitted else {
             return Ok(Err(AgentBrowserFormFault::Target));
         };
+        // A read (a picker opened, an option chosen) commits nothing: one the page
+        // did not confirm is a fault to replan from, never the page's end.
+        let reads = proposal.action().effect() == SemanticEffectClass::Read;
         state
             .journal_mut()?
             .emit(AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Act))?;
@@ -420,7 +457,7 @@ impl AgentWorkController {
                 return Err(AgentWorkFailure::Browser(error));
             }
             Err(AgentWorkFailure::Browser(error))
-                if read_only
+                if (read_only || reads)
                     && matches!(
                         error,
                         AgentBrowserProviderError::Action(
@@ -450,6 +487,109 @@ impl AgentWorkController {
 }
 
 impl AgentWorkController {
+    /// A picker field (Delta's origin button, a date button): the choice its
+    /// value names is taken when already shown; otherwise the button is
+    /// clicked, the value typed into the box it focuses, if any, and the
+    /// one matching suggestion or day chosen. Returns the latest page and
+    /// whether a choice was made.
+    async fn fill_picker(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        binding: &AgentBrowserFormBinding,
+        index: usize,
+        mut current: SemanticObservation,
+    ) -> Result<(SemanticObservation, bool), AgentWorkFailure> {
+        let values =
+            zephium_agentic::semantic_picker_values(binding.field_value(index).unwrap_or_default());
+        let value = values.first().cloned().unwrap_or_default();
+        if zephium_agentic::semantic_sole_choice(&current, &value).is_none() {
+            let Ok(button) = binding.field_reference(index, SemanticActionKind::Click, &current)
+            else {
+                return Ok((current, false));
+            };
+            let open = Self::form_recipe(SemanticActionIntent::Click { target: button })?;
+            current = match Box::pin(Self::form_primitive(
+                state, worker, browser, &current, open, true,
+            ))
+            .await?
+            {
+                Ok(next) => {
+                    state.task_progress(&next)?;
+                    next
+                }
+                Err(_) => return Ok((current, false)),
+            };
+            if let Some(field) = zephium_agentic::semantic_focused_text_field(&current) {
+                let text =
+                    SemanticActionText::try_new(value.clone()).map_err(|_| crate::contract!())?;
+                let typed = SemanticActionProposal::try_new(
+                    SemanticActionIntent::Fill {
+                        target: field,
+                        value: text,
+                    },
+                    SemanticEffectClass::LocalWrite,
+                    SemanticWaitCondition::Immediate,
+                    SemanticVerification::TargetValueMatchesInput,
+                    SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS)
+                        .map_err(|_| crate::contract!())?,
+                )
+                .map_err(|_| crate::contract!())?;
+                current = match Box::pin(Self::form_primitive(
+                    state, worker, browser, &current, typed, false,
+                ))
+                .await?
+                {
+                    Ok(next) => {
+                        state.task_progress(&next)?;
+                        next
+                    }
+                    Err(_) => return Ok((current, false)),
+                };
+            }
+        }
+        if values.len() == 1 {
+            let (current, outcome) = Box::pin(Self::choose_suggestion(
+                state, worker, browser, binding, index, current, true,
+            ))
+            .await?;
+            return Ok((current, outcome == Some(true)));
+        }
+        // A range picker's two days are chosen in turn in its calendar.
+        for day in &values {
+            let Some(choice) = zephium_agentic::semantic_sole_choice(&current, day) else {
+                return Ok((current, false));
+            };
+            let click = Self::form_recipe(SemanticActionIntent::Click { target: choice })?;
+            current = match Box::pin(Self::form_primitive(
+                state, worker, browser, &current, click, true,
+            ))
+            .await?
+            {
+                Ok(next) => {
+                    state.task_progress(&next)?;
+                    next
+                }
+                Err(_) => return Ok((current, false)),
+            };
+        }
+        Ok((current, true))
+    }
+
+    fn form_recipe(
+        intent: SemanticActionIntent,
+    ) -> Result<SemanticActionProposal, AgentWorkFailure> {
+        SemanticActionProposal::try_new(
+            intent,
+            SemanticEffectClass::Read,
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::PageChanged,
+            SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS)
+                .map_err(|_| crate::contract!())?,
+        )
+        .map_err(|_| crate::contract!())
+    }
+
     /// Clicks the one suggestion a field's popup offers for the value typed
     /// into it, when one clearly matches. With `late`, a popup not drawn yet
     /// is given a moment. Returns the latest page and Some(true) when one was
@@ -484,6 +624,7 @@ impl AgentWorkController {
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
             }
             current = Box::pin(Self::observe(state, worker, browser)).await?;
+            state.task_progress(&current)?;
         }
         if zephium_agentic::semantic_typed_choices(&current).is_empty() {
             return Ok((current, None));
@@ -494,21 +635,16 @@ impl AgentWorkController {
         else {
             return Ok((current, Some(false)));
         };
-        let click = SemanticActionProposal::try_new(
-            SemanticActionIntent::Click { target: choice },
-            SemanticEffectClass::LocalWrite,
-            SemanticWaitCondition::Immediate,
-            SemanticVerification::PageChanged,
-            SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS)
-                .map_err(|_| crate::contract!())?,
-        )
-        .map_err(|_| crate::contract!())?;
+        let click = Self::form_recipe(SemanticActionIntent::Click { target: choice })?;
         match Box::pin(Self::form_primitive(
-            state, worker, browser, &current, click, false,
+            state, worker, browser, &current, click, true,
         ))
         .await?
         {
-            Ok(next) => Ok((next, Some(true))),
+            Ok(next) => {
+                state.task_progress(&next)?;
+                Ok((next, Some(true)))
+            }
             Err(_) => Ok((current, Some(false))),
         }
     }

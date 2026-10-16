@@ -669,7 +669,10 @@ pub use semantic_settle_coordinator::{
     SemanticActionSettlementTerminal, SemanticActionSettlementUpdate,
     MAX_PENDING_SEMANTIC_ACTION_SETTLEMENTS,
 };
-pub use semantic_suggestion::{semantic_sole_choice, semantic_typed_choices};
+pub use semantic_suggestion::{
+    semantic_focused_text_field, semantic_picker_values, semantic_shows_value,
+    semantic_sole_choice, semantic_typed_choices,
+};
 #[cfg(test)]
 pub(crate) use semantic_verify::verify_semantic_action;
 pub use semantic_verify::{
