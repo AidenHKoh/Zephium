@@ -3253,5 +3253,18 @@
   "bookmarks_add_link": "添加链接…",
   "bookmarks_menu": "添加到书签",
   "bookmarks_menu_new_folder": "新建文件夹",
-  "launcher_shortcut_needs_modifier_windows": "按住 Ctrl、Alt 或 Windows 键再按此键，以免输入文字。"
+  "launcher_shortcut_needs_modifier_windows": "按住 Ctrl、Alt 或 Windows 键再按此键，以免输入文字。",
+  "native_select_tab_above": "选择上方标签页",
+  "native_select_tab_below": "选择下方标签页",
+  "command_tab_above": "选择上方标签页",
+  "command_tab_below": "选择下方标签页",
+  "keymap_group_spaces": "空间",
+  "command_space_next": "下一个空间",
+  "command_space_previous": "上一个空间",
+  "command_space_select": "切换到空间 {number}",
+  "model_favourites": "个人收藏",
+  "model_favourites_empty": "为模型加星标，即可在此处保留。",
+  "model_favourite": "将 {model} 添加到个人收藏",
+  "model_unfavourite": "将 {model} 移出个人收藏",
+  "model_settings": "模型和密钥"
 }

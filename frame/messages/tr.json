@@ -3253,5 +3253,18 @@
   "bookmarks_add_link": "Bağlantı Ekle…",
   "bookmarks_menu": "Yer İşaretlerine Ekle",
   "bookmarks_menu_new_folder": "Yeni Klasör",
-  "launcher_shortcut_needs_modifier_windows": "Tuşla birlikte Ctrl, Alt veya Windows tuşunu basılı tutun, böylece yazı yazmaz."
+  "launcher_shortcut_needs_modifier_windows": "Tuşla birlikte Ctrl, Alt veya Windows tuşunu basılı tutun, böylece yazı yazmaz.",
+  "native_select_tab_above": "Üstteki Sekmeyi Seç",
+  "native_select_tab_below": "Alttaki Sekmeyi Seç",
+  "command_tab_above": "Üstteki sekmeyi seç",
+  "command_tab_below": "Alttaki sekmeyi seç",
+  "keymap_group_spaces": "Alanlar",
+  "command_space_next": "Sonraki alan",
+  "command_space_previous": "Önceki alan",
+  "command_space_select": "{number} numaralı alana geç",
+  "model_favourites": "Sık Kullanılanlar",
+  "model_favourites_empty": "Bir modele yıldız ekleyerek burada tutun.",
+  "model_favourite": "{model} modelini sık kullanılanlara ekle",
+  "model_unfavourite": "{model} modelini sık kullanılanlardan çıkar",
+  "model_settings": "Modeller ve anahtarlar"
 }

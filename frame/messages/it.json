@@ -3253,5 +3253,18 @@
   "bookmarks_add_link": "Aggiungi link…",
   "bookmarks_menu": "Aggiungi ai segnalibri",
   "bookmarks_menu_new_folder": "Nuova cartella",
-  "launcher_shortcut_needs_modifier_windows": "Tieni premuto Ctrl, Alt o Windows insieme al tasto, così non scrive."
+  "launcher_shortcut_needs_modifier_windows": "Tieni premuto Ctrl, Alt o Windows insieme al tasto, così non scrive.",
+  "native_select_tab_above": "Seleziona scheda sopra",
+  "native_select_tab_below": "Seleziona scheda sotto",
+  "command_tab_above": "Seleziona scheda sopra",
+  "command_tab_below": "Seleziona scheda sotto",
+  "keymap_group_spaces": "Spazi",
+  "command_space_next": "Spazio successivo",
+  "command_space_previous": "Spazio precedente",
+  "command_space_select": "Passa allo spazio {number}",
+  "model_favourites": "Preferiti",
+  "model_favourites_empty": "Aggiungi una stella a un modello per tenerlo qui.",
+  "model_favourite": "Aggiungi {model} ai preferiti",
+  "model_unfavourite": "Rimuovi {model} dai preferiti",
+  "model_settings": "Modelli e chiavi"
 }

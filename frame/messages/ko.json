@@ -3253,5 +3253,18 @@
   "bookmarks_add_link": "링크 추가…",
   "bookmarks_menu": "북마크에 추가",
   "bookmarks_menu_new_folder": "새 폴더",
-  "launcher_shortcut_needs_modifier_windows": "키와 함께 Ctrl, Alt 또는 Windows를 누르세요. 그래야 글자가 입력되지 않습니다."
+  "launcher_shortcut_needs_modifier_windows": "키와 함께 Ctrl, Alt 또는 Windows를 누르세요. 그래야 글자가 입력되지 않습니다.",
+  "native_select_tab_above": "위의 탭 선택",
+  "native_select_tab_below": "아래 탭 선택",
+  "command_tab_above": "위의 탭 선택",
+  "command_tab_below": "아래 탭 선택",
+  "keymap_group_spaces": "공간",
+  "command_space_next": "다음 공간",
+  "command_space_previous": "이전 공간",
+  "command_space_select": "{number}번 공간으로 전환",
+  "model_favourites": "즐겨찾기",
+  "model_favourites_empty": "모델에 별표를 표시하면 여기에 보관됩니다.",
+  "model_favourite": "{model} 즐겨찾기에 추가",
+  "model_unfavourite": "{model} 즐겨찾기에서 제거",
+  "model_settings": "모델 및 키"
 }

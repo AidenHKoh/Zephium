@@ -3253,5 +3253,18 @@
   "bookmarks_add_link": "Добавить ссылку…",
   "bookmarks_menu": "Добавить в закладки",
   "bookmarks_menu_new_folder": "Новая папка",
-  "launcher_shortcut_needs_modifier_windows": "Удерживайте Ctrl, Alt или Windows вместе с клавишей, чтобы она не печатала текст."
+  "launcher_shortcut_needs_modifier_windows": "Удерживайте Ctrl, Alt или Windows вместе с клавишей, чтобы она не печатала текст.",
+  "native_select_tab_above": "Выбрать вкладку выше",
+  "native_select_tab_below": "Выбрать вкладку ниже",
+  "command_tab_above": "Выбрать вкладку выше",
+  "command_tab_below": "Выбрать вкладку ниже",
+  "keymap_group_spaces": "Пространства",
+  "command_space_next": "Следующее пространство",
+  "command_space_previous": "Предыдущее пространство",
+  "command_space_select": "Перейти к пространству {number}",
+  "model_favourites": "Избранное",
+  "model_favourites_empty": "Отметьте модель звездочкой, чтобы она была здесь.",
+  "model_favourite": "Добавить {model} в избранное",
+  "model_unfavourite": "Удалить {model} из избранного",
+  "model_settings": "Модели и ключи"
 }

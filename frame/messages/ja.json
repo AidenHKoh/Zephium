@@ -3253,5 +3253,18 @@
   "bookmarks_add_link": "リンクを追加…",
   "bookmarks_menu": "ブックマークに追加",
   "bookmarks_menu_new_folder": "新規フォルダ",
-  "launcher_shortcut_needs_modifier_windows": "キーと一緒に Ctrl、Alt、または Windows を押してください。文字が入力されなくなります。"
+  "launcher_shortcut_needs_modifier_windows": "キーと一緒に Ctrl、Alt、または Windows を押してください。文字が入力されなくなります。",
+  "native_select_tab_above": "上のタブを選択",
+  "native_select_tab_below": "下のタブを選択",
+  "command_tab_above": "上のタブを選択",
+  "command_tab_below": "下のタブを選択",
+  "keymap_group_spaces": "スペース",
+  "command_space_next": "次のスペース",
+  "command_space_previous": "前のスペース",
+  "command_space_select": "スペース{number}に切り替える",
+  "model_favourites": "お気に入り",
+  "model_favourites_empty": "モデルにスターを付けると、ここに表示されます。",
+  "model_favourite": "{model} をお気に入りに追加",
+  "model_unfavourite": "{model} をお気に入りから削除",
+  "model_settings": "モデルとキー"
 }

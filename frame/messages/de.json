@@ -3253,5 +3253,18 @@
   "bookmarks_add_link": "Link hinzufügen…",
   "bookmarks_menu": "Zu Lesezeichen hinzufügen",
   "bookmarks_menu_new_folder": "Neuer Ordner",
-  "launcher_shortcut_needs_modifier_windows": "Halte Strg, Alt oder die Windows-Taste mit der Taste gedrückt, damit nichts getippt wird."
+  "launcher_shortcut_needs_modifier_windows": "Halte Strg, Alt oder die Windows-Taste mit der Taste gedrückt, damit nichts getippt wird.",
+  "native_select_tab_above": "Tab oben auswählen",
+  "native_select_tab_below": "Tab unten auswählen",
+  "command_tab_above": "Tab oben auswählen",
+  "command_tab_below": "Tab unten auswählen",
+  "keymap_group_spaces": "Bereiche",
+  "command_space_next": "Nächster Bereich",
+  "command_space_previous": "Vorheriger Bereich",
+  "command_space_select": "Zu Bereich {number} wechseln",
+  "model_favourites": "Favoriten",
+  "model_favourites_empty": "Markiere ein Modell mit einem Stern, damit es hier bleibt.",
+  "model_favourite": "{model} zu Favoriten hinzufügen",
+  "model_unfavourite": "{model} aus Favoriten entfernen",
+  "model_settings": "Modelle und Schlüssel"
 }

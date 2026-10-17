@@ -3253,5 +3253,18 @@
   "bookmarks_add_link": "Додати посилання…",
   "bookmarks_menu": "Додати до закладок",
   "bookmarks_menu_new_folder": "Нова папка",
-  "launcher_shortcut_needs_modifier_windows": "Утримуйте Ctrl, Alt або Windows разом із клавішею, щоб вона не друкувала текст."
+  "launcher_shortcut_needs_modifier_windows": "Утримуйте Ctrl, Alt або Windows разом із клавішею, щоб вона не друкувала текст.",
+  "native_select_tab_above": "Вибрати вкладку вище",
+  "native_select_tab_below": "Вибрати вкладку нижче",
+  "command_tab_above": "Вибрати вкладку вище",
+  "command_tab_below": "Вибрати вкладку нижче",
+  "keymap_group_spaces": "Простори",
+  "command_space_next": "Наступний простір",
+  "command_space_previous": "Попередній простір",
+  "command_space_select": "Перейти до простору {number}",
+  "model_favourites": "Вибране",
+  "model_favourites_empty": "Позначте модель зіркою, щоб зберегти її тут.",
+  "model_favourite": "Додати {model} до вибраного",
+  "model_unfavourite": "Видалити {model} з вибраного",
+  "model_settings": "Моделі та ключі"
 }

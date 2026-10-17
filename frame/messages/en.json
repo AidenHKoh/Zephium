@@ -3255,5 +3255,18 @@
   "bookmarks_add_link": "Add Link…",
   "bookmarks_menu": "Add to Bookmarks",
   "bookmarks_menu_new_folder": "New Folder",
-  "launcher_shortcut_needs_modifier_windows": "Hold Ctrl, Alt or Windows with the key, so it doesn’t type."
+  "launcher_shortcut_needs_modifier_windows": "Hold Ctrl, Alt or Windows with the key, so it doesn’t type.",
+  "native_select_tab_above": "Select Tab Above",
+  "native_select_tab_below": "Select Tab Below",
+  "command_tab_above": "Select tab above",
+  "command_tab_below": "Select tab below",
+  "keymap_group_spaces": "Spaces",
+  "command_space_next": "Next space",
+  "command_space_previous": "Previous space",
+  "command_space_select": "Switch to space {number}",
+  "model_favourites": "Favourites",
+  "model_favourites_empty": "Star a model to keep it here.",
+  "model_favourite": "Add {model} to favourites",
+  "model_unfavourite": "Remove {model} from favourites",
+  "model_settings": "Models and keys"
 }
