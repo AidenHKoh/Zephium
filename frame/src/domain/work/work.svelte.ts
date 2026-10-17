@@ -419,7 +419,7 @@ export class WorkSession {
   }
   async run(
     context: WorkContextSelectionV1 | null = null,
-    options: { private?: boolean; skill?: string | null } = {},
+    options: { private?: boolean; skill?: string | null; draft?: string } = {},
   ): Promise<boolean> {
     const scope = this.continuationScope();
     return scope ? (await this.beginRun(scope, context, options)).accepted : false;
@@ -427,7 +427,7 @@ export class WorkSession {
   private async beginRun(
     scope: ContinuationScope,
     context: WorkContextSelectionV1 | null,
-    options: { private?: boolean; skill?: string | null },
+    options: { private?: boolean; skill?: string | null; draft?: string },
   ): Promise<ContinuationResult> {
     const notStarted = { accepted: false, operation: null, failure: "unavailable" };
     if (!this.sameContinuation(scope) || this.pending || this.operations.busy(scope.work))
@@ -458,6 +458,7 @@ export class WorkSession {
             ...(this.folders.length ? { folders: this.folders } : {}),
             ...(options.private ? { private: true } : {}),
             ...(options.skill ? { skill: options.skill } : {}),
+            ...(options.draft ? { draft: options.draft } : {}),
           },
           limits: AGENT_LIMITS,
         },
@@ -472,7 +473,7 @@ export class WorkSession {
   async continueWith(
     text: string,
     context: WorkContextSelectionV1 | null = null,
-    options: { private?: boolean } = {},
+    options: { private?: boolean; draft?: string } = {},
   ): Promise<boolean> {
     const scope = this.continuationScope();
     return scope ? (await this.continueRequest(scope, text, context, options)).accepted : false;
@@ -481,7 +482,7 @@ export class WorkSession {
     scope: ContinuationScope,
     text: string,
     context: WorkContextSelectionV1 | null = null,
-    options: { private?: boolean } = {},
+    options: { private?: boolean; draft?: string } = {},
   ): Promise<ContinuationResult> {
     const message = text.trim();
     const notStarted = () => ({

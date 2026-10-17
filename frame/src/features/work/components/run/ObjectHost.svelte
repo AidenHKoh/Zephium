@@ -25,7 +25,8 @@
             ...base,
             ...(edit.body !== undefined ? { body: edit.body } : {}),
             ...(edit.review ? { review: edit.review } : {}),
-            ...(edit.sent ? { send: "confirming" as const } : {}),
+            ...(edit.send ? { send: edit.send } : {}),
+            ...(edit.note ? { note: edit.note } : {}),
           }
         : base;
     }

@@ -92,6 +92,7 @@
   import { documentMarkdown, resultKey, WorkNotes } from "../lib/work-notes";
   import type { LiftAction } from "./LiftHeader.svelte";
   import { isAgentExecution, isLive } from "../lib/agent-steps";
+  import { draftSend } from "../lib/draft-send";
   import {
     environmentAgents,
     environmentBoards,
@@ -1485,8 +1486,21 @@
   /** What the person made of each draft before it went: kept while the work is open. */
   const drafts = new SvelteMap<string, DraftEdit>();
   const editDraft = (id: string, edit: DraftEdit) => drafts.set(id, { ...drafts.get(id), ...edit });
-  /** The words a draft goes out with, asked of the run so the app's Confirm stands before it. */
-  function draftRequest(view: DraftView, body: string): string {
+  /** The draft's artifact and the run that made it, from the element that shows it. */
+  function draftArtifact(id: string) {
+    const reference = snapshot?.elements.find((element) => element.id === id)?.reference;
+    return reference?.kind === "artifact" ? reference : undefined;
+  }
+  /** What the person made of a draft, with where its send stands read from the run it started. */
+  function drafted(id: string): DraftEdit | undefined {
+    const edit = drafts.get(id);
+    const projection = objectiveSession?.projection;
+    if (!edit?.run || !projection) return edit;
+    const run = projection.executions.find((entry) => entry.id === edit.run);
+    return { ...edit, ...draftSend(projection, run) };
+  }
+  /** The words that ask the run to send a draft, so the app's Confirm stands before it goes. */
+  function draftRequest(view: DraftView): string {
     const target = view.targetUrl ?? view.to ?? "";
     const review = drafts.get(view.id)?.review ?? view.review ?? "comment";
     const lead =
@@ -1503,22 +1517,38 @@
           : view.destination === "linkedin" || view.destination === "x"
             ? m.work_draft_ask_post({ target: view.destination === "x" ? "X" : "LinkedIn" })
             : m.work_draft_ask_message({ target });
-    return `${lead}\n\n${body}`;
+    return lead;
   }
+  /** Send binds a request to the draft object; its words reach the page from the object itself. */
   async function sendDraft(id: string) {
     const view = items.find((item) => item.id === id)?.object?.view;
-    if (view?.kind !== "draft" || drafts.get(id)?.sent || busy) return;
+    const reference = draftArtifact(id);
+    const current = objectiveSession;
+    const projection = current?.projection;
+    if (view?.kind !== "draft" || !reference || !current || !projection) return;
+    if (busy || activeExecution || drafted(id)?.send === "sending") return;
     const body = (drafts.get(id)?.body ?? view.body).trim();
     if (!body) return;
-    session.composer = draftRequest(view, body);
-    editDraft(id, { sent: true });
-    await send();
+    const original = projection.executions
+      .find((entry) => entry.id === reference.execution)
+      ?.artifacts.find((entry) => entry.id === reference.artifact);
+    if (original?.data.kind !== "draft") return;
+    if (body !== view.body) {
+      current.editArtifact(reference.execution, reference.artifact, { ...original.data, body });
+      if (!(await current.saveArtifact(reference.artifact))) return;
+    }
+    const before = new Set(current.projection?.executions.map((entry) => entry.id));
+    const started = await current.continueWith(draftRequest(view), null, {
+      draft: reference.artifact,
+    });
+    const run = current.projection?.executions.find((entry) => !before.has(entry.id));
+    if (started && run) editDraft(id, { run: run.id });
   }
   const boardActions: BoardActions = {
     send: (id) => void sendDraft(id),
     write: (id, text) => editDraft(id, { body: text }),
     review: (id, review) => editDraft(id, { review }),
-    drafted: (id) => drafts.get(id),
+    drafted,
     edit(id, change) {
       const resource = items.find((item) => item.id === id)?.owned;
       const current = resource ? owned.get(resource) : undefined;
@@ -1577,13 +1607,14 @@
     const view = liftedItem?.object?.view;
     if (!view) return undefined;
     if (view.kind === "draft") {
-      const edit = drafts.get(view.id);
+      const edit = drafted(view.id);
       return edit
         ? {
             ...view,
             ...(edit.body !== undefined ? { body: edit.body } : {}),
             ...(edit.review ? { review: edit.review } : {}),
-            ...(edit.sent ? { send: "confirming" as const } : {}),
+            ...(edit.send ? { send: edit.send } : {}),
+            ...(edit.note ? { note: edit.note } : {}),
           }
         : view;
     }
