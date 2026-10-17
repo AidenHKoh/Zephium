@@ -69,6 +69,7 @@ const WEBMAIL_GOAL: &str = "Compose a new email to dana@example.test with the su
 const WEBMAIL_SENT: &str =
     "dana@example.test|Status|Hi Dana,\n\nThe release is ready.\nThanks, Hayk";
 const DESK_FACT: &str = "Desk bell rings twice at noon";
+const HOURS_FACT: &str = "Doors open at half past eight";
 /// The vault's own sign-in, kept by the server: a tab sign-in stands for it.
 static VAULT_OPEN: AtomicBool = AtomicBool::new(false);
 static JOURNEY_FIELDS: AtomicUsize = AtomicUsize::new(0);
@@ -130,6 +131,9 @@ enum Check {
     Back,
     /// A page that reloads itself once on arrival, then a link on it.
     Reloaded,
+    /// A link whose address the site sends to another site, which the
+    /// session refuses: the page task goes on from the page it was on.
+    Detour,
     /// A heavy calendar whose script holds the page for seconds after load:
     /// its first look waits for it and the day reads.
     Heavy,
@@ -357,6 +361,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("spa") => vec![Check::Spa],
         Some("back") => vec![Check::Back],
         Some("reloaded") => vec![Check::Reloaded],
+        Some("detour") => vec![Check::Detour],
         Some("heavy") => vec![Check::Heavy],
         Some("webmail") => vec![Check::Webmail],
         Some("apps") => vec![Check::Apps],
@@ -791,6 +796,24 @@ const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.
                 "Lobby",
                 "<h1>Lobby</h1><p><a href=\"/lobby/desk\">Front desk</a></p><script>if(!sessionStorage.getItem('r')){sessionStorage.setItem('r','1');setTimeout(function(){location.reload();},200);}</script>",
             ),
+        ),
+        (Site::Account, _, "/hours") => (
+            "200 OK",
+            String::new(),
+            page(
+                "Help",
+                "<h1>Help</h1><p><a href=\"/hours/open\">Opening hours</a></p><p><a href=\"/hours/contact\">Contact</a></p>",
+            ),
+        ),
+        (Site::Account, _, "/hours/open") => (
+            "302 Found",
+            format!("Location: http://localhost:{}/hours\r\n", ports.1),
+            String::new(),
+        ),
+        (Site::Account, _, "/hours/contact") => (
+            "200 OK",
+            String::new(),
+            page("Contact", &format!("<h1>Contact</h1><p>{HOURS_FACT}.</p>")),
         ),
         (Site::Account, _, "/lobby/desk") => (
             "200 OK",
@@ -2592,6 +2615,27 @@ pub(super) async fn workflow(
                 ));
                 last = run.state;
                 read
+            }
+            Check::Detour => {
+                let run = context
+                    .run(
+                        "Hours",
+                        false,
+                        "Allow",
+                        vec![vec![browse(
+                            "/hours",
+                            "Open the Opening hours link and report the opening hours. If that page does not open, the Contact page lists them too",
+                        )]],
+                    )
+                    .await?;
+                let read = says(&run, HOURS_FACT) || mentions(&run, &["half past eight"]);
+                let tried = context.sites.hits(Site::Account, "/hours/open").len();
+                line(format!(
+                    "check=detour read={read} tried={tried} pages=[{}]",
+                    pages_of(&run)
+                ));
+                last = run.state;
+                read && tried >= 1
             }
             Check::Spa => {
                 let run = context

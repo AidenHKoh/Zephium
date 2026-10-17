@@ -2521,7 +2521,9 @@ fn failure_note(failure: AgentWorkFailure) -> &'static str {
         AgentWorkFailure::Browser(Browser::Navigation(_)) => {
             "The page led somewhere the read may not follow"
         }
-        AgentWorkFailure::Browser(Browser::Action(_)) => "An action on the page did not work",
+        AgentWorkFailure::Browser(
+            Browser::Action(_) | Browser::ActionRejected(_) | Browser::ActionUnverified,
+        ) => "An action on the page did not work",
         AgentWorkFailure::Browser(Browser::Authority) => {
             "Work could not validate the page operation's authority"
         }

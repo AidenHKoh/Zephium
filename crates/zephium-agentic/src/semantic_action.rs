@@ -2429,6 +2429,11 @@ pub enum SemanticActionBindingError {
     /// outside the visible area, so nothing was pressed or typed.
     #[error("semantic action target was covered or out of view")]
     TargetCovered,
+    /// A step that may commit something reached the page, now or earlier in
+    /// the task, and its outcome was not seen: it may already have taken
+    /// effect, so it is never issued again.
+    #[error("semantic action outcome is unknown")]
+    OutcomeUnknown,
 }
 
 /// Typed structural refusal before backend visibility/occlusion revalidation.

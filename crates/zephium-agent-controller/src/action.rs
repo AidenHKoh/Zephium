@@ -540,14 +540,14 @@ impl AgentBrowserAction {
 
     /// A rejected read or local-write batch never ran and keeps its
     /// continuation: the model hears the refusal and chooses again on a
-    /// fresh observation.
+    /// fresh observation. In a site session so does any other step, which
+    /// never reached the page either.
     pub(crate) fn into_rejected_refusal(
         self,
+        site_session: bool,
     ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
-        if !matches!(
-            self.proposal.action.effect(),
-            SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
-        ) || self.proposal.continuation.is_none()
+        if !(site_session || !commits(self.proposal.action.effect()))
+            || self.proposal.continuation.is_none()
         {
             return Err(Box::new(self));
         }
@@ -574,19 +574,25 @@ impl AgentBrowserAction {
         }
     }
     /// A read-effect action that ran but whose outcome was not observed:
-    /// its batch fails with that reason and the model hears why.
+    /// its batch fails with that reason and the model hears why. A site
+    /// session hands back any step this way; one that may commit is told
+    /// as unknown, never to be run again.
     pub(crate) fn into_unverified_refusal(
         self,
-        local_writes: bool,
+        site_session: bool,
     ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
         let effect = self.proposal.action.effect();
+        let reason = if commits(effect) {
+            SemanticActionBindingError::OutcomeUnknown
+        } else {
+            SemanticActionBindingError::Unverified
+        };
         if !self.finished
             || self.native.is_some()
             || self.pending.is_some()
             || self.terminal.is_some()
             || self.journal_failed
-            || !(effect == SemanticEffectClass::Read
-                || (local_writes && effect == SemanticEffectClass::LocalWrite))
+            || !(effect == SemanticEffectClass::Read || site_session)
             || self.proposal.continuation.is_none()
             || self.failed.as_ref().is_none_or(|failed| {
                 self.receipt != Some(failed.receipt()) || failed.verification_error().is_none()
@@ -604,7 +610,7 @@ impl AgentBrowserAction {
                         .continuation
                         .take()
                         .expect("checked provider continuation"),
-                    SemanticActionBindingError::Unverified,
+                    reason,
                     this.proposal.refusal_context,
                 ),
             )),
@@ -622,44 +628,40 @@ impl AgentBrowserAction {
     /// ran but could not be verified (the page moved on to a check or another
     /// document under it) commits nothing either and is handed back the same
     /// way, as is, with `rewritable`, a fill or choice into a field that
-    /// commits nothing whose value the page did not keep as typed.
+    /// commits nothing whose value the page did not keep as typed. A site
+    /// session also hands back a commit refused before it acted, and any
+    /// step the page applied unverified or timed out on, a commit as one
+    /// whose outcome is unknown.
     pub(crate) fn into_covered_refusal(
         self,
         rewritable: bool,
+        site_session: bool,
     ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
         let effect = self.proposal.action.effect();
         let rewritten = self.native_unverified
             && unverified_hands_back(effect, self.proposal.action.kind(), rewritable);
+        let Some(reason) = self
+            .failed
+            .as_ref()
+            .and_then(|failed| handed_back(effect, failed.failure(), rewritten, site_session))
+        else {
+            return Err(Box::new(self));
+        };
         if !self.finished
             || self.native.is_some()
             || self.pending.is_some()
             || self.terminal.is_some()
             || self.journal_failed
-            || !matches!(
-                effect,
-                SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
-            )
             || self.proposal.continuation.is_none()
-            || self.failed.as_ref().is_none_or(|failed| {
-                self.receipt != Some(failed.receipt())
-                    || !(refused_before_acting(failed.failure())
-                        || (rewritten && failed.failure() == SemanticActionFailure::NeedsHuman))
-            })
+            || self
+                .failed
+                .as_ref()
+                .is_none_or(|failed| self.receipt != Some(failed.receipt()))
         {
             return Err(Box::new(self));
         }
         let mut this = self;
         let failed = this.failed.take().expect("checked original failed owner");
-        let reason = match failed.failure() {
-            SemanticActionFailure::TargetOccluded => SemanticActionBindingError::TargetCovered,
-            SemanticActionFailure::NeedsHuman => SemanticActionBindingError::Unverified,
-            // The page's control cannot take this operation (a scroll into
-            // view of the whole document): the model chooses another.
-            SemanticActionFailure::UnsupportedInteraction => {
-                SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied)
-            }
-            _ => SemanticActionBindingError::DispatchRejected,
-        };
         match this.proposal.batch.fail(&this.proposal.action, failed) {
             Ok(terminal) => Ok((
                 terminal,
@@ -1152,6 +1154,50 @@ pub(crate) const fn refused_before_acting(failure: SemanticActionFailure) -> boo
     )
 }
 
+/// Why a step the page failed goes back to the model, if it does: one the
+/// page refused before acting never ran; in a site session a commit refused
+/// so goes back too, and any step the page applied unverified or timed out
+/// on, a commit as one whose outcome is unknown.
+fn handed_back(
+    effect: SemanticEffectClass,
+    failure: SemanticActionFailure,
+    rewritten: bool,
+    site_session: bool,
+) -> Option<SemanticActionBindingError> {
+    match failure {
+        _ if refused_before_acting(failure) && (site_session || !commits(effect)) => {
+            Some(match failure {
+                SemanticActionFailure::TargetOccluded => SemanticActionBindingError::TargetCovered,
+                // The page's control cannot take this operation (a scroll into
+                // view of the whole document): the model chooses another.
+                SemanticActionFailure::UnsupportedInteraction => {
+                    SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied)
+                }
+                _ => SemanticActionBindingError::DispatchRejected,
+            })
+        }
+        SemanticActionFailure::NeedsHuman if rewritten => {
+            Some(SemanticActionBindingError::Unverified)
+        }
+        SemanticActionFailure::NeedsHuman | SemanticActionFailure::Timeout if site_session => {
+            Some(if commits(effect) {
+                SemanticActionBindingError::OutcomeUnknown
+            } else {
+                SemanticActionBindingError::Unverified
+            })
+        }
+        _ => None,
+    }
+}
+
+/// A step that may change something beyond the page's own draft state.
+const fn commits(effect: SemanticEffectClass) -> bool {
+    !matches!(
+        effect,
+        SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
+    )
+}
+
 /// A step that ran but could not be verified and still commits nothing.
 fn unverified_hands_back(
     effect: SemanticEffectClass,
@@ -1204,6 +1250,68 @@ mod owned_failure_tests {
             ));
         }
     }
+    #[test]
+    fn a_site_session_hands_every_step_the_page_survived_back_and_never_reruns_a_commit() {
+        use SemanticActionBindingError as Reason;
+        use SemanticActionFailure as Failure;
+        let send = SemanticEffectClass::Communication;
+        let draft = SemanticEffectClass::LocalWrite;
+        // A control replaced or covered right after the look: nothing ran.
+        assert_eq!(
+            handed_back(send, Failure::TargetChanged, false, true),
+            Some(Reason::DispatchRejected)
+        );
+        assert_eq!(
+            handed_back(send, Failure::StaleReference, false, true),
+            Some(Reason::DispatchRejected)
+        );
+        assert_eq!(
+            handed_back(send, Failure::TargetOccluded, false, true),
+            Some(Reason::TargetCovered)
+        );
+        // A step that timed out or ran unverified: a commit is unknown and
+        // the model must look before anything else; a draft is unverified.
+        for failure in [Failure::Timeout, Failure::NeedsHuman] {
+            for effect in [
+                SemanticEffectClass::ExternalWrite,
+                SemanticEffectClass::Purchase,
+                SemanticEffectClass::Destructive,
+                send,
+            ] {
+                assert_eq!(
+                    handed_back(effect, failure, false, true),
+                    Some(Reason::OutcomeUnknown)
+                );
+            }
+            assert_eq!(
+                handed_back(draft, failure, false, true),
+                Some(Reason::Unverified)
+            );
+        }
+        // The page itself gone stays the end of the page task.
+        for failure in [
+            Failure::RendererLost,
+            Failure::NavigationReplaced,
+            Failure::LeaseViolation,
+            Failure::HumanControlChanged,
+            Failure::Cancelled,
+        ] {
+            assert_eq!(handed_back(send, failure, false, true), None);
+            assert_eq!(handed_back(draft, failure, false, true), None);
+        }
+        // Outside a site session a commit's failure keeps its owner.
+        assert_eq!(
+            handed_back(send, Failure::TargetChanged, false, false),
+            None
+        );
+        assert_eq!(handed_back(send, Failure::Timeout, false, false), None);
+        assert_eq!(
+            handed_back(draft, Failure::TargetChanged, false, false),
+            Some(Reason::DispatchRejected)
+        );
+        assert_eq!(handed_back(draft, Failure::Timeout, false, false), None);
+    }
+
     #[test]
     fn preflight_failure_closes_local_work_but_never_uncertain_or_external_writes() {
         assert!(owned_failure_may_close(

@@ -148,6 +148,14 @@ pub trait AgentWorkLocalActionPolicy: Send {
         Ok(())
     }
 
+    /// The assessed step never reached the page: any approval it carried
+    /// stays with that step.
+    fn action_not_run(&self) {}
+
+    /// The assessed step reached the page and its outcome was not seen: a
+    /// step that may have committed is never assessed as runnable again.
+    fn action_outcome_unknown(&self) {}
+
     /// Whether the required verified local-action sequence is complete.
     fn terminal_extraction_ready(&self) -> bool {
         true
@@ -371,6 +379,16 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
             .as_mut()
             .ok_or_else(|| crate::contract!())?
             .accept_verified_action(result, observation)
+    }
+    fn action_not_run(&mut self) {
+        if let Some(policy) = self.local_actions.as_ref() {
+            policy.action_not_run();
+        }
+    }
+    fn action_outcome_unknown(&mut self) {
+        if let Some(policy) = self.local_actions.as_ref() {
+            policy.action_outcome_unknown();
+        }
     }
     fn terminal_extraction_ready(&self) -> bool {
         self.local_actions

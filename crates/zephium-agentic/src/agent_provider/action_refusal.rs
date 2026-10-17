@@ -405,6 +405,7 @@ impl AgentProviderActionRefusal {
                     )
                 }) => "field_rewritten: the text was typed, but the field did not keep it exactly as typed: the page rewrote it or is offering suggestions (an autocomplete, a place or date picker). This is a fresh look at the page as it is now, with the field's current value and any suggestion list or calendar it opened. If a suggestion matches what you meant, click it; if the field already holds an acceptable value, go on (search, apply, or the next field); otherwise fill it again with a shorter or different value.",
             SemanticActionBindingError::Unverified => "outcome_not_observed: the action ran, but its declared outcome was not seen. This is a fresh look at the page as it is now: continue from what it shows, and do not repeat the same action unchanged.",
+            SemanticActionBindingError::OutcomeUnknown => "outcome_unknown: the step reached the page but its outcome was not seen, so it may already have taken effect. This is a fresh look at the page as it is now: check on it whether the step happened (a sent message in its thread or folder, a new item in its list, a changed cart or status) and report what it shows. This step is not run again in this task, in this form or another.",
             _ => return Err(Box::new(self)),
         };
         let note = if self.stuck {
@@ -510,6 +511,10 @@ impl AgentProviderActionRefusal {
             SemanticActionBindingError::Unverified => (
                 "outcome_not_observed",
                 "The action ran, but its declared outcome was not seen afterwards: the control may have left the page (a dismissed notice, a menu item that closed its menu) or the page did not change as declared. The observation you hold is stale. Request snapshot(initial) to see the page as it is now and continue from what it shows; do not repeat this action unchanged.",
+            ),
+            SemanticActionBindingError::OutcomeUnknown => (
+                "outcome_unknown",
+                "Nothing executed now. This step reached the page earlier in this task, or just now, and its outcome was not seen: it may already have taken effect, so it is not run again in this task, in this form or another. Look at the page (snapshot initial) for whether it happened (a sent message in its thread or folder, a new item in its list), then report what it shows.",
             ),
             SemanticActionBindingError::TargetCovered => (
                 "target_covered",

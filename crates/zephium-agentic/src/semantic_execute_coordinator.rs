@@ -810,6 +810,7 @@ impl SemanticActionQualificationError {
                 crate::SemanticActionBindingError::DispatchRejected => "binding_dispatch_rejected",
                 crate::SemanticActionBindingError::Unverified => "binding_unverified",
                 crate::SemanticActionBindingError::TargetCovered => "binding_target_covered",
+                crate::SemanticActionBindingError::OutcomeUnknown => "binding_outcome_unknown",
             },
             Self::Checkpoint(error) => match error {
                 crate::SemanticActionPreparationError::IncompleteSnapshot => {

@@ -117,19 +117,13 @@ impl AgentWorkController {
             SemanticActionBindingError::Unverified
                 | SemanticActionBindingError::DispatchRejected
                 | SemanticActionBindingError::TargetCovered
+                | SemanticActionBindingError::OutcomeUnknown
         ) {
             return Ok(refusal);
         }
-        let Some(node) = refusal.target().and_then(|target| {
-            let expected = observation.reference_frame(target).ok()?;
-            let current = frames
-                .iter()
-                .find(|frame| frame.frame() == expected.frame())?;
-            observation.resolve_node(target, current).ok()
-        }) else {
+        let Some(control) = Self::refused_control(&refusal, observation, frames) else {
             return Ok(refusal);
         };
-        let control = super::control_digest(node);
         if refusal.reason() == SemanticActionBindingError::TargetCovered
             && !covered.contains(&control)
         {
@@ -154,6 +148,23 @@ impl AgentWorkController {
         })
     }
 
+    /// The refused proposal's control, by its role and name digest.
+    pub(super) fn refused_control(
+        refusal: &AgentProviderActionRefusal,
+        observation: &SemanticObservation,
+        frames: &[SemanticFrameJoin],
+    ) -> Option<u64> {
+        let target = refusal.target()?;
+        let expected = observation.reference_frame(target).ok()?;
+        let current = frames
+            .iter()
+            .find(|frame| frame.frame() == expected.frame())?;
+        observation
+            .resolve_node(target, current)
+            .ok()
+            .map(super::control_digest)
+    }
+
     pub(super) async fn navigate_current(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
@@ -176,6 +187,11 @@ impl AgentWorkController {
             NavigationStart::Model(turn) => (Some(*turn), None),
             NavigationStart::Follow(follow) => (None, Some(*follow)),
         };
+        // A model's load that fails goes back to the page it left.
+        let departed = turn
+            .as_ref()
+            .and(state.native.retained.as_ref())
+            .map(|browser| page_address(browser.binding().document()));
         let kind = turn
             .as_ref()
             .map_or(AgentBrowserToolKind::Navigate, |turn| {
@@ -557,6 +573,23 @@ impl AgentWorkController {
         state.scroll_streak = 0;
         state.look_streak = 0;
         state.moved_on();
+        let arrived = state
+            .native
+            .retained
+            .as_ref()
+            .map(|browser| page_address(browser.binding().document()));
+        match (departed, proposed_target.as_ref().map(page_address)) {
+            (Some(departed), Some(target))
+                if arrived.as_ref() == Some(&departed) && target != departed =>
+            {
+                state.setbacks.count(
+                    super::Setback::Navigation,
+                    address_digest(&target),
+                    AgentWorkFailure::Native(ContextPortFailure::NativeRefused),
+                )?;
+            }
+            _ => state.setbacks.progressed(),
+        }
         let fresh = Self::fit_model_observation(
             Box::pin(Self::observe_after_navigation(state, worker, browser)).await?,
         )?;
@@ -646,6 +679,20 @@ impl AgentWorkController {
         .await?;
         Ok((fresh, captured_at, progress, Some(turn)))
     }
+}
+
+/// A document's address without the route an app keeps in its fragment.
+pub(super) fn page_address(target: &ContextNavigationTarget) -> String {
+    let mut url = target.as_url().clone();
+    url.set_fragment(None);
+    url.into()
+}
+
+pub(super) fn address_digest(address: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    address.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl AgentWorkController {

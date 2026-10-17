@@ -179,7 +179,8 @@ const AGENT_BROWSER_INSTRUCTIONS_V1: &str = concat!(
     "site, such as the site's search results for a query), never guessed, never current_document_url, ",
     "requested_document_url or prior_document_urls (history, not evidence); back, when available, returns to the ",
     "exact predecessor; stop navigating when completed_hops reaches total_hops; only terminal mapping sources are ",
-    "citable, prior_document_urls are chronological by document_epoch. INSPECTION_PROGRESS: earlier captures; do not ",
+    "citable, prior_document_urls are chronological by document_epoch; requested_not_opened means that address did ",
+    "not open and this is the page you were on, loaded again: do not request it again. INSPECTION_PROGRESS: earlier captures; do not ",
     "repeat completed searches or an unchanged broad scope, choose a narrower region instead; snapshot(initial) ",
     "restores the viewport without scrolling, once, to act on its controls again, never to extract; earlier refs are ",
     "retired; at remaining_inspections=0 only one ",
@@ -4576,6 +4577,8 @@ fn encode_navigation_checkpoint(
         current_document_url: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         requested_document_url: Option<String>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        requested_not_opened: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         prior_document_urls: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -4598,12 +4601,17 @@ fn encode_navigation_checkpoint(
         .current_requested_document()
         .and_then(provider_document_url)
         .filter(|requested| Some(requested) != current.as_ref());
+    // The load ended back on the page it left: the address did not open.
+    let requested_not_opened = requested.is_some()
+        && current.is_some()
+        && prior.as_ref().and_then(|prior| prior.last()) == current.as_ref();
     let wire = Wire {
         completed_hops: checkpoint.completed_hops(),
         total_hops: checkpoint.total_hops(),
         next_navigation_target: target,
         current_document_url: current,
         requested_document_url: requested,
+        requested_not_opened,
         prior_document_urls: prior,
         current_document_epoch: checkpoint
             .is_discovery()

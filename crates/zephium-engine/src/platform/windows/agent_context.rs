@@ -1635,6 +1635,11 @@ where
                         }
                         if let Some(destination) = gate.redirected() {
                             event_redirect(destination);
+                        } else if gate.owned_refusal() {
+                            invoke_unit_callback(
+                                navigation_event_location_callback.as_ref(),
+                                location_panic.as_ref(),
+                            );
                         } else if gate.failed() {
                             invoke_unit_callback(
                                 navigation_invariant.as_ref(),

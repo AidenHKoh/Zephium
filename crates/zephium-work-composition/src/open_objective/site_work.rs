@@ -1290,9 +1290,12 @@ struct GateState {
     /// step and preview: the same step proposed again runs without a new card.
     unspent: Vec<([u8; 32], [u8; 32])>,
     /// The commit handed to the page and not yet verified.
-    in_flight: Option<(Consequence, String)>,
+    in_flight: Option<Flight>,
     /// What this page task committed, in order, with the control's words.
     committed: Vec<(Consequence, String)>,
+    /// Commits that reached the page with their outcome unseen: never run
+    /// again in this page task.
+    unknown: Vec<Flight>,
     /// Add-to-cart controls already pressed: a second press adds a second item.
     carted: Vec<[u8; 32]>,
     /// Status lines seen before the last step, for the commit detector.
@@ -1316,6 +1319,17 @@ struct GateState {
     views: Vec<zephium_agentic::AppView>,
     /// The views Rust opened, oldest first.
     opened: Vec<zephium_agentic::AppView>,
+}
+
+/// A commit handed to the page, by what it is.
+struct Flight {
+    consequence: Consequence,
+    control: String,
+    structure: [u8; 32],
+    /// The person's approval it spends, by step and preview.
+    approved: Option<([u8; 32], [u8; 32])>,
+    /// The cart item it adds.
+    cart: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1469,7 +1483,43 @@ impl SiteGate {
         if state.confirmed.take().is_some() {
             return Some(Receipt::NotSent);
         }
-        state.receipt.take()
+        state
+            .receipt
+            .take()
+            .or_else(|| (!state.unspent.is_empty()).then_some(Receipt::NotSent))
+    }
+    /// The step handed to the page never reached it: an approval it spent
+    /// goes back to that step, and an item it added is not counted.
+    fn not_run(&self) {
+        let mut state = self.state();
+        let Some(flight) = state.in_flight.take() else {
+            return;
+        };
+        if state.dispatched.take().is_some() {
+            state.unspent.extend(flight.approved);
+        }
+        if let Some(item) = flight.cart {
+            state.carted.retain(|known| *known != item);
+        }
+    }
+    /// The step reached the page and its outcome was not seen. Typing
+    /// commits nothing, so it may run again; any other step may have
+    /// committed and never runs again.
+    fn outcome_unknown(&self) {
+        let mut state = self.state();
+        let Some(flight) = state.in_flight.take() else {
+            return;
+        };
+        if flight.consequence == Consequence::Type {
+            if state.dispatched.take().is_some() {
+                state.unspent.extend(flight.approved);
+            }
+            return;
+        }
+        if state.dispatched.take().is_some() {
+            state.receipt = Some(Receipt::Unverified);
+        }
+        state.unknown.push(flight);
     }
     /// What this page task committed, one plain line each: "Saved on the page:
     /// Add task". The lead reports an item as made by these, whatever the
@@ -1492,6 +1542,21 @@ impl SiteGate {
             };
             if lines.last() != Some(&line) && lines.len() < MAX_LEDGER {
                 lines.push(line);
+            }
+        }
+        for flight in &self.state().unknown {
+            let verb = match flight.consequence {
+                Consequence::Communication => "sent",
+                Consequence::Destructive => "deleted",
+                Consequence::Purchase => "purchased",
+                Consequence::Save | Consequence::Edit => "saved",
+                Consequence::Type => continue,
+            };
+            if lines.len() < MAX_LEDGER {
+                lines.push(format!(
+                    "Maybe {verb} on the page, not confirmed: {}",
+                    flight.control
+                ));
             }
         }
         lines
@@ -1910,6 +1975,23 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             declared == consequence.class()
         };
         let control = clip(&label(node), 60);
+        let flight = |approved| Flight {
+            consequence,
+            control: control.clone(),
+            structure: fingerprint.structure,
+            approved,
+            cart: None,
+        };
+        // It reached the page before and its outcome was never seen: it may
+        // have committed, so it is not run again.
+        if consequence != Consequence::Type
+            && state
+                .unknown
+                .iter()
+                .any(|flight| flight.structure == fingerprint.structure)
+        {
+            return Err(AgentWorkFailure::OutcomeUnknown);
+        }
         // The person approved this step and the page then changed under it
         // without changing what it is: it runs, once, without a new question.
         if let Some(at) = state
@@ -1920,9 +2002,9 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             if !fits {
                 return Err(AgentWorkFailure::EffectRequired(consequence.class()));
             }
-            state.unspent.remove(at);
+            let approved = state.unspent.remove(at);
             state.dispatched = Some(consequence);
-            state.in_flight = Some((consequence, control));
+            state.in_flight = Some(flight(Some(approved)));
             state.status_before = status_lines(observation);
             return accept_approved(current_binding);
         }
@@ -1942,7 +2024,10 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
                     return Err(AgentWorkFailure::EffectRequired(consequence.class()));
                 }
                 state.dispatched = Some(consequence);
-                state.in_flight = Some((consequence, control));
+                state.in_flight = Some(flight(Some((
+                    confirmed.fingerprint.structure,
+                    confirmed.digest,
+                ))));
                 state.status_before = status_lines(observation);
                 return accept_approved(current_binding);
             }
@@ -1958,7 +2043,7 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
                     ));
                 }
                 state.dispatched = Some(consequence);
-                state.in_flight = Some((consequence, control));
+                state.in_flight = Some(flight(None));
                 state.status_before = status_lines(observation);
                 return accept_approved(current_binding);
             }
@@ -1983,14 +2068,16 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             }
             // The planner pressed Add to cart again after the page said it
             // was added, putting the item in three times.
+            let mut flight = flight(None);
             if names_any(&label(node), &CART_WORDS) {
                 let item = cart_item(&fingerprint, snapshot);
                 if state.carted.contains(&item) {
                     return Err(AgentWorkFailure::AlreadyDone);
                 }
                 state.carted.push(item);
+                flight.cart = Some(item);
             }
-            state.in_flight = Some((consequence, control));
+            state.in_flight = Some(flight);
             state.status_before = status_lines(observation);
             return accept_approved(current_binding);
         }
@@ -2016,6 +2103,14 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
         self.after_step(observation);
         Ok(())
     }
+
+    fn action_not_run(&self) {
+        self.gate.not_run();
+    }
+
+    fn action_outcome_unknown(&self) {
+        self.gate.outcome_unknown();
+    }
 }
 
 impl SiteWorkPolicy {
@@ -2024,7 +2119,7 @@ impl SiteWorkPolicy {
     fn after_step(&self, observation: &SemanticObservation) {
         let mut state = self.gate.state();
         if let Some(flight) = state.in_flight.take() {
-            state.committed.push(flight);
+            state.committed.push((flight.consequence, flight.control));
         }
         if state.dispatched.take().is_some() {
             state.receipt = Some(Receipt::Committed);
@@ -3749,6 +3844,89 @@ mod tests {
                 SiteEffect::Commit(Consequence::Destructive)
             );
         }
+    }
+
+    #[test]
+    fn an_approved_step_the_page_refused_before_it_ran_runs_again_without_a_new_card() {
+        let look = composer(&[(2, "Send")]);
+        let gate = Arc::new(SiteGate::default());
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        let send = click(&look, 2, SemanticEffectClass::Communication);
+        assert!(policy.assess(&send, &look).is_err());
+        gate.approve(false).unwrap();
+        assert!(policy.assess(&send, &look).is_ok());
+        policy.action_not_run();
+        assert_eq!(gate.take_receipt(), None, "nothing ran, nothing to report");
+        assert_eq!(gate.finish(), Some(Receipt::NotSent));
+        assert!(policy.assess(&send, &look).is_ok());
+        assert!(gate.pending().is_none(), "the person is not asked twice");
+        policy.after_step(&look);
+        assert_eq!(gate.take_receipt(), Some(Receipt::Committed));
+        assert_eq!(gate.committed(), vec!["Sent on the page: Send".to_owned()]);
+    }
+
+    #[test]
+    fn a_commit_whose_outcome_the_page_did_not_show_never_runs_again() {
+        let look = composer(&[(2, "Send")]);
+        let gate = Arc::new(SiteGate::default());
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        let send = click(&look, 2, SemanticEffectClass::Communication);
+        assert!(policy.assess(&send, &look).is_err());
+        gate.approve(false).unwrap();
+        assert!(policy.assess(&send, &look).is_ok());
+        policy.action_outcome_unknown();
+        assert_eq!(gate.take_receipt(), Some(Receipt::Unverified));
+        assert_eq!(
+            policy.assess(&send, &look).err(),
+            Some(AgentWorkFailure::OutcomeUnknown)
+        );
+        assert!(
+            gate.pending().is_none(),
+            "no card for a step that may have run"
+        );
+        assert_eq!(
+            gate.committed(),
+            vec!["Maybe sent on the page, not confirmed: Send".to_owned()]
+        );
+        // The same control re-rendered is the same step.
+        let renewed = composer(&[(3, "Send")]);
+        assert_eq!(
+            policy
+                .assess(
+                    &click(&renewed, 2, SemanticEffectClass::Communication),
+                    &renewed
+                )
+                .err(),
+            Some(AgentWorkFailure::OutcomeUnknown)
+        );
+    }
+
+    #[test]
+    fn an_add_to_cart_the_page_refused_before_it_ran_is_not_counted() {
+        let look = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"heading","l":1,"n":"Combination Pliers"}),
+            json!({"k":3,"p":0,"r":"button","n":"Add to cart","o":1,"ak":1,"b":{"x":1,"y":1,"w":80,"h":30}}),
+        ]);
+        let policy = SiteWorkPolicy {
+            gate: Arc::new(SiteGate::new("shop.example".into(), true, false)),
+            asks: true,
+        };
+        let add = click(&look, 3, SemanticEffectClass::ExternalWrite);
+        assert!(policy.assess(&add, &look).is_ok());
+        policy.action_not_run();
+        assert!(policy.assess(&add, &look).is_ok());
+        policy.action_outcome_unknown();
+        assert_eq!(
+            policy.assess(&add, &look).err(),
+            Some(AgentWorkFailure::OutcomeUnknown)
+        );
     }
 
     #[test]
