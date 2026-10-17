@@ -17,7 +17,7 @@ impl TryFrom<ReadOperation> for Read {
             ReadOperation::Status => Ok(Self::Status),
             ReadOperation::Diff => Ok(Self::Diff),
             ReadOperation::Check => Ok(Self::Check),
-            #[cfg(test)]
+            #[cfg(all(test, target_os = "macos"))]
             ReadOperation::Files => Err(Failure::Input),
         }
     }

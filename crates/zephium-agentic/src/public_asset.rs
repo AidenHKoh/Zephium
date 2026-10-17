@@ -647,8 +647,12 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let proxy = format!("http://{}", listener.local_addr().unwrap());
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .env_clear()
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.env_clear();
+        // Winsock needs the system directory to load its service providers.
+        #[cfg(windows)]
+        child.env("SystemRoot", std::env::var_os("SystemRoot").unwrap());
+        let status = child
             .env("HTTPS_PROXY", &proxy)
             .env("ALL_PROXY", &proxy)
             .args([

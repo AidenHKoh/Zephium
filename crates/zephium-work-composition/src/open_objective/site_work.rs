@@ -417,7 +417,11 @@ pub(crate) fn email_addresses(text: &str) -> Vec<String> {
 pub(crate) fn channels(text: &str) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     for (at, _) in text.match_indices('#') {
-        if text[..at].chars().next_back().is_some_and(char::is_alphanumeric) {
+        if text[..at]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric)
+        {
             continue;
         }
         let name: String = text[at + 1..]
@@ -445,12 +449,14 @@ fn addressed_to(recipients: &[String], node: &SemanticNode, snapshot: &SemanticS
                 Some(SemanticValueSummary::Text(text)) => text.preview().text().to_lowercase(),
                 _ => String::new(),
             };
-            recipients.iter().any(|address| match address.strip_prefix('#') {
-                // A channel is named by its words: "Message #launch-team",
-                // "Message to launch-team".
-                Some(channel) => names_any(&shown, &[channel]) || names_any(&typed, &[channel]),
-                None => shown.contains(address) || typed.contains(address),
-            })
+            recipients
+                .iter()
+                .any(|address| match address.strip_prefix('#') {
+                    // A channel is named by its words: "Message #launch-team",
+                    // "Message to launch-team".
+                    Some(channel) => names_any(&shown, &[channel]) || names_any(&typed, &[channel]),
+                    None => shown.contains(address) || typed.contains(address),
+                })
         })
 }
 
@@ -1169,15 +1175,17 @@ pub(crate) fn preview(
         .filter(|place| !place.is_empty());
     // A message addressed in its own box names those people; the page's
     // headings then belong to other conversations (a mail list beside it).
-    let heading = conversation.clone().or_else(|| region
-        .iter()
-        .chain(if recipients.is_empty() {
-            snapshot.nodes()
-        } else {
-            &[][..]
-        })
-        .find(|part| part.role() == SemanticRole::Heading && !label(part).trim().is_empty())
-        .map(|part| clip(&label(part), 80)));
+    let heading = conversation.clone().or_else(|| {
+        region
+            .iter()
+            .chain(if recipients.is_empty() {
+                snapshot.nodes()
+            } else {
+                &[][..]
+            })
+            .find(|part| part.role() == SemanticRole::Heading && !label(part).trim().is_empty())
+            .map(|part| clip(&label(part), 80))
+    });
     let headline = match consequence {
         Consequence::Communication => {
             let verb = verb(&name, "Send");
@@ -3016,10 +3024,14 @@ mod tests {
                     "b":{"x":1,"y":150,"w":80,"h":30}}),
             ])
         };
-        for (name, right) in [("Message to new-channel", false), ("Message #general", true)] {
+        for (name, right) in [
+            ("Message to new-channel", false),
+            ("Message #general", true),
+        ] {
             let look = chat(name);
             let gate = Arc::new(
-                SiteGate::new("slack.com".into(), false, false).addressed_to(vec!["#general".into()]),
+                SiteGate::new("slack.com".into(), false, false)
+                    .addressed_to(vec!["#general".into()]),
             );
             let policy = SiteWorkPolicy {
                 gate: gate.clone(),
@@ -3065,8 +3077,14 @@ mod tests {
             policy.assess(&close, &look).err(),
             Some(AgentWorkFailure::ActionDenied)
         );
-        assert!(gate.pending().is_none(), "no card for a step the person did not ask for");
-        assert!(policy.assess(&send, &look).is_ok(), "the approval still holds");
+        assert!(
+            gate.pending().is_none(),
+            "no card for a step the person did not ask for"
+        );
+        assert!(
+            policy.assess(&send, &look).is_ok(),
+            "the approval still holds"
+        );
     }
 
     #[test]
@@ -3106,7 +3124,10 @@ mod tests {
             policy.assess(&other, &elsewhere).err(),
             Some(AgentWorkFailure::ActionDenied)
         );
-        assert!(gate.pending().is_some(), "the same words elsewhere are asked");
+        assert!(
+            gate.pending().is_some(),
+            "the same words elsewhere are asked"
+        );
     }
 
     #[test]
@@ -3139,7 +3160,10 @@ mod tests {
             policy.assess(&unnamed, &look),
             Err(AgentWorkFailure::ActionDenied)
         ));
-        assert!(gate.pending().is_some(), "an unnamed control keeps the card");
+        assert!(
+            gate.pending().is_some(),
+            "an unnamed control keeps the card"
+        );
         gate.decline();
         let send = click(&look, 5, SemanticEffectClass::LocalWrite);
         assert!(matches!(
@@ -3170,7 +3194,9 @@ mod tests {
             json!({"k":2,"p":0,"r":"button","n":"Compose","o":9,"ak":1,"fc":true,
                 "b":{"x":1,"y":1,"w":80,"h":30}}),
         ]);
-        let said = mail(Some(json!({"k":6,"p":0,"r":"status","t":"Message sent","fc":true})));
+        let said = mail(Some(
+            json!({"k":6,"p":0,"r":"status","t":"Message sent","fc":true}),
+        ));
         for (after, sent) in [(mail(None), false), (said, true), (closed, true)] {
             let look = mail(None);
             let gate = Arc::new(SiteGate::default());

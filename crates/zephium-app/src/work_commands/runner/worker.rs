@@ -147,7 +147,7 @@ pub(super) fn closed<T, E: WorkerError>(
     result
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(super) async fn pending_capacity_fixture<F, FF>(slots: Arc<Slots>, refused: F)
 where
     F: FnOnce() -> FF,

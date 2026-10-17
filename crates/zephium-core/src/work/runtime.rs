@@ -2227,10 +2227,10 @@ impl WorkExecutionFact {
                         .flat_map(|a| &a.evidence)
                         .any(|original| original == link)
                 })
-                || (!matches!(
+                || !(matches!(
                     self.status,
                     WorkExecutionStatus::Completed | WorkExecutionStatus::NeedsReview
-                ) && !(edit.decision.is_none()
+                ) || (edit.decision.is_none()
                     && matches!(&edit.edited_data, Some(WorkArtifactDataV1::Draft { .. }))
                     && self.artifacts.iter().any(|a| {
                         a.id == edit.artifact && matches!(&a.data, WorkArtifactDataV1::Draft { .. })

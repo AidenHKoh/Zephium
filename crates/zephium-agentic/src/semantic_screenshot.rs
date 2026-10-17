@@ -91,6 +91,7 @@ pub trait SemanticModelImageHost: Send + Sync {
     /// Revalidates the original prepared epochs and persists conservative possible
     /// disclosure before any image/count request. A failed or late ACK returns
     /// None. The returned fence contains only additional host revocation checks.
+    #[allow(clippy::type_complexity)]
     fn before_disclosure<'a>(
         &'a self,
         id: SemanticScreenshotRequestId,

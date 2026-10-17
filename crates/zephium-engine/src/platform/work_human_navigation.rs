@@ -727,7 +727,10 @@ mod tests {
         assert!(gate.record_human_wall_clear(stamp, false, true));
         assert!(gate.record_human_wall_clear(stamp, true, false));
         assert!(gate.record_human_wall_clear(stamp, true, false));
-        assert!(gate.human_verified_wall_clear(), "the wall it showed is gone");
+        assert!(
+            gate.human_verified_wall_clear(),
+            "the wall it showed is gone"
+        );
     }
 
     #[test]

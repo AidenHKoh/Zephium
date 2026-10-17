@@ -1449,7 +1449,8 @@ fn original_read_registry_retained_fetch_needs_exact_source_lease_and_no_handoff
         Some(tick(90)),
         "media cannot extend original policy expiry"
     );
-    rows.dispatch_refused(capped, ContextPortFailure::Unsupported)
+    let _ = rows
+        .dispatch_refused(capped, ContextPortFailure::Unsupported)
         .unwrap();
     let (request, _) = rows
         .read_record_media(
@@ -1460,7 +1461,8 @@ fn original_read_registry_retained_fetch_needs_exact_source_lease_and_no_handoff
             tick(80),
         )
         .unwrap();
-    rows.dispatch_refused(request, ContextPortFailure::Unsupported)
+    let _ = rows
+        .dispatch_refused(request, ContextPortFailure::Unsupported)
         .unwrap();
     let request = rows
         .acquire(&resource, ContextRunId::from_raw(2), tick(6), tick(80))
@@ -1513,7 +1515,8 @@ fn original_read_registry_every_handoff_loses_authority_and_never_revives_on_ret
                 WorkBrowserAnonymousReadStatus::HumanHandoff
             );
             if refused {
-                rows.dispatch_refused(request, ContextPortFailure::Unsupported)
+                let _ = rows
+                    .dispatch_refused(request, ContextPortFailure::Unsupported)
                     .unwrap();
                 assert!(rows
                     .read_record_media(
@@ -1627,7 +1630,8 @@ fn original_read_registry_refused_construction_closes_clones_without_native_rece
         proof.status(tick(2)),
         WorkBrowserAnonymousReadStatus::Current
     );
-    rows.dispatch_refused(request, ContextPortFailure::Unsupported)
+    let _ = rows
+        .dispatch_refused(request, ContextPortFailure::Unsupported)
         .unwrap();
     assert_eq!(
         proof.status(tick(3)),

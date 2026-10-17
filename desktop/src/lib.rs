@@ -3446,8 +3446,10 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     if id == "mode.choose" {
         use tauri::menu::{Menu, MenuItemBuilder};
         let menu = (|| -> tauri::Result<_> {
-            let browse = MenuItemBuilder::with_id("mode.browse", menu_text::label("Browse")).build(app)?;
-            let work = MenuItemBuilder::with_id("mode.work", menu_text::label("Work")).build(app)?;
+            let browse =
+                MenuItemBuilder::with_id("mode.browse", menu_text::label("Browse")).build(app)?;
+            let work =
+                MenuItemBuilder::with_id("mode.work", menu_text::label("Work")).build(app)?;
             Menu::with_items(app, &[&browse, &work])
         })();
         return match (app.get_webview_window(MAIN_LABEL), menu) {
@@ -3905,7 +3907,8 @@ fn menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64) -> b
         return false;
     };
     let keymap = keymap_overrides(&app);
-    let Ok(menu) = build_menu(&app, &keymap, false).and_then(|menu| offered_only(&app, menu)) else {
+    let Ok(menu) = build_menu(&app, &keymap, false).and_then(|menu| offered_only(&app, menu))
+    else {
         return false;
     };
     caller.popup_menu_at(&menu, anchor).is_ok()
@@ -4655,7 +4658,8 @@ fn profile_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f
         return false;
     };
     let keymap = keymap_overrides(&app);
-    let Ok(menu) = build_profile_menu(&app, &keymap).and_then(|menu| offered_only(&app, menu)) else {
+    let Ok(menu) = build_profile_menu(&app, &keymap).and_then(|menu| offered_only(&app, menu))
+    else {
         return false;
     };
     caller.popup_menu_at(&menu, anchor).is_ok()
@@ -5110,11 +5114,9 @@ fn build_menu(
     let item = |id: &str| build_command_menu_item(handle, &resolved, id);
 
     // About is Settings' About page: the system panel cannot open links in a tab.
-    let about = tauri::menu::MenuItemBuilder::with_id(
-        help::ABOUT,
-        menu_text::label("About Zephium"),
-    )
-    .build(handle)?;
+    let about =
+        tauri::menu::MenuItemBuilder::with_id(help::ABOUT, menu_text::label("About Zephium"))
+            .build(handle)?;
     let app_menu = SubmenuBuilder::new(handle, menu_text::label("Zephium"))
         .item(&about)
         .separator()
@@ -5263,8 +5265,7 @@ fn prune_menu_items(
     remove: impl Fn(&dyn tauri::menu::IsMenuItem<tauri::Wry>) -> tauri::Result<()>,
 ) -> tauri::Result<()> {
     use tauri::menu::MenuItemKind;
-    let separator =
-        |item: &MenuItemKind<tauri::Wry>| matches!(item, MenuItemKind::Predefined(predefined) if predefined.text().is_ok_and(|text| text.is_empty()));
+    let separator = |item: &MenuItemKind<tauri::Wry>| matches!(item, MenuItemKind::Predefined(predefined) if predefined.text().is_ok_and(|text| text.is_empty()));
     let mut kept: Vec<MenuItemKind<tauri::Wry>> = Vec::new();
     for item in items {
         if let MenuItemKind::MenuItem(entry) = &item {
@@ -5386,9 +5387,12 @@ fn build_sidebar_menu(
     let protection = match site_protected {
         Some(protected) => Some((
             PredefinedMenuItem::separator(handle)?,
-            CheckMenuItemBuilder::with_id(PROTECTION_SITE_COMMAND, menu_text::label("Block Ads and Trackers"))
-                .checked(protected)
-                .build(handle)?,
+            CheckMenuItemBuilder::with_id(
+                PROTECTION_SITE_COMMAND,
+                menu_text::label("Block Ads and Trackers"),
+            )
+            .checked(protected)
+            .build(handle)?,
             MenuItemBuilder::with_id(PROTECTION_HIDE_COMMAND, menu_text::label("Hide Elements…"))
                 .enabled(can_hide)
                 .build(handle)?,
@@ -5414,7 +5418,8 @@ fn build_sidebar_menu(
     }
     let extension_rule = PredefinedMenuItem::separator(handle)?;
     let manage =
-        MenuItemBuilder::with_id("extensions.manage", menu_text::label("Manage Extensions…")).build(handle)?;
+        MenuItemBuilder::with_id("extensions.manage", menu_text::label("Manage Extensions…"))
+            .build(handle)?;
     let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&back, &forward, &reload];
     if let Some((rule, site, hide)) = &protection {
         items.extend([rule as &dyn IsMenuItem<tauri::Wry>, site, hide]);
@@ -5543,7 +5548,8 @@ fn build_bookmark_menu(
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
     let item = |index: usize, title: &str| {
-        MenuItemBuilder::with_id(BOOKMARK_MENU_ACTION_IDS[index], menu_text::label(title)).build(handle)
+        MenuItemBuilder::with_id(BOOKMARK_MENU_ACTION_IDS[index], menu_text::label(title))
+            .build(handle)
     };
     let open = item(0, "Open")?;
     let rename = item(3, "Rename")?;
@@ -5602,12 +5608,15 @@ fn build_profile_menu(
     use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
     let resolved = zephium_core::commands::resolve(overrides);
     let item = |id: &str| build_command_menu_item(handle, &resolved, id);
-    let profile = MenuItemBuilder::with_id("settings.profiles", menu_text::label("Profile…")).build(handle)?;
-    let account = MenuItemBuilder::with_id("settings.account", menu_text::label("Account…")).build(handle)?;
+    let profile = MenuItemBuilder::with_id("settings.profiles", menu_text::label("Profile…"))
+        .build(handle)?;
+    let account =
+        MenuItemBuilder::with_id("settings.account", menu_text::label("Account…")).build(handle)?;
     let first = PredefinedMenuItem::separator(handle)?;
     let new_tab = item("tab.new")?;
     let new_private = item("window.newPrivate")?;
-    let split = MenuItemBuilder::with_id("split.choose", menu_text::label("Split View…")).build(handle)?;
+    let split =
+        MenuItemBuilder::with_id("split.choose", menu_text::label("Split View…")).build(handle)?;
     let second = PredefinedMenuItem::separator(handle)?;
     let notes = item("tool.notes")?;
     let tasks = item("tool.tasks")?;
@@ -5615,7 +5624,8 @@ fn build_profile_menu(
     let history = item("tool.history")?;
     let downloads = item("tool.downloads")?;
     let bookmarks = item("tool.bookmarks")?;
-    let extensions = MenuItemBuilder::with_id("extensions.manage", menu_text::label("Extensions…")).build(handle)?;
+    let extensions = MenuItemBuilder::with_id("extensions.manage", menu_text::label("Extensions…"))
+        .build(handle)?;
     let third = PredefinedMenuItem::separator(handle)?;
     let settings = item("browser.settings")?;
     let quit = build_quit_menu_item(handle)?;

@@ -23,6 +23,7 @@ impl Failure {
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::DictationOff => "dictation_off",

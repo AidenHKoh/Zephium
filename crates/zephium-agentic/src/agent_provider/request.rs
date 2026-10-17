@@ -1907,6 +1907,7 @@ impl AgentPreparedObservationRequest {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn try_bound_observation_for_provider_exact_count(
         policy: &mut AgentRunPolicy,
         call_request: AgentModelCallRequest,
@@ -5866,6 +5867,7 @@ fn anthropic_tool_wires<'a>(
         .collect())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_anthropic_tool_definitions(
     definitions: &[AnthropicBrowserToolDefinition],
     supplemental_back: bool,

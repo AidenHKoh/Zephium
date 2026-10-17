@@ -90,7 +90,7 @@ where
 /// All results describe a copied workspace, never the source repository history.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReadOperation {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     Files,
     Status,
     Diff,
@@ -249,7 +249,7 @@ impl GitOperation {
                 "--",
                 ".",
             ],
-            #[cfg(test)]
+            #[cfg(all(test, target_os = "macos"))]
             Self::Read(ReadOperation::Files) => &["ls-files", "--cached"],
             Self::Read(ReadOperation::Status) => &[
                 "status",

@@ -1674,7 +1674,13 @@ fn a_new_tab_opened_from_work_fills_the_window_with_the_new_tab() {
         .unwrap();
     assert!(!last_layout.contains(&page.to_string()), "{last_layout}");
     assert_eq!(
-        engine.layout_regions.lock().unwrap().last().copied().flatten(),
+        engine
+            .layout_regions
+            .lock()
+            .unwrap()
+            .last()
+            .copied()
+            .flatten(),
         None
     );
 }

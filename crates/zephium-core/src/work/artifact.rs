@@ -2113,6 +2113,42 @@ impl std::fmt::Debug for WorkArtifactV1 {
     }
 }
 
+impl WorkArtifactDataV1 {
+    /// Model-authored data cannot mint or copy privileged native image references.
+    /// Exact host provenance hydration happens after this boundary.
+    pub fn clear_record_media(&mut self) {
+        match self {
+            Self::Picks { items, .. } => {
+                for item in items {
+                    item.record_media = None;
+                    item.media_attempted = false;
+                }
+            }
+            Self::Sheet { rows, .. } => {
+                for entity in rows.iter_mut().filter_map(|row| row.entity.as_mut()) {
+                    entity.record_media = None;
+                    entity.media_attempted = false;
+                }
+            }
+            Self::List { items, .. } => {
+                for item in items {
+                    item.record_media = None;
+                    item.media_attempted = false;
+                }
+            }
+            Self::ComparisonMatrix { subjects, .. }
+            | Self::Findings { subjects, .. }
+            | Self::EvidenceCollection { subjects, .. } => {
+                for subject in subjects {
+                    subject.record_media = None;
+                    subject.media_attempted = false;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2771,41 +2807,5 @@ mod tests {
             r#"{"kind":"findings","items":[],"html":"<b>"}"#
         )
         .is_err());
-    }
-}
-
-impl WorkArtifactDataV1 {
-    /// Model-authored data cannot mint or copy privileged native image references.
-    /// Exact host provenance hydration happens after this boundary.
-    pub fn clear_record_media(&mut self) {
-        match self {
-            Self::Picks { items, .. } => {
-                for item in items {
-                    item.record_media = None;
-                    item.media_attempted = false;
-                }
-            }
-            Self::Sheet { rows, .. } => {
-                for entity in rows.iter_mut().filter_map(|row| row.entity.as_mut()) {
-                    entity.record_media = None;
-                    entity.media_attempted = false;
-                }
-            }
-            Self::List { items, .. } => {
-                for item in items {
-                    item.record_media = None;
-                    item.media_attempted = false;
-                }
-            }
-            Self::ComparisonMatrix { subjects, .. }
-            | Self::Findings { subjects, .. }
-            | Self::EvidenceCollection { subjects, .. } => {
-                for subject in subjects {
-                    subject.record_media = None;
-                    subject.media_attempted = false;
-                }
-            }
-            _ => {}
-        }
     }
 }

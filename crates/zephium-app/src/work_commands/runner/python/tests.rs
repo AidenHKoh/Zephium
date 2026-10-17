@@ -1,10 +1,13 @@
 use super::*;
+#[cfg(target_os = "macos")]
 use std::fs;
+#[cfg(target_os = "macos")]
 struct Fixture {
     _home: tempfile::TempDir,
     grant: WorkFileGrant,
     root: PathBuf,
 }
+#[cfg(target_os = "macos")]
 impl Fixture {
     fn new(code: &str) -> Self {
         let home = tempfile::Builder::new()

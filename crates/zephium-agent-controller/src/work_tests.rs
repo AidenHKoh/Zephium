@@ -853,6 +853,7 @@ fn input_with_navigation_account(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fault {
     PlainRead,
+    #[cfg(feature = "probe-harness")]
     CompoundFields(bool),
     #[cfg(feature = "probe-harness")]
     Listing,
@@ -1079,10 +1080,13 @@ impl AgentBrowserPort for Port {
             return scoped_tests::capture(self, invocation, fault);
         }
         let correlation = invocation.correlation();
-        let third_call_generation = matches!(self.fault, Fault::CompoundFields(_));
+        #[cfg(not(feature = "probe-harness"))]
+        let third_call_generation = false;
         #[cfg(feature = "probe-harness")]
-        let third_call_generation =
-            third_call_generation || matches!(self.fault, Fault::DecisionRefresh);
+        let third_call_generation = matches!(
+            self.fault,
+            Fault::CompoundFields(_) | Fault::DecisionRefresh
+        );
         assert_eq!(
             correlation.snapshot_generation().get(),
             if third_call_generation {

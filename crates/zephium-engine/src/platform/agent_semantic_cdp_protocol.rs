@@ -559,11 +559,6 @@ pub(crate) fn decode_human_wall_response(
         ))
 }
 
-pub(crate) fn invoke_privacy_command(
-    context: &SemanticExecutionContext,
-) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
-    invoke_privacy_command_mode(context, false)
-}
 pub(crate) fn invoke_privacy_command_mode(
     context: &SemanticExecutionContext,
     public: bool,

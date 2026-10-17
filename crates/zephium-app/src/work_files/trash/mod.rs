@@ -170,7 +170,7 @@ impl PreparedTrash {
         self.apply_with_cancel(root()?, profile, step, cancelled)
             .map(|_| ())
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     fn apply_at(self, root: &Path, profile: &str, step: &str) -> Result<PathBuf, Failure> {
         self.apply_with_cancel(
             root,
@@ -330,7 +330,7 @@ pub(crate) fn restored(profile: &str, id: &str) -> Result<(), Failure> {
     journal.maintain().map(|_| ())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn seed_recovery_fixture(
     root: &Path,
     profile: &str,

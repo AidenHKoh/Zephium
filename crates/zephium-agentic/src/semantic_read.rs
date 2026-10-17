@@ -1514,10 +1514,7 @@ impl<'a> SemanticReadBuilder<'a> {
                 .zip(crate::semantic_record::roots(frame))
             {
                 if let Some(root) = root {
-                    record_roots.insert(
-                        (u64::from(frame.frame().frame().get()), node.key().get()),
-                        root,
-                    );
+                    record_roots.insert((frame.frame().frame().get(), node.key().get()), root);
                 }
             }
         }
@@ -1817,7 +1814,7 @@ impl<'a> SemanticReadBuilder<'a> {
             role: node.role(),
             record_root: self
                 .record_roots
-                .get(&(u64::from(snapshot.frame().frame().get()), node.key().get()))
+                .get(&(snapshot.frame().frame().get(), node.key().get()))
                 .copied(),
             content,
             states: node.states(),
