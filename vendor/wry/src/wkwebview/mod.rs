@@ -553,6 +553,8 @@ impl InnerWebView {
         input_accessory_view_builder: pl_attrs.input_accessory_view_builder,
         #[cfg(target_os = "macos")]
         parked_tracking: Default::default(),
+        #[cfg(target_os = "macos")]
+        skips_hit_test: Default::default(),
         custom_protocol_task_ids: Default::default(),
         custom_protocol_admission: (0..protocol_count)
           .map(|_| {
