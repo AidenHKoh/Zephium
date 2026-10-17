@@ -291,7 +291,7 @@
   }
 
   .surface {
-    --flare: 28px;
+    --flare: 20px;
     --edge: var(--color-border-strong);
     --glow: color-mix(in srgb, black 26%, transparent);
     --fill: var(--color-chrome);
@@ -315,7 +315,7 @@
   }
 
   /* The sheet is one drawn shape: its fill and its hairline follow the outline the canvas cuts its
-     hole to (see composer-hole.ts), fillets down to the window's foot included, so the fill, the
+     hole to (see composer-hole.ts), fillets down to the card's foot included, so the fill, the
      hole and the line cannot part. Over a material the fill is nothing and the window shows. */
   .edge {
     position: absolute;

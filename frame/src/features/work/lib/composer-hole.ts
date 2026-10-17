@@ -1,6 +1,6 @@
 const n = (value: number) => Math.round(value * 100) / 100;
 
-const EASE = 0.62;
+const EASE = 0.56;
 
 type Card = { width: number; height: number };
 type Bar = { left: number; top: number; width: number };

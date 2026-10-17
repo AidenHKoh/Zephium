@@ -831,8 +831,9 @@
       const style = getComputedStyle(sheet);
       const radius = parseFloat(style.borderTopLeftRadius) || 0;
       const flare = parseFloat(style.getPropertyValue("--flare")) || 0;
-      // The sheet stands on the window's foot, below the card: the fillets land there.
-      const reach = { width: area.width, height: bar.bottom - area.top };
+      // The fillets land on the card's own foot, whole and tangent to it, as the new tab's
+      // notch does at its page's edge; below it the window's material simply continues.
+      const reach = { width: area.width, height: Math.min(area.height, bar.bottom - area.top) };
       const place = { left: bar.left - area.left, top: bar.top - area.top, width: bar.width };
       const edge = sheet.querySelector<SVGSVGElement>(".edge");
       if (edge) {
