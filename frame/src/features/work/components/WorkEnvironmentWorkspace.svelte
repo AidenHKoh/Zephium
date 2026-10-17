@@ -43,7 +43,7 @@
     CheckListIcon,
   } from "../lib/icons";
   import WorkBar from "./bar/WorkBar.svelte";
-  import { composerHole } from "../lib/composer-hole";
+  import { composerEdge, composerHole } from "../lib/composer-hole";
   import { centreSize, picksSheet } from "./objects/centre";
   import { partAsks } from "./asks/actions";
   import {
@@ -828,19 +828,21 @@
       const area = card.getBoundingClientRect();
       const bar = sheet.getBoundingClientRect();
       if (!bar.width || !area.width) return;
-      sheet.style.setProperty("--seam", `${Math.max(0, bar.bottom - area.bottom)}px`);
-      const material = root.dataset.material;
-      if (!material || material === "none") {
-        card.style.clipPath = "";
-        return;
-      }
       const style = getComputedStyle(sheet);
-      card.style.clipPath = composerHole(
-        area,
-        { left: bar.left - area.left, top: bar.top - area.top, width: bar.width },
-        parseFloat(style.borderTopLeftRadius) || 0,
-        parseFloat(style.getPropertyValue("--flare")) || 0,
-      );
+      const radius = parseFloat(style.borderTopLeftRadius) || 0;
+      const flare = parseFloat(style.getPropertyValue("--flare")) || 0;
+      // The sheet stands on the window's foot, below the card: the fillets land there.
+      const reach = { width: area.width, height: bar.bottom - area.top };
+      const place = { left: bar.left - area.left, top: bar.top - area.top, width: bar.width };
+      const edge = sheet.querySelector<SVGSVGElement>(".edge");
+      if (edge) {
+        edge.setAttribute("viewBox", `${place.left} ${place.top} ${bar.width} ${bar.height}`);
+        const d = composerEdge(reach, place, radius, flare);
+        for (const path of edge.querySelectorAll("path")) path.setAttribute("d", d);
+      }
+      const material = root.dataset.material;
+      card.style.clipPath =
+        !material || material === "none" ? "" : composerHole(reach, place, radius, flare);
     };
     const observer = new ResizeObserver(cut);
     observer.observe(card);
@@ -855,7 +857,6 @@
       materials.disconnect();
       window.removeEventListener("resize", cut);
       card.style.clipPath = "";
-      sheet.style.removeProperty("--seam");
     };
   });
   $effect(() => {

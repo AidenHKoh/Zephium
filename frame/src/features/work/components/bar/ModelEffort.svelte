@@ -304,16 +304,21 @@
     animation-play-state: paused;
   }
 
+  /* The words hold one size for every level, so nothing moves while the thumb does. */
   .words {
     display: flex;
     flex: 1;
     flex-direction: column;
     gap: 1px;
     min-inline-size: 0;
+    block-size: 46px;
+    contain: strict;
   }
 
   .name {
+    flex: none;
     color: var(--color-text);
+    white-space: nowrap;
     font-size: var(--text-body);
     font-weight: 600;
     line-height: 17px;
@@ -328,6 +333,8 @@
 
   .hint {
     display: -webkit-box;
+    flex: none;
+    block-size: 28px;
     overflow: hidden;
     color: var(--color-muted);
     font-size: var(--text-caption);
@@ -340,15 +347,22 @@
   /* A groove with a bead on it: one detent for each level the model takes. */
   .track {
     --thumb: 16px;
+    --span: 100px;
+    --way: 1;
 
     position: relative;
     flex: none;
-    inline-size: 100px;
+    inline-size: var(--span);
     block-size: 36px;
     margin-inline-end: 4px;
     outline: none;
     cursor: default;
     touch-action: none;
+    contain: layout;
+  }
+
+  .track:dir(rtl) {
+    --way: -1;
   }
 
   .groove {
@@ -362,14 +376,16 @@
     box-shadow: inset 0 0.5px 1px color-mix(in oklab, black 22%, transparent);
   }
 
+  /* Both ride the compositor: the fill is a full-width bar slid under the groove's clip, the thumb
+     a bead translated along the track, so a drag never lays anything out. */
   .fill {
     position: absolute;
-    inset-block: 0;
-    inset-inline-start: 0;
-    inline-size: calc(var(--thumb) / 2 + var(--reach) * (100% - var(--thumb)));
-    border-radius: inherit;
+    inset: 0;
     background: color-mix(in oklab, var(--color-text) 58%, transparent);
-    transition: inline-size var(--motion-base) var(--ease-out);
+    translate: calc(
+      var(--way) * (var(--reach) * (var(--span) - var(--thumb)) + var(--thumb) / 2 - var(--span))
+    );
+    transition: translate var(--motion-base) var(--ease-out);
   }
 
   [data-level="max"] .fill {
@@ -400,7 +416,8 @@
   .thumb {
     position: absolute;
     inset-block-start: 10px;
-    inset-inline-start: calc(var(--reach) * (100% - var(--thumb)));
+    inset-inline-start: 0;
+    translate: calc(var(--way) * var(--reach) * (var(--span) - var(--thumb)));
     inline-size: var(--thumb);
     block-size: var(--thumb);
     border-radius: 50%;
@@ -409,7 +426,7 @@
       0 0 0 3px var(--card, var(--color-fill)),
       0 1px 3px color-mix(in oklab, black 36%, transparent);
     transition:
-      inset-inline-start var(--motion-base) var(--ease-out),
+      translate var(--motion-base) var(--ease-out),
       scale var(--motion-fast) var(--ease-out);
   }
 

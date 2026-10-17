@@ -6,6 +6,7 @@
   import Icon from "$shared/ui/Icon";
   import { File01Icon, Image01Icon, Pdf01Icon, Upload01Icon } from "../lib/icons";
   import * as m from "$shared/i18n/messages";
+  import PickZone from "./bar/PickZone.svelte";
   import "./bar/pick.css";
   let {
     profile,
@@ -53,6 +54,8 @@
     });
     return () => void stop.then((unlisten) => unlisten());
   });
+  const extension = (title: string) =>
+    title.match(/\.([a-z0-9]{1,5})$/iu)?.[1]?.toUpperCase() ?? "";
   const items = $derived(library.filter((item) => IMAGES.test(item.title) === (kind === "image")));
   let selected = $state<string[]>([]);
   let importing = $state(false);
@@ -96,51 +99,70 @@
   aria-label={kind === "image" ? m.work_env_images() : m.work_env_documents()}
   aria-busy={pending || importing}
 >
-  <ul>
-    {#each items as item (item.id)}
-      <li>
-        <label class="row">
-          <input
-            type="checkbox"
-            class="pick-check"
-            checked={eligible.includes(item.id)}
-            disabled={pending || attachedIds.includes(item.id)}
-            onchange={() => toggle(item.id)}
-          />
-          <span class="glyph"
-            ><Icon
-              icon={item.title.toLowerCase().endsWith(".pdf")
-                ? Pdf01Icon
-                : /\.(png|jpe?g|gif|webp)$/i.test(item.title)
-                  ? Image01Icon
-                  : File01Icon}
-              size={14}
-            /></span
-          >
-          <span class="identity"><strong>{item.title}</strong></span>
-          {#if attachedIds.includes(item.id)}<span class="attached">{m.work_media_added()}</span
-            >{/if}
-        </label>
-      </li>
-    {:else}<li class="empty">{m.work_media_none()}</li>{/each}
-  </ul>
+  {#if items.length}
+    <ul>
+      {#each items as item (item.id)}
+        <li>
+          <label class="row">
+            <input
+              type="checkbox"
+              class="pick-check"
+              checked={eligible.includes(item.id)}
+              disabled={pending || attachedIds.includes(item.id)}
+              onchange={() => toggle(item.id)}
+            />
+            <span class="glyph"
+              ><Icon
+                icon={item.title.toLowerCase().endsWith(".pdf")
+                  ? Pdf01Icon
+                  : IMAGES.test(item.title)
+                    ? Image01Icon
+                    : File01Icon}
+                size={15}
+              /></span
+            >
+            <span class="identity">
+              <strong>{item.title}</strong>
+              <span class="where"
+                >{attachedIds.includes(item.id)
+                  ? m.work_media_added()
+                  : extension(item.title)}</span
+              >
+            </span>
+          </label>
+        </li>
+      {/each}
+    </ul>
+  {/if}
   {#if failure}<p role="alert">{failure}</p>{/if}
-  <footer>
-    <Button
-      size="compact"
-      variant="ghost"
-      disabled={pending || importing}
-      onclick={() => void importFile()}
-      ><Icon icon={Upload01Icon} size={13} />{importing
-        ? m.work_media_importing()
-        : m.work_media_import()}</Button
-    ><Button
-      size="compact"
-      variant="primary"
-      disabled={pending || eligible.length === 0}
-      onclick={() => onattach([...eligible])}>{m.work_media_add({ count: eligible.length })}</Button
-    >
-  </footer>
+  {#if items.length}
+    <footer>
+      <Button
+        size="compact"
+        variant="ghost"
+        disabled={pending || importing}
+        onclick={() => void importFile()}
+        ><Icon icon={Upload01Icon} size={13} />{importing
+          ? m.work_media_importing()
+          : m.work_media_import()}</Button
+      ><Button
+        size="compact"
+        variant="primary"
+        disabled={pending || eligible.length === 0}
+        onclick={() => onattach([...eligible])}
+        >{m.work_media_add({ count: eligible.length })}</Button
+      >
+    </footer>
+  {:else}
+    <PickZone icon={kind === "image" ? Image01Icon : File01Icon} text={m.work_media_none()}>
+      {#snippet action()}<Button
+          size="compact"
+          disabled={pending || importing}
+          onclick={() => void importFile()}
+          >{importing ? m.work_media_importing() : m.work_media_import()}</Button
+        >{/snippet}
+    </PickZone>
+  {/if}
 </section>
 
 <style>
@@ -170,7 +192,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    min-block-size: 38px;
+    min-block-size: 44px;
     padding: 4px 10px;
     border-radius: var(--radius-control);
     transition: background-color var(--motion-fast) var(--ease-smooth);
@@ -181,27 +203,35 @@
   }
 
   .glyph {
-    display: inline-flex;
+    display: grid;
+    flex: none;
+    inline-size: 28px;
+    block-size: 28px;
+    place-items: center;
+    border-radius: var(--radius-control-compact);
+    background: var(--color-fill);
     color: var(--color-muted);
   }
 
   .identity {
+    display: flex;
     flex: 1;
+    flex-direction: column;
+    gap: 1px;
     min-inline-size: 0;
+  }
+
+  .identity strong {
     overflow: hidden;
+    font-size: var(--text-body);
+    font-weight: 500;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: var(--text-body);
   }
 
-  .attached,
-  .empty {
-    color: var(--color-faint);
+  .where {
+    color: var(--color-muted);
     font-size: var(--text-caption);
-  }
-
-  .empty {
-    padding: 8px;
   }
 
   p[role="alert"] {

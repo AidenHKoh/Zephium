@@ -240,8 +240,17 @@
         </div>
       </div>
     </form>
-    <span class="flare left" aria-hidden="true"></span>
-    <span class="flare right" aria-hidden="true"></span>
+    <svg class="edge" aria-hidden="true">
+      <defs>
+        <linearGradient id="{id}-edge" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" class="line-stop" />
+          <stop offset="0.35" class="line-stop" stop-opacity="0.85" />
+          <stop offset="1" class="line-stop" stop-opacity="0.12" />
+        </linearGradient>
+      </defs>
+      <path class="body" />
+      <path class="line" stroke="url(#{id}-edge)" />
+    </svg>
   </div>
 </div>
 
@@ -296,10 +305,7 @@
     box-sizing: border-box;
     padding: 8px 8px 10px;
     border-radius: var(--radius-panel) var(--radius-panel) 0 0;
-
-    /* The window's own colour. Over a material the sheet paints nothing and the canvas has a hole
-       the shape of it, so the window shows through; no blur, nothing redrawn as the canvas moves. */
-    background: var(--fill);
+    isolation: isolate;
     box-shadow: 0 -10px 40px -20px var(--glow);
     transition: grid-template-columns var(--motion-slow) var(--ease-emphasized);
   }
@@ -308,47 +314,30 @@
     --fill: transparent;
   }
 
-  /* The one hairline: the sheet's own edge, the hole's edge, and the flares below all draw the
-     same shape. The canvas cuts its hole to it, flares included (see composer-hole.ts). */
-  .surface::before {
-    content: "";
+  /* The sheet is one drawn shape: its fill and its hairline follow the outline the canvas cuts its
+     hole to (see composer-hole.ts), fillets down to the window's foot included, so the fill, the
+     hole and the line cannot part. Over a material the fill is nothing and the window shows. */
+  .edge {
     position: absolute;
     inset: 0;
-    box-sizing: border-box;
-    border: 1px solid var(--edge);
-    border-block-end: 0;
-    border-radius: inherit;
+    z-index: -1;
+    inline-size: 100%;
+    block-size: 100%;
+    overflow: visible;
     pointer-events: none;
   }
 
-  /* Where the sheet meets the card's foot it widens on a concave curve, as the new tab's notch
-     does at the window's edge: the quarter-disc is the canvas, the ring its edge. */
-  .flare {
-    --ring: radial-gradient(
-      circle at var(--corner) 0,
-      transparent calc(var(--flare) - 0.5px),
-      var(--edge) calc(var(--flare) + 0.25px) calc(var(--flare) + 0.75px),
-      var(--fill) calc(var(--flare) + 1.25px)
-    );
-
-    position: absolute;
-    inset-block-end: var(--seam, 0);
-    inline-size: var(--flare);
-    block-size: var(--flare);
-    background: var(--ring);
-    pointer-events: none;
+  .body {
+    fill: var(--fill);
   }
 
-  .flare.left {
-    --corner: 0%;
-
-    right: 100%;
+  .line {
+    fill: none;
+    stroke-width: 1;
   }
 
-  .flare.right {
-    --corner: 100%;
-
-    left: 100%;
+  .line-stop {
+    stop-color: var(--edge);
   }
 
   .tools {
@@ -578,9 +567,8 @@
   }
 
   @media (forced-colors: active) {
-    .surface {
-      border: 1px solid ButtonText;
-      backdrop-filter: none;
+    .line {
+      stroke: ButtonText;
     }
   }
 </style>

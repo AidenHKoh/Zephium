@@ -281,9 +281,23 @@
     held = false;
   }
 
+  /** The person was writing: whatever closes the menu hands the focus back to the words, never to nothing. */
+  function toField() {
+    const field = trigger?.closest(".surface")?.querySelector("textarea");
+    const home = () => {
+      const at = document.activeElement;
+      if (at && at !== document.body && !main?.closest(".model-menu")?.contains(at)) return;
+      field?.focus({ preventScroll: true });
+    };
+    home();
+    // WebKit drops the focus once more when the press that closed the menu lands on the chip.
+    setTimeout(home, 0);
+  }
+
   async function opened(next: boolean) {
     open = next;
     if (!next) {
+      toField();
       reset();
       return;
     }
@@ -297,6 +311,7 @@
 
   function close() {
     toWords = true;
+    toField();
     open = false;
     reset();
   }
@@ -709,7 +724,9 @@
                       data-active={item.id === active ? "" : undefined}
                       data-walk={item.id === active && walked ? "" : undefined}
                       aria-selected={item.id === chosen}
-                      aria-disabled={closed || !!session?.busy || undefined}
+                      aria-disabled={closed ||
+                        (!!session?.busy && session.busy !== "effort") ||
+                        undefined}
                     >
                       <span class="option-name">{item.entry.display_name}</span>
                       {#if closed}<span class="aside">{m.work_model_locked()}</span>{/if}

@@ -533,3 +533,21 @@ test("choosing a model leaves the composer open and the cursor in the words", as
   expect(bar().dataset.mode).toBe("focus");
   await expect.element(words).toHaveValue("Plan the trip");
 });
+
+test("closing the menu from the chip leaves an empty composer engaged and focused", async () => {
+  await page.viewport(1200, 800);
+  native.ready.mockImplementation(ready(true));
+  native.read.mockResolvedValue(view("anthropic/claude-opus-5-5"));
+  const screen = await render(ModelBarStage, { profile: PROFILE });
+  const bar = () => screen.container.querySelector<HTMLElement>(".work-bar")!;
+  const words = screen.getByRole("textbox");
+  await words.click();
+  const chip = screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u });
+  await chip.click();
+  await expect.element(page.getByRole("listbox")).toBeVisible();
+  await chip.click();
+  await expect.element(page.getByRole("listbox")).not.toBeInTheDocument();
+  await expect.element(words).toHaveFocus();
+  await new Promise((done) => setTimeout(done, 100));
+  expect(bar().dataset.mode).toBe("focus");
+});

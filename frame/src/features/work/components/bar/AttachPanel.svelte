@@ -8,6 +8,7 @@
   import Field from "$shared/ui/Field";
   import Icon from "$shared/ui/Icon";
   import Morph from "./Morph.svelte";
+  import PickZone from "./PickZone.svelte";
   import "$shared/ui/Shine/shine.css";
   import { BrowserIcon, File01Icon, FolderAddIcon, Image01Icon, Link04Icon } from "../../lib/icons";
   import * as m from "$shared/i18n/messages";
@@ -69,9 +70,14 @@
     {#if kind === "tabs"}
       {@render picker()}
     {:else if kind === "folder"}
-      <div class="compose">
-        <span class="tile ui-shine" aria-hidden="true"><Icon icon={FolderAddIcon} size={22} /></span
-        >
+      <div class="folder">
+        <PickZone icon={FolderAddIcon} text={m.work_env_folder_hint()}>
+          {#snippet action()}<Button
+              size="compact"
+              disabled={busy || folderPending}
+              onclick={onchoosefolder}>{m.work_env_folder_choose()}</Button
+            >{/snippet}
+        </PickZone>
         <form
           class="create"
           onsubmit={(event) => {
@@ -90,9 +96,6 @@
             >{m.work_env_folder_add()}</Button
           >
         </form>
-        <Button size="compact" disabled={busy || folderPending} onclick={onchoosefolder}
-          >{m.work_env_folder_choose()}</Button
-        >
       </div>
     {:else if kind === "link"}
       <div class="compose">
@@ -236,6 +239,13 @@
     justify-content: center;
     gap: 14px;
     padding: 12px 8px 14px;
+  }
+
+  .folder {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 2px 0 4px;
   }
 
   .compose > :global(.ui-button) {
