@@ -1454,11 +1454,25 @@ where
         if let (Some(site), Some(way)) = (&site, way) {
             use super::route::Way;
             use crate::work_sites::EntryAnswer;
+            // The answer covers the site the part names too, when the lead
+            // named the app by a site it moved away from.
+            let named = spec
+                .service
+                .as_ref()
+                .and_then(|service| service.host.as_deref())
+                .and_then(|host| crate::work_sites::site_of(&format!("https://{host}/")))
+                .filter(|named| named != site);
+            let enter = |answer| {
+                self.run.set_entry(site, answer);
+                if let Some(named) = &named {
+                    self.run.set_entry(named, answer);
+                }
+            };
             match way {
-                Way::Website => self.run.set_entry(site, EntryAnswer::Allow),
-                Way::AlwaysWebsite => self.run.set_entry(site, EntryAnswer::Always),
+                Way::Website => enter(EntryAnswer::Allow),
+                Way::AlwaysWebsite => enter(EntryAnswer::Always),
                 Way::NotNow => {
-                    self.run.set_entry(site, EntryAnswer::NotNow);
+                    enter(EntryAnswer::NotNow);
                     spec.halt = Some(WorkPartNeedV1::AllowSite { host: site.clone() });
                 }
                 Way::Connect => {
