@@ -29,6 +29,8 @@ use zephium_core::split::{self, Divider, Pane};
 
 use crate::pane_geometry::rounded_native_size;
 
+use super::pointer_cover::PointerCover;
+
 type RatioCallback = Rc<dyn Fn(Pane)>;
 type StageFailureCallback = Rc<dyn Fn(usize)>;
 const MAX_ASYNC_STAGE_RETRIES: u8 = 4;
@@ -178,6 +180,7 @@ pub struct StageIvars {
     feedback_dragging: Cell<bool>,
     divider_tracking: RefCell<Vec<(NSRect, Retained<NSTrackingArea>)>>,
     tracking_busy: Cell<bool>,
+    pointer_cover: RefCell<Option<PointerCover>>,
     covers: RefCell<HashMap<ItemId, PaintCover>>,
     indicator: RefCell<Option<Retained<NSView>>>,
     on_ratio: RefCell<Option<RatioCallback>>,
@@ -225,6 +228,17 @@ define_class!(
                     self.addCursorRect_cursor(NSRect::new(NSPoint::new(d.strip.x, h - d.strip.y - d.strip.height), NSSize::new(d.strip.width, d.strip.height)), &cursor);
                 }
             }
+        }
+
+        #[unsafe(method(viewDidHide))]
+        fn view_did_hide(&self) {
+            let _: () = unsafe { msg_send![super(self), viewDidHide] };
+            self.sync_pointer_cover();
+        }
+        #[unsafe(method(viewDidUnhide))]
+        fn view_did_unhide(&self) {
+            let _: () = unsafe { msg_send![super(self), viewDidUnhide] };
+            self.sync_pointer_cover();
         }
 
         #[unsafe(method(mouseEntered:))]
@@ -766,7 +780,26 @@ impl ContentStage {
             .map(|views| views.keys().copied().collect())
     }
 
+    /// The canvas beneath the stage stops setting the cursor while the
+    /// pointer is over it.
+    pub fn cover_pointer(&self) {
+        if self.ivars().pointer_cover.borrow().is_some() {
+            return;
+        }
+        let cover = PointerCover::attach(self);
+        *self.ivars().pointer_cover.borrow_mut() = cover;
+    }
+
+    fn sync_pointer_cover(&self) {
+        if let Ok(cover) = self.ivars().pointer_cover.try_borrow() {
+            if let Some(cover) = cover.as_ref() {
+                cover.sync();
+            }
+        }
+    }
+
     pub fn retire(&self) {
+        self.ivars().pointer_cover.take();
         self.ivars().stage_retry_terminal.set(true);
         self.cancel_split_drag(false);
         self.ivars().stage_retry_scheduled.set(false);

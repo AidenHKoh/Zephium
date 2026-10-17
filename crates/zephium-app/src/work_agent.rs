@@ -2821,11 +2821,13 @@ fn reuses_completed_read(request: &WorkStepKindV1, step: &WorkStepFact) -> bool 
                 url,
                 collection,
                 goal: None,
+                ..
             },
             WorkStepKindV1::Read {
                 url: previous_url,
                 collection: previous,
                 goal: None,
+                ..
             },
         ) if url == previous_url => match (collection, previous) {
             (None, None) => true,
@@ -3304,6 +3306,7 @@ mod tests {
         }))
         .unwrap();
         let request = WorkStepKindV1::Read {
+            verbatim: None,
             url: "https://shop.example.test/catalog?q=sets".into(),
             collection: Some(collection),
             goal: None,

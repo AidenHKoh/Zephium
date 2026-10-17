@@ -8,6 +8,8 @@ use objc2_web_kit::WKWebView;
 use std::time::Instant;
 use zephium_agentic::WorkBrowserHumanRegion;
 
+use super::pointer_cover::PointerCover;
+
 /// The takeover well's foot: `--radius-card` less the pane's 1px border
 /// (`TakeoverPane.svelte`). Its head is square against the header above it.
 const WELL_FOOT_RADIUS: f64 = 17.0;
@@ -24,6 +26,7 @@ pub(crate) struct WorkHumanPresentation {
     deadline: Instant,
     presented: bool,
     retired: bool,
+    cover: Option<PointerCover>,
 }
 impl WorkHumanPresentation {
     pub(crate) fn prepare(
@@ -59,6 +62,7 @@ impl WorkHumanPresentation {
             deadline,
             presented: false,
             retired: false,
+            cover: None,
         })
     }
     pub(crate) fn present(&mut self) -> bool {
@@ -75,6 +79,7 @@ impl WorkHumanPresentation {
         self.round_foot();
         super::passive_page::unregister(&self.page);
         self.page.setHidden(false);
+        self.cover = PointerCover::attach(&self.page);
         self.presented = true;
         #[cfg(feature = "agentic-browser-qa")]
         record_cookie_facts(&self.page, "Presented");
@@ -107,6 +112,9 @@ impl WorkHumanPresentation {
         }
         if self.page.frame() != self.region {
             self.page.setFrame(self.region);
+        }
+        if let Some(cover) = &self.cover {
+            cover.sync();
         }
     }
     pub(crate) fn visible_for_audit(&self) -> bool {
@@ -172,6 +180,8 @@ impl WorkHumanPresentation {
             );
             record_cookie_facts(&self.page, "Retiring");
         }
+        // Before the page parks its own tracking areas, ours among them.
+        self.cover = None;
         let fenced = super::passive_page::register(&self.page);
         self.page.setHidden(true);
         let owns_responder = self.window.firstResponder().is_some_and(|responder| {

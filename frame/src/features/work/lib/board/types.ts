@@ -381,8 +381,10 @@ export type DraftView = ObjectBase & {
   targetUrl?: string;
   /** Who it goes out as, for the avatar row; the person's own name and picture. */
   author?: Likeness & { name: string; handle?: string };
-  /** Where Send stands: until Confirm is wired, a draft is only ever a draft. */
-  send?: "draft" | "confirming" | "sent";
+  /** Where Send stands, read from the run it started. */
+  send?: "draft" | "sending" | "sent";
+  /** Why the last send did not go, in the run's words. */
+  note?: string;
   /** A GitHub draft's review state. */
   review?: "comment" | "approve" | "request_changes";
 };

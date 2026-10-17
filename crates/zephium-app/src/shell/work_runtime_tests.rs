@@ -783,6 +783,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                 command: WorkCommandId::generate(),
                 intent: WorkRuntimeIntent::BeginAgent {
                     grant: WorkAgentGrantV1 {
+                        draft: None,
                         lead: None,
                         provider: WorkSearchProvider::OpenAi,
                         model: PUBLIC_SEARCH_MODEL.into(),
@@ -919,6 +920,7 @@ async fn a_run_that_runs_out_of_time_says_so() {
                 command: WorkCommandId::generate(),
                 intent: WorkRuntimeIntent::BeginAgent {
                     grant: WorkAgentGrantV1 {
+                        draft: None,
                         lead: None,
                         provider: WorkSearchProvider::OpenAi,
                         model: PUBLIC_SEARCH_MODEL.into(),

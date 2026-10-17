@@ -718,6 +718,14 @@ where
         if hosts.is_empty() {
             return None;
         }
+        for (site, _) in &hosts {
+            if let Some(answer) = self.run.entry_answer(site) {
+                driver.enter(site, answer).await;
+                if driver.works_as_person(site) {
+                    self.run.trust_site(site);
+                }
+            }
+        }
         let desk = &self.browser.entries;
         let preparing = desk.prepare();
         let undecided = driver
@@ -858,6 +866,7 @@ where
                 url,
                 goal,
                 collection,
+                ..
             } => {
                 let measured = step.measurements.as_ref();
                 let records: usize = step
@@ -1338,9 +1347,17 @@ fn same_request(request: &WorkStepKindV1, step: &WorkStepKindV1) -> bool {
             },
         ) => a == b,
         (
-            WorkStepKindV1::Read { goal: Some(a), .. },
-            WorkStepKindV1::Read { goal: Some(b), .. },
-        ) => a == b,
+            WorkStepKindV1::Read {
+                goal: Some(a),
+                verbatim: words_a,
+                ..
+            },
+            WorkStepKindV1::Read {
+                goal: Some(b),
+                verbatim: words_b,
+                ..
+            },
+        ) => a == b && words_a == words_b,
         (WorkStepKindV1::List { path: a, .. }, WorkStepKindV1::List { path: b, .. })
         | (WorkStepKindV1::ReadFile { path: a, .. }, WorkStepKindV1::ReadFile { path: b, .. })
         | (WorkStepKindV1::WriteFile { path: a, .. }, WorkStepKindV1::WriteFile { path: b, .. })

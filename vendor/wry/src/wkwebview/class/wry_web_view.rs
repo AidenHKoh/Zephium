@@ -40,10 +40,13 @@ pub struct WryWebViewIvars {
     Option<Box<dyn Fn(&NSEvent, Option<Retained<NSMenu>>) -> Option<Retained<NSMenu>>>>,
   #[cfg(target_os = "ios")]
   pub(crate) input_accessory_view_builder: Option<Box<crate::InputAccessoryViewBuilder>>,
-  /// `Some` while the view is pointer-inert: the tracking areas WebKit
+  /// `Some` while the view's tracking areas are parked: the ones WebKit
   /// installed (and any it adds meanwhile), held out of the view.
   #[cfg(target_os = "macos")]
   pub(crate) parked_tracking: std::cell::RefCell<Option<Vec<Retained<NSTrackingArea>>>>,
+  /// The view is also skipped by hit-testing.
+  #[cfg(target_os = "macos")]
+  pub(crate) skips_hit_test: std::cell::Cell<bool>,
   pub(crate) custom_protocol_task_ids: Mutex<HashMap<usize, Retained<NSUUID>>>,
   /// One in-flight scope per registered scheme, by protocol index: a slow IPC
   /// call never holds back the app's own assets, nor they it.
@@ -94,7 +97,7 @@ define_class!(
     #[cfg(target_os = "macos")]
     #[unsafe(method_id(hitTest:))]
     fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
-      if self.ivars().parked_tracking.borrow().is_some() {
+      if self.ivars().skips_hit_test.get() {
         None
       } else {
         unsafe { objc2::msg_send![super(self), hitTest: point] }
@@ -209,10 +212,21 @@ impl WryWebView {
   /// when another view covers this one (they set the cursor under the cover).
   /// Turning it off gives WebKit's areas back.
   pub fn set_pointer_inert(&self, inert: bool) {
-    if inert == self.ivars().parked_tracking.borrow().is_some() {
+    self.ivars().skips_hit_test.set(inert);
+    self.set_tracking_parked(inert);
+  }
+
+  pub fn is_pointer_inert(&self) -> bool {
+    self.ivars().skips_hit_test.get()
+  }
+
+  /// Holds the tracking areas out of the view while it keeps taking clicks
+  /// and drags: a view under another one stops competing for the cursor.
+  pub fn set_tracking_parked(&self, parked: bool) {
+    if parked == self.ivars().parked_tracking.borrow().is_some() {
       return;
     }
-    if inert {
+    if parked {
       let areas: Vec<_> = self.trackingAreas().iter().collect();
       *self.ivars().parked_tracking.borrow_mut() = Some(areas.clone());
       for area in &areas {
@@ -224,6 +238,10 @@ impl WryWebView {
         unsafe { objc2::msg_send![super(self), addTrackingArea: &*area] }
       }
     }
+  }
+
+  pub fn is_tracking_parked(&self) -> bool {
+    self.ivars().parked_tracking.borrow().is_some()
   }
 }
 

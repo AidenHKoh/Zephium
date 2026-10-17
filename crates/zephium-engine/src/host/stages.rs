@@ -587,6 +587,7 @@ impl EngineHost {
             sink.emit(EngineEvent::SplitChanged { window, tree })
         }));
         content.addSubview(&stage);
+        stage.cover_pointer();
         self.stages.insert(window, stage.clone());
         Some(stage)
     }

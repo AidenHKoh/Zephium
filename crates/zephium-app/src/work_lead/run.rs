@@ -67,6 +67,9 @@ struct State {
     /// apps: the sites they named, or every site they let it work in when
     /// they named none ("create the issue").
     asked_saves: Option<Vec<String>>,
+    /// How the person let the run enter a site when the way question was
+    /// asked: the page tasks on it take the answer instead of asking.
+    entries: Vec<(String, crate::work_sites::EntryAnswer)>,
     waits: usize,
     waiting_since: Option<Instant>,
     stopped: Option<WorkCancelCause>,
@@ -91,6 +94,8 @@ pub(crate) struct LeadRun {
     /// Connections the person chose for this run where they were asked for
     /// something broader (their day's sources): no second question.
     accepted: Mutex<Vec<String>>,
+    /// Held while a part is routed, so parts of one service ask once.
+    pub routing: tokio::sync::Mutex<()>,
     /// A page waited its whole turn for the browser and was never seated:
     /// the run's page lane will not take another, so later pages fail at
     /// once instead of each waiting as long again.
@@ -152,12 +157,14 @@ impl LeadRun {
                 private: false,
                 trusted_sites: Vec::new(),
                 asked_saves: None,
+                entries: Vec::new(),
                 waits: 0,
                 waiting_since: None,
                 stopped: None,
                 unreadable: 0,
             }),
             accepted: Mutex::new(Vec::new()),
+            routing: tokio::sync::Mutex::new(()),
             browser_down: std::sync::atomic::AtomicBool::new(false),
             diagnostic,
         }
@@ -186,6 +193,18 @@ impl LeadRun {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .any(|known| known == connection)
+    }
+    pub(crate) fn set_entry(&self, site: &str, answer: crate::work_sites::EntryAnswer) {
+        let mut state = self.state();
+        state.entries.retain(|(known, _)| known != site);
+        state.entries.push((site.to_owned(), answer));
+    }
+    pub(crate) fn entry_answer(&self, site: &str) -> Option<crate::work_sites::EntryAnswer> {
+        self.state()
+            .entries
+            .iter()
+            .find(|(known, _)| known == site)
+            .map(|(_, answer)| *answer)
     }
     fn state(&self) -> MutexGuard<'_, State> {
         self.state
@@ -714,7 +733,12 @@ impl LeadRun {
                 }
             }
         }
-        for site in named {
+        self.trust_named(text);
+    }
+
+    /// Trusts the sites a text names, without letting it ask to save.
+    pub(crate) fn trust_named(&self, text: &str) {
+        for site in crate::work_sites::named_services(text) {
             self.trust_site(&site);
         }
         for word in

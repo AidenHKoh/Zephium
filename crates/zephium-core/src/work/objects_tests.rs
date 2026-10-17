@@ -324,6 +324,7 @@ fn lead_execution() -> (WorkPlanRevision, WorkExecutionFact, WorkRevision) {
         max_workers: 4,
     };
     let grant = WorkAgentGrantV1 {
+        draft: None,
         provider: WorkSearchProvider::OpenAi,
         model: PUBLIC_SEARCH_MODEL.into(),
         max_turns: 200,

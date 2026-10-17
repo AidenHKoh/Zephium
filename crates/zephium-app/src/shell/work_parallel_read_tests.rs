@@ -91,6 +91,7 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
                         command: WorkCommandId::generate(),
                         intent: WorkRuntimeIntent::BeginAgent {
                             grant: WorkAgentGrantV1 {
+                                draft: None,
                                 lead: None,
                                 provider: WorkSearchProvider::OpenAi,
                                 model: PUBLIC_SEARCH_MODEL.into(),
@@ -436,6 +437,7 @@ async fn work_parallel_searches_share_and_recalculate_the_remaining_grant() {
                         command: WorkCommandId::generate(),
                         intent: WorkRuntimeIntent::BeginAgent {
                             grant: WorkAgentGrantV1 {
+                                draft: None,
                                 lead: None,
                                 provider: WorkSearchProvider::OpenAi,
                                 model: PUBLIC_SEARCH_MODEL.into(),
@@ -659,6 +661,7 @@ async fn work_search_ranking_preserves_sources_and_accounts_for_refused_or_unkno
                         command: WorkCommandId::generate(),
                         intent: WorkRuntimeIntent::BeginAgent {
                             grant: WorkAgentGrantV1 {
+                                draft: None,
                                 lead: None,
                                 provider: WorkSearchProvider::OpenAi,
                                 model: PUBLIC_SEARCH_MODEL.into(),

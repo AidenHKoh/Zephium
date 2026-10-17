@@ -56,6 +56,11 @@ pub(crate) struct PartSpec {
     pub search: Option<super::recipes::SiteSearch>,
     /// The person's connection for the service, when they chose its website.
     pub declined: Option<super::route::Offer>,
+    /// A canvas draft the part sends or posts exactly as it stands.
+    pub draft: Option<String>,
+    /// The part does not run: the person's answer to the way question sent
+    /// them to Settings or away from the service.
+    pub halt: Option<WorkPartNeedV1>,
 }
 
 fn now_ms() -> String {
@@ -158,6 +163,8 @@ pub(crate) fn spec(args: &Value) -> Result<PartSpec, String> {
         records,
         search,
         declined: None,
+        draft: text_arg(args, "draft"),
+        halt: None,
     })
 }
 
@@ -425,6 +432,34 @@ where
     B: FnMut(WorkAttemptProbe, WorkAgentBrowseRequest) -> Fut + Send,
     Fut: Future<Output = Result<WorkBrowserOutcome, WorkError>> + Send,
 {
+    /// A browse that names a canvas draft carries its words, as the person
+    /// last left them, as the exact text the page types.
+    async fn with_draft(&self, name: &str, arguments: &Value) -> Result<Value, String> {
+        let Some(id) = arguments
+            .get("draft")
+            .and_then(Value::as_str)
+            .filter(|_| name == "browse")
+        else {
+            return Ok(arguments.clone());
+        };
+        if arguments.get("text").is_some() {
+            return Err("give draft or text, not both".into());
+        }
+        let projection = self
+            .run
+            .probe
+            .runtime_projection()
+            .await
+            .map_err(|_| "The canvas could not be read".to_owned())?;
+        let words = super::objects::draft_words(&projection, self.run.probe.execution(), id)?;
+        let mut arguments = arguments.clone();
+        if let Some(fields) = arguments.as_object_mut() {
+            fields.remove("draft");
+            fields.insert("text".into(), Value::String(words));
+        }
+        Ok(arguments)
+    }
+
     /// Runs one part to its end and returns what the lead reads.
     pub(crate) async fn part(&self, mut spec: PartSpec) -> (String, bool) {
         if spec.helper == WorkHelperV1::Browser && self.run.browser_down() {
@@ -480,6 +515,23 @@ where
         if self.run.part(fact.clone()).await.is_err() {
             release_site(WorkPartStateV1::Stopped, None, None, 0);
             return ("The part could not be recorded".into(), true);
+        }
+        if let Some(need) = spec.halt.clone() {
+            self.release_part();
+            fact.state = WorkPartStateV1::Failed;
+            fact.need = Some(need.clone());
+            fact.ended_ms = Some(now_ms());
+            let _ = self.run.part(fact.clone()).await;
+            release_site(WorkPartStateV1::Failed, Some(need.clone()), None, 0);
+            return (
+                format!(
+                    "Part {} ({}) did not run\nIt needs {}; its row shows the fix. Make no object, figure, pick or task for it, and say in the reply in one sentence what the person does next.\n",
+                    spec.title,
+                    fact.id,
+                    need_words(&need)
+                ),
+                true,
+            );
         }
         let _slot = self.slots.acquire().await.ok();
         fact.state = WorkPartStateV1::Running;
@@ -638,7 +690,7 @@ where
             .catalog(fact.id);
         if !catalog.is_empty() {
             out.push_str(
-                "Native records (select r keys with data.records; values remain native):\n",
+                "Native records (select r keys with data.records; values remain native). A field marked unknown was not shown by the page: say it was not shown, never that it is none or not set.\n",
             );
             out.push_str(&catalog);
         }
@@ -871,6 +923,11 @@ where
         if matches!(kit, Kit::Browser) && account_goal(spec) {
             brief.push_str("This is an account task: use browse with its original URL and requested goal so sign-in/MFA can hand the page to the person. Existing effect approvals still apply. Continue in the browser through app-launch interstitials. Help, marketing and app-launch pages are not the requested account content.\n");
         }
+        if let (Kit::Browser, Some(draft)) = (&kit, &spec.draft) {
+            brief.push_str(&format!(
+                "The draft to enter exactly as it stands is canvas object {draft}: call browse with draft set to it and a goal that only says what to do with it.\n"
+            ));
+        }
         if let Some(service) = &spec.service {
             if let Some(host) = &service.host {
                 brief.push_str(&format!("Site: {host}\n"));
@@ -914,6 +971,7 @@ where
                 .map(|(index, url)| Request {
                     call: format!("given-{index}"),
                     kind: WorkStepKindV1::Read {
+                        verbatim: None,
                         url: url.clone(),
                         collection: collection.clone(),
                         goal: None,
@@ -1090,7 +1148,15 @@ where
                     | "write_file" | "edit_file" | "run_command"
                         if !matches!(kit, Kit::Registered(_)) =>
                     {
-                        match step_request(&tool_call.name, &tool_call.arguments, self.run)
+                        let arguments =
+                            match self.with_draft(&tool_call.name, &tool_call.arguments).await {
+                                Ok(arguments) => arguments,
+                                Err(fault) => {
+                                    results[index] = Some(answer(fault, true));
+                                    continue;
+                                }
+                            };
+                        match step_request(&tool_call.name, &arguments, self.run)
                             .and_then(|kind| if matches!(kit, Kit::Browser) { account_read_route(spec, kind) } else { Ok(kind) }) {
                             Ok(WorkStepKindV1::Search { .. }) if searches >= PART_SEARCHES => {
                                 results[index] = Some(answer(
@@ -1341,6 +1407,7 @@ where
         {
             return;
         }
+        let _routing = self.run.routing.lock().await;
         let profile = self.run.profile.to_string();
         let servers = crate::work_connections::store::shared()
             .and_then(|store| store.servers(&profile).ok())
@@ -1350,10 +1417,32 @@ where
             crate::work_connections::helper::shared().gh_ready(),
             &servers,
         );
-        let accepted = match &offer {
-            Some(offer) => self.accepts(offer).await,
-            None => false,
-        };
+        let site = super::route::site(&brand)
+            .and_then(|host| crate::work_sites::site_of(&format!("https://{host}/")));
+        let way = self.choose(&brand, offer.as_ref(), site.as_deref()).await;
+        let accepted = way == Some(super::route::Way::Connection);
+        if let (Some(site), Some(way)) = (&site, way) {
+            use super::route::Way;
+            use crate::work_sites::EntryAnswer;
+            match way {
+                Way::Website => self.run.set_entry(site, EntryAnswer::Allow),
+                Way::AlwaysWebsite => self.run.set_entry(site, EntryAnswer::Always),
+                Way::NotNow => {
+                    self.run.set_entry(site, EntryAnswer::NotNow);
+                    spec.halt = Some(WorkPartNeedV1::AllowSite { host: site.clone() });
+                }
+                Way::Connect => {
+                    spec.halt =
+                        super::route::known_server(&brand).map(|name| WorkPartNeedV1::Connect {
+                            connection: name.into(),
+                        });
+                }
+                Way::Connection => {}
+            }
+        }
+        if spec.halt.is_some() {
+            return;
+        }
         if !accepted && spec.helper == WorkHelperV1::Browser {
             spec.declined = offer.clone();
         }
@@ -1365,9 +1454,52 @@ where
         }
     }
 
-    /// The person's answer to a connection offer: an earlier answer in this
-    /// work stands, otherwise they are asked now.
-    async fn accepts(&self, offer: &super::route::Offer) -> bool {
+    /// How the person has the service reached, asked once per work: with
+    /// their connection or on the website when they have a connection,
+    /// on the website or after connecting when the service has one they
+    /// could add. None when the service has neither, or it is not asked:
+    /// the part works as it always did.
+    async fn choose(
+        &self,
+        brand: &str,
+        offer: Option<&super::route::Offer>,
+        site: Option<&str>,
+    ) -> Option<super::route::Way> {
+        use super::route::Way;
+        let name = match offer {
+            Some(offer) => offer.connection.clone(),
+            None => super::route::known_server(brand)?.to_owned(),
+        };
+        // A service with no website of ours has only its connection.
+        let Some(site) = site else {
+            let offer = offer?;
+            self.run.accept_connection(&offer.yes);
+            return Some(Way::Connection);
+        };
+        let objective = self.objective.to_lowercase();
+        if let Some(offer) = offer {
+            let asked_for = self.run.accepted_connection(&offer.yes)
+                || objective.contains(&offer.yes.to_lowercase())
+                || objective
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|word| matches!(word, "mcp" | "connection" | "connector"));
+            if asked_for {
+                self.run.accept_connection(&offer.yes);
+                return Some(Way::Connection);
+            }
+        }
+        let standing = crate::work_sites::standing(&self.run.handle, self.run.profile)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|entry| {
+                entry.site == site
+                    && entry.access == zephium_core::work::sites::WorkSiteAccessV1::Always
+            });
+        if standing {
+            return Some(Way::Website);
+        }
+        let (prompt, options) = super::route::question(&name, offer.is_some());
         let earlier = self
             .run
             .probe
@@ -1382,45 +1514,42 @@ where
                         .rev()
                         .find_map(|step| match &step.kind {
                             WorkStepKindV1::Ask {
-                                options,
+                                prompt: asked,
                                 answer: Some(answer),
                                 purpose: Some(WorkAskPurposeV1::Connection),
                                 ..
-                            } if options.first() == Some(&offer.yes) => Some(answer.clone()),
+                            } if *asked == prompt => Some(super::route::way(answer)),
                             _ => None,
                         })
                 })
             });
-        let objective = self.objective.to_lowercase();
-        let asked_for = self.run.accepted_connection(&offer.yes)
-            || objective.contains(&offer.yes.to_lowercase())
-            || objective
-                .split(|c: char| !c.is_alphanumeric())
-                .any(|word| matches!(word, "mcp" | "connection" | "connector"));
-        let answer = match earlier {
-            _ if asked_for => Some(offer.yes.clone()),
-            Some(answer) => Some(answer),
-            None => self
-                .run
-                .ask(
-                    WorkAskPurposeV1::Connection,
-                    offer.prompt.clone(),
-                    vec![
-                        offer.yes.clone(),
-                        crate::work_connections::gh::DECLINE.into(),
-                    ],
-                    None,
-                )
-                .await
-                .ok()
-                .flatten(),
+        let way = match (earlier, offer) {
+            // They went to connect it: now that they have, it is used.
+            (Some(Way::Connect), Some(_)) => Way::Connection,
+            (Some(Way::Connect), None) | (None, _) => {
+                match self
+                    .run
+                    .ask(WorkAskPurposeV1::Connection, prompt, options, None)
+                    .await
+                    .ok()
+                    .flatten()
+                {
+                    Some(answer) => super::route::way(&answer),
+                    None => Way::Website,
+                }
+            }
+            (Some(way), _) => way,
         };
-        let accepted = answer.as_deref() == Some(offer.yes.as_str());
-        // The connection helper asks under the same words: it takes this answer.
-        if accepted {
+        // A connection the person did not add cannot be used.
+        let way = match (way, offer) {
+            (Way::Connection, None) => Way::Website,
+            (way, _) => way,
+        };
+        if let (Way::Connection, Some(offer)) = (way, offer) {
+            // The connection helper asks under the same words: it takes this answer.
             self.run.accept_connection(&offer.yes);
         }
-        accepted
+        Some(way)
     }
 
     /// The need a part that could not do its job shows on its row, with the
@@ -1792,6 +1921,7 @@ pub(crate) fn step_request(
                 None => url,
             };
             WorkStepKindV1::Read {
+                verbatim: None,
                 url,
                 collection: hands::collection(args.get("records"))?,
                 goal: None,
@@ -1806,8 +1936,26 @@ pub(crate) fn step_request(
                 .filter(|goal| !goal.is_empty())
                 .ok_or("goal is required")?;
             if goal.len() > MAX_WORK_PAGE_GOAL_BYTES {
-                return Err("goal is at most 600 bytes".into());
+                return Err(
+                    "goal is at most 600 bytes: give longer exact words as text or draft".into(),
+                );
             }
+            let verbatim = match args.get("text").and_then(Value::as_str) {
+                Some(words) => {
+                    let words = words.replace("\r\n", "\n").replace('\r', "\n");
+                    let words = words.trim_end_matches('\n');
+                    if words.trim().is_empty() {
+                        None
+                    } else if words.len() > MAX_WORK_PAGE_VERBATIM_BYTES {
+                        return Err(format!(
+                            "text is at most {MAX_WORK_PAGE_VERBATIM_BYTES} bytes"
+                        ));
+                    } else {
+                        Some(words.to_owned())
+                    }
+                }
+                None => None,
+            };
             let url = if start.starts_with("https://") {
                 start
             } else {
@@ -1822,6 +1970,7 @@ pub(crate) fn step_request(
                 format!("https://{site}/")
             };
             WorkStepKindV1::Read {
+                verbatim,
                 url,
                 collection: hands::collection(args.get("records"))?,
                 goal: Some(goal),
@@ -1915,7 +2064,10 @@ pub(crate) fn redirected_read(
     run: &super::run::LeadRun,
 ) -> Result<WorkStepKindV1, String> {
     let WorkStepKindV1::Read {
-        collection, goal, ..
+        collection,
+        goal,
+        verbatim,
+        ..
     } = kind
     else {
         return Err("only a page read follows a redirect".into());
@@ -1923,6 +2075,7 @@ pub(crate) fn redirected_read(
     admit_kind(
         "read",
         WorkStepKindV1::Read {
+            verbatim: verbatim.clone(),
             url: destination.to_owned(),
             collection: collection.clone(),
             goal: goal.clone(),
@@ -1940,6 +2093,7 @@ fn admit_kind(
         url,
         collection,
         goal: None,
+        ..
     } = &mut kind
     {
         if collection.is_none() {
@@ -2445,6 +2599,8 @@ mod tests {
             ],
             search: None,
             declined: None,
+            draft: None,
+            halt: None,
         };
         assert_eq!(
             given_pages(
@@ -2483,6 +2639,8 @@ mod tests {
                 ..Default::default()
             }),
             declined: None,
+            draft: None,
+            halt: None,
         };
         assert!(given_pages("Start at https://catalog.example/", &part).is_empty());
         for url in [
@@ -2502,6 +2660,7 @@ mod tests {
     #[test]
     fn a_goal_that_only_reads_a_daily_app_is_a_view_read() {
         let browse = |url: &str, goal: &str| WorkStepKindV1::Read {
+            verbatim: None,
             url: url.into(),
             collection: None,
             goal: Some(goal.into()),
@@ -2548,6 +2707,7 @@ mod tests {
             "What is new in my GitHub notifications"
         )));
         assert!(!reads_app(&WorkStepKindV1::Read {
+            verbatim: None,
             url: "https://app.slack.com/client".into(),
             collection: None,
             goal: None,
@@ -2671,16 +2831,20 @@ mod tests {
             records: vec![],
             search: None,
             declined: None,
+            draft: None,
+            halt: None,
         };
         let url = "https://unlisted.example/app/inbox";
         assert!(given_pages(url, &part).is_empty());
         let read = WorkStepKindV1::Read {
+            verbatim: None,
             url: url.into(),
             collection: None,
             goal: None,
         };
         assert!(account_read_route(&part, read.clone()).is_err());
         let task = WorkStepKindV1::Read {
+            verbatim: None,
             url: url.into(),
             collection: None,
             goal: Some("Read visible inbox items without changing anything".into()),
@@ -2706,6 +2870,8 @@ mod tests {
             records: vec![],
             search: None,
             declined: None,
+            draft: None,
+            halt: None,
         };
         assert!(public_goal(&part(
             "Find Linear's pricing for a 10-person team"
@@ -2778,6 +2944,7 @@ mod tests {
             id: WorkStepId::generate(),
             turn: 1,
             kind: WorkStepKindV1::Read {
+                verbatim: None,
                 url: url.into(),
                 goal: None,
                 collection: None,
@@ -2860,6 +3027,7 @@ mod tests {
             id: WorkStepId::generate(),
             turn: 1,
             kind: WorkStepKindV1::Read {
+                verbatim: None,
                 url: url.into(),
                 goal: None,
                 collection: None,

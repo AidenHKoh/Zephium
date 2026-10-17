@@ -704,6 +704,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         max_workers: 2,
     };
     let grant = WorkAgentGrantV1 {
+        draft: None,
         lead: None,
         provider: WorkSearchProvider::OpenAi,
         model: PUBLIC_SEARCH_MODEL.into(),
@@ -1482,6 +1483,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
     succeeded_read.evidence = Some(11.into());
     assert!(succeeded_read.validate().is_ok());
     let grant = |folders: Vec<&str>| WorkAgentGrantV1 {
+        draft: None,
         lead: None,
         provider: super::search::WorkSearchProvider::OpenAi,
         model: "gpt-5.6-luna".into(),
@@ -2186,6 +2188,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
         max_workers: 2,
     };
     let grant = WorkAgentGrantV1 {
+        draft: None,
         lead: None,
         provider: WorkSearchProvider::OpenAi,
         model: PUBLIC_SEARCH_MODEL.into(),
@@ -2262,6 +2265,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
         id: id.into(),
         turn: 1,
         kind: WorkStepKindV1::Read {
+            verbatim: None,
             url: url.into(),
             collection: None,
             goal: None,
@@ -2475,6 +2479,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
     assert_eq!(
         started.fetch,
         [WorkStepKindV1::Read {
+            verbatim: None,
             url: "https://slack.com/".into(),
             collection: None,
             goal: Some("Read #design since Monday".into()),
@@ -2493,6 +2498,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
     }
     let mut long = read(9, "https://slack.com/", None);
     long.kind = WorkStepKindV1::Read {
+        verbatim: None,
         url: "https://slack.com/".into(),
         collection: None,
         goal: Some("x".repeat(MAX_WORK_PAGE_GOAL_BYTES + 1)),

@@ -1,4 +1,4 @@
-import type { OwnedData } from "./board/types";
+import type { DraftView, OwnedData } from "./board/types";
 import type { EvidenceReference } from "$shared/ui/data/Artifact";
 
 /** Instance-local UI callbacks; never part of a saved canvas node or runtime projection. */
@@ -66,4 +66,12 @@ export type BoardActions = {
 };
 
 export type DraftReview = "comment" | "approve" | "request_changes";
-export type DraftEdit = { body?: string; review?: DraftReview; sent?: boolean };
+export type DraftEdit = {
+  body?: string;
+  review?: DraftReview;
+  /** The run Send started, whose steps say where the send stands. */
+  run?: string;
+  /** Where that send stands now, read from the run. */
+  send?: DraftView["send"];
+  note?: string;
+};

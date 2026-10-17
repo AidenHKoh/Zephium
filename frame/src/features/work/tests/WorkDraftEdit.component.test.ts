@@ -41,3 +41,21 @@ test("a draft is edited where it stands, takes its review and sends through its 
   await screen.getByRole("button", { name: "Comment", exact: true }).first().click();
   expect(send).toHaveBeenCalledWith("review");
 });
+
+test("a draft's send reads from its run: sending holds the button, a failure returns it with the note", async () => {
+  await page.viewport(1200, 800);
+  const send = vi.fn();
+  const sending = await render(ObjectsSheet, {
+    rows: [{ object: { ...draft, send: "sending" }, width: 520 }],
+    actions: { send },
+  });
+  await expect.element(sending.getByRole("button", { name: "Sending…" }).first()).toBeDisabled();
+  await sending.unmount();
+  const failed = await render(ObjectsSheet, {
+    rows: [{ object: { ...draft, send: "draft", note: "Not sent: you declined it." }, width: 520 }],
+    actions: { send },
+  });
+  await expect.element(failed.getByText("Not sent: you declined it.").first()).toBeVisible();
+  await failed.getByRole("button", { name: "Comment", exact: true }).first().click();
+  expect(send).toHaveBeenCalledWith("review");
+});
