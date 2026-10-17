@@ -1,13 +1,8 @@
 <script lang="ts">
   import type { IconSvgElement } from "@hugeicons/svelte";
   import Icon from "$shared/ui/Icon";
-  import {
-    ArrowLeft01Icon,
-    Calendar03Icon,
-    CheckListIcon,
-    StickyNote03Icon,
-    Table01Icon,
-  } from "../../lib/icons";
+  import Morph from "./Morph.svelte";
+  import { Calendar03Icon, CheckListIcon, StickyNote03Icon, Table01Icon } from "../../lib/icons";
   import * as m from "$shared/i18n/messages";
   import type { Snippet } from "svelte";
 
@@ -22,7 +17,7 @@
     /** What the panel shows: the kinds of block, or the person's notes to put on the canvas. */
     view?: "blocks" | "notes";
     /** The notes list, when notes are on: Note opens it in place instead of making a blank one. */
-    notes?: Snippet;
+    notes?: Snippet<[() => void]>;
     onpick: (kind: BlockKind) => void;
   } = $props();
   const BLOCKS: {
@@ -49,29 +44,26 @@
 </script>
 
 <!-- Things the person can put on the canvas themselves; the agent fills them when asked. -->
-{#if view === "notes" && notes}
-  <button type="button" class="ui-menu-item back" onclick={() => (view = "blocks")}>
-    <span class="ui-menu-icon" aria-hidden="true"><Icon icon={ArrowLeft01Icon} size={15} /></span>
-    {m.work_tool_blocks()}
-  </button>
-  <div class="ui-menu-separator" role="presentation"></div>
-  {@render notes()}
-{:else}<ul class="blocks" aria-label={m.work_tool_blocks()}>
-    {#each BLOCKS as block (block.kind)}<li>
-        <button
-          type="button"
-          class="ui-menu-item block"
-          disabled={busy}
-          onclick={() => (block.kind === "note" && notes ? (view = "notes") : onpick(block.kind))}
-        >
-          <span class="tile" aria-hidden="true"><Icon icon={block.icon} size={16} /></span>
-          <span class="text">
-            <span class="name">{block.name()}</span>
-            <span class="hint">{block.hint()}</span>
-          </span>
-        </button>
-      </li>{/each}
-  </ul>{/if}
+<Morph view={view === "notes" && notes ? "notes" : "blocks"} order={view === "notes" ? 1 : 0}>
+  {#if view === "notes" && notes}
+    {@render notes(() => (view = "blocks"))}
+  {:else}<ul class="blocks" aria-label={m.work_tool_blocks()}>
+      {#each BLOCKS as block (block.kind)}<li>
+          <button
+            type="button"
+            class="ui-menu-item block"
+            disabled={busy}
+            onclick={() => (block.kind === "note" && notes ? (view = "notes") : onpick(block.kind))}
+          >
+            <span class="tile" aria-hidden="true"><Icon icon={block.icon} size={16} /></span>
+            <span class="text">
+              <span class="name">{block.name()}</span>
+              <span class="hint">{block.hint()}</span>
+            </span>
+          </button>
+        </li>{/each}
+    </ul>{/if}
+</Morph>
 
 <style>
   .blocks {
@@ -90,10 +82,6 @@
     background: transparent;
     font: inherit;
     text-align: start;
-  }
-
-  .back {
-    color: var(--color-label-secondary);
   }
 
   button.ui-menu-item:disabled {

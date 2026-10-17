@@ -5,7 +5,9 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import Button from "$shared/ui/Button";
+  import Field from "$shared/ui/Field";
   import Icon from "$shared/ui/Icon";
+  import Morph from "./Morph.svelte";
   import "$shared/ui/Shine/shine.css";
   import { BrowserIcon, File01Icon, FolderAddIcon, Image01Icon, Link04Icon } from "../../lib/icons";
   import * as m from "$shared/i18n/messages";
@@ -61,9 +63,9 @@
   }
 </script>
 
-<!-- Everything that can join the canvas from outside it, one kind at a time. The panel keeps its height, so the kinds below never move. -->
+<!-- Everything that can join the canvas from outside it, one kind at a time. The panel is as tall as the kind needs, and the switcher stays at its foot. -->
 <div class="attach">
-  <div class="stage">
+  <Morph view={kind} order={segments.findIndex((segment) => segment.key === kind)}>
     {#if kind === "tabs"}
       {@render picker()}
     {:else if kind === "folder"}
@@ -71,17 +73,18 @@
         <span class="tile ui-shine" aria-hidden="true"><Icon icon={FolderAddIcon} size={22} /></span
         >
         <form
-          class="create ui-shine-field"
+          class="create"
           onsubmit={(event) => {
             event.preventDefault();
             void addFolder();
           }}
         >
-          <input
-            aria-label={m.work_env_folder_placeholder()}
+          <Field
+            label={m.work_env_folder_placeholder()}
+            labelHidden
             placeholder={m.work_env_folder_placeholder()}
             bind:value={folder}
-            maxlength="1024"
+            maxlength={1024}
             disabled={busy || folderPending}
           /><Button type="submit" size="compact" disabled={busy || folderPending || !folder.trim()}
             >{m.work_env_folder_add()}</Button
@@ -95,18 +98,19 @@
       <div class="compose">
         <span class="tile ui-shine" aria-hidden="true"><Icon icon={Link04Icon} size={22} /></span>
         <form
-          class="create ui-shine-field"
+          class="create"
           onsubmit={(event) => {
             event.preventDefault();
             void addLink();
           }}
         >
-          <input
+          <Field
             type="url"
-            aria-label={m.work_env_link_placeholder()}
+            label={m.work_env_link_placeholder()}
+            labelHidden
             placeholder={m.work_env_link_placeholder()}
             bind:value={link}
-            maxlength="2048"
+            maxlength={2048}
             disabled={busy || linkPending}
           /><Button type="submit" size="compact" disabled={busy || linkPending || !link.trim()}
             >{m.work_env_link_add()}</Button
@@ -117,7 +121,7 @@
     {:else}
       {@render media(kind)}
     {/if}
-  </div>
+  </Morph>
   <div class="segments" role="group" aria-label={m.work_tool_attach()}>
     {#each segments as segment (segment.key)}
       <button
@@ -144,14 +148,6 @@
     min-inline-size: 0;
   }
 
-  /* One height for every kind, so the switcher under it holds still. */
-  .stage {
-    display: flex;
-    flex-direction: column;
-    block-size: 340px;
-    min-block-size: 0;
-  }
-
   /* The kinds of thing to add: the chosen one opens into its name, the rest stay glyphs. */
   .segments {
     display: flex;
@@ -175,6 +171,7 @@
     overflow: hidden;
     white-space: nowrap;
     border: 0;
+    border-radius: var(--shine-radius);
     background: transparent;
     color: var(--color-muted);
     font: inherit;
@@ -238,7 +235,7 @@
     align-items: stretch;
     justify-content: center;
     gap: 14px;
-    padding: 0 8px 24px;
+    padding: 12px 8px 14px;
   }
 
   .compose > :global(.ui-button) {
@@ -257,26 +254,13 @@
   }
 
   .create {
-    --shine-radius: var(--radius-control);
-
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 4px 4px 4px 14px;
   }
 
-  .create input {
+  .create :global(.ui-field) {
     flex: 1;
-    min-inline-size: 0;
-    border: 0;
-    background: transparent;
-    color: var(--color-text);
-    font: inherit;
-    outline: none;
-  }
-
-  .create input::placeholder {
-    color: var(--color-faint);
   }
 
   .note {

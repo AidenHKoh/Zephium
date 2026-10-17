@@ -818,35 +818,44 @@
   let composerSurface = $state<HTMLElement>();
   let composerHeight = $state(0);
   // Over a window material the composer paints nothing, so the canvas has a hole the shape of it.
+  // The hole is read from the sheet itself on every frame it changes, so the two never part.
   $effect(() => {
     const card = cardHost;
     const sheet = composerSurface;
     if (!card || !sheet) return;
     const root = document.documentElement;
     const cut = () => {
+      const area = card.getBoundingClientRect();
+      const bar = sheet.getBoundingClientRect();
+      if (!bar.width || !area.width) return;
+      sheet.style.setProperty("--seam", `${Math.max(0, bar.bottom - area.bottom)}px`);
       const material = root.dataset.material;
       if (!material || material === "none") {
         card.style.clipPath = "";
         return;
       }
-      const area = card.getBoundingClientRect();
-      const bar = sheet.getBoundingClientRect();
+      const style = getComputedStyle(sheet);
       card.style.clipPath = composerHole(
         area,
         { left: bar.left - area.left, top: bar.top - area.top, width: bar.width },
-        parseFloat(getComputedStyle(sheet).borderTopLeftRadius) || 0,
+        parseFloat(style.borderTopLeftRadius) || 0,
+        parseFloat(style.getPropertyValue("--flare")) || 0,
       );
     };
     const observer = new ResizeObserver(cut);
     observer.observe(card);
     observer.observe(sheet);
+    observer.observe(sheet.parentElement ?? sheet);
     const materials = new MutationObserver(cut);
     materials.observe(root, { attributes: true, attributeFilter: ["data-material"] });
+    window.addEventListener("resize", cut);
     cut();
     return () => {
       observer.disconnect();
       materials.disconnect();
+      window.removeEventListener("resize", cut);
       card.style.clipPath = "";
+      sheet.style.removeProperty("--seam");
     };
   });
   $effect(() => {
@@ -2301,7 +2310,7 @@
         onattach={(ids) => void attachResources(ids)}
       />{/snippet}</AttachPanel
   >{/snippet}
-{#snippet notesList()}{#if notes}<NotePanel
+{#snippet notesList(back: () => void)}{#if notes}<NotePanel
       {notes}
       placed={snapshot?.elements.flatMap((element) =>
         element.reference.kind === "resource" ? [element.reference.resource] : [],
@@ -2312,6 +2321,7 @@
         void createNote();
       }}
       onpick={(id) => void placeNote(id)}
+      onback={back}
     />{/if}{/snippet}
 {#snippet barTools()}
   {@const hand = pointerTool() === "hand"}
@@ -2952,30 +2962,29 @@
     pointer-events: none;
   }
 
-  /* Solid behind the title and the island, then easing out: nothing reads through them. */
+  /* Solid only behind the title and the island, then a short, soft ease out. */
   .edge-scrim.top {
     inset-block-start: 0;
-    block-size: 112px;
+    block-size: 72px;
     background: linear-gradient(
       to bottom,
-      var(--color-canvas) 0 44px,
-      color-mix(in srgb, var(--color-canvas) 72%, transparent) 64px,
-      color-mix(in srgb, var(--color-canvas) 28%, transparent) 88px,
-      transparent 112px
+      var(--color-canvas) 0 34px,
+      color-mix(in srgb, var(--color-canvas) 62%, transparent) 46px,
+      color-mix(in srgb, var(--color-canvas) 20%, transparent) 60px,
+      transparent 72px
     );
   }
 
-  /* Under the bar, however tall its context makes it: solid where the bar stands,
-     then easing out, so nothing reads through or ends in a hard line above it. */
+  /* Under the bar, however tall its context makes it: solid where the bar stands, then a short ease out. */
   .edge-scrim.bottom {
     inset-block-end: 0;
-    block-size: calc(var(--dock, 64px) + 72px);
+    block-size: calc(var(--dock, 64px) + 40px);
     background: linear-gradient(
       to top,
-      var(--color-canvas) 0 calc(var(--dock, 64px) * 0.6),
-      color-mix(in srgb, var(--color-canvas) 72%, transparent) calc(var(--dock, 64px) + 16px),
-      color-mix(in srgb, var(--color-canvas) 28%, transparent) calc(var(--dock, 64px) + 44px),
-      transparent calc(var(--dock, 64px) + 72px)
+      var(--color-canvas) 0 calc(var(--dock, 64px) * 0.5),
+      color-mix(in srgb, var(--color-canvas) 62%, transparent) calc(var(--dock, 64px) + 8px),
+      color-mix(in srgb, var(--color-canvas) 20%, transparent) calc(var(--dock, 64px) + 24px),
+      transparent calc(var(--dock, 64px) + 40px)
     );
   }
 

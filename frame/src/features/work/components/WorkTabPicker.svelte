@@ -6,7 +6,6 @@
   import { BrowserIcon } from "../lib/icons";
   import * as m from "$shared/i18n/messages";
   import "./bar/pick.css";
-  import "$shared/ui/Shine/shine.css";
 
   let {
     tabs,
@@ -81,13 +80,7 @@
       </span>
     </label>{/if}
   <label class="search" for={id}>{m.work_env_search_tabs()}</label>
-  <input
-    {id}
-    type="search"
-    class="ui-shine-field"
-    bind:value={query}
-    placeholder={m.work_env_search_tabs()}
-  />
+  <input {id} type="search" bind:value={query} placeholder={m.work_env_search_tabs()} />
   <ul>
     {#each visible as tab (tab.id)}
       {@const attached = attachedTabIds.includes(tab.id)}
@@ -195,17 +188,29 @@
   }
 
   input[type="search"] {
-    --shine-radius: var(--radius-control);
-
     inline-size: 100%;
     box-sizing: border-box;
-    block-size: 34px;
-    padding: 0 12px;
+    block-size: var(--field-height);
+    padding: 0 var(--control-inset);
     border: 0;
+    border-radius: var(--radius-field);
+    background: var(--color-field);
     color: var(--color-text);
     font: inherit;
-    font-size: var(--text-body);
+    font-size: var(--text-label);
     outline: none;
+    transition:
+      background-color var(--motion-instant) var(--ease-smooth),
+      box-shadow var(--motion-instant) var(--ease-smooth);
+  }
+
+  input[type="search"]:hover {
+    background: var(--color-field-hover);
+  }
+
+  input[type="search"]:focus {
+    background: var(--color-field-hover);
+    box-shadow: var(--shadow-field-focus);
   }
 
   input[type="search"]::placeholder {
@@ -219,6 +224,7 @@
     flex-direction: column;
     gap: 1px;
     min-block-size: 0;
+    max-block-size: 244px;
     margin: 0;
     padding: 0;
     overflow-y: auto;

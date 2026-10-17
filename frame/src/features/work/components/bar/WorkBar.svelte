@@ -92,6 +92,10 @@
     void value;
     grow();
   });
+  /** Blank lines are not a message: the bar lets go of them with the focus and rests at its own height. */
+  $effect(() => {
+    if (!engaged && value && !value.trim()) value = "";
+  });
   function submit() {
     if (writing && !disabled && !dictating) onsubmit();
   }
@@ -236,6 +240,8 @@
         </div>
       </div>
     </form>
+    <span class="flare left" aria-hidden="true"></span>
+    <span class="flare right" aria-hidden="true"></span>
   </div>
 </div>
 
@@ -276,6 +282,12 @@
   }
 
   .surface {
+    --flare: 18px;
+    --edge: var(--color-border-strong);
+    --glow: color-mix(in srgb, black 26%, transparent);
+    --fill: var(--color-chrome);
+
+    position: relative;
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
     grid-template-areas: "tools field";
@@ -287,13 +299,56 @@
 
     /* The window's own colour. Over a material the sheet paints nothing and the canvas has a hole
        the shape of it, so the window shows through; no blur, nothing redrawn as the canvas moves. */
-    background: var(--color-chrome);
-    box-shadow: var(--shadow-sheet), var(--shine-top);
+    background: var(--fill);
+    box-shadow: 0 -10px 40px -20px var(--glow);
     transition: grid-template-columns var(--motion-slow) var(--ease-emphasized);
   }
 
   :global(:root:not([data-material="none"])[data-material]) .surface {
-    background: transparent;
+    --fill: transparent;
+  }
+
+  /* The one hairline: the sheet's own edge, the hole's edge, and the flares below all draw the
+     same shape. The canvas cuts its hole to it, flares included (see composer-hole.ts). */
+  .surface::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    box-sizing: border-box;
+    border: 1px solid var(--edge);
+    border-block-end: 0;
+    border-radius: inherit;
+    pointer-events: none;
+  }
+
+  /* Where the sheet meets the card's foot it widens on a concave curve, as the new tab's notch
+     does at the window's edge: the quarter-disc is the canvas, the ring its edge. */
+  .flare {
+    --ring: radial-gradient(
+      circle at var(--corner) 0,
+      transparent calc(var(--flare) - 0.5px),
+      var(--edge) calc(var(--flare) + 0.25px) calc(var(--flare) + 0.75px),
+      var(--fill) calc(var(--flare) + 1.25px)
+    );
+
+    position: absolute;
+    inset-block-end: var(--seam, 0);
+    inline-size: var(--flare);
+    block-size: var(--flare);
+    background: var(--ring);
+    pointer-events: none;
+  }
+
+  .flare.left {
+    --corner: 0%;
+
+    right: 100%;
+  }
+
+  .flare.right {
+    --corner: 100%;
+
+    left: 100%;
   }
 
   .tools {

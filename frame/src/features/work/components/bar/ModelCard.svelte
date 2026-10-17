@@ -27,6 +27,7 @@
     region,
     ontoggle,
     onEffort,
+    onstir,
     pill = $bindable(),
   }: {
     subject: CardSubject;
@@ -36,6 +37,8 @@
     region: string;
     ontoggle: () => void;
     onEffort: (level: WorkModelReasoning) => void;
+    /** Something is happening in the effort control: the person is still using it. */
+    onstir?: () => void;
     pill?: HTMLElement;
   } = $props();
 
@@ -91,7 +94,9 @@
 <section class="card" aria-label={name} data-face={expanded ? "effort" : "model"}>
   <div class="face model" inert={expanded}>
     {#key subject.entry.id}<div class="identity" aria-hidden="true">
-        <span class="tile"><ProviderMark provider={subject.entry.model.provider} size={20} /></span>
+        <span class="tile ui-shine"
+          ><ProviderMark provider={subject.entry.model.provider} size={20} /></span
+        >
         <span class="who">
           <span class="name" title={price}>{name}</span>
           {#if character}<span class="character">{character}</span>{/if}
@@ -114,7 +119,16 @@
         >
       </button>{:else}<span class="fixed">{m.model_effort_fixed()}</span>{/if}
   </div>
-  <div class="face effort" id={region} inert={!expanded} bind:this={face}>
+  <div
+    class="face effort"
+    id={region}
+    role="presentation"
+    inert={!expanded}
+    bind:this={face}
+    onpointerdown={onstir}
+    onpointermove={onstir}
+    onkeydown={onstir}
+  >
     {#if built}<ModelEffort
         levels={subject.levels}
         value={subject.effort}
@@ -174,13 +188,13 @@
   }
 
   .tile {
+    --shine-radius: var(--radius-control-compact);
+
     display: grid;
     flex: none;
     inline-size: 34px;
     block-size: 34px;
     place-items: center;
-    border-radius: var(--radius-control-compact);
-    background: var(--row-active);
   }
 
   .who {

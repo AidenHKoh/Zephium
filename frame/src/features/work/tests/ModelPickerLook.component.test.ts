@@ -115,7 +115,7 @@ test(
     await page.getByRole("button", { name: /^Effort: Medium/u }).click();
     await shoot("effort-face");
     await userEvent.keyboard("{Escape}");
-    await rail(/^Favourites/u).click();
+    await page.getByRole("button", { name: "Favourites", exact: true }).click();
     await shoot("favourites");
     await rail(/^OpenAI/u).click();
     await shoot("openai");

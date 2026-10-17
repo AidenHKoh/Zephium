@@ -58,7 +58,7 @@ const ready = (value: boolean) => async (profile: string) => ({
   fault: null,
 });
 
-test("the trigger is words alone, and the menu changes the model", async () => {
+test("the trigger is the model's mark and words, and the menu changes the model", async () => {
   await page.viewport(1200, 800);
   native.ready.mockImplementation(ready(true));
   native.read.mockResolvedValue(view("anthropic/claude-opus-5-5"));
@@ -67,7 +67,7 @@ test("the trigger is words alone, and the menu changes the model", async () => {
 
   const trigger = screen.getByRole("button", { name: "Model: Claude Opus 5.5, Medium effort" });
   await expect.element(trigger).toHaveTextContent(/Opus 5\.5\s*·\s*Medium/u);
-  expect(trigger.element().querySelector("svg")).toBeNull();
+  expect(trigger.element().querySelector("svg")).not.toBeNull();
   await trigger.click();
 
   await expect.element(page.getByRole("listbox")).toHaveFocus();
@@ -303,12 +303,14 @@ test("a star on a row keeps the model under Favourites, across providers", async
   const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
   await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
   expect(page.getByRole("tab", { name: "Favourites" }).query()).toBeNull();
+  const favourites = page.getByRole("button", { name: "Favourites", exact: true });
+  await expect.element(favourites).toHaveAttribute("aria-pressed", "false");
 
   await page.getByRole("button", { name: "Add Claude Sonnet 5.5 to favourites" }).click();
   await page.getByRole("tab", { name: "OpenAI" }).click();
   await page.getByRole("button", { name: "Add GPT-6 Sol to favourites" }).click();
-  await expect.element(page.getByRole("tab", { name: "Favourites" })).toBeVisible();
-  await page.getByRole("tab", { name: "Favourites" }).click();
+  await favourites.click();
+  await expect.element(favourites).toHaveAttribute("aria-pressed", "true");
   await expect.poll(() => page.getByRole("option").all().length).toBe(2);
   await expect.element(page.getByRole("group", { name: "Anthropic" })).toBeVisible();
   await expect.element(page.getByRole("group", { name: "OpenAI" })).toBeVisible();
@@ -318,7 +320,104 @@ test("a star on a row keeps the model under Favourites, across providers", async
   await expect
     .poll(() => native.settings["work.favourite-models"])
     .toBe("anthropic/claude-sonnet-5-5");
+
+  // The same button goes back to the provider that was open.
+  await favourites.click();
+  await expect.element(favourites).toHaveAttribute("aria-pressed", "false");
+  await expect
+    .element(page.getByRole("tab", { name: "OpenAI" }))
+    .toHaveAttribute("aria-selected", "true");
   preferences.dispose();
+});
+
+test("a row shows no tier word, and its check stands at the end where the star takes its place", async () => {
+  await page.viewport(1200, 800);
+  native.ready.mockImplementation(ready(true));
+  native.read.mockResolvedValue(view("anthropic/claude-opus-5-5"));
+  const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
+  await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
+  const list = document.querySelector(".model-menu [role=listbox]")!;
+  expect(list.textContent).not.toMatch(/Flagship|Balanced|Lightweight/u);
+  const row = list.querySelector('[aria-selected="true"]')!;
+  const slot = row.querySelector(".slot")!;
+  expect(slot.querySelector(".check svg")).not.toBeNull();
+  const edge = (element: Element) => element.getBoundingClientRect().right;
+  expect(edge(slot)).toBeGreaterThan(edge(row.querySelector(".option-name")!));
+  expect(row.firstElementChild?.classList.contains("option-name")).toBe(true);
+});
+
+test("an empty search puts itself away when the menu is clicked elsewhere", async () => {
+  await page.viewport(1200, 800);
+  native.ready.mockImplementation(ready(true));
+  native.read.mockResolvedValue(view("anthropic/claude-opus-5-5"));
+  const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
+  await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
+  const search = page.getByRole("button", { name: "Search models" });
+  await search.click();
+  await expect.element(search).toHaveAttribute("aria-expanded", "true");
+  await page.getByRole("region", { name: "Claude Opus 5.5" }).click();
+  await expect.element(search).toHaveAttribute("aria-expanded", "false");
+
+  // With words in it, the search stays until it is cleared or a place is picked.
+  await search.click();
+  await userEvent.keyboard("sol");
+  await page.getByRole("region", { name: "Claude Opus 5.5" }).click();
+  await expect.element(page.getByRole("combobox", { name: "Search models" })).toHaveValue("sol");
+  await page.getByRole("tab", { name: "OpenAI" }).click();
+  await expect.element(search).toHaveAttribute("aria-expanded", "false");
+  await expect.element(page.getByRole("combobox", { name: "Search models" })).toHaveValue("");
+});
+
+test("the effort control is set by a click and a drag, and turns back after a rest, a click elsewhere or Escape", async () => {
+  await page.viewport(1200, 800);
+  native.ready.mockImplementation(ready(true));
+  native.read.mockResolvedValue(view("openai/gpt-6-luna"));
+  native.effort.mockImplementation(async (_profile: string, effort: WorkModelReasoning) => {
+    await new Promise((done) => setTimeout(done, 30));
+    return view("openai/gpt-6-luna", null, effort);
+  });
+  const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
+  await screen.getByRole("button", { name: /Model: GPT-6 Luna/u }).click();
+  const pill = () => page.getByRole("button", { name: /^Effort:/u });
+  const slider = page.getByRole("slider", { name: "Effort" });
+  const asked = native.effort.mock.calls.length;
+  const open = async () => {
+    await pill().click();
+    await expect.element(slider).toBeVisible();
+  };
+
+  await open();
+  await slider.click({ position: { x: 96, y: 18 } });
+  await expect.element(slider).toHaveAttribute("aria-valuetext", "Max");
+  await slider.click({ position: { x: 6, y: 18 } });
+  await expect.element(slider).toHaveAttribute("aria-valuetext", "Low");
+  expect(native.effort.mock.calls.slice(asked).map((call) => call[1])).toEqual(["max", "low"]);
+
+  // Dragged from the thumb, it follows the pointer and lands on the stop it is let go at.
+  const thumb = page.elementLocator(document.querySelector(".model-menu .thumb")!);
+  await userEvent.dragAndDrop(thumb, slider, { targetPosition: { x: 52, y: 18 } });
+  await expect.element(slider).toHaveAttribute("aria-valuetext", "High");
+  expect(document.querySelector(".model-menu .thumb")).not.toBeNull();
+
+  // Used, it turns back a moment after the last change.
+  await expect
+    .poll(() => pill().element().getAttribute("aria-expanded"), { timeout: 4000 })
+    .toBe("false");
+
+  // Left alone, it turns back after a rest.
+  const opened = performance.now();
+  await open();
+  await new Promise((done) => setTimeout(done, 1500));
+  await expect.element(pill()).toHaveAttribute("aria-expanded", "true");
+  await expect
+    .poll(() => pill().element().getAttribute("aria-expanded"), { timeout: 4000 })
+    .toBe("false");
+  expect(performance.now() - opened).toBeGreaterThan(2500);
+
+  // A click elsewhere in the menu puts it away at once.
+  await open();
+  await page.getByRole("tab", { name: "Anthropic" }).click();
+  await expect.element(pill()).toHaveAttribute("aria-expanded", "false");
 });
 
 test("a model whose wire sets no effort shows no effort control", async () => {

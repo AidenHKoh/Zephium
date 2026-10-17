@@ -4,30 +4,25 @@
   /** What the person can do with a provider now: choose its models, or the one step that opens them. */
   export type Standing = "ready" | "key" | "refused" | "sign_in" | "server";
   export type Seat = { provider: WorkModelProvider; standing: Standing };
-  /** What the rail shows: one provider's models, or the ones the person starred from all of them. */
+  /** What the picker shows: one provider's models, or the ones the person starred from all of them. */
   export type View = "favourites" | WorkModelProvider;
 </script>
 
 <script lang="ts">
   import { untrack } from "svelte";
   import { providerName } from "$domain/ai";
-  import Icon from "$shared/ui/Icon";
   import ProviderMark from "$shared/ui/ProviderMark";
   import ZephiumTile from "$shared/ui/ZephiumTile";
   import * as m from "$shared/i18n/messages";
-  import { StarIcon } from "../../lib/icons";
 
   let {
     seats,
-    starred = false,
     current,
     hits = null,
     panel,
     onpick,
   }: {
     seats: readonly Seat[];
-    /** The person has starred a model: the favourites seat leads the rail. */
-    starred?: boolean;
     current: View | null;
     /** The providers a search matched; null while nothing is searched. */
     hits?: ReadonlySet<WorkModelProvider> | null;
@@ -67,27 +62,21 @@
     }
   }
 
-  type Stop = { view: View; seat: Seat | null };
-  const stops = $derived<Stop[]>([
-    ...(starred ? [{ view: "favourites" as const, seat: null }] : []),
-    ...seats.map((seat) => ({ view: seat.provider, seat })),
-  ]);
-  const at = $derived(
-    Math.max(
-      0,
-      stops.findIndex((stop) => stop.view === current),
-    ),
-  );
-  /** The seats that lead (favourites, Zephium's own) stand apart from the providers by a hairline. */
-  const lead = $derived((starred ? 1 : 0) + (seats[0]?.provider === "cloud" ? 1 : 0));
+  /** The favourites are shown while none of the seats is the place. */
+  const at = $derived(seats.findIndex((seat) => seat.provider === current));
+  /** Zephium's own seat stands apart from the providers by a hairline. */
+  const lead = $derived(seats[0]?.provider === "cloud" ? 1 : 0);
 
   let list = $state<HTMLElement>();
   let plate = $state<{ y: number; h: number; glide: boolean } | null>(null);
   $effect(() => {
-    void stops;
+    void seats;
     const host = list;
-    const seat = host?.querySelectorAll<HTMLElement>('[role="tab"]')[at];
-    if (!host || !seat) return;
+    const seat = at < 0 ? undefined : host?.querySelectorAll<HTMLElement>('[role="tab"]')[at];
+    if (!host || !seat) {
+      plate = null;
+      return;
+    }
     const before = untrack(() => plate);
     plate = { y: seat.offsetTop, h: seat.offsetHeight, glide: !!before };
   });
@@ -96,14 +85,14 @@
     const steps: Record<string, number> = { ArrowDown: 1, ArrowUp: -1 };
     let to: number;
     if (event.key === "Home") to = 0;
-    else if (event.key === "End") to = stops.length - 1;
+    else if (event.key === "End") to = seats.length - 1;
     else if (event.key in steps)
-      to = Math.max(0, Math.min(stops.length - 1, at + steps[event.key]!));
+      to = Math.max(0, Math.min(seats.length - 1, Math.max(0, at) + steps[event.key]!));
     else return;
     event.preventDefault();
-    const next = stops[to];
+    const next = seats[to];
     if (!next || to === at) return;
-    onpick(next.view);
+    onpick(next.provider);
     list?.querySelectorAll<HTMLElement>('[role="tab"]')[to]?.focus();
   }
 </script>
@@ -125,34 +114,32 @@
       style:transform="translateY({plate.y}px)"
       style:block-size="{plate.h}px"
     ></span>{/if}
-  {#each stops as stop, index (stop.view)}
+  {#each seats as seat, index (seat.provider)}
     {#if lead > 0 && index === lead}<span class="rule" role="presentation"></span>{/if}
-    {@const seat = stop.seat}
     <button
       type="button"
       role="tab"
       class="seat"
-      id="{uid}-{stop.view}"
-      title={seat ? caption(seat) : m.model_favourites()}
-      aria-label={seat ? caption(seat) : m.model_favourites()}
-      aria-selected={stop.view === current}
+      id="{uid}-{seat.provider}"
+      title={caption(seat)}
+      aria-label={caption(seat)}
+      aria-selected={seat.provider === current}
       aria-controls={panel}
-      tabindex={stop.view === current ? 0 : -1}
-      data-provider={stop.view}
-      data-standing={seat?.standing ?? "ready"}
-      data-miss={hits && (!seat || !hits.has(seat.provider)) ? "" : undefined}
-      style:--ink={seat ? INKS[seat.provider] : undefined}
+      tabindex={seat.provider === current || (at < 0 && index === 0) ? 0 : -1}
+      data-provider={seat.provider}
+      data-standing={seat.standing}
+      data-miss={hits && !hits.has(seat.provider) ? "" : undefined}
+      style:--ink={INKS[seat.provider]}
       onpointerdown={(event) => event.preventDefault()}
-      onclick={() => onpick(stop.view)}
+      onclick={() => onpick(seat.provider)}
     >
       <span class="mark" aria-hidden="true"
-        >{#if !seat}<span class="star"><Icon icon={StarIcon} size={16} strokeWidth={1.8} /></span
-          >{:else if seat.provider === "cloud"}<ZephiumTile size={24} />{:else}<ProviderMark
+        >{#if seat.provider === "cloud"}<ZephiumTile size={24} />{:else}<ProviderMark
             provider={seat.provider}
             size={18}
           />{/if}</span
       >
-      {#if seat?.standing === "refused"}<span class="badge" aria-hidden="true"></span>{/if}
+      {#if seat.standing === "refused"}<span class="badge" aria-hidden="true"></span>{/if}
     </button>
   {/each}
 </div>
@@ -238,15 +225,6 @@
   .mark {
     display: grid;
     place-items: center;
-  }
-
-  .star {
-    display: grid;
-    color: var(--color-label-secondary);
-  }
-
-  .star :global(path) {
-    fill: currentcolor;
   }
 
   /* A step still to take is a softer mark, in its own colour; only a refused key is an alert. */

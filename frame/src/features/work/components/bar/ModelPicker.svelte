@@ -6,7 +6,6 @@
   import { commands } from "$shared/ipc/bindings";
   import {
     ModelsSession,
-    contextSize,
     effortLevels,
     effortName,
     entryOf,
@@ -37,7 +36,7 @@
   import ModelAsk from "./ModelAsk.svelte";
   import ModelCard, { type CardSubject } from "./ModelCard.svelte";
   import ModelRail, { type Seat, type View } from "./ModelRail.svelte";
-  import { tiers, type Tier } from "./model-tier";
+  import { tiers } from "./model-tier";
   import "$shared/ui/Menu/popover.css";
   import "$shared/ui/Shine/shine.css";
 
@@ -129,8 +128,7 @@
   const sheetHeight = $derived.by(() => {
     const rows = Math.max(0, ...groups.ready.map((group) => group.entries.length));
     // The rail's own height: its padding, a seat and a gap for each, and the hairline after the leading seats.
-    const leading = (hasStars ? 1 : 0) + (seats[0]?.provider === "cloud" ? 1 : 0);
-    const rail = 26 + (seats.length + (hasStars ? 1 : 0)) * 34 + (leading ? 8 : 0);
+    const rail = 26 + seats.length * 34 + (seats[0]?.provider === "cloud" ? 8 : 0);
     return Math.min(520, Math.max(rail, 148 + 34 * rows));
   });
 
@@ -218,39 +216,55 @@
   /** No model can run yet: the one thing to do is add a key, so the control is that, not a menu. */
   const keyless = $derived(!!models && leadMissing);
 
-  /** The card shows the effort control until it is used or put away. */
+  /** The card shows the effort control until it is put away: by Escape, a click elsewhere, or a rest. */
   let effortOpen = $state(false);
   let pill = $state<HTMLElement>();
   let fold: ReturnType<typeof setTimeout> | undefined;
+  /** The thumb is in the person's hand. */
   let held = false;
-  let moved = false;
+  /** The level was changed since the control opened. */
+  let changed = false;
+  let stirredAt = 0;
   /** The menu closed on a choice or Escape: the person is mid-sentence, so the words get the focus back. */
   let toWords = false;
+  const IDLE = 3000;
+  const SETTLED = 1600;
 
   function putAway() {
     clearTimeout(fold);
-    moved = false;
+    changed = false;
     if (!effortOpen) return;
     effortOpen = false;
     if (main?.contains(document.activeElement)) void tick().then(() => pill?.focus());
   }
 
-  /** Left a moment after a change so the new level is seen, then the card turns back to the model. */
-  const foldSoon = () => {
+  /** The control turns back to the model once it has been left alone a while; never under a hand. */
+  function rest() {
     clearTimeout(fold);
-    fold = setTimeout(putAway, 900);
-  };
+    if (effortOpen && !held) fold = setTimeout(putAway, changed ? SETTLED : IDLE);
+  }
 
   function toggleEffort() {
-    clearTimeout(fold);
-    effortOpen = !effortOpen;
+    if (effortOpen) {
+      putAway();
+      return;
+    }
+    effortOpen = true;
+    rest();
+  }
+
+  /** Any use of the control keeps it open a while longer. */
+  function stirred() {
+    const now = performance.now();
+    if (now - stirredAt < 300) return;
+    stirredAt = now;
+    rest();
   }
 
   function chose(level: WorkModelReasoning) {
     void setEffort(level);
-    moved = true;
-    clearTimeout(fold);
-    if (!held) foldSoon();
+    changed = true;
+    rest();
   }
 
   onDestroy(() => clearTimeout(fold));
@@ -263,7 +277,8 @@
     picked = null;
     clearTimeout(fold);
     effortOpen = false;
-    moved = false;
+    changed = false;
+    held = false;
   }
 
   async function opened(next: boolean) {
@@ -335,7 +350,7 @@
     } else settings();
   }
 
-  async function pick(view: View) {
+  async function pick(view: View | null) {
     picked = view;
     query = "";
     searchOpen = false;
@@ -346,14 +361,28 @@
     if (!at || at === document.body) (list ?? main)?.focus({ preventScroll: true });
   }
 
+  /** The favourites view and back to the provider that was open. */
+  let before: View | null = null;
+  async function toggleFavourites() {
+    if (shown === "favourites") {
+      await pick(before);
+      return;
+    }
+    before = shown;
+    await pick("favourites");
+  }
+
   function reveal(id: string | null) {
     if (!id) return;
     list?.querySelector(`[data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" });
   }
 
+  /** The arrows, not the pointer, moved to the row: its star shows as the pointer's would. */
+  let walked = $state(false);
   function walk(to: number) {
     const next = items[Math.max(0, Math.min(items.length - 1, to))];
     if (!next) return;
+    walked = true;
     active = next.id;
     reveal(next.id);
   }
@@ -450,6 +479,7 @@
   }
 
   function pointed(event: PointerEvent) {
+    walked = false;
     const id = (event.target as Element).closest<HTMLElement>("[data-id]")?.dataset.id;
     if (id && id !== active) active = id;
   }
@@ -489,16 +519,6 @@
   );
 </script>
 
-{#snippet tierMark(tier: Tier | undefined)}
-  <span class="tier"
-    >{#if tier}{tier === "light"
-        ? m.model_tier_light()
-        : tier === "balanced"
-          ? m.model_tier_balanced()
-          : m.model_tier_flagship()}{/if}</span
-  >
-{/snippet}
-
 {#if keyless}
   <button type="button" class="model-trigger add-key ui-shine ui-shine-press" onclick={settings}>
     <span class="trigger-mark" aria-hidden="true"><Icon icon={Key01Icon} size={14} /></span>
@@ -514,6 +534,9 @@
       disabled={!models}
     >
       {#if current}
+        <span class="trigger-mark" aria-hidden="true"
+          ><ProviderMark provider={current.model.provider} size={15} /></span
+        >
         <span class="trigger-name">{shortName(current)}</span>
         {#if effort && levels.length > 1}<span class="trigger-level"
             ><span class="trigger-dot" aria-hidden="true">·</span>{effortName(effort)}</span
@@ -540,7 +563,6 @@
       >
         <ModelRail
           {seats}
-          starred={hasStars}
           current={shown}
           {hits}
           panel="{uid}-pane"
@@ -559,7 +581,17 @@
             <div class="tools">
               <button
                 type="button"
-                class="tool"
+                class="tool fade"
+                aria-label={m.model_favourites()}
+                title={m.model_favourites()}
+                aria-pressed={shown === "favourites"}
+                onpointerdown={(event) => event.preventDefault()}
+                onclick={() => void toggleFavourites()}
+                ><Icon icon={StarIcon} size={15} strokeWidth={1.8} /></button
+              >
+              <button
+                type="button"
+                class="tool fade"
                 aria-label={m.model_search()}
                 aria-expanded={searchOpen}
                 aria-controls="{uid}-find"
@@ -619,6 +651,7 @@
               bind:pill
               ontoggle={toggleEffort}
               onEffort={chose}
+              onstir={stirred}
             />
           {/if}
           {#if seat && seat.standing !== "ready" && !searching}
@@ -667,7 +700,6 @@
                     </div>{/if}
                   {#each section.items as item (item.id)}
                     {@const closed = locked(models, item.entry.id)}
-                    {@const small = item.entry.context_window < 500_000}
                     {@const starry = starred.has(item.id)}
                     <div
                       class="option"
@@ -675,34 +707,32 @@
                       role="option"
                       data-id={item.id}
                       data-active={item.id === active ? "" : undefined}
+                      data-walk={item.id === active && walked ? "" : undefined}
                       aria-selected={item.id === chosen}
                       aria-disabled={closed || !!session?.busy || undefined}
                     >
-                      <span class="check" aria-hidden="true"
-                        >{#if item.id === chosen}<Icon
-                            icon={Tick02Icon}
-                            size={13}
-                            strokeWidth={2.2}
-                          />{/if}</span
-                      >
                       <span class="option-name">{item.entry.display_name}</span>
-                      {#if closed}<span class="aside">{m.work_model_locked()}</span>{:else}
-                        {#if small}<span class="aside"
-                            >{contextSize(item.entry.context_window)}</span
-                          >{/if}
-                        {@render tierMark(tierOf[item.entry.id])}
-                      {/if}
-                      <button
-                        type="button"
-                        class="star"
-                        data-on={starry ? "" : undefined}
-                        tabindex="-1"
-                        aria-pressed={starry}
-                        aria-label={starry
-                          ? m.model_unfavourite({ model: item.entry.display_name })
-                          : m.model_favourite({ model: item.entry.display_name })}
-                        ><Icon icon={StarIcon} size={14} strokeWidth={1.8} /></button
-                      >
+                      {#if closed}<span class="aside">{m.work_model_locked()}</span>{/if}
+                      <span class="slot">
+                        <span class="check" aria-hidden="true"
+                          >{#if item.id === chosen}<Icon
+                              icon={Tick02Icon}
+                              size={14}
+                              strokeWidth={2.2}
+                            />{/if}</span
+                        >
+                        <button
+                          type="button"
+                          class="star"
+                          data-on={starry ? "" : undefined}
+                          tabindex="-1"
+                          aria-pressed={starry}
+                          aria-label={starry
+                            ? m.model_unfavourite({ model: item.entry.display_name })
+                            : m.model_favourite({ model: item.entry.display_name })}
+                          ><Icon icon={StarIcon} size={14} strokeWidth={1.8} /></button
+                        >
+                      </span>
                     </div>
                   {/each}
                 </div>
@@ -728,27 +758,37 @@
 
 <svelte:window
   onpointerup={() => {
+    if (!held) return;
     held = false;
-    if (moved && effortOpen) foldSoon();
+    rest();
   }}
   onpointerdowncapture={(event) => {
-    if (effortOpen && event.target instanceof Element && event.target.closest("[role=slider]"))
-      held = true;
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+    if (effortOpen) {
+      if (target.closest("[role=slider]")) {
+        held = true;
+        clearTimeout(fold);
+      } else if (!target.closest("section[data-face]")) putAway();
+    }
+    // An empty search that is clicked away from puts itself away.
+    if (searchOpen && !query.trim() && target.closest(".model-menu") && !target.closest(".head"))
+      closeSearch();
   }}
 />
 
 <style>
-  /* The chip: the shine plate, round like the + and the send button beside it. Words only. */
+  /* The chip: the shine plate, round like the + and the send button beside it. The model's mark, its name and its effort. */
   :global(.model-trigger) {
     --shine-radius: var(--radius-capsule);
 
     display: inline-flex;
-    align-items: baseline;
-    gap: 5px;
+    align-items: center;
+    gap: 7px;
     max-inline-size: 300px;
     block-size: 32px;
     margin-block: 1px;
-    padding-inline: 14px;
+    padding-inline: 12px 14px;
     border: 0;
     color: var(--color-text);
     font: inherit;
@@ -774,6 +814,7 @@
   }
 
   .trigger-name {
+    min-inline-size: 0;
     overflow: hidden;
     font-weight: 550;
     letter-spacing: -0.003em;
@@ -894,12 +935,21 @@
     scale: 0.92;
   }
 
+  .tool[aria-pressed="true"] {
+    background: var(--row-active);
+    color: var(--color-text);
+  }
+
+  .tool[aria-pressed="true"] :global(path) {
+    fill: currentcolor;
+  }
+
   .tool:focus-visible {
     outline: 2px solid var(--color-ring);
     outline-offset: -2px;
   }
 
-  .head[data-search] .tool:first-child {
+  .head[data-search] .tool.fade {
     opacity: 0;
     pointer-events: none;
   }
@@ -1038,27 +1088,20 @@
     opacity: 0.9;
   }
 
-  /* One grid down every row: the mark of the choice, the name, what limits it, its class, the star. */
+  /* One line down every row: the name, what limits it, and one place at the end for the choice's
+     check, which the favourite star takes while the pointer is on the row. */
   .option {
     position: relative;
     display: flex;
     align-items: center;
     gap: 8px;
     min-block-size: 34px;
-    padding-inline: 10px 6px;
+    padding-inline: 12px 6px;
     cursor: default;
   }
 
   .option[aria-disabled="true"] {
     opacity: 0.45;
-  }
-
-  .check {
-    display: grid;
-    flex: none;
-    inline-size: 14px;
-    place-items: center;
-    color: var(--color-text);
   }
 
   .option-name {
@@ -1088,27 +1131,33 @@
     color: var(--color-faint);
     font-size: var(--text-caption);
     line-height: 14px;
-    font-variant-numeric: tabular-nums;
   }
 
-  .tier {
-    flex: none;
-    min-inline-size: 58px;
-    color: var(--color-faint);
-    font-size: var(--text-caption);
-    line-height: 14px;
-    text-align: end;
-    transition: color var(--motion-fast) var(--ease-out);
-  }
-
-  .option[data-active] .tier {
-    color: var(--color-muted);
-  }
-
-  /* Hidden until the pointer is on the row, unless the model is starred. */
-  .star {
+  .slot {
     display: grid;
     flex: none;
+    inline-size: 24px;
+    block-size: 24px;
+    place-items: center;
+  }
+
+  .check,
+  .star {
+    grid-area: 1 / 1;
+    transition:
+      opacity var(--motion-fast) var(--ease-out),
+      scale var(--motion-base) var(--ease-spring),
+      color var(--motion-fast) var(--ease-out);
+  }
+
+  .check {
+    display: grid;
+    color: var(--color-text);
+    place-items: center;
+  }
+
+  .star {
+    display: grid;
     inline-size: 24px;
     block-size: 24px;
     padding: 0;
@@ -1120,17 +1169,15 @@
     opacity: 0;
     place-items: center;
     scale: 0.85;
-    transition:
-      opacity var(--motion-fast) var(--ease-out),
-      scale var(--motion-base) var(--ease-spring),
-      color var(--motion-fast) var(--ease-out);
   }
 
   .star:hover {
     color: var(--color-text);
   }
 
-  .option[data-active] .star,
+  /* A starred model keeps its star; the row the pointer or the arrows are on shows it too. */
+  .option:hover .star,
+  .option[data-walk] .star,
   .star[data-on] {
     opacity: 1;
     scale: 1;
@@ -1142,6 +1189,22 @@
 
   .star[data-on] :global(path) {
     fill: currentcolor;
+  }
+
+  /* On the chosen row the star takes the check's place, and the check comes back with the pointer gone. */
+  .option[aria-selected="true"] .star {
+    opacity: 0;
+  }
+
+  .option[aria-selected="true"]:hover .star,
+  .option[aria-selected="true"][data-walk] .star {
+    opacity: 1;
+  }
+
+  .option[aria-selected="true"]:hover .check,
+  .option[aria-selected="true"][data-walk] .check {
+    opacity: 0;
+    scale: 0.7;
   }
 
   .empty,

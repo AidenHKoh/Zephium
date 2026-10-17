@@ -72,9 +72,12 @@
     const rate = live ? PACE[level] : 0.2;
     const host = core;
     if (!host) return;
-    // The orb starts its own turn when it mounts; its pace is set once that exists.
+    // The orb starts its own turn when it mounts; its pace is set once that exists. Only that turn:
+    // the CSS transitions on the core keep their own time.
     const pace = () => {
-      for (const run of host.getAnimations({ subtree: true })) run.updatePlaybackRate(rate);
+      for (const run of host.getAnimations({ subtree: true }))
+        if (!(run instanceof CSSTransition) && !(run instanceof CSSAnimation))
+          run.updatePlaybackRate(rate);
     };
     pace();
     queueMicrotask(pace);
@@ -102,26 +105,61 @@
   }
 
   const THUMB = 16;
+  /** The pointer is down on the track. */
+  let pressed = false;
+  /** The thumb is in the pointer's hand: it goes where the pointer goes, and settles on a stop at the end. */
+  let following = $state(false);
+  let follow = $state(0);
+  let anchor = 0;
+  let grab = 0;
+  const shown = $derived(following ? follow : reach);
 
-  /** The stop nearest the pointer along the track; the thumb is as wide as its margin. */
-  function scrub(event: PointerEvent) {
-    if (!live || !track) return;
-    const box = track.getBoundingClientRect();
+  /** How far along the track a pointer at `x` is, 0 to 1, with the thumb as wide as its margin. */
+  function fractionAt(x: number) {
+    const box = track!.getBoundingClientRect();
     const span = Math.max(1, box.width - THUMB);
-    let fraction = (event.clientX - box.left - THUMB / 2) / span;
-    if (getComputedStyle(track).direction === "rtl") fraction = 1 - fraction;
-    const next = levels[Math.round(Math.max(0, Math.min(1, fraction)) * (levels.length - 1))];
+    const fraction = Math.max(0, Math.min(1, (x - box.left - THUMB / 2) / span));
+    return getComputedStyle(track!).direction === "rtl" ? 1 - fraction : fraction;
+  }
+
+  function reachFor(fraction: number) {
+    const next = levels[Math.round(fraction * (levels.length - 1))];
     if (next && next !== value) onchange(next);
   }
 
   function down(event: PointerEvent) {
-    if (event.button !== 0 || !live) return;
-    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-    scrub(event);
+    if (event.button !== 0 || !live || !track) return;
+    const element = event.currentTarget as HTMLElement;
+    element.setPointerCapture(event.pointerId);
+    element.focus({ preventScroll: true });
+    pressed = true;
+    anchor = event.clientX;
+    const thumb = track.querySelector(".thumb")!.getBoundingClientRect();
+    if (Math.abs(event.clientX - (thumb.left + thumb.width / 2)) <= thumb.width) {
+      // On the thumb: it keeps the pointer's place on it, so it never jumps under the hand.
+      grab = event.clientX - (thumb.left + thumb.width / 2);
+      follow = reach;
+      following = true;
+    } else {
+      grab = 0;
+      reachFor(fractionAt(event.clientX));
+    }
   }
 
   function move(event: PointerEvent) {
-    if ((event.currentTarget as HTMLElement).hasPointerCapture(event.pointerId)) scrub(event);
+    if (!pressed || !track) return;
+    if (!following && Math.abs(event.clientX - anchor) > 3) {
+      follow = reach;
+      following = true;
+    }
+    if (!following) return;
+    follow = fractionAt(event.clientX - grab);
+    reachFor(follow);
+  }
+
+  function release() {
+    pressed = false;
+    following = false;
   }
 </script>
 
@@ -131,9 +169,8 @@
     <span class="core" bind:this={core}><Orb size={36} /></span>
   </span>
   <span class="words">
-    {#key live ? level : null}<span class="name"
-        >{live ? effortName(level) : m.model_effort_fixed()}</span
-      ><span class="hint">{live ? HINTS[level]() : m.model_effort_fixed_hint()}</span>{/key}
+    <span class="name">{live ? effortName(level) : m.model_effort_fixed()}</span>
+    <span class="hint">{live ? HINTS[level]() : m.model_effort_fixed_hint()}</span>
   </span>
   {#if live && levels.length > 1}<div
       class="track"
@@ -145,10 +182,14 @@
       aria-valuemax={levels.length - 1}
       aria-valuenow={index}
       aria-valuetext={effortName(level)}
-      style:--reach={reach}
+      data-drag={following ? "" : undefined}
+      style:--reach={shown}
       onkeydown={key}
       onpointerdown={down}
       onpointermove={move}
+      onpointerup={release}
+      onpointercancel={release}
+      onlostpointercapture={release}
     >
       <span class="groove">
         <span class="fill"></span>
@@ -277,7 +318,6 @@
     font-weight: 600;
     line-height: 17px;
     letter-spacing: -0.005em;
-    animation: word-in var(--motion-base) var(--ease-out);
   }
 
   [data-level="max"] .name {
@@ -295,7 +335,6 @@
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
     line-clamp: 2;
-    animation: word-in var(--motion-base) var(--ease-out) 30ms backwards;
   }
 
   /* A groove with a bead on it: one detent for each level the model takes. */
@@ -381,6 +420,11 @@
       0 0 0 5px color-mix(in oklab, var(--alive-b) 24%, transparent);
   }
 
+  .track[data-drag] .thumb,
+  .track[data-drag] .fill {
+    transition: none;
+  }
+
   .track:hover .thumb {
     scale: 1.08;
   }
@@ -403,13 +447,6 @@
     }
   }
 
-  @keyframes word-in {
-    from {
-      opacity: 0;
-      transform: translateY(3px);
-    }
-  }
-
   @media (prefers-reduced-motion: reduce) {
     .core,
     .halo,
@@ -419,8 +456,6 @@
       transition: none;
     }
 
-    .name,
-    .hint,
     [data-level="max"] .halo {
       animation: none;
     }

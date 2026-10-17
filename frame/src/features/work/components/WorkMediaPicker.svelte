@@ -159,6 +159,7 @@
     flex-direction: column;
     gap: 2px;
     min-block-size: 0;
+    max-block-size: 244px;
     margin: 0;
     padding: 0;
     overflow: auto;
