@@ -245,7 +245,7 @@ impl AgentBrowserActionProposal {
         frames: &[SemanticFrameJoin],
         batch: SemanticActionBatchId,
     ) -> Result<Self, AgentBrowserActionError> {
-        let (baseline, _) = SemanticObservationAcknowledgement::whole_page_scope(observation)
+        let baseline = SemanticObservationAcknowledgement::exact_scope(observation)
             .ok_or(AgentBrowserActionError::State)?;
         let batch = SemanticActionBatch::bind(batch, observation, frames, vec![recipe])
             .map_err(|_| AgentBrowserActionError::State)?;

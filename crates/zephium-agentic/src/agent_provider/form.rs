@@ -69,8 +69,6 @@ pub enum FormFault {
     Target,
     /// A retained field no longer has the same native identity and meaning.
     Stale,
-    /// A site search form needs its explicit read-only submit target.
-    SubmitRequired,
     /// Native policy requires a separately admitted action, not another form attempt.
     SeparateActionRequired,
     /// Native preflight refused before mutation; the next look may safely replan.
