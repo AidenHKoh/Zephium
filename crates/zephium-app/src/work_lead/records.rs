@@ -449,9 +449,7 @@ impl Records {
             let fields: Vec<String> = row
                 .fields
                 .iter()
-                .filter_map(|(c, v)| {
-                    display(&v.value).map(|value| format!("{}: {}", c.name, value))
-                })
+                .map(|(c, v)| format!("{}: {}", c.name, shown(&v.value)))
                 .collect();
             let line = format!(
                 "r{}: {} — {}\n",
@@ -750,6 +748,11 @@ impl Records {
         })
     }
 }
+/// A field as the lead reads it: a value the page did not show says so,
+/// so a gap is never read as "none" or "not set".
+fn shown(value: &WorkCellValue) -> String {
+    display(value).unwrap_or_else(|| "unknown".into())
+}
 fn display(value: &WorkCellValue) -> Option<String> {
     Some(match value {
         WorkCellValue::Text { text } => text.clone(),
@@ -766,6 +769,17 @@ fn display(value: &WorkCellValue) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_value_the_page_did_not_show_reads_as_unknown_in_the_catalog() {
+        assert_eq!(shown(&WorkCellValue::Unknown), "unknown");
+        assert_eq!(
+            shown(&WorkCellValue::Text {
+                text: "Friday".into()
+            }),
+            "Friday"
+        );
+    }
 
     #[test]
     fn facts_are_labelled_as_words_and_never_repeat_the_name_or_each_other() {
