@@ -59,7 +59,7 @@ mod semantic_screenshot;
 mod stage;
 #[cfg(feature = "agentic-browser")]
 mod work_rendering;
-pub(crate) use native_paths::webview2_user_data_path;
+pub(crate) use native_paths::{webview2_download_path, webview2_user_data_path};
 #[cfg(feature = "agentic-browser")]
 pub use work_rendering::{install_work_rendering_backing, remove_work_rendering_backing};
 #[cfg(feature = "agentic-browser")]

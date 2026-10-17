@@ -464,14 +464,18 @@ Quarantine is OS provenance, not malware scanning.
 DownloadStarting event/deferral and operation. Default cancellation and hidden
 native download UI precede host admission. Cookies, POST bodies and blob/data
 payloads remain native. Pending destination selection requires the exact live
-view/navigation/presentation and foreground parent. Automatic
-saving is not inferred from a recent click or a concurrent browser navigation:
-the event has no initiating-frame activation/navigation identity proof, so every
-Windows download requires native confirmation. HTTP origins
+view/navigation/presentation and foreground parent. The default saves into the
+system Downloads directory; a custom directory requires its picker-issued identity.
+The optional ask-first preference opens the native save dialog. WebView2's
+multiple-automatic-download permission remains denied. This admits a first download
+from a foreground document without claiming initiating-frame activation, which
+DownloadStarting does not expose. HTTP origins
 are displayed without URL secrets; origin-less data downloads label their top
 page origin as context, not an initiating-frame assertion.
 
-Directory handles pin canonical ancestors; a protected staging DACL admits only
+Directory handles pin canonical ancestors; the WebView2 destination uses verified
+ordinary Win32 spelling because verbatim paths fail in its download writer.
+A protected staging DACL admits only
 the current user and SYSTEM. File identities retain all 128 Windows file-ID bits.
 Publication invokes Attachment Services with the proposed filename/source origin,
 requires an Internet zone stream, flushes the payload and moves it without a

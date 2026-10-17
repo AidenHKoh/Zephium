@@ -168,7 +168,7 @@ pub(super) fn cancel_directory(panel: &DirectoryPanel) {
     }
 }
 pub(super) fn reveal(path: &Path) -> Result<(), DownloadError> {
-    let path = wide(path)?;
+    let path = shell_path(path)?;
     let mut item = std::ptr::null_mut();
     unsafe { SHParseDisplayName(PCWSTR(path.as_ptr()), None, &mut item, 0, None) }
         .map_err(|_| DownloadError::Unavailable)?;
@@ -179,7 +179,7 @@ pub(super) fn reveal(path: &Path) -> Result<(), DownloadError> {
     result.map_err(|_| DownloadError::Unavailable)
 }
 pub(super) fn open(path: &Path) -> Result<(), DownloadError> {
-    let path = wide(path)?;
+    let path = shell_path(path)?;
     let result = unsafe {
         ShellExecuteW(
             None,
@@ -195,6 +195,14 @@ pub(super) fn open(path: &Path) -> Result<(), DownloadError> {
     } else {
         Err(DownloadError::Unavailable)
     }
+}
+fn shell_path(path: &Path) -> Result<Vec<u16>, DownloadError> {
+    // Explorer and shell verbs do not share the filesystem APIs' support for
+    // verbatim paths. Keep the recorded canonical path as authority and only
+    // project its strictly validated ordinary spelling at this boundary.
+    let ordinary = crate::platform::imp::webview2_download_path(path)
+        .map_err(|_| DownloadError::Destination)?;
+    wide(&ordinary)
 }
 fn dialog(
     folder: bool,
@@ -594,9 +602,18 @@ impl Downloads {
             .clone()
             .map(PathBuf::from)
             .or_else(dirs::download_dir);
-        // The event exposes neither initiating-frame activation nor a main-frame
-        // navigation ID. A concurrent browser navigation is not proof for this
-        // transfer. Every Windows download therefore requires native confirmation.
+        // Admission pins the foreground document; WebView2's automatic-download
+        // permission remains denied, so a page cannot authorize a download flood.
+        if !preferences.ask_destination
+            && (preferences.directory.is_none() || preferences.directory_identity.is_some())
+        {
+            let Some(directory) = directory else {
+                self.cancel(id, Some(DownloadError::Destination));
+                return;
+            };
+            self.prepare(id, directory.join(filename), preferences.directory_identity);
+            return;
+        }
         let Some(lease) = DialogLease::acquire() else {
             self.cancel(id, Some(DownloadError::Capacity));
             return;
@@ -967,6 +984,30 @@ impl Downloads {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_parses_canonical_downloads_with_unicode_and_spaces() {
+        use windows::Win32::System::Com::{
+            CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+        };
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("zażółć 日本語 (1).txt");
+        std::fs::write(&file, b"fixture").unwrap();
+        let canonical = std::fs::canonicalize(&file).unwrap();
+        let native = shell_path(&canonical).unwrap();
+        let mut item = std::ptr::null_mut();
+        let result =
+            unsafe { SHParseDisplayName(PCWSTR(native.as_ptr()), None, &mut item, 0, None) };
+        unsafe {
+            if !item.is_null() {
+                CoTaskMemFree(Some(item.cast()));
+            }
+            CoUninitialize();
+        }
+        result.unwrap();
+        assert!(!String::from_utf16_lossy(&native).starts_with(r"\\?\"));
+    }
 
     #[test]
     fn interruption_reasons_do_not_mislabel_file_authentication_or_process_errors() {

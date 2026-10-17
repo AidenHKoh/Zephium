@@ -27,7 +27,9 @@ use zephium_core::ids::{DownloadId, ProfileId};
 use zephium_core::permissions::PageOrigin;
 use zephium_core::ports::{engine::Partition, store::Store};
 
-use super::download_files::{verify_file, Destination};
+#[cfg(target_os = "macos")]
+use super::download_files::verify_file;
+use super::download_files::Destination;
 use super::permits::EventPermit;
 use crate::navigation_epoch::{NavigationActivity, NavigationEpochTracker};
 
