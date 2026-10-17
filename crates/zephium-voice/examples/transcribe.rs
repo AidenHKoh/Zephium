@@ -27,6 +27,9 @@ fn main() {
         fn ended(&self, ending: Ending) {
             let _ = self.0.lock().unwrap().send(ending);
         }
+        fn note(&self, fact: &str) {
+            println!("note: {fact}");
+        }
     }
 
     let args: Vec<String> = std::env::args().skip(1).collect();

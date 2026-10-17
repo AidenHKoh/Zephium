@@ -3,6 +3,8 @@
 //! cloud transcription. Audio is never written to disk or logged, and the
 //! device is released the moment a take finishes or is cancelled.
 
+#[cfg(any(target_os = "macos", test))]
+mod failure;
 mod language;
 mod meter;
 mod pcm;
@@ -31,6 +33,9 @@ pub enum Fault {
     NoMicrophone,
     /// The on-device recognizer cannot serve this language here.
     LanguageUnavailable,
+    /// Siri and Dictation are off in System Settings, so the on-device
+    /// recognizer refuses every take.
+    DictationOff,
     /// The on-device recognizer failed.
     Recognizer,
     /// Not on this platform or in this build.
@@ -47,6 +52,9 @@ pub trait Listener: Send + Sync + 'static {
     fn partial(&self, _text: &str) {}
     /// Capture ended on its own; the owner should finish the take.
     fn ended(&self, ending: Ending);
+    /// A closed fact about the take, for the diagnostic log: no audio, no
+    /// words, no system text.
+    fn note(&self, _fact: &str) {}
 }
 
 /// Who turns the speech into words.

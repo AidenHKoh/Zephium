@@ -144,3 +144,14 @@ test("silence ends in a gentle retry, and a refused microphone opens Privacy set
   expect(native.privacy).toHaveBeenCalledWith("microphone");
   await screen.unmount();
 });
+
+test("a Mac with Dictation off says so and opens Keyboard settings, not a retry", async () => {
+  await page.viewport(1000, 600);
+  const screen = await render(VoiceStage);
+  await listening();
+  emitNativeEvent("voiceChanged", change(7, { phase: "failed", fault: "dictation_off" }));
+  await expect.element(page.getByRole("alert")).toHaveTextContent("Dictation is off on this Mac.");
+  await page.getByRole("button", { name: "Open Keyboard Settings" }).click();
+  expect(native.privacy).toHaveBeenCalledWith("dictation");
+  await screen.unmount();
+});

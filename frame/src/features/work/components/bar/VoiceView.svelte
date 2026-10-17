@@ -81,6 +81,7 @@
         return cancel();
       case "microphone":
       case "recognition":
+      case "dictation":
         void commands.voiceOpenPrivacy(problem.remedy).catch(() => false);
         return cancel();
       case "retry":
@@ -93,9 +94,11 @@
       ? m.voice_remedy_settings()
       : problem?.remedy === "microphone" || problem?.remedy === "recognition"
         ? m.voice_remedy_privacy()
-        : problem?.remedy === "retry"
-          ? m.voice_remedy_retry()
-          : null,
+        : problem?.remedy === "dictation"
+          ? m.voice_remedy_keyboard()
+          : problem?.remedy === "retry"
+            ? m.voice_remedy_retry()
+            : null,
   );
 </script>
 

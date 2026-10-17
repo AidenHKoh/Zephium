@@ -57,6 +57,9 @@ pub(crate) enum VoiceFaultV1 {
     RecognitionDenied,
     NoMicrophone,
     LanguageUnavailable,
+    /// Siri and Dictation are off in System Settings, so this Mac's
+    /// recognizer refuses every take.
+    DictationOff,
     /// No engine can run: nothing on this device and no account or key.
     NoEngine,
     KeyRefused,
@@ -105,9 +108,13 @@ pub(crate) struct VoiceStartV1 {
 pub(crate) enum VoicePrivacyV1 {
     Microphone,
     Recognition,
+    /// The keyboard settings, where Dictation is switched on.
+    Dictation,
 }
 
 const MAX_PARTIAL_BYTES: usize = 4 * 1024;
+#[cfg(target_os = "macos")]
+const PRIVACY_PANE: &str = "x-apple.systempreferences:com.apple.preference.security?";
 
 fn fault_of(fault: zephium_voice::Fault) -> VoiceFaultV1 {
     use zephium_voice::Fault;
@@ -116,6 +123,7 @@ fn fault_of(fault: zephium_voice::Fault) -> VoiceFaultV1 {
         Fault::RecognitionDenied => VoiceFaultV1::RecognitionDenied,
         Fault::NoMicrophone => VoiceFaultV1::NoMicrophone,
         Fault::LanguageUnavailable => VoiceFaultV1::LanguageUnavailable,
+        Fault::DictationOff => VoiceFaultV1::DictationOff,
         Fault::Recognizer | Fault::Unsupported => VoiceFaultV1::Unavailable,
     }
 }
@@ -244,8 +252,13 @@ mod product {
             );
         }
 
-        fn ended(&self, _ending: Ending) {
+        fn ended(&self, ending: Ending) {
+            write_diagnostic(format_args!("voice: take={} ended={ending:?}", self.take));
             finish(self.app.clone(), self.take);
+        }
+
+        fn note(&self, fact: &str) {
+            write_diagnostic(format_args!("voice: take={} {fact}", self.take));
         }
     }
 
@@ -293,10 +306,13 @@ mod product {
     }
 
     pub(super) async fn start(app: tauri::AppHandle) -> VoiceStartV1 {
-        let refused = |fault| VoiceStartV1 {
-            take: None,
-            engine: None,
-            fault: Some(fault),
+        let refused = |fault| {
+            write_diagnostic(format_args!("voice: phase=refused fault={fault:?}"));
+            VoiceStartV1 {
+                take: None,
+                engine: None,
+                fault: Some(fault),
+            }
         };
         if live().is_some() {
             return refused(VoiceFaultV1::Busy);
@@ -343,7 +359,9 @@ mod product {
             ) => {
                 *phase = Phase::Listening(capture);
                 drop(live);
-                write_diagnostic(format_args!("voice: phase=listening engine={engine:?}"));
+                write_diagnostic(format_args!(
+                    "voice: take={take} phase=listening engine={engine:?}"
+                ));
                 emit(
                     &app,
                     &VoiceChanged {
@@ -377,7 +395,7 @@ mod product {
                     }
                     Err(fault) => {
                         write_diagnostic(format_args!(
-                            "voice: phase=start engine={engine:?} fault={fault:?}"
+                            "voice: take={take} phase=start engine={engine:?} fault={fault:?}"
                         ));
                         refused(fault_of(fault))
                     }
@@ -422,6 +440,12 @@ mod product {
             let finished = tauri::async_runtime::spawn_blocking(move || capture.finish())
                 .await
                 .unwrap_or(Err(zephium_voice::Fault::Unsupported));
+            let outcome = match &finished {
+                Ok(Outcome::Text(_)) => "text",
+                Ok(Outcome::Nothing) => "nothing",
+                Ok(Outcome::Audio { .. }) => "audio",
+                Err(_) => "fault",
+            };
             let result = match finished {
                 Ok(Outcome::Text(text)) => Ok(text),
                 Ok(Outcome::Nothing) => Ok(String::new()),
@@ -442,7 +466,7 @@ mod product {
             }
             let fault = result.as_ref().err().copied();
             write_diagnostic(format_args!(
-                "voice: phase=done engine={engine:?} fault={fault:?}"
+                "voice: take={take} phase=done engine={engine:?} outcome={outcome} fault={fault:?}"
             ));
             emit(
                 &settle_app,
@@ -671,13 +695,15 @@ pub(crate) fn voice_open_privacy(caller: WebviewWindow, kind: VoicePrivacyV1) ->
     {
         use objc2_app_kit::NSWorkspace;
         use objc2_foundation::{NSString, NSURL};
-        let pane = match kind {
-            VoicePrivacyV1::Microphone => "Privacy_Microphone",
-            VoicePrivacyV1::Recognition => "Privacy_SpeechRecognition",
+        let address = match kind {
+            VoicePrivacyV1::Microphone => PRIVACY_PANE.to_owned() + "Privacy_Microphone",
+            VoicePrivacyV1::Recognition => PRIVACY_PANE.to_owned() + "Privacy_SpeechRecognition",
+            VoicePrivacyV1::Dictation => {
+                "x-apple.systempreferences:com.apple.Keyboard-Settings.extension?Dictation"
+                    .to_owned()
+            }
         };
-        let url = NSURL::URLWithString(&NSString::from_str(&format!(
-            "x-apple.systempreferences:com.apple.preference.security?{pane}"
-        )));
+        let url = NSURL::URLWithString(&NSString::from_str(&address));
         url.is_some_and(|url| NSWorkspace::sharedWorkspace().openURL(&url))
     }
     #[cfg(target_os = "windows")]
@@ -733,6 +759,17 @@ mod tests {
         let value = serde_json::to_value(status).unwrap();
         assert_eq!(value["engines"], serde_json::json!([]));
         assert_eq!(value["microphone"], "undetermined");
+    }
+
+    #[test]
+    fn a_switched_off_dictation_is_its_own_fault() {
+        use zephium_voice::Fault;
+        assert_eq!(fault_of(Fault::DictationOff), VoiceFaultV1::DictationOff);
+        assert_eq!(fault_of(Fault::Recognizer), VoiceFaultV1::Unavailable);
+        assert_eq!(
+            serde_json::to_value(VoiceFaultV1::DictationOff).unwrap(),
+            "dictation_off"
+        );
     }
 
     #[test]

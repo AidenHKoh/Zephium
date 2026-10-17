@@ -5,7 +5,7 @@ import * as m from "$shared/i18n/messages";
 import { IS_MAC } from "$shared/platform";
 
 /** What the bar offers after a take fails. */
-export type VoiceRemedy = "settings" | "microphone" | "recognition" | "retry" | null;
+export type VoiceRemedy = "settings" | "microphone" | "recognition" | "dictation" | "retry" | null;
 
 export function voiceProblem(
   problem: VoiceProblem,
@@ -17,6 +17,8 @@ export function voiceProblem(
       return { message: m.voice_problem_microphone(), remedy: "microphone" };
     case "recognition_denied":
       return { message: m.voice_problem_recognition(), remedy: "recognition" };
+    case "dictation_off":
+      return { message: m.voice_problem_dictation_off(), remedy: "dictation" };
     case "no_microphone":
       return { message: m.voice_problem_no_microphone(), remedy: "retry" };
     case "language_unavailable":

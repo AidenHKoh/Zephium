@@ -2498,6 +2498,11 @@ export type VoiceEngineV1 = "on_device" | "zephium" | "open_ai" | "groq";
 
 /**  Why a take could not start or produce words. Closed; no system text. */
 export type VoiceFaultV1 = "microphone_denied" | "recognition_denied" | "no_microphone" | "language_unavailable" |
+/**
+ *  Siri and Dictation are off in System Settings, so this Mac's
+ *  recognizer refuses every take.
+ */
+"dictation_off" |
 /**  No engine can run: nothing on this device and no account or key. */
 "no_engine" | "key_refused" | "signed_out" | "out_of_credit" | "rate_limited" | "offline" | "provider_down" | "too_long" | "busy" | "unavailable";
 
@@ -2514,7 +2519,9 @@ export type VoicePermissionV1 = "granted" | "undetermined" | "denied";
 
 export type VoicePhaseV1 = "listening" | "transcribing" | "done" | "failed" | "cancelled";
 
-export type VoicePrivacyV1 = "microphone" | "recognition";
+export type VoicePrivacyV1 = "microphone" | "recognition" |
+/**  The keyboard settings, where Dictation is switched on. */
+"dictation";
 
 export type VoiceStartV1 = {
 	/**  The take's id, which its events carry; null when it did not start. */
