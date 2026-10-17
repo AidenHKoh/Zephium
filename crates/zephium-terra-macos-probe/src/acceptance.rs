@@ -292,11 +292,22 @@ pub(super) fn site_scenario(start: &str, goal: &str) -> &'static LeadScenario {
 /// The person's requests, one per line: each later line is a follow-up in
 /// the same work, as the person sends it.
 pub(super) fn request_scenario(request: &str, answer: &str) -> &'static LeadScenario {
-    let requests: Vec<&'static str> = request
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(|line| &*Box::leak(line.to_owned().into_boxed_str()))
+    // Requests are one per line, or, when any line is `---`, the blocks
+    // between such lines, so one request can hold a multi-line message.
+    let blocks: Vec<String> = if request.lines().any(|line| line.trim() == "---") {
+        request
+            .split('\n')
+            .collect::<Vec<_>>()
+            .split(|line| line.trim() == "---")
+            .map(|block| block.join("\n").trim().to_owned())
+            .collect()
+    } else {
+        request.lines().map(|line| line.trim().to_owned()).collect()
+    };
+    let requests: Vec<&'static str> = blocks
+        .into_iter()
+        .filter(|block| !block.is_empty())
+        .map(|block| &*Box::leak(block.into_boxed_str()))
         .collect();
     let answer: &'static str = Box::leak(answer.to_owned().into_boxed_str());
     Box::leak(Box::new(LeadScenario {
