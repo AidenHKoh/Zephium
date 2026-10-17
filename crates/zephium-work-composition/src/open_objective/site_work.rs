@@ -1470,6 +1470,9 @@ struct Flight {
     approved: Option<([u8; 32], [u8; 32])>,
     /// The cart item it adds.
     cart: Option<[u8; 32]>,
+    /// The words a message sends: still in a box on the page after the
+    /// step, they were not sent.
+    message: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1771,6 +1774,26 @@ fn says_done(line: &str) -> bool {
             .iter()
             .any(|done| done.contains(' ') && line.contains(&format!(" {done} ")))
         || names_any(&line, &["has been", "have been", "was", "were", "is now"])
+}
+
+/// A box on the page still holds these words, as typed before the step.
+fn holds_message(observation: &SemanticObservation, text: &str) -> bool {
+    observation
+        .frames()
+        .iter()
+        .flat_map(|frame| frame.nodes())
+        .filter(|node| node.role() == SemanticRole::Textbox || node.editable_structure().is_some())
+        .filter_map(value_text)
+        .map(|value| clip(value, MAX_TEXT))
+        .any(|value| {
+            // A long value may reach either side cut short.
+            let (short, long) = if value.len() <= text.len() {
+                (value.as_str(), text)
+            } else {
+                (text, value.as_str())
+            };
+            !short.is_empty() && long.starts_with(short) && (short == long || short.len() >= 24)
+        })
 }
 
 fn status_lines(observation: &SemanticObservation) -> Vec<String> {
@@ -2177,6 +2200,9 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             structure: fingerprint.structure,
             approved,
             cart: None,
+            message: (consequence == Consequence::Communication)
+                .then(|| preview.text.clone())
+                .flatten(),
         };
         // It reached the page before and its outcome was never seen: it may
         // have committed, so it is not run again.
@@ -2319,6 +2345,23 @@ impl SiteWorkPolicy {
     fn after_step(&self, observation: &SemanticObservation) {
         let mut state = self.gate.state();
         if let Some(flight) = state.in_flight.take() {
+            // A page changed by the step proves no message left it: the
+            // words still waiting in a box, with no word that it went, were
+            // not seen sent.
+            let unsent = flight.message.as_deref().is_some_and(|text| {
+                holds_message(observation, text)
+                    && !status_lines(observation)
+                        .iter()
+                        .any(|line| !state.status_before.contains(line) && says_done(line))
+            });
+            if unsent {
+                if state.dispatched.take().is_some() {
+                    state.receipt = Some(Receipt::Unverified);
+                }
+                state.unknown.push(flight);
+                state.status_before = status_lines(observation);
+                return;
+            }
             state.committed.push((flight.consequence, flight.control));
         }
         if state.dispatched.take().is_some() {
@@ -2855,6 +2898,57 @@ mod tests {
             .facts
             .contains(&("Subject".to_owned(), "Status".to_owned())));
         assert!(shown.facts.iter().all(|(label, _)| label != "Weekly"));
+    }
+
+    #[test]
+    fn a_send_counts_as_sent_only_once_its_words_left_the_box_or_the_page_says_so() {
+        let mail = |extra: Option<serde_json::Value>| {
+            let mut nodes = vec![
+                json!({"k":1,"r":"document","o":16,"fc":true}),
+                json!({"k":2,"p":0,"r":"group","n":"New Message","fc":true}),
+                json!({"k":3,"p":1,"r":"combobox","n":"To recipients","o":10,"fc":true,
+                    "v":{"k":"text","value":"ana@example.test"},"b":{"x":1,"y":1,"w":300,"h":30}}),
+                json!({"k":4,"p":1,"r":"textbox","n":"Message Body","o":11,"fs":1,"es":[1,2,false],"fc":true,
+                    "v":{"k":"text","value":"Hi Ana,\n\nThe release is ready."},"b":{"x":1,"y":80,"w":300,"h":120}}),
+                json!({"k":5,"p":1,"r":"button","n":"Send","o":9,"ak":1,"fc":true,
+                    "b":{"x":1,"y":210,"w":80,"h":30}}),
+            ];
+            nodes.extend(extra);
+            page(nodes)
+        };
+        let closed = page(vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"button","n":"Compose","o":9,"ak":1,"fc":true,
+                "b":{"x":1,"y":1,"w":80,"h":30}}),
+        ]);
+        let said = mail(Some(json!({"k":6,"p":0,"r":"status","t":"Message sent","fc":true})));
+        for (after, sent) in [(mail(None), false), (said, true), (closed, true)] {
+            let look = mail(None);
+            let gate = Arc::new(SiteGate::default());
+            let policy = SiteWorkPolicy {
+                gate: gate.clone(),
+                asks: true,
+            };
+            let send = click(&look, 5, SemanticEffectClass::Communication);
+            assert!(policy.assess(&send, &look).is_err());
+            gate.approve(false).unwrap();
+            assert!(policy.assess(&send, &look).is_ok());
+            policy.after_step(&after);
+            if sent {
+                assert_eq!(gate.take_receipt(), Some(Receipt::Committed));
+                assert_eq!(gate.committed(), vec!["Sent on the page: Send".to_owned()]);
+            } else {
+                assert_eq!(gate.take_receipt(), Some(Receipt::Unverified));
+                assert_eq!(
+                    gate.committed(),
+                    vec!["Maybe sent on the page, not confirmed: Send".to_owned()]
+                );
+                assert!(matches!(
+                    policy.assess(&send, &after),
+                    Err(AgentWorkFailure::OutcomeUnknown)
+                ));
+            }
+        }
     }
 
     #[test]
@@ -4078,7 +4172,7 @@ mod tests {
         let after = compose("Status");
         let again = click(&after, 4, SemanticEffectClass::Communication);
         assert!(policy.assess(&again, &after).is_ok(), "no second card");
-        policy.after_step(&after);
+        policy.after_step(&composer(&[(2, "Compose")]));
         assert_eq!(gate.take_receipt(), Some(Receipt::Committed));
     }
 
