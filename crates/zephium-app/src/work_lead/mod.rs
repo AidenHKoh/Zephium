@@ -303,6 +303,14 @@ impl WorkLeadService {
         };
         run.allow_links_in(&objective);
         run.trust_sites_in(&objective);
+        let earlier: Vec<&WorkExecutionFact> = projection
+            .executions
+            .iter()
+            .filter(|e| e.id != receipt.execution)
+            .collect();
+        for site_text in earlier_site_texts(&earlier) {
+            run.trust_named(&site_text);
+        }
         for body in &bodies {
             run.allow_links_in(&body.text);
         }
@@ -653,6 +661,31 @@ fn answered(execution: &WorkExecutionFact) -> impl Iterator<Item = (&str, &str)>
     })
 }
 
+/// The words of this work's earlier requests, and the entry questions the
+/// person let through, which name the sites the work already entered.
+fn earlier_site_texts<'a>(earlier: &[&'a WorkExecutionFact]) -> Vec<&'a str> {
+    let mut texts = Vec::new();
+    for execution in earlier {
+        texts.extend(execution.spec.request.as_deref());
+        for step in &execution.steps {
+            if let WorkStepKindV1::Ask {
+                prompt,
+                options,
+                answer: Some(answer),
+                purpose: Some(WorkAskPurposeV1::Entry),
+            } = &step.kind
+            {
+                if crate::work_sites::entry_answer_to(options, answer)
+                    != crate::work_sites::EntryAnswer::NotNow
+                {
+                    texts.push(prompt.as_str());
+                }
+            }
+        }
+    }
+    texts
+}
+
 /// "Continue", "go on", "keep going": a request to finish the last one.
 fn continues(objective: &str) -> bool {
     let words: String = objective
@@ -764,6 +797,26 @@ mod tests {
             "user_artifacts": [], "steps": steps, "parts": parts, "inputs": []
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn sites_the_work_already_entered_stay_trusted_in_a_follow_up() {
+        let earlier = execution(
+            "01M3RV9DBTWYS7770BES8YYKT1",
+            "Create a task to buy milk in my Todoist",
+            "completed",
+            json!([
+                {"id": "01M3RV9DBTWYS7770BES8YYKT2", "turn": 1, "status": "succeeded",
+                 "kind": {"kind": "ask", "prompt": "Work in your Slack?", "options": ["Allow", "Always for Slack", "Not now"], "answer": "Allow", "purpose": "entry"}},
+                {"id": "01M3RV9DBTWYS7770BES8YYKT3", "turn": 1, "status": "succeeded",
+                 "kind": {"kind": "ask", "prompt": "Work in your Notion?", "options": ["Allow", "Always for Notion", "Not now"], "answer": "Not now", "purpose": "entry"}}
+            ]),
+            json!([]),
+        );
+        let texts = earlier_site_texts(&[&earlier]);
+        assert!(texts.contains(&"Create a task to buy milk in my Todoist"));
+        assert!(texts.contains(&"Work in your Slack?"));
+        assert!(!texts.contains(&"Work in your Notion?"));
     }
 
     #[test]

@@ -714,7 +714,12 @@ impl LeadRun {
                 }
             }
         }
-        for site in named {
+        self.trust_named(text);
+    }
+
+    /// Trusts the sites a text names, without letting it ask to save.
+    pub(crate) fn trust_named(&self, text: &str) {
+        for site in crate::work_sites::named_services(text) {
             self.trust_site(&site);
         }
         for word in
