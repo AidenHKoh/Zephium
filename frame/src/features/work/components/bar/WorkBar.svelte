@@ -291,7 +291,7 @@
   }
 
   .surface {
-    --flare: 18px;
+    --flare: 28px;
     --edge: var(--color-border-strong);
     --glow: color-mix(in srgb, black 26%, transparent);
     --fill: var(--color-chrome);

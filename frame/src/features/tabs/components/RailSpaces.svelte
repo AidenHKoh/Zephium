@@ -97,11 +97,11 @@
 </Disclosure>
 
 <style>
-  /* Centred on the 40px button, four points either side of it. The rail's
+  /* Centred on the square button, six points either side of it. The rail's
      marks lie behind it, so it is near-solid rather than glass. */
   :global(.ui-disclosure-panel.rail-space-stack[data-align]) {
     top: calc(100% + 4px);
-    inset-inline-start: -4px;
+    inset-inline-start: -6px;
     width: 48px;
     min-width: 0;
     max-height: calc(100vh - 140px);

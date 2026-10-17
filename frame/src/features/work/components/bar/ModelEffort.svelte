@@ -212,6 +212,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
+    inline-size: 100%;
     block-size: 100%;
     box-sizing: border-box;
     padding-inline: 12px 8px;

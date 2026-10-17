@@ -4,7 +4,7 @@ import { composerEdge, composerHole } from "../lib/composer-hole";
 test("the hole follows the composer's width and the card turns up into its walls on a fillet", () => {
   const card = { width: 1000, height: 700 };
   expect(composerHole(card, { left: 150, top: 620, width: 700 }, 22, 18)).toBe(
-    'path("M0 0H1000V700H868A18 18 0 0 1 850 682V642A22 22 0 0 0 828 620H172A22 22 0 0 0 150 642V682A18 18 0 0 1 132 700H0Z")',
+    'path("M0 0H1000V700H868C856.84 700 850 693.16 850 682V642A22 22 0 0 0 828 620H172A22 22 0 0 0 150 642V682C150 693.16 143.16 700 132 700H0Z")',
   );
 });
 
@@ -15,14 +15,14 @@ test("a corner is never larger than half the composer", () => {
 
 test("a fillet never runs past the card's side", () => {
   const path = composerHole({ width: 300, height: 300 }, { left: 6, top: 100, width: 200 }, 22, 18);
-  expect(path).toContain("H212A6 6 0 0 1 206 294");
+  expect(path).toContain("H212C208.28 300 206 297.72 206 294");
 });
 
 test("the edge is the hole's own outline, open at the foot", () => {
   const card = { width: 1000, height: 700 };
   const bar = { left: 150, top: 620, width: 700 };
   expect(composerEdge(card, bar, 22, 18)).toBe(
-    "M868 700A18 18 0 0 1 850 682V642A22 22 0 0 0 828 620H172A22 22 0 0 0 150 642V682A18 18 0 0 1 132 700",
+    "M868 700C856.84 700 850 693.16 850 682V642A22 22 0 0 0 828 620H172A22 22 0 0 0 150 642V682C150 693.16 143.16 700 132 700",
   );
   expect(composerHole(card, bar, 22, 18)).toContain(
     composerEdge(card, bar, 22, 18).slice(1 + "868 700".length),

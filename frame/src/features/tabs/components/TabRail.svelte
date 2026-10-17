@@ -257,11 +257,11 @@
   }
 
   /* The expanded row with its label taken away: the same plate, corner, rim
-     and fills, never a disc of its own. */
+     and fills, never a disc of its own, and square at the row's height. */
   :global(.rail-item) {
     display: grid;
     place-items: center;
-    width: 40px;
+    width: var(--row-sidebar);
     height: var(--row-sidebar);
     border: 0;
     border-radius: var(--radius-row);

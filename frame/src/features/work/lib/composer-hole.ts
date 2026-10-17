@@ -1,5 +1,7 @@
 const n = (value: number) => Math.round(value * 100) / 100;
 
+const EASE = 0.62;
+
 type Card = { width: number; height: number };
 type Bar = { left: number; top: number; width: number };
 
@@ -10,13 +12,17 @@ function outline(card: Card, bar: Bar, radius: number, flare: number) {
   const foot = card.height;
   const f = Math.max(0, Math.min(flare, foot - y - r, x, card.width - x - w));
   const right = x + w;
+  // A fillet with its curvature eased in, the way a continuous corner meets a
+  // straight edge, rather than a circular arc's sudden turn.
+  const k = f * (1 - EASE);
   return {
     from: n(right + f),
     foot: n(foot),
     trace:
-      `A${n(f)} ${n(f)} 0 0 1 ${n(right)} ${n(foot - f)}` +
+      `C${n(right + k)} ${n(foot)} ${n(right)} ${n(foot - k)} ${n(right)} ${n(foot - f)}` +
       `V${n(y + r)}A${n(r)} ${n(r)} 0 0 0 ${n(right - r)} ${n(y)}H${n(x + r)}` +
-      `A${n(r)} ${n(r)} 0 0 0 ${n(x)} ${n(y + r)}V${n(foot - f)}A${n(f)} ${n(f)} 0 0 1 ${n(x - f)} ${n(foot)}`,
+      `A${n(r)} ${n(r)} 0 0 0 ${n(x)} ${n(y + r)}V${n(foot - f)}` +
+      `C${n(x)} ${n(foot - k)} ${n(x - k)} ${n(foot)} ${n(x - f)} ${n(foot)}`,
   };
 }
 
