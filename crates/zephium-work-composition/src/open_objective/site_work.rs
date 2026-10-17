@@ -1439,6 +1439,8 @@ struct GateState {
     ask: Option<(u32, bool)>,
     /// Someone was asked at least once.
     asked: bool,
+    /// The goal asks the page to send or post something.
+    must_send: bool,
     /// The entry question waits on the start page's first view.
     entry: EntryCheck,
     /// Rust pressed a cookie banner's refusal on this page.
@@ -1503,6 +1505,24 @@ impl SiteGate {
     pub(crate) fn expecting_account(self, expected: bool) -> Self {
         self.state().account_expected = expected;
         self
+    }
+    /// The goal asks to send or post: a task that ends without proposing it
+    /// did not do what it was for.
+    pub(crate) fn sending(self, goal: &str) -> Self {
+        self.state().must_send = names_any(goal, &["send", "post", "reply", "publish"]);
+        self
+    }
+    /// The task was to send, and it ended without ever offering the send.
+    pub(crate) fn send_skipped(&self) -> bool {
+        let state = self.state();
+        state.must_send
+            && !state.held
+            && !state.asked
+            && state.unknown.is_empty()
+            && !state
+                .committed
+                .iter()
+                .any(|(consequence, _)| *consequence == Consequence::Communication)
     }
     /// Sending needs the message to be addressed to one of these.
     pub(crate) fn addressed_to(self, recipients: Vec<String>) -> Self {
@@ -4186,6 +4206,16 @@ mod tests {
             "Send to dana@example.test as you?",
             "the card names the address the task typed, not a heading elsewhere"
         );
+    }
+
+    #[test]
+    fn a_task_to_send_that_never_offered_the_send_is_not_done() {
+        let gate = SiteGate::default().sending("Compose and send an email to Ana");
+        assert!(gate.send_skipped());
+        gate.state().held = true;
+        assert!(!gate.send_skipped(), "the send was offered to the person");
+        let reading = SiteGate::default().sending("Read the emails Ana sent today");
+        assert!(!reading.send_skipped());
     }
 
     #[test]

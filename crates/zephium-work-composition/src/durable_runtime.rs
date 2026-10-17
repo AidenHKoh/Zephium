@@ -700,6 +700,12 @@ impl NativeWorkComposition {
         )
         .holding_typing(request.hold_typing)
         .expecting_account(signed_in.is_some() || request.entry)
+        .sending(match &request.step {
+            WorkStepKindV1::Read {
+                goal: Some(goal), ..
+            } => goal,
+            _ => "",
+        })
         .addressed_to(match &request.step {
             WorkStepKindV1::Read { goal, verbatim, .. } => {
                 let to = verbatim
@@ -785,6 +791,13 @@ impl NativeWorkComposition {
             run.note = Some(format!(
                 "The page did something I did not ask you about: {line}"
             ));
+        }
+        if run.status == WorkAttemptStatus::Succeeded && gate.send_skipped() {
+            run.status = WorkAttemptStatus::Failed;
+            run.note = Some(
+                "The page task ended without sending; nothing was sent. Browse again with the same goal once, or tell the person."
+                    .into(),
+            );
         }
         if run.status != WorkAttemptStatus::Succeeded && gate.has_verified_approval() {
             run.note = Some(format!(
