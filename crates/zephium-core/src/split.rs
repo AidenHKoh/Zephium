@@ -237,16 +237,10 @@ pub struct Drop {
     pub edge: Edge,
     /// Where the new pane will stand.
     pub zone: Rect,
-    /// The handle that marks the seam between the two panes.
-    pub bar: Rect,
     /// How far the pane's page slides to make room: toward its own side of the
     /// seam, by the space the new pane takes.
     pub shift: (f64, f64),
 }
-
-/// The bar's thickness across the seam, and its longest length along it.
-const BAR_THICKNESS: f64 = 5.0;
-const BAR_LENGTH: f64 = 72.0;
 
 pub fn drop_target(tree: &Pane, region: Rect, gap: f64, x: f64, y: f64) -> Option<Drop> {
     let (tab, r) = layout(tree, region, gap)
@@ -267,41 +261,20 @@ pub fn drop_target(tree: &Pane, region: Rect, gap: f64, x: f64, y: f64) -> Optio
         .map(|(_, e)| *e)?;
     let (first, second) = divide(r, edge.axis(), 0.5, gap);
     let zone = if edge.before() { first } else { second };
-    let (bar, shift) = match edge.axis() {
+    let shift = match edge.axis() {
         Axis::Row => {
-            let length = BAR_LENGTH.min(r.height * 0.4);
-            let seam = first.x + first.width + gap / 2.0;
             let distance = zone.width + gap;
-            (
-                Rect::new(
-                    seam - BAR_THICKNESS / 2.0,
-                    r.y + (r.height - length) / 2.0,
-                    BAR_THICKNESS,
-                    length,
-                ),
-                (if edge.before() { distance } else { -distance }, 0.0),
-            )
+            (if edge.before() { distance } else { -distance }, 0.0)
         }
         Axis::Col => {
-            let length = BAR_LENGTH.min(r.width * 0.4);
-            let seam = first.y + first.height + gap / 2.0;
             let distance = zone.height + gap;
-            (
-                Rect::new(
-                    r.x + (r.width - length) / 2.0,
-                    seam - BAR_THICKNESS / 2.0,
-                    length,
-                    BAR_THICKNESS,
-                ),
-                (0.0, if edge.before() { distance } else { -distance }),
-            )
+            (0.0, if edge.before() { distance } else { -distance })
         }
     };
     Some(Drop {
         tab,
         edge,
         zone,
-        bar,
         shift,
     })
 }
@@ -573,18 +546,14 @@ mod tests {
         let leaf = Pane::leaf(id(5));
         let left = drop_target(&leaf, region, 8.0, 50.0, 400.0).unwrap();
         assert_eq!(left.shift, (504.0, 0.0));
-        // The bar stands in the gap, and the slid page ends flush against it.
-        assert_eq!(left.bar, Rect::new(497.5, 364.0, 5.0, 72.0));
         let right = drop_target(&leaf, region, 8.0, 950.0, 400.0).unwrap();
         assert_eq!(right.zone, Rect::new(504.0, 0.0, 496.0, 800.0));
         assert_eq!(right.shift, (-504.0, 0.0));
-        assert_eq!(right.bar.x + right.bar.width / 2.0, 500.0);
         let top = drop_target(&leaf, region, 8.0, 500.0, 40.0).unwrap();
         assert_eq!(top.shift, (0.0, 404.0));
         assert_eq!(top.zone, Rect::new(0.0, 0.0, 1000.0, 396.0));
         let bottom = drop_target(&leaf, region, 8.0, 500.0, 760.0).unwrap();
         assert_eq!(bottom.shift, (0.0, -404.0));
-        assert_eq!(bottom.bar.y + bottom.bar.height / 2.0, 400.0);
     }
 
     #[test]

@@ -245,7 +245,6 @@ fn dragging_over_a_pane_edge_previews_the_split_and_dropping_clears_it() {
     let half = (region.width - gap) / 2.0;
     assert_eq!(preview.zone, Rect::new(0.0, 0.0, half, region.height));
     assert_eq!(preview.shift, (half + gap, 0.0));
-    assert!(preview.bar.x < half + gap && preview.bar.x + preview.bar.width > half);
 
     shell.handle(Command::DragOver { point: None });
     assert_eq!(engine.previews().pop(), Some(None));

@@ -4,8 +4,9 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
-use dispatch2::{DispatchQueue, MainThreadBound};
+use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly, Message};
@@ -32,6 +33,15 @@ use crate::pane_geometry::rounded_native_size;
 
 /// A page a drop preview slid aside, and how far.
 type Displaced = (ItemId, (f64, f64));
+
+/// A drop's slide in the stage's own space, which is not flipped: a page sent
+/// down the screen goes to a lower y.
+fn slide((x, y): (f64, f64)) -> (f64, f64) {
+    (x, -y)
+}
+
+/// How long the pointer rests on a drop target before the page makes room.
+const DROP_DWELL: Duration = Duration::from_millis(450);
 type RatioCallback = Rc<dyn Fn(Pane)>;
 type StageFailureCallback = Rc<dyn Fn(usize)>;
 const MAX_ASYNC_STAGE_RETRIES: u8 = 4;
@@ -183,7 +193,8 @@ pub struct StageIvars {
     tracking_busy: Cell<bool>,
     covers: RefCell<HashMap<ItemId, PaintCover>>,
     indicator: RefCell<Option<Retained<NSView>>>,
-    bar: RefCell<Option<Retained<NSView>>>,
+    /// A drop target the pointer has reached but not yet rested on.
+    armed: RefCell<Option<Box<DropPreview>>>,
     /// The page a drop preview slid aside, and where it sent it.
     displaced: RefCell<Option<Box<Displaced>>>,
     preview_generation: Cell<u64>,
@@ -1005,27 +1016,93 @@ impl ContentStage {
 
     /// Shows what dropping a dragged tab would do, or takes it away. The
     /// pane's page slides aside on its layer, never resized, so nothing lays
-    /// out until the drop; the drop is the one layout.
+    /// out until the drop; the drop is the one layout. A new target shows only
+    /// once the pointer has rested on it, so passing over a page moves nothing.
     pub fn set_drop_indicator(&self, preview: Option<DropPreview>) {
         if self.ivars().stage_retry_terminal.get() {
             return;
         }
         let Some(preview) = preview else {
+            self.disarm();
             self.end_preview();
             return;
         };
+        let shown = self
+            .ivars()
+            .displaced
+            .try_borrow()
+            .ok()
+            .and_then(|displaced| displaced.as_deref().copied());
+        if shown == Some((preview.tab, slide(preview.shift))) {
+            return;
+        }
+        let armed = self
+            .ivars()
+            .armed
+            .try_borrow()
+            .ok()
+            .and_then(|armed| armed.as_deref().copied());
+        if armed.is_some_and(|armed| armed.tab == preview.tab && armed.zone == preview.zone) {
+            return;
+        }
+        if shown.is_some() {
+            self.end_preview();
+        }
+        let Ok(mut slot) = self.ivars().armed.try_borrow_mut() else {
+            return;
+        };
+        *slot = Some(Box::new(preview));
+        drop(slot);
+        let generation = self.ivars().preview_generation.get().wrapping_add(1);
+        self.ivars().preview_generation.set(generation);
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let stage = MainThreadBound::new(Weak::from_retained(&self.retain()), mtm);
+        let Ok(when) = DispatchTime::try_from(DROP_DWELL) else {
+            return;
+        };
+        let _ = DispatchQueue::main().after(when, move || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return;
+                };
+                let Some(stage) = stage.get(mtm).load() else {
+                    return;
+                };
+                if stage.ivars().preview_generation.get() != generation {
+                    return;
+                }
+                let armed = stage
+                    .ivars()
+                    .armed
+                    .try_borrow_mut()
+                    .ok()
+                    .and_then(|mut armed| armed.take());
+                if let Some(preview) = armed {
+                    stage.show_preview(*preview);
+                }
+            }));
+        });
+    }
+
+    fn disarm(&self) {
+        if let Ok(mut armed) = self.ivars().armed.try_borrow_mut() {
+            armed.take();
+        }
+    }
+
+    fn show_preview(&self, preview: DropPreview) {
         let generation = self.ivars().preview_generation.get().wrapping_add(1);
         self.ivars().preview_generation.set(generation);
         let height = self.bounds().size.height;
-        let flipped = |r: Rect| {
-            NSRect::new(
-                NSPoint::new(r.x, height - r.y - r.height),
-                NSSize::new(r.width, r.height),
-            )
-        };
-        self.preview_view(&self.ivars().indicator, flipped(preview.zone), Self::tint);
-        self.preview_view(&self.ivars().bar, flipped(preview.bar), Self::handle);
-        self.displace(preview.tab, preview.shift);
+        let zone = preview.zone;
+        let frame = NSRect::new(
+            NSPoint::new(zone.x, height - zone.y - zone.height),
+            NSSize::new(zone.width, zone.height),
+        );
+        self.preview_view(&self.ivars().indicator, frame, Self::tint);
+        self.displace(preview.tab, slide(preview.shift));
     }
 
     fn preview_view(
@@ -1089,21 +1166,6 @@ impl ContentStage {
             .performAsCurrentDrawingAppearance(&paint);
         layer.setBorderWidth(1.0);
         layer.setCornerRadius(10.0);
-    }
-
-    /// A small rounded handle with a light core and a soft dark edge, which
-    /// reads on a white page and on a black one.
-    fn handle(&self, view: &NSView) {
-        let Some(layer) = view.layer() else {
-            return;
-        };
-        layer.setBackgroundColor(Some(&NSColor::colorWithWhite_alpha(0.98, 1.0).CGColor()));
-        layer.setBorderColor(Some(&NSColor::colorWithWhite_alpha(0.0, 0.2).CGColor()));
-        layer.setBorderWidth(0.5);
-        layer.setShadowColor(Some(&NSColor::blackColor().CGColor()));
-        layer.setShadowOpacity(0.45);
-        layer.setShadowRadius(3.0);
-        layer.setShadowOffset(NSSize::new(0.0, 0.0));
     }
 
     fn displace(&self, tab: ItemId, shift: (f64, f64)) {
@@ -1205,11 +1267,14 @@ impl ContentStage {
     fn end_preview(&self) {
         let generation = self.ivars().preview_generation.get().wrapping_add(1);
         self.ivars().preview_generation.set(generation);
-        for slot in [&self.ivars().indicator, &self.ivars().bar] {
-            let view = slot.try_borrow_mut().ok().and_then(|mut slot| slot.take());
-            if let Some(view) = view {
-                fade_out(&view);
-            }
+        let view = self
+            .ivars()
+            .indicator
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some(view) = view {
+            fade_out(&view);
         }
         let displaced = self
             .ivars()
@@ -1231,11 +1296,25 @@ impl ContentStage {
             .try_borrow_mut()
             .ok()
             .and_then(|mut displaced| displaced.take());
-        let views = [&self.ivars().indicator, &self.ivars().bar]
+        let armed = self
+            .ivars()
+            .armed
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut armed| armed.take());
+        let views = self
+            .ivars()
+            .indicator
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut slot| slot.take())
             .into_iter()
-            .filter_map(|slot| slot.try_borrow_mut().ok().and_then(|mut slot| slot.take()))
             .collect::<Vec<_>>();
         if displaced.is_none() && views.is_empty() {
+            if armed.is_some() {
+                let generation = self.ivars().preview_generation.get().wrapping_add(1);
+                self.ivars().preview_generation.set(generation);
+            }
             return;
         }
         let generation = self.ivars().preview_generation.get().wrapping_add(1);
@@ -1337,19 +1416,19 @@ impl ContentStage {
         if let Some(layer) = view.layer() {
             let changed_mode = self.ivars().feedback_dragging.replace(dragging) != dragging;
             if created || changed_mode {
-                let paint = block2::RcBlock::new(|| {
-                    let color = if dragging {
-                        NSColor::labelColor()
-                    } else {
-                        NSColor::secondaryLabelColor()
-                    };
-                    layer.setBackgroundColor(Some(&color.CGColor()));
-                });
-                self.effectiveAppearance()
-                    .performAsCurrentDrawingAppearance(&paint);
-                layer.setCornerRadius(1.5);
+                // A neutral grey with a fine dark edge and a soft shadow: it reads on a
+                // white page and a black one, which the label colour alone never did.
+                let tone = if dragging { 0.78 } else { 0.7 };
+                layer.setBackgroundColor(Some(&NSColor::colorWithWhite_alpha(tone, 1.0).CGColor()));
+                layer.setBorderColor(Some(&NSColor::colorWithWhite_alpha(0.0, 0.22).CGColor()));
+                layer.setBorderWidth(0.5);
+                layer.setShadowColor(Some(&NSColor::blackColor().CGColor()));
+                layer.setShadowOpacity(0.3);
+                layer.setShadowRadius(2.0);
+                layer.setShadowOffset(NSSize::new(0.0, 0.0));
+                layer.setCornerRadius(2.0);
             }
-            layer.setOpacity(if dragging { 0.9 } else { 0.65 });
+            layer.setOpacity(if dragging { 1.0 } else { 0.85 });
         }
         let h = self.bounds().size.height;
         view.setFrame(NSRect::new(
@@ -2034,9 +2113,9 @@ fn feedback_rect(divider: &Divider, dragging: bool) -> Rect {
                 28.0_f64.min(r.height)
             };
             Rect::new(
-                strip.x + strip.width / 2.0 - 1.0,
+                strip.x + strip.width / 2.0 - 2.0,
                 r.y + (r.height - height) / 2.0,
-                2.0,
+                4.0,
                 height,
             )
         }
@@ -2048,9 +2127,9 @@ fn feedback_rect(divider: &Divider, dragging: bool) -> Rect {
             };
             Rect::new(
                 r.x + (r.width - width) / 2.0,
-                strip.y + strip.height / 2.0 - 1.0,
+                strip.y + strip.height / 2.0 - 2.0,
                 width,
-                2.0,
+                4.0,
             )
         }
     }
@@ -2217,11 +2296,11 @@ mod tests {
         let root = split::divider_at_path(&original, region, 8.0, &[]).unwrap();
         assert_eq!(
             feedback_rect(&root, false),
-            Rect::new(499.0, 386.0, 2.0, 28.0)
+            Rect::new(498.0, 386.0, 4.0, 28.0)
         );
         assert_eq!(
             feedback_rect(&root, true),
-            Rect::new(499.0, 0.0, 2.0, 800.0)
+            Rect::new(498.0, 0.0, 4.0, 800.0)
         );
 
         for anchor in [0.0, 4.0, 7.5] {
@@ -2248,11 +2327,11 @@ mod tests {
         let nested = split::divider_at_path(&guide_only, region, 8.0, &[0]).unwrap();
         assert_eq!(
             feedback_rect(&nested, false),
-            Rect::new(234.0, 597.0, 28.0, 2.0)
+            Rect::new(234.0, 596.0, 28.0, 4.0)
         );
         assert_eq!(
             feedback_rect(&nested, true),
-            Rect::new(0.0, 597.0, 496.0, 2.0)
+            Rect::new(0.0, 596.0, 496.0, 4.0)
         );
         assert!(
             (anchored_drag_ratio(&nested, 8.0, 100.0, nested.strip.y + 4.0, (100.0, 4.0)) - 0.75)

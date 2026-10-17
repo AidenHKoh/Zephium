@@ -50,11 +50,12 @@ const INDICATOR_BORDER: f64 = 1.0;
 // The wash over where a dropped tab will stand: the label colour, faint.
 const INDICATOR_FILL: f64 = 0.06;
 const INDICATOR_STROKE: f64 = 0.16;
-/// The room the handle's soft edge needs around it, in logical pixels.
-const HANDLE_HALO: f64 = 6.0;
-// The resize guide is the label colour, as on macOS, not the system accent.
-const GUIDE_ON_DARK: (u8, u8, u8) = (0xff, 0xff, 0xff);
-const GUIDE_ON_LIGHT: (u8, u8, u8) = (0x1d, 0x1d, 0x1f);
+/// How long the pointer rests on a drop target before the page makes room.
+const DROP_DWELL_MS: u32 = 450;
+// The resize guide is a neutral grey either way: it lies over a page, and a page
+// may be white under a dark window or black under a light one.
+const GUIDE_ON_DARK: (u8, u8, u8) = (0xa1, 0xa1, 0xa6);
+const GUIDE_ON_LIGHT: (u8, u8, u8) = (0x8e, 0x8e, 0x93);
 const MAX_NATIVE_RETRIES: u8 = 2;
 
 type PhysicalRect = (i32, i32, i32, i32);
@@ -161,9 +162,10 @@ struct State {
     indicator: Option<HWND>,
     indicator_size: (i32, i32),
     indicator_resize: bool,
-    /// The handle at the seam of a drop preview, and the page it made room in.
-    handle: Option<HWND>,
-    handle_size: (i32, i32),
+    /// A drop target the pointer has reached but not yet rested on, and the
+    /// timer that shows it.
+    armed: Option<DropPreview>,
+    dwell_timer: Option<usize>,
     preview: Option<PreviewMove>,
     on_placement_failure: PlacementFailureCallback,
     /// Motion asked of the next `apply`, and the slide it started.
@@ -242,6 +244,7 @@ thread_local! {
     /// keeps pending layout work non-owning and avoids making COM controllers
     /// or `Rc` state cross-thread.
     static LAYOUT_TIMERS: RefCell<HashMap<usize, Weak<RefCell<State>>>> = RefCell::new(HashMap::new());
+    static DWELL_TIMERS: RefCell<HashMap<usize, Weak<RefCell<State>>>> = RefCell::new(HashMap::new());
 }
 
 impl Drop for State {
@@ -255,8 +258,11 @@ impl Drop for State {
         if let Some(indicator) = self.indicator.take() {
             let _ = unsafe { DestroyWindow(indicator) };
         }
-        if let Some(handle) = self.handle.take() {
-            let _ = unsafe { DestroyWindow(handle) };
+        if let Some(timer) = self.dwell_timer.take() {
+            let _ = unsafe { KillTimer(None, timer) };
+            let _ = DWELL_TIMERS.try_with(|timers| {
+                timers.borrow_mut().remove(&timer);
+            });
         }
     }
 }
@@ -294,8 +300,8 @@ impl Stage {
             indicator: None,
             indicator_size: (0, 0),
             indicator_resize: false,
-            handle: None,
-            handle_size: (0, 0),
+            armed: None,
+            dwell_timer: None,
             preview: None,
             on_placement_failure: Rc::new(on_placement_failure),
             pending_motion: None,
@@ -639,10 +645,62 @@ impl Stage {
 
     /// Shows what dropping a dragged tab would do, or takes it away. The
     /// pane's page slides aside without being resized; the drop is the one
-    /// layout.
+    /// layout. A new target shows only once the pointer has rested on it.
     pub fn set_drop_indicator(&self, preview: Option<DropPreview>) {
+        let Some(preview) = preview else {
+            self.disarm();
+            self.show_preview(None);
+            return;
+        };
+        let Ok(mut s) = self.state.try_borrow_mut() else {
+            return;
+        };
+        let shown = s
+            .preview
+            .is_some_and(|m| m.id == preview.tab && !m.release && m.to == preview.shift);
+        let waiting = s
+            .armed
+            .is_some_and(|armed| armed.tab == preview.tab && armed.zone == preview.zone);
+        if shown || waiting {
+            return;
+        }
+        s.armed = Some(preview);
+        if let Some(old) = s.dwell_timer.take() {
+            let _ = unsafe { KillTimer(None, old) };
+            DWELL_TIMERS.with(|timers| timers.borrow_mut().remove(&old));
+        }
+        let timer = unsafe { SetTimer(None, 0, DROP_DWELL_MS, Some(dwell_timer_proc)) };
+        if timer != 0 {
+            s.dwell_timer = Some(timer);
+            DWELL_TIMERS.with(|timers| {
+                timers
+                    .borrow_mut()
+                    .insert(timer, Rc::downgrade(&self.state));
+            });
+        }
+        let release = s.preview.is_some_and(|m| !m.release);
+        drop(s);
+        if timer == 0 {
+            self.disarm();
+            self.show_preview(Some(preview));
+        } else if release {
+            self.show_preview(None);
+        }
+    }
+
+    fn disarm(&self) {
+        let Ok(mut s) = self.state.try_borrow_mut() else {
+            return;
+        };
+        s.armed = None;
+        if let Some(timer) = s.dwell_timer.take() {
+            let _ = unsafe { KillTimer(None, timer) };
+            DWELL_TIMERS.with(|timers| timers.borrow_mut().remove(&timer));
+        }
+    }
+
+    fn show_preview(&self, preview: Option<DropPreview>) {
         self.set_indicator(preview.map(|preview| preview.zone), false);
-        self.set_handle(preview.map(|preview| preview.bar));
         self.move_page(preview);
     }
 
@@ -690,56 +748,6 @@ impl Stage {
         s.preview = next;
         drop(s);
         schedule_sync(&self.state);
-    }
-
-    fn set_handle(&self, bar: Option<Rect>) {
-        let Ok(mut s) = self.state.try_borrow_mut() else {
-            return;
-        };
-        let Some(bar) = bar else {
-            if let Some(hwnd) = s.handle.take() {
-                let _ = unsafe { DestroyWindow(hwnd) };
-            }
-            s.handle_size = (0, 0);
-            return;
-        };
-        let scale = scale_of(s.parent);
-        let halo = (HANDLE_HALO * scale).round() as i32;
-        let mut top_left = POINT {
-            x: ((s.origin.0 + bar.x) * scale).round() as i32 - halo,
-            y: ((s.origin.1 + bar.y) * scale).round() as i32 - halo,
-        };
-        let _ = unsafe { ClientToScreen(s.parent, &mut top_left) };
-        let w = ((bar.width * scale).round() as i32).max(1);
-        let h = ((bar.height * scale).round() as i32).max(1);
-        let hwnd = match s.handle {
-            Some(hwnd) => hwnd,
-            None => {
-                let Some(created) = create_indicator(s.parent) else {
-                    return;
-                };
-                s.handle = Some(created);
-                created
-            }
-        };
-        let redraw = s.handle_size != (w, h);
-        s.handle_size = (w, h);
-        drop(s);
-        unsafe {
-            if redraw {
-                draw_handle(hwnd, top_left.x, top_left.y, w, h, halo, scale);
-            }
-            let _ = SetWindowPos(
-                hwnd,
-                Some(HWND_TOP),
-                top_left.x,
-                top_left.y,
-                w + 2 * halo,
-                h + 2 * halo,
-                SWP_NOACTIVATE,
-            );
-            let _ = ShowWindow(hwnd, SW_SHOWNA);
-        }
     }
 
     pub fn set_resize_guide(&self, zone: Option<Rect>) {
@@ -950,6 +958,27 @@ fn raise_cover(state: &Rc<RefCell<State>>, id: ItemId) {
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             )
         };
+    }
+}
+
+/// The pointer has rested on a drop target: the page makes room.
+unsafe extern "system" fn dwell_timer_proc(_: HWND, _: u32, timer: usize, _: u32) {
+    let _ = unsafe { KillTimer(None, timer) };
+    let Some(state) = DWELL_TIMERS
+        .with(|timers| timers.borrow_mut().remove(&timer))
+        .and_then(|weak| weak.upgrade())
+    else {
+        return;
+    };
+    let armed = match state.try_borrow_mut() {
+        Ok(mut s) if s.dwell_timer == Some(timer) => {
+            s.dwell_timer = None;
+            s.armed.take()
+        }
+        _ => None,
+    };
+    if let Some(preview) = armed {
+        Stage { state }.show_preview(Some(preview));
     }
 }
 
@@ -1757,90 +1786,6 @@ fn draw_indicator(
             ULW_ALPHA,
         ) {
             eprintln!("stage: indicator ULW failed: {e}");
-        }
-        SelectObject(memory, previous);
-        let _ = DeleteDC(memory);
-        let _ = DeleteObject(bitmap.into());
-        ReleaseDC(None, screen);
-    }
-}
-
-/// The handle at a drop's seam: a light core ringed by a hairline, in a soft
-/// dark halo, so it reads on a white page and on a black one. `halo` is the
-/// margin of the window around the core, in pixels.
-fn draw_handle(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, halo: i32, scale: f64) {
-    let (total_w, total_h) = (w + 2 * halo, h + 2 * halo);
-    let info = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: total_w,
-            biHeight: -total_h,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-    unsafe {
-        let screen = GetDC(None);
-        let Ok(bitmap) = CreateDIBSection(Some(screen), &info, DIB_RGB_COLORS, &mut bits, None, 0)
-        else {
-            ReleaseDC(None, screen);
-            return;
-        };
-        let pixels = std::slice::from_raw_parts_mut(
-            bits as *mut u32,
-            (total_w as usize) * (total_h as usize),
-        );
-        let (half_w, half_h) = (f64::from(w) / 2.0, f64::from(h) / 2.0);
-        let radius = half_w.min(half_h);
-        let ring = 0.75 * scale;
-        for row in 0..total_h as usize {
-            for col in 0..total_w as usize {
-                let px = col as f64 + 0.5 - f64::from(total_w) / 2.0;
-                let py = row as f64 + 0.5 - f64::from(total_h) / 2.0;
-                let dx = px.abs() - half_w + radius;
-                let dy = py.abs() - half_h + radius;
-                let d = dx.max(dy).min(0.0) + dx.max(0.0).hypot(dy.max(0.0)) - radius;
-                let core = (0.5 - d).clamp(0.0, 1.0);
-                let inner = (0.5 - (d + ring)).clamp(0.0, 1.0);
-                let reach = (1.0 - d.max(0.0) / f64::from(halo.max(1))).clamp(0.0, 1.0);
-                // Shadow, then the dark ring, then the light core, each over the last.
-                let shadow = 0.45 * reach * reach;
-                let edge = (core - inner) * 0.25;
-                let light = inner * 0.98;
-                let over_edge = edge + shadow * (1.0 - edge);
-                let alpha = light + over_edge * (1.0 - light);
-                let a = (alpha * 255.0).round() as u32;
-                let c = (light * 255.0).round() as u32;
-                pixels[row * total_w as usize + col] = (a << 24) | (c << 16) | (c << 8) | c;
-            }
-        }
-        let memory = CreateCompatibleDC(Some(screen));
-        let previous = SelectObject(memory, bitmap.into());
-        let blend = BLENDFUNCTION {
-            BlendOp: AC_SRC_OVER as u8,
-            BlendFlags: 0,
-            SourceConstantAlpha: 255,
-            AlphaFormat: AC_SRC_ALPHA as u8,
-        };
-        if let Err(e) = UpdateLayeredWindow(
-            hwnd,
-            None,
-            Some(&POINT { x, y }),
-            Some(&SIZE {
-                cx: total_w,
-                cy: total_h,
-            }),
-            Some(memory),
-            Some(&POINT { x: 0, y: 0 }),
-            COLORREF(0),
-            Some(&blend),
-            ULW_ALPHA,
-        ) {
-            eprintln!("stage: handle ULW failed: {e}");
         }
         SelectObject(memory, previous);
         let _ = DeleteDC(memory);

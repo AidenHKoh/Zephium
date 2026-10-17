@@ -1060,7 +1060,6 @@ impl Shell {
                         .map(|drop| zephium_core::ports::engine::DropPreview {
                             tab: drop.tab,
                             zone: drop.zone,
-                            bar: drop.bar,
                             shift: drop.shift,
                         });
                     let _ = self.engine.set_drop_indicator(win, preview);

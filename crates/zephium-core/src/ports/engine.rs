@@ -572,14 +572,13 @@ pub enum StageMotion {
 }
 
 /// A tab dragged over a pane's edge, shown before it is dropped: the pane's
-/// page slides aside by `shift` without being resized, the tint marks where the
-/// new pane will stand and the bar marks the seam. Rects are relative to the
-/// content region; nothing is laid out until the drop.
+/// page slides aside by `shift` without being resized and the tint marks where
+/// the new pane will stand. Rects are relative to the content region; nothing
+/// is laid out until the drop.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DropPreview {
     pub tab: ItemId,
     pub zone: Rect,
-    pub bar: Rect,
     pub shift: (f64, f64),
 }
 
