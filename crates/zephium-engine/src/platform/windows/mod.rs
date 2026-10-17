@@ -29,6 +29,7 @@ mod content_filter;
 mod find;
 pub(crate) use find::{find, FindReport, FindSession};
 mod fullscreen;
+mod fullscreen_transition;
 pub(crate) use fullscreen::{exit_fullscreen, fullscreen_state};
 pub use fullscreen::{install_fullscreen_observer, FullscreenObserver};
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -59,7 +60,7 @@ mod semantic_screenshot;
 mod stage;
 #[cfg(feature = "agentic-browser")]
 mod work_rendering;
-pub(crate) use native_paths::webview2_user_data_path;
+pub(crate) use native_paths::{webview2_download_path, webview2_user_data_path};
 #[cfg(feature = "agentic-browser")]
 pub use work_rendering::{install_work_rendering_backing, remove_work_rendering_backing};
 #[cfg(feature = "agentic-browser")]

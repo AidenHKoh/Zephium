@@ -42,6 +42,7 @@ pub(super) struct Destination {
     pub path: PathBuf,
     pub staging_path: PathBuf,
     pub staging_identity: FileIdentity,
+    payload: PathBuf,
     staging: File,
     _ancestors: Vec<File>,
     cleanup_on_drop: bool,
@@ -393,21 +394,25 @@ impl Destination {
         verify_private_directory(&staging)?;
         let staging_identity = identity(&staging)?;
         let path = parent.join(requested.file_name().ok_or(DownloadError::Destination)?);
-        Ok(Self {
+        let mut destination = Self {
             path,
+            payload: staging_path.join("payload"),
             staging_path,
             staging_identity,
             staging,
             _ancestors: ancestors,
             cleanup_on_drop: true,
-        })
+        };
+        destination.payload =
+            crate::platform::imp::webview2_download_path(&destination.payload).map_err(io)?;
+        Ok(destination)
     }
     pub(super) fn abandon(mut self) {
         self.cleanup_on_drop = false;
     }
 
     pub(super) fn payload(&self) -> PathBuf {
-        self.staging_path.join("payload")
+        self.payload.clone()
     }
     fn verify_namespace(&self) -> Result<(), DownloadError> {
         // The original stage handle requests DELETE and denies delete sharing.
@@ -585,6 +590,54 @@ pub(super) fn select_directory(path: PathBuf) -> Result<(String, String), Downlo
     ))
 }
 pub(super) fn verify_file(path: &Path, expected: &FileIdentity) -> Result<(), DownloadError> {
+    let _file = verify_identity(path, expected)?;
+    verify_protection(path)
+}
+
+pub(super) fn verify_reveal(path: &Path, expected: &FileIdentity) -> Result<(), DownloadError> {
+    verify_identity(path, expected).map(drop)
+}
+
+pub(super) fn prepare_open(
+    path: &Path,
+    expected: &FileIdentity,
+    source: &str,
+) -> Result<(), DownloadError> {
+    let _parents = lock_ancestors(path.parent().ok_or(DownloadError::Destination)?)?;
+    let file = verify_identity(path, expected)?;
+    if verify_protection(path).is_err() {
+        // Protection may have been removed since publication. Re-run the OS
+        // attachment policy for the recorded original before allowing execution.
+        // Never repair a substituted or edited payload.
+        let ordinary = crate::platform::imp::webview2_download_path(path)
+            .map_err(|_| DownloadError::Destination)?;
+        let metadata_handle = OpenOptions::new()
+            .access_mode(
+                (FILE_READ_ATTRIBUTES | windows::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES)
+                    .0,
+            )
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .open(path)
+            .map_err(io)?;
+        if !same_node(&identity(&metadata_handle)?, expected) {
+            return Err(DownloadError::ChangedFile);
+        }
+        let modified = file
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .map_err(io)?;
+        protect(&ordinary, source, path)?;
+        // Updating an ADS also updates the base file's last-write time. This
+        // metadata-only repair must retain the original download receipt.
+        metadata_handle
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .map_err(io)?;
+    }
+    verify_file(path, expected)
+}
+
+fn verify_identity(path: &Path, expected: &FileIdentity) -> Result<File, DownloadError> {
     let file = open_payload(path, false)?;
     let actual = identity(&file)?;
     if !same_node(&actual, expected)
@@ -595,7 +648,7 @@ pub(super) fn verify_file(path: &Path, expected: &FileIdentity) -> Result<(), Do
     {
         return Err(DownloadError::ChangedFile);
     }
-    verify_protection(path)
+    Ok(file)
 }
 pub(super) fn recover_staging(record: &DownloadRecord) -> Result<(), DownloadError> {
     if !record.writer_released
@@ -734,6 +787,36 @@ mod tests {
         assert!(verify_file(&saved, &receipt).is_ok());
         fs::write(&saved, b"modified").unwrap();
         assert!(verify_file(&saved, &receipt).is_err());
+    }
+    #[test]
+    fn reveal_allows_missing_protection_but_open_restores_it_only_for_the_original() {
+        let root = tempfile::tempdir().unwrap();
+        let pending =
+            Destination::prepare(DownloadId::generate(), root.path().join("report.txt"), None)
+                .unwrap();
+        fs::write(pending.payload(), b"download").unwrap();
+        let (saved, receipt) = pending.finish("https://example.com", Some(8)).unwrap();
+        let mut stream = saved.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        fs::remove_file(&stream).unwrap();
+        assert!(matches!(
+            verify_file(&saved, &receipt),
+            Err(DownloadError::Protection)
+        ));
+        assert!(verify_reveal(&saved, &receipt).is_ok());
+        prepare_open(&saved, &receipt, "https://example.com").unwrap();
+        verify_file(&saved, &receipt).unwrap();
+        fs::remove_file(&stream).unwrap();
+        fs::write(&saved, b"changed payload").unwrap();
+        assert!(matches!(
+            prepare_open(&saved, &receipt, "https://example.com"),
+            Err(DownloadError::ChangedFile)
+        ));
+        assert!(matches!(
+            verify_reveal(&saved, &receipt),
+            Err(DownloadError::ChangedFile)
+        ));
+        assert!(!Path::new(&stream).exists());
     }
     #[test]
     fn recovery_refuses_a_substituted_staging_directory() {

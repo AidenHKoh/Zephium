@@ -324,7 +324,7 @@ pub(super) fn filter_windows_context_menu(
         && unsafe { GetAncestor(parent, GA_ROOT) == GetForegroundWindow() }
 }
 #[cfg(any(target_os = "windows", test))]
-fn windows_menu_item_allowed(name: &str) -> bool {
+pub(super) fn windows_menu_item_allowed(name: &str) -> bool {
     matches!(
         name,
         "back"
@@ -344,6 +344,13 @@ fn windows_menu_item_allowed(name: &str) -> bool {
             | "saveLinkAs"
             | "saveVideoAs"
             | "saveAudioAs"
+            | "saveMediaAs"
+            | "copyLink"
+            | "loop"
+            | "showAllControls"
+            // This is the runtime's unlocalized command name, including its typo.
+            | "pictureInPciture"
+            | "pictureInPicture"
             | "openLinkInNewWindow"
             | "openLinkInNewTab"
             | "openImageInNewWindow"
@@ -363,6 +370,8 @@ mod tests {
         assert!(windows_menu_item_allowed("copyLinkLocation"));
         assert!(windows_menu_item_allowed("extension"));
         assert!(windows_menu_item_allowed("inspectElement"));
+        assert!(windows_menu_item_allowed("pictureInPciture"));
+        assert!(windows_menu_item_allowed("saveMediaAs"));
         for name in [
             "print",
             "savePageAs",

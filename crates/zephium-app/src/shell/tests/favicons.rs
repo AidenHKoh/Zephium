@@ -516,6 +516,51 @@ fn delivered_origins(icons: &IconLog) -> Vec<String> {
 }
 
 #[test]
+fn returning_from_a_private_profile_resends_unchanged_favicons() {
+    let (mut shell, _engine, screen, icons) = setup_with_icon_log(Arc::new(FakeStore::default()));
+    shell.handle(Command::Bootstrap);
+    let regular = active_id(&screen);
+    navigate_and_commit(&mut shell, regular, "kept.example");
+    shell.handle(Command::Engine(EngineEvent::FaviconPixels {
+        id: regular,
+        page_url: "https://kept.example/".into(),
+        rgba: vec![5; zephium_core::icon::RGBA32_BYTES],
+    }));
+    shell.handle(Command::Run("window.newPrivate".into()));
+    let private = active_id(&screen);
+    let private_profile = shell.windows.focused().unwrap().profile;
+    assert!(icons
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|view| { view.profile_id == private_profile.to_string() && view.entries.is_empty() }));
+    shell.handle(Command::Close(private));
+    assert_eq!(
+        delivered_origins(&icons),
+        ["https://kept.example", "https://kept.example"]
+    );
+}
+
+#[test]
+fn a_background_profiles_favicon_does_not_replace_foreground_rasters() {
+    let (mut shell, _engine, _screen, icons) = setup_with_icon_log(Arc::new(FakeStore::default()));
+    shell.handle(Command::Bootstrap);
+    let regular_profile = shell.windows.focused().unwrap().profile;
+    shell.handle(Command::Run("window.newPrivate".into()));
+    icons.lock().unwrap().clear();
+    shell.handle(Command::Engine(EngineEvent::WorkPageFavicon {
+        profile: regular_profile,
+        page_url: "https://background.example/".into(),
+        rgba: vec![6; zephium_core::icon::RGBA32_BYTES],
+    }));
+    assert!(shell
+        .favicons
+        .icon_values
+        .contains_key(&(regular_profile, "https://background.example".into())));
+    assert!(icons.lock().unwrap().is_empty());
+}
+
+#[test]
 fn work_page_read_feeds_the_favicon_cache_by_origin() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, _engine, _screen, icons) = setup_with_icon_log(store.clone());

@@ -1,10 +1,23 @@
-//! Ordinary Win32 spelling at the native WebView2 UDF boundary only.
+//! Ordinary Win32 spelling at native WebView2 filesystem boundaries.
 //! Canonical paths remain the authority for confinement and identity checks.
 
 use std::ffi::OsString;
 use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+
+/// The caller pins the canonical parent against replacement for the transfer.
+/// WebView2 accepts verbatim paths but fails their downloads with FILE_FAILED.
+pub(crate) fn webview2_download_path(canonical: &Path) -> io::Result<PathBuf> {
+    let projected = project_spelling(canonical)?;
+    let parent = canonical.parent().ok_or_else(invalid)?;
+    if std::fs::canonicalize(projected.parent().ok_or_else(invalid)?)? != parent
+        || !std::fs::symlink_metadata(parent)?.is_dir()
+    {
+        return Err(invalid());
+    }
+    Ok(projected)
+}
 
 pub(crate) fn webview2_user_data_path(canonical: &Path) -> io::Result<PathBuf> {
     let projected = project_spelling(canonical)?;
@@ -298,6 +311,23 @@ mod verified_short_path {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_projection_preserves_parent_and_rejects_native_aliases() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("zażółć 日本語");
+        std::fs::create_dir(&directory).unwrap();
+        let canonical = directory.canonicalize().unwrap();
+        let projected = webview2_download_path(&canonical.join("payload")).unwrap();
+        assert_eq!(
+            projected.parent().unwrap().canonicalize().unwrap(),
+            canonical
+        );
+        assert!(!projected.exists());
+        assert!(webview2_download_path(&canonical.join("payload.")).is_err());
+        assert!(webview2_download_path(&canonical.join("NUL.txt")).is_err());
+        assert!(webview2_download_path(&canonical.join("missing").join("payload")).is_err());
+    }
 
     #[test]
     fn projects_existing_canonical_directory_with_exact_roundtrip() {

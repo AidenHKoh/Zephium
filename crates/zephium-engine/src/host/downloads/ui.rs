@@ -16,13 +16,6 @@ impl Downloads {
             });
             return;
         }
-        #[cfg(target_os = "windows")]
-        if matches!(call, DownloadCall::SetAskDestination { enabled: false }) {
-            done.finish(DownloadResponse::Error {
-                error: DownloadError::Unsupported,
-            });
-            return;
-        }
         self.ensure_recovery(partition);
         if matches!(call, DownloadCall::RetryCleanup) {
             self.schedule_recovery(partition.profile());
@@ -284,7 +277,7 @@ impl Downloads {
                     .borrow_mut()
                     .insert(partition.profile(), preferences.clone());
                 done.finish(DownloadResponse::Preferences {
-                    site_downloads_require_confirmation: cfg!(target_os = "windows"),
+                    site_downloads_require_confirmation: false,
                     preferences,
                     supported: true,
                 });
@@ -308,6 +301,10 @@ impl Downloads {
                     });
                     return;
                 };
+                #[cfg(target_os = "windows")]
+                let reveal = matches!(call, DownloadCall::Reveal { .. });
+                #[cfg(target_os = "windows")]
+                let source = record.source;
                 self.calls.borrow_mut().insert(
                     token,
                     UiCall {
@@ -321,7 +318,14 @@ impl Downloads {
                 if std::thread::Builder::new()
                     .name("zephium-download-file-check".into())
                     .spawn(move || {
+                        #[cfg(target_os = "macos")]
                         let result = verify_file(&path, &identity);
+                        #[cfg(target_os = "windows")]
+                        let result = if reveal {
+                            super::super::download_files::verify_reveal(&path, &identity)
+                        } else {
+                            super::super::download_files::prepare_open(&path, &identity, &source)
+                        };
                         let _ = sender.send(Message::Verified(token, path, result));
                     })
                     .is_err()
@@ -429,7 +433,7 @@ impl Downloads {
                 .borrow_mut()
                 .insert(partition.profile(), preferences.clone());
             done.finish(DownloadResponse::Preferences {
-                site_downloads_require_confirmation: cfg!(target_os = "windows"),
+                site_downloads_require_confirmation: false,
                 preferences,
                 supported: true,
             });
