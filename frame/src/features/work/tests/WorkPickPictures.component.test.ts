@@ -14,8 +14,8 @@ const native = vi.hoisted(() => ({ call: vi.fn(), admit: vi.fn(), resource: vi.f
 // Admitted pictures resolve to a real one-pixel image here, each naming its digest.
 vi.mock("$domain/resources", async (original) => ({
   ...(await original<typeof import("$domain/resources")>()),
-  mediaUrl: (_profile: string, digest: string) =>
-    `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7#${digest}`,
+  pictureUrl: (picture: { digest: string }) =>
+    `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7#${picture.digest}`,
 }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
