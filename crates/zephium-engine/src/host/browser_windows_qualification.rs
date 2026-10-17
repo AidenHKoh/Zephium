@@ -283,6 +283,47 @@ fn native_download_staging_and_media_capabilities() {
         menu_pip.pointer("/result/value"),
         Some(&serde_json::Value::Bool(true))
     );
+    view.evaluate_script("document.querySelector('video').muted=false")
+        .unwrap();
+    view.set_visible(false).unwrap();
+    let automatic = include_str!("../platform/automatic_pip.js");
+    crate::platform::imp::automatic_pip(
+        &view,
+        format!("({automatic})('leave',1)"),
+        Rc::new(|| true),
+    );
+    let opened = protocol(
+        &view,
+        "Runtime.evaluate",
+        serde_json::json!({
+            "expression": "(async()=>{const end=performance.now()+5000;while(!document.pictureInPictureElement&&performance.now()<end)await new Promise(r=>setTimeout(r,30));return !!document.pictureInPictureElement})()",
+            "awaitPromise":true,"returnByValue":true,
+        }),
+    );
+    assert_eq!(
+        opened.pointer("/result/value"),
+        Some(&serde_json::Value::Bool(true)),
+        "hidden-tab automatic PiP: {opened}"
+    );
+    view.set_visible(true).unwrap();
+    crate::platform::imp::automatic_pip(
+        &view,
+        format!("({automatic})('return',2)"),
+        Rc::new(|| true),
+    );
+    let closed = protocol(
+        &view,
+        "Runtime.evaluate",
+        serde_json::json!({
+            "expression": "(async()=>{const end=performance.now()+5000;while(document.pictureInPictureElement&&performance.now()<end)await new Promise(r=>setTimeout(r,30));return !document.pictureInPictureElement})()",
+            "awaitPromise":true,"returnByValue":true,
+        }),
+    );
+    assert_eq!(
+        closed.pointer("/result/value"),
+        Some(&serde_json::Value::Bool(true)),
+        "automatic PiP return: {closed}"
+    );
     view.evaluate_script("window.stopFixtureVideo()").unwrap();
     let mut process_id = 0;
     unsafe { view.webview().BrowserProcessId(&mut process_id) }.unwrap();

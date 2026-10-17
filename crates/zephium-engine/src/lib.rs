@@ -2397,6 +2397,25 @@ impl Engine for WebviewEngine {
         }
     }
 
+    fn automatic_pip(&self, id: ItemId, background: bool) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.run_for_active_item(id, move |host| host.automatic_pip(id, background))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (id, background);
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn cancel_automatic_pip(&self) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(|| {
+            let _ = host::try_with(|host| host.cancel_automatic_pip());
+        });
+    }
+
     fn exit_fullscreen(&self, id: ItemId) -> NativeDispatch {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {

@@ -51,6 +51,7 @@ pub(super) struct TabPreferences {
     pub(super) after_close: AfterClose,
     /// Opening an address already open in this space goes to that tab.
     pub(super) switch_to_open: bool,
+    pub(super) automatic_pip: bool,
     /// Launch puts a new tab in front instead of the one left there.
     pub(super) start_with_new_tab: bool,
 }
@@ -63,6 +64,7 @@ impl Default for TabPreferences {
             archive_after: ArchiveAfter::default(),
             after_close: AfterClose::default(),
             switch_to_open: true,
+            automatic_pip: true,
             start_with_new_tab: false,
         }
     }
@@ -75,6 +77,7 @@ impl TabPreferences {
             "tabs.new-position",
             "tabs.after-close",
             "tabs.switch-to-open",
+            "tabs.automatic-pip",
             "tabs.startup",
             "tabs.external-position",
             "tabs.archive",
@@ -97,6 +100,7 @@ impl TabPreferences {
             ("tabs.after-close", "previous") => self.after_close = AfterClose::Previous,
             ("tabs.after-close", "recent") => self.after_close = AfterClose::Recent,
             ("tabs.switch-to-open", value) => self.switch_to_open = value == "true",
+            ("tabs.automatic-pip", value) => self.automatic_pip = value == "true",
             ("tabs.startup", value) => self.start_with_new_tab = value == "new-tab",
             ("tabs.external-position", "new-tab") => self.external_position = None,
             ("tabs.external-position", "end") => self.external_position = Some(NewTabPosition::End),
@@ -183,6 +187,17 @@ impl Shell {
             return Vec::new();
         };
         let prev = win.active.replace(id).filter(|p| *p != id);
+        let remains_visible = prev.is_some_and(|previous| {
+            win.splits
+                .as_ref()
+                .is_some_and(|tree| tree.contains(previous) && tree.contains(id))
+        });
+        if let Some(previous) =
+            prev.filter(|_| self.tab_preferences.automatic_pip && !remains_visible)
+        {
+            let _ = self.engine.automatic_pip(previous, true);
+        }
+        let _ = self.engine.automatic_pip(id, false);
         let now = unix_millis();
         if let Some(prev) = prev {
             self.items.set_lifecycle(prev, Lifecycle::Inactive);

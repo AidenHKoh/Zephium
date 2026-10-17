@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn automatic_pip_follows_tab_selection_and_respects_split_visibility_and_preference() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    engine.automatic_pip.lock().unwrap().clear();
+    shell.handle(Command::Activate(first));
+    assert_eq!(
+        *engine.automatic_pip.lock().unwrap(),
+        vec![(Some(second), true), (Some(first), false)]
+    );
+    engine.automatic_pip.lock().unwrap().clear();
+    shell.windows.focused_mut().unwrap().splits = Some(Pane::Branch {
+        axis: zephium_core::split::Axis::Row,
+        ratio: 0.5,
+        a: Box::new(Pane::leaf(first)),
+        b: Box::new(Pane::leaf(second)),
+    });
+    shell.focus_tab(second);
+    assert_eq!(
+        *engine.automatic_pip.lock().unwrap(),
+        vec![(Some(second), false)]
+    );
+    shell.operation_set_app_setting("tabs.automatic-pip".into(), "false".into());
+    assert_eq!(
+        engine.automatic_pip.lock().unwrap().last(),
+        Some(&(None, false))
+    );
+    engine.automatic_pip.lock().unwrap().clear();
+    shell.windows.focused_mut().unwrap().splits = None;
+    shell.focus_tab(first);
+    assert_eq!(
+        *engine.automatic_pip.lock().unwrap(),
+        vec![(Some(first), false)]
+    );
+}
+
+#[test]
 fn switching_tabs_shows_only_active() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);

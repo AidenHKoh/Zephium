@@ -293,6 +293,7 @@ type FirstUrlAfterReply = Option<(Arc<str>, NavigationRequestId)>;
 
 #[derive(Default)]
 pub(crate) struct FakeEngine {
+    automatic_pip: Mutex<Vec<(Option<ItemId>, bool)>>,
     picker_result: Mutex<Option<zephium_core::blocker::ElementPickerResult>>,
     hold_picker: std::sync::atomic::AtomicBool,
     held_picker: Mutex<Option<zephium_core::blocker::ElementPickerCompletion>>,
@@ -459,6 +460,16 @@ impl FakeEngine {
 }
 
 impl Engine for FakeEngine {
+    fn automatic_pip(&self, id: ItemId, background: bool) -> NativeDispatch {
+        self.automatic_pip
+            .lock()
+            .unwrap()
+            .push((Some(id), background));
+        NativeDispatch::Scheduled
+    }
+    fn cancel_automatic_pip(&self) {
+        self.automatic_pip.lock().unwrap().push((None, false));
+    }
     fn set_focus_gate(&self, gate: Option<zephium_core::time::FocusGate>) {
         self.log(match gate {
             Some(gate) => format!("focus-gate {}", gate.shut.join(",")),

@@ -2,6 +2,8 @@
 mod agent_context;
 #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
 mod agent_cookie_source;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod automatic_pip;
 mod blocker_statistics;
 #[cfg(all(test, target_os = "windows"))]
 mod browser_windows_qualification;
@@ -147,6 +149,8 @@ struct Spare {
 // Keep native observer registrations adjacent to their WebView and drop them
 // first. Platform observers never strongly capture this wrapper or WebView.
 struct ObservedView {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    automatic_pip_sequence: Rc<Cell<u64>>,
     #[cfg(target_os = "macos")]
     _capture_observer: objc2::rc::Retained<crate::platform::macos::capture::CaptureObserver>,
     #[cfg(target_os = "macos")]

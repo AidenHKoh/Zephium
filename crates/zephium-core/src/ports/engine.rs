@@ -927,6 +927,13 @@ pub trait Engine {
     fn fullscreen_presentation(&self) -> FullscreenPresentation {
         FullscreenPresentation::OwnWindow
     }
+    /// Browser tab selection, never a page or Work command. Returning closes
+    /// only the video PiP owned by this automatic presentation.
+    fn automatic_pip(&self, _id: ItemId, _background: bool) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    fn cancel_automatic_pip(&self) {}
+
     /// Asks the page to leave element fullscreen. The result arrives as
     /// [`EngineEvent::FullscreenChanged`]; picture in picture is unaffected.
     fn exit_fullscreen(&self, _id: ItemId) -> NativeDispatch {

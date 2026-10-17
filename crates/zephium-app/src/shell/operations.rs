@@ -840,6 +840,9 @@ impl Shell {
             self.search.include_history = value == "true";
         }
         self.tab_preferences.apply(&key, &value);
+        if key == "tabs.automatic-pip" && value == "false" {
+            self.engine.cancel_automatic_pip();
+        }
         self.apply_time_setting(&key, &value);
         self.apply_performance_setting(&key, &value);
         // This projection is downstream of truthful store-queue admission.

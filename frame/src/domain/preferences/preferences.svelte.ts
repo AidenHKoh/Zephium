@@ -28,6 +28,7 @@ const defaults = {
   "tabs.new-position": "end",
   "tabs.after-close": "next",
   "tabs.switch-to-open": "true",
+  "tabs.automatic-pip": "true",
   "tabs.startup": "continue",
   "time.track": "true",
   "time.retention": "90",

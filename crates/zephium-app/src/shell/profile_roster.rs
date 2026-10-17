@@ -269,6 +269,7 @@ impl Shell {
             self.roster.left_at.insert(leaving, active);
         }
         self.remember_space_left();
+        self.engine.cancel_automatic_pip();
         for id in self.items.view_ids() {
             if self.profile_of_item(id) == Some(leaving) {
                 effects.extend(self.items.hibernate(id));

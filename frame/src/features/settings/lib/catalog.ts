@@ -229,6 +229,12 @@ export const fields = {
     description: m.pref_tabs_duplicates_help,
     initial: true,
   },
+  "tabs.automatic-pip": {
+    section: "tabs",
+    label: m.pref_tabs_automatic_pip,
+    description: m.pref_tabs_automatic_pip_help,
+    initial: true,
+  },
   "tabs.external": {
     section: "tabs",
     label: m.tabs_external,

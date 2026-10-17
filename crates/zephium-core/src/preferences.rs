@@ -26,6 +26,7 @@ pub const KEYS: &[&str] = &[
     "tabs.new-position",
     "tabs.after-close",
     "tabs.switch-to-open",
+    "tabs.automatic-pip",
     "tabs.startup",
     "time.track",
     "time.retention",
@@ -236,6 +237,7 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         | "ui.contrast"
         | "search.history"
         | "tabs.switch-to-open"
+        | "tabs.automatic-pip"
         | "time.track"
         | "performance.sleep"
         | "updates.auto-check"

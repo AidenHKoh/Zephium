@@ -28,8 +28,10 @@ mod agentic_semantic_probe;
 #[cfg(feature = "native-agentic-foreground-probe")]
 pub(crate) use agentic_foreground_probe::ForegroundRenderingLease;
 mod apps;
+mod automatic_pip;
 pub(crate) mod capture;
 pub(crate) mod fullscreen;
+pub(crate) use automatic_pip::automatic_pip;
 pub(crate) use fullscreen::{exit as exit_fullscreen, state as fullscreen_state};
 mod content_filter;
 mod credentials;

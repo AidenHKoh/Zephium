@@ -138,6 +138,7 @@ impl Shell {
             crate::diagnostic!("private: content policy compilation was not admitted");
         }
         if let Some(active) = regular.active {
+            self.engine.cancel_automatic_pip();
             self.items.set_lifecycle(active, Lifecycle::Inactive);
         }
         if let Some(win) = self.windows.focused_mut() {
@@ -165,6 +166,7 @@ impl Shell {
     /// Shows whichever scope the window is not showing, keeping the other's
     /// tabs, focus and splits as they were.
     pub(super) fn swap_private_scope(&mut self) -> Vec<Effect> {
+        self.engine.cancel_automatic_pip();
         let Some(session) = self.private.as_mut() else {
             return Vec::new();
         };

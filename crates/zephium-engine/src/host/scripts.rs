@@ -104,6 +104,8 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
   var mediaMuted = captureGetter(HTMLMediaElement.prototype, 'muted');
   var mediaVolume = captureGetter(HTMLMediaElement.prototype, 'volume');
   var mediaSrcObject = captureGetter(HTMLMediaElement.prototype, 'srcObject');
+  var pictureInPicture = captureGetter(Document.prototype, 'pictureInPictureElement');
+  var videoPresentation = globalThis.HTMLVideoElement && captureGetter(HTMLVideoElement.prototype, 'webkitPresentationMode');
   var trackReadyState = globalThis.MediaStreamTrack &&
       captureGetter(MediaStreamTrack.prototype, 'readyState');
   var getTracks = globalThis.MediaStream && MediaStream.prototype.getTracks;
@@ -436,8 +438,11 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
       var elements = collect('audio,video');
       if (elements.length > MAX_TRACKED) localIncomplete = true;
       var playing = false;
+      if (pictureInPicture && callGetter(pictureInPicture, document)) media = true;
       for (var m = 0; m < elements.length && m < MAX_TRACKED; m++) {
         var element = elements[m];
+        if (videoPresentation && apply(elementMatches, element, ['video']) &&
+            callGetter(videoPresentation, element) === 'picture-in-picture') media = true;
         // Muted autoplay loses nothing on reload; audible playback does.
         if (!callGetter(mediaPaused, element) && !callGetter(mediaEnded, element) &&
             callGetter(mediaReadyState, element) > 0) {
