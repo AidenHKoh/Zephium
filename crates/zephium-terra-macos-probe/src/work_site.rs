@@ -176,6 +176,9 @@ enum Check {
     /// The same compose with Send replaced by an identical new node while
     /// the confirmation waits: the approved step runs once.
     WebmailSwap,
+    /// The same compose with a body that starts empty and takes a block per
+    /// line from the browser's own editing, as a mail composer's does.
+    WebmailBlocks,
     /// The same compose beside an open newsletter thread with its own Reply
     /// box and Send: the new message is sent, the thread is never answered.
     WebmailThread,
@@ -401,6 +404,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("media-held") => vec![Check::Media(media_fixture::Scenario::Held)],
         Some("webmail-compose") => vec![Check::WebmailCompose],
         Some("webmail-swap") => vec![Check::WebmailSwap],
+        Some("webmail-blocks") => vec![Check::WebmailBlocks],
         Some("webmail-thread") => vec![Check::WebmailThread],
         Some("webmail-routes") => vec![Check::WebmailRoutes],
         Some("linearwrite") => vec![Check::LinearWrite],
@@ -2413,7 +2417,10 @@ pub(super) async fn workflow(
                 last = run.state;
                 made.len() == 1 && made[0] == expected && approved_once
             }
-            Check::WebmailCompose | Check::WebmailSwap | Check::WebmailThread => {
+            Check::WebmailCompose
+            | Check::WebmailSwap
+            | Check::WebmailBlocks
+            | Check::WebmailThread => {
                 let before = context.sites.written("/edit/webmail/send").len();
                 let replies = context.sites.written("/edit/webmail/reply").len();
                 let run = context
@@ -2424,6 +2431,7 @@ pub(super) async fn workflow(
                         vec![vec![browse(
                             match check {
                                 Check::WebmailSwap => "/edit/webmail-swap",
+                                Check::WebmailBlocks => "/edit/webmail-blocks",
                                 Check::WebmailThread => "/edit/webmail-thread",
                                 _ => "/edit/webmail",
                             },
@@ -2438,19 +2446,26 @@ pub(super) async fn workflow(
                     .await?;
                 let sent = context.sites.written("/edit/webmail/send");
                 let sent = &sent[before.min(sent.len())..];
+                // The blocks body also reports how often it was typed into:
+                // once per line, so a single fill typed all of it.
+                let expected = if check == Check::WebmailBlocks {
+                    format!("{WEBMAIL_SENT}|3")
+                } else {
+                    WEBMAIL_SENT.to_owned()
+                };
                 let held = confirms(&run);
                 let replied = context.sites.written("/edit/webmail/reply").len() - replies;
                 line(format!(
                     "check=webmail_compose sent={} replied={replied} exact={} confirms={held:?} headline={:?} pages=[{}]",
                     sent.len(),
-                    sent.first().is_some_and(|text| text == WEBMAIL_SENT),
+                    sent.first().is_some_and(|text| *text == expected),
                     run.confirmed.first(),
                     pages_of(&run)
                 ));
                 last = run.state;
                 sent.len() == 1
                     && replied == 0
-                    && sent[0] == WEBMAIL_SENT
+                    && sent[0] == expected
                     && held
                         == vec![(
                             Some(WorkConfirmDecisionV1::Approved),

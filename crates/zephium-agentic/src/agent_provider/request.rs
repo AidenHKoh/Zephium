@@ -135,8 +135,8 @@ const AGENT_BROWSER_INSTRUCTIONS_V1: &str = concat!(
     "advertised ops. Observed ops describe DOM capabilities; the act tool's target enums are the narrower ",
     "task-approved choices. If a desired control is missing from those enums, inspect its containing ",
     "dialog or section; never substitute an unrelated allowed target. For text entry into a fill-capable control, including an editable combobox, ",
-    "use fill directly; no preparatory click is needed. When fill_form is offered for a search/filter form, ",
-    "propose all desired visible field values and its submit control once, instead of separate act turns. ",
+    "use fill directly; no preparatory click is needed. When fill_form is offered and the goal gives values for ",
+    "several visible fields of a form, propose them all once (with its submit control only for a search), instead of separate act turns. ",
     "Native code chooses widget operations, commits suggestions and verifies values. ",
     "value=\"\" means observed empty text; ",
     "an absent value is unknown. Do not reuse a ",
@@ -4779,7 +4779,7 @@ fn append_act_targets(
     if config.permits_tool(AgentBrowserToolKind::FillForm) {
         fact.insert(
             "fill_form".into(),
-            Value::String("When the goal gives values for two or more fields here, set them all in one fill_form call with the form's own submit button: the host types each value and picks its one matching suggestion or calendar day. A button that opens a picker (an airport or a date) is a field too: give it the value to choose. Use act only for a single field.".into()),
+            Value::String("When the goal gives values for two or more fields visible here, set them all in one fill_form call: the host types each value and picks its one matching suggestion or calendar day. Give the form's own submit button only when it runs a search; a button that sends, posts or saves comes after, as its own act. A button that opens a picker (an airport or a date) is a field too: give it the value to choose. Use act only for a single field.".into()),
         );
     }
     let text = format!("ZEPHIUM_HOST_ACT_TARGETS_V1\n{}", Value::Object(fact));
@@ -5757,13 +5757,7 @@ fn openai_tool_wires<'a>(
                 && !definitions
                     .iter()
                     .any(|tool| tool.kind == AgentBrowserToolKind::FillForm))
-            .then(|| {
-                if config.requires_form_submit() {
-                    &*SEARCH_FORM_TOOL
-                } else {
-                    &*FORM_TOOL
-                }
-            }),
+            .then(|| &*FORM_TOOL),
         )
         .chain(config.adds_baseline_read().then(|| &*BASELINE_READ_TOOL))
         .chain(
@@ -5835,13 +5829,7 @@ fn anthropic_tool_wires<'a>(
                 && !definitions
                     .iter()
                     .any(|tool| tool.kind == AgentBrowserToolKind::FillForm))
-            .then(|| {
-                if config.requires_form_submit() {
-                    &*ANTHROPIC_SEARCH_FORM_TOOL
-                } else {
-                    &*ANTHROPIC_FORM_TOOL
-                }
-            }),
+            .then(|| &*ANTHROPIC_FORM_TOOL),
         )
         .chain(
             config
@@ -5956,20 +5944,6 @@ static FORM_TOOL: LazyLock<BrowserToolDefinition> = LazyLock::new(|| BrowserTool
     description: tool_description(AgentBrowserToolKind::FillForm),
     parameters: tool_parameters(AgentBrowserToolKind::FillForm, false),
 });
-
-static SEARCH_FORM_TOOL: LazyLock<BrowserToolDefinition> = LazyLock::new(|| {
-    let mut tool = FORM_TOOL.clone();
-    tool.parameters["properties"]["submit"] = reference_schema();
-    tool.description = "Batch one search/filter/date form: all requested target/value pairs and its observed final control. Use exact option labels and observed formats; date/time segments stay numeric. Native code verifies fields, then independently gates the final control: only a read-only control runs here; other effects stop for normal approval. For intentionally preparation-only work use act.";
-    tool
-});
-
-static ANTHROPIC_SEARCH_FORM_TOOL: LazyLock<AnthropicBrowserToolDefinition> =
-    LazyLock::new(|| AnthropicBrowserToolDefinition {
-        kind: SEARCH_FORM_TOOL.kind,
-        description: SEARCH_FORM_TOOL.description,
-        input_schema: project_anthropic_schema(&SEARCH_FORM_TOOL.parameters),
-    });
 
 static ANTHROPIC_FORM_TOOL: LazyLock<AnthropicBrowserToolDefinition> =
     LazyLock::new(|| AnthropicBrowserToolDefinition {
@@ -6332,7 +6306,7 @@ static SITE_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinit
                     .as_array_mut()
                     .expect("fixed action schema"),
             );
-            tool.description = "Propose one current-ref Click, Fill, Select, Press or Scroll on this site with verification of its intended outcome. Fill and Select use local_write for drafts and search fields; typing into a document that saves as you type is external_write. Click uses read for exploring, opening, searching and filtering: a search or filter button may load a results page, which then opens for you. local_write is for reversible local changes. A click that sends, posts, publishes, pays, books, deletes, shares or saves declares its true effect (communication, purchase, destructive or external_write) and must be the batch's only action; the app asks the person when it needs to. Adding to a cart, basket or wishlist is external_write; purchase is only placing the order or paying. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Verify an effect that lands elsewhere on the page with page_changed. Opening a page dialog requires page_dialog_opened; choosing an item that dismisses it requires page_dialog_closed. Scroll uses read and immediate settlement with scroll_position_changed verification; amount=into_view brings a disclosure listed for scroll into view, never the document; a click, fill or press brings its own control into view, so after a fill act on the next control directly. A native select is chosen with select, never clicked. Press sends one key to a control: Enter in a message box sends what it holds (communication; fill the box first, and never type the key into the text), Enter in a search field searches (read), Escape closes a popup or menu (read), arrow keys move in a list or picker. Rich editors (a message composer, an issue description, a page's blocks) are filled like any text box: fill replaces their text. Typed fields take their own format: a number field a plain number such as 12.5, a date field YYYY-MM-DD, a time field HH:MM, an email or web address with no surrounding spaces. A custom dropdown opens with a click; choose its observed option by clicking it, with page_changed verification when the choice closes the list. Follow shown links with the navigate tool.";
+            tool.description = "Propose one current-ref Click, Fill, Select, Press or Scroll on this site with verification of its intended outcome. Fill and Select use local_write for drafts and search fields; typing into a document that saves as you type is external_write. Click uses read for exploring, opening, searching and filtering: a search or filter button may load a results page, which then opens for you. local_write is for reversible local changes. A click that sends, posts, publishes, pays, books, deletes, shares or saves declares its true effect (communication, purchase, destructive or external_write) and must be the batch's only action; the app asks the person when it needs to. Adding to a cart, basket or wishlist is external_write; purchase is only placing the order or paying. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Verify an effect that lands elsewhere on the page with page_changed. Opening a page dialog requires page_dialog_opened; choosing an item that dismisses it requires page_dialog_closed. Scroll uses read and immediate settlement with scroll_position_changed verification; amount=into_view brings a disclosure listed for scroll into view, never the document; a click, fill or press brings its own control into view, so after a fill act on the next control directly. A native select is chosen with select, never clicked. Press sends one key to a control: Enter in a message box sends what it holds (communication; fill the box first, and never type the key into the text), Enter in a search field searches (read), Escape closes a popup or menu (read), arrow keys move in a list or picker. Rich editors (a message composer, an issue description, a page's blocks) are filled like any text box: fill replaces their text. A form whose several values the goal gives is filled with one fill_form call, never a fill per call. Typed fields take their own format: a number field a plain number such as 12.5, a date field YYYY-MM-DD, a time field HH:MM, an email or web address with no surrounding spaces. A custom dropdown opens with a click; choose its observed option by clicking it, with page_changed verification when the choice closes the list. Follow shown links with the navigate tool.";
         }
         tools
     });
@@ -6882,7 +6856,7 @@ fn tool_description(kind: AgentBrowserToolKind) -> &'static str {
         AgentBrowserToolKind::Act => {
             "Propose one bounded, homogeneous semantic action batch. Classify the action's effect, not the objective: read explores without changing form values; local_write changes reversible local page/form state, including search input and selection. Edits saved to a service require external_write; sending, buying and deleting require their corresponding stronger effects. The host independently assesses effects and permission."
         }
-        AgentBrowserToolKind::FillForm => "Fill a search/filter form in one turn: ordered target/value pairs. Use exact text or option labels and each field's observed format (numeric segments stay numeric). Native code chooses widget operations and verifies values. Supply submit when results are requested; null means prepare only. Each effect is independently authorized; failures name the field.",
+        AgentBrowserToolKind::FillForm => "Fill several fields of one form in one turn (a search, date, message or sign-up form): ordered target/value pairs. Use exact text or option labels and each field's observed format (numeric segments stay numeric). Native code chooses widget operations and verifies values. Supply submit only for a read-only search control; null leaves the form filled for a later act that sends, posts or saves. Each effect is independently authorized; failures name the field.",
         AgentBrowserToolKind::Wait => "Wait for one typed observable condition.",
         AgentBrowserToolKind::Read => "Request bounded readable semantic content.",
         AgentBrowserToolKind::Extract => "Apply one shell-registered extraction schema.",
@@ -8209,7 +8183,7 @@ mod tests {
     }
 
     #[test]
-    fn search_form_requires_submission_while_trusted_preparation_remains_available() {
+    fn a_site_form_takes_its_fields_with_or_without_a_search_submit() {
         for provider in [
             AgentProviderKind::OpenAiResponses,
             AgentProviderKind::AnthropicMessages,
@@ -8237,20 +8211,13 @@ mod tests {
                 "input_schema"
             }];
             validate_strict_schema(schema);
-            assert!(super::super::call_schema::schema_problem(
-                schema,
-                &json!({"fields":[{"target":"@a1","value":"Northport"}],"submit":null})
-            )
-            .is_some());
-            assert!(super::super::call_schema::schema_problem(
-                schema,
-                &json!({"fields":[{"target":"@a1","value":"Northport"}],"submit":"@a2"})
-            )
-            .is_none());
-            assert!(config.requires_form_submit());
-            assert!(!provider_config(provider)
-                .with_compound_form()
-                .requires_form_submit());
+            for submit in [json!(null), json!("@a2")] {
+                assert!(super::super::call_schema::schema_problem(
+                    schema,
+                    &json!({"fields":[{"target":"@a1","value":"Northport"}],"submit":submit})
+                )
+                .is_none());
+            }
         }
     }
 
@@ -9918,7 +9885,7 @@ mod tests {
                 (AgentBrowserToolKind::Snapshot, 1_682),
                 (AgentBrowserToolKind::Locate, 2_373),
                 (AgentBrowserToolKind::Act, 14_301),
-                (AgentBrowserToolKind::FillForm, 970),
+                (AgentBrowserToolKind::FillForm, 1_074),
                 (AgentBrowserToolKind::Wait, 2_152),
                 (AgentBrowserToolKind::Read, 1_510),
                 (AgentBrowserToolKind::Extract, 1_602),
@@ -9927,7 +9894,7 @@ mod tests {
                 (AgentBrowserToolKind::ResumeAfterHuman, 204),
             ]
         );
-        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 26772);
+        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 26876);
     }
 
     #[test]

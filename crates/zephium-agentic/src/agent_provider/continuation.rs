@@ -1148,12 +1148,6 @@ impl AgentProviderContinuation {
         {
             return Err(denied);
         }
-        if config.requires_form_submit() && form.submit().is_none() {
-            return Err(AgentBrowserFormError {
-                field: None,
-                fault: AgentBrowserFormFault::SubmitRequired,
-            });
-        }
         let targets = self
             .transcript
             .action_targets()

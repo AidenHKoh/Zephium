@@ -641,3 +641,32 @@ fn cross_context_origin_stale_generation_and_wrong_effect_never_assess() {
         .evaluate(&observe(&foreign, 2, "wanted", false, ""))
         .is_err());
 }
+
+#[test]
+fn a_code_owned_fill_binds_in_a_dialog_view_that_has_no_document_root() {
+    let frame = frame();
+    let wire = serde_json::json!({"v":1,"i":1,"g":1,"c":"complete","n":[
+        {"k":1,"r":"dialog","n":"New Message"},
+        {"k":2,"p":0,"r":"textbox","n":"Subject","o":3,"v":{"k":"text","value":""}}
+    ]});
+    let look = decode(&frame, 1, &wire.to_string());
+    assert!(SemanticObservationAcknowledgement::whole_page_scope(&look).is_none());
+    let recipe = SemanticActionProposal::try_new(
+        SemanticActionIntent::Fill {
+            target: look.frames()[0].nodes()[1].reference(),
+            value: SemanticActionText::try_new("Status".into()).unwrap(),
+        },
+        SemanticEffectClass::LocalWrite,
+        SemanticWaitCondition::Immediate,
+        SemanticVerification::TargetValueMatchesInput,
+        SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS).unwrap(),
+    )
+    .unwrap();
+    assert!(crate::AgentBrowserActionProposal::bind_code_owned(
+        recipe,
+        &look,
+        &[look.frames()[0].frame().clone()],
+        SemanticActionBatchId::new(1).unwrap(),
+    )
+    .is_ok());
+}

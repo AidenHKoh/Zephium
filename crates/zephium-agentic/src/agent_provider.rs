@@ -1130,10 +1130,6 @@ impl AgentProviderCallConfig {
         )
     }
 
-    pub(super) fn requires_form_submit(&self) -> bool {
-        self.compound_form && self.tools == BrowserToolProfile::SiteActionsExtraction
-    }
-
     /// Reports whether this immutable request profile advertises a tool kind.
     pub fn permits_tool(&self, kind: AgentBrowserToolKind) -> bool {
         if kind == AgentBrowserToolKind::FillForm {

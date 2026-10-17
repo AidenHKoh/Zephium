@@ -821,7 +821,7 @@ pub(crate) fn verify_semantic_action(
                 if before != observed_before
                     || after != observed_after
                     || before == expected.as_str()
-                    || after != expected.as_str()
+                    || !crate::semantic_action::fill_value_matches(after, expected.as_str())
                 {
                     return Err(SemanticVerificationError::OutcomeNotObserved);
                 }
@@ -1916,6 +1916,53 @@ mod tests {
                     "caller-supplied empty evidence cannot replace missing observation"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_multi_line_fill_verifies_when_the_editor_keeps_other_line_breaks() {
+        let (observation, _) = observation();
+        let typed = "Hi Dana,\n\nThe release is ready.\nThanks, Hayk";
+        let batch = bind(
+            &observation,
+            SemanticActionIntent::Fill {
+                target: SemanticReferenceId::new(3).expect("target"),
+                value: SemanticActionText::try_new(typed.to_owned()).expect("text"),
+            },
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::TargetValueMatchesInput,
+        )
+        .expect("batch");
+        let prepared = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare");
+        let action = &prepared;
+        let attempt = SemanticActionAttemptId::new(1).expect("attempt");
+        let tracker = immediate(action, 1);
+        for (kept, verifies) in [
+            ("Hi Dana,\n\n\nThe release is ready.\nThanks, Hayk\n", true),
+            ("Hi Dana,\n\nThe release is ready.", false),
+        ] {
+            let snapshot = current(
+                &observation,
+                json!([
+                    {"k": 1, "r": "document", "o": 16},
+                    {"k": 3, "p": 0, "r": "textbox", "n": "Private title",
+                     "v": {"k": "text", "value": kept}, "o": 10}
+                ]),
+            );
+            let result = verify_semantic_action(
+                &tracker,
+                action,
+                SemanticEffectEvidence::exact_target_value(
+                    attempt,
+                    SemanticSettleInstant::from_millis(101),
+                    &snapshot,
+                    "old",
+                    kept,
+                ),
+            );
+            assert_eq!(result.is_ok(), verifies);
         }
     }
 
