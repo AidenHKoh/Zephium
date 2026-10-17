@@ -14,6 +14,7 @@ pub(super) fn editor(path: &str) -> Option<&'static str> {
         "/edit/slack" | "/edit/slack-enter" => Some(SLACK),
         "/edit/linear" => Some(LINEAR),
         "/edit/notion" => Some(NOTION),
+        "/edit/webmail" | "/edit/webmail-swap" => Some(WEBMAIL),
         _ => None,
     }
 }
@@ -185,6 +186,47 @@ document.querySelectorAll('.block').forEach(add);
 </script></body></html>"#
 );
 
+/// Gmail's compose: the Compose button moves the address to a fragment that
+/// holds state (`#inbox?compose=new`), which loads no document, and opens a
+/// dialog with To and Subject inputs, a contenteditable body and Send. The
+/// swap variant re-renders Send as an identical new node, as a single-page app
+/// does while a confirmation waits.
+const WEBMAIL: &str = concat!(
+    r#"<!doctype html><html><head><meta charset="utf-8"><title>Inbox - Mail</title></head><body>
+<nav aria-label="Mailboxes"><a href="/edit/webmail">Inbox</a></nav>
+<main><h1>Inbox</h1><button id="compose">Compose</button>
+<div role="list" aria-label="Messages"><div role="listitem">Dana: Quarterly report</div></div>
+<div id="status" role="status"></div></main>
+<div id="dialog" role="dialog" aria-modal="true" aria-label="New Message" hidden>
+<h2>New Message</h2>
+<input id="to" type="text" aria-label="To recipients">
+<input id="subject" type="text" aria-label="Subject">
+<div id="body" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message Body"></div>
+<div id="bar"><button id="send">Send</button></div>
+</div>"#,
+    "__EDITOR__",
+    r#"<script>
+var dialog=document.getElementById('dialog'), body=mount(document.getElementById('body'),function(){ arm(); });
+var swapping=location.pathname.indexOf('swap')>=0, swaps=[];
+location.hash='inbox';
+document.getElementById('compose').addEventListener('click',function(){ location.hash='inbox?compose=new'; dialog.hidden=false; document.getElementById('to').focus(); });
+function send(){
+  var parts=[document.getElementById('to').value, document.getElementById('subject').value, body.text()];
+  fetch('/edit/webmail/send?text='+encodeURIComponent(parts.join('|')),{method:'POST'});
+  dialog.hidden=true; document.getElementById('status').textContent='Message sent';
+}
+function rerender(){
+  var old=document.getElementById('send'), fresh=old.cloneNode(true);
+  fresh.addEventListener('click',send); old.replaceWith(fresh);
+}
+document.getElementById('send').addEventListener('click',send);
+function arm(){
+  if(!swapping) return;
+  swaps.forEach(clearTimeout); swaps=[3500].map(function(ms){ return setTimeout(rerender,ms); });
+}
+</script></body></html>"#
+);
+
 /// The replica with the shared editor in place.
 pub(super) fn page(path: &str) -> Option<String> {
     let page = editor(path).map(|html| html.replace("__EDITOR__", EDITOR))?;
@@ -205,7 +247,13 @@ mod tests {
             Some("On my way 🚀")
         );
         assert_eq!(super::posted("/edit/slack/send"), None);
-        for path in ["/edit/slack", "/edit/linear", "/edit/notion"] {
+        for path in [
+            "/edit/slack",
+            "/edit/linear",
+            "/edit/notion",
+            "/edit/webmail",
+            "/edit/webmail-swap",
+        ] {
             let page = super::page(path).unwrap();
             assert!(page.contains("function mount") && !page.contains("__EDITOR__"));
         }

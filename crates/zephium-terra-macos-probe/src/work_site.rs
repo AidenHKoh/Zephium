@@ -65,6 +65,9 @@ const BOARD_FACT: &str = "Ticket ZP-42 is due Thursday";
 const DAY_FACT: &str = "Standup at 09:15";
 const SHELF_FACT: &str = "Shelf total is 9 products";
 const KETTLE_FACT: &str = "Kettle price is 37 credits";
+const WEBMAIL_GOAL: &str = "Compose a new email to dana@example.test with the subject Status, then send it. The body, where \\n stands for a real line break to type, is: Hi Dana,\\n\\nThe release is ready.\\nThanks, Hayk";
+const WEBMAIL_SENT: &str =
+    "dana@example.test|Status|Hi Dana,\n\nThe release is ready.\nThanks, Hayk";
 const DESK_FACT: &str = "Desk bell rings twice at noon";
 /// The vault's own sign-in, kept by the server: a tab sign-in stands for it.
 static VAULT_OPEN: AtomicBool = AtomicBool::new(false);
@@ -156,6 +159,12 @@ enum Check {
     LinearWrite,
     /// A line added to a page of blocks that saves as it is typed.
     NotionWrite,
+    /// A mail compose that moves to `#inbox?compose=new` and sends a
+    /// multi-line body: the page loads nothing, the body keeps its lines.
+    WebmailCompose,
+    /// The same compose with Send replaced by an identical new node while
+    /// the confirmation waits: the approved step runs once.
+    WebmailSwap,
     /// A consent choice a page outside the person's session saved in one run
     /// reaches the site in the next run from Work's own memory; the profile's
     /// own store holds none.
@@ -368,6 +377,8 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("media-crop") => vec![Check::Media(media_fixture::Scenario::Canvas)],
         Some("media-record") => vec![Check::Media(media_fixture::Scenario::Record)],
         Some("media-held") => vec![Check::Media(media_fixture::Scenario::Held)],
+        Some("webmail-compose") => vec![Check::WebmailCompose],
+        Some("webmail-swap") => vec![Check::WebmailSwap],
         Some("linearwrite") => vec![Check::LinearWrite],
         Some("notionwrite") => vec![Check::NotionWrite],
         Some("writes") => vec![
@@ -2326,6 +2337,43 @@ pub(super) async fn workflow(
                     )];
                 last = run.state;
                 made.len() == 1 && made[0] == expected && approved_once
+            }
+            Check::WebmailCompose | Check::WebmailSwap => {
+                let before = context.sites.written("/edit/webmail/send").len();
+                let run = context
+                    .run_deciding(
+                        "Send Dana the status",
+                        false,
+                        "Allow",
+                        vec![vec![browse(
+                            if check == Check::WebmailSwap {
+                                "/edit/webmail-swap"
+                            } else {
+                                "/edit/webmail"
+                            },
+                            WEBMAIL_GOAL,
+                        )]],
+                        vec![(true, false)],
+                    )
+                    .await?;
+                let sent = context.sites.written("/edit/webmail/send");
+                let sent = &sent[before.min(sent.len())..];
+                let held = confirms(&run);
+                line(format!(
+                    "check=webmail_compose sent={} exact={} confirms={held:?} headline={:?} pages=[{}]",
+                    sent.len(),
+                    sent.first().is_some_and(|text| text == WEBMAIL_SENT),
+                    run.confirmed.first(),
+                    pages_of(&run)
+                ));
+                last = run.state;
+                sent.len() == 1
+                    && sent[0] == WEBMAIL_SENT
+                    && held
+                        == vec![(
+                            Some(WorkConfirmDecisionV1::Approved),
+                            WorkStepStatus::Succeeded,
+                        )]
             }
             Check::NotionWrite => {
                 let before = context.sites.written("/edit/notion/save").len();
