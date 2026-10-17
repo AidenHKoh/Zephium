@@ -1590,6 +1590,10 @@ fn says_done(line: &str) -> bool {
     if parts.is_empty() || parts.len() > 8 || !names_any(&line, &DONE_WORDS) {
         return false;
     }
+    // An editor keeping what is being written ("Draft saved") commits nothing.
+    if names_any(&line, &["draft", "drafts", "autosaved", "szkic", "wersja robocza"]) {
+        return false;
+    }
     let edge = |word: &str| {
         DONE_WORDS
             .iter()
@@ -2940,6 +2944,8 @@ mod tests {
             ),
             ("Recently ordered together", false),
             ("Sent", true),
+            ("Draft saved", false),
+            ("Compose: Draft saved", false),
         ] {
             assert_eq!(says_done(line), done, "{line}");
         }
