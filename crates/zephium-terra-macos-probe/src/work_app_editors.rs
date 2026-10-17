@@ -16,6 +16,7 @@ pub(super) fn editor(path: &str) -> Option<&'static str> {
         "/edit/notion" => Some(NOTION),
         "/edit/webmail"
         | "/edit/webmail-swap"
+        | "/edit/webmail-autosave"
         | "/edit/webmail-blocks"
         | "/edit/webmail-thread" => Some(WEBMAIL),
         _ => None,
@@ -203,7 +204,9 @@ document.querySelectorAll('.block').forEach(add);
 /// dialog with To and Subject inputs, a contenteditable body and Send. The
 /// swap variant re-renders Send as an identical new node, as a single-page app
 /// does while a confirmation waits. The thread variant opens a newsletter's
-/// conversation with its own Reply box and Send beside Compose.
+/// conversation with its own Reply box and Send beside Compose. The autosave
+/// variant saves the draft as Gmail does while a confirmation waits: the
+/// fragment takes the draft's id, the box takes the subject as its title.
 const WEBMAIL: &str = concat!(
     r#"<!doctype html><html><head><meta charset="utf-8"><title>Inbox - Mail</title></head><body>
 <nav aria-label="Mailboxes"><a href="/edit/webmail">Inbox</a></nav>
@@ -222,6 +225,7 @@ const WEBMAIL: &str = concat!(
 var dialog=document.getElementById('dialog'), blocks=location.pathname.indexOf('blocks')>=0;
 var body=(blocks ? plain : mount)(document.getElementById('body'),function(){ arm(); });
 var swapping=location.pathname.indexOf('swap')>=0, swaps=[];
+var autosave=location.pathname.indexOf('autosave')>=0, saves=0, saving=null;
 location.hash='inbox';
 document.getElementById('compose').addEventListener('click',function(){ location.hash='inbox?compose=new'; dialog.hidden=false; document.getElementById('to').focus(); });
 function send(){
@@ -242,6 +246,15 @@ if(reply) reply.addEventListener('click',function(){
   document.getElementById('status').textContent='Reply sent';
 });
 function arm(){
+  if(autosave){
+    clearTimeout(saving);
+    saving=setTimeout(function(){
+      saves++; location.hash='inbox?compose=draft'+saves;
+      var title=document.getElementById('subject').value||'New Message';
+      dialog.setAttribute('aria-label',title); dialog.querySelector('h2').textContent=title;
+      document.getElementById('status').textContent='Draft saved';
+    },1500);
+  }
   if(!swapping) return;
   swaps.forEach(clearTimeout); swaps=[3500].map(function(ms){ return setTimeout(rerender,ms); });
 }
@@ -287,6 +300,7 @@ mod tests {
             "/edit/notion",
             "/edit/webmail",
             "/edit/webmail-swap",
+            "/edit/webmail-autosave",
             "/edit/webmail-blocks",
             "/edit/webmail-thread",
         ] {
