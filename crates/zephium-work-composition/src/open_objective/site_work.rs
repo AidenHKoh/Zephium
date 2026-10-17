@@ -1423,6 +1423,9 @@ struct GateState {
     /// The addresses the task names as recipients: a send whose message
     /// shows none of them goes back to the model.
     recipients: Vec<String>,
+    /// This task typed one of those addresses into a field: a mail app may
+    /// then show the recipient by contact name alone.
+    typed_recipient: bool,
     /// The task reads a daily app's view as its records.
     view: bool,
     /// The original task expects the person's account, even outside app views.
@@ -2038,6 +2041,16 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             node,
             snapshot,
         );
+        if action.kind() == SemanticActionKind::Fill {
+            let mut state = self.gate.state();
+            if let Some(text) = action.fill_text() {
+                let typed = email_addresses(text.as_str());
+                state.typed_recipient |= state
+                    .recipients
+                    .iter()
+                    .any(|address| typed.contains(address));
+            }
+        }
         let keyboard_mutation = action.kind() == SemanticActionKind::Press
             && key_changes_value(action.bound_action().press_key(), node);
         if keyboard_mutation {
@@ -2079,6 +2092,7 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
         let mut state = self.gate.state();
         if consequence == Consequence::Communication
             && !state.recipients.is_empty()
+            && !state.typed_recipient
             && !addressed_to(&state.recipients, node, snapshot)
         {
             return Err(AgentWorkFailure::WrongRecipient);
@@ -4068,6 +4082,34 @@ mod tests {
             Err(AgentWorkFailure::WrongRecipient)
         ));
         assert!(policy.gate.pending().is_none(), "no card is raised");
+    }
+
+    #[test]
+    fn a_recipient_the_task_typed_counts_when_the_page_shows_only_a_contact_name() {
+        let compose = page(vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"dialog","n":"New message","fc":true}),
+            json!({"k":3,"p":1,"r":"button","n":"Dana Example","o":1,"ak":1,"fc":true}),
+            json!({"k":4,"p":1,"r":"textbox","n":"Subject","o":10,"fc":true,
+                "v":{"k":"text","value":"Hi"}}),
+            json!({"k":5,"p":1,"r":"button","n":"Send","o":9,"ak":1,"fc":true,
+                "b":{"x":1,"y":1,"w":100,"h":30}}),
+        ]);
+        let policy = SiteWorkPolicy {
+            gate: Arc::new(SiteGate::default().addressed_to(vec!["dana@example.test".into()])),
+            asks: true,
+        };
+        let send = click(&compose, 5, SemanticEffectClass::Communication);
+        assert!(matches!(
+            policy.assess(&send, &compose),
+            Err(AgentWorkFailure::WrongRecipient)
+        ));
+        policy.gate.state().typed_recipient = true;
+        assert!(matches!(
+            policy.assess(&send, &compose),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        assert!(policy.gate.pending().is_some(), "held for the person");
     }
 
     #[test]
