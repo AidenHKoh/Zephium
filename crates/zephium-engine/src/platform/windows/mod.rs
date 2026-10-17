@@ -29,6 +29,7 @@ mod content_filter;
 mod find;
 pub(crate) use find::{find, FindReport, FindSession};
 mod fullscreen;
+mod fullscreen_transition;
 pub(crate) use fullscreen::{exit_fullscreen, fullscreen_state};
 pub use fullscreen::{install_fullscreen_observer, FullscreenObserver};
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]

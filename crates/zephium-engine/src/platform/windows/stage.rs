@@ -132,6 +132,8 @@ struct HostView {
 type PlacementFailureCallback = Rc<dyn Fn(ItemId, Arc<AtomicBool>)>;
 
 struct State {
+    fullscreen_transition: Option<super::fullscreen_transition::FullscreenTransition>,
+    fullscreen_restore: Option<RECT>,
     parent: HWND,
     gap: f64,
     origin: (f64, f64),
@@ -235,6 +237,8 @@ impl Stage {
         on_placement_failure: impl Fn(ItemId, Arc<AtomicBool>) + 'static,
     ) -> Self {
         let state = Rc::new(RefCell::new(State {
+            fullscreen_transition: None,
+            fullscreen_restore: None,
             parent,
             gap,
             origin: (0.0, 0.0),
@@ -278,7 +282,11 @@ impl Stage {
             // A slide is started only by a deliberate change of shape of a
             // stage already on screen, where nothing but the horizontal
             // extent changes. Any other layout ends a journey in progress.
-            let motion = s.pending_motion.take();
+            let motion = s.pending_motion.take().filter(|_| {
+                !s.fullscreen_transition
+                    .as_ref()
+                    .is_some_and(|transition| transition.active())
+            });
             s.slide = match (motion, region) {
                 (Some(StageMotion::Slide), Some(r))
                     if !s.hidden
@@ -342,6 +350,9 @@ impl Stage {
         // Preserve the old no-flash invariant: obsolete panes are hidden in
         // this call; positioning/showing the latest panes is coalesced.
         hide_views(&self.state, &hide_now);
+        if let Some(transition) = self.state.borrow().fullscreen_transition.clone() {
+            transition.layout_changed();
+        }
         schedule_sync(&self.state);
         true
     }
@@ -361,7 +372,37 @@ impl Stage {
         }
         let previous = std::mem::replace(&mut state.fullscreen, id);
         state.dirty.extend(previous.into_iter().chain(id));
+        state.slide = None;
+        state.pending_motion = None;
+        let parent = state.parent;
+        let controller = id
+            .or(previous)
+            .and_then(|owner| state.views.get(&owner).map(|view| view.controller.clone()));
+        let restore = if id.is_none() {
+            state.fullscreen_restore.take()
+        } else {
+            None
+        };
         drop(state);
+        if id.is_some() && previous.is_none() {
+            let mut rect = RECT::default();
+            if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(parent, &mut rect) }
+                .is_ok()
+            {
+                self.state.borrow_mut().fullscreen_restore = Some(rect);
+            }
+        }
+        let transition = super::fullscreen_transition::FullscreenTransition::new(
+            parent,
+            controller,
+            id.is_some(),
+            restore,
+        );
+        let previous_transition = std::mem::replace(
+            &mut self.state.borrow_mut().fullscreen_transition,
+            transition,
+        );
+        drop(previous_transition);
         schedule_sync(&self.state);
     }
 
@@ -1134,6 +1175,10 @@ fn sync(state: &Rc<RefCell<State>>) {
     }
     for placement in placements.iter().filter(|placement| placement.show) {
         apply_native_placement(state, placement);
+    }
+    let transition = state.borrow().fullscreen_transition.clone();
+    if let Some(transition) = transition {
+        transition.raise();
     }
     // The next step of the journey is the next pass: every visible pane is
     // due to move again, on the stage's own frame-paced timer.
