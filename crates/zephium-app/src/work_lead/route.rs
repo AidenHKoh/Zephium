@@ -163,6 +163,22 @@ pub(crate) fn reaches_own_app(brand: &str, host: Option<&str>) -> bool {
     })
 }
 
+/// The app's own host for a service named by a bare site that only
+/// redirects to it on another site: gmail.com for mail.google.com.
+pub(crate) fn app_host(host: &str) -> Option<&'static str> {
+    let host = host.trim_start_matches("www.").to_ascii_lowercase();
+    let site_of = |host: &str| crate::work_sites::site_of(&format!("https://{host}/"));
+    let bare = site_of(&host).is_some_and(|site| site == host);
+    let app = site(&brand(
+        Some(&WorkPartServiceV1 {
+            host: Some(host.clone()),
+            connection: None,
+        }),
+        "",
+    )?)?;
+    (bare && site_of(app) != site_of(&host)).then_some(app)
+}
+
 /// Sites an app moved away from, which models still name it by.
 const FORMER_SITES: [(&str, &str); 1] = [("notion", "notion.so")];
 
@@ -297,6 +313,15 @@ mod tests {
         let website = settle(WorkHelperV1::Connection, "linear", None, false).unwrap();
         assert_eq!(website.0, WorkHelperV1::Browser);
         assert_eq!(website.1.host.as_deref(), Some("linear.app"));
+    }
+
+    #[test]
+    fn a_service_named_by_a_site_that_only_redirects_opens_its_app() {
+        assert_eq!(app_host("gmail.com"), Some("mail.google.com"));
+        assert_eq!(app_host("www.gmail.com"), Some("mail.google.com"));
+        assert_eq!(app_host("mail.google.com"), None);
+        assert_eq!(app_host("slack.com"), None);
+        assert_eq!(app_host("example.com"), None);
     }
 
     #[test]

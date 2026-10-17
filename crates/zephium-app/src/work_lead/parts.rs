@@ -495,6 +495,11 @@ where
         if spec.helper == WorkHelperV1::Browser && self.run.browser_down() {
             return (BROWSER_DOWN.into(), true);
         }
+        if let Some(service) = spec.service.as_mut() {
+            if let Some(app) = service.host.as_deref().and_then(super::route::app_host) {
+                service.host = Some(app.into());
+            }
+        }
         let site = part_site(&spec);
         if let Some(site) = &site {
             match self.claim_site(site, &spec.title) {
@@ -2011,7 +2016,10 @@ pub(crate) fn step_request(
                 if !public_host(&site) {
                     return Err("start is an https page or a bare site such as airbnb.com".into());
                 }
-                format!("https://{site}/")
+                format!(
+                    "https://{}/",
+                    super::route::app_host(&site).unwrap_or(&site)
+                )
             };
             WorkStepKindV1::Read {
                 verbatim,
