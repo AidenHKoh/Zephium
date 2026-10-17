@@ -2314,6 +2314,7 @@ pub(super) async fn lead_workflow(
                         lead: None,
                         skill: None,
                         search_fallback: None,
+                        draft: None,
                     },
                     limits: WorkExecutionLimits {
                         model_tokens: 1_000_000,

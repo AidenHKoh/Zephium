@@ -116,7 +116,10 @@ fn main() {
     check("the canvas has tracking areas", live > 0);
 
     let cover = pointer_cover::PointerCover::attach(&pane_view).expect("cover");
-    check("a cover under the pointer parks the canvas areas", areas() == 0);
+    check(
+        "a cover under the pointer parks the canvas areas",
+        areas() == 0,
+    );
     check(
         "the parked canvas still takes hits",
         canvas_view.hitTest(NSPoint::new(100.0, 100.0)).is_some(),

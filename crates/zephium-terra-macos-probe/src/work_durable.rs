@@ -2484,6 +2484,7 @@ async fn agent_workflow(
         private: false,
         skill: None,
         search_fallback: None,
+        draft: None,
     };
     let search = OpenAiPublicSearch::try_new(
         transport.clone(),

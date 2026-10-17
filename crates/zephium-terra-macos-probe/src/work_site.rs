@@ -1406,6 +1406,7 @@ impl Context<'_> {
                                 private,
                                 skill: None,
                                 search_fallback: None,
+                                draft: None,
                             },
                             limits: WorkExecutionLimits {
                                 model_tokens: 1_000_000,
@@ -1601,6 +1602,7 @@ impl Context<'_> {
                                 private: false,
                                 skill: None,
                                 search_fallback: None,
+                                draft: None,
                             },
                             limits: WorkExecutionLimits {
                                 model_tokens: 1_000_000,
