@@ -148,9 +148,17 @@ pub(crate) fn site(brand: &str) -> Option<&'static str> {
 
 /// Whether a browsing part opens the person's own app for the service (its
 /// signed-in home), not the service's public site: only then is their
-/// connection the better way in. A part with no host names the service itself.
+/// connection the better way in. A part with no host names the service itself,
+/// and so does any host on the app's site (the lead writes todoist.com for
+/// app.todoist.com): a public read there (pricing, docs) is told apart by its
+/// goal before this.
 pub(crate) fn reaches_own_app(brand: &str, host: Option<&str>) -> bool {
-    host.is_none_or(|host| site(brand) == Some(host))
+    host.is_none_or(|host| {
+        site(brand).is_some_and(|app| {
+            let site = |host: &str| crate::work_sites::site_of(&format!("https://{host}/"));
+            app == host || site(app).is_some_and(|app| site(host).as_deref() == Some(&*app))
+        })
+    })
 }
 
 /// The person's connection for the service: gh for GitHub when it is
@@ -268,8 +276,8 @@ mod tests {
         assert!(reaches_own_app("notion", Some("app.notion.com")));
         assert!(reaches_own_app("slack", None));
         assert!(!reaches_own_app("notion", Some("www.notion.so")));
-        assert!(!reaches_own_app("notion", Some("notion.com")));
-        assert!(!reaches_own_app("stripe", Some("stripe.com")));
+        assert!(reaches_own_app("todoist", Some("todoist.com")));
+        assert!(!reaches_own_app("todoist", Some("doist.com")));
 
         let used = settle(WorkHelperV1::Browser, "slack", Some(&slack), true).unwrap();
         assert_eq!(used.0, WorkHelperV1::Connection);
