@@ -332,6 +332,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("wall") => vec![Check::Wall],
         Some("human-signin") => vec![Check::Human(human_fixture::Scenario::SignIn)],
         Some("human-signin-hash") => vec![Check::Human(human_fixture::Scenario::SignInHash)],
+        Some("human-signin-sites") => vec![Check::Human(human_fixture::Scenario::SignInSites)],
         Some("human-email-code") => vec![Check::Human(human_fixture::Scenario::EmailCode)],
         Some("human-check") => vec![Check::Human(human_fixture::Scenario::Check)],
         Some("human-long-wait") => vec![Check::Human(human_fixture::Scenario::LongWait)],
@@ -611,6 +612,22 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
         )
     };
     let (status, headers, body) = match (site, method.as_str(), path.as_str()) {
+        (Site::Account, _, "/human-fixture/exit") => (
+            "302 Found",
+            format!(
+                "Location: http://localhost:{}/human-fixture/hop\r\n",
+                ports.1
+            ),
+            String::new(),
+        ),
+        (Site::Other, _, "/human-fixture/hop") => (
+            "302 Found",
+            format!(
+                "Set-Cookie: zhop=1; Path=/; Max-Age=3600\r\nLocation: http://127.0.0.1:{}/human-fixture/signin-sites/2\r\n",
+                ports.0
+            ),
+            String::new(),
+        ),
         (Site::Account, "GET", path) if path.starts_with("/human-fixture/") => {
             ("200 OK", String::new(), human_fixture::response(path))
         }

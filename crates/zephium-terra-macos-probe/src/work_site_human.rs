@@ -25,6 +25,9 @@ pub(super) enum Scenario {
     /// A sign-in that lands on an app routing by its fragment, as Gmail's
     /// `#inbox`.
     SignInHash,
+    /// A sign-in that leaves the site for another one and comes back to a
+    /// new document, as a provider's account pages do.
+    SignInSites,
     EmailCode,
     Check,
     Unresolved,
@@ -32,9 +35,10 @@ pub(super) enum Scenario {
     StaleDocument,
     LongWait,
 }
-pub(super) const SCENARIOS: [Scenario; 8] = [
+pub(super) const SCENARIOS: [Scenario; 9] = [
     Scenario::SignIn,
     Scenario::SignInHash,
+    Scenario::SignInSites,
     Scenario::EmailCode,
     Scenario::Check,
     Scenario::Unresolved,
@@ -47,6 +51,7 @@ impl Scenario {
         match self {
             Self::SignIn => "signin",
             Self::SignInHash => "signin-hash",
+            Self::SignInSites => "signin-sites",
             Self::EmailCode => "email-code",
             Self::Check => "check",
             Self::Unresolved => "unresolved",
@@ -72,7 +77,12 @@ impl Scenario {
     fn resumes(self) -> bool {
         matches!(
             self,
-            Self::SignIn | Self::SignInHash | Self::EmailCode | Self::Check | Self::LongWait
+            Self::SignIn
+                | Self::SignInHash
+                | Self::SignInSites
+                | Self::EmailCode
+                | Self::Check
+                | Self::LongWait
         )
     }
 }
@@ -178,6 +188,7 @@ pub(super) fn response(path: &str) -> String {
     if ![
         "signin",
         "signin-hash",
+        "signin-sites",
         "email-code",
         "check",
         "unresolved",
@@ -206,6 +217,16 @@ pub(super) fn response(path: &str) -> String {
     } else {
         format!("<main><h1>Fixture dashboard</h1><p>{FACT}.</p><p>This dashboard is public synthetic test data. The retained page now exposes its balance and reference without a reload, route change, cookie signal or manual continue command.</p></main>")
     };
+    let (title, wall) = if *scenario == "signin-sites" && document == 2 {
+        ("Fixture dashboard", content.as_str())
+    } else {
+        (title, wall)
+    };
+    let arrival = if *scenario == "signin-sites" && document == 2 {
+        "location.hash='inbox';"
+    } else {
+        ""
+    };
     let routed = if *scenario == "signin-hash" {
         "location.hash='inbox';"
     } else {
@@ -223,7 +244,7 @@ pub(super) fn response(path: &str) -> String {
 <main id="wall">{wall}</main><script>
 (function(){{
  const documentNumber={document}; let finished=false, emailShown=false;
- {tamper}
+ {tamper}{arrival}
  async function poll(){{
   if(finished)return;
   try{{
@@ -234,6 +255,11 @@ pub(super) fn response(path: &str) -> String {
     emailShown=true;document.title='Fixture confirmation';
     document.body.innerHTML='<main><h1>Continue to your workspace</h1><p>Complete the next step to open your account.</p><input type="text" name="code"><button type="button">Continue</button></main>';
     await fetch('/human-fixture/email-ack/'+documentNumber,{{cache:'no-store'}});
+   }}
+   if(action==='clear' && '{scenario}'==='signin-sites'){{
+    finished=true;
+    await fetch('/human-fixture/ack/'+documentNumber,{{cache:'no-store'}});
+    location.assign('/human-fixture/exit');return;
    }}
    if(action==='clear'){{
     finished=true;document.title='Fixture dashboard';
@@ -274,7 +300,7 @@ fn advance(session: &mut Session, pages: &[WorkHumanPageV1]) -> Action {
     // The app's own route change after sign-in moves the revision on.
     if !matches!(
         session.scenario,
-        Scenario::StaleDocument | Scenario::SignInHash
+        Scenario::StaleDocument | Scenario::SignInHash | Scenario::SignInSites
     ) && session
         .revision
         .as_ref()
@@ -307,6 +333,8 @@ fn advance(session: &mut Session, pages: &[WorkHumanPageV1]) -> Action {
     if session.scenario.resumes()
         && session.signal_at.is_some()
         && CLEARED_DOCUMENT.load(Ordering::SeqCst) == 1
+        && (session.scenario != Scenario::SignInSites
+            || POLLED_DOCUMENT.load(Ordering::SeqCst) == 2)
         && !session.check_clear
     {
         return Action::Check(page.id, true);
@@ -333,6 +361,7 @@ fn advance(session: &mut Session, pages: &[WorkHumanPageV1]) -> Action {
         match session.scenario {
             Scenario::SignIn
             | Scenario::SignInHash
+            | Scenario::SignInSites
             | Scenario::EmailCode
             | Scenario::Check
             | Scenario::LongWait => {

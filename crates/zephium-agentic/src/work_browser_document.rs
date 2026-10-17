@@ -146,7 +146,7 @@ impl std::fmt::Debug for WorkBrowserRedirect {
 }
 
 /// HTTPS, or plain HTTP on a loopback host (local qualification sites only).
-fn site_scheme(target: &ContextNavigationTarget) -> bool {
+pub fn site_scheme(target: &ContextNavigationTarget) -> bool {
     let url = target.as_url();
     url.username().is_empty()
         && url.password().is_none()
