@@ -49,14 +49,14 @@
     {
       const box = layoutAnchor(triggerElement)?.getBoundingClientRect() ?? new DOMRect();
       const content = contentElement;
-      const rows = content?.querySelectorAll<HTMLElement>(".ui-menu-item");
+      const first = content?.querySelector<HTMLElement>(".ui-menu-item");
       const row = content?.querySelector<HTMLElement>(".ui-menu-item[data-selected]");
-      if (!content || !triggerElement || !rows?.length || !row) {
+      if (!content || !triggerElement || !first || !row) {
         return new DOMRect(box.x, box.bottom + 6, box.width, 0);
       }
       const panel = getComputedStyle(content);
       const scroll = content.querySelector<HTMLElement>(".ui-menu-viewport")?.scrollTop ?? 0;
-      const rowTop = parseFloat(panel.paddingTop) + row.offsetTop - rows[0].offsetTop - scroll;
+      const rowTop = parseFloat(panel.paddingTop) + row.offsetTop - first.offsetTop - scroll;
       const inset =
         parseFloat(panel.paddingInlineStart) +
         parseFloat(getComputedStyle(row).paddingInlineStart) -
