@@ -37,6 +37,7 @@ objc2-speech = { version = "=0.3.2", default-features = false, features = [
     "SFSpeechRecognitionTaskHint",
     "SFSpeechRecognizer",
     "SFTranscription",
+    "SFTranscriptionSegment",
 ] }
 objc2-avf-audio = { version = "=0.3.2", default-features = false, features = [
     "std",

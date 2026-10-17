@@ -22,6 +22,7 @@ use objc2_speech::{
 };
 
 use crate::failure::{domain_tag, Failure};
+use crate::stitch::Stitch;
 use crate::{pick_locale, Core, Ending, Fault, Listener, Outcome, Permission, Recognition};
 
 /// How long a permission prompt may stay up before the take gives up.
@@ -163,6 +164,8 @@ struct Words {
 #[derive(Default)]
 struct WordsState {
     text: String,
+    /// Every utterance of the take, not only the one since the last pause.
+    stitch: Stitch,
     done: bool,
     /// Results seen, and whether the last of them was final.
     results: u32,
@@ -181,14 +184,21 @@ struct Heard {
 }
 
 impl Words {
-    fn update(&self, text: String, last: bool) {
-        if let Ok(mut state) = self.state.lock() {
-            state.text = text;
-            state.results += 1;
-            state.last = last;
-            state.done |= last;
-        }
+    /// Folds a result into the take and returns the take's words so far.
+    fn update(&self, text: &str, span: Option<(f64, f64)>, last: bool) -> String {
+        let whole = match self.state.lock() {
+            Ok(mut state) => {
+                let whole = state.stitch.take(text, span);
+                state.text.clone_from(&whole);
+                state.results += 1;
+                state.last = last;
+                state.done |= last;
+                whole
+            }
+            Err(_) => text.to_owned(),
+        };
         self.changed.notify_all();
+        whole
     }
 
     /// Records the task's error and ends the wait. True when the take should
@@ -299,16 +309,18 @@ impl OnDevice {
                 // SAFETY: Speech passes null or a result valid for this call.
                 if let Some(result) = unsafe { result.as_ref() } {
                     // SAFETY: reads on the live result.
-                    let (text, last) = unsafe {
-                        (
-                            result.bestTranscription().formattedString().to_string(),
-                            result.isFinal(),
-                        )
+                    let (text, span, last) = unsafe {
+                        let best = result.bestTranscription();
+                        let segments = best.segments();
+                        let span = segments.firstObject().zip(segments.lastObject()).map(
+                            |(first, end)| (first.timestamp(), end.timestamp() + end.duration()),
+                        );
+                        (best.formattedString().to_string(), span, result.isFinal())
                     };
+                    let whole = sink.update(&text, span, last);
                     if !last {
-                        listener.partial(&text);
+                        listener.partial(&whole);
                     }
-                    sink.update(text, last);
                 }
                 // An error ends the task: no speech, a cancel, or a failure.
                 // The words so far stand either way.

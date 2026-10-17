@@ -8,6 +8,8 @@ mod failure;
 mod language;
 mod meter;
 mod pcm;
+#[cfg(any(target_os = "macos", test))]
+mod stitch;
 
 #[cfg(target_os = "macos")]
 mod apple;
