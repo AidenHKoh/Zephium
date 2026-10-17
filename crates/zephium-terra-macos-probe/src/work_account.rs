@@ -298,10 +298,7 @@ fn configure_mode(url: &str, send: bool) -> Result<String, &'static str> {
     ))
 }
 pub(super) fn slack_send_request(url: &str) -> String {
-    format!(
-        "Open my disposable Slack test channel at {url} with the Browser helper. If sign-in or MFA is needed, hand the live page to me and resume after native verification. Stay in the browser through any app-launch page. Send exactly this message once: {} Prepare it and wait for the normal explicit confirmation before sending. Then read the channel to verify it appears and report the result honestly. Never resend after uncertain verification or extraction failure. Do not search, substitute help pages, use Computer, edit, delete, invite, or change other account data.\nExplain from recorded state whether the approved message was sent and what verification was obtained. Do not send or retry any action to explain the previous result.",
-        approval::MESSAGE
-    )
+    super::work_site::slack_send_request(url, approval::MESSAGE)
 }
 
 impl Account {

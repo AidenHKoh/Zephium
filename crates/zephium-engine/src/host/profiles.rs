@@ -601,6 +601,24 @@ impl EngineHost {
         returned_process_id: Option<u32>,
         deadline: std::time::Instant,
     ) -> bool {
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        if returned_process_id.is_some_and(|id| {
+            self.browser_processes
+                .get(&profile)
+                .is_some_and(|process| process.id() != id)
+        }) {
+            eprintln!(
+                "windows-work-construction: stage=idle_generation owners_extension_partition_spare_agent_work={:?} remaining_ms={}; content=redacted",
+                [
+                    self.windows_extensions.has_native_views_for_profile(profile),
+                    self.partitions.values().any(|partition| partition.profile() == profile),
+                    self.spare.as_ref().is_some_and(|spare| spare.partition.profile() == profile),
+                    self.has_windows_agent_view_or_transfer_for_profile(profile),
+                    self.work_resources.values().any(|resource| resource.view.as_ref().is_some_and(|view| view.work_native_profile() == Some(profile))),
+                ],
+                deadline.saturating_duration_since(std::time::Instant::now()).as_millis()
+            );
+        }
         if self.erasure_tombstones.contains(&profile)
             || self.unverifiable_browser_processes.contains(&profile)
             || self.unproven_browser_processes.contains_key(&profile)
