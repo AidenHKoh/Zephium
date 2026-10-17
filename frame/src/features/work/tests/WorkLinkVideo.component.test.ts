@@ -37,7 +37,7 @@ vi.mock("$domain/resources", async (original) => ({
 const profile = "00000000000000000000000001";
 const video = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42";
 
-test("a video link admits its thumbnail as its poster and opens its page", async () => {
+test("a video link draws its admitted thumbnail as its poster, guesses none, and opens its page", async () => {
   await page.viewport(1200, 800);
   const snapshot: WorkEnvironmentSnapshot = {
     version: 1,
@@ -57,6 +57,10 @@ test("a video link admits its thumbnail as its poster and opens its page", async
     },
     elements: [
       { id: "link", area: null, reference: { kind: "link", url: video, title: "youtube.com" } },
+      { id: "picture", area: null, reference: { kind: "resource", resource: "thumbnail" } },
+    ],
+    relations: [
+      { id: "uses", from: "link", to: "picture", kind: "uses", origin: { kind: "user" } },
     ],
   };
   const environment = new WorkEnvironmentSession(profile, snapshot.space);
@@ -104,23 +108,6 @@ test("a video link admits its thumbnail as its poster and opens its page", async
           }
         : { kind: "page", items: [], next: null },
   }));
-  native.admit.mockImplementation(
-    async (_profile: string, _environment: string, element: string) => {
-      const current = environment.snapshot!;
-      environment.snapshot = {
-        ...current,
-        revision: String(BigInt(current.revision) + 1n),
-        elements: [
-          ...current.elements,
-          { id: "picture", area: null, reference: { kind: "resource", resource: "thumbnail" } },
-        ],
-        relations: [
-          { id: "uses", from: element, to: "picture", kind: "uses", origin: { kind: "user" } },
-        ],
-      };
-      return { status: "ok", data: { kind: "admitted", element: "picture" } };
-    },
-  );
   native.paneShow.mockResolvedValue({ accepted: true, operation_id: "0000000000000001" });
   native.settle.mockResolvedValue({ outcome: "applied", disposition: null });
   const screen = await render(WorkEnvironmentWorkspace, {
@@ -134,18 +121,13 @@ test("a video link admits its thumbnail as its poster and opens its page", async
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";
   root.style.width = "1100px";
-  await expect.poll(() => native.admit.mock.calls.length).toBe(1);
-  expect(native.admit.mock.calls[0]!.slice(1)).toEqual([
-    snapshot.id,
-    "link",
-    "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
-  ]);
   // The thumbnail is the video's poster, never a media card of its own.
   // The picture waits on a notes lookup before its media read.
   const poster = () =>
     screen.container.querySelector<HTMLImageElement>(".media.video img")?.getAttribute("src") ?? "";
   await expect.poll(poster, { timeout: 5000 }).toBe(`${PIXEL}#${"e".repeat(64)}`);
   expect(screen.container.textContent).not.toContain("hqdefault.jpg");
+  expect(native.admit).not.toHaveBeenCalled();
   // A click opens its page like any link: nothing plays in the canvas.
   (screen.container.querySelector(".media.video button") as HTMLElement).click();
   await expect.poll(() => native.paneShow.mock.calls.length).toBeGreaterThan(0);
