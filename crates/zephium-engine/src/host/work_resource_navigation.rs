@@ -24,6 +24,14 @@ enum WorkNavigationStage {
     Parking,
     Navigating,
 }
+/// The closed name of where a navigation ran out of time, for the page
+/// task's failure line.
+fn navigation_timeout_stage(stage: WorkNavigationStage) -> &'static str {
+    match stage {
+        WorkNavigationStage::Parking => "navigation_dispatch",
+        WorkNavigationStage::Navigating => "navigation_load",
+    }
+}
 impl WorkNavigation {
     pub(super) fn refuse(mut self, failure: ContextPortFailure) {
         self.timer = None;
@@ -214,6 +222,7 @@ impl WorkNativeResource {
             self.record_successor_navigation_failure(
                 crate::WorkSuccessorNavigationFailure::HostDeadlineExpired,
             );
+            crate::agent_context_port::note_action_timeout_stage(navigation_timeout_stage(stage));
             Some(Err(ContextPortFailure::TimedOut))
         } else if let Some(now) = work_browser_monotonic_now() {
             if now >= lease.deadline() {
@@ -221,6 +230,9 @@ impl WorkNativeResource {
                 self.record_successor_navigation_failure(
                     crate::WorkSuccessorNavigationFailure::LeaseDeadlineExpired,
                 );
+                crate::agent_context_port::note_action_timeout_stage(navigation_timeout_stage(
+                    stage,
+                ));
                 Some(Err(ContextPortFailure::TimedOut))
             } else if !(match stage {
                 WorkNavigationStage::Parking => self

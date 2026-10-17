@@ -44,9 +44,35 @@ pub(super) const VIEWS: [AppView; 6] = [
     },
 ];
 
+/// A mail app whose views are routes in the address fragment: the address
+/// moves between them and no document loads.
+pub(super) const ROUTED_PATH: &str = "/edit/webmail-routes";
+
+pub(super) fn routed(path: &str) -> Option<&'static str> {
+    (path == ROUTED_PATH).then_some(ROUTED)
+}
+
 pub(super) fn view(path: &str) -> Option<&'static AppView> {
     VIEWS.iter().find(|view| view.path == path)
 }
+
+const ROUTED: &str = r##"<!doctype html><html><head><meta charset="utf-8"><title>Mail</title></head><body>
+<nav aria-label="Mailboxes"><a href="/edit/webmail-routes">Inbox</a> <button id="drafts">Drafts</button></nav>
+<main id="view"></main>
+<script>
+var views={
+  inbox:'<h1>Inbox</h1><div role="list" aria-label="Messages"><div role="listitem">Dana: Quarterly report</div></div>',
+  drafts:'<h1>Drafts</h1><div role="list" aria-label="Messages"><div role="listitem">Draft: Launch checklist for Zephium 1.0</div></div>'
+};
+function show(){
+  var name=location.hash.slice(1).split('?')[0]||'inbox';
+  document.getElementById('view').innerHTML=views[name]||'<h1>Not found</h1>';
+}
+addEventListener('hashchange',show);
+document.getElementById('drafts').addEventListener('click',function(){ location.hash='drafts'; });
+if(!location.hash) location.hash='inbox';
+show();
+</script></body></html>"##;
 
 const SLACK: &str = r##"<!doctype html><html><head><meta charset="utf-8"><title>launch (Channel) - Acme - Slack</title></head><body>
 <div class="p-client_container"><div class="p-client">
