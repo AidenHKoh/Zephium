@@ -1797,8 +1797,12 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
         if state.pending.is_some() && self.asks {
             return Some(AgentBrowserHumanReason::UserDecision);
         }
+        let account = state.view || state.account_expected;
         drop(state);
-        if sign_in_wall(observation) {
+        // A signed-out app can show its public landing page instead of a
+        // wall; a task about the person's own account has nothing to read
+        // there, however much text the page holds.
+        if sign_in_wall(observation) || (account && signed_out(observation)) {
             return Some(AgentBrowserHumanReason::SignIn);
         }
         if embedded_human_challenge(observation) {
@@ -3174,6 +3178,45 @@ mod tests {
         };
         assert!(!sign_in_wall(&offer("Zamknij okno dialogowe")));
         assert!(sign_in_wall(&offer("Dalej")));
+    }
+
+    #[test]
+    fn a_task_for_the_persons_account_hands_over_on_a_landing_page_that_offers_sign_in() {
+        let landing = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"landmark","lm":"banner"}),
+            json!({"k":3,"p":1,"r":"link","n":"Pricing","o":9,"u":"https://example.test/pricing"}),
+            json!({"k":4,"p":1,"r":"link","n":"Log in","o":9,"u":"https://example.test/login"}),
+            json!({"k":5,"p":0,"r":"heading","n":"Notes and docs in one place","l":1}),
+        ]);
+        let policy = |view: bool, account: bool| SiteWorkPolicy {
+            gate: Arc::new({
+                let gate =
+                    SiteGate::new("example.test".into(), false, false).expecting_account(account);
+                if view {
+                    gate.reading_view("https://example.test/", "my recent pages")
+                } else {
+                    gate
+                }
+            }),
+            asks: true,
+        };
+        for (view, account) in [(true, false), (false, true)] {
+            assert_eq!(
+                policy(view, account).human_wall(&landing),
+                Some(AgentBrowserHumanReason::SignIn)
+            );
+        }
+        // A public read of the same page has nothing to sign in for.
+        assert_eq!(policy(false, false).human_wall(&landing), None);
+        // The signed-in app shows an account control and stays readable.
+        let app = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"landmark","lm":"banner"}),
+            json!({"k":3,"p":1,"r":"link","n":"Log in","o":9,"u":"https://example.test/login"}),
+            json!({"k":4,"p":1,"r":"button","n":"Account","o":1,"ak":1}),
+        ]);
+        assert_eq!(policy(true, true).human_wall(&app), None);
     }
 
     fn keyboard_audit_action(

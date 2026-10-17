@@ -102,7 +102,7 @@ impl HumanNavigation {
         ContextNavigationTarget::parse(raw).ok().filter(|target| {
             target.as_url().as_str() == raw
                 && (zephium_agentic::same_work_human_site(&self.source, target)
-                    || (self.open && target.as_url().scheme() == "https"))
+                    || (self.open && zephium_agentic::work_site_scheme(target)))
         })
     }
     /// This URL may hold the resumed task. URL checks alone never prove that
@@ -165,13 +165,14 @@ impl HumanNavigation {
         if main_frame != Some(true) || self.target(raw).is_none() {
             return false;
         }
-        if self.loading.is_some() {
-            return !self.committed;
-        }
         // Moving to a fragment of the page itself (Gmail's `#inbox`) loads
-        // nothing; `location_changed` records the new address.
+        // nothing, even while the page is still loading; `location_changed`
+        // records the new address.
         if fragment_move(&self.current, raw) {
             return true;
+        }
+        if self.loading.is_some() {
+            return !self.committed;
         }
         self.invalidate_wall();
         self.requested = true;
@@ -225,7 +226,8 @@ impl HumanNavigation {
                 Ok((true, true))
             }
             E::Finished if self.loading == Some(event.id) && self.committed => {
-                self.current = target;
+                // The finish names the loaded URL; the page may have routed
+                // itself to a fragment since (`location_changed` saw it).
                 self.loading = None;
                 self.finished = true;
                 Ok((false, true))
@@ -733,6 +735,24 @@ mod tests {
             "the app's fragment stays its page"
         );
         assert!(!gate.human_fragment_move("https://example.test/mail/u/0/#inbox"));
+    }
+
+    #[test]
+    fn a_route_set_while_the_landing_page_loads_survives_its_finish() {
+        let gate = ready_gate();
+        let source = ContextNavigationTarget::parse(URL).unwrap();
+        gate.begin_human(&source, Instant::now() + Duration::from_secs(30), true)
+            .unwrap();
+        let back = "https://example.test/mail/u/0/";
+        assert!(gate.allows_apple_action(back, apple_action(T::Other, true)));
+        gate.observe(event(2, E::Started, back)).unwrap();
+        gate.observe(event(2, E::Committed, back)).unwrap();
+        let routed = "https://example.test/mail/u/0/#inbox";
+        assert!(gate.allows_apple_action(routed, apple_action(T::Other, true)));
+        gate.location_changed(Some(routed)).unwrap();
+        gate.observe(event(2, E::Finished, back)).unwrap();
+        let revision = gate.human_revision().unwrap();
+        gate.finish_human(routed, revision).unwrap();
     }
 
     #[test]
