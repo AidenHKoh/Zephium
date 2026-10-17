@@ -415,7 +415,7 @@ pub(crate) fn email_addresses(text: &str) -> Vec<String> {
 /// Whether the region a send acts in shows one of the addresses: in a
 /// recipient field's value, a recipient chip or the conversation's header.
 fn addressed_to(recipients: &[String], node: &SemanticNode, snapshot: &SemanticSnapshot) -> bool {
-    subtree(snapshot, region_index(node, snapshot))
+    subtree(snapshot, message_region(node, snapshot))
         .iter()
         .filter(|part| part.sensitivity() != SemanticSensitivity::Secret)
         .any(|part| {
@@ -428,6 +428,21 @@ fn addressed_to(recipients: &[String], node: &SemanticNode, snapshot: &SemanticS
                 .iter()
                 .any(|address| shown.contains(address) || typed.contains(address))
         })
+}
+
+/// The message a send control sends: the smallest part of the page around
+/// it that holds what is being written. A mail app's compose box is often no
+/// dialog or form, and its page also lists other people's messages.
+fn message_region(node: &SemanticNode, snapshot: &SemanticSnapshot) -> usize {
+    ancestors(node, snapshot)
+        .find(|(index, _)| {
+            subtree(snapshot, *index).iter().any(|part| {
+                !std::ptr::eq(part, node)
+                    && (part.role() == SemanticRole::Textbox || part.editable_structure().is_some())
+                    && !in_search(part, snapshot)
+            })
+        })
+        .map_or_else(|| region_index(node, snapshot), |(index, _)| index)
 }
 
 /// The region a step acts in: its dialog, form or named region, else the page.
@@ -1055,21 +1070,73 @@ pub(crate) fn preview(
     snapshot: &SemanticSnapshot,
     site: &str,
 ) -> Preview {
-    let region = subtree(snapshot, region_index(node, snapshot));
+    let message = consequence == Consequence::Communication;
+    let region = subtree(
+        snapshot,
+        if message {
+            message_region(node, snapshot)
+        } else {
+            region_index(node, snapshot)
+        },
+    );
     let name = clip(&label(node), 80);
+    let body = message
+        .then(|| {
+            region
+                .iter()
+                .filter(|part| {
+                    (part.role() == SemanticRole::Textbox || part.editable_structure().is_some())
+                        && !in_search(part, snapshot)
+                })
+                .filter_map(|part| value_text(part).map(|text| (part, text)))
+                .max_by_key(|(part, text)| (part.editable_structure().is_some(), text.len()))
+        })
+        .flatten();
+    let recipients: Vec<String> = if message {
+        region
+            .iter()
+            .filter(|part| part.sensitivity() != SemanticSensitivity::Secret)
+            .filter(|part| !body.is_some_and(|(body, _)| std::ptr::eq(*part, body)))
+            .flat_map(|part| {
+                let mut words = label(part);
+                if let Some(value) = value_text(part) {
+                    words.push(' ');
+                    words.push_str(value);
+                }
+                email_addresses(&words)
+            })
+            .fold(Vec::new(), |mut all, address| {
+                if !all.contains(&address) {
+                    all.push(address);
+                }
+                all
+            })
+    } else {
+        Vec::new()
+    };
+    // A message addressed in its own box names those people; the page's
+    // headings then belong to other conversations (a mail list beside it).
     let heading = region
         .iter()
-        .chain(snapshot.nodes())
+        .chain(if recipients.is_empty() {
+            snapshot.nodes()
+        } else {
+            &[][..]
+        })
         .find(|part| part.role() == SemanticRole::Heading && !label(part).trim().is_empty())
         .map(|part| clip(&label(part), 80));
     let headline = match consequence {
         Consequence::Communication => {
             let verb = verb(&name, "Send");
-            match &heading {
-                Some(place) => {
+            match (recipients.as_slice(), &heading) {
+                ([first, rest @ ..], _) if rest.is_empty() => format!("{verb} to {first} as you?"),
+                ([first, rest @ ..], _) => {
+                    format!("{verb} to {first} and {} more as you?", rest.len())
+                }
+                ([], Some(place)) => {
                     format!("{verb} to {} as you?", place.trim_start_matches("Message "))
                 }
-                None => format!("{verb} on {site} as you?"),
+                ([], None) => format!("{verb} on {site} as you?"),
             }
         }
         Consequence::Purchase => {
@@ -1127,15 +1194,7 @@ pub(crate) fn preview(
         Consequence::Communication => (action.kind() == SemanticActionKind::Press)
             .then(|| value_text(node))
             .flatten()
-            .or_else(|| {
-                region
-                    .iter()
-                    .filter(|part| {
-                        part.role() == SemanticRole::Textbox || part.editable_structure().is_some()
-                    })
-                    .filter(|part| !in_search(part, snapshot))
-                    .find_map(value_text)
-            })
+            .or(body.map(|(_, text)| text))
             .map(str::to_owned),
         _ => None,
     }
@@ -1149,8 +1208,9 @@ pub(crate) fn preview(
             continue;
         }
         let fact = match part.role() {
+            // A message's own fields (To, Subject) are shown; its body is the text.
             SemanticRole::Textbox | SemanticRole::Combobox | SemanticRole::Spinbutton
-                if consequence != Consequence::Communication =>
+                if !body.is_some_and(|(body, _)| std::ptr::eq(part, body)) =>
             {
                 part.name()
                     .zip(value_text(part))
@@ -2695,6 +2755,39 @@ mod tests {
         .actions()[0]
             .prepare(snapshot)
             .unwrap()
+    }
+
+    #[test]
+    fn a_mail_card_names_its_own_recipient_subject_and_body_not_the_inbox_beside_it() {
+        let look = page(vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"heading","l":2,"n":"Upgrade","fc":true}),
+            json!({"k":3,"p":0,"r":"paragraph","t":"Weekly: prices slipped","fc":true}),
+            json!({"k":4,"p":0,"r":"group","n":"New Message","fc":true}),
+            json!({"k":5,"p":3,"r":"combobox","n":"To recipients","o":10,"fc":true,
+                "v":{"k":"text","value":"ana@example.test"},"b":{"x":1,"y":1,"w":300,"h":30}}),
+            json!({"k":6,"p":3,"r":"textbox","n":"Subject","o":10,"fc":true,
+                "v":{"k":"text","value":"Status"},"b":{"x":1,"y":40,"w":300,"h":30}}),
+            json!({"k":7,"p":3,"r":"textbox","n":"Message Body","o":11,"fs":1,"es":[1,2,false],"fc":true,
+                "v":{"k":"text","value":"Hi Ana,\n\nThe release is ready."},"b":{"x":1,"y":80,"w":300,"h":120}}),
+            json!({"k":8,"p":3,"r":"button","n":"Send","o":9,"ak":1,"fc":true,
+                "b":{"x":1,"y":210,"w":80,"h":30}}),
+        ]);
+        let action = click(&look, 8, SemanticEffectClass::Communication);
+        let snapshot = &look.frames()[0];
+        let shown = preview(
+            Consequence::Communication,
+            &action,
+            &snapshot.nodes()[7],
+            snapshot,
+            "mail.example.test",
+        );
+        assert_eq!(shown.headline, "Send to ana@example.test as you?");
+        assert_eq!(shown.text.as_deref(), Some("Hi Ana, The release is ready."));
+        assert!(shown
+            .facts
+            .contains(&("Subject".to_owned(), "Status".to_owned())));
+        assert!(shown.facts.iter().all(|(label, _)| label != "Weekly"));
     }
 
     #[test]
