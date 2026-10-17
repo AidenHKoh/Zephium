@@ -1,7 +1,7 @@
 //! Dictation in the Work bar: one take at a time, its live level and words
 //! as events, and the transcript back to the bar. Audio stays in memory, is
 //! never logged, and goes only to the engine the take names. The take ends
-//! on stop, cancel, a natural pause or the window losing focus.
+//! on stop, cancel or the window losing focus; a pause to think never ends it.
 use super::*;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, specta::Type, Eq, PartialEq)]
@@ -344,7 +344,7 @@ mod product {
             engine,
         });
         let started =
-            tauri::async_runtime::spawn_blocking(move || Capture::start(recognition, true, relay))
+            tauri::async_runtime::spawn_blocking(move || Capture::start(recognition, false, relay))
                 .await
                 .unwrap_or(Err(zephium_voice::Fault::Unsupported));
         let mut live = live();
