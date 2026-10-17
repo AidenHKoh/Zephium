@@ -311,6 +311,13 @@ impl WorkLeadService {
         for site_text in earlier_site_texts(&earlier) {
             run.trust_named(&site_text);
         }
+        // A site an earlier request of this work already worked in as the
+        // person was let in by them: a follow-up does not ask again.
+        for site in entered_sites(&earlier) {
+            if run.entry_answer(&site).is_none() {
+                run.set_entry(&site, crate::work_sites::EntryAnswer::Allow);
+            }
+        }
         for body in &bodies {
             run.allow_links_in(&body.text);
         }
@@ -686,6 +693,19 @@ fn earlier_site_texts<'a>(earlier: &[&'a WorkExecutionFact]) -> Vec<&'a str> {
     texts
 }
 
+/// The sites earlier requests of this work opened in the person's session.
+fn entered_sites(earlier: &[&WorkExecutionFact]) -> Vec<String> {
+    let mut sites: Vec<String> = earlier
+        .iter()
+        .flat_map(|execution| &execution.steps)
+        .filter_map(|step| step.account.as_ref())
+        .filter_map(|account| crate::work_sites::site_of(&format!("https://{}/", account.host)))
+        .collect();
+    sites.sort();
+    sites.dedup();
+    sites
+}
+
 /// "Continue", "go on", "keep going": a request to finish the last one.
 fn continues(objective: &str) -> bool {
     let words: String = objective
@@ -802,6 +822,24 @@ mod tests {
             "user_artifacts": [], "steps": steps, "parts": parts, "inputs": []
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_follow_up_is_let_into_the_sites_earlier_requests_worked_in_as_the_person() {
+        let earlier = execution(
+            "01M3RV9DBTWYS7770BES8YYKT1",
+            "Create a task in Todoist",
+            "completed",
+            json!([
+                {"id": "01M3RV9DBTWYS7770BES8YYKT2", "turn": 1, "status": "succeeded",
+                 "kind": {"kind": "read", "url": "https://app.todoist.com/app"},
+                 "account": {"host": "app.todoist.com", "badge": true}},
+                {"id": "01M3RV9DBTWYS7770BES8YYKT3", "turn": 1, "status": "succeeded",
+                 "kind": {"kind": "read", "url": "https://www.example.com/"}}
+            ]),
+            json!([]),
+        );
+        assert_eq!(entered_sites(&[&earlier]), ["todoist.com"]);
     }
 
     #[test]
