@@ -2201,6 +2201,15 @@ const child=listItem(shadowList,index);
 if(child!==null)stack.push({node:child,...inherited});
 }
 }
+function focusFirst(stack,from,focused){
+for(let at=stack.length-1;at>=from;at-=1){
+const child=stack[at].node;
+if(nodeType(child)===1&&[...focused].some(element=>apply(nodeContains,child,[element])===true)){
+stack.push(stack.splice(at,1)[0]);
+return;
+}
+}
+}
 function flatText(root,state,limit,referenced){
 const chunks=[];
 let bytes=0;
@@ -2996,12 +3005,14 @@ sink=null;
 if(!state.stopped){
 const main=item.main===true||
 (descriptor!==null&&descriptor.role==="landmark"&&descriptor.landmark==="main");
+const from=stack.length;
 pushChildren(
 stack,
 item.node,
 {parent,sink,depth:item.depth+1,disabled,nameAncestors,main},
 state
 );
+if(sink===null&&focused.size!==0)focusFirst(stack,from,focused);
 }
 }
 if(state.stopped){

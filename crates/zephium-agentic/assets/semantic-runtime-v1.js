@@ -1638,6 +1638,17 @@
     }
   }
 
+  // The queued child holding focus goes on top of the stack.
+  function focusFirst(stack, from, focused) {
+    for (let at = stack.length - 1; at >= from; at -= 1) {
+      const child = stack[at].node;
+      if (nodeType(child) === 1 && [...focused].some(element => apply(nodeContains, child, [element]) === true)) {
+        stack.push(stack.splice(at, 1)[0]);
+        return;
+      }
+    }
+  }
+
   // A referenced label names its control even when aria-hidden itself.
   function flatText(root, state, limit, referenced) {
     const chunks = [];
@@ -2504,12 +2515,16 @@
       if (!state.stopped) {
         const main = item.main === true ||
           (descriptor !== null && descriptor.role === "landmark" && descriptor.landmark === "main");
+        const from = stack.length;
         pushChildren(
           stack,
           item.node,
           { parent, sink, depth: item.depth + 1, disabled, nameAncestors, main },
           state
         );
+        // The part being worked in (a mail written over a long inbox) is read
+        // first; text gathered into one record keeps its order.
+        if (sink === null && focused.size !== 0) focusFirst(stack, from, focused);
       }
     }
     // A look cut short leaves the records still collecting descendant text

@@ -17,6 +17,7 @@ pub(super) fn editor(path: &str) -> Option<&'static str> {
         "/edit/webmail"
         | "/edit/webmail-swap"
         | "/edit/webmail-autosave"
+        | "/edit/webmail-inbox"
         | "/edit/webmail-blocks"
         | "/edit/webmail-thread" => Some(WEBMAIL),
         _ => None,
@@ -207,6 +208,8 @@ document.querySelectorAll('.block').forEach(add);
 /// conversation with its own Reply box and Send beside Compose. The autosave
 /// variant saves the draft as Gmail does while a confirmation waits: the
 /// fragment takes the draft's id, the box takes the subject as its title.
+/// The inbox variant lists more messages than one look holds before the
+/// compose box, which floats over them without being modal, as Gmail's does.
 const WEBMAIL: &str = concat!(
     r#"<!doctype html><html><head><meta charset="utf-8"><title>Inbox - Mail</title></head><body>
 <nav aria-label="Mailboxes"><a href="/edit/webmail">Inbox</a></nav>
@@ -277,6 +280,28 @@ pub(super) fn page(path: &str) -> Option<String> {
             ""
         },
     );
+    let page = if path == "/edit/webmail-inbox" {
+        let rows: String = (1..=120)
+            .map(|n| {
+                format!(
+                    "<div role=\"listitem\" style=\"height:7px;font-size:6px;overflow:hidden\">\
+                     <input type=\"checkbox\" aria-label=\"Select\"><a href=\"#m{n}\">Sender {n}</a> \
+                     <span>Update {n}</span> <span>Oct {}</span></div>",
+                    n % 28 + 1
+                )
+            })
+            .collect();
+        page.replace(
+            "<div role=\"listitem\">Dana: Quarterly report</div>",
+            &format!("<div role=\"listitem\">Dana: Quarterly report</div>{rows}"),
+        )
+        .replace(
+            "role=\"dialog\" aria-modal=\"true\"",
+            "role=\"dialog\" style=\"position:fixed;right:8px;bottom:0;width:420px;background:#fff;border:1px solid #888\"",
+        )
+    } else {
+        page
+    };
     // A composer that only Enter sends, as Slack's is with its button hidden.
     Some(if path == "/edit/slack-enter" {
         page.replace("<button id=\"send\"", "<button id=\"send\" hidden")
@@ -301,6 +326,7 @@ mod tests {
             "/edit/webmail",
             "/edit/webmail-swap",
             "/edit/webmail-autosave",
+            "/edit/webmail-inbox",
             "/edit/webmail-blocks",
             "/edit/webmail-thread",
         ] {

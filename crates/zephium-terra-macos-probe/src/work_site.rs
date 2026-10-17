@@ -177,6 +177,9 @@ enum Check {
     /// the confirmation waits: the approved step runs once.
     WebmailSwap,
     WebmailAutosave,
+    /// The same compose floating over an inbox longer than one look: after
+    /// the approval the page task still sees the message and sends it.
+    WebmailInbox,
     /// The same compose with a body that starts empty and takes a block per
     /// line from the browser's own editing, as a mail composer's does.
     WebmailBlocks,
@@ -406,6 +409,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("webmail-compose") => vec![Check::WebmailCompose],
         Some("webmail-swap") => vec![Check::WebmailSwap],
         Some("webmail-autosave") => vec![Check::WebmailAutosave],
+        Some("webmail-inbox") => vec![Check::WebmailInbox],
         Some("webmail-blocks") => vec![Check::WebmailBlocks],
         Some("webmail-thread") => vec![Check::WebmailThread],
         Some("webmail-routes") => vec![Check::WebmailRoutes],
@@ -2422,6 +2426,7 @@ pub(super) async fn workflow(
             Check::WebmailCompose
             | Check::WebmailSwap
             | Check::WebmailAutosave
+            | Check::WebmailInbox
             | Check::WebmailBlocks
             | Check::WebmailThread => {
                 let before = context.sites.written("/edit/webmail/send").len();
@@ -2435,6 +2440,7 @@ pub(super) async fn workflow(
                             match check {
                                 Check::WebmailSwap => "/edit/webmail-swap",
                                 Check::WebmailAutosave => "/edit/webmail-autosave",
+                                Check::WebmailInbox => "/edit/webmail-inbox",
                                 Check::WebmailBlocks => "/edit/webmail-blocks",
                                 Check::WebmailThread => "/edit/webmail-thread",
                                 _ => "/edit/webmail",
