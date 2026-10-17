@@ -1620,7 +1620,9 @@ fn projected_value_matches(
     expected: &SemanticActionText,
 ) -> bool {
     match current {
-        Some(SemanticValueSummary::Text(current)) => current.as_str() == expected.as_str(),
+        Some(SemanticValueSummary::Text(current)) => {
+            fill_value_matches(current.as_str(), expected.as_str())
+        }
         None
         | Some(
             SemanticValueSummary::Redacted
@@ -1628,6 +1630,16 @@ fn projected_value_matches(
             | SemanticValueSummary::Ordinal(_),
         ) => false,
     }
+}
+
+/// A field holds the filled text exactly. A multi-line text also matches when
+/// only its line breaks are represented differently: a rich editor keeps a
+/// block per line, an empty line as a block holding a break, and may add a
+/// trailing break or turn a space into a non-breaking one.
+pub(crate) fn fill_value_matches(value: &str, expected: &str) -> bool {
+    value == expected
+        || (value.contains(['\n', '\r']) || expected.contains(['\n', '\r']))
+            && value.split_whitespace().eq(expected.split_whitespace())
 }
 
 impl fmt::Debug for SemanticActionBatch {
@@ -2492,6 +2504,29 @@ mod tests {
     };
     use serde_json::json;
     use zephium_core::ids::ProfileId;
+
+    #[test]
+    fn a_multi_line_fill_matches_up_to_how_its_line_breaks_are_kept() {
+        let typed = "Hi Dana,\n\nThe release is ready.\nThanks, Hayk";
+        assert!(fill_value_matches(typed, typed));
+        for kept in [
+            "Hi Dana,\n\nThe release is ready.\nThanks, Hayk\n",
+            "Hi Dana,\n\n\nThe release is ready.\nThanks, Hayk",
+            "Hi Dana,\nThe release is ready.\n\nThanks, Hayk",
+            "Hi\u{a0}Dana,\n\nThe release is ready.\r\nThanks, Hayk",
+        ] {
+            assert!(fill_value_matches(kept, typed));
+        }
+        for wrong in [
+            "Hi Dana,\n\nThe release is ready.",
+            "Hi Dana,\n\nThe release is ready.\nThanks, Hayk and Sam",
+            "Thanks, Hayk\n\nThe release is ready.\nHi Dana,",
+            "Hi Dana,\n\nThe release is read y.\nThanks, Hayk",
+        ] {
+            assert!(!fill_value_matches(wrong, typed));
+        }
+        assert!(!fill_value_matches("a  b", "a b"));
+    }
 
     fn observation() -> SemanticObservation {
         let identity = ContextIdentity::new(
