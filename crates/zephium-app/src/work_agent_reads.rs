@@ -493,6 +493,7 @@ fn redirected_kind(step: &WorkStepKindV1, destination: &str) -> Option<WorkStepK
     let WorkStepKindV1::Read {
         url,
         goal,
+        verbatim,
         collection,
     } = step
     else {
@@ -506,6 +507,7 @@ fn redirected_kind(step: &WorkStepKindV1, destination: &str) -> Option<WorkStepK
         && zephium_agentic::AgentNavigationDiscovery::try_new_public_page(from.clone()).is_ok();
     (public_destination && (zephium_agentic::same_work_site(&from, &to) || public_read)).then(
         || WorkStepKindV1::Read {
+            verbatim: verbatim.clone(),
             url: destination.to_owned(),
             goal: goal.clone(),
             collection: collection.clone(),
@@ -1424,7 +1426,9 @@ fn job_listing(kind: WorkStepKindV1) -> WorkStepKindV1 {
             url,
             collection: None,
             goal: None,
+            ..
         } if job_board(&url) => WorkStepKindV1::Read {
+            verbatim: None,
             url,
             goal: None,
             collection: Some(WorkBrowseCollection {
@@ -1627,6 +1631,7 @@ mod tests {
     fn typed_turn_limit_can_retry_only_a_failed_read_with_known_usage() {
         for goal in [None, Some("Send the message".into())] {
             let step = WorkStepKindV1::Read {
+                verbatim: None,
                 url: "https://example.com/article".into(),
                 goal: goal.clone(),
                 collection: None,
@@ -1681,6 +1686,7 @@ mod tests {
                 max_items: 5,
             });
             let step = WorkStepKindV1::Read {
+                verbatim: None,
                 url: "https://example.com/products".into(),
                 goal: goal.clone(),
                 collection: collection.clone(),
@@ -1688,6 +1694,7 @@ mod tests {
             assert_eq!(
                 redirected_kind(&step, "https://www.example.com/products/"),
                 Some(WorkStepKindV1::Read {
+                    verbatim: None,
                     url: "https://www.example.com/products/".into(),
                     goal: goal.clone(),
                     collection,
@@ -1726,6 +1733,7 @@ mod tests {
             id: WorkStepId::generate(),
             turn: 1,
             kind: WorkStepKindV1::Read {
+                verbatim: None,
                 url: url.into(),
                 collection: None,
                 goal: None,
@@ -2399,6 +2407,7 @@ mod tests {
                 collection: Some(collection),
                 ..
             } = job_listing(WorkStepKindV1::Read {
+                verbatim: None,
                 url: url.into(),
                 collection: None,
                 goal: None,
@@ -2419,6 +2428,7 @@ mod tests {
         ] {
             assert!(!job_board(url), "{url}");
             let kind = WorkStepKindV1::Read {
+                verbatim: None,
                 url: url.into(),
                 collection: None,
                 goal: None,
@@ -2427,6 +2437,7 @@ mod tests {
         }
         // A collection the model chose is its own.
         let chosen = WorkStepKindV1::Read {
+            verbatim: None,
             url: "https://jobs.lever.co/acme".into(),
             collection: Some(WorkBrowseCollection {
                 title: "Roles".into(),

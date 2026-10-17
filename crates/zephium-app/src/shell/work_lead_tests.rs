@@ -587,6 +587,7 @@ pub(super) fn command(work: WorkId, expected: WorkRevision) -> WorkCommandV1 {
         command: WorkCommandId::generate(),
         intent: WorkRuntimeIntent::BeginAgent {
             grant: WorkAgentGrantV1 {
+                draft: None,
                 provider: WorkSearchProvider::OpenAi,
                 model: PUBLIC_SEARCH_MODEL.into(),
                 max_turns: 10,
@@ -1144,10 +1145,7 @@ async fn a_service_the_person_connected_is_offered_once_before_its_website() {
             _ => None,
         })
         .collect();
-    assert_eq!(
-        asks,
-        ["Use Slack (MCP)? Its tools read Slack as you in this work."]
-    );
+    assert_eq!(asks, ["Use your Slack connection, or work on the website?"]);
     let slack = &run.parts[0];
     assert_eq!(slack.helper, WorkHelperV1::Connection);
     assert_eq!(slack.state, WorkPartStateV1::Done);
@@ -1156,6 +1154,413 @@ async fn a_service_the_person_connected_is_offered_once_before_its_website() {
         .iter()
         .any(|s| matches!(&s.kind, WorkStepKindV1::Call { call } if call.service == "slack")));
     let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A lead that drafts an email, then a Gmail helper that browses with the
+/// draft's id from its brief and nothing else of the words.
+struct Drafting;
+impl WorkModelClient for Drafting {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let turn = request
+                .messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
+                .count();
+            let system = request
+                .system
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<String>();
+            let id = |text: &str| {
+                text.split(|c: char| !c.is_alphanumeric())
+                    .find(|word| WorkArtifactId::parse(word).is_some())
+                    .map(str::to_owned)
+            };
+            let assistant = if system.contains("You are the Work agent") {
+                match turn {
+                    0 => vec![call(
+                        "d",
+                        "create",
+                        json!({"kind": "draft", "title": "Hello Hayk", "data": {
+                            "destination": "email", "to": "hayk@example.com", "subject": "Hello",
+                            "body": "Hi Hayk,\n\nThe deck is ready.\nBest, Ana"}}),
+                    )],
+                    1 => {
+                        let draft = id(&results(&request)).expect("the draft's id");
+                        vec![call(
+                            "p",
+                            "start_part",
+                            json!({"title": "Gmail", "helper": "browser", "service": "mail.google.com",
+                                "goal": "Send the draft", "draft": draft}),
+                        )]
+                    }
+                    2 => vec![call(
+                        "r",
+                        "create",
+                        json!({"kind": "reply", "title": "Sent", "data": {
+                            "headline": "Email sent", "text": "The email went to Hayk."}}),
+                    )],
+                    _ => vec![call("f", "finish", json!({"say": "Sent."}))],
+                }
+            } else {
+                match turn {
+                    0 => {
+                        let brief = request
+                            .messages
+                            .iter()
+                            .find_map(|m| match m {
+                                WorkModelMessage::User(parts) => {
+                                    parts.iter().find_map(|p| match p {
+                                        WorkModelPart::Text(t) => Some(t.clone()),
+                                        _ => None,
+                                    })
+                                }
+                                _ => None,
+                            })
+                            .unwrap();
+                        let at = brief
+                            .find("canvas object")
+                            .expect("the brief names the draft");
+                        let draft = id(&brief[at..]).expect("the draft's id");
+                        vec![call(
+                            "b",
+                            "browse",
+                            json!({"start": "mail.google.com", "goal": "Send the draft", "draft": draft}),
+                        )]
+                    }
+                    _ => vec![call(
+                        "f",
+                        "finish",
+                        json!({"summary": "Email", "digest": "Sent.", "found": true}),
+                    )],
+                }
+            };
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    input_tokens: 1_000,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 100,
+                    reasoning_tokens: 0,
+                    cost_micros: None,
+                },
+                assistant,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_draft_reaches_the_page_exactly_with_its_line_breaks_and_not_through_the_goal() {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Draft an email to Hayk and send it".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let lead = LeadModel {
+        client: Arc::new(Drafting),
+        ..model(Arc::new(Script {
+            calls: Mutex::new(Vec::new()),
+        }))
+    };
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let seen: Arc<Mutex<Vec<(Option<String>, Option<String>)>>> = Arc::default();
+    let record = seen.clone();
+    let answering = answer_asks(&handle, profile, work, "Allow");
+    drive(
+        &mut shell,
+        &queue,
+        WorkLeadService::new(handle.clone()).run(
+            profile,
+            command(work, WorkRevision::INITIAL),
+            None,
+            models,
+            &Search,
+            move |_, request| {
+                if let WorkStepKindV1::Read { goal, verbatim, .. } = &request.step {
+                    record
+                        .lock()
+                        .unwrap()
+                        .push((goal.clone(), verbatim.clone()));
+                }
+                async move { Ok(notes(request, "Sent")) }
+            },
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    answering.abort();
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        *seen,
+        [(
+            Some("Send the draft".to_owned()),
+            Some(
+                "To: hayk@example.com\nSubject: Hello\nBody:\nHi Hayk,\n\nThe deck is ready.\nBest, Ana"
+                    .to_owned()
+            )
+        )]
+    );
+}
+
+/// A lead that sends one part to a service's own app, and a page helper that
+/// browses it once.
+struct Routing(&'static str);
+impl WorkModelClient for Routing {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let turn = request
+                .messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
+                .count();
+            let system = request
+                .system
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<String>();
+            let assistant = if system.contains("You are the Work agent") {
+                match turn {
+                    0 => vec![
+                        call(
+                            "p",
+                            "start_part",
+                            json!({"title": "Issue", "helper": "browser", "service": self.0,
+                                "goal": "Create an issue called Fix login"}),
+                        ),
+                        call(
+                            "q",
+                            "start_part",
+                            json!({"title": "Labels", "helper": "browser", "service": self.0,
+                                "goal": "Create a label called Bug"}),
+                        ),
+                    ],
+                    1 => vec![call(
+                        "r",
+                        "create",
+                        json!({"kind": "reply", "title": "Issue", "data": {
+                            "headline": "Issue", "text": "The parts ran."}}),
+                    )],
+                    _ => vec![call("f", "finish", json!({"say": "Done."}))],
+                }
+            } else {
+                match turn {
+                    0 => vec![call(
+                        "b",
+                        "browse",
+                        json!({"start": self.0, "goal": "Create an issue called Fix login", "mine": true}),
+                    )],
+                    _ => vec![call(
+                        "f",
+                        "finish",
+                        json!({"summary": "Created", "digest": "Created.", "found": true}),
+                    )],
+                }
+            };
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    input_tokens: 1_000,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 100,
+                    reasoning_tokens: 0,
+                    cost_micros: None,
+                },
+                assistant,
+            })
+        })
+    }
+}
+
+/// Answers every question the run asks with `answer`, until aborted.
+fn answer_asks(
+    handle: &crate::Handle,
+    profile: zephium_core::ids::ProfileId,
+    work: WorkId,
+    answer: &'static str,
+) -> tokio::task::JoinHandle<()> {
+    let handle = handle.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let Ok(request) = handle.work_projection(profile, work) else {
+                continue;
+            };
+            let zephium_ipc::work::WorkReplyV1::Projection { projection } =
+                request.response(profile).await.reply
+            else {
+                continue;
+            };
+            let Some(execution) = projection.executions.last() else {
+                continue;
+            };
+            let open = execution.steps.iter().find_map(|step| match &step.kind {
+                WorkStepKindV1::Ask { answer: None, .. }
+                    if step.status == WorkStepStatus::Running =>
+                {
+                    Some(step.id)
+                }
+                _ => None,
+            });
+            let Some(step) = open else {
+                continue;
+            };
+            let _ = handle
+                .work_command(
+                    profile,
+                    WorkCommandV1 {
+                        version: 1,
+                        work,
+                        expected_revision: projection.work.revision,
+                        command: WorkCommandId::generate(),
+                        intent: WorkRuntimeIntent::AnswerStep {
+                            execution: execution.id,
+                            step,
+                            answer: answer.into(),
+                        },
+                    },
+                )
+                .unwrap()
+                .await;
+        }
+    })
+}
+
+/// Runs the Routing lead on `service`, answering every question with
+/// `answer`; returns the run and the pages that opened.
+async fn routed(service: &'static str, answer: &'static str) -> (WorkExecutionFact, usize) {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Create an issue called Fix login".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let lead = LeadModel {
+        client: Arc::new(Routing(service)),
+        ..model(Arc::new(Script {
+            calls: Mutex::new(Vec::new()),
+        }))
+    };
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let answering = answer_asks(&handle, profile, work, answer);
+    let opened = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = opened.clone();
+    let done = drive(
+        &mut shell,
+        &queue,
+        WorkLeadService::new(handle.clone()).run(
+            profile,
+            command(work, WorkRevision::INITIAL),
+            None,
+            models,
+            &Search,
+            move |_, request| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move { Ok(notes(request, "Created")) }
+            },
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    answering.abort();
+    (
+        done.executions[0].clone(),
+        opened.load(std::sync::atomic::Ordering::SeqCst),
+    )
+}
+
+fn way_asks(run: &WorkExecutionFact) -> Vec<(String, Vec<String>)> {
+    run.steps
+        .iter()
+        .filter_map(|s| match &s.kind {
+            WorkStepKindV1::Ask {
+                prompt, options, ..
+            } => Some((prompt.clone(), options.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_service_with_an_official_connection_asks_one_way_question_for_all_its_parts() {
+    let (run, opened) = routed("linear.app", "Use the website").await;
+    assert_eq!(
+        way_asks(&run),
+        [(
+            "Work on the Linear website, or connect Linear first?".to_owned(),
+            vec![
+                "Use the website".to_owned(),
+                "Connect Linear".to_owned(),
+                "Always the website".to_owned(),
+                "Not now".to_owned()
+            ]
+        )]
+    );
+    assert!(opened >= 1);
+    assert!(run.parts.iter().all(|p| p.state == WorkPartStateV1::Done));
+}
+
+#[tokio::test]
+async fn connecting_first_ends_the_part_with_the_connect_need() {
+    let (run, opened) = routed("linear.app", "Connect Linear").await;
+    assert_eq!(opened, 0);
+    assert_eq!(way_asks(&run).len(), 1);
+    for part in &run.parts {
+        assert_eq!(part.state, WorkPartStateV1::Failed);
+        assert_eq!(
+            part.need,
+            Some(WorkPartNeedV1::Connect {
+                connection: "Linear".into()
+            })
+        );
+    }
+}
+
+#[tokio::test]
+async fn not_now_keeps_the_service_untouched_and_asks_to_allow_it() {
+    let (run, opened) = routed("app.todoist.com", "Not now").await;
+    assert_eq!(opened, 0);
+    assert_eq!(way_asks(&run).len(), 1);
+    assert!(run
+        .parts
+        .iter()
+        .all(|p| matches!(p.need, Some(WorkPartNeedV1::AllowSite { .. }))));
+}
+
+#[tokio::test]
+async fn a_service_without_an_official_connection_keeps_its_entry_question_alone() {
+    let (run, _) = routed("airbnb.com", "Allow").await;
+    assert!(way_asks(&run)
+        .iter()
+        .all(|(prompt, _)| !prompt.contains("connect")));
 }
 
 /// A lead scripted turn by turn: the turn's index and every tool result so

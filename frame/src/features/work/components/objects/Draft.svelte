@@ -180,6 +180,7 @@
     </div>
   {/if}
   <footer>
+    {#if object.note}<p class="note" role="status">{object.note}</p>{/if}
     {#if object.destination === "github" && actions.review && (object.send ?? "draft") === "draft"}<div
         class="reviews nodrag nopan"
         role="radiogroup"
@@ -201,7 +202,7 @@
       >{#if send === "sent"}<Icon
           icon={Tick02Icon}
           size={13}
-        />{m.work_draft_sent()}{:else if send === "confirming"}{m.work_draft_confirming()}{:else}{verb}{/if}</button
+        />{m.work_draft_sent()}{:else if send === "sending"}{m.work_draft_sending()}{:else}{verb}{/if}</button
     >
   </footer>
 </article>
@@ -457,6 +458,14 @@
     align-items: center;
     justify-content: flex-end;
     gap: 12px;
+  }
+
+  .note {
+    margin: 0;
+    margin-inline-end: auto;
+    min-inline-size: 0;
+    color: var(--color-muted);
+    font-size: var(--text-label);
   }
 
   .count {
