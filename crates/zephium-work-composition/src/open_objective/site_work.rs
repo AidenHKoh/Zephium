@@ -2314,6 +2314,18 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             state.status_before = status_lines(observation);
             return accept_approved(current_binding);
         }
+        // An approval is the person's answer for one control. Another one
+        // proposed meanwhile (a close button Rust tries, a detour the model
+        // takes) is refused without a card and leaves the approval waiting.
+        if state.confirmed.as_ref().is_some_and(|confirmed| {
+            matches!(
+                confirmed.preview.consequence,
+                Consequence::Communication | Consequence::Purchase | Consequence::Destructive
+            ) && (confirmed.preview.consequence != consequence
+                || confirmed.preview.action != preview.action)
+        }) {
+            return Err(AgentWorkFailure::ActionDenied);
+        }
         if let Some(confirmed) = state.confirmed.take() {
             // What the person approved is what the card showed (where it goes,
             // the words, the control): the same card on the same open page is
@@ -3025,6 +3037,36 @@ mod tests {
                 assert!(matches!(result, Err(AgentWorkFailure::WrongRecipient)));
             }
         }
+    }
+
+    #[test]
+    fn an_approved_send_waits_out_another_control_proposed_before_it() {
+        let look = page(vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"dialog","n":"Compose: Status","fc":true}),
+            json!({"k":3,"p":1,"r":"button","n":"Save & close","o":9,"ak":1,"fc":true,
+                "b":{"x":200,"y":1,"w":30,"h":30}}),
+            json!({"k":4,"p":1,"r":"textbox","n":"Message Body","o":11,"fs":1,"es":[1,2,false],"fc":true,
+                "v":{"k":"text","value":"Hi Ana"},"b":{"x":1,"y":40,"w":300,"h":80}}),
+            json!({"k":5,"p":1,"r":"button","n":"Send","o":9,"ak":1,"fc":true,
+                "b":{"x":1,"y":130,"w":80,"h":30}}),
+        ]);
+        let gate = Arc::new(SiteGate::new("mail.example.test".into(), false, false));
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        let send = click(&look, 5, SemanticEffectClass::Communication);
+        assert!(policy.assess(&send, &look).is_err());
+        gate.approve(false).unwrap();
+        // Rust tries the box's close control as a read before the model runs.
+        let close = click(&look, 3, SemanticEffectClass::Read);
+        assert_eq!(
+            policy.assess(&close, &look).err(),
+            Some(AgentWorkFailure::ActionDenied)
+        );
+        assert!(gate.pending().is_none(), "no card for a step the person did not ask for");
+        assert!(policy.assess(&send, &look).is_ok(), "the approval still holds");
     }
 
     #[test]
