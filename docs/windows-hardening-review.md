@@ -19,6 +19,53 @@ Review commits:
 
 ## First changes
 
+### October 10: reported download, icon and video failures
+
+Local changes on `windows/hardening`, awaiting owner visual acceptance:
+
+- Reproduced `FILE_FAILED` with a loopback HTTP attachment and the production
+  private staging directory. WebView2 accepted the verbatim destination spelling
+  but failed the transfer. Verified ordinary Win32 spelling completed the same
+  transfer, publication and Internet-zone/file-identity checks. Canonical ancestor
+  leases and staging ACLs remain authoritative. Windows now honors automatic save
+  to Downloads and the optional ask-first setting; a custom folder still requires
+  its native picker identity. Multiple automatic downloads remain denied.
+- Fixed favicon delivery ownership when switching profiles. Returning to a profile
+  resends unchanged rasters; a late background-profile icon cannot replace the
+  foreground webview's cache. Empty profiles explicitly reset the surface owner.
+  All 18 favicon tests pass, including both regressions.
+- Native generated-video qualification opened and closed video PiP successfully.
+  The installed runtime exposes its menu command as `pictureInPciture`; the host
+  filter had discarded it. Preserve that command and the observed native media
+  controls, retaining foreground/document admission. Document PiP is unavailable
+  in this runtime; no emulation or media URL extraction was introduced.
+- Element fullscreen now conceals intermediate native geometry with a black owned
+  popup, then fades out after geometry settles. Windows animation preferences are
+  respected; the cover allocates only the current client area and releases its
+  HWND/timer within 600 ms. Native tests cover expiry and replacement. Visual
+  smoothness, mixed-DPI monitors and real-site acceptance remain owner checks.
+
+Validation: 446 application tests and 264 engine tests passed (3 opt-in engine
+tests ignored by the ordinary suite). The native download/PiP qualifier was run
+separately and passed, including dispatch of the actual native PiP menu command
+and profile cleanup after browser-process exit. Strict Clippy passed for both
+crates and all their targets. Frontend check passed (736 tests in 131 files), and
+the frontend build passed its bundle budgets. Existing build warnings about motion
+initialization and CSS highlight selectors remain outside these fixes.
+These are debug correctness checks, not release performance measurements.
+
+The Review QA identity is also admitted to the closed Windows Work-storage identity
+list so the requested isolated app can start. The separate namespace-validation
+fixture still fails with `Unsafe` while preparing its original Product fixture,
+before reaching the added Review QA assertion; no security predicate was relaxed.
+
+Owner checks for the rebuilt candidate: start fresh downloads from the original
+sites; toggle ask-first and choose a folder; verify filename collisions and Open/
+Reveal; enter/exit YouTube fullscreen from normal and maximized windows; open PiP
+from the native video menu; switch private/regular profiles and revisit favicons.
+
+### October 7: initial hardening
+
 - Runtime-generation maintenance no longer deletes shared volatile registry
   markers just because their generation is absent from the current data root.
   QA, production, and other app identities share the registry namespace. The
@@ -186,6 +233,39 @@ The engine's `native_protection_qualification` test uses
 and `--ignored --nocapture --test-threads=1`. All reported native checks here
 use debug binaries for correctness. Their incidental timing output must not
 be presented as release performance evidence.
+
+## October 18 download handoff follow-up
+
+The owner confirmed ordinary download completion, fullscreen and manual video
+PiP, then reported Open/Show in Folder failures and fullscreen reveals before
+slow page layouts settled. The two completed QA download receipts still name
+existing files, but neither file retains a `Zone.Identifier` stream. This
+explains the protection error; the cause of the later stream removal is not
+established.
+
+Show in Folder now verifies the recorded file identity without requiring
+execution protection. Open still requires protection: for an unchanged original
+it reruns Attachment Services when protection is missing, restores the receipt's
+last-write timestamp after the ADS-only update, and verifies protection again.
+Modified or substituted files remain refused. Explorer and shell verbs receive
+the strictly validated ordinary spelling of the canonical local path.
+
+The Windows download suite passes 22 tests (one native opt-in test excluded),
+including missing-stream recovery, rejection of edited payloads, and shell PIDL
+parsing of Unicode names with spaces. No downloaded executable was run during
+qualification. The native loopback download also retains its provenance after
+the original WebView2 process exits; that fixture did not reproduce later stream
+removal.
+
+The earlier 600 ms fullscreen cover is superseded by readiness sampling. The
+cover now waits for native window geometry, a matching page viewport/fullscreen
+state, and 200 ms of stable video rectangles, then fades over 180 ms (or reveals
+without animation for reduced motion). Enter requires the page to fill the
+window and the window to cover its monitor; exit requires restoration of the
+saved window rectangle. A four-second failure deadline prevents a hung renderer
+from leaving the window black. Competing page slides are suppressed while the
+cover is active. Engine tests pass 267 cases with three opt-in tests excluded.
+Automatic PiP remains a separate implementation on the integrated branch.
 
 ## Remaining acceptance and engineering work
 
