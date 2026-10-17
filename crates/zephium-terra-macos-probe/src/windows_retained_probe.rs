@@ -808,6 +808,7 @@ fn run_inner(
             id: space,
             profile,
             name: "Fixed native fixture".into(),
+            look: Default::default(),
         }],
         active_space: Some(space),
         ..SessionState::default()

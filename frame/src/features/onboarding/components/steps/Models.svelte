@@ -4,7 +4,7 @@
   import type { IconSvgElement } from "@hugeicons/svelte";
   import * as m from "$shared/i18n/messages";
   import { commands, type WorkLocalServerV1 } from "$shared/ipc/bindings";
-  import Icon, { ZephiumMark } from "$shared/ui/Icon";
+  import Icon from "$shared/ui/Icon";
   import ZephiumTile from "$shared/ui/ZephiumTile";
   import type { Mind } from "../../lib/minds";
 
@@ -44,7 +44,8 @@
 
   type Option = {
     id: Mind;
-    icon: IconSvgElement;
+    /** Zephium shows its own app icon instead. */
+    icon?: IconSvgElement;
     title: string;
     body: string;
     found: string | null;
@@ -55,7 +56,6 @@
     if (hosted)
       list.push({
         id: "zephium",
-        icon: ZephiumMark,
         title: m.onb_ai_zephium(),
         body: m.onb_ai_zephium_body(),
         found: null,
@@ -91,9 +91,8 @@
         onkeydown={keydown}
       />
       <span class="top">
-        {#if option.id === "zephium"}<ZephiumTile size={36} />{:else}<span class="tile"
-            ><Icon icon={option.icon} size={18} /></span
-          >{/if}
+        {#if option.icon}<span class="tile"><Icon icon={option.icon} size={18} /></span
+          >{:else}<ZephiumTile size={36} />{/if}
         {#if option.found}<span class="found">{option.found}</span>{/if}
       </span>
       <span class="title">{option.title}</span>

@@ -131,17 +131,58 @@ describe("icon tone", () => {
   });
 });
 
-describe("profile isolation", () => {
-  it("never shows one profile's icon for another's site", async () => {
+describe("profile switches", () => {
+  const ref = { origin: "https://example.com", revision: "a" };
+
+  it("keeps a profile's icons while another is shown, since native will not resend them", async () => {
     await favicons.init();
-    const ref = { origin: "https://example.com", revision: "a" };
     deliver([{ origin: ref.origin, revision: "a", rgba: raster(7) }], "personal");
-    expect(favicons.image(ref)?.data[0]).toBe(7);
-
-    // A private window is a different profile whose icons native caches apart.
     deliver([{ origin: "https://other.example", revision: "a", rgba: raster(9) }], "private");
+    deliver([], "personal");
 
-    expect(favicons.image(ref)).toBeNull();
+    expect(favicons.image(ref)?.data[0]).toBe(7);
     expect(favicons.image({ origin: "https://other.example", revision: "a" })?.data[0]).toBe(9);
+  });
+
+  it("gives each profile its own icon for one site", async () => {
+    await favicons.init();
+    deliver([{ origin: ref.origin, revision: "a", rgba: raster(7) }], "personal");
+    deliver([{ origin: ref.origin, revision: "b", rgba: raster(9) }], "work");
+    deliver([], "personal");
+
+    expect(favicons.image(ref)?.data[0]).toBe(7);
+    expect(favicons.image({ origin: ref.origin, revision: "b" })?.data[0]).toBe(9);
+    expect(favicons.forPage("https://example.com/inbox")?.image.data[0]).toBe(7);
+    deliver([], "work");
+    expect(favicons.forPage("https://example.com/inbox")?.image.data[0]).toBe(9);
+  });
+
+  it("never shows another profile's icon for a stored address", async () => {
+    await favicons.init();
+    deliver([{ origin: "https://secret.example", revision: "a", rgba: raster(7) }], "private");
+    deliver([], "personal");
+
+    expect(favicons.forPage("https://secret.example/")).toBeNull();
+    deliver([], "private");
+    expect(favicons.forPage("https://secret.example/")?.image.data[0]).toBe(7);
+  });
+
+  it("survives A to B to A with no resend", async () => {
+    await favicons.init();
+    const entries = Array.from({ length: 40 }, (_, index) => ({
+      origin: `https://site-${index}.example`,
+      revision: "a",
+      rgba: raster(index + 1),
+    }));
+    deliver(entries, "a");
+    deliver(
+      entries.slice(0, 10).map((entry) => ({ ...entry, revision: "b", rgba: raster(200) })),
+      "b",
+    );
+    deliver([], "a");
+
+    for (const entry of entries) {
+      expect(favicons.image({ origin: entry.origin, revision: "a" })).not.toBeNull();
+    }
   });
 });

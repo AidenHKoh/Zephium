@@ -59,3 +59,6 @@ export { default as Tick02Icon } from "@hugeicons/core-free-icons/Tick02Icon";
 export { default as Upload01Icon } from "@hugeicons/core-free-icons/Upload01Icon";
 export { default as UserIcon } from "@hugeicons/core-free-icons/UserIcon";
 export { default as WorkHistoryIcon } from "@hugeicons/core-free-icons/WorkHistoryIcon";
+export { default as StarIcon } from "@hugeicons/core-free-icons/StarIcon";
+export { default as Settings02Icon } from "@hugeicons/core-free-icons/Settings02Icon";
+export { default as ArrowLeft01Icon } from "@hugeicons/core-free-icons/ArrowLeft01Icon";

@@ -69,7 +69,7 @@
 
 <!--
   One control for every mutually exclusive choice in the product. The chosen
-  segment is a single plate that travels rather than two fills that swap, so
+  segment is a single shine plate that travels rather than two fills that swap, so
   the control reads as moving between places instead of repainting — and
   because there is exactly one of these, the appearance picker and the sidebar
   cannot drift apart into two different ideas of what a choice looks like.
@@ -145,7 +145,7 @@
     width: calc((100% - var(--seg-pad) * 2) / var(--seg-count));
     border-radius: calc(var(--seg-radius) - var(--seg-pad));
     background: var(--row-active);
-    box-shadow: var(--row-rim);
+    box-shadow: var(--shine-top);
     translate: calc(var(--seg-index) * 100%) 0;
     transition:
       translate var(--motion-base) var(--ease-spring),

@@ -35,6 +35,8 @@ pub mod work;
 
 /// Allowlisted application appearance preferences.
 pub mod preferences;
+/// Colour themes and the window ground native derives from them.
+pub mod theme;
 
 /// Durable user-authored resources shared by Browse and Work.
 pub mod resources;

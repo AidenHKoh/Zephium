@@ -18,10 +18,16 @@ pub struct Model {
     pub ready: bool,
     pub owner: Option<Owner>,
     pub error: bool,
+    /// The tab whose address this presentation edits, and that address.
+    editing: Option<(String, String)>,
 }
 impl Model {
     pub fn session(&self) -> String {
         format!("{:016x}", self.revision)
+    }
+    /// The tab whose address this presentation edits.
+    pub fn editing_tab(&self) -> Option<String> {
+        self.editing.as_ref().map(|(tab, _)| tab.clone())
     }
     pub fn snapshot(&self) -> PanelState {
         PanelState {
@@ -34,6 +40,8 @@ impl Model {
             space_id: self.owner.as_ref().map(|o| o.space.clone()),
             error: self.error,
             corner_radius: RADIUS,
+            seed: self.editing.as_ref().map(|(_, url)| url.clone()),
+            seed_tab: self.editing_tab(),
         }
     }
     pub fn reject(&mut self) {
@@ -77,6 +85,14 @@ impl Model {
         }
         self.presented = true;
         self.error = false;
+        self.editing = None;
+    }
+    /// Opens on a tab's address, so a chosen result replaces that tab's page.
+    pub fn edit(&mut self, tab: String, url: String) {
+        self.search();
+        if self.presented {
+            self.editing = Some((tab, url));
+        }
     }
     pub fn hide(&mut self) {
         if !self.advance() {
@@ -84,6 +100,7 @@ impl Model {
         }
         self.presented = false;
         self.error = false;
+        self.editing = None;
     }
     /// A launcher is transient: it goes away when focus moves to the browser
     /// or to another application. An owned native surface, such as a menu or
@@ -196,5 +213,22 @@ mod tests {
         m.set_owner(Some(owner("two", "p", "s")));
         assert!(!m.admits(&request));
         assert!(!m.snapshot().visible);
+    }
+
+    #[test]
+    fn editing_seeds_the_address_and_keeps_the_panel_session() {
+        let mut m = Model::default();
+        m.set_owner(Some(owner("one", "p", "s")));
+        m.edit("tab".into(), "https://example.com/".into());
+        let snapshot = m.snapshot();
+        assert_eq!(snapshot.seed.as_deref(), Some("https://example.com/"));
+        // Search answers the panel's own session, or the panel drops every result.
+        let request = m.context("request").unwrap();
+        assert_eq!(request.session_id, snapshot.session_id);
+        assert!(m.admits(&request));
+        assert_eq!(m.editing_tab().as_deref(), Some("tab"));
+        m.search();
+        assert_eq!(m.snapshot().seed, None);
+        assert_eq!(m.editing_tab(), None);
     }
 }

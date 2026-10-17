@@ -4,8 +4,9 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
-use dispatch2::{DispatchQueue, MainThreadBound};
+use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly, Message};
@@ -17,7 +18,7 @@ use objc2_app_kit::{
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSArray, NSNotification, NSNotificationCenter, NSNumber,
-    NSObjectProtocol, NSPoint, NSRect, NSSize, NSValue,
+    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSValue,
 };
 use objc2_quartz_core::{
     kCAFillModeForwards, CABasicAnimation, CAMediaTiming, CAMediaTimingFunction, CATransaction,
@@ -25,12 +26,24 @@ use objc2_quartz_core::{
 
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
+use zephium_core::ports::engine::DropPreview;
 use zephium_core::split::{self, Divider, Pane};
 
 use crate::pane_geometry::rounded_native_size;
 
 use super::pointer_cover::PointerCover;
 
+/// A page a drop preview slid aside, and how far.
+type Displaced = (ItemId, (f64, f64));
+
+/// A drop's slide in the stage's own space, which is not flipped: a page sent
+/// down the screen goes to a lower y.
+fn slide((x, y): (f64, f64)) -> (f64, f64) {
+    (x, -y)
+}
+
+/// How long the pointer rests on a drop target before the page makes room.
+const DROP_DWELL: Duration = Duration::from_millis(450);
 type RatioCallback = Rc<dyn Fn(Pane)>;
 type StageFailureCallback = Rc<dyn Fn(usize)>;
 const MAX_ASYNC_STAGE_RETRIES: u8 = 4;
@@ -183,6 +196,11 @@ pub struct StageIvars {
     pointer_cover: RefCell<Option<PointerCover>>,
     covers: RefCell<HashMap<ItemId, PaintCover>>,
     indicator: RefCell<Option<Retained<NSView>>>,
+    /// A drop target the pointer has reached but not yet rested on.
+    armed: RefCell<Option<Box<DropPreview>>>,
+    /// The page a drop preview slid aside, and where it sent it.
+    displaced: RefCell<Option<Box<Displaced>>>,
+    preview_generation: Cell<u64>,
     on_ratio: RefCell<Option<RatioCallback>>,
     on_stage_failure: RefCell<Option<StageFailureCallback>>,
     /// A slide that keeps the wider, older frame until it arrives, and the
@@ -500,6 +518,9 @@ impl ContentStage {
             }
             return None;
         }
+        // A layout is the drop, or a change that outdates the preview: either
+        // way the pages are about to stand where they belong.
+        self.clear_preview();
         let epoch = self
             .ivars()
             .content_update_epoch
@@ -1026,69 +1047,326 @@ impl ContentStage {
         !self.ivars().stage_retry_terminal.get()
     }
 
-    pub fn set_drop_indicator(&self, zone: Option<Rect>) {
+    /// Shows what dropping a dragged tab would do, or takes it away. The
+    /// pane's page slides aside on its layer, never resized, so nothing lays
+    /// out until the drop; the drop is the one layout. A new target shows only
+    /// once the pointer has rested on it, so passing over a page moves nothing.
+    pub fn set_drop_indicator(&self, preview: Option<DropPreview>) {
         if self.ivars().stage_retry_terminal.get() {
             return;
         }
-        match zone {
-            None => {
-                let view = self
+        let Some(preview) = preview else {
+            self.disarm();
+            self.end_preview();
+            return;
+        };
+        let shown = self
+            .ivars()
+            .displaced
+            .try_borrow()
+            .ok()
+            .and_then(|displaced| displaced.as_deref().copied());
+        if shown == Some((preview.tab, slide(preview.shift))) {
+            return;
+        }
+        let armed = self
+            .ivars()
+            .armed
+            .try_borrow()
+            .ok()
+            .and_then(|armed| armed.as_deref().copied());
+        if armed.is_some_and(|armed| armed.tab == preview.tab && armed.zone == preview.zone) {
+            return;
+        }
+        if shown.is_some() {
+            self.end_preview();
+        }
+        let Ok(mut slot) = self.ivars().armed.try_borrow_mut() else {
+            return;
+        };
+        *slot = Some(Box::new(preview));
+        drop(slot);
+        let generation = self.ivars().preview_generation.get().wrapping_add(1);
+        self.ivars().preview_generation.set(generation);
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let stage = MainThreadBound::new(Weak::from_retained(&self.retain()), mtm);
+        let Ok(when) = DispatchTime::try_from(DROP_DWELL) else {
+            return;
+        };
+        let _ = DispatchQueue::main().after(when, move || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return;
+                };
+                let Some(stage) = stage.get(mtm).load() else {
+                    return;
+                };
+                if stage.ivars().preview_generation.get() != generation {
+                    return;
+                }
+                let armed = stage
                     .ivars()
-                    .indicator
+                    .armed
                     .try_borrow_mut()
                     .ok()
-                    .and_then(|mut indicator| indicator.take());
-                if let Some(view) = view {
-                    view.removeFromSuperview();
+                    .and_then(|mut armed| armed.take());
+                if let Some(preview) = armed {
+                    stage.show_preview(*preview);
                 }
-            }
-            Some(z) => {
-                let existing = self
-                    .ivars()
-                    .indicator
-                    .try_borrow()
-                    .ok()
-                    .and_then(|indicator| indicator.clone());
-                let view = if let Some(view) = existing {
-                    view
-                } else {
-                    let candidate = self.make_indicator();
-                    self.addSubview(&candidate);
-                    let Ok(mut indicator) = self.ivars().indicator.try_borrow_mut() else {
-                        candidate.removeFromSuperview();
-                        return;
-                    };
-                    if let Some(installed) = indicator.as_ref() {
-                        let installed = installed.clone();
-                        drop(indicator);
-                        candidate.removeFromSuperview();
-                        installed
-                    } else {
-                        *indicator = Some(candidate.clone());
-                        candidate
-                    }
+            }));
+        });
+    }
+
+    fn disarm(&self) {
+        if let Ok(mut armed) = self.ivars().armed.try_borrow_mut() {
+            armed.take();
+        }
+    }
+
+    fn show_preview(&self, preview: DropPreview) {
+        let generation = self.ivars().preview_generation.get().wrapping_add(1);
+        self.ivars().preview_generation.set(generation);
+        let height = self.bounds().size.height;
+        let zone = preview.zone;
+        let frame = NSRect::new(
+            NSPoint::new(zone.x, height - zone.y - zone.height),
+            NSSize::new(zone.width, zone.height),
+        );
+        self.preview_view(&self.ivars().indicator, frame, Self::tint);
+        self.displace(preview.tab, slide(preview.shift));
+    }
+
+    fn preview_view(
+        &self,
+        slot: &RefCell<Option<Retained<NSView>>>,
+        frame: NSRect,
+        style: fn(&Self, &NSView),
+    ) {
+        let existing = slot.try_borrow().ok().and_then(|slot| slot.clone());
+        let created = existing.is_none();
+        let view = match existing {
+            Some(view) => view,
+            None => {
+                let view = NSView::new(self.mtm());
+                view.setWantsLayer(true);
+                style(self, &view);
+                let Ok(mut slot) = slot.try_borrow_mut() else {
+                    return;
                 };
-                let h = self.bounds().size.height;
-                view.setFrame(NSRect::new(
-                    NSPoint::new(z.x, h - z.y - z.height),
-                    NSSize::new(z.width, z.height),
-                ));
+                self.addSubview(&view);
+                *slot = Some(view.clone());
+                view
+            }
+        };
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        view.setFrame(frame);
+        CATransaction::commit();
+        if created {
+            if let Some(layer) = view.layer() {
+                let fade = CABasicAnimation::animationWithKeyPath(Some(ns_string!("opacity")));
+                // SAFETY: opacity takes NSNumber values.
+                unsafe {
+                    fade.setFromValue(Some(&NSNumber::new_f64(0.0)));
+                    fade.setToValue(Some(&NSNumber::new_f64(1.0)));
+                }
+                fade.setDuration(0.14);
+                layer.addAnimation_forKey(&fade, Some(ns_string!("zephium.preview.fade")));
             }
         }
     }
 
-    fn make_indicator(&self) -> Retained<NSView> {
-        let v = NSView::new(self.mtm());
-        v.setWantsLayer(true);
-        if let Some(layer) = v.layer() {
-            let fill = NSColor::colorWithWhite_alpha(1.0, 0.12);
-            let border = NSColor::colorWithWhite_alpha(1.0, 0.42);
-            layer.setBackgroundColor(Some(&fill.CGColor()));
-            layer.setBorderColor(Some(&border.CGColor()));
-            layer.setBorderWidth(1.5);
-            layer.setCornerRadius(10.0);
+    /// A faint wash over where the new pane will stand.
+    fn tint(&self, view: &NSView) {
+        let Some(layer) = view.layer() else {
+            return;
+        };
+        let paint = block2::RcBlock::new(|| {
+            layer.setBackgroundColor(Some(
+                &NSColor::labelColor()
+                    .colorWithAlphaComponent(0.06)
+                    .CGColor(),
+            ));
+            layer.setBorderColor(Some(
+                &NSColor::labelColor()
+                    .colorWithAlphaComponent(0.16)
+                    .CGColor(),
+            ));
+        });
+        self.effectiveAppearance()
+            .performAsCurrentDrawingAppearance(&paint);
+        layer.setBorderWidth(1.0);
+        layer.setCornerRadius(10.0);
+    }
+
+    fn displace(&self, tab: ItemId, shift: (f64, f64)) {
+        let current = self
+            .ivars()
+            .displaced
+            .try_borrow()
+            .ok()
+            .and_then(|displaced| displaced.as_deref().copied());
+        if current == Some((tab, shift)) {
+            return;
         }
-        v
+        if let Some((old, _)) = current.filter(|(old, _)| *old != tab) {
+            self.restore(old, self.ivars().preview_generation.get());
+        }
+        let Some(layer) = self.page_layer(tab) else {
+            return;
+        };
+        if let Some(stage) = self.layer() {
+            stage.setMasksToBounds(true);
+        }
+        let from = presented_shift(&layer);
+        let seconds = motion_seconds();
+        layer.addAnimation_forKey(
+            &offset_animation(
+                ns_string!("transform.translation.x"),
+                from.0,
+                shift.0,
+                seconds,
+                true,
+            ),
+            Some(ns_string!("zephium.preview.x")),
+        );
+        layer.addAnimation_forKey(
+            &offset_animation(
+                ns_string!("transform.translation.y"),
+                from.1,
+                shift.1,
+                seconds,
+                true,
+            ),
+            Some(ns_string!("zephium.preview.y")),
+        );
+        if let Ok(mut displaced) = self.ivars().displaced.try_borrow_mut() {
+            *displaced = Some(Box::new((tab, shift)));
+        }
+    }
+
+    fn page_layer(&self, tab: ItemId) -> Option<Retained<objc2_quartz_core::CALayer>> {
+        let views = self.ivars().views.try_borrow().ok()?;
+        views.get(&tab)?.view.layer()
+    }
+
+    /// A page slides home from wherever it has got to; the stage stops
+    /// clipping once it is there, unless a newer preview has begun.
+    fn restore(&self, tab: ItemId, generation: u64) {
+        let Some(layer) = self.page_layer(tab) else {
+            return;
+        };
+        let from = presented_shift(&layer);
+        let seconds = motion_seconds();
+        let stage = Weak::from_retained(&self.retain());
+        let arrived = block2::RcBlock::new(move || {
+            if let Some(stage) = stage.load() {
+                if stage.ivars().preview_generation.get() == generation {
+                    if let Some(layer) = stage.layer() {
+                        layer.setMasksToBounds(false);
+                    }
+                }
+            }
+        });
+        CATransaction::begin();
+        // SAFETY: the block holds the stage weakly and runs on the main thread.
+        unsafe { CATransaction::setCompletionBlock(Some(&arrived)) };
+        layer.addAnimation_forKey(
+            &offset_animation(
+                ns_string!("transform.translation.x"),
+                from.0,
+                0.0,
+                seconds,
+                false,
+            ),
+            Some(ns_string!("zephium.preview.x")),
+        );
+        layer.addAnimation_forKey(
+            &offset_animation(
+                ns_string!("transform.translation.y"),
+                from.1,
+                0.0,
+                seconds,
+                false,
+            ),
+            Some(ns_string!("zephium.preview.y")),
+        );
+        CATransaction::commit();
+    }
+
+    /// The pointer left without dropping: everything eases back.
+    fn end_preview(&self) {
+        let generation = self.ivars().preview_generation.get().wrapping_add(1);
+        self.ivars().preview_generation.set(generation);
+        let view = self
+            .ivars()
+            .indicator
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some(view) = view {
+            fade_out(&view);
+        }
+        let displaced = self
+            .ivars()
+            .displaced
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut displaced| displaced.take());
+        if let Some((tab, _)) = displaced.as_deref() {
+            self.restore(*tab, generation);
+        }
+    }
+
+    /// Takes the preview away at once, for a layout that is about to set the
+    /// pages where they belong.
+    fn clear_preview(&self) {
+        let displaced = self
+            .ivars()
+            .displaced
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut displaced| displaced.take());
+        let armed = self
+            .ivars()
+            .armed
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut armed| armed.take());
+        let views = self
+            .ivars()
+            .indicator
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut slot| slot.take())
+            .into_iter()
+            .collect::<Vec<_>>();
+        if displaced.is_none() && views.is_empty() {
+            if armed.is_some() {
+                let generation = self.ivars().preview_generation.get().wrapping_add(1);
+                self.ivars().preview_generation.set(generation);
+            }
+            return;
+        }
+        let generation = self.ivars().preview_generation.get().wrapping_add(1);
+        self.ivars().preview_generation.set(generation);
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        for view in views {
+            view.removeFromSuperview();
+        }
+        if let Some((tab, _)) = displaced.as_deref() {
+            if let Some(layer) = self.page_layer(*tab) {
+                layer.removeAnimationForKey(ns_string!("zephium.preview.x"));
+                layer.removeAnimationForKey(ns_string!("zephium.preview.y"));
+            }
+        }
+        if let Some(layer) = self.layer() {
+            layer.setMasksToBounds(false);
+        }
+        CATransaction::commit();
     }
 
     fn region(&self) -> Rect {
@@ -1171,19 +1449,19 @@ impl ContentStage {
         if let Some(layer) = view.layer() {
             let changed_mode = self.ivars().feedback_dragging.replace(dragging) != dragging;
             if created || changed_mode {
-                let paint = block2::RcBlock::new(|| {
-                    let color = if dragging {
-                        NSColor::labelColor()
-                    } else {
-                        NSColor::secondaryLabelColor()
-                    };
-                    layer.setBackgroundColor(Some(&color.CGColor()));
-                });
-                self.effectiveAppearance()
-                    .performAsCurrentDrawingAppearance(&paint);
-                layer.setCornerRadius(1.5);
+                // A neutral grey with a fine dark edge and a soft shadow: it reads on a
+                // white page and a black one, which the label colour alone never did.
+                let tone = if dragging { 0.78 } else { 0.7 };
+                layer.setBackgroundColor(Some(&NSColor::colorWithWhite_alpha(tone, 1.0).CGColor()));
+                layer.setBorderColor(Some(&NSColor::colorWithWhite_alpha(0.0, 0.22).CGColor()));
+                layer.setBorderWidth(0.5);
+                layer.setShadowColor(Some(&NSColor::blackColor().CGColor()));
+                layer.setShadowOpacity(0.3);
+                layer.setShadowRadius(2.0);
+                layer.setShadowOffset(NSSize::new(0.0, 0.0));
+                layer.setCornerRadius(2.0);
             }
-            layer.setOpacity(if dragging { 0.9 } else { 0.65 });
+            layer.setOpacity(if dragging { 1.0 } else { 0.85 });
         }
         let h = self.bounds().size.height;
         view.setFrame(NSRect::new(
@@ -1868,9 +2146,9 @@ fn feedback_rect(divider: &Divider, dragging: bool) -> Rect {
                 28.0_f64.min(r.height)
             };
             Rect::new(
-                strip.x + strip.width / 2.0 - 1.0,
+                strip.x + strip.width / 2.0 - 2.0,
                 r.y + (r.height - height) / 2.0,
-                2.0,
+                4.0,
                 height,
             )
         }
@@ -1882,9 +2160,9 @@ fn feedback_rect(divider: &Divider, dragging: bool) -> Rect {
             };
             Rect::new(
                 r.x + (r.width - width) / 2.0,
-                strip.y + strip.height / 2.0 - 1.0,
+                strip.y + strip.height / 2.0 - 2.0,
                 width,
-                2.0,
+                4.0,
             )
         }
     }
@@ -1914,19 +2192,66 @@ fn ease_out() -> Retained<CAMediaTimingFunction> {
 /// A horizontal move added to the layer's resting position, held at its end
 /// until the stage settles.
 fn translation(from: f64, to: f64, seconds: f64) -> Retained<CABasicAnimation> {
-    let animation =
-        CABasicAnimation::animationWithKeyPath(Some(ns_string!("transform.translation.x")));
+    offset_animation(
+        ns_string!("transform.translation.x"),
+        from,
+        to,
+        seconds,
+        true,
+    )
+}
+
+/// A move along one axis added to the layer's resting position; `hold` keeps
+/// it at its end until it is taken away.
+fn offset_animation(
+    key_path: &NSString,
+    from: f64,
+    to: f64,
+    seconds: f64,
+    hold: bool,
+) -> Retained<CABasicAnimation> {
+    let animation = CABasicAnimation::animationWithKeyPath(Some(key_path));
     // SAFETY: NSNumber is the value type a scalar key path takes.
     unsafe {
         animation.setFromValue(Some(&NSNumber::new_f64(from)));
         animation.setToValue(Some(&NSNumber::new_f64(to)));
-        animation.setFillMode(kCAFillModeForwards);
+    }
+    if hold {
+        // SAFETY: an immutable framework constant.
+        animation.setFillMode(unsafe { kCAFillModeForwards });
+        animation.setRemovedOnCompletion(false);
     }
     animation.setAdditive(true);
-    animation.setRemovedOnCompletion(false);
     animation.setDuration(seconds);
     animation.setTimingFunction(Some(&emphasized()));
     animation
+}
+
+/// How long a preview takes to move: the panel slide, or an instant under
+/// reduced motion.
+fn motion_seconds() -> f64 {
+    if NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion() {
+        0.001
+    } else {
+        SLIDE_SECONDS
+    }
+}
+
+/// How far a layer is drawn from its resting place right now, mid-animation
+/// included.
+fn presented_shift(layer: &objc2_quartz_core::CALayer) -> (f64, f64) {
+    // SAFETY: a plain read of the layer's presentation copy on the main thread.
+    let shown = unsafe { layer.presentationLayer() };
+    let source: &objc2_quartz_core::CALayer = shown.as_deref().unwrap_or(layer);
+    let read = |key: &NSString| -> f64 {
+        // SAFETY: key-value coding of a transform component returns an NSNumber.
+        let value: Option<Retained<NSNumber>> = unsafe { msg_send![source, valueForKeyPath: key] };
+        value.map_or(0.0, |value| value.as_f64())
+    };
+    (
+        read(ns_string!("transform.translation.x")),
+        read(ns_string!("transform.translation.y")),
+    )
 }
 
 /// The frame's content ground (`--color-page` in frame/src/styles/tokens.css),
@@ -2004,11 +2329,11 @@ mod tests {
         let root = split::divider_at_path(&original, region, 8.0, &[]).unwrap();
         assert_eq!(
             feedback_rect(&root, false),
-            Rect::new(499.0, 386.0, 2.0, 28.0)
+            Rect::new(498.0, 386.0, 4.0, 28.0)
         );
         assert_eq!(
             feedback_rect(&root, true),
-            Rect::new(499.0, 0.0, 2.0, 800.0)
+            Rect::new(498.0, 0.0, 4.0, 800.0)
         );
 
         for anchor in [0.0, 4.0, 7.5] {
@@ -2035,11 +2360,11 @@ mod tests {
         let nested = split::divider_at_path(&guide_only, region, 8.0, &[0]).unwrap();
         assert_eq!(
             feedback_rect(&nested, false),
-            Rect::new(234.0, 597.0, 28.0, 2.0)
+            Rect::new(234.0, 596.0, 28.0, 4.0)
         );
         assert_eq!(
             feedback_rect(&nested, true),
-            Rect::new(0.0, 597.0, 496.0, 2.0)
+            Rect::new(0.0, 596.0, 496.0, 4.0)
         );
         assert!(
             (anchored_drag_ratio(&nested, 8.0, 100.0, nested.strip.y + 4.0, (100.0, 4.0)) - 0.75)

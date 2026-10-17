@@ -172,14 +172,14 @@
     flex: 1;
     min-width: 0;
     block-size: var(--field-height);
-    padding-inline: 10px;
+    padding-inline: var(--control-inset);
     border: 0;
     border-radius: var(--radius-field);
     background: var(--color-field);
     box-shadow: var(--shadow-field);
     color: var(--color-text);
     font: inherit;
-    font-size: var(--text-body);
+    font-size: var(--text-label);
   }
 
   input::placeholder {

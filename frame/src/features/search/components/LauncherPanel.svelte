@@ -22,7 +22,8 @@
     onTool = () => {},
     onDismiss = () => {},
     onCapture,
-    destinations = launcherDestinations(),
+    hidden = [],
+    destinations = launcherDestinations((kind) => !hidden.includes(kind)),
   }: {
     /** The current presentation. The launcher stays mounted while hidden and
      *  binds each new session as it is shown. */
@@ -31,6 +32,8 @@
     onDismiss?: () => void;
     /** Saves the typed line as a task; resolves to the saved title, or null. */
     onCapture?: (text: string) => Promise<string | null>;
+    /** Destinations whose feature is switched off. */
+    hidden?: readonly string[];
     destinations?: Destination[];
   } = $props();
 
@@ -169,6 +172,9 @@
         clearTimeout(arrival);
         if (entering) arrival = setTimeout(() => (entering = false), ARRIVAL_MS);
         surface.begin(next);
+        // Editing a page's address opens on that address, selected, so typing
+        // replaces it and Return goes back to it.
+        if (next.seed) surface.seed(next.seed);
         input?.focus();
         input?.select();
       } else if (bound !== null) {
@@ -609,7 +615,10 @@
     height: 34px;
     padding: 0 4px 0 14px;
     border-radius: var(--radius-capsule);
-    background: var(--color-fill);
+
+    /* A raised capsule on the sheet, lit along its edges like the glass. */
+    background: var(--color-tile);
+    box-shadow: var(--shine), var(--shadow-tile);
     color: var(--color-text);
     font-size: 12.5px;
     font-weight: 500;
@@ -657,7 +666,10 @@
     height: 18px;
     padding: 0 4px;
     border-radius: 5px;
-    background: var(--color-fill);
+
+    /* Drawn keycaps: an outline the key sits in, never a filled chip. */
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--color-border-strong);
     color: var(--color-muted);
     font-family: var(--font-sans);
     font-size: 11px;

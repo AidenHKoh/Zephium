@@ -17,6 +17,7 @@ mod filesystem;
 mod history;
 pub mod media;
 mod page_permissions;
+pub mod profile_avatars;
 mod resources;
 mod session;
 mod settings;

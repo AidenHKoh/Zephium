@@ -112,6 +112,55 @@ fn history_operations_distinguish_noop_from_scheduled_dispatch() {
 }
 
 #[test]
+fn keys_and_menu_refuse_history_the_tab_does_not_have() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "only-page.example");
+
+    for command in ["nav.back", "nav.forward"] {
+        let refused = shell.handle_operation(Command::Run(command.into()));
+        assert_eq!(refused.outcome, OperationOutcome::NoOp, "{command}");
+        assert_eq!(
+            refused.reason,
+            OperationReason::HistoryUnavailable,
+            "{command}"
+        );
+    }
+    assert!(!engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("back") || call.starts_with("forward")));
+
+    shell.handle(Command::Engine(EngineEvent::NavState {
+        id,
+        can_go_back: true,
+        can_go_forward: true,
+    }));
+    for command in ["nav.back", "nav.forward"] {
+        let admitted = shell.handle_operation(Command::Run(command.into()));
+        assert_eq!(admitted.outcome, OperationOutcome::Deferred, "{command}");
+    }
+    assert!(engine.calls().iter().any(|call| call.starts_with("back")));
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("forward")));
+
+    shell.handle(Command::Engine(EngineEvent::NavState {
+        id,
+        can_go_back: false,
+        can_go_forward: false,
+    }));
+    let state = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .unwrap();
+    assert!(!state.can_go_back && !state.can_go_forward);
+}
+
+#[test]
 fn navigation_waits_for_exact_inflight_discard_instead_of_claiming_success() {
     let (mut shell, _engine, screen) = setup();
     shell.handle(Command::Bootstrap);
@@ -284,6 +333,30 @@ fn settings_is_a_window_page_and_extensions_is_a_deduplicated_tab() {
 }
 
 #[test]
+fn a_new_tab_asked_for_from_settings_over_a_page_is_the_new_tab() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let web = active_id(&screen);
+    navigate_and_commit(&mut shell, web, "settings-new-tab.example");
+    let window = shell.windows.focused().unwrap().id;
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    shell.handle_operation(Command::Open);
+    let fresh = active_id(&screen);
+    assert_ne!(fresh, web);
+    assert_eq!(shell.active_browser_page(), None);
+    assert!(shell.items.tab(fresh).unwrap().url.is_none());
+    // The page leaves the stage, so the frame's new tab is what shows.
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .rev()
+            .find(|call| call.starts_with("layout@")),
+        Some(&format!("layout@{window} "))
+    );
+}
+
+#[test]
 fn trusted_extension_page_closure_removes_only_matching_typed_marker() {
     use zephium_core::item::TabContent;
 
@@ -362,6 +435,7 @@ fn trusted_extension_page_closure_removes_only_matching_typed_marker() {
         id: other_space,
         profile: other_profile,
         name: "Other".into(),
+        look: Default::default(),
     }));
     let inactive_guest = ItemId::from(903);
     assert!(shell.items.insert_extension_tab(
@@ -602,12 +676,57 @@ fn disabled_work_rejects_native_entry_without_changing_browse() {
     let before = engine.calls();
     let refused = shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Work)));
     assert_eq!(refused.outcome, OperationOutcome::Rejected);
+    assert_eq!(refused.reason, OperationReason::FeatureDisabled);
     assert_eq!(shell.active_browser_page(), None);
     assert_eq!(active_id(&screen), tab);
     assert_eq!(engine.calls(), before);
     let settings =
         shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
     assert_eq!(settings.outcome, OperationOutcome::Deferred);
+}
+
+#[test]
+fn switching_work_off_refuses_work_and_returns_its_window_to_browse() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let tab = active_id(&screen);
+    navigate_and_commit(&mut shell, tab, "switch-off.example");
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Work)));
+    assert_eq!(shell.active_browser_page(), Some(crate::BrowserPage::Work));
+    shell.operation_set_app_setting("ai.enabled".into(), "false".into());
+    assert_eq!(shell.active_browser_page(), Some(crate::BrowserPage::Work));
+    let off = shell.operation_set_app_setting("work.enabled".into(), "false".into());
+    assert_eq!(off.reason, OperationReason::StoreWorkPending);
+    assert_eq!(shell.active_browser_page(), None);
+    assert_eq!(active_id(&screen), tab);
+    let refused = shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Work)));
+    assert_eq!(refused.reason, OperationReason::FeatureDisabled);
+    shell.operation_set_app_setting("work.enabled".into(), "true".into());
+    let back = shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Work)));
+    assert_eq!(back.outcome, OperationOutcome::Deferred);
+    assert_eq!(shell.active_browser_page(), Some(crate::BrowserPage::Work));
+}
+
+#[test]
+fn a_tool_switched_off_leaves_its_page_and_refuses_it_until_on() {
+    let (mut shell, _engine, _screen) = setup();
+    shell.handle(Command::Bootstrap);
+    for (key, page) in [
+        ("notes.enabled", crate::BrowserPage::Notes),
+        ("tasks.enabled", crate::BrowserPage::Tasks),
+        ("time.enabled", crate::BrowserPage::Time),
+    ] {
+        shell.handle_operation(Command::ShowBrowserPage(Some(page)));
+        assert_eq!(shell.active_browser_page(), Some(page));
+        shell.operation_set_app_setting(key.into(), "false".into());
+        assert_eq!(shell.active_browser_page(), None, "{key}");
+        let refused = shell.handle_operation(Command::ShowBrowserPage(Some(page)));
+        assert_eq!(refused.reason, OperationReason::FeatureDisabled);
+        shell.operation_set_app_setting(key.into(), "true".into());
+        let back = shell.handle_operation(Command::ShowBrowserPage(Some(page)));
+        assert_eq!(back.outcome, OperationOutcome::Deferred);
+        shell.handle_operation(Command::ShowBrowserPage(None));
+    }
 }
 
 #[test]
@@ -853,6 +972,7 @@ fn scoped_launcher_actions_reject_stale_requests_and_unoffered_actions() {
             url: "https://not-in-results.example/".into(),
         },
         background: false,
+        replace: None,
     });
     assert_eq!(forged.reason, OperationReason::InvalidScope);
     shell.handle(Command::CancelSearch {
@@ -862,6 +982,7 @@ fn scoped_launcher_actions_reject_stale_requests_and_unoffered_actions() {
         context: Box::new(context),
         action: SearchAction::ActivateTab { id: id.to_string() },
         background: false,
+        replace: None,
     });
     assert_eq!(stale.reason, OperationReason::InvalidScope);
 }
@@ -896,6 +1017,7 @@ fn a_background_launcher_open_keeps_the_current_tab_and_the_search() {
             context: Box::new(context.clone()),
             action: action.clone(),
             background: true,
+            replace: None,
         });
         // Deferred: the new view settles once native has created it.
         assert!(matches!(
@@ -907,6 +1029,56 @@ fn a_background_launcher_open_keeps_the_current_tab_and_the_search() {
     assert_eq!(shell.items.view_ids().len(), before + 2);
     // The launcher is still showing these rows, so they must still admit.
     assert_eq!(shell.search.context.as_ref(), Some(&context));
+}
+
+#[test]
+fn an_address_chosen_while_editing_replaces_the_page_in_front() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let active = active_id(&screen);
+    let window = shell.windows.focused().unwrap();
+    let context = zephium_ipc::SearchContext {
+        window_id: window.id.to_string(),
+        session_id: "0000000000000001".into(),
+        request_id: "one".into(),
+        profile_id: window.profile.to_string(),
+        space_id: window.space.to_string(),
+    };
+    shell.handle(Command::SearchScoped {
+        query: "example.com".into(),
+        context: Box::new(context.clone()),
+    });
+    let action = shell
+        .search
+        .results
+        .iter()
+        .find(|result| matches!(result.action, SearchAction::OpenUrl { .. }))
+        .map(|result| result.action.clone())
+        .expect("the typed address is offered");
+    let today = |shell: &Shell| {
+        let window = shell.windows.focused().unwrap();
+        shell
+            .items
+            .roots(Placement::Space {
+                space: window.space,
+                section: SpaceSection::Today,
+            })
+            .len()
+    };
+    let before = today(&shell);
+    let opened = shell.handle_operation(Command::RunSearchAction {
+        context: Box::new(context),
+        action,
+        background: false,
+        replace: Some(active.to_string()),
+    });
+    assert!(matches!(
+        opened.outcome,
+        OperationOutcome::Applied | OperationOutcome::Deferred
+    ));
+    assert_eq!(shell.windows.focused().unwrap().active, Some(active));
+    assert_eq!(today(&shell), before);
+    assert!(shell.items.pending_navigation_request(active).is_some());
 }
 
 #[test]
@@ -1056,6 +1228,7 @@ fn keyboard_selection_walks_the_sidebar_from_favorites_through_pinned_folders() 
         url: format!("https://{host}/"),
         title: host.into(),
         zoom: 1.0,
+        last_active_ms: None,
     };
     let pinned = Placement::Space {
         space,
@@ -1076,6 +1249,7 @@ fn keyboard_selection_walks_the_sidebar_from_favorites_through_pinned_folders() 
                 id: space,
                 profile,
                 name: "Main".into(),
+                look: Default::default(),
             }],
             items: vec![
                 item(
@@ -1450,4 +1624,230 @@ fn a_new_tab_opened_from_settings_fills_the_window_with_the_new_tab() {
         .find(|call| call.starts_with("layout@"))
         .unwrap();
     assert!(!last_layout.contains(&page.to_string()), "{last_layout}");
+}
+
+#[test]
+fn a_new_tab_opened_from_work_fills_the_window_with_the_new_tab() {
+    let (mut shell, engine, chrome, screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    let page = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: page,
+        input: "example.com".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id: page,
+        url: "https://example.com/".into(),
+    }));
+    present_committed(&mut shell, page, "https://example.com/");
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Work)));
+    assert_eq!(shell.active_browser_page(), Some(crate::BrowserPage::Work));
+    assert!(chrome.last_frame().unwrap().fill_width);
+
+    assert_eq!(
+        shell.handle_operation(Command::Open).outcome,
+        OperationOutcome::Deferred
+    );
+    let (revision, _) = chrome.complete_browser_return(true);
+    let before = engine.calls().len();
+    shell.browser_chrome_restored(revision, true);
+
+    let opened = active_id(&screen);
+    assert_ne!(opened, page);
+    assert_eq!(shell.active_browser_page(), None);
+    let frame = chrome.last_frame().expect("chrome was placed");
+    assert!(
+        frame.fill_width,
+        "the frame draws the new tab across the window: {frame:?}"
+    );
+    assert!(
+        !engine.calls()[before..]
+            .iter()
+            .any(|call| call.starts_with("layout@") && call.contains(&page.to_string())),
+        "the page left behind is never laid out on the way to the new tab"
+    );
+    let last_layout = engine
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|call| call.starts_with("layout@"))
+        .unwrap();
+    assert!(!last_layout.contains(&page.to_string()), "{last_layout}");
+    assert_eq!(
+        engine.layout_regions.lock().unwrap().last().copied().flatten(),
+        None
+    );
+}
+
+#[test]
+fn a_page_retitling_itself_while_settings_closes_still_opens_the_new_tab() {
+    let (mut shell, _engine, chrome, screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    let page = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: page,
+        input: "chat.example".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id: page,
+        url: "https://chat.example/".into(),
+    }));
+    present_committed(&mut shell, page, "https://chat.example/");
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+
+    assert_eq!(
+        shell.handle_operation(Command::Open).outcome,
+        OperationOutcome::Deferred
+    );
+    shell.handle(Command::Engine(EngineEvent::TitleChanged {
+        id: page,
+        title: "(3) Chat".into(),
+    }));
+    let (revision, _) = chrome.complete_browser_return(true);
+    shell.browser_chrome_restored(revision, true);
+
+    assert_ne!(active_id(&screen), page);
+    assert_eq!(shell.active_browser_page(), None);
+}
+
+fn open_page(shell: &mut Shell, screen: &Screen, url: &str) -> ItemId {
+    shell.handle(Command::Run("tab.new".into()));
+    let id = active_id(screen);
+    shell.handle(Command::Navigate {
+        id,
+        input: url.into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id,
+        url: url.into(),
+    }));
+    shell.handle(Command::Engine(EngineEvent::LoadingChanged {
+        id,
+        loading: false,
+    }));
+    id
+}
+
+#[test]
+fn idle_today_tabs_close_into_history_and_tabs_in_use_stay() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let old = open_page(&mut shell, &screen, "https://old.example/");
+    let kept_by_engine = open_page(&mut shell, &screen, "https://form.example/");
+    let recent = open_page(&mut shell, &screen, "https://recent.example/");
+    let front = open_page(&mut shell, &screen, "https://front.example/");
+    let now = crate::shell::tabs::unix_millis().unwrap();
+    assert!(shell.items.tab(front).unwrap().last_active_ms.unwrap() >= now - 1_000);
+    let eight_days_ago = now - 8 * 24 * 60 * 60 * 1000;
+    for id in [old, kept_by_engine, front] {
+        shell.items.set_last_active(id, eight_days_ago);
+    }
+    shell.items.set_last_active(recent, now - 60 * 60 * 1000);
+
+    shell.handle(Command::Tick);
+    assert!(shell.items.tab(old).is_some(), "never is the default");
+
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.archive".into(),
+        value: "7d".into(),
+    });
+    // A page the engine refused to discard holds state a reload would lose.
+    shell.residency.discard_protected_until.insert(
+        kept_by_engine,
+        std::time::Instant::now() + std::time::Duration::from_secs(60),
+    );
+    shell.handle(Command::Tick);
+    assert!(shell.items.tab(old).is_none());
+    assert_eq!(
+        shell.recently_closed.last().map(|tab| tab.url.as_str()),
+        Some("https://old.example/")
+    );
+    for id in [kept_by_engine, recent, front] {
+        assert!(shell.items.tab(id).is_some());
+    }
+    assert!(shell.items.tab(front).unwrap().last_active_ms.unwrap() >= now);
+    assert_eq!(active_id(&screen), front);
+}
+
+#[test]
+fn a_tab_without_a_recorded_time_starts_its_clock_when_first_seen() {
+    let store = Arc::new(FakeStore::default());
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.archive".into(), "12h".into());
+    let (mut shell, _engine, screen) = setup_with(store);
+    shell.handle(Command::Bootstrap);
+    open_page(&mut shell, &screen, "https://front.example/");
+    let space = shell.windows.focused().unwrap().space;
+    let legacy = ItemId::generate();
+    assert!(shell.items.insert_unloaded_tab(
+        legacy,
+        Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        },
+        url::Url::parse("https://legacy.example/").unwrap(),
+        "Legacy",
+    ));
+    assert_eq!(shell.items.tab(legacy).unwrap().last_active_ms, None);
+    shell.handle(Command::Tick);
+    let stamped = shell.items.tab(legacy).unwrap().last_active_ms;
+    assert!(stamped.is_some_and(|ms| ms + 1_000 >= crate::shell::tabs::unix_millis().unwrap()));
+}
+
+#[test]
+fn links_from_other_apps_follow_new_tabs_unless_placed_on_their_own() {
+    let store = Arc::new(FakeStore::default());
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.new-position".into(), "after-current".into());
+    let (mut shell, _engine, screen) = setup_with(store);
+    shell.handle(Command::Bootstrap);
+    let first = open_page(&mut shell, &screen, "https://first.example/");
+    open_page(&mut shell, &screen, "https://second.example/");
+    let today = |screen: &Screen| {
+        last(screen)
+            .nodes
+            .iter()
+            .filter(|node| node.section == SidebarSectionView::Today && node.parent_id.is_none())
+            .filter_map(|node| ItemId::parse(&node.id))
+            .collect::<Vec<_>>()
+    };
+    let follows = |screen: &Screen, opened: ItemId| {
+        let order = today(screen);
+        let at = order.iter().position(|id| *id == first).unwrap();
+        order.get(at + 1) == Some(&opened)
+    };
+
+    // By default a handed-over link lands where a new tab would.
+    shell.handle(Command::Activate(first));
+    shell.handle(Command::OpenExternal(
+        vec!["https://beside.example/".into()],
+    ));
+    assert!(follows(&screen, active_id(&screen)));
+
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.external-position".into(),
+        value: "end".into(),
+    });
+    shell.handle(Command::Activate(first));
+    shell.handle(Command::OpenExternal(vec!["https://end.example/".into()]));
+    let end = active_id(&screen);
+    assert_eq!(today(&screen).last(), Some(&end));
+
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.new-position".into(),
+        value: "end".into(),
+    });
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.external-position".into(),
+        value: "after-current".into(),
+    });
+    shell.handle(Command::Activate(first));
+    shell.handle(Command::OpenExternal(vec!["https://next.example/".into()]));
+    assert!(follows(&screen, active_id(&screen)));
 }

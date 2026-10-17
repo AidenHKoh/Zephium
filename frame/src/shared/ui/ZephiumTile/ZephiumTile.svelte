@@ -1,24 +1,25 @@
 <script lang="ts">
-  import Icon, { ZephiumMark } from "$shared/ui/Icon";
-
-  /** Zephium's app icon: the mark on its dark tile, the same in either theme. */
+  /** Zephium's app icon itself, its own squircle and shadow included, the
+   *  same in either theme. */
   let { size = 16 }: { size?: number } = $props();
 </script>
 
-<span class="zephium-tile" style:--size={`${size}px`} aria-hidden="true"
-  ><Icon icon={ZephiumMark} size={Math.round(size * 0.8)} /></span
->
+<img
+  class="zephium-tile"
+  src="/zephium-icon.png"
+  srcset="/zephium-icon.png 128w, /zephium-icon@2x.png 256w"
+  sizes={`${size}px`}
+  width={size}
+  height={size}
+  alt=""
+  aria-hidden="true"
+  draggable="false"
+/>
 
 <style>
   .zephium-tile {
-    display: inline-grid;
+    display: inline-block;
     flex: none;
-    inline-size: var(--size);
-    block-size: var(--size);
-    border-radius: calc(var(--size) * 0.23);
-    background: var(--brand-tile);
-    box-shadow: var(--shadow-brand-tile);
-    color: var(--color-brand-tile-ink);
-    place-items: center;
+    object-fit: contain;
   }
 </style>

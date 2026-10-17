@@ -15,6 +15,9 @@ import { duration, easing, reducedMotion } from "$shared/lib/motion";
  */
 
 const KEY = "data-motion-key";
+/** Slow out of the rail and settling late, so a mark stays behind the edge
+ *  of a page sliding away on the emphasized curve. */
+const TRAILING = "cubic-bezier(0.55, 0, 0.25, 1)";
 const COUNTERPARTS = `[${KEY}], [data-morph]`;
 
 export type Snapshot = {
@@ -128,6 +131,24 @@ function reveal(root: HTMLElement, travelling: Set<HTMLElement>) {
   }
 }
 
+/** Starts a paused flight once the view is wide enough to show where it
+ *  lands, or after a short while regardless. */
+function holdUntilRoom(flight: Animation, right: number) {
+  flight.pause();
+  let timer = 0;
+  const go = () => {
+    if (window.innerWidth < right && timer !== 0) return;
+    window.removeEventListener("resize", go);
+    clearTimeout(timer);
+    if (flight.playState === "paused") flight.play();
+  };
+  window.addEventListener("resize", go);
+  timer = window.setTimeout(() => {
+    timer = 0;
+    go();
+  }, 250);
+}
+
 /** After the change: carry every mark from the old shape into the new one. */
 export function play(snapshot: Snapshot | null) {
   if (!snapshot) return;
@@ -137,19 +158,35 @@ export function play(snapshot: Snapshot | null) {
 
   const travelling = new Set<HTMLElement>();
   const time = duration("page");
+  // Widening, the page slides off the column's new width as the marks travel
+  // into it, and a native page is drawn above the column: a mark bound for
+  // somewhere the page still covers, flying on the page's own curve, would
+  // pass underneath it and be seen only once it had landed. Those travel on a
+  // gentler curve that keeps them behind the page's edge all the way.
+  const edgeFrom = snapshot.rect.right;
+  const widening = incoming.getBoundingClientRect().right - edgeFrom > 1;
   for (const element of incoming.querySelectorAll<HTMLElement>(COUNTERPARTS)) {
     const key = keyOf(element);
     const from = key ? snapshot.marks.get(key) : undefined;
     const to = from ? shownRect(markOf(element)) : null;
     if (!from || !to) continue;
+    const trailing = widening && to.left + to.width / 2 > edgeFrom;
     const dx = from.left + from.width / 2 - (to.left + to.width / 2);
     const dy = from.top + from.height / 2 - (to.top + to.height / 2);
     travelling.add(element);
     if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) continue;
-    element.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], {
-      duration: time,
-      easing: easing("emphasized"),
-    });
+    const flight = element.animate(
+      [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }],
+      {
+        duration: trailing ? time * 1.15 : time,
+        easing: trailing ? TRAILING : easing("emphasized"),
+        fill: "backwards",
+      },
+    );
+    // The view itself is widened by native a moment after the shape changes;
+    // until it is, the destination is outside it and the flight would be
+    // drawn nowhere. It waits, still where it was, until there is room.
+    if (trailing && to.right > window.innerWidth) holdUntilRoom(flight, to.right);
     // A row's name is new to the list shape; it arrives behind its mark.
     element.querySelector<HTMLElement>(".tab-label")?.animate([{ opacity: 0 }, { opacity: 1 }], {
       duration: duration("slow"),

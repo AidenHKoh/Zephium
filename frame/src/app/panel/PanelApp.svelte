@@ -50,11 +50,23 @@
     let stopMotion: (() => void) | undefined;
     let liveMotion = false;
     let liveLanguage = false;
+    const liveFeatures: string[] = [];
+    const liveLook: string[] = [];
     const motionListener = events.uiCommand.listen(({ payload }) => {
       if (disposed) return;
+      const look = theme.customizationKeys.find((key) => payload.startsWith(`preference.${key}=`));
+      if (look) {
+        liveLook.push(look);
+        theme.customize(look, payload.slice(`preference.${look}=`.length));
+      }
+      const feature = FEATURES.find((key) => payload.startsWith(`preference.${key}.enabled=`));
+      if (feature) {
+        liveFeatures.push(feature);
+        setFeature(feature, payload.endsWith("=false"));
+      }
       if (payload.startsWith("preference.ui.language=")) {
         liveLanguage = true;
-        applyLanguage(payload.slice("preference.ui.language=".length));
+        void applyLanguage(payload.slice("preference.ui.language=".length));
       }
       if (
         payload === "preference.ui.reduce-motion=true" ||
@@ -79,13 +91,22 @@
         const [launcher] = await Promise.all([loadLauncherPanel(), theme.init(), faviconsReady]);
         if (disposed) return;
         Launcher = launcher.default;
-        const [motion, language] = await Promise.all([
+        const [motion, language, notesOn, tasksOn, ...look] = await Promise.all([
           commands.settingGet("ui.reduce-motion").catch(() => null),
           commands.settingGet("ui.language").catch(() => null),
+          commands.settingGet("notes.enabled").catch(() => null),
+          commands.settingGet("tasks.enabled").catch(() => null),
+          ...theme.customizationKeys.map((key) => commands.settingGet(key).catch(() => null)),
         ]);
         if (disposed) return;
+        theme.customizationKeys.forEach((key, index) => {
+          const value = look[index];
+          if (!liveLook.includes(key) && value != null) theme.customize(key, value);
+        });
         if (!liveMotion) theme.setReducedMotion(motion === "true");
-        if (!liveLanguage) applyLanguage(language);
+        if (!liveLanguage) void applyLanguage(language);
+        if (!liveFeatures.includes("notes")) setFeature("notes", notesOn === "false");
+        if (!liveFeatures.includes("tasks")) setFeature("tasks", tasksOn === "false");
         await tick();
         if (disposed) return;
         void document.documentElement.getBoundingClientRect();
@@ -106,6 +127,14 @@
       theme.dispose();
     };
   });
+  /** The launcher offers no way into a feature switched off. */
+  const FEATURES = ["notes", "tasks"] as const;
+  let off = $state<string[]>([]);
+  function setFeature(feature: string, isOff: boolean) {
+    off = isOff
+      ? [...off.filter((key) => key !== feature), feature]
+      : off.filter((key) => key !== feature);
+  }
   function open(kind: ToolKind) {
     void intent({ type: "open", tool: kind });
   }
@@ -138,11 +167,12 @@
 >
   {#if failed}<div class="panel-error" role="alert">{m.panel_action_failed()}</div>{/if}
   <RenderBoundary title={m.surface_render_failed()} retryLabel={m.surface_retry()}>
-    {#if Launcher}<Launcher
-        context={presentation}
-        onTool={open}
-        onCapture={capture}
-        onDismiss={() => void intent({ type: "dismiss" })}
-      />{/if}
+    {#if Launcher}{#key off.join()}<Launcher
+          context={presentation}
+          onTool={open}
+          onCapture={off.includes("tasks") ? undefined : capture}
+          hidden={off}
+          onDismiss={() => void intent({ type: "dismiss" })}
+        />{/key}{/if}
   </RenderBoundary>
 </div>

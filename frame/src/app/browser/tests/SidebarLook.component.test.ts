@@ -61,8 +61,22 @@ test("the rail at rest", async () => {
   const farthest = stack.querySelector<HTMLElement>(".shelf-item")!;
   await expect.poll(() => getComputedStyle(farthest).opacity).toBe("1");
   await expect.poll(() => getComputedStyle(stack).opacity).toBe("1");
-  expect(farthest.textContent?.trim()).toBe("");
-  expect(farthest.getAttribute("aria-label")).toBe("Notes");
+  // You and a private window head the stack as glyphs; then the tools in the
+  // native menu's order, and Settings last, nearest the case.
+  await expect
+    .element(page.getByRole("menuitem", { name: "New Incognito Window" }))
+    .toBeInTheDocument();
+  const items = [...stack.querySelectorAll<HTMLElement>(".shelf-item")];
+  expect(items.map((item) => item.getAttribute("aria-label"))).toEqual([
+    "Notes",
+    "Tasks",
+    "Time",
+    "History",
+    "Downloads",
+    "Bookmarks",
+    "Settings",
+  ]);
+  expect(items.every((item) => item.textContent?.trim() === "")).toBe(true);
   await page
     .elementLocator(screen.container)
     .screenshot({ path: "../../../../../target/rail-shelf.png" });
@@ -78,6 +92,6 @@ test("in Work the rail ends in the account, where Browse keeps its tools", async
     .elementLocator(screen.container)
     .screenshot({ path: "../../../../../target/rail-work-dark.png" });
   await screen.getByRole("button", { name: "Account" }).click();
-  await expect.element(page.getByRole("menuitem", { name: "Settings" })).toBeVisible();
+  await expect.element(page.getByRole("menuitem", { name: "Settings", exact: true })).toBeVisible();
   await page.screenshot({ path: "../../../../../target/rail-work-menu.png" });
 });

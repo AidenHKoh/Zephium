@@ -18,6 +18,8 @@ export const commands = {
 	workEditDraft: (expectedProfile: string, work: WorkId, expectedRevision: WorkRevision, command: WorkCommandId, execution: WorkExecutionId, artifact: WorkArtifactId, body: string) => __TAURI_INVOKE<WorkResponseV1_Serialize>("work_edit_draft", { expectedProfile, work, expectedRevision, command, execution, artifact, body }),
 	workOperation: (expectedProfile: string, operation: WorkCommandId, input: WorkOperationV1_Deserialize) => __TAURI_INVOKE<WorkOperationResponseV1_Serialize>("work_operation", { expectedProfile, operation, input }),
 	workOperationStatus: (expectedProfile: string, work: WorkId, operation: WorkCommandId, acknowledge: boolean) => __TAURI_INVOKE<WorkOperationResponseV1_Serialize>("work_operation_status", { expectedProfile, work, operation, acknowledge }),
+	/**  Whether turning Work off would stop work that is running now. */
+	workRunning: () => __TAURI_INVOKE<boolean>("work_running"),
 	/**  Manifest preview for the composer. Bodies never cross this boundary. */
 	workContextPreview: (expectedProfile: string, purpose: WorkContextPurpose, selection: WorkContextSelectionV1_Deserialize) => __TAURI_INVOKE<WorkContextPreviewV1_Serialize>("work_context_preview", { expectedProfile, purpose, selection }),
 	mediaImport: (expectedProfile: string) => typedError<MediaImportV1_Serialize, null>(__TAURI_INVOKE("media_import", { expectedProfile })),
@@ -79,6 +81,8 @@ export const commands = {
 	workModels: (expectedProfile: string) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_models", { expectedProfile }),
 	workModelsReady: (expectedProfile: string) => __TAURI_INVOKE<WorkModelsReadyV1>("work_models_ready", { expectedProfile }),
 	workChooseModel: (expectedProfile: string, role: WorkModelRole, id: string | null) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_choose_model", { expectedProfile, role, id }),
+	/**  The lead's reasoning effort for this profile; null returns it to each model's default. */
+	workSetModelEffort: (expectedProfile: string, effort: "low" | "medium" | "high" | "xhigh" | "max" | null) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_set_model_effort", { expectedProfile, effort }),
 	workSetProviderKey: (expectedProfile: string, provider: WorkModelProvider, key: string) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_set_provider_key", { expectedProfile, provider, key }),
 	workTestProviderKey: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_test_provider_key", { expectedProfile, provider }),
 	workClearProviderKey: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_clear_provider_key", { expectedProfile, provider }),
@@ -298,6 +302,27 @@ export const commands = {
 	blockerRetry: (failedGeneration: string) => __TAURI_INVOKE<OperationAdmission>("blocker_retry", { failedGeneration }),
 	blockerRefreshSources: () => __TAURI_INVOKE<OperationAdmission>("blocker_refresh_sources"),
 	profilesDelete: (profile: string) => __TAURI_INVOKE<OperationAdmission>("profiles_delete", { profile }),
+	profilesGet: () => typedError<{
+	current: string | null,
+	private: boolean,
+	profiles: ProfileEntryView[],
+} | null, null>(__TAURI_INVOKE("profiles_get")),
+	profilesCreate: (name: string, avatar: ProfileAvatarInputV1, andSwitch: boolean) => __TAURI_INVOKE<OperationAdmission>("profiles_create", { name, avatar, andSwitch }),
+	profilesSwitch: (profile: string) => __TAURI_INVOKE<OperationAdmission>("profiles_switch", { profile }),
+	profilesRename: (profile: string, name: string) => __TAURI_INVOKE<OperationAdmission>("profiles_rename", { profile, name }),
+	profilesSetAvatar: (profile: string, avatar: ProfileAvatarInputV1) => __TAURI_INVOKE<OperationAdmission>("profiles_set_avatar", { profile, avatar }),
+	/**  Picks a picture natively and stages its 256px square copy. */
+	profileAvatarPick: () => typedError<ProfileAvatarPickV1, null>(__TAURI_INVOKE("profile_avatar_pick")),
+	spacesCreate: (name: string, look: SpaceLookInputV1) => __TAURI_INVOKE<OperationAdmission>("spaces_create", { name, look }),
+	spacesUpdate: (space: string, name: string, look: SpaceLookInputV1) => __TAURI_INVOKE<OperationAdmission>("spaces_update", { space, name, look }),
+	spacesDelete: (space: string) => __TAURI_INVOKE<OperationAdmission>("spaces_delete", { space }),
+	spacesReorder: (space: string, before: string | null) => __TAURI_INVOKE<OperationAdmission>("spaces_reorder", { space, before }),
+	spacesSwitch: (space: string) => __TAURI_INVOKE<OperationAdmission>("spaces_switch", { space }),
+	/**  The next (1) or previous (-1) space, for a swipe over the tab list. */
+	spacesStep: (step: number) => __TAURI_INVOKE<OperationAdmission>("spaces_step", { step }),
+	spacesMoveTab: (tab: string, space: string) => __TAURI_INVOKE<OperationAdmission>("spaces_move_tab", { tab, space }),
+	/**  The switcher at rail width, where the column has no room for its own. */
+	spacesMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("spaces_menu_popup", { x, y }),
 	operationStatus: (operationId: string) => __TAURI_INVOKE<OperationStatus>("operation_status", { operationId }),
 	operationsReconcile: () => __TAURI_INVOKE<OperationDisposition[]>("operations_reconcile"),
 	operationAcknowledge: (operationId: string) => __TAURI_INVOKE<boolean>("operation_acknowledge", { operationId }),
@@ -313,6 +338,10 @@ export const commands = {
 	space_id: string | null,
 	error: boolean,
 	corner_radius: number,
+	/**  The address the launcher opens on when it edits the current page's. */
+	seed: string | null,
+	/**  The tab whose address is being edited; it is no destination of its own. */
+	seed_tab: string | null,
 } | null>("panel_ready"),
 	panelIntent: (intent: PanelIntent) => __TAURI_INVOKE<boolean>("panel_intent", { intent }),
 	/**
@@ -320,6 +349,11 @@ export const commands = {
 	 *  places the material behind it.
 	 */
 	panelLayout: (layout: PanelLayout) => __TAURI_INVOKE<void>("panel_layout", { layout }),
+	/**
+	 *  Opens the launcher on the current page's address. At rail width the field
+	 *  is not drawn, so this is how the page's address is edited there.
+	 */
+	launcherEdit: (tabId: string, url: string) => __TAURI_INVOKE<boolean>("launcher_edit", { tabId, url }),
 	launcherTrigger: () => __TAURI_INVOKE<{
 	shortcut: string,
 	default_shortcut: string,
@@ -361,7 +395,7 @@ export const commands = {
 	tabMenuPopup: (id: string, x: number | null, y: number | null, context: TabMenuContext) => __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, context }),
 	bookmarkMenuPopup: (x: number | null, y: number | null, folder: boolean) => __TAURI_INVOKE<boolean>("bookmark_menu_popup", { x, y, folder }),
 	profileMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("profile_menu_popup", { x, y }),
-	sidebarMenuPopup: (x: number | null, y: number | null, siteProtected: boolean | null, canHide: boolean) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y, siteProtected, canHide }),
+	sidebarMenuPopup: (x: number | null, y: number | null, siteProtected: boolean | null, canHide: boolean, extensions: SidebarMenuExtension[], manageExtensions: boolean) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y, siteProtected, canHide, extensions, manageExtensions }),
 	toolsMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("tools_menu_popup", { x, y }),
 	/**
 	 *  New Tab has its own main-only entry. The actor revalidates the bound blank
@@ -460,6 +494,12 @@ export const commands = {
 	 */
 	can_request: boolean,
 } | null>("default_browser_request"),
+	loginItemStatus: () => __TAURI_INVOKE<LoginItemStatus>("login_item_status"),
+	/**  Registers or removes the login item, then reports what the system holds. */
+	loginItemSet: (enabled: boolean) => __TAURI_INVOKE<LoginItemStatus>("login_item_set", { enabled }),
+	/**  Opens Login Items in System Settings, where a pending approval is given. */
+	loginItemOpenSettings: () => __TAURI_INVOKE<boolean>("login_item_open_settings"),
+	haptic: (kind: HapticKind) => __TAURI_INVOKE<void>("haptic", { kind }),
 	/**  The Bookmarks panel's reads and writes, scoped to the focused profile. */
 	bookmarkCall: (expectedProfile: string, call: BookmarkCall) => __TAURI_INVOKE<BookmarkResponse>("bookmark_call", { expectedProfile, call }),
 	timeCall: (expectedProfile: string, call: TimeCall) => __TAURI_INVOKE<TimeResponse>("time_call", { expectedProfile, call }),
@@ -483,6 +523,17 @@ export const commands = {
 	dividerGrab: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_grab", { x, y }),
 	dividerDrag: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_drag", { x, y }),
 	dividerRelease: (x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("divider_release", { x, y }),
+	/**
+	 *  Where the sidebar column stands, or `null` when swipes should not be read.
+	 *  Resolves whether the native stream is live; when it is not, the frame reads
+	 *  the swipe from wheel events as before.
+	 */
+	swipeRegion: (region: {
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+} | null) => __TAURI_INVOKE<boolean>("swipe_region", { region }),
 };
 
 /** Events */
@@ -513,6 +564,7 @@ export const events = {
 	zephiumAccountChanged: makeEvent<AccountChanged>("zephium:account-changed"),
 	zephiumImportProgress: makeEvent<ImportJobView>("zephium:import-progress"),
 	zephiumKeymapChanged: makeEvent<KeymapChanged>("zephium:keymap-changed"),
+	zephiumSwipe: makeEvent<SwipeScroll>("zephium:swipe"),
 	zephiumVoiceChanged: makeEvent<VoiceChanged>("zephium:voice-changed"),
 	zephiumVoiceLevels: makeEvent<VoiceLevels>("zephium:voice-levels"),
 	zephiumWorkDecisionPreferenceChanged: makeEvent<WorkDecisionPreferenceChanged>("zephium:work-decision-preference-changed"),
@@ -1215,6 +1267,8 @@ export type FocusView = {
 	allowed: string[],
 };
 
+export type HapticKind = "align" | "level";
+
 /**
  *  One request from a history surface. Reads and deletions share one bounded
  *  entry point, as resource calls do.
@@ -1377,6 +1431,14 @@ export type LayoutChanged = LayoutState;
 export type LayoutState = {
 	dividers: DividerView[],
 	work_pane: WorkPaneLayout | null,
+};
+
+export type LoginItemStatus = {
+	/**  False where this build cannot register, such as an unbundled binary. */
+	supported: boolean,
+	enabled: boolean,
+	/**  Registered, but the person still has to allow it in System Settings. */
+	needs_approval: boolean,
 };
 
 export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica";
@@ -1595,7 +1657,9 @@ export type OperationProcessed = OperationDisposition;
  *  enum prevents native errors, URLs, or attacker-controlled strings from
  *  becoming an unbounded privileged IPC/logging surface.
  */
-export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed";
+export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed" |
+/**  Work and AI features are switched off. */
+"feature_disabled";
 
 /**
  *  Process-local reconciliation state for an admitted mutation. Pending and
@@ -1690,12 +1754,46 @@ export type PanelState = {
 	space_id: string | null,
 	error: boolean,
 	corner_radius: number,
+	/**  The address the launcher opens on when it edits the current page's. */
+	seed: string | null,
+	/**  The tab whose address is being edited; it is no destination of its own. */
+	seed_tab: string | null,
 };
 
 export type PersonalHideView = {
 	id: string,
 	label: string,
 	enabled: boolean,
+};
+
+export type ProfileAvatarInputV1 = {
+	style: ProfileAvatarStyleView,
+	color: number,
+	symbol: number,
+	/**  The token `profile_avatar_pick` returned, for a photo style. */
+	photo: string | null,
+};
+
+export type ProfileAvatarPickV1 = { kind: "picked"; token: string } | { kind: "cancelled" } | { kind: "unsupported" } | { kind: "unavailable" };
+
+export type ProfileAvatarStyleView = "initials" | "symbol" | "photo";
+
+/**
+ *  How a profile is drawn. Colour and symbol index the frame's curated sets;
+ *  a photo is served by native under its revision, never sent as bytes.
+ */
+export type ProfileAvatarView = {
+	style: ProfileAvatarStyleView,
+	color: number,
+	symbol: number,
+	revision: number,
+};
+
+export type ProfileEntryView = {
+	id: string,
+	name: string,
+	kind: ProfileKindView,
+	avatar: ProfileAvatarView,
 };
 
 export type ProfileId = string;
@@ -1710,6 +1808,16 @@ export type ProfileView = {
 	id: string,
 	name: string,
 	kind: ProfileKindView,
+};
+
+/**
+ *  Every persistent profile, in order, and the one the window browses as.
+ *  `private` is set while the window shows its private scope instead.
+ */
+export type ProfilesView = {
+	current: string | null,
+	private: boolean,
+	profiles: ProfileEntryView[],
 };
 
 /**  Why a recorded shortcut was not taken. */
@@ -2054,6 +2162,18 @@ export type ShutSiteView = {
 };
 
 /**
+ *  One extension's button, carried into the rail's menu. The frame holds the
+ *  action and its popup; native only draws the row and relays the choice.
+ */
+export type SidebarMenuExtension = {
+	id: string,
+	label: string,
+	/**  32×32 RGBA, base64, as the frame already holds it. */
+	icon: string | null,
+	enabled: boolean,
+};
+
+/**
  *  A folder carries bounded display metadata; a tab is a normalized reference
  *  into [`ItemsState::tabs`]. The node id and tab id intentionally match, but
  *  the explicit reference keeps consumers from inferring that invariant.
@@ -2088,12 +2208,38 @@ export type SiteTimeView = {
 	series: number[],
 };
 
+export type SpaceIconView =
+/**  An index into the frame's curated symbols. */
+{ kind: "symbol"; index: number } | { kind: "emoji"; text: string };
+
 export type SpaceId = string;
+
+export type SpaceLookInputV1 = {
+	icon: SpaceIconView | null,
+	color: number,
+	theme: SpaceThemeView | null,
+};
+
+export type SpaceThemeView = { kind: "preset"; id: string } |
+/**  Seeds in the shape of `ui.theme-custom`. */
+{ kind: "custom"; seeds: string };
 
 /**  One ordered space owned by the focused profile. */
 export type SpaceView = {
 	id: string,
 	name: string,
+	icon: SpaceIconView | null,
+	/**  An avatar hue, shared with profiles. */
+	color: number,
+	/**  Overrides the app theme for the whole window while the space is active. */
+	theme: SpaceThemeView | null,
+	/**  Pinned and open tabs, which deleting the space closes. */
+	tabs: number,
+	/**
+	 *  The icons of its first tabs in sidebar order, at most three, for the
+	 *  switcher to stack beside the name. A tab with no icon yet is null.
+	 */
+	previews: (IconRef | null)[],
 };
 
 /**
@@ -2103,6 +2249,31 @@ export type SpaceView = {
  */
 export type SplitGroupView = {
 	members: string[],
+};
+
+export type SwipePhase =
+/**  Fingers landed: a new gesture, even in the middle of the last one's momentum. */
+"began" | "changed" |
+/**  Fingers lifted. What follows is momentum and is not sent. */
+"lifted";
+
+/**  The sidebar column in chrome points from the chrome's top-left corner. */
+export type SwipeRegion = {
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+};
+
+/**
+ *  Fingers' travel since the last event, positive to the right and down, in
+ *  points; `time` is the event's own clock in milliseconds.
+ */
+export type SwipeScroll = {
+	phase: SwipePhase,
+	dx: number | null,
+	dy: number | null,
+	time: number | null,
 };
 
 export type TabAvailability = { state: "sleeping" } | { state: "waiting_for_capacity"; url: string } | { state: "blocked_by_capacity"; url: string };
@@ -2327,6 +2498,11 @@ export type VoiceEngineV1 = "on_device" | "zephium" | "open_ai" | "groq";
 
 /**  Why a take could not start or produce words. Closed; no system text. */
 export type VoiceFaultV1 = "microphone_denied" | "recognition_denied" | "no_microphone" | "language_unavailable" |
+/**
+ *  Siri and Dictation are off in System Settings, so this Mac's
+ *  recognizer refuses every take.
+ */
+"dictation_off" |
 /**  No engine can run: nothing on this device and no account or key. */
 "no_engine" | "key_refused" | "signed_out" | "out_of_credit" | "rate_limited" | "offline" | "provider_down" | "too_long" | "busy" | "unavailable";
 
@@ -2343,7 +2519,9 @@ export type VoicePermissionV1 = "granted" | "undetermined" | "denied";
 
 export type VoicePhaseV1 = "listening" | "transcribing" | "done" | "failed" | "cancelled";
 
-export type VoicePrivacyV1 = "microphone" | "recognition";
+export type VoicePrivacyV1 = "microphone" | "recognition" |
+/**  The keyboard settings, where Dictation is switched on. */
+"dictation";
 
 export type VoiceStartV1 = {
 	/**  The take's id, which its events carry; null when it did not start. */
@@ -4540,6 +4718,12 @@ export type WorkMemoryV1_Serialize = {
 	used_ms?: string | null,
 };
 
+/**  The efforts one entry takes as the lead, weakest first. */
+export type WorkModelEffortsV1 = {
+	id: string,
+	levels: WorkModelReasoning[],
+};
+
 export type WorkModelEntry = WorkModelEntry_Serialize | WorkModelEntry_Deserialize;
 
 export type WorkModelEntry_Deserialize = {
@@ -4593,6 +4777,8 @@ export type WorkModelProvider = "open_ai" | "anthropic" | "google" | "deep_seek"
 "compatible" |
 /**  Zephium Cloud: the upstream's native body, our base URL and bearer. */
 "cloud";
+
+export type WorkModelReasoning = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type WorkModelRef = {
 	provider: WorkModelProvider,
@@ -4663,6 +4849,10 @@ export type WorkModelsV1_Deserialize = {
 	providers: WorkProviderStatusV1_Deserialize[],
 	cloud: WorkCloudStatusV1,
 	fault: WorkModelsFaultV1 | null,
+	/**  Entries that take an effort; the rest take none. */
+	efforts: WorkModelEffortsV1[],
+	/**  The effort the lead runs at now; null when its model takes none. */
+	effort: WorkModelReasoning | null,
 };
 
 export type WorkModelsV1_Serialize = {
@@ -4676,6 +4866,10 @@ export type WorkModelsV1_Serialize = {
 	providers: WorkProviderStatusV1_Serialize[],
 	cloud: WorkCloudStatusV1,
 	fault: WorkModelsFaultV1 | null,
+	/**  Entries that take an effort; the rest take none. */
+	efforts: WorkModelEffortsV1[],
+	/**  The effort the lead runs at now; null when its model takes none. */
+	effort: WorkModelReasoning | null,
 };
 
 export type WorkMoreModelsV1 = WorkMoreModelsV1_Serialize | WorkMoreModelsV1_Deserialize;

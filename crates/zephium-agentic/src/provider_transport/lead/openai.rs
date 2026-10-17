@@ -124,6 +124,8 @@ pub(super) fn body(
             WorkModelReasoning::Low => "low",
             WorkModelReasoning::Medium => "medium",
             WorkModelReasoning::High => "high",
+            WorkModelReasoning::XHigh => "xhigh",
+            WorkModelReasoning::Max => "max",
         };
         body.insert("reasoning".into(), json!({"effort": effort}));
     }

@@ -33,7 +33,7 @@ use zephium_core::ports::store::{
     ProfileDeletionFinalizeOutcome, ProfileDeletionLoad, SessionLoad, Store, StoreShutdownOutcome,
     UserscriptCatalogLoadOutcome, UserscriptCatalogMutationOutcome, MAX_FAVICON_BATCH_ORIGINS,
 };
-use zephium_core::profiles::ProfileKind;
+use zephium_core::profiles::{ProfileAvatar, ProfileKind};
 use zephium_core::session::{
     PersistedKind, SessionState, MAX_RECENTLY_CLOSED_TABS, MAX_SESSION_ITEMS,
     MAX_SESSION_NAME_CHARS, MAX_SESSION_PROFILES, MAX_SESSION_SPACES, MAX_SPLIT_DEPTH,
@@ -316,6 +316,14 @@ enum Cmd {
     ),
     LoadProfileBlockerConfig(ProfileId, BlockerConfigLoadDone),
     LoadProfileBlockerSites(ProfileId, BlockerSiteLoadDone),
+    LoadProfileAvatars(Sender<Vec<(ProfileId, ProfileAvatar)>>),
+    SaveProfileAvatar(
+        ProfileId,
+        ProfileAvatar,
+        Option<Arc<Vec<u8>>>,
+        Box<dyn FnOnce(bool) + Send>,
+    ),
+    ProfileAvatarPhoto(ProfileId, Box<dyn FnOnce(Option<Vec<u8>>) + Send>),
     Activity(ActivityWrite, ActivityWritePermit),
     TimeReport(
         ProfileId,
@@ -940,6 +948,49 @@ impl Store for SqliteStore {
                 .try_send(Cmd::FocusDays(from_day, days, done))
                 .is_ok()
     }
+    fn load_profile_avatars(&self) -> Vec<(ProfileId, ProfileAvatar)> {
+        let (tx, rx) = mpsc::channel();
+        if self.tx.try_send(Cmd::LoadProfileAvatars(tx)).is_err() {
+            return Vec::new();
+        }
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
+    }
+
+    fn save_profile_avatar(
+        &self,
+        profile: ProfileId,
+        avatar: ProfileAvatar,
+        photo: Option<Arc<Vec<u8>>>,
+        done: Box<dyn FnOnce(bool) + Send>,
+    ) {
+        if !self.admits_writes() {
+            return done(false);
+        }
+        if let Err(
+            mpsc::TrySendError::Full(Cmd::SaveProfileAvatar(_, _, _, done))
+            | mpsc::TrySendError::Disconnected(Cmd::SaveProfileAvatar(_, _, _, done)),
+        ) = self
+            .tx
+            .try_send(Cmd::SaveProfileAvatar(profile, avatar, photo, done))
+        {
+            done(false);
+        }
+    }
+
+    fn profile_avatar_photo(
+        &self,
+        profile: ProfileId,
+        done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
+    ) {
+        if let Err(
+            mpsc::TrySendError::Full(Cmd::ProfileAvatarPhoto(_, done))
+            | mpsc::TrySendError::Disconnected(Cmd::ProfileAvatarPhoto(_, done)),
+        ) = self.tx.try_send(Cmd::ProfileAvatarPhoto(profile, done))
+        {
+            done(None);
+        }
+    }
+
     fn load_profile_blocker_sites(&self, profile: ProfileId, done: BlockerSiteLoadDone) -> bool {
         let lifecycle = self
             .lifecycle
@@ -1487,7 +1538,9 @@ fn admissible_session(session: &SessionState) -> bool {
             .all(|space| space.name.len() <= MAX_NAME_BYTES)
         && session.items.iter().all(|item| match &item.kind {
             PersistedKind::Folder { name } => name.len() <= MAX_NAME_BYTES,
-            PersistedKind::Tab { url, title, zoom } => {
+            PersistedKind::Tab {
+                url, title, zoom, ..
+            } => {
                 url.len() <= MAX_URL_BYTES
                     && title.len() <= MAX_TITLE_BYTES
                     && zoom.is_finite()
@@ -1651,6 +1704,19 @@ fn actor(
                     continue;
                 }
                 done(hub.time_report(profile, &query).ok());
+            }
+            Some(Cmd::LoadProfileAvatars(reply)) => {
+                let _ = reply.send(hub.profile_avatars().unwrap_or_default());
+            }
+            Some(Cmd::SaveProfileAvatar(profile, avatar, photo, done)) => {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                    done(false);
+                    continue;
+                }
+                done(hub.save_profile_avatar(profile, avatar, photo).is_ok());
+            }
+            Some(Cmd::ProfileAvatarPhoto(profile, done)) => {
+                done(hub.profile_avatar_photo(profile));
             }
             Some(Cmd::FocusDays(from_day, days, done)) => {
                 if !activity.flush_focus(&mut hub, &mut pending) {

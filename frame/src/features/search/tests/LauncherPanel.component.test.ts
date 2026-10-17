@@ -62,6 +62,8 @@ const context: PanelState = {
   profile_name: "Personal",
   error: false,
   corner_radius: 20,
+  seed: null,
+  seed_tab: null,
 };
 const destinations = [
   { kind: "tasks" as const, label: "Tasks", icon: CheckListIcon },

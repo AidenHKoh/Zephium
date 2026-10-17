@@ -1793,6 +1793,23 @@ pub static META: &[Migration] = &[
         version: 26,
         up: record_media,
     },
+    Migration {
+        version: 27,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE profile_avatars (
+                     profile_id TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE
+                         CHECK (length(CAST(profile_id AS BLOB)) = 26),
+                     style TEXT NOT NULL CHECK (style IN ('initials', 'symbol', 'photo')),
+                     color INTEGER NOT NULL CHECK (color BETWEEN 0 AND 255),
+                     symbol INTEGER NOT NULL CHECK (symbol BETWEEN 0 AND 255),
+                     revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 4294967295),
+                     photo BLOB CHECK (photo IS NULL OR length(photo) BETWEEN 1 AND 65536),
+                     CHECK ((style = 'photo') = (photo IS NOT NULL))
+                 ) STRICT;",
+            )
+        },
+    },
 ];
 
 fn record_media(tx: &Transaction) -> rusqlite::Result<()> {
@@ -2707,6 +2724,7 @@ mod tests {
         (24, 0xb38257a2cbe5bad8),
         (25, 0xdd0b59247509897e),
         (26, 0x8cf0e4639f17eb73),
+        (27, 0x6c555aa33142ef81),
     ];
     const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
         (1, 0x10b8_b7a3_094f_23d7),

@@ -306,6 +306,7 @@ fn activity_deletion_unblocks_survivor_fifo_without_unrelated_traffic() {
             id: SpaceId::from(4),
             profile: ProfileId::from(3),
             name: "Work".into(),
+            look: Default::default(),
         }],
         active_space: Some(SpaceId::from(4)),
         ..SessionState::default()

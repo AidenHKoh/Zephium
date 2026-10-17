@@ -77,6 +77,8 @@ mod external_links;
 #[cfg(feature = "work-product")]
 mod favicon_probe;
 mod focus_alerts;
+mod haptics;
+mod help;
 mod intro_sound;
 mod keymap;
 mod launcher_trigger;
@@ -88,9 +90,11 @@ mod linux_shortcut;
 mod linux_shortcut_portal;
 #[cfg(any(target_os = "linux", test))]
 mod linux_x11_shortcut;
+mod login_item;
 mod material;
 mod media;
 mod memory_pressure;
+mod menu_text;
 mod notes;
 mod overlay;
 #[cfg(target_os = "macos")]
@@ -99,11 +103,14 @@ mod platform;
 mod presence;
 #[cfg(target_os = "windows")]
 mod privileged_runtime_windows;
+mod profiles;
 mod resource_close;
 mod search_providers;
+mod spaces;
 mod startup_alert;
 #[cfg(feature = "work-development-traces")]
 mod startup_styles;
+mod swipe;
 mod updates;
 mod voice;
 mod webext;
@@ -591,7 +598,12 @@ impl UiStartupGate {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
-        if let Some(next) = then {
+        // Models set up later have nowhere to open while Work and AI are off.
+        let ai = window
+            .app_handle()
+            .try_state::<keymap::Keymap>()
+            .is_none_or(|keymap| keymap.ai_enabled());
+        if let Some(next) = then.filter(|next| ai || !matches!(next, OnboardingNextV1::Models)) {
             let id = match next {
                 OnboardingNextV1::Account => "settings.account",
                 OnboardingNextV1::Models => "settings.ai",
@@ -1552,6 +1564,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_product::work_edit_draft,
             work_product::work_operation,
             work_product::work_operation_status,
+            work_product::work_running,
             work_product::work_context_preview,
             media::media_import,
             media::media_open,
@@ -1575,6 +1588,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_models::work_models,
             work_models::work_models_ready,
             work_models::work_choose_model,
+            work_models::work_set_model_effort,
             work_models::work_set_provider_key,
             work_models::work_test_provider_key,
             work_models::work_clear_provider_key,
@@ -1674,6 +1688,20 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             blocker_retry,
             blocker_refresh_sources,
             profiles_delete,
+            profiles::profiles_get,
+            profiles::profiles_create,
+            profiles::profiles_switch,
+            profiles::profiles_rename,
+            profiles::profiles_set_avatar,
+            profiles::profile_avatar_pick,
+            spaces::spaces_create,
+            spaces::spaces_update,
+            spaces::spaces_delete,
+            spaces::spaces_reorder,
+            spaces::spaces_switch,
+            spaces::spaces_step,
+            spaces::spaces_move_tab,
+            spaces::spaces_menu_popup,
             operation_status,
             operations_reconcile,
             operation_acknowledge,
@@ -1682,6 +1710,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             panel_ready,
             panel_intent,
             panel_layout,
+            launcher_edit,
             launcher_trigger,
             launcher_set_shortcut,
             launcher_record_shortcut,
@@ -1727,6 +1756,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             keymap::keymap_record,
             default_browser::default_browser_status,
             default_browser::default_browser_request,
+            login_item::login_item_status,
+            login_item::login_item_set,
+            login_item::login_item_open_settings,
+            haptics::haptic,
             bookmark_call,
             time_call,
             focus_control,
@@ -1739,7 +1772,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tab_drop,
             divider_grab,
             divider_drag,
-            divider_release
+            divider_release,
+            swipe::swipe_region
         ])
         .events(collect_events![
             keymap::KeymapChanged,
@@ -1751,6 +1785,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_models::WorkModelsChanged,
             voice::VoiceChanged,
             voice::VoiceLevels,
+            swipe::SwipeScroll,
             account::AccountChanged,
             ItemsChanged,
             FaviconsChanged,
@@ -2109,6 +2144,17 @@ pub(crate) fn restore_browser_chrome(
     }
 }
 
+/// What the launcher draws from the theme; the `=` keeps `ui.theme` from
+/// also matching `ui.theme-custom`.
+const LAUNCHER_THEME_KEYS: &[&str] = &[
+    "ui.theme=",
+    "ui.theme-custom=",
+    "ui.theme-contrast=",
+    "ui.contrast=",
+    "ui.font=",
+    "ui.font-size=",
+];
+
 fn emit_ui_command(app: &tauri::AppHandle, id: &str) {
     emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id);
     // The launcher follows appearance, motion and language only; anything else would
@@ -2116,6 +2162,10 @@ fn emit_ui_command(app: &tauri::AppHandle, id: &str) {
     if id.starts_with("theme.")
         || id.starts_with("preference.ui.reduce-motion=")
         || id.starts_with("preference.ui.language=")
+        || LAUNCHER_THEME_KEYS.iter().any(|key| {
+            id.strip_prefix("preference.")
+                .is_some_and(|rest| rest.starts_with(key))
+        })
     {
         emit_to_privileged(app, overlay::PANEL_LABEL, EVENT_UI, &id);
     }
@@ -3220,6 +3270,47 @@ fn apply_native_materials(app: &tauri::AppHandle, mode: &str) {
     }
 }
 
+pub(crate) fn app_setting(key: &str) -> Option<String> {
+    APP_STORE.get().and_then(|store| store.app_setting(key))
+}
+
+/// The appearance the app shows, which is the person's choice when they made
+/// one. A window's own theme reports the system's, so a light app on a dark
+/// Mac would otherwise paint its window and tint its glass for dark.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn appearance_is_light(window: &WebviewWindow) -> bool {
+    match NATIVE_APPEARANCE.load(Ordering::Acquire) {
+        APPEARANCE_LIGHT => true,
+        APPEARANCE_DARK => false,
+        _ => matches!(window.theme(), Ok(tauri::Theme::Light)),
+    }
+}
+
+/// Reinstalls the window material after the person picks another one.
+fn apply_native_material(app: &tauri::AppHandle, value: &str) {
+    material::choose(value);
+    reinstall_native_materials(app);
+}
+
+fn reinstall_native_materials(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        #[cfg(target_os = "macos")]
+        for (label, panel) in [(MAIN_LABEL, false), (overlay::PANEL_LABEL, true)] {
+            if let Some(window) = handle.get_webview_window(label) {
+                material::install(&window, panel);
+            }
+        }
+        #[cfg(target_os = "windows")]
+        apply_native_materials(
+            &handle,
+            &app_setting("appearance").unwrap_or_else(|| "system".into()),
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = handle;
+    });
+}
+
 fn apply_native_theme(app: &tauri::AppHandle, mode: &str) {
     let appearance = appearance_code(mode);
     // Publish the mode before set_theme: a synchronous ThemeChanged callback
@@ -3235,6 +3326,20 @@ fn apply_native_theme(app: &tauri::AppHandle, mode: &str) {
     app.set_theme(theme);
     #[cfg(target_os = "windows")]
     apply_native_materials(app, mode);
+    // The window's ground and the glass's tint follow the app's appearance,
+    // which a forced choice changes without the system's changing.
+    #[cfg(target_os = "macos")]
+    reinstall_native_materials(app);
+}
+
+/// The title band's caption buttons draw from this; the chrome is not granted
+/// the window state commands or event listening.
+#[cfg(target_os = "windows")]
+fn publish_window_state(window: &WebviewWindow, focused: bool) {
+    let maximized = window.is_maximized().unwrap_or(false);
+    let _ = window.eval(format!(
+        "window.__zephiumWindow={{maximized:{maximized},focused:{focused}}};window.dispatchEvent(new CustomEvent('zephium:window-state'))"
+    ));
 }
 
 fn accepted_ui_operation() -> zephium_ipc::OperationAdmission {
@@ -3252,9 +3357,17 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     if shutdown_started(app) {
         return rejected_operation();
     }
+    // A feature switched off has no way in, from any menu, key or launcher.
+    if !app
+        .try_state::<keymap::Keymap>()
+        .is_none_or(|keymap| keymap.offers(id))
+    {
+        return rejected_operation();
+    }
     if matches!(
         id,
         "settings.profiles"
+            | "settings.about"
             | "settings.account"
             | "settings.newtab"
             | "settings.ai"
@@ -3264,6 +3377,29 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
         let section = id.replacen("settings.", "settings.section.", 1);
         let _ = try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &section);
         return execute_command(app, "browser.settings");
+    }
+    if id == help::MENU {
+        let resolved = zephium_core::commands::resolve(&keymap_overrides(app));
+        let menu = build_command_menu_item(app, &resolved, "settings.shortcuts")
+            .and_then(|shortcuts| help::build_popup(app, &shortcuts));
+        return match (app.get_webview_window(MAIN_LABEL), menu) {
+            (Some(window), Ok(menu)) if window.popup_menu(&menu).is_ok() => accepted_ui_operation(),
+            _ => rejected_operation(),
+        };
+    }
+    if let Some(url) = help::url(id) {
+        return app
+            .try_state::<Handle>()
+            .map_or_else(rejected_operation, |shell| {
+                dispatch_operation(
+                    app,
+                    &shell,
+                    Command::OpenUrl {
+                        input: url.into(),
+                        new_tab: true,
+                    },
+                )
+            });
     }
     if id == "settings.connections" || id.starts_with("settings.connections.") {
         let section = id.replacen("settings.", "settings.section.", 1);
@@ -3287,8 +3423,8 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     if id == "mode.choose" {
         use tauri::menu::{Menu, MenuItemBuilder};
         let menu = (|| -> tauri::Result<_> {
-            let browse = MenuItemBuilder::with_id("mode.browse", "Browse").build(app)?;
-            let work = MenuItemBuilder::with_id("mode.work", "Work").build(app)?;
+            let browse = MenuItemBuilder::with_id("mode.browse", menu_text::label("Browse")).build(app)?;
+            let work = MenuItemBuilder::with_id("mode.work", menu_text::label("Work")).build(app)?;
             Menu::with_items(app, &[&browse, &work])
         })();
         return match (app.get_webview_window(MAIN_LABEL), menu) {
@@ -3296,8 +3432,11 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             _ => rejected_operation(),
         };
     }
-    // Site protection acts on the frame's focused page state.
-    if matches!(id, PROTECTION_SITE_COMMAND | PROTECTION_HIDE_COMMAND) {
+    // Site protection acts on the frame's focused page state, and an
+    // extension's button opens from the frame, which holds its action.
+    if matches!(id, PROTECTION_SITE_COMMAND | PROTECTION_HIDE_COMMAND)
+        || id.starts_with(EXTENSION_ACTION_COMMAND)
+    {
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
             accepted_ui_operation()
         } else {
@@ -3369,6 +3508,9 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     }
     if let Some(action) = id.strip_prefix("tabmenu.") {
         return execute_tab_menu_action(app, action);
+    }
+    if let Some(admission) = spaces::execute(app, id) {
+        return admission;
     }
     // Sidebar presentation is privileged-chrome state persisted through the
     // settings allowlist, not an actor mutation. Deliver the intent and let
@@ -3452,6 +3594,9 @@ fn execute_tab_menu_action(
                 axis: Axis::Row,
             },
         ),
+        action if action.starts_with(spaces::TAB_MENU_MOVE) => {
+            spaces::move_tab(app, id, &action[spaces::TAB_MENU_MOVE.len()..])
+        }
         _ => rejected_operation(),
     }
 }
@@ -3576,6 +3721,7 @@ fn newtab_run(
             context: Box::new(context),
             action,
             background: false,
+            replace: None,
         },
     )
 }
@@ -3655,6 +3801,7 @@ fn launcher_run(
             context: Box::new(context),
             action,
             background,
+            replace: overlay.editing_tab(),
         },
     );
     if !accepted {
@@ -3735,7 +3882,7 @@ fn menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64) -> b
         return false;
     };
     let keymap = keymap_overrides(&app);
-    let Ok((menu, _)) = build_menu(&app, &keymap) else {
+    let Ok(menu) = build_menu(&app, &keymap, false).and_then(|menu| offered_only(&app, menu)) else {
         return false;
     };
     caller.popup_menu_at(&menu, anchor).is_ok()
@@ -4332,8 +4479,52 @@ fn bookmark_menu_popup(
     caller.popup_menu_at(&menu, anchor).is_ok()
 }
 
+/// One extension's button, carried into the rail's menu. The frame holds the
+/// action and its popup; native only draws the row and relays the choice.
+#[derive(Clone, Debug, serde::Deserialize, specta::Type)]
+pub struct SidebarMenuExtension {
+    id: String,
+    label: String,
+    /// 32×32 RGBA, base64, as the frame already holds it.
+    icon: Option<String>,
+    enabled: bool,
+}
+
+const SIDEBAR_MENU_EXTENSIONS: usize = 24;
+const EXTENSION_ACTION_COMMAND: &str = "extension.action=";
+
+fn extension_menu_id(id: &str) -> Option<String> {
+    (!id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_graphic()))
+        .then(|| format!("{EXTENSION_ACTION_COMMAND}{id}"))
+}
+
+fn extension_menu_label(label: &str) -> String {
+    let label: String = label
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect();
+    // A bare `&` would become a Windows mnemonic.
+    let label = label.replace('&', "&&");
+    if label.is_empty() {
+        "Extension".into()
+    } else {
+        label
+    }
+}
+
+fn extension_menu_icon(icon: Option<&str>) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let rgba = base64::engine::general_purpose::STANDARD
+        .decode(icon?)
+        .ok()?;
+    (rgba.len() == 32 * 32 * 4).then_some(rgba)
+}
+
 #[tauri::command]
 #[specta::specta]
+#[allow(clippy::too_many_arguments)]
 fn sidebar_menu_popup(
     caller: WebviewWindow,
     app: tauri::AppHandle,
@@ -4341,6 +4532,8 @@ fn sidebar_menu_popup(
     y: f64,
     site_protected: Option<bool>,
     can_hide: bool,
+    extensions: Vec<SidebarMenuExtension>,
+    manage_extensions: bool,
 ) -> bool {
     if !authorize(&caller, CallerPolicy::Main, "sidebar_menu_popup") {
         return false;
@@ -4363,7 +4556,14 @@ fn sidebar_menu_popup(
         return false;
     };
     let keymap = keymap_overrides(&app);
-    let Ok(menu) = build_sidebar_menu(&app, &keymap, site_protected, can_hide) else {
+    let Ok(menu) = build_sidebar_menu(
+        &app,
+        &keymap,
+        site_protected,
+        can_hide,
+        &extensions,
+        manage_extensions,
+    ) else {
         return false;
     };
     caller.popup_menu_at(&menu, anchor).is_ok()
@@ -4432,7 +4632,7 @@ fn profile_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f
         return false;
     };
     let keymap = keymap_overrides(&app);
-    let Ok(menu) = build_profile_menu(&app, &keymap) else {
+    let Ok(menu) = build_profile_menu(&app, &keymap).and_then(|menu| offered_only(&app, menu)) else {
         return false;
     };
     caller.popup_menu_at(&menu, anchor).is_ok()
@@ -4462,7 +4662,7 @@ fn tools_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64
         return false;
     };
     let keymap = keymap_overrides(&app);
-    let Ok(menu) = build_tools_menu(&app, &keymap) else {
+    let Ok(menu) = build_tools_menu(&app, &keymap).and_then(|menu| offered_only(&app, menu)) else {
         return false;
     };
     caller.popup_menu_at(&menu, anchor).is_ok()
@@ -4561,6 +4761,31 @@ fn onboarding_finish(
     gate.hand_over(&caller)
 }
 
+/// Opens the launcher on the current page's address. At rail width the field
+/// is not drawn, so this is how the page's address is edited there.
+#[tauri::command]
+#[specta::specta]
+fn launcher_edit(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    tab_id: String,
+    url: String,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "launcher_edit")
+        || tab_id.is_empty()
+        || tab_id.len() > 64
+        || !tab_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        || url.is_empty()
+        || url.len() > 8192
+        || url.chars().any(char::is_control)
+    {
+        return false;
+    }
+    overlay::request(&app, move |panel| panel.edit(tab_id, url))
+}
+
 #[tauri::command]
 #[specta::specta]
 fn launcher_trigger(caller: WebviewWindow) -> Option<launcher_trigger::LauncherTrigger> {
@@ -4640,6 +4865,8 @@ fn sidebar_set_width(
     if !platform::imp::publish_sidebar_resize_revision(revision) {
         return;
     }
+    #[cfg(target_os = "macos")]
+    platform::imp::sidebar_column_width(&caller, width);
     #[cfg(not(target_os = "macos"))]
     let _ = revision;
     shell.dispatch(Command::SetSidebarWidth(width, animate));
@@ -4821,7 +5048,8 @@ fn build_command_menu_item_enabled(
                 "native menu references unregistered command {id}"
             )))
         })?;
-    let mut builder = MenuItemBuilder::with_id(command.id, command.title).enabled(enabled);
+    let mut builder =
+        MenuItemBuilder::with_id(command.id, menu_text::label(command.title)).enabled(enabled);
     if let Some(accelerator) = &command.accelerator {
         builder = builder.accelerator(accelerator);
     }
@@ -4833,39 +5061,48 @@ fn build_quit_menu_item(
 ) -> tauri::Result<tauri::menu::MenuItem<tauri::Wry>> {
     // Native terminate: bypasses Tauri's ExitRequested path on macOS.
     // An ordinary menu event reaches the existing draft/store shutdown barrier.
-    tauri::menu::MenuItemBuilder::with_id("browser.quit", "Quit Zephium")
+    tauri::menu::MenuItemBuilder::with_id("browser.quit", menu_text::label("Quit Zephium"))
         .accelerator("CmdOrCtrl+Q")
         .build(handle)
 }
 
+/// Page keystrokes never reach privileged chrome, so the Work pane's
+/// dismissal keys are menu items, present in View only while a pane is shown.
+const WORK_PANE_MENU_COMMAND_IDS: [&str; 2] = ["work.pane.close", "work.pane.openInBrowse"];
+
 /// The application menu: the macOS menu bar, and the "more" popup on Windows
-/// and Linux. Returns the Work pane items, which only the menu bar keeps.
+/// and Linux.
 fn build_menu(
     handle: &tauri::AppHandle,
     overrides: &std::collections::HashMap<String, String>,
-) -> tauri::Result<(
-    tauri::menu::Menu<tauri::Wry>,
-    Vec<tauri::menu::MenuItem<tauri::Wry>>,
-)> {
+    work_pane: bool,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, SubmenuBuilder};
 
     let resolved = zephium_core::commands::resolve(overrides);
     let item = |id: &str| build_command_menu_item(handle, &resolved, id);
 
-    let app_menu = SubmenuBuilder::new(handle, "Zephium")
-        .about(None)
+    // About is Settings' About page: the system panel cannot open links in a tab.
+    let about = tauri::menu::MenuItemBuilder::with_id(
+        help::ABOUT,
+        menu_text::label("About Zephium"),
+    )
+    .build(handle)?;
+    let app_menu = SubmenuBuilder::new(handle, menu_text::label("Zephium"))
+        .item(&about)
         .separator()
         .item(&item("browser.settings")?)
+        .separator();
+    #[cfg(target_os = "macos")]
+    let app_menu = app_menu
+        .services_with_text(menu_text::label("Services"))
         .separator()
-        .services()
-        .separator()
-        .hide()
-        .hide_others()
-        .show_all()
-        .separator()
-        .item(&build_quit_menu_item(handle)?)
-        .build()?;
-    let file = SubmenuBuilder::new(handle, "File")
+        .hide_with_text(menu_text::label("Hide Zephium"))
+        .hide_others_with_text(menu_text::label("Hide Others"))
+        .show_all_with_text(menu_text::label("Show All"))
+        .separator();
+    let app_menu = app_menu.item(&build_quit_menu_item(handle)?).build()?;
+    let file = SubmenuBuilder::new(handle, menu_text::label("File"))
         .item(&item("tab.new")?)
         .item(&item("window.newPrivate")?)
         .item(&item("note.new")?)
@@ -4875,30 +5112,30 @@ fn build_menu(
         .separator()
         .item(&item("tab.close")?)
         .build()?;
-    let find = SubmenuBuilder::new(handle, "Find")
+    let find = SubmenuBuilder::new(handle, menu_text::label("Find"))
         .item(&item("find.show")?)
         .item(&item("find.next")?)
         .item(&item("find.previous")?)
         .build()?;
     // Standard Edit selectors keep Cmd+C/V/X working inside every webview.
-    let edit = SubmenuBuilder::new(handle, "Edit")
-        .undo()
-        .redo()
+    let edit = SubmenuBuilder::new(handle, menu_text::label("Edit"))
+        .undo_with_text(menu_text::label("Undo"))
+        .redo_with_text(menu_text::label("Redo"))
         .separator()
-        .cut()
-        .copy()
-        .paste()
-        .select_all()
+        .cut_with_text(menu_text::label("Cut"))
+        .copy_with_text(menu_text::label("Copy"))
+        .paste_with_text(menu_text::label("Paste"))
+        .select_all_with_text(menu_text::label("Select All"))
         .separator()
         .item(&find)
         .item(&item("page.copyLink")?)
         .build()?;
-    let appearance = SubmenuBuilder::new(handle, "Appearance")
+    let appearance = SubmenuBuilder::new(handle, menu_text::label("Appearance"))
         .item(&item("theme.system")?)
         .item(&item("theme.light")?)
         .item(&item("theme.dark")?)
         .build()?;
-    let view = SubmenuBuilder::new(handle, "View")
+    let view = SubmenuBuilder::new(handle, menu_text::label("View"))
         .item(&item("nav.reload")?)
         .item(&item("nav.stop")?)
         .separator()
@@ -4910,62 +5147,113 @@ fn build_menu(
         .item(&appearance)
         .separator()
         .item(&item("url.focus")?)
-        .item(&item("page.devtools")?)
-        .build()?;
-    let history = SubmenuBuilder::new(handle, "History")
+        .item(&item("page.devtools")?);
+    let view = if work_pane {
+        let mut view = view.separator();
+        for id in WORK_PANE_MENU_COMMAND_IDS {
+            view = view.item(&item(id)?);
+        }
+        view
+    } else {
+        view
+    }
+    .build()?;
+    let history = SubmenuBuilder::new(handle, menu_text::label("History"))
         .item(&item("nav.back")?)
         .item(&item("nav.forward")?)
         .separator()
         .item(&item("tab.reopen")?)
         .item(&item("browser.history")?)
         .build()?;
-    let bookmarks = SubmenuBuilder::new(handle, "Bookmarks")
+    let bookmarks = SubmenuBuilder::new(handle, menu_text::label("Bookmarks"))
         .item(&item("bookmark.add")?)
         .item(&item("tool.bookmarks")?)
         .build()?;
-    let window = SubmenuBuilder::new(handle, "Window")
-        .minimize()
-        .fullscreen()
+    let spaces = spaces::build_menu_section(handle, overrides)?;
+    let window = SubmenuBuilder::new(handle, menu_text::label("Window"))
+        .minimize_with_text(menu_text::label("Minimize"));
+    #[cfg(target_os = "macos")]
+    let window = window.fullscreen_with_text(menu_text::label("Enter Full Screen"));
+    let window = window
         .separator()
         .item(&item("tab.next")?)
         .item(&item("tab.previous")?)
+        .item(&item("tab.below")?)
+        .item(&item("tab.above")?)
         .separator()
+        .item(&item("tool.notes")?)
+        .item(&item("tool.tasks")?)
+        .item(&item("tool.time")?)
+        .item(&item("tool.history")?)
         .item(&item("tool.downloads")?)
-        .item(&item("browser.tasks")?)
+        .separator()
         .item(&item("browser.notes")?)
+        .item(&item("browser.tasks")?)
         .build()?;
-    // Page keystrokes never reach privileged chrome, so the pane's dismissal
-    // keys live in the menu and are enabled exactly while a pane is shown.
-    let pane_close = build_command_menu_item_enabled(handle, &resolved, "work.pane.close", false)?;
-    let pane_open =
-        build_command_menu_item_enabled(handle, &resolved, "work.pane.openInBrowse", false)?;
-    let work = SubmenuBuilder::new(handle, "Work")
-        .item(&pane_close)
-        .item(&pane_open)
-        .build()?;
-    let help = SubmenuBuilder::new(handle, "Help")
-        .item(&item("settings.shortcuts")?)
-        .build()?;
+    let help = help::build_menu(handle, &item("settings.shortcuts")?)?;
 
-    let menu = Menu::with_items(
+    Menu::with_items(
         handle,
         &[
-            &app_menu, &file, &edit, &view, &history, &bookmarks, &work, &window, &help,
+            &app_menu, &file, &edit, &view, &history, &bookmarks, &spaces, &window, &help,
         ],
-    )?;
-    Ok((menu, vec![pane_close, pane_open]))
+    )
 }
 
-/// Installs (or reinstalls, after a rebinding) the macOS menu bar.
+/// Installs (or reinstalls, after a rebinding or a Work pane showing or
+/// hiding) the macOS menu bar. Main thread only.
 #[cfg(target_os = "macos")]
 fn install_menu_bar(
     app: &tauri::AppHandle,
     overrides: &std::collections::HashMap<String, String>,
+    work_pane: bool,
 ) -> tauri::Result<()> {
-    let (menu, work_items) = build_menu(app, overrides)?;
-    app.set_menu(menu)?;
-    if let Some(keymap) = app.try_state::<keymap::Keymap>() {
-        keymap.adopt_work_menu_items(work_items);
+    app.set_menu(offered_only(app, build_menu(app, overrides, work_pane)?)?)?;
+    Ok(())
+}
+
+/// Takes out the items of features switched off, then the separators that
+/// no longer separate anything.
+fn offered_only(
+    handle: &tauri::AppHandle,
+    menu: tauri::menu::Menu<tauri::Wry>,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let Some(keymap) = handle.try_state::<keymap::Keymap>() else {
+        return Ok(menu);
+    };
+    for item in menu.items()? {
+        if let tauri::menu::MenuItemKind::Submenu(submenu) = &item {
+            prune_menu_items(&keymap, submenu.items()?, |item| submenu.remove(item))?;
+        }
+    }
+    prune_menu_items(&keymap, menu.items()?, |item| menu.remove(item))?;
+    Ok(menu)
+}
+
+fn prune_menu_items(
+    keymap: &keymap::Keymap,
+    items: Vec<tauri::menu::MenuItemKind<tauri::Wry>>,
+    remove: impl Fn(&dyn tauri::menu::IsMenuItem<tauri::Wry>) -> tauri::Result<()>,
+) -> tauri::Result<()> {
+    use tauri::menu::MenuItemKind;
+    let separator =
+        |item: &MenuItemKind<tauri::Wry>| matches!(item, MenuItemKind::Predefined(predefined) if predefined.text().is_ok_and(|text| text.is_empty()));
+    let mut kept: Vec<MenuItemKind<tauri::Wry>> = Vec::new();
+    for item in items {
+        if let MenuItemKind::MenuItem(entry) = &item {
+            if !keymap.offers(entry.id().as_ref()) {
+                remove(&item)?;
+                continue;
+            }
+        }
+        if separator(&item) && kept.last().is_none_or(separator) {
+            remove(&item)?;
+            continue;
+        }
+        kept.push(item);
+    }
+    if let Some(last) = kept.last().filter(|last| separator(last)) {
+        remove(last)?;
     }
     Ok(())
 }
@@ -5053,9 +5341,12 @@ fn build_sidebar_menu(
     overrides: &std::collections::HashMap<String, String>,
     site_protected: Option<bool>,
     can_hide: bool,
+    extensions: &[SidebarMenuExtension],
+    manage_extensions: bool,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{
-        CheckMenuItemBuilder, IsMenuItem, Menu, MenuItemBuilder, PredefinedMenuItem,
+        CheckMenuItemBuilder, IconMenuItemBuilder, IsMenuItem, Menu, MenuItemBuilder,
+        PredefinedMenuItem,
     };
 
     let resolved = zephium_core::commands::resolve(overrides);
@@ -5068,18 +5359,47 @@ fn build_sidebar_menu(
     let protection = match site_protected {
         Some(protected) => Some((
             PredefinedMenuItem::separator(handle)?,
-            CheckMenuItemBuilder::with_id(PROTECTION_SITE_COMMAND, "Block Ads and Trackers")
+            CheckMenuItemBuilder::with_id(PROTECTION_SITE_COMMAND, menu_text::label("Block Ads and Trackers"))
                 .checked(protected)
                 .build(handle)?,
-            MenuItemBuilder::with_id(PROTECTION_HIDE_COMMAND, "Hide Elements…")
+            MenuItemBuilder::with_id(PROTECTION_HIDE_COMMAND, menu_text::label("Hide Elements…"))
                 .enabled(can_hide)
                 .build(handle)?,
         )),
         None => None,
     };
+    // At rail width the extensions have no tray to sit in, so their buttons
+    // stand here, each with its own icon, above the way to manage them.
+    let mut extension_items = Vec::new();
+    for extension in extensions.iter().take(SIDEBAR_MENU_EXTENSIONS) {
+        let Some(id) = extension_menu_id(&extension.id) else {
+            continue;
+        };
+        let label = extension_menu_label(&extension.label);
+        let builder = IconMenuItemBuilder::with_id(id, label).enabled(extension.enabled);
+        let item = match extension_menu_icon(extension.icon.as_deref()) {
+            Some(rgba) => builder
+                .icon(tauri::image::Image::new_owned(rgba, 32, 32))
+                .build(handle)?,
+            None => builder.build(handle)?,
+        };
+        extension_items.push(item);
+    }
+    let extension_rule = PredefinedMenuItem::separator(handle)?;
+    let manage =
+        MenuItemBuilder::with_id("extensions.manage", menu_text::label("Manage Extensions…")).build(handle)?;
     let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&back, &forward, &reload];
     if let Some((rule, site, hide)) = &protection {
         items.extend([rule as &dyn IsMenuItem<tauri::Wry>, site, hide]);
+    }
+    if manage_extensions {
+        items.push(&extension_rule);
+        items.extend(
+            extension_items
+                .iter()
+                .map(|item| item as &dyn IsMenuItem<tauri::Wry>),
+        );
+        items.push(&manage);
     }
     items.extend([&separator as &dyn IsMenuItem<tauri::Wry>, &compact]);
 
@@ -5150,7 +5470,7 @@ fn build_tab_menu(
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
     let item = |index: usize, title: &str, enabled: bool| {
-        MenuItemBuilder::with_id(TAB_MENU_ACTION_IDS[index], title)
+        MenuItemBuilder::with_id(TAB_MENU_ACTION_IDS[index], menu_text::label(title))
             .enabled(enabled)
             .build(handle)
     };
@@ -5169,13 +5489,25 @@ fn build_tab_menu(
     let close = item(7, "Close Tab", true)?;
     let others = item(8, "Close Other Tabs", context.others)?;
     let below = item(9, "Close Tabs Below", context.below)?;
-    Menu::with_items(
-        handle,
-        &[
-            &reload, &duplicate, &copy_link, &bookmark, &first, &keep, &split, &second, &close,
-            &others, &below,
-        ],
-    )
+    // Favorites belong to every space, so only a space's own tab can move.
+    let move_to = if context.essential {
+        None
+    } else {
+        spaces::tab_menu_section(handle, &format!("tabmenu.{}", spaces::TAB_MENU_MOVE))?
+    };
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![
+        &reload, &duplicate, &copy_link, &bookmark, &first, &keep, &split,
+    ];
+    if let Some(move_to) = &move_to {
+        items.push(move_to);
+    }
+    items.extend([
+        &second as &dyn tauri::menu::IsMenuItem<tauri::Wry>,
+        &close,
+        &others,
+        &below,
+    ]);
+    Menu::with_items(handle, &items)
 }
 
 fn build_bookmark_menu(
@@ -5184,7 +5516,7 @@ fn build_bookmark_menu(
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
     let item = |index: usize, title: &str| {
-        MenuItemBuilder::with_id(BOOKMARK_MENU_ACTION_IDS[index], title).build(handle)
+        MenuItemBuilder::with_id(BOOKMARK_MENU_ACTION_IDS[index], menu_text::label(title)).build(handle)
     };
     let open = item(0, "Open")?;
     let rename = item(3, "Rename")?;
@@ -5211,14 +5543,14 @@ fn build_tools_menu(
     handle: &tauri::AppHandle,
     overrides: &std::collections::HashMap<String, String>,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
+    use tauri::menu::{Menu, PredefinedMenuItem};
     let resolved = zephium_core::commands::resolve(overrides);
     let item = |id: &str| build_command_menu_item(handle, &resolved, id);
-    let notes = MenuItemBuilder::with_id("tool.notes", "Notes").build(handle)?;
-    let tasks = MenuItemBuilder::with_id("tool.tasks", "Tasks").build(handle)?;
-    let activity = MenuItemBuilder::with_id("tool.time", "Time").build(handle)?;
+    let notes = item("tool.notes")?;
+    let tasks = item("tool.tasks")?;
+    let activity = item("tool.time")?;
     let first = PredefinedMenuItem::separator(handle)?;
-    let history = MenuItemBuilder::with_id("tool.history", "History").build(handle)?;
+    let history = item("tool.history")?;
     let downloads = item("tool.downloads")?;
     let bookmarks = item("tool.bookmarks")?;
     let second = PredefinedMenuItem::separator(handle)?;
@@ -5243,20 +5575,20 @@ fn build_profile_menu(
     use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
     let resolved = zephium_core::commands::resolve(overrides);
     let item = |id: &str| build_command_menu_item(handle, &resolved, id);
-    let profile = MenuItemBuilder::with_id("settings.profiles", "Profile…").build(handle)?;
-    let account = MenuItemBuilder::with_id("settings.account", "Account…").build(handle)?;
+    let profile = MenuItemBuilder::with_id("settings.profiles", menu_text::label("Profile…")).build(handle)?;
+    let account = MenuItemBuilder::with_id("settings.account", menu_text::label("Account…")).build(handle)?;
     let first = PredefinedMenuItem::separator(handle)?;
     let new_tab = item("tab.new")?;
     let new_private = item("window.newPrivate")?;
-    let split = MenuItemBuilder::with_id("split.choose", "Split View…").build(handle)?;
+    let split = MenuItemBuilder::with_id("split.choose", menu_text::label("Split View…")).build(handle)?;
     let second = PredefinedMenuItem::separator(handle)?;
-    let notes = MenuItemBuilder::with_id("tool.notes", "Notes").build(handle)?;
-    let tasks = MenuItemBuilder::with_id("tool.tasks", "Tasks").build(handle)?;
-    let time = MenuItemBuilder::with_id("tool.time", "Time").build(handle)?;
-    let history = MenuItemBuilder::with_id("tool.history", "History").build(handle)?;
+    let notes = item("tool.notes")?;
+    let tasks = item("tool.tasks")?;
+    let time = item("tool.time")?;
+    let history = item("tool.history")?;
     let downloads = item("tool.downloads")?;
     let bookmarks = item("tool.bookmarks")?;
-    let extensions = MenuItemBuilder::with_id("extensions.manage", "Extensions…").build(handle)?;
+    let extensions = MenuItemBuilder::with_id("extensions.manage", menu_text::label("Extensions…")).build(handle)?;
     let third = PredefinedMenuItem::separator(handle)?;
     let settings = item("browser.settings")?;
     let quit = build_quit_menu_item(handle)?;
@@ -5588,6 +5920,12 @@ pub fn run() {
                 APP_STORE.set(store.clone()).map_err(|_| {
                     std::io::Error::other("process-global application store is already installed")
                 })?;
+                for (key, value) in
+                    zephium_core::preferences::migrations(|key| store.app_setting(key))
+                {
+                    let _ = store.set_app_setting(key.into(), value);
+                }
+                menu_text::set_language(store.app_setting("ui.language").as_deref());
                 updates::schedule_native_checks(app.handle());
                 work_models::install(app.handle());
                 account::install(app.handle());
@@ -5865,7 +6203,7 @@ pub fn run() {
             // Windows and Linux get the same menu as a popup from the sidebar
             // "more" button instead of a persistent bar.
             #[cfg(target_os = "macos")]
-            install_menu_bar(&handle, &keymap)?;
+            install_menu_bar(&handle, &keymap, false)?;
             app.on_menu_event(|app, event| {
                 let _ = execute_command(app, event.id().0.as_str());
             });
@@ -5940,6 +6278,7 @@ pub fn run() {
                 ),
                 Projection::PanelOwner(owner) => overlay::update_context(&emit_handle, &owner),
                 Projection::Items(state) => {
+                    spaces::follow(&emit_handle, &state);
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_ITEMS, &state)
                 }
                 Projection::Tab(tab) => {
@@ -6001,6 +6340,20 @@ pub fn run() {
                             apply_native_theme(&emit_handle, mode);
                         }
                     }
+                    if let Some(value) = id.strip_prefix("preference.ui.material=") {
+                        apply_native_material(&emit_handle, value);
+                    }
+                    if let Some((key, value)) = id.strip_prefix("preference.").and_then(|rest| rest.split_once('=')) {
+                        if material::theme_changed(key, value) {
+                            reinstall_native_materials(&emit_handle);
+                        }
+                        if let Some(keymap) = emit_handle.try_state::<keymap::Keymap>() {
+                            let language = key == "ui.language" && menu_text::set_language(Some(value));
+                            if keymap.follow_preference(key, value) || language {
+                                keymap.rebuild_menu_bar(&emit_handle);
+                            }
+                        }
+                    }
                     emit_ui_command(&emit_handle, &id);
                 }
                 Projection::OpenNote { profile, id } => emit_to_privileged(&emit_handle, MAIN_LABEL, "zephium:note-open-requested", &NoteOpenRequested { profile, id }),
@@ -6009,7 +6362,7 @@ pub fn run() {
                 }
                 Projection::Layout(layout) => {
                     if let Some(keymap) = emit_handle.try_state::<keymap::Keymap>() {
-                        keymap.set_work_pane_shown(layout.work_pane.is_some());
+                        keymap.set_work_pane_shown(&emit_handle, layout.work_pane.is_some());
                     }
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_LAYOUT, &layout)
                 }
@@ -6036,6 +6389,9 @@ pub fn run() {
                     } else {
                         diagnostic!("operation: rejected duplicate or unreserved actor disposition");
                     }
+                }
+                Projection::Profiles(view) => {
+                    emit_to_privileged(&emit_handle, MAIN_LABEL, "zephium:profiles", &view)
                 }
 
             });
@@ -6246,6 +6602,8 @@ pub fn run() {
                         if minimized {
                             return;
                         }
+                        #[cfg(target_os = "windows")]
+                        publish_window_state(&resize_window, resize_window.is_focused().unwrap_or(true));
                         let size = platform::imp::content_size(&resize_window)
                             .unwrap_or_else(|| inner_logical(&resize_window));
                         resize_shell.dispatch(Command::SetWindowSize(size));
@@ -6339,6 +6697,8 @@ pub fn run() {
                         }
                     }
                     tauri::WindowEvent::Focused(true) => {
+                        #[cfg(target_os = "windows")]
+                        publish_window_state(&resize_window, true);
                         resize_shell.dispatch(Command::SetWindowFocused(true));
                         // Some window managers restore without a distinct
                         // resize notification. Wake content before it can be
@@ -6350,6 +6710,8 @@ pub fn run() {
                     // background work: audio and timers must continue. Only
                     // an OS-minimized window hides all content views.
                     tauri::WindowEvent::Focused(false) => {
+                        #[cfg(target_os = "windows")]
+                        publish_window_state(&resize_window, false);
                         resize_shell.dispatch(Command::SetWindowFocused(false));
                         voice::window_blurred(resize_window.app_handle());
                         if resize_window.is_minimized().unwrap_or(false) {
@@ -6690,6 +7052,44 @@ mod tests {
     }
 
     #[test]
+    fn menu_bar_hosts_pane_keys_in_view_and_lists_each_panel_once() {
+        let source = include_str!("lib.rs");
+        let menu = source
+            .split("fn build_menu(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn install_menu_bar").next())
+            .expect("menu builder");
+        assert!(!menu.contains("\"Work\""), "the menu bar has no Work menu");
+        assert!(menu.contains("for id in WORK_PANE_MENU_COMMAND_IDS"));
+        let pane: Vec<_> = zephium_core::commands::REGISTRY
+            .iter()
+            .filter(|command| command.group == zephium_core::commands::Group::Work)
+            .map(|command| command.id)
+            .collect();
+        assert_eq!(pane, super::WORK_PANE_MENU_COMMAND_IDS);
+        for id in [
+            "tool.notes",
+            "tool.tasks",
+            "tool.time",
+            "tool.history",
+            "tool.downloads",
+            "browser.notes",
+            "browser.tasks",
+        ] {
+            assert_eq!(menu.matches(&format!("item(\"{id}\")")).count(), 1, "{id}");
+        }
+    }
+
+    #[test]
+    fn about_and_help_go_through_the_command_router() {
+        let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!source.contains("about_with_text"));
+        assert!(source.contains("| \"settings.about\""));
+        assert!(source.contains("help::url(id)"));
+        assert!(source.contains("id == help::MENU"));
+    }
+
+    #[test]
     fn export_typescript_bindings() {
         super::specta_builder()
             .export(
@@ -6715,6 +7115,11 @@ mod tests {
                 zephium_core::work::environment::WORK_PLACEMENT_PIN
             ),
         ).expect("export Work constants");
+        std::fs::write(
+            "../frame/src/shared/ipc/theme-presets.json",
+            zephium_core::theme::presets_json(),
+        )
+        .expect("export theme presets");
     }
 
     #[test]
@@ -6912,7 +7317,7 @@ mod tests {
             .split("fn handle_run_event")
             .next()
             .unwrap();
-        assert!(native_menu.contains(r#"with_id("split.choose", "Split View…")"#));
+        assert!(native_menu.contains(r#"with_id("split.choose", menu_text::label("Split View…"))"#));
         assert!(native_menu.contains(r#"item("tab.new")"#));
         assert!(sidebar.contains(r#"command.id === "split.choose""#));
         assert!(sidebar.contains("splitting = true"));

@@ -79,12 +79,17 @@ export class TabProjectionModel {
   }
 
   applyPresentation({ tab, active }: PresentationTab): boolean {
+    // A presentation carries the active tab as it was when it was sent. One
+    // that arrives after a newer snapshot (a page restored on the way out of
+    // Settings, then a new tab opened) still brings its tab up to date, but
+    // the snapshot's choice of tab stands.
+    const current = tab.projection_revision > this.#appliedGlobalRevision;
     if (!this.#admitTabRevision(tab)) return false;
 
     const index = this.#state.tabs.findIndex((candidate) => candidate.id === tab.id);
     const tabs = this.#state.tabs.slice();
     if (index !== -1) tabs[index] = tab;
-    this.#state = { ...this.#state, tabs, active };
+    this.#state = { ...this.#state, tabs, active: current ? active : this.#state.active };
     return true;
   }
 

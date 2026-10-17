@@ -7,13 +7,17 @@ import type { Destination } from "./search-surface.svelte";
  *  loaded. Only their names travel here: the launcher never pays for an
  *  editor or a task list a second time. Each answers to Command and its
  *  position, from anywhere in the launcher. */
-export const launcherDestinations = (): Destination[] =>
+export const launcherDestinations = (
+  offered: (kind: Destination["kind"]) => boolean = () => true,
+): Destination[] =>
   [
     { kind: "tasks" as const, label: m.tool_tasks(), icon: CheckListIcon },
     { kind: "notes" as const, label: m.tool_notes(), icon: Note01Icon },
     { kind: "history" as const, label: m.browser_history_title(), icon: HistoryIcon },
     { kind: "downloads" as const, label: m.browser_downloads_title(), icon: Download01Icon },
-  ].map((destination, index) => ({
-    ...destination,
-    keys: [IS_MAC ? "⌘" : "Ctrl", String(index + 1)],
-  }));
+  ]
+    .filter((destination) => offered(destination.kind))
+    .map((destination, index) => ({
+      ...destination,
+      keys: [IS_MAC ? "⌘" : "Ctrl", String(index + 1)],
+    }));

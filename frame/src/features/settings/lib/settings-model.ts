@@ -1,4 +1,5 @@
 import * as m from "$shared/i18n/messages";
+import { preferences } from "$domain/preferences";
 import { fields } from "./catalog";
 import {
   Settings01Icon,
@@ -10,18 +11,19 @@ import {
   Shield01Icon,
   KeyboardIcon,
   Globe02Icon,
-  SparklesIcon,
-  AiBrowserIcon,
+  ChipIcon,
+  Briefcase02Icon,
   Clock01Icon,
   DashboardSpeed01Icon,
-  PuzzleIcon,
   InformationCircleIcon,
   UserMultiple02Icon,
-  TranslateIcon,
-  MagicWand01Icon,
+  Mortarboard02Icon,
   Brain01Icon,
   Plug01Icon,
+  DashboardSquare02Icon,
 } from "@hugeicons/core-free-icons";
+/** Navigation order: groups in `groups` order, sections within a group as
+ *  listed here. Ids are deep-link targets, so a rename changes titles only. */
 const allSections = [
   {
     id: "general",
@@ -32,17 +34,10 @@ const allSections = [
   },
   {
     id: "appearance",
-    group: "personalize",
+    group: "browser",
     title: m.section_appearance,
     description: m.section_appearance_description,
     icon: PaintBoardIcon,
-  },
-  {
-    id: "newtab",
-    group: "personalize",
-    title: m.section_newtab,
-    description: m.section_newtab_description,
-    icon: Add01Icon,
   },
   {
     id: "tabs",
@@ -52,11 +47,11 @@ const allSections = [
     icon: Layers01Icon,
   },
   {
-    id: "profiles",
+    id: "newtab",
     group: "browser",
-    title: m.section_profiles,
-    description: m.section_profiles_description,
-    icon: UserMultiple02Icon,
+    title: m.section_newtab,
+    description: m.section_newtab_description,
+    icon: Add01Icon,
   },
   {
     id: "search",
@@ -73,95 +68,96 @@ const allSections = [
     icon: Shield01Icon,
   },
   {
-    id: "shortcuts",
-    group: "application",
-    title: m.section_shortcuts,
-    description: m.section_shortcuts_description,
-    icon: KeyboardIcon,
-  },
-  {
-    id: "languages",
-    group: "application",
-    title: m.section_languages,
-    description: m.section_languages_description,
-    icon: TranslateIcon,
-  },
-  {
-    id: "work",
-    group: "intelligence",
-    title: m.section_work,
-    description: m.section_work_description,
-    icon: AiBrowserIcon,
-  },
-  {
-    id: "ai",
-    group: "intelligence",
-    title: m.section_ai,
-    description: m.section_ai_description,
-    icon: SparklesIcon,
-  },
-  {
-    id: "plugins",
-    group: "intelligence",
-    title: m.section_plugins,
-    description: m.section_plugins_description,
-    icon: PuzzleIcon,
-  },
-  {
-    id: "mcp",
-    group: "intelligence",
-    title: m.section_mcp,
-    description: m.section_mcp_description,
-    icon: Plug01Icon,
-  },
-  {
-    id: "skills",
-    group: "intelligence",
-    title: m.section_skills,
-    description: m.section_skills_description,
-    icon: MagicWand01Icon,
-  },
-  {
-    id: "memory",
-    group: "intelligence",
-    title: m.section_memory,
-    description: m.section_memory_description,
-    icon: Brain01Icon,
-  },
-  {
-    id: "sites",
-    group: "intelligence",
-    title: m.section_sites,
-    description: m.section_sites_description,
-    icon: Globe02Icon,
-  },
-  {
     id: "focus",
-    group: "intelligence",
+    group: "browser",
     title: m.section_focus,
     description: m.section_focus_description,
     icon: Clock01Icon,
   },
   {
     id: "performance",
-    group: "application",
+    group: "browser",
     title: m.section_performance,
     description: m.section_performance_description,
     icon: DashboardSpeed01Icon,
   },
   {
-    id: "account",
-    group: "application",
-    title: m.section_account,
-    description: m.section_account_description,
-    icon: UserCircleIcon,
+    id: "profiles",
+    group: "browser",
+    title: m.section_profiles,
+    description: m.section_profiles_description,
+    icon: UserMultiple02Icon,
+  },
+  {
+    id: "work",
+    group: "work",
+    title: m.section_work,
+    description: m.ai_switch_section_description,
+    icon: Briefcase02Icon,
+  },
+  {
+    id: "ai",
+    group: "work",
+    title: m.section_ai,
+    description: m.section_ai_description,
+    icon: ChipIcon,
+  },
+  {
+    id: "skills",
+    group: "work",
+    title: m.section_skills,
+    description: m.section_skills_description,
+    icon: Mortarboard02Icon,
+  },
+  {
+    id: "memory",
+    group: "work",
+    title: m.section_memory,
+    description: m.section_memory_description,
+    icon: Brain01Icon,
+  },
+  {
+    id: "sites",
+    group: "work",
+    title: m.section_sites,
+    description: m.section_sites_description,
+    icon: Globe02Icon,
+  },
+  {
+    id: "mcp",
+    group: "work",
+    title: m.section_mcp,
+    description: m.section_mcp_description,
+    icon: Plug01Icon,
+  },
+  {
+    id: "features",
+    group: "app",
+    title: m.section_features,
+    description: m.section_features_description,
+    icon: DashboardSquare02Icon,
+  },
+  {
+    id: "shortcuts",
+    group: "app",
+    title: m.section_shortcuts,
+    description: m.section_shortcuts_description,
+    icon: KeyboardIcon,
   },
   {
     id: "about",
-    group: "application",
+    group: "app",
     title: m.section_about,
     description: m.section_about_description,
     icon: InformationCircleIcon,
+  },
+  // Reached through the identity card above the groups, and through search.
+  {
+    id: "account",
+    group: "identity",
+    title: m.section_account,
+    description: m.section_account_description,
+    icon: UserCircleIcon,
   },
 ] as const;
 export type SettingsSection = (typeof allSections)[number]["id"];
@@ -169,27 +165,37 @@ export type SettingsSection = (typeof allSections)[number]["id"];
  *  only in development builds. A release offers only what works. */
 export const showPreviews = import.meta.env.DEV;
 /** Sections that hold nothing but placeholders today. */
-const previewSections = new Set<SettingsSection>(["profiles"]);
+const previewSections = new Set<SettingsSection>();
 export const sections = allSections.filter(
   (section) => showPreviews || !previewSections.has(section.id),
 );
+/** Pages that leave with their feature's switch. */
+const featureSections: Partial<Record<SettingsSection, () => boolean>> = {
+  work: () => preferences.enabled("work"),
+  focus: () => preferences.enabled("time"),
+  ai: preferences.aiEnabled,
+  skills: preferences.aiEnabled,
+  memory: preferences.aiEnabled,
+  sites: preferences.aiEnabled,
+  mcp: preferences.aiEnabled,
+};
+export const shownSections = () =>
+  sections.filter((section) => featureSections[section.id]?.() ?? true);
 export const groups = [
   { id: "browser", label: m.settings_browser },
-  { id: "personalize", label: m.settings_personalize },
-  { id: "intelligence", label: m.settings_intelligence },
-  { id: "application", label: m.settings_application },
+  { id: "work", label: m.section_work },
+  { id: "app", label: m.settings_application },
 ] as const;
-export const emptySections = new Set<SettingsSection>(["plugins"]);
 export function searchSettings(query: string) {
   const words = query.trim().toLocaleLowerCase().split(/\s+/u);
   const matches = (text: string) => words.every((word) => text.toLocaleLowerCase().includes(word));
-  const shown = new Set<string>(sections.map((section) => section.id));
+  const offered = shownSections();
+  const shown = new Set<string>(offered.map((section) => section.id));
   const preferences = Object.entries(fields)
     .filter(
       ([, field]) =>
         shown.has(field.section) &&
         (showPreviews || !("preview" in field)) &&
-        !emptySections.has(field.section as SettingsSection) &&
         matches(field.label() + " " + field.description()),
     )
     .map(([id, field]) => ({
@@ -199,7 +205,7 @@ export function searchSettings(query: string) {
       description: field.description,
       target: id as string | null,
     }));
-  const destinations = sections
+  const destinations = offered
     .filter(
       (section) =>
         matches(section.title()) && !preferences.some((field) => field.section === section.id),
@@ -215,7 +221,7 @@ export function searchSettings(query: string) {
 }
 export function searchSections(query: string) {
   const words = query.trim().toLocaleLowerCase().split(/\s+/u);
-  return sections.filter((section) =>
+  return shownSections().filter((section) =>
     words.every((word) =>
       [
         section.title(),

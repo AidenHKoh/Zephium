@@ -88,7 +88,7 @@
       data-tauri-drag-region="false"
     >
       {#if searchLabel && searchOpen}<div class="shared-tool-search">
-          <Icon icon={Search01Icon} size={15} /><input
+          <Icon icon={Search01Icon} size={14} /><input
             use:takeFocus
             type="search"
             aria-label={searchLabel}
@@ -103,7 +103,15 @@
               event.stopPropagation();
               onsearchdismiss();
             }}
-          />
+          />{#if state.query}<button
+              type="button"
+              class="shared-tool-clear"
+              aria-label={m.tool_search_clear()}
+              onclick={(event) => {
+                edit({ query: "" });
+                event.currentTarget.parentElement?.querySelector("input")?.focus();
+              }}><Icon icon={Cancel01Icon} size={10} strokeWidth={2.4} /></button
+            >{/if}
         </div>{/if}{#if filters}<SegmentedControl
           label={meta.title()}
           full

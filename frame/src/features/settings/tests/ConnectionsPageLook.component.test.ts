@@ -132,7 +132,7 @@ test("Settings → Connections: tools on this Mac and servers, in both themes", 
   await screen.getByRole("button", { name: "Sentry" }).click();
   await shoot("settings-add");
 
-  await screen.getByRole("radio", { name: "On this Mac" }).click();
+  await screen.getByRole("radio", { name: "On this computer" }).click();
   await screen.getByRole("button", { name: "Add variable" }).click();
   await screen.getByRole("button", { name: "Check connection" }).click();
   await shoot("settings-add-command");

@@ -4,6 +4,7 @@ import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
 import type { AccountReplyV1, AccountV1 } from "$shared/ipc/bindings";
 import { accountFixture as account, usageFixture } from "$shared/testing/account";
+import { preferences } from "$domain/preferences";
 import AccountPage from "../components/sections/AccountPage.svelte";
 
 const native = vi.hoisted(() => ({
@@ -19,6 +20,7 @@ const native = vi.hoisted(() => ({
   changeEmail: vi.fn(),
   history: vi.fn(),
   receipt: vi.fn(),
+  settings: {} as Record<string, string>,
 }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
@@ -35,6 +37,8 @@ vi.mock("$shared/ipc/bindings", async () => {
     accountChangeEmail: native.changeEmail,
     accountUsageHistory: native.history,
     accountReceipt: native.receipt,
+    profilesGet: async () => ({ status: "ok" as const, data: null }),
+    settingGet: async (key: string) => native.settings[key] ?? null,
   });
 });
 
@@ -77,7 +81,7 @@ test("signing in takes an address, then the emailed code, with no password", asy
     .mockResolvedValueOnce(reply(signedIn));
   const screen = await render(AccountPage);
 
-  await expect.element(screen.getByRole("heading", { name: "Zephium account" })).toBeVisible();
+  await expect.element(screen.getByRole("heading", { name: "Sign in to Zephium" })).toBeVisible();
   const continueButton = screen.getByRole("button", { name: "Continue" });
   await expect.element(continueButton).toBeDisabled();
   await screen.getByLabelText("Email address").fill("ada@example.com");
@@ -246,7 +250,7 @@ test("the name can be set and cleared", async () => {
   native.get.mockResolvedValue(reply(signedIn));
   native.setName.mockResolvedValue(reply({ ...signedIn, name: "Ada Lovelace" }));
   const screen = await render(AccountPage);
-  await screen.getByRole("button", { name: "Edit…" }).click();
+  await screen.getByRole("button", { name: "Edit name" }).click();
   await screen.getByLabelText("Name").fill("  Ada Lovelace ");
   await screen.getByRole("button", { name: "Save" }).click();
   expect(native.setName).toHaveBeenCalledWith("Ada Lovelace");
@@ -260,4 +264,20 @@ test("signing out returns to the sign-in screen", async () => {
   const screen = await render(AccountPage);
   await screen.getByRole("button", { name: "Sign out", exact: true }).first().click();
   await expect.element(screen.getByLabelText("Email address")).toBeVisible();
+});
+
+test("with Work and AI off the plan stays and Zephium AI's usage and credits go", async () => {
+  await page.viewport(1100, 1200);
+  native.settings = { "ai.enabled": "false" };
+  await preferences.init();
+  native.get.mockResolvedValue(reply(signedIn));
+  const screen = await render(AccountPage);
+  await expect.element(screen.getByText("Plan", { exact: true })).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Upgrade" })).toBeVisible();
+  expect(screen.getByText("Included usage").elements()).toHaveLength(0);
+  expect(screen.getByText("Extra usage").elements()).toHaveLength(0);
+  expect(screen.getByText("Zephium AI").elements()).toHaveLength(0);
+  screen.unmount();
+  preferences.dispose();
+  native.settings = {};
 });

@@ -1,25 +1,60 @@
 <script lang="ts">
-  import type { Snippet } from "svelte";
   import * as m from "$shared/i18n/messages";
-  import { Settings02Icon, ToolCaseIcon } from "@hugeicons/core-free-icons";
+  import { onMount } from "svelte";
+  import {
+    HelpCircleIcon,
+    IncognitoIcon,
+    Settings02Icon,
+    UserIcon,
+  } from "@hugeicons/core-free-icons";
   import { commands } from "$shared/ipc/bindings";
   import * as tools from "$session/tools.svelte";
+  import type { ToolKind } from "$session/tools.svelte";
+  import { preferences } from "$domain/preferences";
+  import { tabs } from "$domain/tabs";
+  import { drawn, profiles } from "$domain/profiles";
   import Disclosure from "$shared/ui/Disclosure";
   import Icon from "$shared/ui/Icon";
+  import ProfileAvatar from "$shared/ui/ProfileAvatar";
   import { RECORD_TOOLS, SHELF_TOOLS, toolPresentation } from "../lib/dock-tools";
   import NoticePip from "./NoticePip.svelte";
+  import { keymap } from "$domain/keymap";
+  import { acceleratorKeys } from "$shared/lib/accelerator";
+  import { IS_MAC, IS_WINDOWS } from "$shared/platform";
 
-  let { compact = false, extensions }: { compact?: boolean; extensions?: Snippet } = $props();
-
-  const groups = [SHELF_TOOLS, RECORD_TOOLS] as const;
-  // Settings closes the stack nearest the case, after the tools.
-  const count = SHELF_TOOLS.length + RECORD_TOOLS.length + 1;
-
-  function pick(kind: (typeof SHELF_TOOLS)[number] | (typeof RECORD_TOOLS)[number]) {
+  let { compact = false }: { compact?: boolean } = $props();
+  onMount(() => {
+    void profiles.retain();
+    return () => profiles.release();
+  });
+  const name = $derived(tabs.profile()?.name ?? profiles.current()?.name ?? "");
+  const others = $derived(profiles.inPrivate() ? [] : profiles.others());
+  const privately = $derived(profiles.inPrivate() || tabs.profile()?.kind === "incognito");
+  /** The avatar the person chose; until then the foot is the account glyph. */
+  const chosen = $derived.by(() => {
+    const current = profiles.inPrivate() ? null : profiles.current();
+    return current && current.avatar.revision > 0 ? drawn(current) : null;
+  });
+  // A tool whose feature is off is not offered here either.
+  const shelf = $derived(SHELF_TOOLS.filter((kind) => preferences.enabled(kind)));
+  const groups = $derived([shelf, RECORD_TOOLS].filter((group) => group.length > 0));
+  // Rows settle in nearest the case first, so each counts from the bottom:
+  // Settings, the tools, then who you are.
+  const toolRows = $derived(groups.reduce((sum, group) => sum + group.length, 0));
+  // Windows has no menu bar to hold Help, so it stands beneath Settings.
+  const below = IS_WINDOWS ? 1 : 0;
+  const headStep = $derived(toolRows + 1 + below);
+  function pick(kind: ToolKind) {
     if (tools.activeTool() === kind) tools.close();
     else tools.open(kind);
   }
-
+  // Each row says its key, so the menu teaches the way past itself.
+  function keysFor(command: string) {
+    const accelerator = keymap.all().find((entry) => entry.id === command)?.accelerator;
+    return accelerator ? acceleratorKeys(accelerator, IS_MAC).join(IS_MAC ? "" : "+") : null;
+  }
+  const named = (label: string, keys: string | null) => (keys ? `${label}  ${keys}` : label);
+  const run = (id: string) => void commands.runCommand(id).catch(() => {});
   // The full native menu stays one gesture away, where a Mac user reaches for
   // everything else a control can do.
   function nativeMenu(event: MouseEvent) {
@@ -29,65 +64,128 @@
   }
 </script>
 
+{#snippet row(
+  icon: typeof UserIcon,
+  label: string,
+  keys: string | null,
+  step: number,
+  onclick: () => void,
+  current = false,
+)}
+  <button
+    type="button"
+    role="menuitem"
+    class="ui-menu-item shelf-item"
+    style:--step={step}
+    title={compact ? named(label, keys) : undefined}
+    aria-label={compact ? label : undefined}
+    aria-current={current || undefined}
+    {onclick}
+  >
+    <span class="ui-menu-icon"><Icon {icon} size={16} /></span>
+    {#if !compact}<span>{label}</span>{#if keys}<span class="shelf-keys">{keys}</span>{/if}{/if}
+  </button>
+{/snippet}
+
+{#snippet me(size: number)}{#if chosen}<ProfileAvatar view={chosen} {size} />{:else}<span
+      class="avatar"
+      style:--size={`${size}px`}
+      aria-hidden="true"
+      ><Icon icon={UserIcon} size={Math.round(size * 0.58)} strokeWidth={1.8} /></span
+    >{/if}{/snippet}
+
 <!--
-  The head of the dock: the tools, stacked on demand. A click opens them as a
-  menu rising out of the case, nearest first, the way a stack opens from the
-  Dock; nothing opens on hover, because nothing on this platform does. At
-  rail width a name has nowhere to go, so the stack is glyphs, each named by
-  its tooltip.
+  The foot of the column is you: the profile this window browses as, opening
+  onto what belongs to it, stacked on demand. A click opens the stack rising
+  out of the avatar, nearest first, the way a stack opens from the Dock;
+  nothing opens on hover. Its head is a switcher: you, which opens your
+  profiles in Settings, and the others beside you, one click away, with a
+  private window last. At rail width the stack is glyphs, each named by its
+  tooltip.
 -->
 <div
   class="shelf"
   data-compact={compact}
-  data-morph="tools"
+  data-morph="profile"
   role="presentation"
   oncontextmenu={nativeMenu}
 >
   <Disclosure
-    label={m.dock_tools()}
+    label={name ? `${m.dock_tools()} — ${name}` : m.dock_tools()}
     menu
     triggerClass={["case", tools.activeTool() !== null && "case-lit"].filter(Boolean).join(" ")}
-    panelClass="shelf-stack"
+    panelClass="shelf-stack sidebar-softens"
   >
-    {#snippet trigger()}<Icon icon={ToolCaseIcon} size={18} />{#if compact}<NoticePip
-        />{/if}{/snippet}
-    {#if extensions}
-      <!-- The web's buttons sit farthest from the case, apart from ours. -->
-      <div class="shelf-extensions" style:--step={count}>{@render extensions()}</div>
-      <div class="shelf-rule shelf-extensions-rule" role="separator"></div>
-    {/if}
+    {#snippet trigger()}{#if chosen}<ProfileAvatar
+          view={chosen}
+          size={compact ? 36 : 40}
+        />{:else}<Icon
+          icon={UserIcon}
+          size={compact ? 16 : 17}
+          strokeWidth={1.7}
+        />{/if}{#if compact}<NoticePip />{/if}{/snippet}
+    <div class="shelf-head" role="presentation" style:--step={headStep}>
+      <button
+        type="button"
+        role="menuitem"
+        class="ui-menu-item shelf-me"
+        title={compact ? `${name} — ${m.browse_profile_settings()}` : m.browse_profile_settings()}
+        aria-label={`${name} — ${m.browse_profile_settings()}`}
+        onclick={() => run("settings.profiles")}
+      >
+        {@render me(compact ? 24 : 22)}
+        {#if !compact}<span class="shelf-me-name">{name}</span>{/if}
+      </button>
+      {#if others.length > 0 || !privately}<div class="shelf-chips" role="presentation">
+          {#each others as profile (profile.id)}
+            <button
+              type="button"
+              role="menuitem"
+              class="shelf-chip"
+              title={profile.name}
+              aria-label={m.profiles_menu_label({ name: profile.name })}
+              onclick={() => void profiles.switchTo(profile.id)}
+              ><ProfileAvatar view={drawn(profile)} size={20} /></button
+            >
+          {/each}
+          {#if !privately}<button
+              type="button"
+              role="menuitem"
+              class="shelf-chip shelf-private"
+              data-after-others={others.length > 0 || undefined}
+              title={named(m.browse_incognito_window(), keysFor("window.newPrivate"))}
+              aria-label={m.browse_incognito_window()}
+              onclick={() => run("window.newPrivate")}
+              ><Icon icon={IncognitoIcon} size={16} strokeWidth={1.7} /></button
+            >{/if}
+        </div>{/if}
+    </div>
     {#each groups as group, at (at)}
-      {#if at > 0}<div class="shelf-rule" role="separator"></div>{/if}
+      {@const before = groups.slice(0, at).reduce((sum, earlier) => sum + earlier.length, 0)}
+      <div class="shelf-rule" role="separator"></div>
       {#each group as kind, index (kind)}
         {@const view = toolPresentation(kind)}
-        {@const step = count - 1 - (at === 0 ? index : SHELF_TOOLS.length + index)}
-        <button
-          type="button"
-          role="menuitem"
-          class="ui-menu-item shelf-item"
-          style:--step={step}
-          title={compact ? view.label() : undefined}
-          aria-label={compact ? view.label() : undefined}
-          aria-current={tools.activeTool() === kind || undefined}
-          onclick={() => pick(kind)}
-        >
-          <span class="ui-menu-icon"><Icon icon={view.icon} size={16} /></span>
-          {#if !compact}<span>{view.label()}</span>{/if}
-        </button>
+        {@render row(
+          view.icon,
+          view.label(),
+          keysFor(`tool.${kind}`),
+          toolRows - before - index + below,
+          () => pick(kind),
+          tools.activeTool() === kind,
+        )}
       {/each}
     {/each}
-    <button
-      type="button"
-      role="menuitem"
-      class="ui-menu-item shelf-item"
-      style:--step={0}
-      title={compact ? m.command_browser_settings() : undefined}
-      aria-label={compact ? m.command_browser_settings() : undefined}
-      onclick={() => void commands.runCommand("browser.settings")}
-    >
-      <span class="ui-menu-icon"><Icon icon={Settings02Icon} size={16} /></span>
-      {#if !compact}<span>{m.command_browser_settings()}</span>{/if}
-    </button>
+    <div class="shelf-rule" role="separator"></div>
+    {@render row(
+      Settings02Icon,
+      m.command_browser_settings(),
+      keysFor("browser.settings"),
+      below,
+      () => run("browser.settings"),
+    )}
+    {#if IS_WINDOWS}{@render row(HelpCircleIcon, m.native_help(), null, 0, () =>
+        run("help.menu"),
+      )}{/if}
   </Disclosure>
 </div>
 
@@ -98,49 +196,76 @@
     flex: none;
   }
 
-  /* The one square at the head of the row, on the same ground as the kept
-     sites beside it: ours on one side of the rule, the web's on the other. */
+  /* You, at the head of the row: lit the way the current tab is, with light
+     caught only along its top edge, and round where every kept site is
+     square, so it reads as yours rather than as one more site. */
   .shelf :global(.case) {
     position: relative;
     display: grid;
     place-items: center;
-    width: var(--dock-tile);
-    height: var(--dock-tile);
+    width: 40px;
+    height: 40px;
+    margin-inline: 2px;
     border: 0;
-    border-radius: var(--radius-card);
-    background: var(--color-card);
-    color: var(--color-muted);
+    border-radius: var(--radius-capsule);
+    background: var(--row-active);
+    box-shadow: var(--shine-top);
+    color: var(--color-label-secondary);
     cursor: default;
     transition:
       background-color var(--motion-fast) var(--ease-out),
       color var(--motion-fast) var(--ease-out),
-      box-shadow var(--motion-fast) var(--ease-out),
       scale var(--motion-slow) var(--ease-spring);
   }
 
   .shelf :global(.case:hover),
-  .shelf :global(.case[data-state="open"]) {
-    background: var(--color-fill-hover);
+  .shelf :global(.case[data-state="open"]),
+  .shelf :global(.case.case-lit) {
+    background: var(--row-pressed);
     color: var(--color-text);
   }
 
   .shelf :global(.case:active) {
-    scale: 0.95;
+    scale: 0.94;
     transition-duration: var(--motion-instant);
   }
 
-  /* With a tool open the case is lit like any current thing in the column. */
-  .shelf :global(.case.case-lit) {
-    background: var(--color-fill-active);
-    box-shadow: var(--row-rim);
-    color: var(--color-text);
+  /* A chosen picture fills the lit circle; its light still catches the top. */
+  .shelf :global(.case .profile-avatar) {
+    pointer-events: none;
   }
 
-  /* The stack rises out of the case rather than dropping from it. */
+  .shelf :global(.case:has(.profile-avatar)::after) {
+    position: absolute;
+    border-radius: inherit;
+    box-shadow: var(--shine-top);
+    content: "";
+    inset: 0;
+    pointer-events: none;
+  }
+
+  /* The account glyph where no picture has been chosen, small. */
+  .avatar {
+    display: grid;
+    flex: none;
+    width: var(--size);
+    height: var(--size);
+    border-radius: var(--radius-capsule);
+    background: var(--row-active);
+    box-shadow: var(--shine-top);
+    color: var(--color-label-secondary);
+    place-items: center;
+  }
+
+  /* The stack rises out of the case rather than dropping from it, and never
+     past the window: a short one scrolls its rows instead. */
   .shelf :global(.shelf-stack) {
     top: auto;
     bottom: calc(100% + 8px);
-    min-width: 176px;
+    min-width: 232px;
+    max-height: calc(100vh - 120px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
     transform-origin: bottom left;
   }
 
@@ -148,7 +273,93 @@
     translate: 0 6px;
   }
 
+  /* Who you are, and who else you could be. */
+  .shelf-head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .shelf-me {
+    flex: 1;
+    min-width: 0;
+    min-height: 34px;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    text-align: start;
+  }
+
+  .shelf-me-name {
+    overflow: hidden;
+    color: var(--color-text);
+    font-size: var(--text-body);
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .shelf-chips {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 2px;
+    padding-inline-end: 2px;
+  }
+
+  .shelf-chip {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--color-muted);
+    cursor: default;
+    outline: none;
+    place-items: center;
+    transition:
+      background-color var(--motion-instant) var(--ease-smooth),
+      color var(--motion-instant) var(--ease-smooth),
+      scale var(--motion-base) var(--ease-spring);
+  }
+
+  .shelf-chip:hover,
+  .shelf-chip:focus-visible {
+    background: var(--row-active);
+    color: var(--color-text);
+  }
+
+  .shelf-chip:focus-visible {
+    box-shadow: inset 0 0 0 1.5px var(--color-text);
+  }
+
+  .shelf-chip:active {
+    scale: 0.92;
+    background: var(--row-pressed);
+  }
+
+  /* A private window is not another of your profiles: a hairline keeps it
+     apart from them. */
+  .shelf-private[data-after-others] {
+    position: relative;
+    margin-inline-start: 7px;
+  }
+
+  .shelf-private[data-after-others]::before {
+    position: absolute;
+    width: 1px;
+    height: 14px;
+    background: var(--color-border);
+    content: "";
+    inset-inline-start: -5px;
+  }
+
   .shelf :global(.shelf-item) {
+    min-height: 32px;
+    padding-block: 4px;
     width: 100%;
     border: 0;
     background: transparent;
@@ -157,13 +368,30 @@
     text-align: start;
   }
 
-  .shelf :global(.shelf-item:hover),
-  .shelf :global(.shelf-item:focus-visible) {
+  /* A caption, not a keycap: the key belongs to the row and steps forward
+     with it when the row is pointed at. */
+  .shelf-keys {
+    margin-inline-start: auto;
+    padding-inline-start: 24px;
+    color: var(--color-faint);
+    font-size: var(--text-label);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.02em;
+    transition: color var(--motion-instant) var(--ease-smooth);
+  }
+
+  .shelf :global(.shelf-item:hover .shelf-keys),
+  .shelf :global(.shelf-item:focus-visible .shelf-keys) {
+    color: var(--color-muted);
+  }
+
+  .shelf :global(:is(.shelf-item, .shelf-me):hover),
+  .shelf :global(:is(.shelf-item, .shelf-me):focus-visible) {
     outline: none;
     background: var(--row-active);
   }
 
-  .shelf :global(.shelf-item:active) {
+  .shelf :global(:is(.shelf-item, .shelf-me):active) {
     background: var(--row-pressed);
   }
 
@@ -173,9 +401,9 @@
 
   /* Each row settles in behind the one below it, so the stack reads as
      unfolding from the case instead of arriving as a block. */
-  .shelf :global(.shelf-stack[data-open="true"] .shelf-item) {
+  .shelf :global(.shelf-stack[data-open="true"] :is(.shelf-item, .shelf-head)) {
     animation: shelf-item-in var(--motion-slow) var(--ease-out) both;
-    animation-delay: calc(var(--step) * 16ms);
+    animation-delay: calc(var(--step) * 14ms);
   }
 
   /* stylelint-disable-next-line keyframes-name-pattern -- Svelte's global prefix. */
@@ -186,45 +414,63 @@
     }
   }
 
-  .shelf-extensions {
-    display: flex;
-    flex-direction: column;
-  }
-
-  /* Nothing to set apart when no extension has a button. */
-  .shelf-extensions:not(:has(:global(button))),
-  .shelf-extensions:not(:has(:global(button))) + .shelf-extensions-rule {
-    display: none;
-  }
-
   .shelf-rule {
     height: 1px;
-    margin: 5px var(--menu-item-inset);
-    background: var(--color-menu-separator);
+    margin: 4px var(--menu-item-inset);
+    background: var(--color-border);
   }
 
   /* At rail width: a square plate like every other rail item, and a stack
-     of glyphs just wide enough for them. */
+     of glyphs just wide enough for them, you and the others first. */
   .shelf[data-compact="true"] :global(.case) {
-    width: 40px;
-    height: var(--row-sidebar);
-    border-radius: var(--radius-row);
+    width: 36px;
+    height: 36px;
+    margin-inline: 0;
   }
 
-  /* Centred on the 40px case: four points either side of it. */
+  /* Centred on the 40px case: four points either side of it. The rail's marks
+     and header lie behind it, so it is near-solid rather than glass. */
   .shelf[data-compact="true"] :global(.shelf-stack) {
+    background: color-mix(in srgb, var(--color-float) 96%, transparent);
     inset-inline-start: -4px;
     min-width: 0;
     width: 48px;
   }
 
-  .shelf[data-compact="true"] :global(.shelf-item) {
+  .shelf[data-compact="true"] .shelf-head,
+  .shelf[data-compact="true"] .shelf-chips {
+    flex-direction: column;
+    gap: 2px;
+    padding: 0;
+  }
+
+  .shelf[data-compact="true"] .shelf-me {
+    flex: none;
     justify-content: center;
+    width: 100%;
     padding-inline: 0;
   }
 
-  .shelf[data-compact="true"] .shelf-rule {
-    margin-inline: 8px;
+  .shelf[data-compact="true"] .shelf-chip {
+    width: 36px;
+    height: 32px;
+    border-radius: calc(var(--radius-menu) - var(--menu-pad));
+  }
+
+  .shelf[data-compact="true"] .shelf-private[data-after-others] {
+    margin: 7px 0 0;
+  }
+
+  .shelf[data-compact="true"] .shelf-private[data-after-others]::before {
+    width: 14px;
+    height: 1px;
+    inset-block-start: -4px;
+    inset-inline-start: 11px;
+  }
+
+  .shelf[data-compact="true"] :global(.shelf-item) {
+    justify-content: center;
+    padding-inline: 0;
   }
 
   @media (forced-colors: active) {

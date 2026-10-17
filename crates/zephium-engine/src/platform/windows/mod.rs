@@ -135,11 +135,12 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 };
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, BasicAuthenticationRequestedEventHandler,
-    BrowserProcessExitedEventHandler, ClearBrowsingDataCompletedHandler,
-    ClientCertificateRequestedEventHandler, HistoryChangedEventHandler,
-    LaunchingExternalUriSchemeEventHandler, NavigationStartingEventHandler,
-    NewBrowserVersionAvailableEventHandler, ProcessFailedEventHandler,
-    ServerCertificateErrorDetectedEventHandler, SourceChangedEventHandler,
+    BrowserProcessExitedEventHandler, CallDevToolsProtocolMethodCompletedHandler,
+    ClearBrowsingDataCompletedHandler, ClientCertificateRequestedEventHandler,
+    HistoryChangedEventHandler, LaunchingExternalUriSchemeEventHandler,
+    NavigationStartingEventHandler, NewBrowserVersionAvailableEventHandler,
+    ProcessFailedEventHandler, ServerCertificateErrorDetectedEventHandler,
+    SourceChangedEventHandler,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_SHIFT,
@@ -148,7 +149,7 @@ use windows::Win32::{
     Foundation::{HANDLE, WAIT_EVENT, WAIT_OBJECT_0, WAIT_TIMEOUT},
     System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
 };
-use windows_core::{IUnknown, Interface, PWSTR};
+use windows_core::{IUnknown, Interface, HSTRING, PWSTR};
 use wry::WebViewExtWindows;
 use zephium_core::ports::engine::{EngineEvent, Shortcut};
 
@@ -752,6 +753,68 @@ impl Drop for NavigationObserver {
         let _ = unsafe { self.core.remove_SourceChanged(self.source_token) };
         let _ = unsafe { self.core.remove_HistoryChanged(self.history_token) };
     }
+}
+
+pub fn history_state(view: &wry::WebView) -> Option<(bool, bool)> {
+    let state = (view.can_go_back().ok()?, view.can_go_forward().ok()?);
+    if state.0 && !state.1 {
+        prune_blank_bootstrap(&view.webview());
+    }
+    Some(state)
+}
+
+thread_local! {
+    static BOOTSTRAP_CHECKED: RefCell<std::collections::HashSet<usize>> = RefCell::default();
+}
+
+/// A warm spare is adopted from an about:blank load that stays in WebView2's
+/// list, so its own answer offers a "back" to nothing. Once a real page stands
+/// in front of it the entry is dropped; HistoryChanged then restates the
+/// state. Each view is asked once.
+fn prune_blank_bootstrap(core: &ICoreWebView2) {
+    let key = core.as_raw() as usize;
+    if !BOOTSTRAP_CHECKED.with(|checked| checked.borrow_mut().insert(key)) {
+        return;
+    }
+    let reset = core.clone();
+    let completion =
+        CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, response| {
+            if result.is_ok() && blank_bootstrap_only(&response) {
+                let reset_done =
+                    CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
+                // SAFETY: exact STA-owned core and immutable argument buffers.
+                let _ = unsafe {
+                    reset.CallDevToolsProtocolMethod(
+                        &HSTRING::from("Page.resetNavigationHistory"),
+                        &HSTRING::from("{}"),
+                        &reset_done,
+                    )
+                };
+            }
+            Ok(())
+        }));
+    // SAFETY: exact STA-owned core and immutable argument buffers.
+    let _ = unsafe {
+        core.CallDevToolsProtocolMethod(
+            &HSTRING::from("Page.getNavigationHistory"),
+            &HSTRING::from("{}"),
+            &completion,
+        )
+    };
+}
+
+/// Whether the history is exactly the bootstrap blank page and the page in
+/// front of it.
+fn blank_bootstrap_only(response: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(response) else {
+        return false;
+    };
+    let entries = value.get("entries").and_then(|entries| entries.as_array());
+    value.get("currentIndex").and_then(|index| index.as_u64()) == Some(1)
+        && entries.is_some_and(|entries| {
+            entries.len() == 2
+                && entries[0].get("url").and_then(|url| url.as_str()) == Some("about:blank")
+        })
 }
 
 pub fn current_url(view: &wry::WebView) -> Option<String> {
@@ -2166,5 +2229,34 @@ mod process_exit_tests {
         proof.record(event);
         proof.record(event);
         assert_eq!(runs.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_history_tests {
+    use super::blank_bootstrap_only;
+
+    #[test]
+    fn only_the_blank_bootstrap_behind_one_page_is_pruned() {
+        let history = |current: u32, urls: &[&str]| {
+            let entries: Vec<_> = urls
+                .iter()
+                .map(|url| serde_json::json!({ "url": url }))
+                .collect();
+            serde_json::json!({ "currentIndex": current, "entries": entries }).to_string()
+        };
+        assert!(blank_bootstrap_only(&history(
+            1,
+            &["about:blank", "https://a.test/"]
+        )));
+        assert!(!blank_bootstrap_only(&history(
+            2,
+            &["about:blank", "https://a.test/", "https://b.test/"]
+        )));
+        assert!(!blank_bootstrap_only(&history(
+            1,
+            &["https://a.test/", "https://b.test/"]
+        )));
+        assert!(!blank_bootstrap_only("not json"));
     }
 }

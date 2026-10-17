@@ -8,6 +8,7 @@ import type { SearchResult } from "$shared/ipc/bindings";
 import { preferences } from "$domain/preferences";
 import { taskSession } from "$domain/resources";
 import NewTabLook from "./NewTabLook.svelte";
+import { themed } from "./look-bench";
 
 const native = vi.hoisted(() => ({
   call: vi.fn(),
@@ -188,4 +189,21 @@ test("a narrow pane keeps the notch inside the page", async () => {
     .element(screen.getByRole("button", { name: /Due today 0 Nothing overdue/u }))
     .toBeVisible();
   await capture(screen, "narrow");
+});
+
+test("the new tab in each theme, both modes", async () => {
+  const screen = await setup({ "ui.newtab-clock-format": "12h" });
+  await expect.element(screen.getByText("2:32 PM")).toBeVisible();
+  for (const id of ["zephium", "paper", "nord", "dracula", "catppuccin"]) {
+    themed(id);
+    for (const theme of ["dark", "light"]) {
+      document.documentElement.dataset.theme = theme;
+      screen.container.style.background = "var(--color-canvas)";
+      await settled();
+      await page
+        .elementLocator(screen.container)
+        .screenshot({ path: `../../../../../target/look/themes/${id}-${theme}-newtab-page.png` });
+    }
+  }
+  themed("zephium");
 });

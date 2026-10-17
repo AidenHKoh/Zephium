@@ -14,6 +14,7 @@ mod diagnostics;
 mod erasure;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod fullscreen;
+mod haptics;
 mod host;
 mod layout_queue;
 #[cfg(any(target_os = "windows", test))]
@@ -23,6 +24,8 @@ mod pane_geometry;
 mod platform;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod work_website_data;
+
+pub use haptics::{haptic, Haptic};
 
 #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
 pub use platform::windows::{install_work_rendering_backing, remove_work_rendering_backing};
@@ -2569,12 +2572,16 @@ impl Engine for WebviewEngine {
         NativeDispatch::Scheduled
     }
 
-    fn set_drop_indicator(&self, window: WindowId, zone: Option<Rect>) -> NativeDispatch {
+    fn set_drop_indicator(
+        &self,
+        window: WindowId,
+        preview: Option<zephium_core::ports::engine::DropPreview>,
+    ) -> NativeDispatch {
         let queued_retirement = self.retirement.clone();
         let queued_delivery = self.event_delivery.clone();
         let queued_fatal = self.fatal_security_failure.clone();
         NativeDispatch::from_scheduled(self.run(move || {
-            if !host::try_with(move |h| h.set_drop_indicator(window, zone)) {
+            if !host::try_with(move |h| h.set_drop_indicator(window, preview)) {
                 fail_native_host_admission(
                     &queued_delivery,
                     &queued_retirement,

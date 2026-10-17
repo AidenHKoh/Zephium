@@ -181,7 +181,7 @@
   onkeydown={keydown}
 >
   <div class="page-nav">
-    <TasksNavigation {session} onclose={() => void browser.open(null)} />
+    <TasksNavigation {session} onclose={() => void browser.close()} />
   </div>
   <div
     bind:this={stage}

@@ -270,6 +270,7 @@ fn decode_v2(stored: StoredSession) -> Option<SessionState> {
                 id,
                 profile,
                 name: s.name,
+                look: Default::default(),
             })
         })
         .collect::<Option<Vec<_>>>()?;
@@ -323,6 +324,7 @@ fn decode_item(item: StoredItem) -> Option<PersistedItem> {
             url,
             title: item.title.unwrap_or_default(),
             zoom: 1.0,
+            last_active_ms: None,
         },
         _ => return None,
     };
@@ -364,6 +366,7 @@ fn decode_v1(v1: V1Session) -> Option<SessionState> {
                 url: t.url,
                 title: t.title,
                 zoom: 1.0,
+                last_active_ms: None,
             },
         })
         .collect();
@@ -378,6 +381,7 @@ fn decode_v1(v1: V1Session) -> Option<SessionState> {
             id: space,
             profile,
             name: "Space".into(),
+            look: Default::default(),
         }],
         items,
         active_space: Some(space),

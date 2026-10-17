@@ -57,6 +57,9 @@ pub(super) struct FaviconState {
     pub(super) delivered: std::cell::RefCell<std::collections::HashMap<IconKey, String>>,
     /// References made since the last publish whose pixels the surface lacks.
     pub(super) undelivered: std::cell::RefCell<Vec<IconKey>>,
+    /// Profile each surface last heard an icon event for; its address lookups
+    /// follow that profile.
+    pub(super) announced: std::cell::RefCell<std::collections::HashMap<IconSurface, ProfileId>>,
     pub(super) icon_attempts: std::collections::HashMap<ItemId, IconAttempt>,
     pub(super) icon_load_completion_pending: std::collections::HashMap<ItemId, (ProfileId, String)>,
     pub(super) store_reads: std::collections::HashMap<ItemId, PendingFaviconStoreRead>,
@@ -112,6 +115,29 @@ impl Shell {
             };
             if seen.insert(origin.clone()) {
                 origins.push(origin);
+            }
+        }
+        // The switcher stacks the first tabs' icons of the other spaces too.
+        for other in self
+            .spaces
+            .of(profile)
+            .into_iter()
+            .filter(|other| *other != space)
+        {
+            for id in self.space_first_tabs(other) {
+                if origins.len() == MAX_FAVICON_BATCH_ORIGINS {
+                    break;
+                }
+                let origin = self
+                    .items
+                    .tab(id)
+                    .and_then(|tab| tab.url.as_ref())
+                    .and_then(origin_of);
+                if let Some(origin) = origin {
+                    if seen.insert(origin.clone()) {
+                        origins.push(origin);
+                    }
+                }
             }
         }
         origins
@@ -615,12 +641,36 @@ impl Shell {
         }
         drop(delivered);
         for ((surface, profile), entries) in grouped {
+            self.favicons
+                .announced
+                .borrow_mut()
+                .insert(surface, profile);
             (self.emit)(Projection::Favicons(zephium_ipc::FaviconsView {
                 surface,
                 profile_id: profile.to_string(),
                 entries,
             }));
         }
+        self.announce_icon_owner();
+    }
+
+    /// The chrome surface follows the focused window's profile even when no
+    /// raster is due, so a returning profile reads its own icons.
+    pub(super) fn announce_icon_owner(&self) {
+        let Some(profile) = self.windows.focused().map(|window| window.profile) else {
+            return;
+        };
+        let mut announced = self.favicons.announced.borrow_mut();
+        if announced.get(&IconSurface::Chrome) == Some(&profile) {
+            return;
+        }
+        announced.insert(IconSurface::Chrome, profile);
+        drop(announced);
+        (self.emit)(Projection::Favicons(zephium_ipc::FaviconsView {
+            surface: IconSurface::Chrome,
+            profile_id: profile.to_string(),
+            entries: Vec::new(),
+        }));
     }
 
     /// Names the cached icon for an origin and queues its pixels when the
@@ -655,6 +705,7 @@ impl Shell {
             .delivered
             .borrow_mut()
             .retain(|(owner, _, _), _| *owner != surface);
+        self.favicons.announced.borrow_mut().remove(&surface);
     }
 
     pub(super) fn incognito_profile(&self, profile: ProfileId) -> bool {

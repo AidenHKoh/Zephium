@@ -308,11 +308,80 @@ pub enum ProfileKindView {
     Incognito,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileAvatarStyleView {
+    Initials,
+    Symbol,
+    Photo,
+}
+
+/// How a profile is drawn. Colour and symbol index the frame's curated sets;
+/// a photo is served by native under its revision, never sent as bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ProfileAvatarView {
+    pub style: ProfileAvatarStyleView,
+    pub color: u8,
+    pub symbol: u8,
+    pub revision: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ProfileEntryView {
+    pub id: String,
+    pub name: String,
+    pub kind: ProfileKindView,
+    pub avatar: ProfileAvatarView,
+}
+
+/// Every persistent profile, in order, and the one the window browses as.
+/// `private` is set while the window shows its private scope instead.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ProfilesView {
+    pub current: Option<String>,
+    pub private: bool,
+    pub profiles: Vec<ProfileEntryView>,
+}
+
 /// One ordered space owned by the focused profile.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct SpaceView {
     pub id: String,
     pub name: String,
+    pub icon: Option<SpaceIconView>,
+    /// An avatar hue, shared with profiles.
+    pub color: u8,
+    /// Overrides the app theme for the whole window while the space is active.
+    pub theme: Option<SpaceThemeView>,
+    /// Pinned and open tabs, which deleting the space closes.
+    pub tabs: u32,
+    /// The icons of its first tabs in sidebar order, at most three, for the
+    /// switcher to stack beside the name. A tab with no icon yet is null.
+    pub previews: Vec<Option<IconRef>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SpaceIconView {
+    /// An index into the frame's curated symbols.
+    Symbol {
+        index: u8,
+    },
+    Emoji {
+        text: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SpaceThemeView {
+    Preset {
+        id: String,
+    },
+    /// Seeds in the shape of `ui.theme-custom`.
+    Custom {
+        seeds: String,
+    },
 }
 
 /// Stable display section for a sidebar node. Children inherit their
@@ -455,6 +524,10 @@ pub struct PanelState {
     pub space_id: Option<String>,
     pub error: bool,
     pub corner_radius: u16,
+    /// The address the launcher opens on when it edits the current page's.
+    pub seed: Option<String>,
+    /// The tab whose address is being edited; it is no destination of its own.
+    pub seed_tab: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
@@ -885,6 +958,8 @@ pub enum OperationReason {
     ProfileDeletionPolicyRejected,
     ProfileDeletionInProgress,
     ProfileDeletionCompleted,
+    /// Work and AI features are switched off.
+    FeatureDisabled,
 }
 
 /// The shell has processed an admitted operation in actor order. Consumers
@@ -1302,6 +1377,7 @@ pub enum Projection {
     BlockerStatus(BlockerStatusView),
     Focus(FocusStatus),
     OperationProcessed(OperationDisposition),
+    Profiles(ProfilesView),
 }
 
 /// Shared Rust-owned Notes/Tasks wire model.

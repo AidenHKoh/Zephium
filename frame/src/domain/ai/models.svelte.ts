@@ -2,6 +2,7 @@ import { commands } from "$shared/ipc/bindings";
 import type {
   WorkModelEntry,
   WorkModelProvider,
+  WorkModelReasoning,
   WorkModelRole,
   WorkModelsFaultV1,
   WorkModelsV1,
@@ -29,7 +30,8 @@ export class ModelsSession {
   endpoint = $state.raw<WorkModelEntry[]>([]);
   more = $state.raw<WorkModelEntry[]>([]);
   listingMore = $state(false);
-  private listing = false;
+  /** The server address last asked for its models; each is asked once. */
+  private listed: string | null = null;
   private readSequence = 0;
   private readPending = false;
   private active = false;
@@ -120,6 +122,11 @@ export class ModelsSession {
     return this.act(`choose:${role}`, () => commands.workChooseModel(this.profile, role, id));
   }
 
+  /** The lead's effort for this profile; null returns it to each model's default. */
+  setEffort(effort: WorkModelReasoning | null) {
+    return this.act("effort", () => commands.workSetModelEffort(this.profile, effort));
+  }
+
   /** The key goes straight to Rust, which checks it with the provider first. */
   setKey(provider: WorkModelProvider, key: string) {
     return this.act(
@@ -147,18 +154,21 @@ export class ModelsSession {
     return this.act("endpoint", () => commands.workSetModelEndpoint(this.profile, base));
   }
 
-  /** The person's own server's models, asked once per session. */
+  /** The person's own server's models, asked once per address it is set to.
+   *  An empty answer or a fault settles it; a new address asks again. */
   async listEndpoint() {
-    if (this.listing || this.endpoint.length) return;
-    this.listing = true;
+    const base =
+      this.models?.providers.find((provider) => provider.provider === "compatible")?.base ?? null;
+    if (base === null || base === this.listed) return;
+    this.listed = base;
+    this.endpoint = [];
     const generation = this.generation;
     const response = await observe(
       Promise.resolve().then(() => commands.workMoreModels(this.profile, "compatible")),
       KEY_TIMEOUT,
       this.lifetime.signal,
     );
-    if (generation !== this.generation) return;
-    this.listing = false;
+    if (generation !== this.generation || base !== this.listed) return;
     if (response.state === "received" && !response.value.fault)
       this.endpoint = response.value.entries;
   }
@@ -202,7 +212,7 @@ export class ModelsSession {
     this.endpoint = [];
     this.more = [];
     this.listingMore = false;
-    this.listing = false;
+    this.listed = null;
     this.readPending = false;
     this.readSequence++;
   }

@@ -285,6 +285,7 @@ where
         let mut failed_calls = 0u8;
         // A turn that ran out of output is asked again once, briefly.
         let mut ran_long = false;
+        let effort = crate::work_models::lead_effort(self.run.profile, &self.models.lead.entry);
         loop {
             if self.run.cancelled().await {
                 return Ok(WorkAttemptStatus::Cancelled);
@@ -312,10 +313,12 @@ where
                 } else {
                     model.entry.max_output.clamp(4_096, LEAD_TURN_OUTPUT)
                 },
-                reasoning: model.entry.supports.reasoning.then_some(if ran_long {
-                    WorkModelReasoning::Low
-                } else {
-                    WorkModelReasoning::Medium
+                reasoning: effort.map(|effort| {
+                    if ran_long {
+                        WorkModelReasoning::Low
+                    } else {
+                        effort
+                    }
                 }),
                 native_search: false,
                 parallel_tools: true,

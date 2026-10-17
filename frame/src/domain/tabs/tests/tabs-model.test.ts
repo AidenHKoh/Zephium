@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ItemsState, TabView } from "$shared/ipc/bindings";
 import { initialItemsState, TabProjectionModel, ZERO_PROJECTION_REVISION } from "../tabs-model";
+import { spaceFixture } from "$shared/testing/fixtures";
 
 function revision(value: number): string {
   return value.toString(16).padStart(32, "0");
@@ -28,7 +29,7 @@ function snapshot(value: number, tabs: TabView[], active: string | null): ItemsS
       name: "Personal",
       kind: "default",
     },
-    spaces: [{ id: "space-a", name: "Main" }],
+    spaces: [spaceFixture("space-a", "Main")],
     active_space_id: "space-a",
     nodes: [],
     tabs,
@@ -111,10 +112,7 @@ describe("tab projection admission", () => {
     const replacement: ItemsState = {
       ...snapshot(6, [tab("b", 5)], "b"),
       profile: { id: "profile-b", name: "Work", kind: "named" },
-      spaces: [
-        { id: "space-b", name: "Build" },
-        { id: "space-c", name: "Research" },
-      ],
+      spaces: [spaceFixture("space-b", "Build"), spaceFixture("space-c", "Research")],
       active_space_id: "space-b",
       nodes: [
         {
@@ -179,6 +177,19 @@ describe("tab projection admission", () => {
       }),
     ).toBe(false);
     expect(model.value.split_group).toBe(replacement);
+  });
+
+  it("lets a late presentation update its tab without taking back the active tab", () => {
+    const model = new TabProjectionModel(snapshot(3, [tab("page", 1)], "page"));
+    // Native presents the restored page, then opens a new tab; the new tab's
+    // snapshot reaches the frame before the page's presentation does.
+    expect(
+      model.applySnapshot(snapshot(9, [tab("page", 1), tab("fresh", 8, { url: null })], "fresh")),
+    ).toBe(true);
+    const presented = tab("page", 6, { title: "Presented" });
+    expect(model.applyPresentation({ tab: presented, active: "page" })).toBe(true);
+    expect(model.value.active).toBe("fresh");
+    expect(model.value.tabs.find((candidate) => candidate.id === "page")).toBe(presented);
   });
 
   it("rejects a presentation older than a previously applied delta", () => {

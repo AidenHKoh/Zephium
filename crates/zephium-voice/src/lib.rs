@@ -3,9 +3,13 @@
 //! cloud transcription. Audio is never written to disk or logged, and the
 //! device is released the moment a take finishes or is cancelled.
 
+#[cfg(any(target_os = "macos", test))]
+mod failure;
 mod language;
 mod meter;
 mod pcm;
+#[cfg(any(target_os = "macos", test))]
+mod stitch;
 
 #[cfg(target_os = "macos")]
 mod apple;
@@ -31,6 +35,9 @@ pub enum Fault {
     NoMicrophone,
     /// The on-device recognizer cannot serve this language here.
     LanguageUnavailable,
+    /// Siri and Dictation are off in System Settings, so the on-device
+    /// recognizer refuses every take.
+    DictationOff,
     /// The on-device recognizer failed.
     Recognizer,
     /// Not on this platform or in this build.
@@ -47,6 +54,9 @@ pub trait Listener: Send + Sync + 'static {
     fn partial(&self, _text: &str) {}
     /// Capture ended on its own; the owner should finish the take.
     fn ended(&self, ending: Ending);
+    /// A closed fact about the take, for the diagnostic log: no audio, no
+    /// words, no system text.
+    fn note(&self, _fact: &str) {}
 }
 
 /// Who turns the speech into words.
@@ -112,8 +122,40 @@ pub fn on_device_locale(language: Option<&str>) -> Option<String> {
 pub fn preferred_languages() -> Vec<String> {
     #[cfg(target_os = "macos")]
     return apple::preferred_languages();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    return windows_preferred_languages();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     Vec::new()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_preferred_languages() -> Vec<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Globalization::{GetUserPreferredUILanguages, MUI_LANGUAGE_NAME};
+    let (mut count, mut length) = (0u32, 0u32);
+    // SAFETY: a size query with no buffer, then a fill of exactly that size.
+    unsafe {
+        if GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, None, &mut length).is_err() {
+            return Vec::new();
+        }
+        let mut buffer = vec![0u16; length as usize];
+        if GetUserPreferredUILanguages(
+            MUI_LANGUAGE_NAME,
+            &mut count,
+            Some(PWSTR(buffer.as_mut_ptr())),
+            &mut length,
+        )
+        .is_err()
+        {
+            return Vec::new();
+        }
+        buffer
+            .split(|unit| *unit == 0)
+            .filter(|tag| !tag.is_empty())
+            .take(8)
+            .map(String::from_utf16_lossy)
+            .collect()
+    }
 }
 
 /// One live take. Dropping it cancels.

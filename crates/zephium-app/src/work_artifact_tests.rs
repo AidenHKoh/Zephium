@@ -305,6 +305,7 @@ fn durable_result_process() {
                 id: 2_u128.into(),
                 profile: 1_u128.into(),
                 name: "Fixture".into(),
+                look: Default::default(),
             }],
             items: vec![],
             active_space: Some(2_u128.into()),

@@ -13,7 +13,7 @@ use crate::item::{
 use crate::items::Items;
 use crate::navigation;
 use crate::profiles::{Profile, ProfileKind, Profiles};
-use crate::spaces::{Space, Spaces};
+use crate::spaces::{Space, SpaceLook, Spaces};
 use crate::split::Pane;
 
 pub const MAX_SESSION_PROFILES: usize = 64;
@@ -23,6 +23,8 @@ pub const MAX_RECENTLY_CLOSED_TABS: usize = 32;
 pub const MAX_SESSION_NAME_CHARS: usize = 256;
 pub const MAX_ITEM_TREE_DEPTH: usize = 64;
 pub const MAX_SPLIT_DEPTH: usize = 64;
+/// Persisted wall-clock times stay within JavaScript's exact integer range.
+pub const MAX_EXACT_MS: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionState {
@@ -49,6 +51,9 @@ pub struct PersistedSpace {
     pub id: SpaceId,
     pub profile: ProfileId,
     pub name: String,
+    /// Absent on snapshots from before spaces had looks.
+    #[serde(default, skip_serializing_if = "SpaceLook::is_default")]
+    pub look: SpaceLook,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -68,6 +73,9 @@ pub enum PersistedKind {
         url: String,
         title: String,
         zoom: f64,
+        /// Absent on legacy snapshots and for tabs never in front.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_active_ms: Option<u64>,
     },
     /// Browser-owned pages have no navigable URL or native content view.
     BrowserTab {
@@ -146,6 +154,7 @@ pub fn snapshot_with_recently_closed(
             id: space.id,
             profile: space.profile,
             name: space.name.clone(),
+            look: space.look.clone(),
         });
         for section in [
             crate::item::SpaceSection::Pinned,
@@ -206,6 +215,7 @@ fn collect(items: &Items, placement: Placement, out: &mut Vec<PersistedItem>) {
                         url: url.to_string(),
                         title: tab.title.clone(),
                         zoom: tab.zoom,
+                        last_active_ms: tab.last_active_ms,
                     },
                 },
             },
@@ -271,6 +281,7 @@ pub fn restore(state: SessionState) -> Restored {
                 id: s.id,
                 profile: s.profile,
                 name: bounded_name(&s.name, "Space"),
+                look: s.look.sanitized(),
             });
         }
     }
@@ -289,7 +300,12 @@ pub fn restore(state: SessionState) -> Restored {
             PersistedKind::Folder { name } => ItemKind::Folder {
                 name: bounded_name(&name, "Folder"),
             },
-            PersistedKind::Tab { url, title, zoom } => {
+            PersistedKind::Tab {
+                url,
+                title,
+                zoom,
+                last_active_ms,
+            } => {
                 let Ok(url) = Url::parse(&url) else {
                     continue;
                 };
@@ -304,6 +320,8 @@ pub fn restore(state: SessionState) -> Restored {
                 } else {
                     1.0
                 };
+                tab.last_active_ms =
+                    last_active_ms.filter(|ms| (1_000..=MAX_EXACT_MS).contains(ms));
                 ItemKind::Tab(tab)
             }
             PersistedKind::BrowserTab { page } => {
@@ -487,6 +505,7 @@ mod tests {
             id: space,
             profile,
             name: "Space".into(),
+            look: Default::default(),
         });
         (profiles, spaces, Items::default(), profile, space)
     }
@@ -726,6 +745,58 @@ mod tests {
     }
 
     #[test]
+    fn a_tabs_last_active_time_survives_restore_and_legacy_rows_have_none() {
+        let profile = ProfileId::from(1);
+        let space = SpaceId::from(2);
+        let tab = |id: u128, last_active_ms: Option<u64>| PersistedItem {
+            id: ItemId::from(id),
+            parent: None,
+            placement: today(space),
+            kind: PersistedKind::Tab {
+                url: format!("https://example.com/{id}"),
+                title: "E".into(),
+                zoom: 1.0,
+                last_active_ms,
+            },
+        };
+        let state = SessionState {
+            profiles: vec![PersistedProfile {
+                id: profile,
+                name: "P".into(),
+                kind: ProfileKind::Default,
+            }],
+            spaces: vec![PersistedSpace {
+                id: space,
+                profile,
+                name: "S".into(),
+                look: Default::default(),
+            }],
+            items: vec![tab(10, Some(1_700_000_000_000)), tab(11, None)],
+            ..SessionState::default()
+        };
+        let restored = restore(state.clone());
+        assert_eq!(
+            restored.items.tab(ItemId::from(10)).unwrap().last_active_ms,
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(canonicalize(state.clone()), state);
+        let json = serde_json::to_string(&state.items[1]).unwrap();
+        assert!(!json.contains("last_active_ms"));
+        let legacy: PersistedItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(legacy, state.items[1]);
+
+        let mut hostile = state;
+        hostile.items = vec![tab(12, Some(MAX_EXACT_MS + 1)), tab(13, Some(0))];
+        let restored = restore(hostile);
+        for id in [12, 13] {
+            assert_eq!(
+                restored.items.tab(ItemId::from(id)).unwrap().last_active_ms,
+                None
+            );
+        }
+    }
+
+    #[test]
     fn restore_drops_dangling_references() {
         let state = SessionState {
             profiles: vec![],
@@ -733,6 +804,7 @@ mod tests {
                 id: SpaceId::from(2),
                 profile: ProfileId::from(1),
                 name: "Orphan".into(),
+                look: Default::default(),
             }],
             items: vec![PersistedItem {
                 id: ItemId::from(10),
@@ -742,6 +814,7 @@ mod tests {
                     url: "https://example.com/".into(),
                     title: "E".into(),
                     zoom: 1.0,
+                    last_active_ms: None,
                 },
             }],
             active_space: Some(SpaceId::from(2)),
@@ -783,11 +856,13 @@ mod tests {
                     id: space,
                     profile,
                     name: "\u{2066}Work\n".into(),
+                    look: Default::default(),
                 },
                 PersistedSpace {
                     id: private_space,
                     profile: private,
                     name: "Secret".into(),
+                    look: Default::default(),
                 },
             ],
             items: vec![
@@ -799,6 +874,7 @@ mod tests {
                         url: "https://example.com/".into(),
                         title: format!("\u{202e}Example\0{}", "y".repeat(600)),
                         zoom: f64::INFINITY,
+                        last_active_ms: None,
                     },
                 },
                 PersistedItem {
@@ -809,6 +885,7 @@ mod tests {
                         url: "file:///etc/passwd".into(),
                         title: "Local file".into(),
                         zoom: 1.0,
+                        last_active_ms: None,
                     },
                 },
                 PersistedItem {
@@ -819,6 +896,7 @@ mod tests {
                         url: "https://private.example/".into(),
                         title: "Private".into(),
                         zoom: 1.0,
+                        last_active_ms: None,
                     },
                 },
             ],
@@ -868,6 +946,7 @@ mod tests {
             id: sibling_space,
             profile,
             name: "Sibling".into(),
+            look: Default::default(),
         });
         let foreign_profile = ProfileId::from(4);
         let foreign_space = SpaceId::from(5);
@@ -880,6 +959,7 @@ mod tests {
             id: foreign_space,
             profile: foreign_profile,
             name: "Foreign".into(),
+            look: Default::default(),
         });
 
         let local = ItemId::from(10);
@@ -979,5 +1059,45 @@ mod tests {
         });
 
         assert_eq!(restore(state).splits, None);
+    }
+
+    #[test]
+    fn spaces_keep_order_and_look_and_a_damaged_look_is_sanitized() {
+        use crate::spaces::{SpaceIcon, SpaceTheme};
+        let (profiles, mut spaces, items, profile, space) = seed();
+        let look = SpaceLook {
+            icon: Some(SpaceIcon::Symbol(4)),
+            color: 6,
+            theme: Some(SpaceTheme::Preset("dracula".into())),
+        };
+        assert!(spaces.create(SpaceId::from(3), profile, "Night", look.clone()));
+        assert!(spaces.reorder(SpaceId::from(3), Some(space)));
+        let mut state = snapshot(
+            &profiles,
+            &spaces,
+            &items,
+            Some(SpaceId::from(3)),
+            None,
+            None,
+        );
+        assert_eq!(canonicalize(state.clone()), state);
+        let restored = restore(state.clone());
+        let order: Vec<_> = restored
+            .spaces
+            .iter()
+            .map(|s| (s.id, s.look.clone()))
+            .collect();
+        assert_eq!(
+            order,
+            vec![(SpaceId::from(3), look), (space, SpaceLook::default())]
+        );
+        assert_eq!(restored.active_space, Some(SpaceId::from(3)));
+
+        state.spaces[0].look.color = 200;
+        state.spaces[0].look.theme = Some(SpaceTheme::Custom("{}".into()));
+        let restored = restore(state);
+        let look = &restored.spaces.get(SpaceId::from(3)).unwrap().look;
+        assert_eq!((look.color, &look.theme), (0, &None));
+        assert_eq!(look.icon, Some(SpaceIcon::Symbol(4)));
     }
 }

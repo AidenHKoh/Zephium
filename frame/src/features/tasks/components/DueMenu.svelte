@@ -14,6 +14,7 @@
   import * as m from "$shared/i18n/messages";
   import "$shared/ui/Menu/popover.css";
   import { menuMaterialFor } from "$shared/ui/Menu/material";
+  import { layoutAnchor } from "$shared/ui/Menu/anchor";
   import {
     addDays,
     dayName,
@@ -174,6 +175,7 @@
       class="ui-menu ui-popover due-menu"
       sideOffset={6}
       align="end"
+      customAnchor={layoutAnchor(triggerElement)}
       aria-label={label}
     >
       <div class="due-quick">

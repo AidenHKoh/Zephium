@@ -2,12 +2,15 @@
   import { Delete02Icon, Download01Icon } from "@hugeicons/core-free-icons";
   import { extensions } from "$domain/extensions";
   import { tabs } from "$domain/tabs";
+  import { surface } from "$domain/surface";
   import { webext } from "$domain/webext";
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
 
   let listedId = $derived(
-    webext.isAvailable() ? extensions.chromeStoreListingId(tabs.activeTab()?.url ?? "") : null,
+    webext.isAvailable() && surface.currentPage() === null
+      ? extensions.chromeStoreListingId(tabs.activeTab()?.url ?? "")
+      : null,
   );
   let listing = $derived(listedId !== null);
   let installed = $derived(listedId === null ? null : webext.named(listedId));

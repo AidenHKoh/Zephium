@@ -23,9 +23,12 @@
     sites,
     imported,
     playing,
+    modes = true,
     element = $bindable(),
   }: {
     mode: "browse" | "work";
+    /** The Browse and Work switch, absent while Work and AI are off. */
+    modes?: boolean;
     /** What the person has kept, in sidebar order. */
     sites: Site[];
     /** What an import brought, once it has. */
@@ -63,10 +66,10 @@
         <Icon icon={ArrowRight02Icon} size={14} />
         <Icon icon={Refresh01Icon} size={14} />
       </div>
-      <div class="modes">
-        <span class="on"><Icon icon={Globe02Icon} size={13} />{m.mode_browse()}</span>
-        <span><Icon icon={Briefcase02Icon} size={13} />{m.mode_work()}</span>
-      </div>
+      {#if modes}<div class="modes">
+          <span class="on"><Icon icon={Globe02Icon} size={13} />{m.mode_browse()}</span>
+          <span><Icon icon={Briefcase02Icon} size={13} />{m.mode_work()}</span>
+        </div>{/if}
       <div class="address">{m.search_web_short()}</div>
       <div class="row quiet"><Icon icon={PlusSignIcon} size={14} />{m.new_tab()}</div>
       {#if imported}

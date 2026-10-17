@@ -38,9 +38,13 @@ const change = (take: number, rest: Partial<VoiceChanged>): VoiceChanged => ({
   ...rest,
 });
 
-async function listening(engine: VoiceStartV1["engine"] = "on_device", take = 7) {
+/** With words in the field the mic gives way to Send, so a take starts from the shortcut. */
+async function listening(engine: VoiceStartV1["engine"] = "on_device", take = 7, shortcut = false) {
   native.start.mockResolvedValue({ take, engine, fault: null });
-  await page.getByRole("button", { name: "Dictate" }).click();
+  if (shortcut) {
+    await uiCommands.init();
+    emitNativeEvent("uiCommand", "work.dictate");
+  } else await page.getByRole("button", { name: "Dictate" }).click();
   await expect.element(page.getByRole("button", { name: "Stop and insert" })).toBeVisible();
   await expect.poll(() => native.start.mock.calls.length).toBe(1);
 }
@@ -67,7 +71,7 @@ test("the mic opens a live take, and stopping lands the words in the field", asy
 test("dictated words join what was already typed, and other takes' changes are ignored", async () => {
   await page.viewport(1000, 600);
   const screen = await render(VoiceStage, { value: "Find flights " });
-  await listening();
+  await listening("on_device", 7, true);
   emitNativeEvent("voiceChanged", change(3, { phase: "done", text: "Ignored" }));
   emitNativeEvent("voiceChanged", change(7, { phase: "done", text: "to Lisbon" }));
   await expect.poll(() => field().value).toBe("Find flights to Lisbon");
@@ -77,7 +81,7 @@ test("dictated words join what was already typed, and other takes' changes are i
 test("Escape cancels the take and keeps what was typed", async () => {
   await page.viewport(1000, 600);
   const screen = await render(VoiceStage, { value: "Plan:" });
-  await listening();
+  await listening("on_device", 7, true);
   await userEvent.keyboard("{Escape}");
   await expect.poll(() => native.cancel.mock.calls.length).toBe(1);
   await expect.element(page.getByRole("button", { name: "Dictate" })).toBeVisible();
@@ -138,5 +142,16 @@ test("silence ends in a gentle retry, and a refused microphone opens Privacy set
   await expect.poll(() => native.start.mock.calls.length).toBe(2);
   await page.getByRole("button", { name: "Open Privacy Settings" }).click();
   expect(native.privacy).toHaveBeenCalledWith("microphone");
+  await screen.unmount();
+});
+
+test("a Mac with Dictation off says so and opens Keyboard settings, not a retry", async () => {
+  await page.viewport(1000, 600);
+  const screen = await render(VoiceStage);
+  await listening();
+  emitNativeEvent("voiceChanged", change(7, { phase: "failed", fault: "dictation_off" }));
+  await expect.element(page.getByRole("alert")).toHaveTextContent("Dictation is off on this Mac.");
+  await page.getByRole("button", { name: "Open Keyboard Settings" }).click();
+  expect(native.privacy).toHaveBeenCalledWith("dictation");
   await screen.unmount();
 });

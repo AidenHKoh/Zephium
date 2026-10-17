@@ -3,6 +3,7 @@ import { test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import type { VoiceChanged, VoiceStartV1 } from "$shared/ipc/bindings";
+import { uiCommands } from "$domain/ui-commands";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import VoiceStage from "./VoiceStage.svelte";
 
@@ -75,7 +76,9 @@ test("the bar at rest, listening, transcribing and when it cannot listen, in bot
   await settle();
 
   native.start.mockResolvedValue({ take: 2, engine: "zephium", fault: null });
-  await page.getByRole("button", { name: "Dictate" }).click();
+  // With words in the field the mic has given way to Send: a take starts from the shortcut.
+  await uiCommands.init();
+  emitNativeEvent("uiCommand", "work.dictate");
   quiet = speak(2);
   await new Promise((done) => setTimeout(done, 1600));
   await shoot(bar(), "listening-cloud");

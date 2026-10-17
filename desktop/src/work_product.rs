@@ -415,6 +415,25 @@ pub(crate) async fn work_context_preview(
     }
 }
 
+/// Whether turning Work off would stop work that is running now.
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn work_running(caller: WebviewWindow, app: tauri::AppHandle) -> bool {
+    if !super::authorize(&caller, super::CallerPolicy::Main, "work_running") {
+        return false;
+    }
+    #[cfg(feature = "work-product")]
+    {
+        app.try_state::<WorkProductState>()
+            .is_some_and(|owner| owner.operations.running())
+    }
+    #[cfg(not(feature = "work-product"))]
+    {
+        let _ = app;
+        false
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn work_operation_status(

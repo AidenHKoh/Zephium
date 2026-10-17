@@ -121,6 +121,9 @@ pub struct TabState {
     pub can_go_forward: bool,
     pub zoom: f64,
     pub lifecycle: Lifecycle,
+    /// When the person last had this tab in front, in Unix milliseconds.
+    /// Persisted, so archiving idle tabs holds across a relaunch.
+    pub last_active_ms: Option<u64>,
     /// The last navigation the person asked for that did not load. Runtime
     /// only: never persisted, and cleared by the next attempt or commit.
     pub failure: Option<Box<NavigationFailure>>,
@@ -161,6 +164,7 @@ impl TabState {
             can_go_forward: false,
             zoom: 1.0,
             lifecycle: Lifecycle::Inactive,
+            last_active_ms: None,
             failure: None,
             capture: None,
             view: false,

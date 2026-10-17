@@ -229,11 +229,17 @@ impl Edge {
     }
 }
 
+/// What dropping a tab on a pane's edge would do, before it does. Every rect
+/// is in the same space as the region the tree was laid into.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Drop {
     pub tab: ItemId,
     pub edge: Edge,
+    /// Where the new pane will stand.
     pub zone: Rect,
+    /// How far the pane's page slides to make room: toward its own side of the
+    /// seam, by the space the new pane takes.
+    pub shift: (f64, f64),
 }
 
 pub fn drop_target(tree: &Pane, region: Rect, gap: f64, x: f64, y: f64) -> Option<Drop> {
@@ -253,13 +259,24 @@ pub fn drop_target(tree: &Pane, region: Rect, gap: f64, x: f64, y: f64) -> Optio
         .iter()
         .min_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, e)| *e)?;
-    let zone = match edge {
-        Edge::Left => Rect::new(r.x, r.y, r.width / 2.0, r.height),
-        Edge::Right => Rect::new(r.x + r.width / 2.0, r.y, r.width / 2.0, r.height),
-        Edge::Top => Rect::new(r.x, r.y, r.width, r.height / 2.0),
-        Edge::Bottom => Rect::new(r.x, r.y + r.height / 2.0, r.width, r.height / 2.0),
+    let (first, second) = divide(r, edge.axis(), 0.5, gap);
+    let zone = if edge.before() { first } else { second };
+    let shift = match edge.axis() {
+        Axis::Row => {
+            let distance = zone.width + gap;
+            (if edge.before() { distance } else { -distance }, 0.0)
+        }
+        Axis::Col => {
+            let distance = zone.height + gap;
+            (0.0, if edge.before() { distance } else { -distance })
+        }
     };
-    Some(Drop { tab, edge, zone })
+    Some(Drop {
+        tab,
+        edge,
+        zone,
+        shift,
+    })
 }
 
 pub fn ratio_for(axis: Axis, rect: Rect, gap: f64, px: f64, py: f64) -> f64 {
@@ -507,7 +524,8 @@ mod tests {
         let left = drop_target(&leaf, region, 8.0, 50.0, 400.0).unwrap();
         assert_eq!(left.tab, id(5));
         assert_eq!(left.edge, Edge::Left);
-        assert_eq!(left.zone, Rect::new(0.0, 0.0, 500.0, 800.0));
+        // (1000 - 8) / 2 each, the new pane first.
+        assert_eq!(left.zone, Rect::new(0.0, 0.0, 496.0, 800.0));
         assert_eq!(
             drop_target(&leaf, region, 8.0, 950.0, 400.0).unwrap().edge,
             Edge::Right
@@ -520,6 +538,22 @@ mod tests {
             drop_target(&leaf, region, 8.0, 500.0, 760.0).unwrap().edge,
             Edge::Bottom
         );
+    }
+
+    #[test]
+    fn a_drop_slides_the_page_away_by_the_room_the_new_pane_takes() {
+        let region = Rect::new(0.0, 0.0, 1000.0, 800.0);
+        let leaf = Pane::leaf(id(5));
+        let left = drop_target(&leaf, region, 8.0, 50.0, 400.0).unwrap();
+        assert_eq!(left.shift, (504.0, 0.0));
+        let right = drop_target(&leaf, region, 8.0, 950.0, 400.0).unwrap();
+        assert_eq!(right.zone, Rect::new(504.0, 0.0, 496.0, 800.0));
+        assert_eq!(right.shift, (-504.0, 0.0));
+        let top = drop_target(&leaf, region, 8.0, 500.0, 40.0).unwrap();
+        assert_eq!(top.shift, (0.0, 404.0));
+        assert_eq!(top.zone, Rect::new(0.0, 0.0, 1000.0, 396.0));
+        let bottom = drop_target(&leaf, region, 8.0, 500.0, 760.0).unwrap();
+        assert_eq!(bottom.shift, (0.0, -404.0));
     }
 
     #[test]

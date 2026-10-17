@@ -23,7 +23,9 @@
 
   const reasons: Record<Rejection, () => string> = {
     invalid: m.launcher_shortcut_invalid,
-    needs_modifier: m.launcher_shortcut_needs_modifier,
+    needs_modifier: IS_MAC
+      ? m.launcher_shortcut_needs_modifier
+      : m.launcher_shortcut_needs_modifier_windows,
     system: m.launcher_shortcut_system,
     app_command: m.launcher_shortcut_app_command,
     unavailable: m.launcher_shortcut_unavailable,

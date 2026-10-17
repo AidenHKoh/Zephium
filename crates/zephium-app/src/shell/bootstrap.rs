@@ -266,6 +266,7 @@ impl Shell {
         active_item = active_item.filter(|id| self.item_in_scope(*id, profile, space));
         splits = splits.filter(|tree| self.pane_in_scope(tree, profile, space));
 
+        self.load_profile_avatars();
         let window = self
             .windows
             .create(WindowKind::Main, profile, space, self.pending_size);
@@ -307,10 +308,12 @@ impl Shell {
         self.project_items();
         self.project_browser_page();
         self.bootstrapped = true;
+        self.project_profiles();
         self.resume_focus();
         self.apply_deferred_web_extensions();
         let waiting = std::mem::take(&mut self.pending_external);
         self.open_external(waiting);
+        self.archive_idle_tabs();
         if !retired_settings.is_empty() {
             self.schedule_persist();
         }
@@ -362,6 +365,7 @@ impl Shell {
                 id,
                 profile,
                 name: "Space".into(),
+                look: Default::default(),
             }) {
                 return Some(id);
             }

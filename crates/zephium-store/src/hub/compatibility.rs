@@ -83,9 +83,9 @@ impl Hub {
                     PersistedKind::Folder { name } => {
                         ("folder", Some(name.as_str()), None, None, 1.0)
                     }
-                    PersistedKind::Tab { url, title, zoom } => {
-                        ("tab", None, Some(url.as_str()), Some(title.as_str()), *zoom)
-                    }
+                    PersistedKind::Tab {
+                        url, title, zoom, ..
+                    } => ("tab", None, Some(url.as_str()), Some(title.as_str()), *zoom),
                     PersistedKind::BrowserTab { .. } => {
                         return Err(invalid_data(
                             "legacy session writer cannot encode browser-owned tabs",
@@ -161,7 +161,12 @@ impl Hub {
                 let id = SpaceId::parse(&raw)
                     .filter(|id| id.to_string() == raw)
                     .ok_or_else(|| invalid_data("compatibility space has an invalid id"))?;
-                spaces.push(PersistedSpace { id, profile, name });
+                spaces.push(PersistedSpace {
+                    id,
+                    profile,
+                    name,
+                    look: Default::default(),
+                });
             }
             if spaces.len() != space_count as usize {
                 return Err(invalid_data(
@@ -263,6 +268,7 @@ impl Hub {
                         url,
                         title: title.unwrap_or_default(),
                         zoom,
+                        last_active_ms: None,
                     },
                     _ => {
                         return Err(invalid_data("compatibility item has an invalid kind"));

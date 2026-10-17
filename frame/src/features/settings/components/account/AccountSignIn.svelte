@@ -87,13 +87,13 @@
   }
 </script>
 
-<div class="sign-in">
-  <div class="mark"><ZephiumTile size={52} /></div>
+<div class="welcome">
+  <div class="mark"><ZephiumTile size={76} /></div>
   {#if !pendingEmail}
-    <h2>{m.account_intro_title()}</h2>
-    <p class="body">{m.account_intro_body()}</p>
+    <h2>{m.account_welcome_title()}</h2>
+    <p class="body">{m.account_welcome_body()}</p>
     <form
-      class="row"
+      class="entry"
       bind:this={emailForm}
       onsubmit={(event) => {
         event.preventDefault();
@@ -103,6 +103,7 @@
       <Field
         label={m.account_email()}
         labelHidden
+        size="large"
         type="email"
         placeholder={m.account_email_placeholder()}
         autocomplete="email"
@@ -112,11 +113,67 @@
         bind:value={email}
         disabled={busy === "send"}
       />
-      <Button type="submit" variant="primary" pending={busy === "send"} disabled={!emailValid}
-        >{m.account_continue()}</Button
+      <Button
+        type="submit"
+        variant="primary"
+        size="large"
+        pending={busy === "send"}
+        disabled={!emailValid}>{m.account_continue()}</Button
       >
     </form>
-    <p class="terms">
+  {:else}
+    <h2>{m.account_code_title()}</h2>
+    <p class="body">{m.account_code_body({ email: pendingEmail })}</p>
+    <form
+      class="entry"
+      bind:this={codeForm}
+      onsubmit={(event) => {
+        event.preventDefault();
+        void verify();
+      }}
+    >
+      <Field
+        class="code"
+        label={m.account_code()}
+        labelHidden
+        size="large"
+        inputmode="numeric"
+        autocomplete="one-time-code"
+        placeholder="000000"
+        maxlength={11}
+        spellcheck="false"
+        value={code}
+        oninput={(event) => typed(event.currentTarget.value)}
+        disabled={busy === "verify"}
+      />
+      <Button
+        type="submit"
+        variant="primary"
+        size="large"
+        pending={busy === "verify"}
+        disabled={codeDigits(code).length !== 6}>{m.account_continue()}</Button
+      >
+    </form>
+    <div class="links">
+      <Button
+        variant="ghost"
+        size="compact"
+        disabled={resendIn > 0 || !!busy}
+        pending={busy === "send"}
+        onclick={() => void resend()}
+        >{resendIn > 0
+          ? m.account_code_resend_in({ seconds: resendIn })
+          : m.account_code_resend()}</Button
+      >
+      <span class="dot" aria-hidden="true">·</span>
+      <Button variant="ghost" size="compact" disabled={!!busy} onclick={() => void otherEmail()}
+        >{m.account_code_other()}</Button
+      >
+    </div>
+    {#if resent && !faultText}<p class="note" role="status">{m.account_code_sent()}</p>{/if}
+  {/if}
+  {#if faultText}<p class="note" data-tone="error" role="alert">{faultText}</p>{/if}
+  {#if !pendingEmail}<p class="terms">
       {m.account_terms()}
       <a
         href={TERMS_URL}
@@ -133,114 +190,76 @@
           open(PRIVACY_URL);
         }}>{m.account_privacy_link()}</a
       >
-    </p>
-  {:else}
-    <h2>{m.account_code_title()}</h2>
-    <p class="body">{m.account_code_body({ email: pendingEmail })}</p>
-    <form
-      class="row"
-      bind:this={codeForm}
-      onsubmit={(event) => {
-        event.preventDefault();
-        void verify();
-      }}
-    >
-      <Field
-        class="code"
-        label={m.account_code()}
-        labelHidden
-        inputmode="numeric"
-        autocomplete="one-time-code"
-        placeholder="000000"
-        maxlength={11}
-        spellcheck="false"
-        value={code}
-        oninput={(event) => typed(event.currentTarget.value)}
-        disabled={busy === "verify"}
-      />
-      <Button
-        type="submit"
-        variant="primary"
-        pending={busy === "verify"}
-        disabled={codeDigits(code).length !== 6}>{m.account_continue()}</Button
-      >
-    </form>
-    <div class="links">
-      <Button
-        variant="ghost"
-        size="compact"
-        disabled={resendIn > 0 || !!busy}
-        pending={busy === "send"}
-        onclick={() => void resend()}
-        >{resendIn > 0
-          ? m.account_code_resend_in({ seconds: resendIn })
-          : m.account_code_resend()}</Button
-      >
-      <Button variant="ghost" size="compact" disabled={!!busy} onclick={() => void otherEmail()}
-        >{m.account_code_other()}</Button
-      >
-    </div>
-    {#if resent && !faultText}<p class="note" role="status">{m.account_code_sent()}</p>{/if}
-  {/if}
-  {#if faultText}<p class="note" data-tone="error" role="alert">{faultText}</p>{/if}
+    </p>{/if}
 </div>
 
 <style>
-  .sign-in {
+  /* The page's one thing when signed out: the app's own icon, a line on
+     what an account is for, and the address, centred like a welcome. */
+  .welcome {
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
-    padding-block: 8px 34px;
+    align-items: center;
+    max-inline-size: 400px;
+    margin: 0 auto;
+    padding-block: 28px 40px;
+    text-align: center;
   }
 
   .mark {
     display: flex;
-    margin-block-end: 18px;
+    margin-block-end: 22px;
   }
 
   h2 {
     margin: 0;
     color: var(--color-text);
-    font-size: 18px;
-    font-weight: 500;
-    letter-spacing: -0.02em;
+    font-size: 24px;
+    font-weight: 600;
+    line-height: 1.25;
+    letter-spacing: -0.025em;
   }
 
   .body {
-    max-inline-size: 450px;
-    margin: 8px 0 20px;
+    max-inline-size: 360px;
+    margin: 10px 0 26px;
     color: var(--color-muted);
     font-size: var(--text-body);
     line-height: 1.6;
   }
 
-  .row {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    inline-size: min(100%, 420px);
+  .entry {
+    display: grid;
+    gap: 10px;
+    inline-size: min(100%, 340px);
   }
 
-  .row :global(.ui-field) {
-    flex: 1;
+  .entry :global(.ui-input) {
+    text-align: center;
   }
 
-  .row :global(.code input) {
+  .entry :global(.code .ui-input) {
     font-family: var(--font-mono);
+    font-size: 18px;
     font-variant-numeric: tabular-nums;
-    letter-spacing: 0.3em;
+    letter-spacing: 0.4em;
+    text-indent: 0.4em;
   }
 
   .links {
     display: flex;
-    gap: 4px;
-    margin-block-start: 10px;
-    margin-inline-start: -10px;
+    align-items: center;
+    gap: 2px;
+    margin-block-start: 14px;
+  }
+
+  .dot {
+    color: var(--color-faint);
   }
 
   .terms,
   .note {
-    margin: 12px 0 0;
+    margin: 18px 0 0;
     color: var(--color-faint);
     font-size: var(--text-caption);
     line-height: 1.5;

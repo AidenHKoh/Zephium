@@ -297,6 +297,7 @@ pub(crate) struct FakeEngine {
     hold_picker: std::sync::atomic::AtomicBool,
     held_picker: Mutex<Option<zephium_core::blocker::ElementPickerCompletion>>,
     calls: Mutex<Vec<String>>,
+    previews: Mutex<Vec<Option<zephium_core::ports::engine::DropPreview>>>,
     extension_browser_surfaces: Mutex<Vec<ExtensionBrowserSurface>>,
     extension_action_requests: Mutex<Vec<(ProfileId, ItemId, ExtensionBrowserSurfaceGeneration)>>,
     extension_action_invocations: Mutex<Vec<ExtensionActionRequest>>,
@@ -344,6 +345,9 @@ pub(crate) struct FakeEngine {
 impl FakeEngine {
     fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
+    }
+    fn previews(&self) -> Vec<Option<zephium_core::ports::engine::DropPreview>> {
+        self.previews.lock().unwrap().clone()
     }
     fn log(&self, s: String) {
         self.calls.lock().unwrap().push(s);
@@ -698,7 +702,12 @@ impl Engine for FakeEngine {
         self.log(format!("layout@{window} {}", ids.join(",")));
         self.native_admission()
     }
-    fn set_drop_indicator(&self, _window: WindowId, _zone: Option<Rect>) -> NativeDispatch {
+    fn set_drop_indicator(
+        &self,
+        _window: WindowId,
+        preview: Option<zephium_core::ports::engine::DropPreview>,
+    ) -> NativeDispatch {
+        self.previews.lock().unwrap().push(preview);
         self.native_admission()
     }
     fn hint_stage_motion(
@@ -925,6 +934,13 @@ pub(crate) struct FakeStore {
             zephium_core::permissions::PagePermissionPatch,
         )>,
     >,
+    pub(super) avatars: Mutex<
+        Vec<(
+            ProfileId,
+            zephium_core::profiles::ProfileAvatar,
+            Option<Arc<Vec<u8>>>,
+        )>,
+    >,
 }
 
 impl FakeStore {
@@ -950,6 +966,33 @@ impl FakeStore {
 }
 
 impl Store for FakeStore {
+    fn save_profile_avatar(
+        &self,
+        profile: ProfileId,
+        avatar: zephium_core::profiles::ProfileAvatar,
+        photo: Option<Arc<Vec<u8>>>,
+        done: Box<dyn FnOnce(bool) + Send>,
+    ) {
+        self.avatars.lock().unwrap().push((profile, avatar, photo));
+        done(true);
+    }
+
+    fn profile_avatar_photo(
+        &self,
+        profile: ProfileId,
+        done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
+    ) {
+        let photo = self
+            .avatars
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(owner, _, _)| *owner == profile)
+            .and_then(|(_, _, photo)| photo.as_deref().cloned());
+        done(photo);
+    }
+
     fn load_page_permission_catalog(
         &self,
         profile: ProfileId,
@@ -1632,6 +1675,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::BlockerStatus(_) => {}
         Projection::Focus(_) => {}
         Projection::OperationProcessed(_) => {}
+        Projection::Profiles(_) => {}
         Projection::OpenNote { .. } => {}
     }
 }
@@ -1780,6 +1824,7 @@ fn add_inactive_named_profile(shell: &mut Shell, seed: u128) -> ProfileId {
         id: space,
         profile,
         name: "Deletable".into(),
+        look: Default::default(),
     }));
     profile
 }
@@ -1915,9 +1960,11 @@ mod persistence;
 mod presentation;
 mod private;
 mod profile_deletion;
+mod profiles;
 mod projections;
 mod search;
 mod shutdown;
+mod spaces;
 mod tabs;
 mod time;
 mod view_lifecycle;

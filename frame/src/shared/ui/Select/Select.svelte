@@ -2,7 +2,11 @@
   import { Select } from "bits-ui";
   import Mark from "../Menu/Mark.svelte";
   import "../Menu/popover.css";
+  import "../Shine/shine.css";
+  import "../Button/control.css";
   import { menuMaterialFor } from "../Menu/material";
+  import { layoutAnchor } from "../Menu/anchor";
+  import { untrack } from "svelte";
   let {
     label,
     labelHidden = false,
@@ -21,7 +25,52 @@
   const uid = $props.id();
   let triggerElement = $state<HTMLButtonElement | null>(null);
   let material = $state<"opaque" | undefined>();
+  let contentElement = $state<HTMLElement | null>(null);
   let current = $derived(options.find((option) => option.value === value)?.label ?? "");
+
+  // A pop-up, the way the platform draws one: the chosen row opens over the
+  // trigger with its label on the trigger's, and the list grows around it.
+  const popup = $derived(
+    triggerElement
+      ? {
+          contextElement: triggerElement,
+          getBoundingClientRect: (): DOMRect => untrack(() => place()),
+        }
+      : null,
+  );
+
+  // The click that opens it ends over the chosen row. A release that has not
+  // travelled is that click, not a choice; press, drag and release still picks.
+  let pressed: { x: number; y: number } | null = null;
+  const travelled = (event: PointerEvent) =>
+    !pressed || Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > 4;
+
+  function place(): DOMRect {
+    {
+      const box = layoutAnchor(triggerElement)?.getBoundingClientRect() ?? new DOMRect();
+      const content = contentElement;
+      const first = content?.querySelector<HTMLElement>(".ui-menu-item");
+      const row = content?.querySelector<HTMLElement>(".ui-menu-item[data-selected]");
+      if (!content || !triggerElement || !first || !row) {
+        return new DOMRect(box.x, box.bottom + 6, box.width, 0);
+      }
+      const panel = getComputedStyle(content);
+      const scroll = content.querySelector<HTMLElement>(".ui-menu-viewport")?.scrollTop ?? 0;
+      const rowTop = parseFloat(panel.paddingTop) + row.offsetTop - first.offsetTop - scroll;
+      const inset =
+        parseFloat(panel.paddingInlineStart) +
+        parseFloat(getComputedStyle(row).paddingInlineStart) -
+        parseFloat(getComputedStyle(triggerElement).paddingInlineStart);
+      const left = box.left - inset;
+      const room = window.innerHeight - 12;
+      const top = Math.min(
+        Math.max(12, box.top + box.height / 2 - rowTop - row.offsetHeight / 2),
+        Math.max(12, room - content.offsetHeight),
+      );
+      content.style.transformOrigin = `${box.left + box.width / 2 - left}px ${box.top + box.height / 2 - top}px`;
+      return new DOMRect(left, top, box.width + inset * 2, 0);
+    }
+  }
 </script>
 
 <div class="field">
@@ -36,14 +85,20 @@
     items={[...options]}
     onValueChange={(next) => onchange?.(next)}
   >
-    <Select.Trigger bind:ref={triggerElement} id={uid} class="ui-select" aria-label={label}>
+    <Select.Trigger
+      bind:ref={triggerElement}
+      id={uid}
+      class="ui-select ui-control ui-shine ui-shine-press"
+      aria-label={label}
+      onpointerdown={(event) => (pressed = { x: event.clientX, y: event.clientY })}
+    >
       <span class="value">{current}</span>
       <svg
         class="chevron"
         aria-hidden="true"
         viewBox="0 0 12 16"
-        width="12"
-        height="16"
+        width="11"
+        height="14"
         fill="none"
         stroke="currentColor"
         stroke-width="1.6"
@@ -56,10 +111,14 @@
     </Select.Trigger>
     <Select.Portal>
       <Select.Content
+        bind:ref={contentElement}
         data-menu-material={material}
         class="ui-menu ui-select-menu"
+        side="bottom"
         align="start"
-        sideOffset={6}
+        customAnchor={popup}
+        sideOffset={0}
+        avoidCollisions={false}
         collisionPadding={12}
       >
         <Select.Viewport class="ui-menu-viewport">
@@ -69,6 +128,10 @@
               value={option.value}
               label={option.label}
               disabled={option.disabled}
+              onpointerup={(event) => {
+                if (travelled(event)) pressed = null;
+                else event.preventDefault();
+              }}
             >
               {#snippet children({ selected })}
                 {option.label}
@@ -95,49 +158,14 @@
     color: var(--color-muted);
   }
 
+  /* The one control size, on the shine plate. The text inset matches the
+     menu's own, so the label does not move when it opens. */
   .field :global(.ui-select) {
-    display: inline-flex;
-    align-items: center;
     justify-content: space-between;
     gap: 8px;
-    box-sizing: border-box;
     min-width: 120px;
-    min-height: var(--field-height);
-    padding: 5px 8px 5px 14px;
-    border: 0;
-
-    /* Almost round, and no ring. A hairline around a control this small draws
-       a shape the fill has already drawn, and two edges a pixel apart is what
-       makes a field look like a widget rather than a surface. The text inset
-       matches the menu's own, so the label does not move when it opens. */
-    border-radius: var(--radius-field);
-    background: var(--color-field);
-    color: var(--color-text);
-    font: inherit;
-    font-size: var(--text-body);
+    padding-inline: var(--control-inset) 10px;
     font-weight: 450;
-    line-height: 16px;
-    cursor: default;
-    /* stylelint-disable-next-line property-no-vendor-prefix */
-    -webkit-user-select: none;
-    user-select: none;
-    transition:
-      background-color var(--motion-instant) var(--ease-smooth),
-      box-shadow var(--motion-instant) var(--ease-smooth);
-  }
-
-  .field :global(.ui-select:disabled) {
-    opacity: 0.5;
-  }
-
-  .field :global(.ui-select:hover:not(:disabled)) {
-    background: var(--color-field-hover);
-  }
-
-  /* While its menu is up the trigger is held rather than hovered — and it is
-     usually underneath the panel anyway, since the chosen row opens over it. */
-  .field :global(.ui-select[data-state="open"]) {
-    background: var(--color-field-hover);
   }
 
   .value {
@@ -157,15 +185,20 @@
     color: var(--color-muted);
   }
 
-  /* At least the trigger's width, so the label it is covering never has to
-     move sideways to fit. */
+  /* It opens over its own trigger: at least as wide, so the label under it
+     never moves sideways, and solid, so that label never reads through. */
   :global(.ui-select-menu) {
     min-width: var(--bits-floating-anchor-width, 0);
+    background: var(--color-float);
+    backdrop-filter: none;
+    animation:
+      ui-menu-fade var(--motion-fast) var(--ease-out),
+      ui-select-in var(--motion-base) var(--ease-out);
   }
 
-  @media (forced-colors: active) {
-    .field :global(.ui-select) {
-      border: 1px solid ButtonText;
+  @media (prefers-reduced-motion: reduce) {
+    :global(.ui-select-menu) {
+      animation: ui-menu-fade var(--motion-instant) linear;
     }
   }
 </style>

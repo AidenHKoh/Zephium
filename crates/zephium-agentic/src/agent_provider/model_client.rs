@@ -323,9 +323,9 @@ pub(crate) fn translate(
                 AgentProviderReasoningEffort::None => None,
                 AgentProviderReasoningEffort::Low => Some(WorkModelReasoning::Low),
                 AgentProviderReasoningEffort::Medium => Some(WorkModelReasoning::Medium),
-                AgentProviderReasoningEffort::High
-                | AgentProviderReasoningEffort::XHigh
-                | AgentProviderReasoningEffort::Max => Some(WorkModelReasoning::High),
+                AgentProviderReasoningEffort::High => Some(WorkModelReasoning::High),
+                AgentProviderReasoningEffort::XHigh => Some(WorkModelReasoning::XHigh),
+                AgentProviderReasoningEffort::Max => Some(WorkModelReasoning::Max),
             },
             native_search: false,
             parallel_tools: false,

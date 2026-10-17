@@ -1,5 +1,6 @@
 //! Authoritative browser-shell state machine and effect coordination.
 
+mod archive;
 mod blocker;
 mod blocker_sites;
 mod blocker_statistics;
@@ -22,6 +23,7 @@ mod persistence;
 mod presentation;
 mod private;
 mod profile_deletion;
+mod profile_roster;
 mod projections;
 mod scope;
 mod search;
@@ -165,6 +167,7 @@ impl AgentLifecycleOwner {
 
 mod browser_pages;
 mod kept_sites;
+mod spaces;
 mod work_pane;
 
 /// Pages a run may queue for a seat in its page group at once.
@@ -221,6 +224,8 @@ pub struct Shell {
     zoom: ZoomState,
     divider: Option<GrabbedDivider>,
     private: Option<private::PrivateSession>,
+    roster: profile_roster::RosterState,
+    space_memory: spaces::SpaceMemory,
     /// Sites allowed to open a kind of application link without asking,
     /// for this run only.
     external_apps_allowed: std::collections::HashSet<(ProfileId, String, String)>,
@@ -238,6 +243,8 @@ pub struct Shell {
     browser_return_revision: u64,
     browser_after_return: Option<Box<Command>>,
     browser_return_ready: bool,
+    /// Set while the window lays out for a return that a queued command is about to change.
+    browser_return_hidden: bool,
     browser_return: Option<browser_pages::PendingBrowserReturn>,
     work_pane: Option<work_pane::WorkPane>,
     work_pane_generation: u32,
@@ -453,6 +460,8 @@ impl Shell {
             zoom: ZoomState::default(),
             divider: None,
             private: None,
+            roster: profile_roster::RosterState::default(),
+            space_memory: spaces::SpaceMemory::default(),
             external_apps_allowed: std::collections::HashSet::new(),
             residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),
@@ -465,6 +474,7 @@ impl Shell {
             browser_return_revision: 0,
             browser_after_return: None,
             browser_return_ready: false,
+            browser_return_hidden: false,
             browser_return: None,
             work_pane: None,
             work_pane_generation: 0,
@@ -750,6 +760,33 @@ impl Shell {
             Command::RenameFocusedProfile(name) => {
                 let _ = self.operation_rename_focused_profile(&name);
             }
+            Command::CreateProfile {
+                name,
+                avatar,
+                photo,
+                switch,
+            } => {
+                let _ = self.operation_create_profile(&name, avatar, photo, switch);
+            }
+            Command::SwitchProfile(profile) => {
+                let _ = self.operation_switch_profile(profile);
+            }
+            Command::RenameProfile { profile, name } => {
+                let _ = self.operation_rename_profile(profile, &name);
+            }
+            Command::SetProfileAvatar {
+                profile,
+                avatar,
+                photo,
+            } => {
+                let _ = self.operation_set_profile_avatar(profile, avatar, photo);
+            }
+            Command::ProfileAvatarPhoto { profile, reply } => {
+                self.profile_avatar_photo(profile, reply);
+            }
+            Command::Profiles { reply } => {
+                let _ = reply.try_send(self.profiles_view());
+            }
             Command::Close(id) => {
                 let _ = self.operation_close(id);
             }
@@ -779,6 +816,9 @@ impl Shell {
             }
             Command::TabAction { id, action } => {
                 let _ = self.operation_tab_action(id, action);
+            }
+            Command::Space(command) => {
+                let _ = self.operation_space(*command);
             }
             Command::SetWindowSize(size) => match self.windows.focused_mut() {
                 Some(win) => {
@@ -1015,10 +1055,14 @@ impl Shell {
             }
             Command::DragOver { point } => {
                 if let Some(win) = self.windows.focused().map(|w| w.id) {
-                    let zone = point
+                    let preview = point
                         .and_then(|(x, y)| self.resolve_drop(x, y))
-                        .map(|d| d.zone);
-                    let _ = self.engine.set_drop_indicator(win, zone);
+                        .map(|drop| zephium_core::ports::engine::DropPreview {
+                            tab: drop.tab,
+                            zone: drop.zone,
+                            shift: drop.shift,
+                        });
+                    let _ = self.engine.set_drop_indicator(win, preview);
                 }
             }
             Command::DropTab { id, x, y } => {
@@ -1073,8 +1117,9 @@ impl Shell {
                 context,
                 action,
                 background,
+                replace,
             } => {
-                let _ = self.operation_run_search_action(*context, action, background);
+                let _ = self.operation_run_search_action(*context, action, background, replace);
             }
             Command::OpenUrl { input, new_tab } => {
                 let _ = self.operation_open_url(input, new_tab);
@@ -1206,6 +1251,7 @@ impl Shell {
                 if extension_actions.rejected {
                     crate::diagnostic!("extensions: maintenance could not refresh toolbar actions");
                 }
+                self.archive_idle_tabs();
                 if self.maintain_views() {
                     self.project_items();
                 }

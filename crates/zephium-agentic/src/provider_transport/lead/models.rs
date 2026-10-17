@@ -509,6 +509,70 @@ pub fn family_default(provider: WorkModelProvider, role: WorkModelRole) -> Optio
     })
 }
 
+/// The reasoning efforts `model` takes from `upstream` that change its
+/// request, weakest first; empty when its wire sends none. Checked against
+/// each provider's model pages on 2026-10-14.
+pub fn efforts(upstream: WorkModelProvider, model: &str) -> Vec<WorkModelReasoning> {
+    use WorkModelReasoning::*;
+    match upstream {
+        P::OpenAi if model.starts_with("gpt-6") || model.starts_with("gpt-5.6") => {
+            vec![Low, Medium, High, XHigh, Max]
+        }
+        P::OpenAi => vec![Low, Medium, High],
+        P::Anthropic if super::anthropic::budget_thinking(model) => vec![Low, Medium, High],
+        P::Anthropic
+            if model.starts_with("claude-opus-4-6") || model.starts_with("claude-sonnet-4-6") =>
+        {
+            vec![Low, Medium, High, Max]
+        }
+        P::Anthropic => vec![Low, Medium, High, XHigh, Max],
+        P::Google if model.starts_with("gemini-3-pro") => vec![Low, High],
+        P::Google => vec![Low, Medium, High],
+        P::XAi => match model
+            .strip_prefix("grok-4.")
+            .and_then(|minor| minor.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|minor| minor.parse::<u32>().ok())
+        {
+            Some(6..) => vec![Low, Medium, High, XHigh],
+            Some(5) => vec![Low, Medium, High],
+            _ => Vec::new(),
+        },
+        P::DeepSeek => vec![Low, High],
+        P::Groq | P::Cerebras if super::chat::takes_effort(upstream, model) => {
+            vec![Low, Medium, High]
+        }
+        P::OpenRouter => vec![Low, Medium, High],
+        _ => Vec::new(),
+    }
+}
+
+/// The level of `levels` nearest to `wanted`, a tie going to the stronger.
+pub fn nearest_effort(
+    levels: &[WorkModelReasoning],
+    wanted: WorkModelReasoning,
+) -> Option<WorkModelReasoning> {
+    let rank = |level: WorkModelReasoning| level as i32;
+    levels
+        .iter()
+        .copied()
+        .min_by_key(|level| ((rank(*level) - rank(wanted)).abs(), -rank(*level)))
+}
+
+/// What the lead runs at when the person chose no effort: medium, or the
+/// provider's own default where medium used to mean more.
+pub fn default_effort(
+    upstream: WorkModelProvider,
+    model: &str,
+    levels: &[WorkModelReasoning],
+) -> Option<WorkModelReasoning> {
+    let wanted = if upstream == P::Google && model.contains("-pro") {
+        WorkModelReasoning::High
+    } else {
+        WorkModelReasoning::Medium
+    };
+    nearest_effort(levels, wanted)
+}
+
 /// A Cloud catalog model with the upstream whose path it travels.
 #[derive(Clone, Debug)]
 pub struct CloudModel {
@@ -789,6 +853,43 @@ mod tests {
                 .unwrap()
                 .input,
             4_000_000
+        );
+    }
+
+    #[test]
+    fn efforts_offer_only_levels_each_wire_sends_and_defaults_keep_todays_request() {
+        use WorkModelReasoning::*;
+        let all = vec![Low, Medium, High, XHigh, Max];
+        assert_eq!(efforts(P::OpenAi, "gpt-6-luna"), all);
+        assert_eq!(efforts(P::OpenAi, "gpt-5.6-terra"), all);
+        assert_eq!(efforts(P::Anthropic, "claude-opus-5-5"), all);
+        assert_eq!(
+            efforts(P::Anthropic, "claude-haiku-4-5-20251001"),
+            vec![Low, Medium, High]
+        );
+        assert_eq!(efforts(P::XAi, "grok-4.7"), vec![Low, Medium, High, XHigh]);
+        assert!(efforts(P::XAi, "grok-4.3").is_empty());
+        assert_eq!(efforts(P::DeepSeek, "deepseek-v4-pro"), vec![Low, High]);
+        assert!(efforts(P::Mistral, "mistral-medium-3-5").is_empty());
+        assert!(efforts(P::Groq, "qwen/qwen3.8-27b").is_empty());
+        assert!(efforts(P::Compatible, "llama").is_empty());
+
+        assert_eq!(nearest_effort(&[Low, High], Medium), Some(High));
+        assert_eq!(nearest_effort(&[Low, Medium, High], Max), Some(High));
+        assert_eq!(
+            nearest_effort(&[Low, Medium, High, XHigh], Max),
+            Some(XHigh)
+        );
+        assert_eq!(nearest_effort(&[], Medium), None);
+        let pro = efforts(P::Google, "gemini-3.1-pro-preview");
+        assert_eq!(
+            default_effort(P::Google, "gemini-3.1-pro-preview", &pro),
+            Some(High)
+        );
+        assert_eq!(default_effort(P::OpenAi, "gpt-6-luna", &all), Some(Medium));
+        assert_eq!(
+            default_effort(P::DeepSeek, "deepseek-v4-pro", &[Low, High]),
+            Some(High)
         );
     }
 

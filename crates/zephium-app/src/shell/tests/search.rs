@@ -163,7 +163,7 @@ fn newtab_search_cannot_execute_after_its_tab_has_navigated() {
         id,
         input: "other.example".into(),
     });
-    let disposition = shell.operation_run_search_action(context, action, false);
+    let disposition = shell.operation_run_search_action(context, action, false, None);
     assert_eq!(disposition.outcome, OperationOutcome::Rejected);
 }
 

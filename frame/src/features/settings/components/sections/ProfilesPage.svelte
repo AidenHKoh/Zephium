@@ -1,148 +1,225 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { Add01Icon } from "@hugeicons/core-free-icons";
+  import type { ProfileEntryView } from "$shared/ipc/bindings";
+  import { drawn, profiles } from "$domain/profiles";
+  import { takeNewRequest } from "$session/profile-sheet.svelte";
   import * as m from "$shared/i18n/messages";
-  import { tabs } from "$domain/tabs";
-  import * as preview from "../../lib/preview.svelte";
-  import PreviewNotice from "../PreviewNotice.svelte";
-  import SettingsGroup from "$shared/ui/SettingsGroup";
-  import SettingsRow from "$shared/ui/SettingsRow";
-  import PreviewSelect from "../PreviewSelect.svelte";
-  import PreviewDialog from "../PreviewDialog.svelte";
   import Button from "$shared/ui/Button";
-  import Field from "$shared/ui/Field";
-  import Slider from "$shared/ui/Slider";
   import Icon from "$shared/ui/Icon";
-  import { UserCircleIcon, Globe02Icon, StarIcon, SparklesIcon } from "@hugeicons/core-free-icons";
-  let failed = $state(false);
-  let editing = $state(false);
-  let newName = $state("");
-  let input = $state<HTMLInputElement>();
-  const icons = [UserCircleIcon, Globe02Icon, StarIcon, SparklesIcon];
-  let name = $derived(preview.get("profiles.name", tabs.profile()?.name ?? ""));
-  async function photo(event: Event) {
-    const file = (event.target as HTMLInputElement).files?.[0];
-    if (!file) return;
-    const scope = preview.scope();
-    failed = false;
-    if (
-      !["image/png", "image/jpeg", "image/webp"].includes(file.type) ||
-      file.size > 4 * 1024 * 1024
-    ) {
-      failed = true;
-      return;
-    }
-    try {
-      const data = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result));
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-      const image = new Image();
-      image.src = data;
-      await image.decode();
-      if (image.naturalWidth > 4096 || image.naturalHeight > 4096) throw new Error("size");
-      if (preview.scope() !== scope) return;
-      preview.setPhoto(data);
-      preview.set("profiles.icon", "Photo");
-    } catch {
-      failed = true;
-    }
-    if (input) input.value = "";
+  import ProfileAvatar, { AVATAR_COLORS } from "$shared/ui/ProfileAvatar";
+  import ProfileSheet from "../profiles/ProfileSheet.svelte";
+
+  onMount(() => {
+    void profiles.retain();
+    if (takeNewRequest()) create(true);
+    return () => profiles.release();
+  });
+
+  const list = $derived(profiles.all());
+  const currentId = $derived(profiles.current()?.id ?? null);
+  let sheetOpen = $state(false);
+  let editing = $state.raw<ProfileEntryView | null>(null);
+  let switching = $state<string | null>(null);
+  let failed = $state<string | null>(null);
+  /** A new profile starts on the first colour no other profile wears. */
+  const nextColor = $derived(
+    Array.from({ length: AVATAR_COLORS }, (_, index) => (index + 1) % AVATAR_COLORS).find(
+      (color) => !list.some((profile) => profile.avatar.color === color),
+    ) ?? 1,
+  );
+
+  let andSwitch = $state(false);
+  function create(fromSidebar = false) {
+    andSwitch = fromSidebar;
+    editing = null;
+    sheetOpen = true;
+  }
+
+  function edit(profile: ProfileEntryView) {
+    editing = profile;
+    sheetOpen = true;
+  }
+
+  async function switchTo(profile: ProfileEntryView) {
+    if (switching) return;
+    switching = profile.id;
+    failed = null;
+    if (!(await profiles.switchTo(profile.id))) failed = profile.id;
+    switching = null;
   }
 </script>
 
-<PreviewNotice />
-<div class="profile-editor-hero">
-  <div class="profile-photo-preview" aria-label={m.profile_image_preview()}>
-    {#if preview.get("profiles.icon", "Initials") === "Photo" && preview.photo()}<img
-        src={preview.photo()!}
-        alt={m.profile_image_preview()}
-        style:transform={`scale(${preview.get("profile.zoom", "1")})`}
-        style:object-position={`${preview.get("profile.x", "50")}% ${preview.get("profile.y", "50")}%`}
-      />{:else if preview.get("profiles.icon", "Initials") === "Icon"}<Icon
-        icon={icons[Number(preview.get("profile.symbol", "0"))] ?? UserCircleIcon}
-        size={40}
-      />{:else}<span>{Array.from(name.trim())[0]?.toLocaleUpperCase() ?? "Z"}</span>{/if}
-  </div>
-  <div>
-    <h2>{name || m.settings_current_profile()}</h2>
-    <p>{m.settings_local_profile()}</p>
-  </div>
-</div>
-<SettingsGroup title={m.section_profiles()}
-  ><div data-setting="profiles.name">
-    <SettingsRow title={m.settings_profile_name()}
-      ><Field
-        label={m.settings_profile_name()}
-        labelHidden
-        value={name}
-        maxlength={80}
-        oninput={(event) => preview.set("profiles.name", event.currentTarget.value)}
-      /></SettingsRow
-    >
-  </div>
-  <PreviewSelect id="profiles.icon" /></SettingsGroup
->
-{#if preview.get("profiles.icon", "Initials") === "Icon"}<div class="profile-icon-choices">
-    {#each icons as icon, index (index)}<button
-        type="button"
-        aria-label={`${m.settings_profile_name()} ${index + 1}`}
-        aria-pressed={preview.get("profile.symbol", "0") === String(index)}
-        onclick={() => preview.set("profile.symbol", String(index))}
-        ><Icon {icon} size={25} /></button
-      >{/each}
-  </div>{/if}
-{#if preview.get("profiles.icon", "Initials") === "Photo"}<div class="settings-inline-form">
-    <input
-      class="sr-only"
-      tabindex="-1"
-      bind:this={input}
-      type="file"
-      accept="image/png,image/jpeg,image/webp"
-      onchange={photo}
-    /><Button onclick={() => input?.click()}>{m.profile_choose_photo()}</Button>
-    <p class="settings-help">{m.profile_photo_help()}</p>
-    {#if failed}<p role="alert" class="settings-help" data-error="true">
-        {m.profile_photo_invalid()}
-      </p>{/if}{#if preview.photo()}{#each [{ key: "zoom", label: m.profile_zoom, min: 1, max: 3, step: 0.05, initial: "1" }, { key: "x", label: m.profile_horizontal, min: 0, max: 100, step: 1, initial: "50" }, { key: "y", label: m.profile_vertical, min: 0, max: 100, step: 1, initial: "50" }] as control (control.key)}<div
-          class="profile-range"
-        >
-          <Slider
-            label={control.label()}
-            min={control.min}
-            max={control.max}
-            step={control.step}
-            value={Number(preview.get(`profile.${control.key}`, control.initial))}
-            onchange={(value) => preview.set(`profile.${control.key}`, String(value))}
-          />
-        </div>{/each}{/if}
-  </div>{/if}
-<SettingsGroup title={m.profile_preview_list()}
-  >{#each preview.entries("profiles.list") as profile (profile.id)}<SettingsRow title={profile.name}
-      ><Button variant="ghost" onclick={() => preview.removeEntry("profiles.list", profile.id)}
-        >{m.preview_remove()}</Button
-      ></SettingsRow
-    >{/each}
-  <div class="settings-inline-form">
-    <Button onclick={() => (editing = true)}>{m.profile_create()}</Button>
-  </div></SettingsGroup
->
-<PreviewDialog
-  bind:open={editing}
-  title={m.profile_create()}
-  valid={newName.trim().length > 0}
-  onapply={() => {
-    preview.saveEntry("profiles.list", {
-      id: crypto.randomUUID(),
-      name: newName.trim(),
-      value: "",
-    });
-    newName = "";
-  }}
-  ><Field
-    label={m.profile_new_name()}
-    bind:value={newName}
-    required
-    maxlength={80}
-  /></PreviewDialog
->
+<section class="profiles" aria-label={m.profiles_list_label()}>
+  <ul class="list">
+    {#each list as profile (profile.id)}
+      {@const here = profile.id === currentId}
+      <li class="row" data-current={here || undefined}>
+        <ProfileAvatar view={drawn(profile)} size={40} />
+        <div class="copy">
+          <strong>{profile.name}</strong>
+          <small
+            >{profile.kind === "default"
+              ? m.profiles_kind_default()
+              : m.profiles_kind_named()}{#if failed === profile.id}<span
+                class="failed"
+                role="alert"
+              >
+                · {m.profiles_failed()}</span
+              >{/if}</small
+          >
+        </div>
+        <div class="actions">
+          {#if here}<span class="here">{m.profiles_this_window()}</span>
+          {:else}<Button
+              size="compact"
+              pending={switching === profile.id}
+              disabled={!!switching}
+              aria-label={m.profiles_switch_label({ name: profile.name })}
+              onclick={() => void switchTo(profile)}>{m.profiles_switch()}</Button
+            >{/if}
+          <Button
+            size="compact"
+            variant="ghost"
+            aria-label={m.profiles_edit_label({ name: profile.name })}
+            onclick={() => edit(profile)}>{m.profiles_edit()}</Button
+          >
+        </div>
+      </li>
+    {/each}
+    <li>
+      <button type="button" class="add" onclick={() => create()}>
+        <span class="add-mark"><Icon icon={Add01Icon} size={16} strokeWidth={1.8} /></span>
+        <span>{m.profiles_new()}</span>
+      </button>
+    </li>
+  </ul>
+  <p class="note">{m.profiles_list_note()}</p>
+</section>
+
+<ProfileSheet
+  bind:open={sheetOpen}
+  profile={editing}
+  current={editing?.id === currentId}
+  color={nextColor}
+  {andSwitch}
+/>
+
+<style>
+  .profiles {
+    margin-block-end: 34px;
+  }
+
+  .list {
+    overflow: hidden;
+    margin: 0;
+    padding: 0;
+    border-radius: var(--radius-card);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-card);
+    list-style: none;
+  }
+
+  .row,
+  .add {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    box-sizing: border-box;
+    min-block-size: 68px;
+    padding: 12px 14px 12px 16px;
+  }
+
+  li + li > .add::before,
+  li + .row::before {
+    position: absolute;
+    top: 0;
+    block-size: 1px;
+    background: var(--color-border);
+    content: "";
+    inset-inline: 70px 0;
+  }
+
+  .copy {
+    display: grid;
+    flex: 1;
+    gap: 2px;
+    min-inline-size: 0;
+  }
+
+  strong,
+  small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  strong {
+    color: var(--color-text);
+    font-size: var(--text-page-title);
+    font-weight: 500;
+    line-height: 19px;
+    letter-spacing: -0.008em;
+  }
+
+  small {
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    line-height: 1.5;
+  }
+
+  .failed {
+    color: var(--color-danger);
+  }
+
+  .actions {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .here {
+    padding-inline: 10px;
+    color: var(--color-label-secondary);
+    font-size: var(--text-label);
+    font-weight: 500;
+  }
+
+  .add {
+    inline-size: 100%;
+    min-block-size: 56px;
+    border: 0;
+    background: transparent;
+    color: var(--color-text);
+    font: inherit;
+    font-size: var(--text-page-title);
+    text-align: start;
+    transition: background-color var(--motion-fast) var(--ease-out);
+  }
+
+  .add:hover {
+    background: var(--row-hover);
+  }
+
+  .add:focus-visible {
+    outline-offset: -2px;
+  }
+
+  .add-mark {
+    display: grid;
+    flex: none;
+    inline-size: 40px;
+    block-size: 28px;
+    color: var(--color-label-secondary);
+    place-items: center;
+  }
+
+  .note {
+    margin: 10px 16px 0;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    line-height: 1.5;
+  }
+</style>

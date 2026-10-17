@@ -350,9 +350,13 @@ impl EngineHost {
     }
 
     #[cfg(target_os = "macos")]
-    pub(crate) fn set_drop_indicator(&mut self, window: WindowId, zone: Option<Rect>) {
+    pub(crate) fn set_drop_indicator(
+        &mut self,
+        window: WindowId,
+        preview: Option<zephium_core::ports::engine::DropPreview>,
+    ) {
         if let Some(stage) = self.ensure_stage(window) {
-            stage.set_drop_indicator(zone);
+            stage.set_drop_indicator(preview);
         }
     }
 
@@ -463,9 +467,13 @@ impl EngineHost {
     }
 
     #[cfg(not(target_os = "macos"))]
-    pub(crate) fn set_drop_indicator(&mut self, window: WindowId, zone: Option<Rect>) {
+    pub(crate) fn set_drop_indicator(
+        &mut self,
+        window: WindowId,
+        preview: Option<zephium_core::ports::engine::DropPreview>,
+    ) {
         if let Some(stage) = self.ensure_stage(window) {
-            stage.set_drop_indicator(zone);
+            stage.set_drop_indicator(preview);
         }
     }
 

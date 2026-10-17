@@ -1,12 +1,12 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import { keymap, type KeymapEntry, type KeymapOutcome } from "$domain/keymap";
+  import { preferences } from "$domain/preferences";
   import { IS_MAC } from "$shared/platform";
   import { acceleratorFrom, acceleratorKeys, heldModifiers } from "$shared/lib/accelerator";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Button from "$shared/ui/Button";
-  import PreferenceSelect from "../PreferenceSelect.svelte";
   import PreferenceSwitch from "../PreferenceSwitch.svelte";
   import LauncherShortcut from "../LauncherShortcut.svelte";
   import ShortcutField from "../ShortcutField.svelte";
@@ -14,7 +14,7 @@
 
   type Notice = { id: string; text: string; replace?: string };
 
-  let sections = $derived(keymapSections(keymap.all()));
+  let sections = $derived(keymapSections(keymap.all(), preferences.commandOffered));
   let anyCustomized = $derived(keymap.all().some((entry) => entry.customized));
   let recordingId = $state<string | null>(null);
   let held = $state<string[]>([]);
@@ -169,10 +169,7 @@
   </div>
 {/if}
 <SettingsGroup title={m.settings_accessibility()}
-  ><PreferenceSelect id="accessibility.text" preference="ui.text-size" /><PreferenceSwitch
-    id="accessibility.contrast"
-    preference="ui.contrast"
-  /></SettingsGroup
+  ><PreferenceSwitch id="accessibility.contrast" preference="ui.contrast" /></SettingsGroup
 >
 
 <style>

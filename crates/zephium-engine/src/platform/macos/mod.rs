@@ -240,6 +240,39 @@ pub fn current_url(view: &wry::WebView) -> Option<String> {
     bounded_current_url(view).ok()
 }
 
+/// Back and forward as the person would count them. A warm spare is adopted
+/// from an about:blank load that stays in WebKit's list, so its own answer
+/// offers a "back" to nothing. That entry is dropped once a real page stands
+/// in front of it; the swipe stays on throughout, so WebKit keeps recording
+/// the snapshots it draws from.
+pub fn history_state(view: &wry::WebView) -> Option<(bool, bool)> {
+    let page = native::webkit(view);
+    let (mut back, forward) = unsafe { (page.canGoBack(), page.canGoForward()) };
+    if back {
+        let list = unsafe { page.backForwardList() };
+        let previous = unsafe { list.backItem() }
+            .and_then(|item| unsafe { item.URL() }.absoluteString())
+            .map(|url| url.to_string());
+        if blank_behind(previous.as_deref()) {
+            // SAFETY: main-thread WebKit access; the SPI is used only when present. It
+            // keeps the current entry and drops every other.
+            let clears: bool =
+                unsafe { objc2::msg_send![&*list, respondsToSelector: objc2::sel!(_clear)] };
+            if clears && unsafe { list.backList().count() } == 1 && !forward {
+                let _: () = unsafe { objc2::msg_send![&*list, _clear] };
+                back = unsafe { page.canGoBack() };
+            } else {
+                back = false;
+            }
+        }
+    }
+    Some((back, forward))
+}
+
+fn blank_behind(previous: Option<&str>) -> bool {
+    previous == Some("about:blank")
+}
+
 #[derive(Clone, Copy)]
 enum CurrentUrlUnavailable {
     MissingNativeUrl,
@@ -625,6 +658,13 @@ fn initialize_data_store_enumeration() -> Result<(), &'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_blank_bootstrap_is_not_a_page_to_go_back_to() {
+        assert!(blank_behind(Some("about:blank")));
+        assert!(!blank_behind(Some("https://example.com/")));
+        assert!(!blank_behind(None));
+    }
+
     #[test]
     fn current_url_reader_preserves_exact_utf16_and_utf8_bounds() {
         use super::*;

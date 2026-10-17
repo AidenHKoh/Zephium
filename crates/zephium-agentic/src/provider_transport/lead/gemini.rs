@@ -96,12 +96,14 @@ pub(super) fn body(request: &WorkModelRequest) -> Result<Value, WorkModelError> 
     }
     let mut generation = json!({"maxOutputTokens": request.max_output_tokens});
     if let Some(reasoning) = request.reasoning {
-        let pro = request.model.model.contains("-pro");
+        let pro = request.model.model.starts_with("gemini-3-pro");
         let level = match reasoning {
             WorkModelReasoning::Low => "low",
             WorkModelReasoning::Medium if pro => "high",
             WorkModelReasoning::Medium => "medium",
-            WorkModelReasoning::High => "high",
+            WorkModelReasoning::High | WorkModelReasoning::XHigh | WorkModelReasoning::Max => {
+                "high"
+            }
         };
         generation["thinkingConfig"] = json!({"thinkingLevel": level});
     }

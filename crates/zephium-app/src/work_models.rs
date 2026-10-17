@@ -271,6 +271,7 @@ struct State {
     cloud_fetched: Option<Instant>,
     /// Choices kept in memory when no settings store is installed.
     choices: HashMap<String, WorkModelEntry>,
+    efforts: HashMap<String, String>,
 }
 
 fn state() -> std::sync::MutexGuard<'static, State> {
@@ -618,6 +619,99 @@ fn effective(state: &State, profile: ProfileId, role: WorkModelRole) -> Option<W
         .find_map(|provider| family_entry(state, provider, role))
 }
 
+fn effort_key(profile: ProfileId) -> String {
+    format!("work.models.{profile}.lead.effort")
+}
+
+fn effort_name(effort: WorkModelReasoning) -> &'static str {
+    match effort {
+        WorkModelReasoning::Low => "low",
+        WorkModelReasoning::Medium => "medium",
+        WorkModelReasoning::High => "high",
+        WorkModelReasoning::XHigh => "xhigh",
+        WorkModelReasoning::Max => "max",
+    }
+}
+
+fn stored_effort(state: &State, profile: ProfileId) -> Option<WorkModelReasoning> {
+    let key = effort_key(profile);
+    let name = setting(&key).or_else(|| state.efforts.get(&key).cloned())?;
+    [
+        WorkModelReasoning::Low,
+        WorkModelReasoning::Medium,
+        WorkModelReasoning::High,
+        WorkModelReasoning::XHigh,
+        WorkModelReasoning::Max,
+    ]
+    .into_iter()
+    .find(|effort| effort_name(*effort) == name)
+}
+
+/// The provider whose wire `entry` travels: a hosted model's upstream.
+fn upstream(state: &State, entry: &WorkModelEntry) -> Option<WorkModelProvider> {
+    match entry.model.provider {
+        P::Cloud => state
+            .cloud
+            .iter()
+            .find(|model| model.entry.id == entry.id)
+            .map(|model| model.upstream),
+        provider => Some(provider),
+    }
+}
+
+/// The efforts `entry` takes as a lead, weakest first; empty when it has no
+/// reasoning its wire can set.
+fn efforts(state: &State, entry: &WorkModelEntry) -> Vec<WorkModelReasoning> {
+    match upstream(state, entry) {
+        Some(upstream) if entry.supports.reasoning => models::efforts(upstream, &entry.model.model),
+        _ => Vec::new(),
+    }
+}
+
+/// The effort the lead runs `entry` at for `profile`: the person's choice,
+/// nearest to what the model takes, else the model's default.
+fn effort_for(
+    state: &State,
+    profile: ProfileId,
+    entry: &WorkModelEntry,
+) -> Option<WorkModelReasoning> {
+    let levels = efforts(state, entry);
+    match stored_effort(state, profile) {
+        Some(chosen) => models::nearest_effort(&levels, chosen),
+        None => models::default_effort(upstream(state, entry)?, &entry.model.model, &levels),
+    }
+}
+
+/// The lead's effort for one run in `profile` on `entry`; read once when a
+/// run starts, so a change applies to the next run.
+pub fn lead_effort(profile: ProfileId, entry: &WorkModelEntry) -> Option<WorkModelReasoning> {
+    effort_for(&state(), profile, entry)
+}
+
+/// Stores the lead's effort for `profile`; `None` returns it to each model's default.
+pub fn set_effort(
+    profile: ProfileId,
+    effort: Option<WorkModelReasoning>,
+) -> Result<(), WorkModelError> {
+    let key = effort_key(profile);
+    let value = effort.map(effort_name).unwrap_or_default().to_owned();
+    if SETTINGS.read().ok().is_some_and(|slot| slot.is_some())
+        && !store_setting(key.clone(), value.clone())
+    {
+        return Err(WorkModelError::Unauthorized);
+    }
+    {
+        let mut state = state();
+        if value.is_empty() {
+            state.efforts.remove(&key);
+        } else {
+            state.efforts.insert(key, value);
+        }
+    }
+    notify();
+    Ok(())
+}
+
 /// Tracks the key's standing from real calls: a refusal marks it invalid,
 /// success marks it valid, so Settings and the picker stay truthful.
 struct Observed {
@@ -848,6 +942,10 @@ pub struct WorkModelsView {
     pub cloud_plan: Option<String>,
     /// Hosted models listed for this account but locked by its plan.
     pub cloud_locked: Vec<String>,
+    /// The efforts each entry takes as a lead, for entries that take any.
+    pub efforts: Vec<(String, Vec<WorkModelReasoning>)>,
+    /// The effort the lead runs at now; `None` when its model takes none.
+    pub effort: Option<WorkModelReasoning>,
 }
 
 /// The current view for `profile`.
@@ -855,6 +953,8 @@ pub async fn view(profile: ProfileId) -> WorkModelsView {
     ensure_presence().await;
     let state = state();
     let chosen = ROLES.map(|role| stored_choice(&state, profile, role).map(|entry| entry.id));
+    let effort = effective(&state, profile, WorkModelRole::Lead)
+        .and_then(|lead| effort_for(&state, profile, &lead));
     let effective = ROLES.map(|role| effective(&state, profile, role).map(|entry| entry.id));
     let mut entries = entries(&state);
     for role in ROLES {
@@ -864,6 +964,11 @@ pub async fn view(profile: ProfileId) -> WorkModelsView {
             }
         }
     }
+    let efforts = entries
+        .iter()
+        .map(|entry| (entry.id.clone(), efforts(&state, entry)))
+        .filter(|(_, levels)| !levels.is_empty())
+        .collect();
     let providers = KEYED_PROVIDERS
         .into_iter()
         .map(|provider| WorkProviderView {
@@ -886,6 +991,8 @@ pub async fn view(profile: ProfileId) -> WorkModelsView {
             .filter(|model| !model.available)
             .map(|model| model.entry.id.clone())
             .collect(),
+        efforts,
+        effort,
     }
 }
 
@@ -1452,6 +1559,47 @@ mod tests {
         assert!(state().cloud.is_empty());
         assert!(!ready(hosted).await);
         assert!(stored_choice(&state(), hosted, WorkModelRole::Lead).is_some());
+
+        // The lead's effort is the profile's, held to what each model takes.
+        let tuned = profile_id(44);
+        with_keys(&[P::OpenAi, P::DeepSeek, P::Mistral]);
+        choose(tuned, WorkModelRole::Lead, Some("openai/gpt-6-luna")).unwrap();
+        let view = super::view(tuned).await;
+        assert_eq!(view.effort, Some(WorkModelReasoning::Medium));
+        assert!(view
+            .efforts
+            .iter()
+            .any(|(id, levels)| id == "openai/gpt-6-luna"
+                && levels.last() == Some(&WorkModelReasoning::Max)));
+        assert!(!view
+            .efforts
+            .iter()
+            .any(|(id, _)| id == "mistral/mistral-medium-3-5"));
+        set_effort(tuned, Some(WorkModelReasoning::Max)).unwrap();
+        assert_eq!(
+            super::view(tuned).await.effort,
+            Some(WorkModelReasoning::Max)
+        );
+        let luna = effective(&state(), tuned, WorkModelRole::Lead).unwrap();
+        assert_eq!(lead_effort(tuned, &luna), Some(WorkModelReasoning::Max));
+        choose(tuned, WorkModelRole::Lead, Some("deepseek/deepseek-v4-pro")).unwrap();
+        assert_eq!(
+            super::view(tuned).await.effort,
+            Some(WorkModelReasoning::High)
+        );
+        choose(
+            tuned,
+            WorkModelRole::Lead,
+            Some("mistral/mistral-medium-3-5"),
+        )
+        .unwrap();
+        assert_eq!(super::view(tuned).await.effort, None);
+        set_effort(tuned, None).unwrap();
+        choose(tuned, WorkModelRole::Lead, Some("openai/gpt-6-luna")).unwrap();
+        assert_eq!(
+            super::view(tuned).await.effort,
+            Some(WorkModelReasoning::Medium)
+        );
     }
 
     fn profile_id(id: u128) -> ProfileId {

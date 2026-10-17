@@ -35,6 +35,13 @@
   }
 }
 
+/* A pop-up grows from the row it opened on, so it has no travel of its own. */
+@keyframes ui-select-in {
+  from {
+    transform: scale(0.97);
+  }
+}
+
 @keyframes ui-menu-out {
   to {
     opacity: 0;

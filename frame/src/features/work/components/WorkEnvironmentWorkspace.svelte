@@ -38,12 +38,12 @@
     Pdf01Icon,
     PlusSignIcon,
     ShapeCollectionIcon,
-    StickyNote03Icon,
     Cursor01Icon,
     HandIcon,
     CheckListIcon,
   } from "../lib/icons";
   import WorkBar from "./bar/WorkBar.svelte";
+  import { composerEdge, composerHole } from "../lib/composer-hole";
   import { centreSize, picksSheet } from "./objects/centre";
   import { partAsks } from "./asks/actions";
   import {
@@ -55,6 +55,7 @@
     registrableSite,
   } from "./asks/asks";
   import BarTool from "./bar/BarTool.svelte";
+  import { preferences } from "$domain/preferences";
   import NotePanel from "./bar/NotePanel.svelte";
   import TasksPanel from "./bar/TasksPanel.svelte";
   import BlocksPanel, { type BlockKind } from "./bar/BlocksPanel.svelte";
@@ -804,7 +805,9 @@
     }
   }
   /** The bar's one open panel: a tool's, or the field's own attach. */
-  let panel = $state<"note" | "tabs" | "media" | "attach" | "tasks" | "blocks" | null>(null);
+  let panel = $state<"tabs" | "media" | "attach" | "tasks" | "blocks" | null>(null);
+  /** The blocks panel opens on the kinds of block, or on the person's notes (N). */
+  let blocksView = $state<"blocks" | "notes">("blocks");
   setContext(canvasOpenTasks, () => openPanel("tasks", true));
   /** Work keeps its rail compact: a tool asked for from the app's menus opens here instead. */
   function toolAsked(event: Event) {
@@ -817,7 +820,51 @@
   let attachKind = $state<AttachKind>("tabs");
   let objectivePending = $state(false);
   let composerElement = $state<HTMLElement>();
+  let composerSurface = $state<HTMLElement>();
   let composerHeight = $state(0);
+  // Over a window material the composer paints nothing, so the canvas has a hole the shape of it.
+  // The hole is read from the sheet itself on every frame it changes, so the two never part.
+  $effect(() => {
+    const card = cardHost;
+    const sheet = composerSurface;
+    if (!card || !sheet) return;
+    const root = document.documentElement;
+    const cut = () => {
+      const area = card.getBoundingClientRect();
+      const bar = sheet.getBoundingClientRect();
+      if (!bar.width || !area.width) return;
+      const style = getComputedStyle(sheet);
+      const radius = parseFloat(style.borderTopLeftRadius) || 0;
+      const flare = parseFloat(style.getPropertyValue("--flare")) || 0;
+      // The fillets land on the card's own foot, whole and tangent to it, as the new tab's
+      // notch does at its page's edge; below it the window's material simply continues.
+      const reach = { width: area.width, height: Math.min(area.height, bar.bottom - area.top) };
+      const place = { left: bar.left - area.left, top: bar.top - area.top, width: bar.width };
+      const edge = sheet.querySelector<SVGSVGElement>(".edge");
+      if (edge) {
+        edge.setAttribute("viewBox", `${place.left} ${place.top} ${bar.width} ${bar.height}`);
+        const d = composerEdge(reach, place, radius, flare);
+        for (const path of edge.querySelectorAll("path")) path.setAttribute("d", d);
+      }
+      const material = root.dataset.material;
+      card.style.clipPath =
+        !material || material === "none" ? "" : composerHole(reach, place, radius, flare);
+    };
+    const observer = new ResizeObserver(cut);
+    observer.observe(card);
+    observer.observe(sheet);
+    observer.observe(sheet.parentElement ?? sheet);
+    const materials = new MutationObserver(cut);
+    materials.observe(root, { attributes: true, attributeFilter: ["data-material"] });
+    window.addEventListener("resize", cut);
+    cut();
+    return () => {
+      observer.disconnect();
+      materials.disconnect();
+      window.removeEventListener("resize", cut);
+      card.style.clipPath = "";
+    };
+  });
   $effect(() => {
     const element = composerElement;
     if (!element) {
@@ -1968,10 +2015,14 @@
     if (!snapshot || pane || lifted || takeover) return;
     const key = event.key.toLowerCase();
     if (key === "v" || key === "h") setPointerTool(key === "v" ? "select" : "hand");
-    else if (key === "n") openPanel("note", true);
-    else if (key === "a") openPanel("media", true);
-    else if (key === "b") openPanel("blocks", true);
-    else if (key === "t") openPanel("tasks", true);
+    else if (key === "n" && preferences.enabled("notes")) {
+      blocksView = "notes";
+      openPanel("blocks", true);
+    } else if (key === "a") openPanel("media", true);
+    else if (key === "b") {
+      blocksView = "blocks";
+      openPanel("blocks", true);
+    } else if (key === "t" && preferences.enabled("tasks")) openPanel("tasks", true);
     else if (key === "/" && aiEnabled)
       composerElement?.querySelector<HTMLElement>("textarea")?.focus();
     else return;
@@ -2290,6 +2341,19 @@
         onattach={(ids) => void attachResources(ids)}
       />{/snippet}</AttachPanel
   >{/snippet}
+{#snippet notesList(back: () => void)}{#if notes}<NotePanel
+      {notes}
+      placed={snapshot?.elements.flatMap((element) =>
+        element.reference.kind === "resource" ? [element.reference.resource] : [],
+      ) ?? []}
+      {busy}
+      oncreate={() => {
+        panel = null;
+        void createNote();
+      }}
+      onpick={(id) => void placeNote(id)}
+      onback={back}
+    />{/if}{/snippet}
 {#snippet barTools()}
   {@const hand = pointerTool() === "hand"}
   <BarTool
@@ -2301,47 +2365,32 @@
   />
   <span class="tool-rule" aria-hidden="true"></span>
   <BarTool
-    icon={StickyNote03Icon}
-    label={m.work_tool_note()}
-    keys={["N"]}
-    disabled={!snapshot}
-    open={panel === "note"}
-    onopenchange={(open) => openPanel("note", open)}
-    >{#snippet content()}{#if notes}<NotePanel
-          {notes}
-          placed={snapshot?.elements.flatMap((element) =>
-            element.reference.kind === "resource" ? [element.reference.resource] : [],
-          ) ?? []}
-          {busy}
-          oncreate={() => {
-            panel = null;
-            void createNote();
-          }}
-          onpick={(id) => void placeNote(id)}
-        />{/if}{/snippet}</BarTool
-  >
-  <BarTool
     icon={ShapeCollectionIcon}
     label={m.work_tool_blocks()}
     keys={["B"]}
     disabled={!snapshot}
     open={panel === "blocks"}
-    onopenchange={(open) => openPanel("blocks", open)}
+    onopenchange={(open) => {
+      if (open && panel !== "blocks") blocksView = "blocks";
+      openPanel("blocks", open);
+    }}
     >{#snippet content()}<BlocksPanel
         {busy}
+        bind:view={blocksView}
+        notes={preferences.enabled("notes") && notes ? notesList : undefined}
         onpick={(kind) => void createBlock(kind)}
       />{/snippet}</BarTool
   >
-  <BarTool
-    icon={CheckListIcon}
-    label={m.panel_tasks()}
-    keys={["T"]}
-    disabled={!snapshot}
-    wide
-    open={panel === "tasks"}
-    onopenchange={(open) => openPanel("tasks", open)}
-    >{#snippet content()}<TasksPanel profile={session.profile} />{/snippet}</BarTool
-  >
+  {#if preferences.enabled("tasks")}<BarTool
+      icon={CheckListIcon}
+      label={m.panel_tasks()}
+      keys={["T"]}
+      disabled={!snapshot}
+      wide
+      open={panel === "tasks"}
+      onopenchange={(open) => openPanel("tasks", open)}
+      >{#snippet content()}<TasksPanel profile={session.profile} />{/snippet}</BarTool
+    >{/if}
   <BarTool
     icon={PlusSignIcon}
     label={m.work_tool_attach()}
@@ -2879,6 +2928,7 @@
     {#if blockSaveFailed}<p role="alert">{m.resource_conflict()}</p>{/if}
     {#if aiEnabled}<WorkBar
         bind:ref={composerElement}
+        bind:surface={composerSurface}
         bind:value={session.composer}
         placeholder={lineRunning
           ? m.work_composer_steer()
@@ -2940,30 +2990,29 @@
     pointer-events: none;
   }
 
-  /* Solid behind the title and the island, then easing out: nothing reads through them. */
+  /* Solid only behind the title and the island, then a short, soft ease out. */
   .edge-scrim.top {
     inset-block-start: 0;
-    block-size: 112px;
+    block-size: 72px;
     background: linear-gradient(
       to bottom,
-      var(--color-canvas) 0 44px,
-      color-mix(in srgb, var(--color-canvas) 72%, transparent) 64px,
-      color-mix(in srgb, var(--color-canvas) 28%, transparent) 88px,
-      transparent 112px
+      var(--color-canvas) 0 34px,
+      color-mix(in srgb, var(--color-canvas) 62%, transparent) 46px,
+      color-mix(in srgb, var(--color-canvas) 20%, transparent) 60px,
+      transparent 72px
     );
   }
 
-  /* Under the bar, however tall its context makes it: solid where the bar stands,
-     then easing out, so nothing reads through or ends in a hard line above it. */
+  /* Under the bar, however tall its context makes it: solid where the bar stands, then a short ease out. */
   .edge-scrim.bottom {
     inset-block-end: 0;
-    block-size: calc(var(--dock, 64px) + 72px);
+    block-size: calc(var(--dock, 64px) + 40px);
     background: linear-gradient(
       to top,
-      var(--color-canvas) 0 calc(var(--dock, 64px) * 0.6),
-      color-mix(in srgb, var(--color-canvas) 72%, transparent) calc(var(--dock, 64px) + 16px),
-      color-mix(in srgb, var(--color-canvas) 28%, transparent) calc(var(--dock, 64px) + 44px),
-      transparent calc(var(--dock, 64px) + 72px)
+      var(--color-canvas) 0 calc(var(--dock, 64px) * 0.5),
+      color-mix(in srgb, var(--color-canvas) 62%, transparent) calc(var(--dock, 64px) + 8px),
+      color-mix(in srgb, var(--color-canvas) 20%, transparent) calc(var(--dock, 64px) + 24px),
+      transparent calc(var(--dock, 64px) + 40px)
     );
   }
 

@@ -24,6 +24,7 @@
     trailing,
     onsubmit,
     ref = $bindable(),
+    surface = $bindable(),
   }: {
     value?: string;
     placeholder: string;
@@ -41,11 +42,12 @@
     trailing?: Snippet;
     onsubmit: () => void;
     ref?: HTMLElement;
+    /** The sheet the words sit on; the canvas cuts its window-through hole to its shape. */
+    surface?: HTMLElement;
   } = $props();
   const id = $props.id();
   let textarea = $state<HTMLTextAreaElement>();
   let focused = $state(false);
-  let surface = $state<HTMLElement>();
   /** A menu or popover the field's own controls opened: it may live in a portal, but it is the bar's. */
   let menu = $state(false);
   const opened = (element: Element | undefined) =>
@@ -69,7 +71,9 @@
   /** Dictating: the row is the live voice view until the words land. */
   let dictating = $state(false);
   let voice = $state<{ toggle(): void }>();
-  const engaged = $derived(focused || menu || !!value.trim() || holding || dictating);
+  /** There are words to send: the mic gives way to Send. */
+  const writing = $derived(!!value.trim());
+  const engaged = $derived(focused || menu || writing || holding || dictating);
   /**
    * WebKit does not focus a button it clicks: a press inside the bar blurs
    * the field with nowhere named to go. The bar holds through its own
@@ -88,8 +92,12 @@
     void value;
     grow();
   });
+  /** Blank lines are not a message: the bar lets go of them with the focus and rests at its own height. */
+  $effect(() => {
+    if (!engaged && value && !value.trim()) value = "";
+  });
   function submit() {
-    if (value.trim() && !disabled && !dictating) onsubmit();
+    if (writing && !disabled && !dictating) onsubmit();
   }
 
   function dictate() {
@@ -128,7 +136,7 @@
       event.preventDefault();
       submit();
     }
-    if (event.key === "Escape" && !value.trim()) textarea?.blur();
+    if (event.key === "Escape" && !writing) textarea?.blur();
   }
 </script>
 
@@ -207,27 +215,42 @@
           {#if trailing && engaged}{@render trailing()}
           {:else if model && engaged}<span class="model" title={m.work_bar_model()}>{model}</span
             >{/if}
-          <button
-            type="button"
-            class="mic"
-            aria-label={m.voice_start()}
-            title={dictateHint}
-            {disabled}
-            onclick={dictate}
-          >
-            <Icon icon={Mic01Icon} size={17} strokeWidth={1.6} />
-          </button>
-          {#if value.trim()}<button
+          <div class="action" data-send={writing}>
+            <button
+              type="button"
+              class="mic"
+              aria-label={m.voice_start()}
+              title={dictateHint}
+              {disabled}
+              inert={writing}
+              onclick={dictate}
+            >
+              <Icon icon={Mic01Icon} size={17} strokeWidth={1.6} />
+            </button>
+            <button
               type="submit"
               class="send"
               aria-label={m.work_env_send()}
               disabled={disabled || busy}
+              inert={!writing}
             >
               <Icon icon={ArrowUp02Icon} size={16} strokeWidth={2.2} />
-            </button>{/if}
+            </button>
+          </div>
         </div>
       </div>
     </form>
+    <svg class="edge" aria-hidden="true">
+      <defs>
+        <linearGradient id="{id}-edge" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" class="line-stop" />
+          <stop offset="0.35" class="line-stop" stop-opacity="0.85" />
+          <stop offset="1" class="line-stop" stop-opacity="0.12" />
+        </linearGradient>
+      </defs>
+      <path class="body" />
+      <path class="line" stroke="url(#{id}-edge)" />
+    </svg>
   </div>
 </div>
 
@@ -268,6 +291,12 @@
   }
 
   .surface {
+    --flare: 20px;
+    --edge: var(--color-border-strong);
+    --glow: color-mix(in srgb, black 26%, transparent);
+    --fill: var(--color-chrome);
+
+    position: relative;
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
     grid-template-areas: "tools field";
@@ -276,11 +305,39 @@
     box-sizing: border-box;
     padding: 8px 8px 10px;
     border-radius: var(--radius-panel) var(--radius-panel) 0 0;
-
-    /* Solid, like the island: a blur would be redrawn from the canvas under it every frame a pan moves. */
-    background: color-mix(in srgb, var(--color-float) var(--wash-raised), var(--color-canvas));
-    box-shadow: var(--shadow-sheet);
+    isolation: isolate;
+    box-shadow: 0 -10px 40px -20px var(--glow);
     transition: grid-template-columns var(--motion-slow) var(--ease-emphasized);
+  }
+
+  :global(:root:not([data-material="none"])[data-material]) .surface {
+    --fill: transparent;
+  }
+
+  /* The sheet is one drawn shape: its fill and its hairline follow the outline the canvas cuts its
+     hole to (see composer-hole.ts), fillets down to the card's foot included, so the fill, the
+     hole and the line cannot part. Over a material the fill is nothing and the window shows. */
+  .edge {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    inline-size: 100%;
+    block-size: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  .body {
+    fill: var(--fill);
+  }
+
+  .line {
+    fill: none;
+    stroke-width: 1;
+  }
+
+  .line-stop {
+    stop-color: var(--edge);
   }
 
   .tools {
@@ -414,24 +471,45 @@
     white-space: nowrap;
   }
 
-  .mic {
+  /* The mic and Send share one place: whichever the field needs is there, the other gone. */
+  .action {
     display: grid;
     flex: none;
+    place-items: center;
+  }
+
+  .mic,
+  .send {
+    display: grid;
+    grid-area: 1 / 1;
     place-items: center;
     inline-size: 30px;
     block-size: 30px;
     margin: 2px;
     border: 0;
     border-radius: var(--radius-capsule);
-    background: transparent;
-    color: var(--color-muted);
     cursor: default;
     transition:
       background-color var(--motion-fast) var(--ease-out),
-      color var(--motion-fast) var(--ease-out);
+      color var(--motion-fast) var(--ease-out),
+      opacity var(--motion-base) var(--ease-out),
+      scale var(--motion-base) var(--ease-spring);
   }
 
-  .mic:focus-visible {
+  .mic {
+    background: transparent;
+    color: var(--color-muted);
+  }
+
+  .send {
+    background: var(--color-lit);
+    color: var(--color-on-lit);
+    opacity: 0;
+    scale: 0.6;
+  }
+
+  .mic:focus-visible,
+  .send:focus-visible {
     outline: 2px solid var(--color-ring);
     outline-offset: 2px;
   }
@@ -449,36 +527,6 @@
     display: none;
   }
 
-  .send {
-    display: grid;
-    place-items: center;
-    flex: none;
-    inline-size: 30px;
-    block-size: 30px;
-    margin: 2px;
-    border: 0;
-    border-radius: var(--radius-capsule);
-    background: var(--color-lit);
-    color: var(--color-on-lit);
-    cursor: default;
-    animation: send-in var(--motion-base) var(--ease-spring);
-    transition:
-      background-color var(--motion-fast) var(--ease-out),
-      scale var(--motion-base) var(--ease-spring);
-  }
-
-  @keyframes send-in {
-    from {
-      opacity: 0;
-      scale: 0.6;
-    }
-  }
-
-  .send:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: 2px;
-  }
-
   .send:disabled {
     background: var(--color-fill);
     color: var(--color-faint);
@@ -490,6 +538,17 @@
 
   .send:active:not(:disabled) {
     scale: 0.92;
+    transition-duration: var(--motion-instant);
+  }
+
+  .action[data-send="true"] .mic {
+    opacity: 0;
+    scale: 0.6;
+  }
+
+  .action[data-send="true"] .send {
+    opacity: 1;
+    scale: 1;
   }
 
   .sr-only {
@@ -501,15 +560,15 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
+    .mic,
     .send {
-      animation: none;
+      transition: opacity var(--motion-fast) linear;
     }
   }
 
   @media (forced-colors: active) {
-    .surface {
-      border: 1px solid ButtonText;
-      backdrop-filter: none;
+    .line {
+      stroke: ButtonText;
     }
   }
 </style>

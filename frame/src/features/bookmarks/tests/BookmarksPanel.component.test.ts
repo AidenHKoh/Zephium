@@ -3,6 +3,7 @@ import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
 import "$styles/global.css";
 import type { BookmarkCall, BookmarkResponse, BookmarkView } from "$shared/ipc/bindings";
+import * as compose from "../lib/compose.svelte";
 import * as reveal from "../lib/reveal.svelte";
 import BookmarksPanel from "../components/BookmarksPanel.svelte";
 
@@ -145,7 +146,9 @@ test("adds a page by its address and says when it is not one", async () => {
     return answer(call);
   });
   const screen = await render(BookmarksPanel, { profile: "p", query: "" });
-  await screen.getByRole("button", { name: "Add bookmark" }).click();
+  await expect.element(screen.getByRole("button", { name: /Zephium/u })).toBeVisible();
+  // The header's Add menu asks; the panel opens the form.
+  compose.request("link");
   const address = screen.getByRole("textbox", { name: "Address" });
   await userEvent.type(address, "not an address{Enter}");
   await expect.element(screen.getByRole("alert")).toHaveTextContent(/web address/u);
@@ -163,6 +166,28 @@ test("adds a page by its address and says when it is not one", async () => {
     }),
   );
   await expect.element(screen.getByRole("form")).not.toBeInTheDocument();
+});
+
+test("a new folder asked for from the header is made and named in place", async () => {
+  native.call.mockImplementation(async (_profile: string, call: BookmarkCall) =>
+    call.kind === "add_folder" ? { kind: "saved", id: "9" } : answer(call),
+  );
+  const screen = await render(BookmarksPanel, { profile: "p", query: "" });
+  await expect.element(screen.getByRole("button", { name: /Zephium/u })).toBeVisible();
+  compose.request("folder");
+  await vi.waitFor(() =>
+    expect(native.call).toHaveBeenCalledWith("p", expect.objectContaining({ kind: "add_folder" })),
+  );
+  expect(compose.requested()).toBeNull();
+});
+
+test("folders end in a chevron, not a count, and the top level has no crumb row", async () => {
+  native.call.mockImplementation(async (_profile: string, call: BookmarkCall) => answer(call));
+  const screen = await render(BookmarksPanel, { profile: "p", query: "" });
+  await expect.element(screen.getByRole("button", { name: /Zephium/u })).toBeVisible();
+  expect(screen.container.querySelector(".crumbs")).toBeNull();
+  expect(screen.container.textContent).not.toMatch(/\d+ items/u);
+  expect(screen.container.querySelectorAll(".chevron")).toHaveLength(1);
 });
 
 test("dragging a bookmark reorders it, and onto a folder files it there", async () => {

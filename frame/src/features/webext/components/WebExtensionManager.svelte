@@ -28,7 +28,7 @@
     <IconButton
       icon={ArrowLeft02Icon}
       label={m.settings_back()}
-      onclick={() => void browser.open(null)}
+      onclick={() => void browser.close()}
     /><span class="toolbar-current">{m.webext_page_title()}</span>
     <span class="spacer"></span>
     <Menu

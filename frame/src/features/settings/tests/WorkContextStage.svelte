@@ -11,7 +11,6 @@
     <div class="settings-page">
       <div class="settings-view">
         <header class="settings-page-heading">
-          <span class="settings-eyebrow">Settings</span>
           <h1>{title}</h1>
           <p>{description}</p>
         </header>

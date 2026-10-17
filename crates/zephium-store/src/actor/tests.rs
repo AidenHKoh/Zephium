@@ -33,6 +33,7 @@ fn tab(id: u128, space: SpaceId, url: &str) -> PersistedItem {
             url: url.into(),
             title: "T".into(),
             zoom: 1.0,
+            last_active_ms: None,
         },
     }
 }
@@ -244,6 +245,7 @@ fn sample() -> SessionState {
             id: space,
             profile,
             name: "Space".into(),
+            look: Default::default(),
         }],
         items: vec![
             PersistedItem {
@@ -268,6 +270,7 @@ fn sample() -> SessionState {
                     url: "https://docs.rs/".into(),
                     title: "Docs".into(),
                     zoom: 1.5,
+                    last_active_ms: None,
                 },
             },
             tab(10, space, "https://example.com/"),
@@ -296,6 +299,7 @@ fn two_profile_sample() -> SessionState {
         id: SpaceId::from(4),
         profile: ProfileId::from(3),
         name: "Work".into(),
+        look: Default::default(),
     });
     state
 }
@@ -2801,6 +2805,7 @@ fn maximum_valid_session_fits_snapshot_budget() {
                 url: url.clone(),
                 title: "\\".repeat(zephium_core::item::MAX_PAGE_TITLE_CHARS),
                 zoom: 1.0,
+                last_active_ms: None,
             },
         })
         .collect();
@@ -2814,6 +2819,7 @@ fn maximum_valid_session_fits_snapshot_budget() {
             id: space,
             profile,
             name: "Space".into(),
+            look: Default::default(),
         }],
         items,
         active_space: Some(space),
@@ -3252,6 +3258,7 @@ fn profile_deletion_rejects_a_hard_link_to_another_profile_database() {
             id: SpaceId::from(4),
             profile: survivor,
             name: "Work".into(),
+            look: Default::default(),
         }],
         items: Vec::new(),
         active_space: Some(SpaceId::from(4)),

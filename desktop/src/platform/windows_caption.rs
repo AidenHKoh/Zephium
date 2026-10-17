@@ -1,5 +1,6 @@
-//! An owned native popup stays above child WebViews without resizing content.
-//! A near-transparent edge target reveals a compact native group; timers run only during transitions.
+//! The window's controls are drawn by chrome in its title band. What stays
+//! native is the top resize grip: a near-transparent edge target above the
+//! child WebViews, which would otherwise consume the frameless top border.
 use tauri::WebviewWindow;
 use windows::core::w;
 use windows::Win32::{
@@ -18,6 +19,7 @@ const HIDE: usize = ID + 1;
 const FADE: usize = ID + 2;
 // A page filling the screen owns every pixel, the top edge included.
 static SUPPRESSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+const CHROME_OWNS_CONTROLS: bool = true;
 struct State {
     owner: HWND,
     strip: HWND,
@@ -213,7 +215,7 @@ unsafe fn layout(p: *mut State) {
         origin.x,
         origin.y,
         rect.right.max(1),
-        border + (6.0 * scale).ceil() as i32,
+        border,
         SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
     );
     for (index, hwnd) in (*p).buttons.into_iter().enumerate() {
@@ -334,7 +336,7 @@ unsafe fn transition(p: *mut State, expanded: bool) {
     layout(p);
 }
 unsafe fn reveal(p: *mut State) {
-    if (*p).changing_state || (*p).sizing {
+    if CHROME_OWNS_CONTROLS || (*p).changing_state || (*p).sizing {
         return;
     }
     let _ = KillTimer(Some((*p).strip), HIDE);
@@ -440,7 +442,7 @@ unsafe extern "system" fn owner_proc(
         drop(Box::from_raw(p));
         return DefSubclassProc(hwnd, msg, w, l);
     }
-    if msg == WM_SYSKEYDOWN && w.0 == VK_F10.0 as usize {
+    if !CHROME_OWNS_CONTROLS && msg == WM_SYSKEYDOWN && w.0 == VK_F10.0 as usize {
         reveal(p);
         let _ = SetFocus(Some((*p).buttons[0]));
         return LRESULT(0);

@@ -1,171 +1,398 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { UserIcon } from "@hugeicons/core-free-icons";
-  import { accountSession, initials, planName } from "$domain/account";
+  import {
+    AccountSetting01Icon,
+    CubeIcon,
+    Settings02Icon,
+    UserIcon,
+  } from "@hugeicons/core-free-icons";
+  import { accountSession, planName, usageTone } from "$domain/account";
+  import { keymap } from "$domain/keymap";
+  import { drawn, profiles } from "$domain/profiles";
+  import { tabs } from "$domain/tabs";
   import { commands } from "$shared/ipc/bindings";
   import * as m from "$shared/i18n/messages";
+  import { acceleratorKeys } from "$shared/lib/accelerator";
+  import { IS_MAC } from "$shared/platform";
   import Disclosure from "$shared/ui/Disclosure";
   import Icon from "$shared/ui/Icon";
+  import ProfileAvatar from "$shared/ui/ProfileAvatar";
+  import "$shared/ui/Shine/shine.css";
 
-  /** The profile's name, shown while no account is signed in. */
+  /** The profile's name until the window's own profile is known. */
   let { name = "" }: { name?: string } = $props();
 
   onMount(() => {
     void accountSession.retain();
-    return () => accountSession.release();
+    void profiles.retain();
+    return () => {
+      accountSession.release();
+      profiles.release();
+    };
   });
 
   const account = $derived(accountSession.account());
   const signedIn = $derived(account?.signed_in === true);
-  const letters = $derived(signedIn ? initials(account?.email, account?.name) : "");
-  const heading = $derived(signedIn ? account?.email : name);
-  const summary = $derived.by(() => {
-    if (!signedIn || !account) return null;
-    const plan = planName(account.plan);
-    const used = account.usage?.used_percent;
-    const parts = [
-      plan ? m.account_plan_line({ plan }) : null,
-      used != null ? m.ai_cloud_used({ percent: used }) : null,
-    ];
-    return parts.filter(Boolean).join(" · ") || null;
+  const who = $derived(tabs.profile()?.name || profiles.current()?.name || name);
+  const shown = $derived(who || m.browse_profile_settings());
+  const others = $derived(profiles.others());
+  const chosen = $derived.by(() => {
+    const current = profiles.current();
+    return current && current.avatar.revision > 0 ? drawn(current) : null;
   });
 
+  const used = $derived(signedIn ? (account?.usage?.used_percent ?? null) : null);
+  const tone = $derived(usageTone(used));
+  const standing = $derived.by(() => {
+    if (!signedIn || !account) return null;
+    const parts = [
+      planName(account.plan),
+      used != null ? m.ai_cloud_used({ percent: used }) : null,
+    ].filter(Boolean);
+    return parts.join(" · ") || account.email || null;
+  });
+
+  function keysFor(command: string) {
+    const accelerator = keymap.all().find((entry) => entry.id === command)?.accelerator;
+    return accelerator ? acceleratorKeys(accelerator, IS_MAC).join(IS_MAC ? "" : "+") : null;
+  }
   const run = (id: string) => void commands.runCommand(id).catch(() => {});
 </script>
 
+{#snippet face(size: number)}{#if chosen}<ProfileAvatar view={chosen} {size} />{:else}<span
+      class="plain"
+      style:--size="{size}px"
+      aria-hidden="true"
+      ><Icon icon={UserIcon} size={Math.round(size * 0.58)} strokeWidth={1.8} /></span
+    >{/if}{/snippet}
+
+{#snippet row(
+  icon: typeof UserIcon,
+  label: string,
+  caption: string | null,
+  step: number,
+  go: () => void,
+  tint?: string,
+)}
+  <button type="button" role="menuitem" class="ui-menu-item row" style:--step={step} onclick={go}>
+    <span class="ui-menu-icon"><Icon {icon} size={16} /></span>
+    <span class="label">{label}</span>
+    {#if caption}<span class="caption" data-tone={tint}>{caption}</span>{/if}
+  </button>
+{/snippet}
+
 <!--
-  The rail's own lightweight menu rather than the page-wide one: this loads
-  with Work into the chrome, which pays for every dependency at launch.
+  Work's foot is the same figure as Browse's: you, as a lit circle, opening onto
+  who you are and what belongs to the work: your account, its models, settings.
+  It is the rail's own light menu rather than the page-wide one, since it
+  loads with Work into a chrome that pays for every dependency at launch.
 -->
-<Disclosure label={m.account_menu()} menu triggerClass="account-trigger" panelClass="account-panel">
-  {#snippet trigger()}<span class="avatar" data-signed-in={signedIn} aria-hidden="true"
-      >{#if letters}{letters}{:else}<Icon icon={UserIcon} size={15} strokeWidth={1.7} />{/if}</span
-    >{/snippet}
-  {#if heading}<div class="heading" role="presentation">{heading}</div>{/if}
-  {#if summary}<div class="heading summary" role="presentation">{summary}</div>{/if}
-  {#if account?.available}<button
+<Disclosure
+  label={m.account_menu()}
+  menu
+  triggerClass="work-case"
+  panelClass="work-menu ui-shine-sheet sidebar-softens"
+>
+  {#snippet trigger()}{#if chosen}<ProfileAvatar view={chosen} size={36} />{:else}<Icon
+        icon={UserIcon}
+        size={16}
+        strokeWidth={1.7}
+      />{/if}{#if tone !== "calm"}<span class="pip" data-tone={tone} aria-hidden="true"
+      ></span>{/if}{/snippet}
+  <div class="head" role="presentation" style:--step={3}>
+    <button
       type="button"
       role="menuitem"
-      class="ui-menu-item item"
-      onclick={() => run("settings.account")}
-      >{signedIn ? m.account_manage() : m.ai_cloud_sign_in()}</button
-    >{/if}
-  <button type="button" role="menuitem" class="ui-menu-item item" onclick={() => run("settings.ai")}
-    >{m.work_model_manage()}</button
-  >
-  <div class="separator" role="separator"></div>
-  <button
-    type="button"
-    role="menuitem"
-    class="ui-menu-item item"
-    onclick={() => run("browser.settings")}
-    >{m.account_settings()}<span class="hint" aria-hidden="true">⌘,</span></button
-  >
+      class="ui-menu-item me"
+      aria-label={`${shown} — ${m.browse_profile_settings()}`}
+      title={m.browse_profile_settings()}
+      onclick={() => run("settings.profiles")}
+    >
+      {@render face(22)}
+      <span class="me-name">{shown}</span>
+    </button>
+    {#if others.length > 0}<div class="chips" role="presentation">
+        {#each others as profile (profile.id)}
+          <button
+            type="button"
+            role="menuitem"
+            class="chip"
+            title={profile.name}
+            aria-label={m.profiles_menu_label({ name: profile.name })}
+            onclick={() => void profiles.switchTo(profile.id)}
+            ><ProfileAvatar view={drawn(profile)} size={20} /></button
+          >
+        {/each}
+      </div>{/if}
+  </div>
+  <div class="rule" role="separator"></div>
+  {#if account?.available}
+    {@render row(
+      signedIn ? AccountSetting01Icon : UserIcon,
+      signedIn ? m.account_menu() : m.ai_cloud_sign_in(),
+      standing,
+      2,
+      () => run("settings.account"),
+      tone,
+    )}
+  {/if}
+  {@render row(CubeIcon, m.settings_models(), null, 1, () => run("settings.ai"))}
+  <div class="rule" role="separator"></div>
+  {@render row(Settings02Icon, m.command_browser_settings(), keysFor("browser.settings"), 0, () =>
+    run("browser.settings"),
+  )}
 </Disclosure>
 
 <style>
-  /* Out of the rail, beside it, its foot level with the trigger's. */
-  :global(.account-panel.ui-disclosure-panel) {
+  /* Up out of the trigger, clear of it and of the window's foot, the way the
+     tool stack rises from Browse's: fully on screen at any rail or column width. */
+  :global(.work-menu.ui-disclosure-panel) {
     top: auto;
-    bottom: 0;
-    inset-inline-start: calc(100% + 10px);
-    min-width: 220px;
-    max-width: 300px;
+    bottom: calc(100% + 12px);
+    inset-inline-start: 0;
+    min-width: 232px;
+    max-width: 320px;
+    max-height: calc(100vh - 140px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
     transform-origin: bottom left;
-    translate: -4px 0;
+    translate: 0 6px;
   }
 
-  :global(.account-panel.ui-disclosure-panel[data-open="true"]) {
+  :global(.work-menu.ui-disclosure-panel[data-open="true"]) {
     translate: 0 0;
   }
 
-  .heading {
-    overflow: hidden;
-    padding: 8px var(--menu-item-inset) 2px;
-    color: var(--color-text);
-    font-size: var(--text-label);
-    font-weight: 550;
-    line-height: 16px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .summary {
-    padding-block: 0 6px;
-    color: var(--color-faint);
-    font-weight: 450;
-  }
-
-  .item {
-    inline-size: 100%;
-    border: 0;
-    background: transparent;
-    font: inherit;
-    text-align: start;
-  }
-
-  .item:hover,
-  .item:focus-visible {
-    background: var(--row-active);
-  }
-
-  .item:active {
-    background: var(--row-pressed);
-  }
-
-  .hint {
-    margin-inline-start: auto;
-    padding-inline-start: 28px;
-    color: var(--color-faint);
-    font-size: var(--text-label);
-  }
-
-  .separator {
-    flex: none;
-    height: 1px;
-    margin: 5px calc(var(--menu-pad) * -1);
-    background: var(--color-menu-separator);
-  }
-
-  :global(.account-trigger) {
+  /* The profile as the tab list's own foot draws it: lit like the current tab,
+     with light caught only along its top edge. */
+  :global(.work-case) {
+    position: relative;
     display: grid;
     inline-size: 36px;
     block-size: 36px;
     padding: 0;
     border: 0;
     border-radius: var(--radius-capsule);
-    background: transparent;
+    background: var(--row-active);
+    box-shadow: var(--shine-top);
+    color: var(--color-label-secondary);
     place-items: center;
     cursor: default;
     pointer-events: auto;
-    transition: background-color var(--motion-fast) var(--ease-out);
+    transition:
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out),
+      scale var(--motion-slow) var(--ease-spring);
   }
 
-  :global(.account-trigger:hover),
-  :global(.account-trigger[data-state="open"]) {
-    background: var(--color-fill-hover);
+  :global(.work-case:hover),
+  :global(.work-case[data-state="open"]) {
+    background: var(--row-pressed);
+    color: var(--color-text);
   }
 
-  :global(.account-trigger:focus-visible) {
+  :global(.work-case:active) {
+    scale: 0.94;
+    transition-duration: var(--motion-instant);
+  }
+
+  :global(.work-case:focus-visible) {
     outline: 2px solid var(--color-ring);
     outline-offset: 1px;
   }
 
-  .avatar {
-    display: grid;
-    inline-size: 26px;
-    block-size: 26px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-fill-strong);
-    color: var(--color-label-secondary);
-    font-size: 10.5px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    place-items: center;
-    box-shadow: inset 0 0 0 0.5px var(--color-border);
+  :global(.work-case .profile-avatar) {
+    pointer-events: none;
   }
 
-  .avatar[data-signed-in="true"] {
+  :global(.work-case:has(.profile-avatar)::after) {
+    position: absolute;
+    border-radius: inherit;
+    box-shadow: var(--shine-top);
+    content: "";
+    inset: 0;
+    pointer-events: none;
+  }
+
+  /* The agent stops when the included usage runs out, so the figure says so from the rail. */
+  .pip {
+    position: absolute;
+    inset-block-end: 0;
+    inset-inline-end: 0;
+    inline-size: 9px;
+    block-size: 9px;
+    border-radius: 50%;
+    background: var(--color-warning, var(--color-soft-lemon));
+    box-shadow: 0 0 0 2px var(--color-chrome);
+  }
+
+  .pip[data-tone="full"] {
+    background: var(--color-danger);
+  }
+
+  .plain {
+    display: grid;
+    flex: none;
+    inline-size: var(--size);
+    block-size: var(--size);
+    border-radius: var(--radius-capsule);
+    background: var(--row-active);
+    box-shadow: var(--shine-top);
+    color: var(--color-label-secondary);
+    place-items: center;
+  }
+
+  .head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .me {
+    flex: 1;
+    min-inline-size: 0;
+    min-block-size: 34px;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    text-align: start;
+  }
+
+  .me-name {
+    overflow: hidden;
     color: var(--color-text);
+    font-size: var(--text-body);
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .chips {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 2px;
+    padding-inline-end: 2px;
+  }
+
+  .chip {
+    display: grid;
+    inline-size: 28px;
+    block-size: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    cursor: default;
+    outline: none;
+    place-items: center;
+    transition:
+      background-color var(--motion-instant) var(--ease-smooth),
+      scale var(--motion-base) var(--ease-spring);
+  }
+
+  .chip:hover,
+  .chip:focus-visible {
+    background: var(--row-active);
+  }
+
+  .chip:focus-visible {
+    box-shadow: inset 0 0 0 1.5px var(--color-text);
+  }
+
+  .chip:active {
+    scale: 0.92;
+    background: var(--row-pressed);
+  }
+
+  .row {
+    inline-size: 100%;
+    min-block-size: 32px;
+    padding-block: 4px;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    font-size: var(--text-body);
+    text-align: start;
+  }
+
+  .label {
+    white-space: nowrap;
+  }
+
+  /* A caption, not a keycap: it belongs to the row and says what stands behind it. */
+  .caption {
+    overflow: hidden;
+    margin-inline-start: auto;
+    padding-inline-start: 24px;
+    color: var(--color-faint);
+    font-size: var(--text-label);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.02em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: color var(--motion-instant) var(--ease-smooth);
+  }
+
+  .caption[data-tone="high"] {
+    color: var(--color-warning, var(--color-muted));
+  }
+
+  .caption[data-tone="full"] {
+    color: var(--color-danger);
+  }
+
+  .row:hover .caption,
+  .row:focus-visible .caption {
+    color: var(--color-muted);
+  }
+
+  :is(.row, .me):hover,
+  :is(.row, .me):focus-visible {
+    outline: none;
+    background: var(--row-active);
+  }
+
+  :is(.row, .me):active {
+    background: var(--row-pressed);
+  }
+
+  .rule {
+    block-size: 1px;
+    margin: 4px var(--menu-item-inset);
+    background: var(--color-border);
+  }
+
+  /* Each row settles in behind the one below it, so the menu unfolds from its foot. */
+  :global(.work-menu[data-open="true"]) :is(.row, .head) {
+    animation: account-row-in var(--motion-slow) var(--ease-out) both;
+    animation-delay: calc(var(--step) * 14ms);
+  }
+
+  /* stylelint-disable-next-line keyframes-name-pattern -- Svelte's global prefix. */
+  @keyframes -global-account-row-in {
+    from {
+      opacity: 0;
+      translate: 0 6px;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :global(.work-case),
+    .chip,
+    .caption {
+      transition: none;
+    }
+
+    :global(.work-menu[data-open="true"]) :is(.row, .head) {
+      animation: none;
+    }
+  }
+
+  @media (forced-colors: active) {
+    :global(.work-case[data-state="open"]) {
+      border: 1px solid Highlight;
+    }
   }
 </style>

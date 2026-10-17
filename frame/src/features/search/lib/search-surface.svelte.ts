@@ -134,14 +134,20 @@ export function createSearchSurface(options: {
           },
         ]
       : []),
-    ...results.map((result) => ({
-      id: resultIdentity(result),
-      title: result.title,
-      section: resultSection(result),
-      result,
-      tool: null,
-      icon: null,
-    })),
+    // Editing a page's address, that page is no destination of its own.
+    ...results
+      .filter(
+        (result) =>
+          !(result.action.type === "ActivateTab" && result.action.id === context?.seed_tab),
+      )
+      .map((result) => ({
+        id: resultIdentity(result),
+        title: result.title,
+        section: resultSection(result),
+        result,
+        tool: null,
+        icon: null,
+      })),
     ...matchingTools.map((destination) => ({
       id: `tool:${destination.kind}`,
       title: destination.label,
@@ -293,6 +299,14 @@ export function createSearchSurface(options: {
     });
   }
 
+  // The page's own address, when the launcher opened to edit it. It is not
+  // something typed, so it is never offered as a task.
+  let seededQuery = "";
+  function seed(value: string) {
+    changed(value);
+    seededQuery = value;
+  }
+
   function changed(value: string) {
     captured = null;
     // Replacing the selected suffix with another typed character shortens
@@ -431,6 +445,7 @@ export function createSearchSurface(options: {
   }
 
   function toHome() {
+    seededQuery = "";
     fulfilled = false;
     query = "";
     displayed = "";
@@ -512,6 +527,7 @@ export function createSearchSurface(options: {
     begin,
     end,
     changed,
+    seed,
     submit,
     capture,
     copy,
@@ -584,7 +600,7 @@ export function createSearchSurface(options: {
       return rows.find((row) => row.id === selectedId) ?? null;
     },
     get capturable() {
-      return !anchored && !!options.onCapture && !!query.trim();
+      return !anchored && !!options.onCapture && !!query.trim() && query !== seededQuery;
     },
     get failed() {
       return failed;

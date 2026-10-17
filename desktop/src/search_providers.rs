@@ -93,6 +93,9 @@ pub(super) fn schedule(
     }
     let (scope, term) = scoped_query(&query);
     let notes_possible = matches!(scope, SearchScope::All | SearchScope::Notes)
+        && app
+            .try_state::<crate::keymap::Keymap>()
+            .is_none_or(|keymap| keymap.offers("tool.notes"))
         && !term.is_empty()
         && term.len() <= 512;
     let term = term.to_owned();

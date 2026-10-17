@@ -12,6 +12,8 @@
     triggerClass = "",
     panelClass = "",
     onopen,
+    onclose,
+    triggerTitle,
   }: {
     label: string;
     trigger: Snippet;
@@ -22,6 +24,9 @@
     triggerClass?: string;
     panelClass?: string;
     onopen?: () => void;
+    onclose?: () => void;
+    /** A native tooltip, the only label that can appear outside a narrow chrome. */
+    triggerTitle?: string;
   } = $props();
 
   let open = $state(false);
@@ -45,6 +50,7 @@
   function dismiss(restore: boolean) {
     if (!open) return;
     open = false;
+    onclose?.();
     if (restore) button?.focus();
   }
 
@@ -55,8 +61,16 @@
     const outside = (event: PointerEvent) => {
       if (!(event.target instanceof Node) || !root?.contains(event.target)) dismiss(false);
     };
+    // A press on a web page lands in another view and never reaches this
+    // document; it takes focus with it, so the window going out of focus
+    // is that press, as it is any other application's.
+    const away = () => dismiss(false);
     window.addEventListener("pointerdown", outside, true);
-    return () => window.removeEventListener("pointerdown", outside, true);
+    window.addEventListener("blur", away);
+    return () => {
+      window.removeEventListener("pointerdown", outside, true);
+      window.removeEventListener("blur", away);
+    };
   });
 
   function onkeydown(event: KeyboardEvent) {
@@ -115,6 +129,7 @@
     type="button"
     class={triggerClass}
     aria-label={label}
+    title={triggerTitle}
     aria-haspopup={menu ? "menu" : "dialog"}
     aria-expanded={open}
     data-state={open ? "open" : "closed"}

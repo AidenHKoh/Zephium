@@ -28,29 +28,75 @@
 
 .shared-tool-controls {
   display: grid;
-  gap: 12px;
-  padding: 0 16px 12px;
+  gap: 10px;
+  padding: 0 12px 10px;
 }
 
+/* The field of the kit at the size of the column's rows: a search field as
+   the system draws one, short and rounded, so the list under it is the
+   thing to read. */
 .shared-tool-search {
   display: flex;
   align-items: center;
-  gap: 8px;
-  background: var(--color-fill);
-  border-radius: var(--radius-row);
-  padding: 9px 10px;
-  color: var(--color-label-secondary);
+  gap: 6px;
+  box-sizing: border-box;
+  height: var(--search-height);
+  padding-inline: 12px 6px;
+  border-radius: var(--radius-field);
+  background: var(--color-field);
+  color: var(--color-faint);
+  transition:
+    background-color var(--motion-instant) var(--ease-smooth),
+    box-shadow var(--motion-instant) var(--ease-smooth);
+}
+
+.shared-tool-search:hover {
+  background: var(--color-field-hover);
+}
+
+.shared-tool-search:focus-within {
+  background: var(--color-field-hover);
+  box-shadow: var(--shadow-field-focus);
+  color: var(--color-muted);
 }
 
 .shared-tool-search input {
   min-width: 0;
   width: 100%;
+  height: 100%;
   background: none;
   border: 0;
   outline: none;
   color: var(--color-text);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--text-body);
+}
+
+.shared-tool-search input::placeholder {
+  color: var(--color-faint);
+}
+
+.shared-tool-search input::-webkit-search-decoration,
+.shared-tool-search input::-webkit-search-cancel-button {
+  appearance: none;
+}
+
+.shared-tool-clear {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--color-fill-hover);
+  color: var(--color-muted);
+  cursor: default;
+}
+
+.shared-tool-clear:hover {
+  color: var(--color-text);
 }
 
 .shared-tool-content {

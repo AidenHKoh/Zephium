@@ -31,6 +31,7 @@
   import { findInPage } from "$features/address";
   import { acceleratorFrom } from "$shared/lib/accelerator";
   import { applyLanguage } from "$shared/lib/locale.svelte";
+  import { applySpaceTheme, spaceThemeValues } from "$features/tabs";
   import Shell from "./Shell.svelte";
 
   // Follows the stored preference and nothing else. Adopting reads the
@@ -49,14 +50,39 @@
     );
   });
 
-  $effect(() => applyLanguage(preferences.value("ui.language")));
+  // A space with a theme of its own dresses the whole window while it is
+  // active. Read as plain values, so a projection that changes nothing about
+  // it does not apply the theme again.
+  const worn = $derived(
+    spaceThemeValues(tabs.activeSpace()?.theme ?? null, {
+      theme: preferences.value("ui.theme"),
+      custom: preferences.value("ui.theme-custom"),
+    }),
+  );
+  const wornTheme = $derived(worn.theme);
+  const wornCustom = $derived(worn.custom);
+  $effect(() => {
+    const next = {
+      theme: wornTheme,
+      custom: wornCustom,
+      level: preferences.value("ui.theme-contrast"),
+      contrast: preferences.value("ui.contrast") === "true",
+      font: preferences.value("ui.font"),
+      fontSize: preferences.value("ui.font-size"),
+      codeFont: preferences.value("ui.code-font"),
+    };
+    const space = tabs.activeSpaceId();
+    untrack(() =>
+      applySpaceTheme(space, JSON.stringify(next), () => theme.applyCustomization(next)),
+    );
+  });
+
+  $effect(() => void applyLanguage(preferences.value("ui.language")));
 
   $effect(() => {
-    const text = preferences.value("ui.text-size");
     theme.applyLayout({
       density: preferences.value("ui.density") === "compact" ? "compact" : "comfortable",
       contrast: preferences.value("ui.contrast") === "true",
-      text: text === "large" || text === "small" ? text : "default",
     });
   });
 
@@ -140,6 +166,8 @@
           uiEventsReady,
           sidebarReady,
         ]);
+        if (disposed) return;
+        await applyLanguage(preferences.value("ui.language"));
         if (disposed) return;
 
         // A hidden native window can suspend animation frames indefinitely.

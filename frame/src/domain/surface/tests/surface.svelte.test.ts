@@ -70,3 +70,26 @@ it("shares initialization and does not report a disposed navigation as a new fai
   expect(page.currentPage()).toBeNull();
   expect(page.navigationFailed()).toBe(false);
 });
+
+describe("closing a page", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    harness.listener = null;
+    harness.run.mockReset();
+    harness.run.mockResolvedValue({ accepted: true, operation_id: null });
+  });
+  it("returns to Work when the page was opened over it, and to Browse otherwise", async () => {
+    const page = await import("../surface.svelte");
+    await page.init();
+    harness.listener?.({ payload: "browser.work" });
+    harness.listener?.({ payload: "browser.settings" });
+    await page.close();
+    expect(harness.run).toHaveBeenLastCalledWith("browser.work");
+    harness.listener?.({ payload: "browser.work" });
+    harness.listener?.({ payload: "browser.return" });
+    harness.listener?.({ payload: "browser.settings" });
+    await page.close();
+    expect(harness.run).toHaveBeenLastCalledWith("browser.return");
+    page.dispose();
+  });
+});

@@ -32,6 +32,8 @@ pub enum Ending {
     Limit,
     /// The microphone went away.
     Lost,
+    /// The recognizer failed; finishing the take says how.
+    Failed,
 }
 
 /// What one block of samples produced.
