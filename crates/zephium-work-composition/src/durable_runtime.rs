@@ -724,6 +724,14 @@ impl NativeWorkComposition {
                         found.push(address);
                     }
                 }
+                for channel in goal
+                    .iter()
+                    .flat_map(|goal| crate::open_objective::site_work::channels(goal))
+                {
+                    if !found.contains(&channel) {
+                        found.push(channel);
+                    }
+                }
                 found
             }
             _ => Vec::new(),

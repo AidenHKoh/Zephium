@@ -412,6 +412,27 @@ pub(crate) fn email_addresses(text: &str) -> Vec<String> {
     found
 }
 
+/// The channels a text names ("#general", "#launch-team"), lowercased; an
+/// issue number ("#123") is no channel.
+pub(crate) fn channels(text: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for (at, _) in text.match_indices('#') {
+        if text[..at].chars().next_back().is_some_and(char::is_alphanumeric) {
+            continue;
+        }
+        let name: String = text[at + 1..]
+            .chars()
+            .take_while(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+            .collect::<String>()
+            .trim_end_matches('.')
+            .to_lowercase();
+        if name.chars().any(char::is_alphabetic) && !found.contains(&format!("#{name}")) {
+            found.push(format!("#{name}"));
+        }
+    }
+    found
+}
+
 /// Whether the region a send acts in shows one of the addresses: in a
 /// recipient field's value, a recipient chip or the conversation's header.
 fn addressed_to(recipients: &[String], node: &SemanticNode, snapshot: &SemanticSnapshot) -> bool {
@@ -424,9 +445,12 @@ fn addressed_to(recipients: &[String], node: &SemanticNode, snapshot: &SemanticS
                 Some(SemanticValueSummary::Text(text)) => text.preview().text().to_lowercase(),
                 _ => String::new(),
             };
-            recipients
-                .iter()
-                .any(|address| shown.contains(address) || typed.contains(address))
+            recipients.iter().any(|address| match address.strip_prefix('#') {
+                // A channel is named by its words: "Message #launch-team",
+                // "Message to launch-team".
+                Some(channel) => names_any(&shown, &[channel]) || names_any(&typed, &[channel]),
+                None => shown.contains(address) || typed.contains(address),
+            })
         })
 }
 
@@ -1122,9 +1146,30 @@ pub(crate) fn preview(
     } else {
         recipients
     };
+    // A chat box names its conversation ("Message to launch-team"): that is
+    // where it goes, not the welcome banner above it.
+    let conversation = message
+        .then(|| {
+            region
+                .iter()
+                .chain(std::iter::once(node))
+                .filter(|part| {
+                    part.role() == SemanticRole::Textbox || part.editable_structure().is_some()
+                })
+                .filter_map(|part| part.name())
+                .find_map(|name| {
+                    let name = clip(name.as_str(), 80);
+                    ["Message to ", "Message ", "Reply to ", "Reply in "]
+                        .iter()
+                        .find_map(|lead| name.strip_prefix(lead))
+                        .map(str::to_owned)
+                })
+        })
+        .flatten()
+        .filter(|place| !place.is_empty());
     // A message addressed in its own box names those people; the page's
     // headings then belong to other conversations (a mail list beside it).
-    let heading = region
+    let heading = conversation.clone().or_else(|| region
         .iter()
         .chain(if recipients.is_empty() {
             snapshot.nodes()
@@ -1132,7 +1177,7 @@ pub(crate) fn preview(
             &[][..]
         })
         .find(|part| part.role() == SemanticRole::Heading && !label(part).trim().is_empty())
-        .map(|part| clip(&label(part), 80));
+        .map(|part| clip(&label(part), 80)));
     let headline = match consequence {
         Consequence::Communication => {
             let verb = verb(&name, "Send");
@@ -2142,7 +2187,23 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             let state = self.gate.state();
             state.hold_typing && !state.allow_typing
         };
-        // The more consequential side wins; neither lowers the other.
+        // A named control the page reads as harmless (the message box being
+        // typed in, an emoji picker) is that, whatever a small model calls
+        // it: its label alone would put a card before every keystroke. An
+        // unnamed control keeps the model's caution.
+        if matches!(observed, SiteEffect::Read | SiteEffect::Draft)
+            && Consequence::declared(declared).is_some()
+            && !clip(&label(node), 80).is_empty()
+        {
+            return Err(AgentWorkFailure::EffectRequired(
+                if observed == SiteEffect::Read {
+                    SemanticEffectClass::Read
+                } else {
+                    SemanticEffectClass::LocalWrite
+                },
+            ));
+        }
+        // Otherwise the more consequential side wins; neither lowers the other.
         let consequence = match (observed, Consequence::declared(declared)) {
             (SiteEffect::Commit(consequence), _) => consequence,
             (_, Some(consequence)) => consequence,
@@ -2179,7 +2240,12 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
         let fingerprint = fingerprint(action, node, snapshot);
         let site = state.site.clone();
         let typed = if state.typed_recipient {
-            state.recipients.clone()
+            state
+                .recipients
+                .iter()
+                .filter(|address| address.contains('@'))
+                .cloned()
+                .collect()
         } else {
             Vec::new()
         };
@@ -2898,6 +2964,86 @@ mod tests {
             .facts
             .contains(&("Subject".to_owned(), "Status".to_owned())));
         assert!(shown.facts.iter().all(|(label, _)| label != "Weekly"));
+    }
+
+    #[test]
+    fn a_post_goes_only_to_the_channel_the_task_names_and_its_card_says_where() {
+        assert_eq!(
+            channels("Post in #general and #launch-team, see issue #123 and a#b."),
+            vec!["#general".to_owned(), "#launch-team".to_owned()]
+        );
+        let chat = |name: &str| {
+            page(vec![
+                json!({"k":1,"r":"document","o":16,"fc":true}),
+                json!({"k":2,"p":0,"r":"heading","l":2,"n":"Welcome to your first channel","fc":true}),
+                json!({"k":3,"p":0,"r":"group","n":"Composer","fc":true}),
+                json!({"k":4,"p":2,"r":"textbox","n":name,"o":11,"fs":1,"es":[1,2,false],"fc":true,
+                    "v":{"k":"text","value":"Hello team"},"b":{"x":1,"y":80,"w":300,"h":60}}),
+                json!({"k":5,"p":2,"r":"button","n":"Send now","o":9,"ak":1,"fc":true,
+                    "b":{"x":1,"y":150,"w":80,"h":30}}),
+            ])
+        };
+        for (name, right) in [("Message to new-channel", false), ("Message #general", true)] {
+            let look = chat(name);
+            let gate = Arc::new(
+                SiteGate::new("slack.com".into(), false, false).addressed_to(vec!["#general".into()]),
+            );
+            let policy = SiteWorkPolicy {
+                gate: gate.clone(),
+                asks: true,
+            };
+            let send = click(&look, 5, SemanticEffectClass::Communication);
+            let result = policy.assess(&send, &look);
+            if right {
+                assert!(matches!(result, Err(AgentWorkFailure::ActionDenied)));
+                assert_eq!(
+                    gate.pending().unwrap().preview.headline,
+                    "Send now to #general as you?"
+                );
+            } else {
+                assert!(matches!(result, Err(AgentWorkFailure::WrongRecipient)));
+            }
+        }
+    }
+
+    #[test]
+    fn a_named_control_the_page_reads_as_harmless_needs_no_card_whatever_the_model_calls_it() {
+        let look = page(vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"textbox","n":"Message to design","o":11,"fs":1,"es":[1,2,false],"fc":true,
+                "b":{"x":1,"y":1,"w":300,"h":60}}),
+            json!({"k":3,"p":0,"r":"button","n":"Emoji","o":9,"ak":1,"fc":true,
+                "b":{"x":1,"y":70,"w":30,"h":30}}),
+            json!({"k":4,"p":0,"r":"button","o":9,"ak":1,"fc":true,
+                "b":{"x":40,"y":70,"w":30,"h":30}}),
+            json!({"k":5,"p":0,"r":"button","n":"Send now","o":9,"ak":1,"fc":true,
+                "b":{"x":80,"y":70,"w":30,"h":30}}),
+        ]);
+        let gate = Arc::new(SiteGate::new("slack.com".into(), false, false));
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        let emoji = click(&look, 3, SemanticEffectClass::Communication);
+        assert!(matches!(
+            policy.assess(&emoji, &look),
+            Err(AgentWorkFailure::EffectRequired(
+                SemanticEffectClass::LocalWrite
+            ))
+        ));
+        let unnamed = click(&look, 4, SemanticEffectClass::Communication);
+        assert!(matches!(
+            policy.assess(&unnamed, &look),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        assert!(gate.pending().is_some(), "an unnamed control keeps the card");
+        gate.decline();
+        let send = click(&look, 5, SemanticEffectClass::LocalWrite);
+        assert!(matches!(
+            policy.assess(&send, &look),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        assert!(gate.pending().is_some(), "a send is always asked");
     }
 
     #[test]

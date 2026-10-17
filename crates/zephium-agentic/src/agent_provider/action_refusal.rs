@@ -518,7 +518,7 @@ impl AgentProviderActionRefusal {
             ),
             SemanticActionBindingError::WrongRecipient => (
                 "wrong_recipient",
-                "Nothing executed. This message is not addressed to the recipient the task names, so it is not sent. Open a new message addressed to them (the page's compose or new-message control), or add them in its To field, then send that one. Do not send in a conversation with someone else.",
+                "Nothing executed. This message is not addressed to the recipient or channel the task names, so it is not sent. Open a new message addressed to them (the page's compose or new-message control, or the channel in its sidebar or search), or add them in its To field, then send that one. If the page has no such channel or person, report that instead. Do not send in a conversation or channel other than the one named.",
             ),
             SemanticActionBindingError::TargetCovered => (
                 "target_covered",
