@@ -3,6 +3,8 @@ mod agent_context;
 #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
 mod agent_cookie_source;
 mod blocker_statistics;
+#[cfg(all(test, target_os = "windows"))]
+mod browser_windows_qualification;
 mod construction;
 mod content_rules;
 mod content_styles;
