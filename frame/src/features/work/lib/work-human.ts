@@ -180,4 +180,3 @@ export function regionOf(
   if (x + width > Math.floor(parent.width) || y + height > Math.floor(parent.height)) return null;
   return { x, y, width, height };
 }
-
