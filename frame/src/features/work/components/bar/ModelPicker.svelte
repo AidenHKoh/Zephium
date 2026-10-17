@@ -286,7 +286,13 @@
     const field = trigger?.closest(".surface")?.querySelector("textarea");
     const home = () => {
       const at = document.activeElement;
-      if (at && at !== document.body && !main?.closest(".model-menu")?.contains(at)) return;
+      if (
+        at &&
+        at !== document.body &&
+        !trigger?.contains(at) &&
+        !main?.closest(".model-menu")?.contains(at)
+      )
+        return;
       field?.focus({ preventScroll: true });
     };
     home();
@@ -308,7 +314,7 @@
     return () => sheet.removeEventListener("pointerdown", away, true);
   });
 
-  async function opened(next: boolean) {
+  function opened(next: boolean) {
     open = next;
     if (!next) {
       toField();
@@ -319,8 +325,6 @@
     // The person's own server says which models it serves; the rest is the curated list.
     if (usable(models, "compatible")) void session?.listEndpoint();
     active = home;
-    await tick();
-    (list ?? main)?.focus({ preventScroll: true });
   }
 
   function close() {
@@ -501,7 +505,11 @@
   }
 
   function returned(event: Event) {
-    if (!toWords) return;
+    if (!toWords) {
+      const field = trigger?.closest(".surface")?.querySelector("textarea");
+      if (field && document.activeElement === field) event.preventDefault();
+      return;
+    }
     toWords = false;
     event.preventDefault();
     trigger?.closest(".surface")?.querySelector("textarea")?.focus();
@@ -585,7 +593,10 @@
         sideOffset={10}
         collisionPadding={12}
         aria-label={m.work_model_label()}
-        onOpenAutoFocus={(event) => event.preventDefault()}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          (list ?? main)?.focus({ preventScroll: true });
+        }}
         onCloseAutoFocus={returned}
         onEscapeKeydown={escape}
         onkeydown={keys}
