@@ -262,7 +262,7 @@
     },
     "lazy:features/work/components/bar/ModelPicker.svelte": {
       "js": 179300,
-      "css": 34013
+      "css": 33996
     },
     "lazy:features/work/components/bar/VoiceView.svelte": {
       "js": 15564,
