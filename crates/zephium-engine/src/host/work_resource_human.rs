@@ -322,9 +322,13 @@ impl WorkNativeResource {
                     && outcome.is_some()
                     && work_browser_monotonic_now()
                         .is_some_and(|now| guard.human_current(Operation::PresentHuman, now))
-                    && admitted.record_human_wall_clear(stamp, outcome == Some(0));
+                    && admitted.record_human_wall_clear(
+                        stamp,
+                        outcome == Some(0),
+                        outcome.is_some_and(|code| code != 0),
+                    );
                 if !valid {
-                    admitted.record_human_wall_clear(stamp, false);
+                    admitted.record_human_wall_clear(stamp, false, false);
                 }
                 if let Some(check) = check.as_ref() {
                     if !valid {
@@ -343,7 +347,7 @@ impl WorkNativeResource {
             })
             .is_err()
         {
-            gate.record_human_wall_clear(stamp, false);
+            gate.record_human_wall_clear(stamp, false, false);
             if let Some(check) = failed_check {
                 check.finish(None);
             }

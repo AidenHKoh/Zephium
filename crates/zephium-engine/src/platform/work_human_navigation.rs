@@ -16,6 +16,8 @@ pub(super) struct HumanNavigation {
     progress: Option<zephium_agentic::WorkBrowserHumanProgress>,
     wall_clear_samples: u8,
     wall_sampled: Option<Instant>,
+    /// A sign-in or check surface was sampled on the handed-over page.
+    wall_seen: bool,
     #[cfg(target_os = "windows")]
     write_navigation: Option<(wry::NavigationId, u64, ContextNavigationTarget)>,
 }
@@ -150,6 +152,9 @@ impl HumanNavigation {
     fn verified_wall_clear(&self) -> bool {
         self.back_on_site()
             && !self.requested
+            // Clear means a wall that was there is gone, or the person moved
+            // the page on: a signed-out landing page shows no wall at all.
+            && (self.wall_seen || self.revision != 0)
             && self.wall_clear_samples >= 2
             && self
                 .wall_sampled
@@ -351,6 +356,7 @@ impl WorkDocumentNavigation {
         &self,
         stamp: WorkHumanDocumentStamp,
         clear: bool,
+        wall: bool,
     ) -> bool {
         let Ok(mut state) = self.0.lock() else {
             return false;
@@ -369,6 +375,7 @@ impl WorkDocumentNavigation {
         {
             return false;
         }
+        human.wall_seen |= wall;
         human.wall_clear_samples = if clear {
             human.wall_clear_samples.saturating_add(1).min(2)
         } else {
@@ -416,6 +423,7 @@ impl WorkDocumentNavigation {
             progress: None,
             wall_clear_samples: 0,
             wall_sampled: None,
+            wall_seen: false,
             #[cfg(target_os = "windows")]
             write_navigation: None,
         });
@@ -692,15 +700,34 @@ mod tests {
             "returning URL alone cannot clear a wall"
         );
         let stamp = gate.human_wall_probe().unwrap();
-        assert!(gate.record_human_wall_clear(stamp, true));
+        assert!(gate.record_human_wall_clear(stamp, true, false));
         assert!(
             !gate.human_verified_wall_clear(),
             "one transient clear sample is insufficient"
         );
-        assert!(gate.record_human_wall_clear(stamp, true));
+        assert!(gate.record_human_wall_clear(stamp, true, false));
         assert!(gate.human_verified_wall_clear());
         gate.finish_human(back, gate.human_revision().unwrap())
             .unwrap();
+    }
+
+    #[test]
+    fn a_landing_page_that_never_showed_a_wall_holds_until_the_person_moves_on() {
+        let gate = ready_gate();
+        let source = ContextNavigationTarget::parse(URL).unwrap();
+        gate.begin_human(&source, Instant::now() + Duration::from_secs(30), true)
+            .unwrap();
+        let stamp = gate.human_wall_probe().unwrap();
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(
+            !gate.human_verified_wall_clear(),
+            "a page that looked clear from the start was never signed in to"
+        );
+        assert!(gate.record_human_wall_clear(stamp, false, true));
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(gate.human_verified_wall_clear(), "the wall it showed is gone");
     }
 
     #[test]
@@ -723,8 +750,8 @@ mod tests {
         );
         gate.location_changed(Some(routed)).unwrap();
         let stamp = gate.human_wall_probe().unwrap();
-        assert!(gate.record_human_wall_clear(stamp, true));
-        assert!(gate.record_human_wall_clear(stamp, true));
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(gate.record_human_wall_clear(stamp, true, false));
         assert!(gate.human_verified_wall_clear());
         let resumed = gate
             .finish_human(routed, gate.human_revision().unwrap())
@@ -818,11 +845,11 @@ mod wall_proof_tests {
         let (gate, progress) = human();
         let revision = gate.human_revision();
         let stamp = gate.human_wall_probe().unwrap();
-        assert!(gate.record_human_wall_clear(stamp, false));
+        assert!(gate.record_human_wall_clear(stamp, false, true));
         assert!(!progress.verified_wall_clear());
-        assert!(gate.record_human_wall_clear(stamp, true));
+        assert!(gate.record_human_wall_clear(stamp, true, false));
         assert!(!progress.verified_wall_clear());
-        assert!(gate.record_human_wall_clear(stamp, true));
+        assert!(gate.record_human_wall_clear(stamp, true, false));
         assert!(progress.verified_wall_clear());
         assert_eq!(
             gate.human_revision(),
@@ -842,14 +869,14 @@ mod wall_proof_tests {
             !progress.verified_wall_clear(),
             "native location changes revoke proof immediately"
         );
-        assert!(!gate.record_human_wall_clear(stamp, true));
+        assert!(!gate.record_human_wall_clear(stamp, true, false));
         let next = gate.human_wall_probe().unwrap();
-        assert!(gate.record_human_wall_clear(next, true));
-        assert!(gate.record_human_wall_clear(next, true));
+        assert!(gate.record_human_wall_clear(next, true, false));
+        assert!(gate.record_human_wall_clear(next, true, false));
         assert!(gate.human_verified_wall_clear());
         gate.retire();
         assert!(
-            !gate.record_human_wall_clear(next, true),
+            !gate.record_human_wall_clear(next, true, false),
             "a stopped native page cannot recover authority"
         );
     }
@@ -870,13 +897,13 @@ mod wall_proof_tests {
         let stamp = gate
             .human_wall_probe()
             .expect("an unchanged sign-in route may replace its DOM in place");
-        assert!(gate.record_human_wall_clear(stamp, false));
+        assert!(gate.record_human_wall_clear(stamp, false, true));
         assert!(
             !progress.verified_wall_clear(),
             "a credential/chooser observation is never bypassed by the URL"
         );
-        assert!(gate.record_human_wall_clear(stamp, true));
-        assert!(gate.record_human_wall_clear(stamp, true));
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(gate.record_human_wall_clear(stamp, true, false));
         assert!(progress.verified_wall_clear());
         assert_eq!(gate.human_revision(), revision);
         {
@@ -905,8 +932,8 @@ mod wall_proof_tests {
         ] {
             let (gate, progress) = human();
             let stamp = gate.human_wall_probe().unwrap();
-            assert!(gate.record_human_wall_clear(stamp, true));
-            assert!(gate.record_human_wall_clear(stamp, true));
+            assert!(gate.record_human_wall_clear(stamp, true, false));
+            assert!(gate.record_human_wall_clear(stamp, true, false));
             {
                 let mut state = gate.0.lock().unwrap();
                 let human = state.human.as_mut().unwrap();
@@ -917,7 +944,7 @@ mod wall_proof_tests {
             }
             assert!(!progress.verified_wall_clear());
             assert!(gate.human_wall_probe().is_none());
-            assert!(!gate.record_human_wall_clear(stamp, true));
+            assert!(!gate.record_human_wall_clear(stamp, true, false));
             {
                 let mut state = gate.0.lock().unwrap();
                 state
@@ -928,8 +955,8 @@ mod wall_proof_tests {
                     .unwrap();
             }
             let clean = gate.human_wall_probe().unwrap();
-            assert!(gate.record_human_wall_clear(clean, true));
-            assert!(gate.record_human_wall_clear(clean, true));
+            assert!(gate.record_human_wall_clear(clean, true, false));
+            assert!(gate.record_human_wall_clear(clean, true, false));
             assert!(progress.verified_wall_clear());
         }
     }
@@ -938,8 +965,8 @@ mod wall_proof_tests {
     fn expired_or_prior_presentation_proof_cannot_clear_the_current_wall() {
         let (gate, _) = human();
         let prior = gate.human_wall_probe().unwrap();
-        assert!(gate.record_human_wall_clear(prior, true));
-        assert!(gate.record_human_wall_clear(prior, true));
+        assert!(gate.record_human_wall_clear(prior, true, false));
+        assert!(gate.record_human_wall_clear(prior, true, false));
         gate.0.lock().unwrap().human.as_mut().unwrap().wall_sampled =
             Some(Instant::now() - Duration::from_secs(3));
         assert!(!gate.human_verified_wall_clear());
@@ -952,7 +979,7 @@ mod wall_proof_tests {
         )
         .unwrap();
         assert!(
-            !gate.record_human_wall_clear(prior, true),
+            !gate.record_human_wall_clear(prior, true, false),
             "same URL/native id does not reuse a prior human epoch"
         );
         assert!(!gate.human_verified_wall_clear());
