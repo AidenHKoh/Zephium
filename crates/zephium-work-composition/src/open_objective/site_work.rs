@@ -3714,4 +3714,30 @@ mod tests {
             vec!["Purchased on the page: Request to book".to_owned()]
         );
     }
+
+    #[test]
+    fn setting_where_to_deliver_is_a_draft_never_a_commit() {
+        let location = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"dialog","n":"Choose your location"}),
+            json!({"k":3,"p":1,"r":"paragraph","t":"Delivery options and speeds vary by location"}),
+            json!({"k":4,"p":1,"r":"textbox","n":"Enter a US zip code","o":10,"v":{"k":"text","value":"10001"}}),
+            json!({"k":5,"p":1,"r":"button","n":"Apply","o":1,"ak":1}),
+            json!({"k":6,"p":1,"r":"button","n":"Done","o":1,"ak":1}),
+            json!({"k":7,"p":1,"r":"button","n":"Continue","o":1,"ak":1}),
+        ]);
+        for key in [5, 6, 7] {
+            assert!(
+                matches!(
+                    effect(&location, key, SemanticActionKind::Click),
+                    SiteEffect::Draft | SiteEffect::Read
+                ),
+                "{key}"
+            );
+        }
+        assert!(matches!(
+            effect(&location, 4, SemanticActionKind::Fill),
+            SiteEffect::Draft | SiteEffect::Read
+        ));
+    }
 }
