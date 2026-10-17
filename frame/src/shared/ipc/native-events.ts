@@ -31,6 +31,7 @@ import type {
   UiCommand,
   VoiceChanged,
   VoiceLevels,
+  SwipeScroll,
   WebExtensionAccessRequested,
 } from "./bindings";
 
@@ -89,6 +90,7 @@ export const nativeEventNames = {
   focusChanged: "zephium:focus",
   voiceChanged: "zephium:voice-changed",
   voiceLevels: "zephium:voice-levels",
+  swipeScroll: "zephium:swipe",
   profilesChanged: "zephium:profiles",
 } as const;
 
@@ -145,5 +147,6 @@ export const events = {
   focusChanged: scopedEvent<FocusChanged>(nativeEventNames.focusChanged),
   voiceChanged: scopedEvent<VoiceChanged>(nativeEventNames.voiceChanged),
   voiceLevels: scopedEvent<VoiceLevels>(nativeEventNames.voiceLevels),
+  swipeScroll: scopedEvent<SwipeScroll>(nativeEventNames.swipeScroll),
   profilesChanged: scopedEvent<ProfilesView>(nativeEventNames.profilesChanged),
 };

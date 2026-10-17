@@ -523,6 +523,17 @@ export const commands = {
 	dividerGrab: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_grab", { x, y }),
 	dividerDrag: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_drag", { x, y }),
 	dividerRelease: (x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("divider_release", { x, y }),
+	/**
+	 *  Where the sidebar column stands, or `null` when swipes should not be read.
+	 *  Resolves whether the native stream is live; when it is not, the frame reads
+	 *  the swipe from wheel events as before.
+	 */
+	swipeRegion: (region: {
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+} | null) => __TAURI_INVOKE<boolean>("swipe_region", { region }),
 };
 
 /** Events */
@@ -553,6 +564,7 @@ export const events = {
 	zephiumAccountChanged: makeEvent<AccountChanged>("zephium:account-changed"),
 	zephiumImportProgress: makeEvent<ImportJobView>("zephium:import-progress"),
 	zephiumKeymapChanged: makeEvent<KeymapChanged>("zephium:keymap-changed"),
+	zephiumSwipe: makeEvent<SwipeScroll>("zephium:swipe"),
 	zephiumVoiceChanged: makeEvent<VoiceChanged>("zephium:voice-changed"),
 	zephiumVoiceLevels: makeEvent<VoiceLevels>("zephium:voice-levels"),
 	zephiumWorkDecisionPreferenceChanged: makeEvent<WorkDecisionPreferenceChanged>("zephium:work-decision-preference-changed"),
@@ -2223,6 +2235,11 @@ export type SpaceView = {
 	theme: SpaceThemeView | null,
 	/**  Pinned and open tabs, which deleting the space closes. */
 	tabs: number,
+	/**
+	 *  The icons of its first tabs in sidebar order, at most three, for the
+	 *  switcher to stack beside the name. A tab with no icon yet is null.
+	 */
+	previews: (IconRef | null)[],
 };
 
 /**
@@ -2232,6 +2249,31 @@ export type SpaceView = {
  */
 export type SplitGroupView = {
 	members: string[],
+};
+
+export type SwipePhase =
+/**  Fingers landed: a new gesture, even in the middle of the last one's momentum. */
+"began" | "changed" |
+/**  Fingers lifted. What follows is momentum and is not sent. */
+"lifted";
+
+/**  The sidebar column in chrome points from the chrome's top-left corner. */
+export type SwipeRegion = {
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+};
+
+/**
+ *  Fingers' travel since the last event, positive to the right and down, in
+ *  points; `time` is the event's own clock in milliseconds.
+ */
+export type SwipeScroll = {
+	phase: SwipePhase,
+	dx: number | null,
+	dy: number | null,
+	time: number | null,
 };
 
 export type TabAvailability = { state: "sleeping" } | { state: "waiting_for_capacity"; url: string } | { state: "blocked_by_capacity"; url: string };

@@ -337,6 +337,9 @@ impl Shell {
         });
         self.browser_return = None;
         if !applied || !exact {
+            crate::diagnostic!(
+                "browser: return to Browse refused (chrome applied={applied}, snapshot exact={exact})"
+            );
             self.browser_after_return = None;
             self.project_browser_page();
             (self.emit)(Projection::UiCommand("browser.return-failed".into()));

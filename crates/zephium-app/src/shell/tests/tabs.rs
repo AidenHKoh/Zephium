@@ -220,6 +220,42 @@ fn linked_tab_shows_alone_and_split_group_survives() {
 }
 
 #[test]
+fn dragging_over_a_pane_edge_previews_the_split_and_dropping_clears_it() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "example.com");
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    navigate_and_commit(&mut shell, second, "github.com");
+    shell.handle(Command::Activate(first));
+
+    let win = shell.windows.focused().unwrap();
+    let gap = win.metrics.gap;
+    let region = layout::compute(win.size, win.mode, win.metrics, true)
+        .content
+        .unwrap();
+    let (x, y) = (region.x + 2.0, region.y + region.height / 2.0);
+    shell.handle(Command::DragOver {
+        point: Some((x, y)),
+    });
+    let preview = engine.previews().pop().flatten().expect("a preview");
+    assert_eq!(preview.tab, first);
+    // The new pane takes the left half and the page moves into the right.
+    let half = (region.width - gap) / 2.0;
+    assert_eq!(preview.zone, Rect::new(0.0, 0.0, half, region.height));
+    assert_eq!(preview.shift, (half + gap, 0.0));
+    assert!(preview.bar.x < half + gap && preview.bar.x + preview.bar.width > half);
+
+    shell.handle(Command::DragOver { point: None });
+    assert_eq!(engine.previews().pop(), Some(None));
+
+    shell.handle(Command::DropTab { id: second, x, y });
+    assert_eq!(engine.previews().pop(), Some(None));
+    assert_eq!(engine.last_layout().len(), 2);
+}
+
+#[test]
 fn url_focus_emits_ui_command() {
     let engine = Arc::new(FakeEngine::default());
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));

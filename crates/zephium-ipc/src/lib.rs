@@ -355,6 +355,9 @@ pub struct SpaceView {
     pub theme: Option<SpaceThemeView>,
     /// Pinned and open tabs, which deleting the space closes.
     pub tabs: u32,
+    /// The icons of its first tabs in sidebar order, at most three, for the
+    /// switcher to stack beside the name. A tab with no icon yet is null.
+    pub previews: Vec<Option<IconRef>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]

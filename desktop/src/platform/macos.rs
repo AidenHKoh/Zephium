@@ -1,5 +1,6 @@
 mod log;
 mod sidebar_resize;
+mod swipe;
 pub use log::redirect_stderr;
 
 use std::cell::RefCell;
@@ -650,6 +651,34 @@ pub async fn configure_sidebar_resize(
     receive.await.unwrap_or(false)
 }
 
+/// Reads sideways swipes over the sidebar column's `region` (chrome points,
+/// from its top-left) from the trackpad itself, or stops when it is `None`.
+/// Resolves whether that native stream is live.
+pub async fn configure_swipe(window: &WebviewWindow, region: Option<[f64; 4]>) -> bool {
+    let generation = CHROME_GENERATION.load(Ordering::Acquire);
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let scheduled = window.run_on_main_thread(move || {
+        let live = with_chrome_view(generation, |view| {
+            // SAFETY: the published chrome retains this exact main-thread WK view.
+            let Some(view) =
+                (unsafe { Retained::retain(view as *const WKWebView as *mut WKWebView) })
+            else {
+                return false;
+            };
+            let region = region.map(|[x, y, width, height]| swipe::Region {
+                x,
+                y,
+                width,
+                height,
+            });
+            swipe::configure(&view, generation, region)
+        })
+        .unwrap_or(false);
+        let _ = send.send(live);
+    });
+    scheduled.is_ok() && receive.await.unwrap_or(false)
+}
+
 fn clear_chrome_view(generation: u64) {
     if MainThreadMarker::new().is_none()
         || generation == 0
@@ -675,6 +704,7 @@ fn clear_chrome_view(generation: u64) {
                     .clear_if_current(generation);
                 slot.borrow_mut().take();
                 sidebar_resize::dispose(Some(generation));
+                swipe::dispose(Some(generation));
             }
         }
     });

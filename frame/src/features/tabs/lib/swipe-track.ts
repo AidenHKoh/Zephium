@@ -28,6 +28,8 @@ export function rubberBand(distance: number, extent: number): number {
   return Math.sign(distance) * (1 - 1 / ((magnitude * 0.55) / limit + 1)) * limit;
 }
 
+const NONE: Reading = { kind: "none" };
+
 type Phase = "idle" | "probe" | "track" | "spent" | "ignored";
 
 type Options = {
@@ -36,12 +38,18 @@ type Options = {
 };
 
 /**
- * A trackpad swipe as the page can see it: wheel deltas with no phase, then
- * momentum events a frame apart until they fade. Fingers travel is positive to
- * the right. The first few pixels judge the axis, and only a clearly sideways
- * gesture is ours; the list then follows the fingers one to one and commits
- * once it has travelled far enough, or when the fingers lift at speed. What
- * follows a commit, momentum included, is ignored until the events go quiet.
+ * A trackpad swipe. Fingers travel is positive to the right. The first few
+ * pixels judge the axis, and only a clearly sideways gesture is ours; the list
+ * then follows the fingers one to one and commits once it has travelled far
+ * enough, or when the fingers lift at speed.
+ *
+ * Native reports the fingers themselves: `begin` when they land, `move` for
+ * their travel and `lift` when they leave. Momentum never reaches here, and
+ * fingers landing mid-momentum simply begin again. Without native the page
+ * sees only wheel deltas with no phase, momentum a frame apart until it
+ * fades, and `wheel` has to tell a new gesture from the old one's tail by
+ * the gaps and by a jump in strength. What follows a commit is ignored until
+ * the next gesture begins.
  */
 export class SwipeTracker {
   #options: Options;
@@ -57,9 +65,34 @@ export class SwipeTracker {
     this.#options = options;
   }
 
-  /** Whether a timer is needed to learn that the fingers have gone. */
+  /** Whether the gesture is being followed, so a fallback timer is needed to learn the fingers left. */
   get tracking() {
     return this.#phase === "track";
+  }
+
+  /** Fingers landed: any gesture still running, its momentum included, is over. */
+  begin() {
+    this.#phase = "probe";
+    this.#sx = 0;
+    this.#sy = 0;
+    this.#offset = 0;
+    this.#velocity = 0;
+  }
+
+  /** Fingers travelled. Ignored unless a gesture has begun and is still ours. */
+  move(dx: number, dy: number, time: number): Reading {
+    if (this.#phase === "idle" || this.#phase === "spent" || this.#phase === "ignored") {
+      return NONE;
+    }
+    const gap = time - this.#time;
+    this.#time = time;
+    this.#magnitude = Math.abs(dx);
+    return this.#advance(dx, dy, gap);
+  }
+
+  /** Fingers lifted: the gesture commits or springs home. */
+  lift(): Reading {
+    return this.idle();
   }
 
   wheel(dx: number, dy: number, time: number): Reading {
@@ -71,22 +104,21 @@ export class SwipeTracker {
     if (this.#phase !== "idle" && gap > QUIET) this.#phase = "idle";
     if (this.#phase === "spent" || this.#phase === "ignored") {
       const sideways = Math.abs(dx) >= DOMINANCE * Math.abs(dy);
-      if (!sideways || Math.abs(dx) <= previous * 2.2 + 8) return { kind: "none" };
+      if (!sideways || Math.abs(dx) <= previous * 2.2 + 8) return NONE;
       this.#phase = "idle";
     }
-    if (this.#phase === "idle") {
-      this.#sx = 0;
-      this.#sy = 0;
-      this.#velocity = 0;
-      this.#phase = "probe";
-    }
+    if (this.#phase === "idle") this.begin();
+    return this.#advance(dx, dy, gap);
+  }
+
+  #advance(dx: number, dy: number, gap: number): Reading {
     if (this.#phase === "probe") {
       this.#sx += dx;
       this.#sy += dy;
-      if (Math.abs(this.#sx) + Math.abs(this.#sy) < PROBE) return { kind: "none" };
+      if (Math.abs(this.#sx) + Math.abs(this.#sy) < PROBE) return NONE;
       if (Math.abs(this.#sx) < DOMINANCE * Math.abs(this.#sy)) {
         this.#phase = "ignored";
-        return { kind: "none" };
+        return NONE;
       }
       this.#phase = "track";
       this.#offset = this.#sx;
@@ -103,7 +135,7 @@ export class SwipeTracker {
     const velocity = this.#velocity;
     this.#phase = "idle";
     this.#velocity = 0;
-    if (phase !== "track") return { kind: "none" };
+    if (phase !== "track") return NONE;
     const step: SwipeStep = offset < 0 ? 1 : -1;
     const flicked =
       Math.abs(velocity) >= FLICK &&

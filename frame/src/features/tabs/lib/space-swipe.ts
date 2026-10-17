@@ -1,11 +1,14 @@
 import { tabs } from "$domain/tabs";
 import { haptic } from "$shared/lib/haptic";
 import { reducedMotion } from "$shared/lib/motion";
+import { attachNativeSwipe, nativeSwipeLive, type SwipeSink } from "./native-swipe";
 import { SwipeTracker, type Reading, type SwipeStep } from "./swipe-track";
 import { advance, atRest, launch, type Motion } from "./sheet-spring";
 
-/** Wheel events stop arriving this long after the fingers lift and momentum fades. */
+/** Without native, wheel events stop arriving this long after the fingers lift and momentum fades. */
 const IDLE = 90;
+/** A native swipe that goes this long without a word from the fingers has lost its lift. */
+const LOST = 1500;
 /** How long a committed sheet waits for its space to arrive before coming back. */
 const ARRIVAL = 700;
 /** The room between one space's sheet and the next. */
@@ -46,7 +49,8 @@ const controls = new WeakMap<HTMLElement, Control>();
  * a spring carries it the rest of the way from the speed the fingers had; a
  * short one springs home. Everything that moves is a transform or an opacity,
  * written by one frame callback that only exists while something is moving.
- * See SwipeTracker for what counts as a swipe.
+ * Native reads the trackpad and says when the fingers land and lift; where it
+ * cannot, the wheel is read instead. See SwipeTracker for what counts as a swipe.
  */
 export function spaceSwipe(node: HTMLElement, options: Options) {
   let current = options;
@@ -69,6 +73,7 @@ export function spaceSwipe(node: HTMLElement, options: Options) {
   let soft = false;
   let peeking = false;
   let idle: ReturnType<typeof setTimeout> | undefined;
+  let lost: ReturnType<typeof setTimeout> | undefined;
   let waiting: ReturnType<typeof setTimeout> | undefined;
 
   const spread = () => (node.clientWidth || 240) + SHEET_GAP;
@@ -219,8 +224,31 @@ export function spaceSwipe(node: HTMLElement, options: Options) {
     }, IDLE);
   }
 
+  const sink: SwipeSink = {
+    began(dx, dy, time) {
+      if (held !== 0) return;
+      clearTimeout(idle);
+      idle = undefined;
+      clearTimeout(lost);
+      // A sheet still settling is taken up from where it is.
+      base = mode === "spring" ? motion.x : mode === "track" ? pending : 0;
+      tracker.begin();
+      if (dx !== 0 || dy !== 0) sink.moved(dx, dy, time);
+    },
+    moved(dx, dy, time) {
+      if (held !== 0) return;
+      apply(tracker.move(dx, dy, time));
+      clearTimeout(lost);
+      if (tracker.tracking) lost = setTimeout(() => sink.lifted(), LOST);
+    },
+    lifted() {
+      clearTimeout(lost);
+      if (held === 0) apply(tracker.lift());
+    },
+  };
+
   function onwheel(event: Wheel) {
-    if (event.ctrlKey || event.deltaMode !== 0 || held !== 0) return;
+    if (nativeSwipeLive() || event.ctrlKey || event.deltaMode !== 0 || held !== 0) return;
     if (event.target instanceof Element && event.target.closest("input, textarea, select")) return;
     heard = performance.now();
     const natural = event.webkitDirectionInvertedFromDevice !== false;
@@ -255,18 +283,21 @@ export function spaceSwipe(node: HTMLElement, options: Options) {
   });
 
   host.addEventListener("wheel", onwheel, { passive: true });
+  const detach = attachNativeSwipe(host, sink);
   return {
     update(next: Options) {
       current = next;
     },
     destroy() {
       clearTimeout(idle);
+      clearTimeout(lost);
       clearTimeout(waiting);
       if (frame) cancelAnimationFrame(frame);
       home();
       tracker.reset();
       controls.delete(node);
       host.removeEventListener("wheel", onwheel);
+      detach();
     },
   };
 }

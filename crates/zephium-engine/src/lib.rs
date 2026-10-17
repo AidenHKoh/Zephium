@@ -2570,12 +2570,16 @@ impl Engine for WebviewEngine {
         NativeDispatch::Scheduled
     }
 
-    fn set_drop_indicator(&self, window: WindowId, zone: Option<Rect>) -> NativeDispatch {
+    fn set_drop_indicator(
+        &self,
+        window: WindowId,
+        preview: Option<zephium_core::ports::engine::DropPreview>,
+    ) -> NativeDispatch {
         let queued_retirement = self.retirement.clone();
         let queued_delivery = self.event_delivery.clone();
         let queued_fatal = self.fatal_security_failure.clone();
         NativeDispatch::from_scheduled(self.run(move || {
-            if !host::try_with(move |h| h.set_drop_indicator(window, zone)) {
+            if !host::try_with(move |h| h.set_drop_indicator(window, preview)) {
                 fail_native_host_admission(
                     &queued_delivery,
                     &queued_retirement,

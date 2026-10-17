@@ -571,6 +571,18 @@ pub enum StageMotion {
     Arrive,
 }
 
+/// A tab dragged over a pane's edge, shown before it is dropped: the pane's
+/// page slides aside by `shift` without being resized, the tint marks where the
+/// new pane will stand and the bar marks the seam. Rects are relative to the
+/// content region; nothing is laid out until the drop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DropPreview {
+    pub tab: ItemId,
+    pub zone: Rect,
+    pub bar: Rect,
+    pub shift: (f64, f64),
+}
+
 /// Where page content goes when it enters element fullscreen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FullscreenPresentation {
@@ -734,7 +746,7 @@ pub trait Engine {
         tree: Option<Pane>,
         region: Option<Rect>,
     ) -> NativeDispatch;
-    fn set_drop_indicator(&self, window: WindowId, zone: Option<Rect>) -> NativeDispatch;
+    fn set_drop_indicator(&self, window: WindowId, preview: Option<DropPreview>) -> NativeDispatch;
     /// A transient guide in window coordinates; never changes pane geometry.
     fn set_resize_guide(&self, _window: WindowId, _zone: Option<Rect>) -> NativeDispatch {
         NativeDispatch::Unsupported

@@ -297,6 +297,7 @@ pub(crate) struct FakeEngine {
     hold_picker: std::sync::atomic::AtomicBool,
     held_picker: Mutex<Option<zephium_core::blocker::ElementPickerCompletion>>,
     calls: Mutex<Vec<String>>,
+    previews: Mutex<Vec<Option<zephium_core::ports::engine::DropPreview>>>,
     extension_browser_surfaces: Mutex<Vec<ExtensionBrowserSurface>>,
     extension_action_requests: Mutex<Vec<(ProfileId, ItemId, ExtensionBrowserSurfaceGeneration)>>,
     extension_action_invocations: Mutex<Vec<ExtensionActionRequest>>,
@@ -344,6 +345,9 @@ pub(crate) struct FakeEngine {
 impl FakeEngine {
     fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
+    }
+    fn previews(&self) -> Vec<Option<zephium_core::ports::engine::DropPreview>> {
+        self.previews.lock().unwrap().clone()
     }
     fn log(&self, s: String) {
         self.calls.lock().unwrap().push(s);
@@ -698,7 +702,12 @@ impl Engine for FakeEngine {
         self.log(format!("layout@{window} {}", ids.join(",")));
         self.native_admission()
     }
-    fn set_drop_indicator(&self, _window: WindowId, _zone: Option<Rect>) -> NativeDispatch {
+    fn set_drop_indicator(
+        &self,
+        _window: WindowId,
+        preview: Option<zephium_core::ports::engine::DropPreview>,
+    ) -> NativeDispatch {
+        self.previews.lock().unwrap().push(preview);
         self.native_admission()
     }
     fn hint_stage_motion(

@@ -17,9 +17,10 @@ use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, CreateSolidBrush,
-    DeleteDC, DeleteObject, FillRect, GetDC, ReleaseDC, SelectObject, SetWindowRgn, AC_SRC_ALPHA,
-    AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HDC,
+    ClientToScreen, CombineRgn, CreateCompatibleDC, CreateDIBSection, CreateRectRgn,
+    CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, FillRect, GetDC, ReleaseDC,
+    SelectObject, SetWindowRgn, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    BLENDFUNCTION, DIB_RGB_COLORS, HDC, RGN_AND,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -35,7 +36,7 @@ use wry::WebViewExtWindows;
 
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
-use zephium_core::ports::engine::StageMotion;
+use zephium_core::ports::engine::{DropPreview, StageMotion};
 use zephium_core::split::{self, Pane};
 
 use crate::motion_curve::EMPHASIZED;
@@ -45,9 +46,12 @@ use crate::pane_geometry::rounded_native_size;
 
 const RADIUS: f64 = 8.0;
 const INDICATOR_RADIUS: f64 = 10.0;
-const INDICATOR_BORDER: f64 = 1.5;
-const INDICATOR_FILL: f64 = 0.12;
-const INDICATOR_STROKE: f64 = 0.42;
+const INDICATOR_BORDER: f64 = 1.0;
+// The wash over where a dropped tab will stand: the label colour, faint.
+const INDICATOR_FILL: f64 = 0.06;
+const INDICATOR_STROKE: f64 = 0.16;
+/// The room the handle's soft edge needs around it, in logical pixels.
+const HANDLE_HALO: f64 = 6.0;
 // The resize guide is the label colour, as on macOS, not the system accent.
 const GUIDE_ON_DARK: (u8, u8, u8) = (0xff, 0xff, 0xff);
 const GUIDE_ON_LIGHT: (u8, u8, u8) = (0x1d, 0x1d, 0x1f);
@@ -157,6 +161,10 @@ struct State {
     indicator: Option<HWND>,
     indicator_size: (i32, i32),
     indicator_resize: bool,
+    /// The handle at the seam of a drop preview, and the page it made room in.
+    handle: Option<HWND>,
+    handle_size: (i32, i32),
+    preview: Option<PreviewMove>,
     on_placement_failure: PlacementFailureCallback,
     /// Motion asked of the next `apply`, and the slide it started.
     pending_motion: Option<StageMotion>,
@@ -198,6 +206,37 @@ impl Slide {
     }
 }
 
+/// The page a drop preview slides aside: it keeps its size and only moves,
+/// like a journey, and rests at `to` until the preview ends and it comes home.
+#[derive(Clone, Copy, Debug)]
+struct PreviewMove {
+    id: ItemId,
+    started: Instant,
+    from: (f64, f64),
+    to: (f64, f64),
+    /// Coming home: dropped from the stage once it has arrived.
+    release: bool,
+}
+
+impl PreviewMove {
+    fn arrived(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.started) >= SLIDE
+    }
+
+    fn at(&self, now: Instant) -> (f64, f64) {
+        let elapsed = now.saturating_duration_since(self.started);
+        let progress = if elapsed >= SLIDE {
+            1.0
+        } else {
+            EMPHASIZED.at(elapsed.as_secs_f64() / SLIDE.as_secs_f64())
+        };
+        (
+            self.from.0 + (self.to.0 - self.from.0) * progress,
+            self.from.1 + (self.to.1 - self.from.1) * progress,
+        )
+    }
+}
+
 thread_local! {
     /// `SetTimer` callbacks run on the window thread. A thread-local weak map
     /// keeps pending layout work non-owning and avoids making COM controllers
@@ -215,6 +254,9 @@ impl Drop for State {
         }
         if let Some(indicator) = self.indicator.take() {
             let _ = unsafe { DestroyWindow(indicator) };
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = unsafe { DestroyWindow(handle) };
         }
     }
 }
@@ -252,6 +294,9 @@ impl Stage {
             indicator: None,
             indicator_size: (0, 0),
             indicator_resize: false,
+            handle: None,
+            handle_size: (0, 0),
+            preview: None,
             on_placement_failure: Rc::new(on_placement_failure),
             pending_motion: None,
             slide: None,
@@ -278,6 +323,16 @@ impl Stage {
             // A slide is started only by a deliberate change of shape of a
             // stage already on screen, where nothing but the horizontal
             // extent changes. Any other layout ends a journey in progress.
+            // A layout is the drop, or a change that outdates the preview:
+            // either way the pages are about to stand where they belong.
+            if let Some(moving) = s.preview.take() {
+                s.dirty.insert(moving.id);
+                if let Some(view) = s.views.get(&moving.id) {
+                    let mut applied = view.applied.get();
+                    applied.rounded = None;
+                    view.applied.set(applied);
+                }
+            }
             let motion = s.pending_motion.take();
             s.slide = match (motion, region) {
                 (Some(StageMotion::Slide), Some(r))
@@ -428,6 +483,9 @@ impl Stage {
     pub fn remove_view(&self, id: ItemId) {
         // wry owns the container window; dropping the webview destroys it.
         let mut state = self.state.borrow_mut();
+        if state.preview.is_some_and(|moving| moving.id == id) {
+            state.preview = None;
+        }
         state.views.remove(&id);
         state.ready.remove(&id);
         state.dirty.remove(&id);
@@ -579,8 +637,109 @@ impl Stage {
         true
     }
 
-    pub fn set_drop_indicator(&self, zone: Option<Rect>) {
-        self.set_indicator(zone, false);
+    /// Shows what dropping a dragged tab would do, or takes it away. The
+    /// pane's page slides aside without being resized; the drop is the one
+    /// layout.
+    pub fn set_drop_indicator(&self, preview: Option<DropPreview>) {
+        self.set_indicator(preview.map(|preview| preview.zone), false);
+        self.set_handle(preview.map(|preview| preview.bar));
+        self.move_page(preview);
+    }
+
+    fn move_page(&self, preview: Option<DropPreview>) {
+        let Ok(mut s) = self.state.try_borrow_mut() else {
+            return;
+        };
+        let now = Instant::now();
+        let current = s.preview;
+        let next = match (preview, current) {
+            (Some(p), Some(m)) if m.id == p.tab && !m.release && m.to == p.shift => return,
+            (Some(p), current) => {
+                let from = current
+                    .filter(|m| m.id == p.tab)
+                    .map_or((0.0, 0.0), |m| m.at(now));
+                Some(PreviewMove {
+                    id: p.tab,
+                    started: now,
+                    from,
+                    to: p.shift,
+                    release: false,
+                })
+            }
+            (None, Some(m)) if !m.release => Some(PreviewMove {
+                id: m.id,
+                started: now,
+                from: m.at(now),
+                to: (0.0, 0.0),
+                release: true,
+            }),
+            (None, _) => return,
+        };
+        // Another page was displaced: it goes home at once.
+        if let Some(old) = current.filter(|m| next.is_none_or(|n| n.id != m.id)) {
+            s.dirty.insert(old.id);
+            if let Some(view) = s.views.get(&old.id) {
+                let mut applied = view.applied.get();
+                applied.rounded = None;
+                view.applied.set(applied);
+            }
+        }
+        if let Some(next) = next {
+            s.dirty.insert(next.id);
+        }
+        s.preview = next;
+        drop(s);
+        schedule_sync(&self.state);
+    }
+
+    fn set_handle(&self, bar: Option<Rect>) {
+        let Ok(mut s) = self.state.try_borrow_mut() else {
+            return;
+        };
+        let Some(bar) = bar else {
+            if let Some(hwnd) = s.handle.take() {
+                let _ = unsafe { DestroyWindow(hwnd) };
+            }
+            s.handle_size = (0, 0);
+            return;
+        };
+        let scale = scale_of(s.parent);
+        let halo = (HANDLE_HALO * scale).round() as i32;
+        let mut top_left = POINT {
+            x: ((s.origin.0 + bar.x) * scale).round() as i32 - halo,
+            y: ((s.origin.1 + bar.y) * scale).round() as i32 - halo,
+        };
+        let _ = unsafe { ClientToScreen(s.parent, &mut top_left) };
+        let w = ((bar.width * scale).round() as i32).max(1);
+        let h = ((bar.height * scale).round() as i32).max(1);
+        let hwnd = match s.handle {
+            Some(hwnd) => hwnd,
+            None => {
+                let Some(created) = create_indicator(s.parent) else {
+                    return;
+                };
+                s.handle = Some(created);
+                created
+            }
+        };
+        let redraw = s.handle_size != (w, h);
+        s.handle_size = (w, h);
+        drop(s);
+        unsafe {
+            if redraw {
+                draw_handle(hwnd, top_left.x, top_left.y, w, h, halo, scale);
+            }
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOP),
+                top_left.x,
+                top_left.y,
+                w + 2 * halo,
+                h + 2 * halo,
+                SWP_NOACTIVATE,
+            );
+            let _ = ShowWindow(hwnd, SW_SHOWNA);
+        }
     }
 
     pub fn set_resize_guide(&self, zone: Option<Rect>) {
@@ -1016,10 +1175,31 @@ fn sync(state: &Rc<RefCell<State>>) {
         dirty,
         revision,
         fullscreen,
+        preview,
     ) = {
         let Ok(mut state) = state.try_borrow_mut() else {
             return;
         };
+        // A page displaced for a drop preview keeps moving until it rests,
+        // and is let go once it is home.
+        let now = Instant::now();
+        let preview = state.preview.and_then(|moving| {
+            if moving.release && moving.arrived(now) {
+                state.preview = None;
+                state.dirty.insert(moving.id);
+                if let Some(view) = state.views.get(&moving.id) {
+                    let mut applied = view.applied.get();
+                    applied.rounded = None;
+                    view.applied.set(applied);
+                }
+                None
+            } else {
+                if !moving.arrived(now) {
+                    state.dirty.insert(moving.id);
+                }
+                Some((moving.id, moving.at(now), !moving.arrived(now)))
+            }
+        });
         // Mid-journey, the panes are laid out in the journey's geometry and
         // shifted by how far it has got; on arrival, the real geometry.
         let travelling = state
@@ -1050,9 +1230,10 @@ fn sync(state: &Rc<RefCell<State>>) {
             dirty,
             state.revision,
             state.fullscreen,
+            preview,
         )
     };
-    let sliding = offset != 0.0;
+    let sliding = offset != 0.0 || preview.is_some_and(|(_, _, moving)| moving);
 
     let scale = scale_of(parent);
     let local = Rect::new(0.0, 0.0, size.0, size.1);
@@ -1064,8 +1245,11 @@ fn sync(state: &Rc<RefCell<State>>) {
         .into_iter()
         .filter_map(|(id, rect)| {
             let (width, height) = rounded_native_size(rect.width, rect.height, scale)?;
-            let x = (origin.0 + rect.x + offset) * scale;
-            let y = (origin.1 + rect.y) * scale;
+            let shift = preview
+                .filter(|(shifted, _, _)| *shifted == id)
+                .map_or((0.0, 0.0), |(_, shift, _)| shift);
+            let x = (origin.0 + rect.x + offset + shift.0) * scale;
+            let y = (origin.1 + rect.y + shift.1) * scale;
             (x.is_finite() && y.is_finite())
                 .then_some((id, (x.round() as i32, y.round() as i32, width, height)))
         })
@@ -1135,14 +1319,81 @@ fn sync(state: &Rc<RefCell<State>>) {
     for placement in placements.iter().filter(|placement| placement.show) {
         apply_native_placement(state, placement);
     }
+    // A displaced page is clipped to the stage, so what slides out of it
+    // never covers the chrome around.
+    if let Some((id, _, _)) = preview {
+        let stage = (
+            (origin.0 * scale).round() as i32,
+            (origin.1 * scale).round() as i32,
+            (size.0 * scale).round() as i32,
+            (size.1 * scale).round() as i32,
+        );
+        if let Some(rect) = pane_rects.get(&id) {
+            clip_to_stage(state, id, *rect, stage, radius);
+        }
+    }
     // The next step of the journey is the next pass: every visible pane is
     // due to move again, on the stage's own frame-paced timer.
-    if state.try_borrow().is_ok_and(|state| state.slide.is_some()) {
+    let travelling = state.try_borrow().is_ok_and(|state| {
+        state.slide.is_some()
+            || state
+                .preview
+                .is_some_and(|moving| !moving.arrived(Instant::now()))
+    });
+    if travelling {
         if let Ok(mut current) = state.try_borrow_mut() {
             let visible = current.visible.clone();
             current.dirty.extend(visible);
         }
         schedule_sync(state);
+    }
+}
+
+/// Narrows a page's rounded region to the part of it inside the stage.
+fn clip_to_stage(
+    state: &Rc<RefCell<State>>,
+    id: ItemId,
+    rect: PhysicalRect,
+    stage: PhysicalRect,
+    radius: i32,
+) {
+    let Ok(state) = state.try_borrow() else {
+        return;
+    };
+    let Some(view) = state.views.get(&id) else {
+        return;
+    };
+    let (x, y, width, height) = rect;
+    let left = (stage.0 - x).max(0);
+    let top = (stage.1 - y).max(0);
+    let right = (stage.0 + stage.2 - x).min(width);
+    let bottom = (stage.1 + stage.3 - y).min(height);
+    if right <= left || bottom <= top {
+        return;
+    }
+    // SAFETY: GDI regions created and consumed on this thread; the system owns
+    // the final region only when SetWindowRgn succeeds.
+    unsafe {
+        let rounded = CreateRoundRectRgn(
+            0,
+            0,
+            width.saturating_add(1),
+            height.saturating_add(1),
+            radius,
+            radius,
+        );
+        let inside = CreateRectRgn(left, top, right, bottom);
+        if !rounded.0.is_null() && !inside.0.is_null() {
+            let _ = CombineRgn(Some(rounded), Some(rounded), Some(inside), RGN_AND);
+            if SetWindowRgn(view.container, Some(rounded), true) == 0 {
+                let _ = DeleteObject(rounded.into());
+            }
+        } else if !rounded.0.is_null() {
+            let _ = DeleteObject(rounded.into());
+        }
+        if !inside.0.is_null() {
+            let _ = DeleteObject(inside.into());
+        }
     }
 }
 
@@ -1429,7 +1680,7 @@ fn finish_native_placement(
 }
 
 /// Premultiplied BGRA rounded rect pushed through UpdateLayeredWindow:
-/// translucent white fill, brighter border, signed-distance antialiasing.
+/// a faint wash in the label colour with a finer edge, signed-distance antialiasing.
 #[allow(clippy::too_many_arguments)]
 fn draw_indicator(
     hwnd: HWND,
@@ -1480,14 +1731,10 @@ fn draw_indicator(
                     INDICATOR_STROKE * (outer - inner) + INDICATOR_FILL * inner
                 };
                 let v = (alpha * 255.0).round() as u32;
-                pixels[row * w as usize + col] = if resize {
-                    let red = (f64::from(guide.0) * alpha).round() as u32;
-                    let green = (f64::from(guide.1) * alpha).round() as u32;
-                    let blue = (f64::from(guide.2) * alpha).round() as u32;
-                    (v << 24) | (red << 16) | (green << 8) | blue
-                } else {
-                    (v << 24) | (v << 16) | (v << 8) | v
-                };
+                let red = (f64::from(guide.0) * alpha).round() as u32;
+                let green = (f64::from(guide.1) * alpha).round() as u32;
+                let blue = (f64::from(guide.2) * alpha).round() as u32;
+                pixels[row * w as usize + col] = (v << 24) | (red << 16) | (green << 8) | blue;
             }
         }
         let memory = CreateCompatibleDC(Some(screen));
@@ -1510,6 +1757,90 @@ fn draw_indicator(
             ULW_ALPHA,
         ) {
             eprintln!("stage: indicator ULW failed: {e}");
+        }
+        SelectObject(memory, previous);
+        let _ = DeleteDC(memory);
+        let _ = DeleteObject(bitmap.into());
+        ReleaseDC(None, screen);
+    }
+}
+
+/// The handle at a drop's seam: a light core ringed by a hairline, in a soft
+/// dark halo, so it reads on a white page and on a black one. `halo` is the
+/// margin of the window around the core, in pixels.
+fn draw_handle(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, halo: i32, scale: f64) {
+    let (total_w, total_h) = (w + 2 * halo, h + 2 * halo);
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: total_w,
+            biHeight: -total_h,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+    unsafe {
+        let screen = GetDC(None);
+        let Ok(bitmap) = CreateDIBSection(Some(screen), &info, DIB_RGB_COLORS, &mut bits, None, 0)
+        else {
+            ReleaseDC(None, screen);
+            return;
+        };
+        let pixels = std::slice::from_raw_parts_mut(
+            bits as *mut u32,
+            (total_w as usize) * (total_h as usize),
+        );
+        let (half_w, half_h) = (f64::from(w) / 2.0, f64::from(h) / 2.0);
+        let radius = half_w.min(half_h);
+        let ring = 0.75 * scale;
+        for row in 0..total_h as usize {
+            for col in 0..total_w as usize {
+                let px = col as f64 + 0.5 - f64::from(total_w) / 2.0;
+                let py = row as f64 + 0.5 - f64::from(total_h) / 2.0;
+                let dx = px.abs() - half_w + radius;
+                let dy = py.abs() - half_h + radius;
+                let d = dx.max(dy).min(0.0) + dx.max(0.0).hypot(dy.max(0.0)) - radius;
+                let core = (0.5 - d).clamp(0.0, 1.0);
+                let inner = (0.5 - (d + ring)).clamp(0.0, 1.0);
+                let reach = (1.0 - d.max(0.0) / f64::from(halo.max(1))).clamp(0.0, 1.0);
+                // Shadow, then the dark ring, then the light core, each over the last.
+                let shadow = 0.45 * reach * reach;
+                let edge = (core - inner) * 0.25;
+                let light = inner * 0.98;
+                let over_edge = edge + shadow * (1.0 - edge);
+                let alpha = light + over_edge * (1.0 - light);
+                let a = (alpha * 255.0).round() as u32;
+                let c = (light * 255.0).round() as u32;
+                pixels[row * total_w as usize + col] = (a << 24) | (c << 16) | (c << 8) | c;
+            }
+        }
+        let memory = CreateCompatibleDC(Some(screen));
+        let previous = SelectObject(memory, bitmap.into());
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        if let Err(e) = UpdateLayeredWindow(
+            hwnd,
+            None,
+            Some(&POINT { x, y }),
+            Some(&SIZE {
+                cx: total_w,
+                cy: total_h,
+            }),
+            Some(memory),
+            Some(&POINT { x: 0, y: 0 }),
+            COLORREF(0),
+            Some(&blend),
+            ULW_ALPHA,
+        ) {
+            eprintln!("stage: handle ULW failed: {e}");
         }
         SelectObject(memory, previous);
         let _ = DeleteDC(memory);

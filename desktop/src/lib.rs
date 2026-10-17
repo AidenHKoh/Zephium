@@ -110,6 +110,7 @@ mod spaces;
 mod startup_alert;
 #[cfg(feature = "work-development-traces")]
 mod startup_styles;
+mod swipe;
 mod updates;
 mod voice;
 mod webext;
@@ -1771,7 +1772,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tab_drop,
             divider_grab,
             divider_drag,
-            divider_release
+            divider_release,
+            swipe::swipe_region
         ])
         .events(collect_events![
             keymap::KeymapChanged,
@@ -1783,6 +1785,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_models::WorkModelsChanged,
             voice::VoiceChanged,
             voice::VoiceLevels,
+            swipe::SwipeScroll,
             account::AccountChanged,
             ItemsChanged,
             FaviconsChanged,
@@ -5175,6 +5178,8 @@ fn build_menu(
         .separator()
         .item(&item("tab.next")?)
         .item(&item("tab.previous")?)
+        .item(&item("tab.below")?)
+        .item(&item("tab.above")?)
         .separator()
         .item(&item("tool.notes")?)
         .item(&item("tool.tasks")?)

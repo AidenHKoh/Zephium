@@ -1052,10 +1052,15 @@ impl Shell {
             }
             Command::DragOver { point } => {
                 if let Some(win) = self.windows.focused().map(|w| w.id) {
-                    let zone = point
+                    let preview = point
                         .and_then(|(x, y)| self.resolve_drop(x, y))
-                        .map(|d| d.zone);
-                    let _ = self.engine.set_drop_indicator(win, zone);
+                        .map(|drop| zephium_core::ports::engine::DropPreview {
+                            tab: drop.tab,
+                            zone: drop.zone,
+                            bar: drop.bar,
+                            shift: drop.shift,
+                        });
+                    let _ = self.engine.set_drop_indicator(win, preview);
                 }
             }
             Command::DropTab { id, x, y } => {

@@ -97,6 +97,78 @@ describe("a sideways swipe", () => {
   });
 });
 
+/** The fingers as native reports them: landing, travel a frame apart, lifting. */
+function touch(tracker: SwipeTracker, deltas: number[], { dy = 0, start = 0, frame = 16 } = {}) {
+  tracker.begin();
+  let time = start;
+  const readings: Reading[] = [];
+  for (const dx of deltas) {
+    readings.push(tracker.move(dx, dy, time));
+    time += frame;
+  }
+  return { readings, end: time };
+}
+
+describe("a swipe read from the fingers", () => {
+  it("follows them and springs home when they lift short and slow", () => {
+    const tracker = new SwipeTracker(open);
+    const { readings } = touch(tracker, [3, 3, 2, 1, 1, 0.5, 0.5]);
+    expect(last(readings)).toMatchObject({ kind: "track" });
+    expect(tracker.lift()).toMatchObject({ kind: "cancel" });
+    expect(tracker.tracking).toBe(false);
+  });
+
+  it("commits a short flick the moment the fingers lift, without waiting for quiet", () => {
+    const tracker = new SwipeTracker(open);
+    touch(tracker, [-9, -12, -14]);
+    expect(tracker.lift()).toMatchObject({ kind: "commit", step: 1 });
+  });
+
+  it("commits once past the distance while the fingers are still down, and then lets go", () => {
+    const tracker = new SwipeTracker(open);
+    const { readings } = touch(tracker, Array(30).fill(-6));
+    expect(readings.filter((reading) => reading.kind === "commit")).toHaveLength(1);
+    expect(tracker.lift()).toEqual({ kind: "none" });
+  });
+
+  it("starts a new gesture the moment fingers land, even right after a commit", () => {
+    const tracker = new SwipeTracker(open);
+    const first = touch(tracker, Array(30).fill(-6));
+    tracker.lift();
+    // No gap, no quiet: the next swipe is simply the next swipe.
+    const second = touch(tracker, [5, 5, 5], { start: first.end + 4 });
+    expect(last(second.readings)).toMatchObject({ kind: "track", offset: 15 });
+    expect(tracker.lift()).toMatchObject({ kind: "cancel" });
+  });
+
+  it("starts over when fingers land again before the last lift was heard", () => {
+    const tracker = new SwipeTracker(open);
+    touch(tracker, [4, 4, 4]);
+    expect(tracker.tracking).toBe(true);
+    const next = touch(tracker, [-5, -5]);
+    expect(last(next.readings)).toMatchObject({ kind: "track", offset: -10 });
+  });
+
+  it("ignores travel that arrives with no fingers down", () => {
+    const tracker = new SwipeTracker(open);
+    expect(tracker.move(40, 0, 0)).toEqual({ kind: "none" });
+    expect(tracker.lift()).toEqual({ kind: "none" });
+  });
+
+  it("leaves a vertical gesture alone through to its lift", () => {
+    const tracker = new SwipeTracker(open);
+    const { readings } = touch(tracker, Array(20).fill(1), { dy: 20 });
+    expect(readings.every((reading) => reading.kind === "none")).toBe(true);
+    expect(tracker.lift()).toEqual({ kind: "none" });
+  });
+
+  it("can be cancelled by the lift before it was judged", () => {
+    const tracker = new SwipeTracker(open);
+    touch(tracker, [1, 1]);
+    expect(tracker.lift()).toEqual({ kind: "none" });
+  });
+});
+
 describe("where there is no space to go to", () => {
   const first = { extent: () => 240, canStep: (step: 1 | -1) => step === -1 };
 
