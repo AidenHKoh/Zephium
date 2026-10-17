@@ -909,6 +909,12 @@ where
                         if let Some(destination) = gate.redirected() {
                             event_redirect(destination);
                             navigation_semantic.cancel();
+                        } else if gate.owned_refusal() {
+                            invoke_owned_unit_callback(
+                                navigation_event_location_callback.as_ref(),
+                                location_callback_panicked.as_ref(),
+                            );
+                            navigation_semantic.cancel();
                         } else if gate.failed() {
                             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                             if let Some(report) = &navigation_diagnostic {

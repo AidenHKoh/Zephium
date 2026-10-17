@@ -669,6 +669,20 @@ impl WorkDocumentNavigation {
         let state = self.0.lock().ok()?;
         state.effective.clone()
     }
+    /// The settled site-session document a load would depart from, by its
+    /// address without the route an app keeps in its fragment.
+    pub(crate) fn departure(&self) -> Option<ContextNavigationTarget> {
+        let state = self.0.lock().ok()?;
+        if state.phase != Phase::Ready
+            || state.policy != zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+        {
+            return None;
+        }
+        ContextNavigationTarget::parse(
+            human::without_any_fragment(state.effective.as_ref()?).as_str(),
+        )
+        .ok()
+    }
     pub(crate) fn handed_on(&self) -> bool {
         self.0.lock().is_ok_and(|state| state.handed_on)
     }
@@ -821,6 +835,43 @@ impl WorkDocumentNavigation {
         {
             state.url_observation_failure = None;
         }
+        state.phase = Phase::Armed;
+        Ok(())
+    }
+
+    /// Arms a load of the document a failed site-session load departed
+    /// from, under that load's own operation, whatever phase the failure
+    /// left. The failed load's late events are its own, never this load's.
+    pub(crate) fn arm_departure(
+        &self,
+        source: ContextJoin,
+        operation: ContextOperationJoin,
+        target: ContextNavigationTarget,
+    ) -> Result<(), ()> {
+        let mut state = self.0.lock().map_err(|_| ())?;
+        if matches!(
+            state.phase,
+            Phase::Bootstrap | Phase::Human | Phase::Retired | Phase::Ready
+        ) || state.operation.is_some_and(|armed| armed != operation)
+            || state.navigation_epoch != source.navigation_epoch().get()
+            || state.policy != zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+            || !state.policy.admits_request(&target)
+        {
+            return Err(());
+        }
+        state.superseded = state.native_id.take();
+        state.follow = None;
+        state.back_policy = None;
+        state.operation = Some(operation);
+        state.first_document = true;
+        state.page_loads_unstarted = 0;
+        state.target = Some(target);
+        state.effective = None;
+        state.requested = false;
+        state.admission_kind = Some(AdmissionKind::ProgrammaticGet);
+        state.finalization_generation = state.finalization_generation.checked_add(1).ok_or(())?;
+        state.clear_write_navigation();
+        state.location_revision = 0;
         state.phase = Phase::Armed;
         Ok(())
     }
@@ -1610,6 +1661,16 @@ impl WorkDocumentNavigation {
             .lock()
             .map_or(true, |state| state.phase != Phase::Ready)
     }
+    /// A refused load that an admitted site-session navigation still owns:
+    /// that navigation decides how the page goes on, not the event that
+    /// refused it.
+    pub(crate) fn owned_refusal(&self) -> bool {
+        self.0.lock().is_ok_and(|state| {
+            state.phase == Phase::Refused
+                && state.operation.is_some()
+                && state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+        })
+    }
     pub(crate) fn failed(&self) -> bool {
         self.0.lock().map_or(true, |state| {
             matches!(state.phase, Phase::Refused | Phase::Retired)
@@ -1847,6 +1908,41 @@ mod tests {
         );
         assert!(gate.ready(Some("https://example.test/next?sort=price")));
         assert!(!gate.failed());
+    }
+    #[test]
+    fn a_site_load_that_fails_goes_back_to_the_page_it_left() {
+        let gate = armed_policy(zephium_agentic::WorkBrowserDocumentPolicy::SiteSession);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, URL)).unwrap();
+        }
+        settle(&gate, URL);
+        let departure = gate.departure().unwrap();
+        assert_eq!(departure.as_url().as_str(), URL);
+        let (source, request) =
+            next_request_with_policy(zephium_agentic::WorkBrowserDocumentPolicy::SiteSession);
+        gate.arm_successor(source, &request).unwrap();
+        assert!(gate.departure().is_none());
+        let next = request.target().as_url().as_str();
+        assert!(gate.allows(next));
+        gate.observe(event(2, E::Started, next)).unwrap();
+        // The site sends the address to another site, which the session refuses.
+        assert!(!gate.allows("https://accounts.other.test/login"));
+        gate.observe(event(2, E::Failed, next)).unwrap();
+        assert!(gate.failed());
+        gate.arm_departure(source, request.operation(), departure.clone())
+            .unwrap();
+        assert!(gate.allows(URL));
+        // The failed load's own late events are not the page going back.
+        gate.observe(event(2, E::Cancelled, next)).unwrap();
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(3, phase, URL)).unwrap();
+        }
+        settle(&gate, URL);
+        assert!(gate.ready(Some(URL)));
+        assert!(!gate.failed());
+        let (operation, outcome) = gate.take_successor_terminal().unwrap();
+        assert_eq!(operation, request.operation());
+        assert_eq!(outcome, Ok(departure));
     }
     fn site_gate(url: &str) -> WorkDocumentNavigation {
         let gate = WorkDocumentNavigation::default();

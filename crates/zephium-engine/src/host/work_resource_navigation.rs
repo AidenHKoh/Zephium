@@ -14,6 +14,9 @@ pub(super) struct WorkNavigation {
     timer: Option<crate::platform::imp::ContentPolicyTimeout>,
     deadline: Instant,
     stage: WorkNavigationStage,
+    /// The site-session document this load departs from, until a failed
+    /// load has gone back to it once.
+    departure: Option<zephium_agentic::ContextNavigationTarget>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -310,6 +313,9 @@ impl WorkNativeResource {
             Some(Err(ContextPortFailure::TimedOut))
         };
         if let Some(outcome) = outcome {
+            if outcome.is_err() && self.return_to_departure(erased) {
+                return;
+            }
             if outcome.is_err() {
                 self.guard.fail();
                 if let Some(gate) = self.view.as_ref().and_then(|view| view.work_navigation()) {
@@ -343,6 +349,78 @@ impl WorkNativeResource {
             }
         }
     }
+    /// A site-session load that failed after it was sent leaves its page
+    /// wherever it stopped. The page it departed from is loaded again, once,
+    /// under the same operation, so the run carries on from where it was
+    /// and the model hears the address did not open.
+    fn return_to_departure(&mut self, erased: bool) -> bool {
+        let Some((lease, source, operation)) = self
+            .navigation
+            .as_ref()
+            .filter(|pending| {
+                pending.stage == WorkNavigationStage::Navigating && pending.departure.is_some()
+            })
+            .and_then(|pending| pending.task.request())
+            .map(|request| {
+                (
+                    request.lease().clone(),
+                    request.source(),
+                    request.navigation().operation(),
+                )
+            })
+        else {
+            return false;
+        };
+        let Some(departure) = self
+            .navigation
+            .as_mut()
+            .and_then(|pending| pending.departure.take())
+        else {
+            return false;
+        };
+        let Some(now) = work_browser_monotonic_now() else {
+            return false;
+        };
+        if erased
+            || !self.guard.is_healthy()
+            || now >= lease.deadline()
+            || !self
+                .guard
+                .navigation_dispatch_current(&lease, operation, now)
+        {
+            return false;
+        }
+        let dispatched = self.view.as_mut().is_some_and(|view| {
+            view.prepare_semantic_document_load().is_ok()
+                && view.work_navigation().is_some_and(|gate| {
+                    gate.arm_departure(source, operation, departure.clone())
+                        .is_ok()
+                })
+                && view.view().load_url(departure.as_url().as_str()).is_ok()
+        });
+        if !dispatched {
+            return false;
+        }
+        let duration = NAVIGATION_BUDGET.min(Duration::from_millis(
+            lease.deadline().millis().saturating_sub(now.millis()),
+        ));
+        let timeout_guard = self.guard.clone();
+        let timer = crate::platform::imp::schedule_content_policy_timeout(duration, move || {
+            let rejected = timeout_guard.clone();
+            if !crate::host::try_with_agent_context_terminal(move |host| {
+                host.timeout_work_navigation(&timeout_guard, operation)
+            }) {
+                rejected.fail();
+            }
+        });
+        let Some(navigation) = self.navigation.as_mut() else {
+            return false;
+        };
+        navigation.deadline = Instant::now() + duration;
+        navigation.timer = timer;
+        true
+    }
+
     pub(super) fn progress_history_back(&mut self, erased: bool) {
         let Some(pending) = self.history_back.as_ref() else {
             return;
@@ -758,11 +836,17 @@ impl EngineHost {
                 rejected.fail();
             }
         });
+        let departure = resource
+            .view
+            .as_ref()
+            .and_then(|view| view.work_navigation())
+            .and_then(|gate| gate.departure());
         resource.navigation = Some(WorkNavigation {
             task,
             timer,
             deadline,
             stage: WorkNavigationStage::Parking,
+            departure,
         });
         let mut dispatched = true;
         if resource
