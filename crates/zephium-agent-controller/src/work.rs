@@ -335,6 +335,10 @@ pub trait AgentWorkTask: Send {
     ) -> Result<(), AgentWorkFailure> {
         Ok(())
     }
+    /// The assessed step never reached the page.
+    fn action_not_run(&mut self) {}
+    /// The assessed step reached the page and its outcome was not seen.
+    fn action_outcome_unknown(&mut self) {}
     /// Whether terminal extraction is currently authorized by trusted task
     /// state. This is dynamic progress, not a frozen capability grant.
     fn terminal_extraction_ready(&self) -> bool {
@@ -1523,6 +1527,7 @@ impl AgentWorkController {
                     covered_controls: Vec::new(),
                     no_progress: NoProgress::default(),
                     scroll_streak: 0,
+                    setbacks: Setbacks::default(),
                     look_streak: 0,
                     look_run: LookRun::default(),
                     sign_in_refusals: 0,
@@ -1557,6 +1562,7 @@ struct WorkState {
     no_progress: NoProgress,
     /// Verified scrolls in a row with nothing else done.
     scroll_streak: u8,
+    setbacks: Setbacks,
     /// Whole looks of this page in a row with nothing done between them.
     look_streak: u8,
     /// Turns in a row that only asked for a look, refused or not.
@@ -2478,7 +2484,7 @@ impl AgentWorkController {
         if state.history_back {
             session.config = session.config.with_history_back();
         }
-        session.unverified_local_writes = state
+        session.site_session = state
             .navigation_discovery
             .as_ref()
             .is_some_and(AgentNavigationDiscovery::is_site_session);
@@ -3587,23 +3593,38 @@ impl AgentWorkController {
                 continue;
             }
             if turn.turn.proposal().kind() == AgentBrowserToolKind::Screenshot {
+                state.journal_mut()?.emit(AgentWorkEventKind::ToolProposed(
+                    AgentBrowserToolKind::Screenshot,
+                ))?;
                 if Self::screenshot_possible(state, &turn, &observation)? {
                     match Self::screenshot_current(state, worker, browser, turn, &observation)
                         .await?
                     {
-                        Some(next) => {
+                        Ok(Some(next)) => {
                             no_progress.pending = None;
                             turn = next;
+                            continue;
                         }
-                        None => {
+                        Ok(None) => {
                             state.observation = Some(observation);
                             return Ok(());
                         }
+                        Err(failed) => {
+                            let failure;
+                            (turn, failure) = *failed;
+                            let page = state.native.retained.as_ref().map_or(0, |browser| {
+                                navigation::address_digest(&navigation::page_address(
+                                    browser.binding().document(),
+                                ))
+                            });
+                            state.setbacks.count(Setback::Screenshot, page, failure)?;
+                            fruitless.refused(state)?;
+                        }
                     }
-                    continue;
                 }
-                // A picture refused for this look goes back as a fresh text
-                // look rather than ending the page.
+                // A picture refused for this look, or one whose capture
+                // failed, goes back as a fresh text look rather than ending
+                // the page.
                 let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
                 let checkpoint = turn
                     .into_tool_turn()
@@ -4094,6 +4115,9 @@ impl AgentWorkController {
                                             SemanticActionBindingError::OutcomeAlreadySatisfied,
                                         )
                                         .ok_or_else(|| crate::contract!())?),
+                                    Err(AgentWorkFailure::OutcomeUnknown) => Err(proposal
+                                        .into_refusal(SemanticActionBindingError::OutcomeUnknown)
+                                        .ok_or_else(|| crate::contract!())?),
                                     Err(failure) => return Err(failure),
                                 }
                             }
@@ -4188,6 +4212,10 @@ impl AgentWorkController {
             Self::retain_action_read_evidence(state, &proposal, &observation, captured_at)?;
             let link = Self::clicked_link(state, proposal.action(), &observation);
             let scrolled = proposal.action().kind() == SemanticActionKind::Scroll;
+            let commits = !matches!(
+                proposal.action().effect(),
+                SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
+            );
             let typed = (proposal.action().kind() == SemanticActionKind::Fill)
                 .then(|| {
                     proposal
@@ -4216,6 +4244,15 @@ impl AgentWorkController {
                         .as_mut()
                         .and_then(|session| session.take_rejected_refusal())
                         .ok_or_else(|| crate::contract!())?;
+                    if matches!(
+                        refusal.reason(),
+                        SemanticActionBindingError::Unverified
+                            | SemanticActionBindingError::OutcomeUnknown
+                    ) {
+                        state.task.action_outcome_unknown();
+                    } else {
+                        state.task.action_not_run();
+                    }
                     // The page ran its checks for a step it then refused
                     // (covered, changed): the context needs a fresh look
                     // before the next step, as after any step it ran.
@@ -4285,6 +4322,16 @@ impl AgentWorkController {
                     state
                         .journal_mut()?
                         .emit(AgentWorkEventKind::ActionProposalRefused(refusal.reason()))?;
+                    // A commit, or a step whose outcome is unknown, is held to
+                    // the tighter bound of native failures.
+                    if commits || refusal.reason() == SemanticActionBindingError::OutcomeUnknown {
+                        state.setbacks.count(
+                            Setback::Action(refusal.reason()),
+                            Self::refused_control(&refusal, &observation, &frames)
+                                .unwrap_or_default(),
+                            AgentWorkFailure::Browser(error),
+                        )?;
+                    }
                     fruitless.refused(state)?;
                     let refusal = Self::repeated_refusal(&mut action_refusals, refusal)?;
                     let refusal = Self::count_refused_control(
@@ -4352,6 +4399,7 @@ impl AgentWorkController {
             )?;
             state.look_streak = 0;
             state.moved_on();
+            state.setbacks.progressed();
             state.scroll_streak = if scrolled {
                 state.scroll_streak.saturating_add(1)
             } else {
@@ -5016,7 +5064,8 @@ impl AgentWorkController {
             Err(
                 error @ (AgentWorkFailure::ActionDenied
                 | AgentWorkFailure::EffectRequired(_)
-                | AgentWorkFailure::AlreadyDone),
+                | AgentWorkFailure::AlreadyDone
+                | AgentWorkFailure::OutcomeUnknown),
             ) => {
                 #[cfg(feature = "probe-harness")]
                 eprintln!("owned-read: none=assess {error:?}");
@@ -5190,13 +5239,20 @@ impl AgentWorkController {
         Ok(prepared.is_ok())
     }
 
+    /// Answers a Screenshot turn with a picture of the page. A capture the
+    /// page did not give (it changed under it, pictures are not allowed
+    /// there) hands the turn back with why, for a fresh text look.
+    #[allow(clippy::type_complexity)]
     async fn screenshot_current(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
         turn: AgentBrowserProviderTurn,
         observation: &SemanticObservation,
-    ) -> Result<Option<AgentBrowserProviderTurn>, AgentWorkFailure> {
+    ) -> Result<
+        Result<Option<AgentBrowserProviderTurn>, Box<(AgentBrowserProviderTurn, AgentWorkFailure)>>,
+        AgentWorkFailure,
+    > {
         state.check_task_contract()?;
         if !state.viewport_screenshot
             || state.native.screenshot_pending.is_some()
@@ -5210,7 +5266,7 @@ impl AgentWorkController {
                 AgentBrowserProviderError::UnsupportedTool(AgentBrowserToolKind::Screenshot),
             ));
         }
-        let Some(screenshot) = Self::capture_screenshot(
+        let screenshot = match Self::capture_screenshot(
             state,
             worker,
             browser,
@@ -5218,9 +5274,18 @@ impl AgentWorkController {
             observation,
             SemanticScreenshotBudget::STANDARD,
         )
-        .await?
-        else {
-            return Ok(None);
+        .await
+        {
+            Ok(Some(screenshot)) => screenshot,
+            Ok(None) => return Ok(Ok(None)),
+            Err(
+                failure @ (AgentWorkFailure::Screenshot(_)
+                | AgentWorkFailure::ScreenshotRequest(_)
+                | AgentWorkFailure::Context
+                | AgentWorkFailure::ContextLost
+                | AgentWorkFailure::Browser(AgentBrowserProviderError::Authority)),
+            ) => return Ok(Err(Box::new((turn, failure)))),
+            Err(failure) => return Err(failure),
         };
         state.native.check_control(worker, browser)?;
         state.refresh_account(worker, browser)?;
@@ -5239,7 +5304,7 @@ impl AgentWorkController {
             session.continue_after_screenshot(turn.into_tool_turn(), screenshot, observation),
         )
         .await
-        .map(Some)
+        .map(|next| Ok(Some(next)))
     }
 
     /// One bounded viewport screenshot of `observation`'s page, bound to the
@@ -6990,6 +7055,49 @@ impl LookRun {
     }
 }
 
+/// A native failure of one step that the page survived.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Setback {
+    Screenshot,
+    Navigation,
+    Action(SemanticActionBindingError),
+}
+
+/// Native failures in a row that went back to the model, and each failure
+/// by its target. A third in a row with nothing done between them, or the
+/// same failure on the same target a second time, ends the page as it ended
+/// before such failures were handed back.
+#[derive(Default)]
+struct Setbacks {
+    run: u8,
+    seen: Vec<(Setback, u64)>,
+}
+
+const MAX_SETBACKS: u8 = 3;
+const MAX_SEEN_SETBACKS: usize = 16;
+
+impl Setbacks {
+    fn count(
+        &mut self,
+        setback: Setback,
+        target: u64,
+        failure: AgentWorkFailure,
+    ) -> Result<(), AgentWorkFailure> {
+        self.run = self.run.saturating_add(1);
+        if self.run >= MAX_SETBACKS || self.seen.contains(&(setback, target)) {
+            return Err(failure);
+        }
+        if self.seen.len() == MAX_SEEN_SETBACKS {
+            self.seen.remove(0);
+        }
+        self.seen.push((setback, target));
+        Ok(())
+    }
+    fn progressed(&mut self) {
+        self.run = 0;
+    }
+}
+
 /// Counts refusals since the page last moved forward.
 #[derive(Default)]
 struct Fruitless(u8);
@@ -7077,6 +7185,33 @@ mod fruitless_tests {
             }
         }
         assert!(guard.blocked.len() <= 64);
+    }
+
+    #[test]
+    fn a_third_failure_in_a_row_or_the_same_one_twice_ends_the_page() {
+        let failure =
+            AgentWorkFailure::Screenshot(zephium_agentic::SemanticScreenshotNativeFailure::Stale);
+        let mut setbacks = Setbacks::default();
+        assert!(setbacks.count(Setback::Screenshot, 0, failure).is_ok());
+        assert!(setbacks.count(Setback::Navigation, 7, failure).is_ok());
+        assert_eq!(
+            setbacks.count(Setback::Navigation, 8, failure),
+            Err(failure)
+        );
+        let mut setbacks = Setbacks::default();
+        let changed = Setback::Action(SemanticActionBindingError::DispatchRejected);
+        let unknown = Setback::Action(SemanticActionBindingError::OutcomeUnknown);
+        assert!(setbacks.count(changed, 5, failure).is_ok());
+        setbacks.progressed();
+        assert!(setbacks.count(unknown, 5, failure).is_ok());
+        setbacks.progressed();
+        assert!(setbacks.count(changed, 6, failure).is_ok());
+        setbacks.progressed();
+        assert_eq!(
+            setbacks.count(changed, 5, failure),
+            Err(failure),
+            "progress between them does not excuse the same failure twice"
+        );
     }
 
     #[test]
@@ -7453,6 +7588,9 @@ pub enum AgentWorkFailure {
     /// The proposal repeats a commitment this page already made (a second
     /// add to cart of the same item); nothing is issued.
     AlreadyDone,
+    /// The proposal repeats a step whose outcome this page task did not
+    /// see: it may already have taken effect, so it is not issued again.
+    OutcomeUnknown,
 }
 
 pub(super) struct WorkEvents {

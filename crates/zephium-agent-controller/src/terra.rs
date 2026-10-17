@@ -2031,9 +2031,10 @@ pub struct AgentBrowserSession {
     action_proposal_failure: Option<crate::action::AgentBrowserActionProposalRefusal>,
     action_terminal: Option<zephium_agentic::SemanticActionBatchResult>,
     rejected_refusal: Option<zephium_agentic::AgentProviderActionRefusal>,
-    /// A site session hands an unverified draft step back to the model
-    /// instead of ending the page task.
-    pub(crate) unverified_local_writes: bool,
+    /// A site session hands every step the page survived back to the model
+    /// instead of ending the page task: an unverified draft, a commit
+    /// refused before it acted, or one whose outcome is unknown.
+    pub(crate) site_session: bool,
     /// The pending fill types into a field that commits nothing: the page
     /// rewriting it is the model's to see, not the person's to resolve.
     pub(crate) rewritable_fill: bool,
@@ -2288,7 +2289,7 @@ impl AgentBrowserSession {
             action_proposal_failure: None,
             action_terminal: None,
             rejected_refusal: None,
-            unverified_local_writes: false,
+            site_session: false,
             rewritable_fill: false,
             failure: None,
             deadline,
@@ -3096,7 +3097,7 @@ impl AgentBrowserSession {
     ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
         use zephium_agentic::*;
         self.check_live()?;
-        // `unverified_local_writes` is a site session's mode, not a record of
+        // `site_session` is a site session's mode, not a record of
         // writes: a read of what loading showed stays a read in either mode.
         if self.objective.is_none() {
             return Err(crate::continuation!());
@@ -3927,7 +3928,7 @@ impl AgentBrowserSession {
             .action
             .take()
             .ok_or(AgentBrowserProviderError::ActionPending)?;
-        let (terminal, refusal) = match action.into_rejected_refusal() {
+        let (terminal, refusal) = match action.into_rejected_refusal(self.site_session) {
             Ok((terminal, refusal)) => (terminal, Some(refusal)),
             Err(action) => match action.into_rejected_batch() {
                 Ok(terminal) => (terminal, None),
@@ -3950,9 +3951,8 @@ impl AgentBrowserSession {
             return Err(AgentBrowserProviderError::Journal);
         }
         self.action_terminal.take();
-        // A rejected read or local write never ran: the model may choose
-        // again on a fresh observation. Any other rejection closes its debt
-        // and stays fatal.
+        // A rejected step never ran: the model may choose again on a fresh
+        // observation. Any other rejection closes its debt and stays fatal.
         if let Some(refusal) = refusal {
             self.failure = None;
             self.rejected_refusal = Some(refusal);
@@ -4051,7 +4051,11 @@ impl AgentBrowserSession {
         match result {
             Err(error @ crate::AgentBrowserActionError::Failed(failure))
                 if crate::action::refused_before_acting(failure)
-                    || failure == zephium_agentic::SemanticActionFailure::NeedsHuman =>
+                    || matches!(
+                        failure,
+                        zephium_agentic::SemanticActionFailure::NeedsHuman
+                            | zephium_agentic::SemanticActionFailure::Timeout
+                    ) =>
             {
                 if let Some(refusal) = self.covered_refusal()? {
                     self.rejected_refusal = Some(refusal);
@@ -4117,13 +4121,14 @@ impl AgentBrowserSession {
         let Some(action) = self.action.take() else {
             return Ok(None);
         };
-        let (terminal, refusal) = match action.into_covered_refusal(self.rewritable_fill) {
-            Ok(parts) => parts,
-            Err(action) => {
-                self.action = Some(*action);
-                return Ok(None);
-            }
-        };
+        let (terminal, refusal) =
+            match action.into_covered_refusal(self.rewritable_fill, self.site_session) {
+                Ok(parts) => parts,
+                Err(action) => {
+                    self.action = Some(*action);
+                    return Ok(None);
+                }
+            };
         self.action_terminal = Some(terminal);
         let recorded = self.journal.as_mut().is_some_and(|journal| {
             journal
@@ -4210,8 +4215,7 @@ impl AgentBrowserSession {
         let Some(action) = self.action.take() else {
             return Ok(None);
         };
-        let (terminal, refusal) = match action.into_unverified_refusal(self.unverified_local_writes)
-        {
+        let (terminal, refusal) = match action.into_unverified_refusal(self.site_session) {
             Ok(parts) => parts,
             Err(action) => {
                 self.action = Some(*action);

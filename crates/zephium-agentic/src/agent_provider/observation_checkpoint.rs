@@ -83,8 +83,8 @@ pub struct AgentProviderObservationCheckpoint {
 
 impl AgentProviderContinuation {
     /// A picture the planner asked for cannot be taken of this look (it is
-    /// cut short or shows a private field): the planner gets a fresh text
-    /// look instead, told so.
+    /// cut short or shows a private field), or its capture failed: the
+    /// planner gets a fresh text look instead, told so.
     pub fn into_screenshot_refresh(
         self,
         observation: &SemanticObservation,
@@ -97,7 +97,7 @@ impl AgentProviderContinuation {
         }
         Ok(AgentProviderObservationCheckpoint::refresh(
             self,
-            "screenshot_unavailable: no picture of this page can be taken now (the look is cut short or shows a private field). This is a fresh text look of the page: work from it, scroll or extract; do not ask for a screenshot of it again.".to_owned(),
+            "screenshot_unavailable: no picture of this page can be taken now. This is a fresh text look of the page: work from it, scroll or extract; do not ask for a screenshot of it again.".to_owned(),
         ))
     }
 
