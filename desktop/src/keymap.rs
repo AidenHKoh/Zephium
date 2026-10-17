@@ -146,6 +146,7 @@ impl Keymap {
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn work_pane_shown(&self) -> bool {
         self.work_pane_shown.load(Ordering::Acquire)
     }
