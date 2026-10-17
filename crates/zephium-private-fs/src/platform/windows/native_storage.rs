@@ -33,6 +33,8 @@ pub enum NativeApplication {
     Product,
     /// `pnpm dev` builds, kept apart from the installed product's profile.
     Development,
+    /// The separately identified browser hardening review installation.
+    ReviewQa,
     /// The separately identified extension/Work QA installation.
     ExtensionQa,
     /// File-grant integration qualification.
@@ -54,6 +56,7 @@ impl NativeApplication {
         match self {
             Self::Product => "app.zephium",
             Self::Development => "app.zephium.dev",
+            Self::ReviewQa => "app.zephium.review-qa",
             Self::ExtensionQa => "app.zephium.webext-qa",
             Self::FilesIntegrationQa => "app.zephium.files-integration-qa",
             Self::Performance => "app.zephium.performance",
