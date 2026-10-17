@@ -24,6 +24,7 @@ export type ServerForm = {
 export const PRESETS: { name: string; url: string; auth: WorkServerAuthV1 }[] = [
   { name: "Linear", url: "https://mcp.linear.app/mcp", auth: "oauth" },
   { name: "Notion", url: "https://mcp.notion.com/mcp", auth: "oauth" },
+  { name: "Todoist", url: "https://ai.todoist.net/mcp", auth: "oauth" },
   { name: "Sentry", url: "https://mcp.sentry.dev/mcp", auth: "oauth" },
   { name: "Stripe", url: "https://mcp.stripe.com", auth: "oauth" },
   { name: "Figma", url: "http://127.0.0.1:3845/mcp", auth: "none" },
