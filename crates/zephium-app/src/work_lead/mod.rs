@@ -726,6 +726,11 @@ fn context_text(
     grant: &WorkAgentGrantV1,
 ) -> String {
     let mut out = format!("Request: {objective}\nNow: {}\n", prompt::now_line());
+    if let Some(draft) = grant.draft {
+        out.push_str(&format!(
+            "The person pressed Send on draft {draft}: this request sends it. Start the part for its destination with start_part's draft set to {draft}.\n"
+        ));
+    }
     let earlier: Vec<&WorkExecutionFact> = projection
         .executions
         .iter()

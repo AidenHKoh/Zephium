@@ -786,6 +786,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
     hub.save(&session()).unwrap();
     let initial = create(&mut hub);
     let grant = WorkAgentGrantV1 {
+        draft: None,
         lead: None,
         provider: WorkSearchProvider::OpenAi,
         model: PUBLIC_SEARCH_MODEL.into(),
@@ -1320,6 +1321,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
                 88,
                 2,
                 WorkStepKindV1::Read {
+                    verbatim: None,
                     url: "https://example.com/page".into(),
                     collection: None,
                     goal: None,
@@ -1581,6 +1583,7 @@ impl AgentSettlementFixture {
                     command: 100.into(),
                     intent: WorkRuntimeIntent::BeginAgent {
                         grant: WorkAgentGrantV1 {
+                            draft: None,
                             lead: None,
                             provider: WorkSearchProvider::OpenAi,
                             model: PUBLIC_SEARCH_MODEL.into(),
@@ -1730,6 +1733,7 @@ fn page_settlement_revisions_are_store_owned_and_follow_commit_order() {
         f.step(
             id,
             WorkStepKindV1::Read {
+                verbatim: None,
                 url: "https://example.com/inbox".into(),
                 goal: None,
                 collection: None,
@@ -1932,6 +1936,7 @@ fn a_published_reply_does_not_hide_an_unconfirmed_page_task() {
         f.step(
             1,
             WorkStepKindV1::Read {
+                verbatim: None,
                 url: "https://example.com/".into(),
                 goal: Some("Send the approved message".into()),
                 collection: None,
@@ -1970,6 +1975,7 @@ fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
     hub.save(&session()).unwrap();
     let initial = create(&mut hub);
     let grant = WorkAgentGrantV1 {
+        draft: None,
         provider: WorkSearchProvider::OpenAi,
         model: PUBLIC_SEARCH_MODEL.into(),
         max_turns: 200,
@@ -2462,6 +2468,7 @@ fn image_disclosure_read(f: &mut AgentSettlementFixture) {
     f.step(
         1,
         WorkStepKindV1::Read {
+            verbatim: None,
             url: "https://example.test/view".into(),
             goal: None,
             collection: None,

@@ -479,6 +479,7 @@ impl NativeWorkComposition {
         ));
         let id = request.id;
         request.step = WorkStepKindV1::Read {
+            verbatim: None,
             url: url.clone(),
             goal: None,
             collection: None,
@@ -1472,6 +1473,7 @@ impl NativeWorkComposition {
                             _ => None,
                         };
                         request.step = WorkStepKindV1::Read {
+                            verbatim: None,
                             url: resume.document.as_url().to_string(),
                             collection: None,
                             goal,
@@ -3725,7 +3727,9 @@ fn compile_page_step(
     #[cfg(not(feature = "public-qualification"))]
     let loopback = false;
     let (navigation, assignment) = match &request.step {
-        WorkStepKindV1::Read { url, goal, .. } => {
+        WorkStepKindV1::Read {
+            url, goal, verbatim, ..
+        } => {
             let target = ContextNavigationTarget::parse(url).map_err(|_| WorkError::Invalid)?;
             let navigation = if task {
                 AgentNavigationDiscovery::try_new_site_session(target, PAGE_TASK_HOPS)
@@ -3739,7 +3743,8 @@ fn compile_page_step(
             .map_err(|_| refused(&settings, "navigation", WorkError::Invalid))?;
             let assignment = match goal {
                 Some(goal) => format!(
-                    "Work on this site, starting at {url}\nGoal: {goal}\nWhen the goal is met or cannot go further, report what you found and what is ready, with exact names, figures and dates as the pages show them."
+                    "Work on this site, starting at {url}\nGoal: {goal}{}\nWhen the goal is met or cannot go further, report what you found and what is ready, with exact names, figures and dates as the pages show them.",
+                    exact_content(verbatim.as_deref())
                 ),
                 None if signed_in.is_some() => format!(
                     "Read only this page: {url}\nIt is open with the person's own signed-in session. Report the facts on this page that matter for the objective, with exact figures, names and dates. Do not follow links: other page visits are separate assignments."
@@ -3952,6 +3957,16 @@ fn compile_page_step(
 
 /// The provider admits an objective of this many bytes: its conservative
 /// count takes one token per byte.
+/// The words a page task types or posts as they are: between the markers
+/// nothing is shortened, reworded or corrected, and line breaks stay.
+fn exact_content(verbatim: Option<&str>) -> String {
+    verbatim.map_or_else(String::new, |text| {
+        format!(
+            "\nExact content, to enter exactly as written in the matching fields of the page, every line break kept (the labels name the fields):\n<<<\n{text}\n>>>"
+        )
+    })
+}
+
 const MAX_PAGE_OBJECTIVE_BYTES: usize = {
     let tokens = zephium_agentic::MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS as usize;
     if tokens < zephium_agentic::MAX_AGENT_PROVIDER_OBJECTIVE_BYTES {
@@ -4329,6 +4344,17 @@ mod page_objective_tests {
     }
 
     #[test]
+    fn a_longest_goal_with_the_longest_exact_content_still_opens() {
+        let goal = "g".repeat(zephium_core::work::runtime::MAX_WORK_PAGE_GOAL_BYTES);
+        let text = "Hej\n"
+            .repeat(zephium_core::work::runtime::MAX_WORK_PAGE_VERBATIM_BYTES / "Hej\n".len());
+        let step = format!("{}{}", step(&goal), exact_content(Some(&text)));
+        let objective = fit_objective("Send this email", &step, None).expect("fits");
+        assert!(admitted(&objective));
+        assert!(objective.contains(&format!("<<<\n{text}\n>>>")));
+    }
+
+    #[test]
     fn clipping_never_splits_a_character() {
         let step = step("Find a stay");
         let overall = "Жильё на месяц ".repeat(400);
@@ -4657,6 +4683,7 @@ mod public_asset_retry_tests {
             construction_attempt: WorkBrowserConstructionAttempt::default(),
             id: WorkStepId::from(1),
             step: WorkStepKindV1::Read {
+                verbatim: None,
                 url: "https://example.test/catalog".into(),
                 collection: None,
                 goal: None,
@@ -4690,6 +4717,7 @@ mod public_asset_retry_tests {
                 let mut r = request();
                 r.private_run = private_storage;
                 r.step = WorkStepKindV1::Read {
+                    verbatim: None,
                     url: "https://example.test/".into(),
                     collection: None,
                     goal,
@@ -4755,6 +4783,7 @@ mod public_asset_retry_tests {
             account: "SECRET_ACCOUNT".into(),
         };
         original.step = WorkStepKindV1::Read {
+            verbatim: None,
             url: "https://SECRET_URL".into(),
             collection: None,
             goal: Some("SECRET_GOAL".into()),

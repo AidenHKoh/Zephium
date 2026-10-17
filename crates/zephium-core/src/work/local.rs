@@ -293,6 +293,7 @@ mod tests {
         };
         assert!(titled
             .validate(&WorkStepKindV1::Read {
+                verbatim: None,
                 url: "https://example.com".into(),
                 collection: None,
                 goal: None,

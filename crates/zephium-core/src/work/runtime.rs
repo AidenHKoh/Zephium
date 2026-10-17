@@ -324,6 +324,9 @@ pub struct WorkAgentGrantV1 {
     /// this skill loaded. A name it does not know is ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill: Option<String>,
+    /// The canvas draft the person pressed Send on: this run sends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<WorkArtifactId>,
     /// What a browser search falls back to when a results page cannot be
     /// used; only a browser search grant names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -415,6 +418,9 @@ pub const MAX_WORK_ACCOUNT_GRANTS: usize = 4;
 pub const MAX_WORK_ACCOUNT_PAGES: u8 = 12;
 /// A page task's goal, as the agent states it for one site.
 pub const MAX_WORK_PAGE_GOAL_BYTES: usize = 600;
+/// Content a page task enters exactly as written. It sits beside the goal in
+/// an objective of at most 8 KiB, so it leaves room for the page rules.
+pub const MAX_WORK_PAGE_VERBATIM_BYTES: usize = 3_500;
 /// One origin read with the profile's signed-in session for one request.
 /// The person's approval attests the account; Zephium never infers it.
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -1325,6 +1331,10 @@ pub enum WorkStepKindV1 {
         /// A page task: the agent works toward this goal on the url's site.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         goal: Option<String>,
+        /// Words a page task types or posts exactly as written, line breaks
+        /// included; the goal stays a short instruction.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verbatim: Option<String>,
     },
     Discover {
         query: String,
@@ -1684,6 +1694,7 @@ impl WorkStepKindV1 {
                 url,
                 collection,
                 goal,
+                verbatim,
             } => {
                 validate_public_url(url)?;
                 if let Some(goal) = goal {
@@ -1691,6 +1702,12 @@ impl WorkStepKindV1 {
                     if goal.trim().is_empty() || goal.chars().any(char::is_control) {
                         return Err(WorkError::Invalid);
                     }
+                }
+                if let Some(verbatim) = verbatim {
+                    if goal.is_none() || verbatim.contains('\r') {
+                        return Err(WorkError::Invalid);
+                    }
+                    validate_text(verbatim, MAX_WORK_PAGE_VERBATIM_BYTES)?;
                 }
                 collection.as_ref().map_or(Ok(()), |shape| shape.validate())
             }

@@ -73,6 +73,49 @@ pub(crate) fn newest(objects: &[CanvasObject], id: WorkArtifactId) -> Option<&Ca
     Some(at)
 }
 
+/// A canvas draft as the person last left it, labelled for a page task to
+/// enter exactly: To, Subject and the body, line breaks kept.
+pub(crate) fn draft_words(
+    projection: &WorkRuntimeProjection,
+    current: WorkExecutionId,
+    id: &str,
+) -> Result<String, String> {
+    let canvas = canvas(projection, current);
+    let found = WorkArtifactId::parse(id.trim())
+        .and_then(|id| newest(&canvas, id))
+        .ok_or("draft is the id of a draft object on this canvas")?;
+    let edited = projection
+        .executions
+        .iter()
+        .flat_map(|execution| &execution.user_artifacts)
+        .find(|state| state.artifact == found.artifact.id)
+        .and_then(|state| state.edited_data.as_ref());
+    let WorkArtifactDataV1::Draft {
+        destination,
+        to,
+        subject,
+        body,
+        ..
+    } = edited.unwrap_or(&found.artifact.data)
+    else {
+        return Err("that object is not a draft".into());
+    };
+    let mut words = String::new();
+    if let Some(to) = to {
+        words.push_str(&format!("To: {to}\n"));
+    }
+    if let Some(subject) = subject {
+        words.push_str(&format!("Subject: {subject}\n"));
+    }
+    let label = if *destination == zephium_core::work::objects::WorkDraftDestinationV1::Email {
+        "Body"
+    } else {
+        "Message"
+    };
+    words.push_str(&format!("{label}:\n{body}"));
+    Ok(words)
+}
+
 fn summary(artifact: &WorkArtifactV1) -> String {
     let text = artifact.data.plain_text();
     let line = text

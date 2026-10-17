@@ -501,6 +501,7 @@ impl WorkAgentTurnDisclosure {
                         continue;
                     };
                     WorkStepKindV1::Read {
+                        verbatim: None,
                         url,
                         collection,
                         goal: None,
@@ -519,6 +520,7 @@ impl WorkAgentTurnDisclosure {
                         continue;
                     };
                     WorkStepKindV1::Read {
+                        verbatim: None,
                         url,
                         collection,
                         goal: Some(goal.trim().to_owned()),
