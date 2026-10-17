@@ -430,23 +430,29 @@ fn draft_dialog(node: &SemanticNode, snapshot: &SemanticSnapshot) -> Option<usiz
     (drafts && creates).then_some(index)
 }
 
-/// An editor set in the page rather than a dialog (an inline "add task" row):
-/// a small part of the page around the field holds the button that creates
-/// what is typed, so typing drafts. The page itself never counts: a page of
-/// blocks with a "New page" button elsewhere still saves as it is typed.
-fn draft_editor(node: &SemanticNode, snapshot: &SemanticSnapshot) -> bool {
+/// The button that creates what this field drafts: in its dialog, or in an
+/// editor set in the page (an inline "add task" row), a small part of the
+/// page around the field. The page itself never counts: a page of blocks
+/// with a "New page" button elsewhere still saves as it is typed.
+fn draft_creator<'a>(
+    node: &SemanticNode,
+    snapshot: &'a SemanticSnapshot,
+) -> Option<&'a SemanticNode> {
     const SMALL: usize = 80;
+    let creator = |index: usize| {
+        subtree(snapshot, index).iter().find(|part| {
+            part.role() == SemanticRole::Button
+                && !std::ptr::eq(*part, node)
+                && creates(&label(part))
+        })
+    };
+    if let Some(index) = draft_dialog(node, snapshot) {
+        return creator(index);
+    }
     ancestors(node, snapshot)
         .take_while(|(_, ancestor)| ancestor.parent().is_some())
-        .map(|(index, _)| subtree(snapshot, index))
-        .take_while(|region| region.len() <= SMALL)
-        .any(|region| {
-            region.iter().any(|part| {
-                part.role() == SemanticRole::Button
-                    && !std::ptr::eq(part, node)
-                    && creates(&label(part))
-            })
-        })
+        .take_while(|(index, _)| subtree(snapshot, *index).len() <= SMALL)
+        .find_map(|(index, _)| creator(index))
 }
 
 /// "Create issue", "Add task", "Save page": the control that makes it.
@@ -503,8 +509,7 @@ fn typing_effect(node: &SemanticNode, snapshot: &SemanticSnapshot) -> SiteEffect
             .any(|(_, a)| a.landmark_kind() == Some(SemanticLandmarkKind::Form))
         && !composer_has_send(snapshot)
         && !composer(node)
-        && draft_dialog(node, snapshot).is_none()
-        && !draft_editor(node, snapshot)
+        && draft_creator(node, snapshot).is_none()
     {
         // A document that saves as it is typed commits on the first key.
         SiteEffect::Commit(Consequence::Edit)
@@ -657,6 +662,13 @@ pub(crate) fn classify(
                     // when a compact look omits Send. Unrelated page buttons
                     // must not relabel Enter as saving or purchasing.
                     SiteEffect::Commit(Consequence::Communication)
+                } else if let Some(creator) = draft_creator(node, snapshot) {
+                    // Enter in a drafted item makes it, as its own button would.
+                    SiteEffect::Commit(
+                        commit_words(&label(creator))
+                            .filter(|c| *c != Consequence::Destructive)
+                            .unwrap_or(Consequence::Save),
+                    )
                 } else {
                     // Enter commits what the region's own control would.
                     let region = subtree(snapshot, region_index(node, snapshot));
@@ -2289,14 +2301,29 @@ mod tests {
             json!({"k":7,"p":3,"r":"button","n":"Team: Backlog","o":1,"ak":1}),
             json!({"k":8,"p":3,"r":"button","n":"Create issue","o":1,"ak":1}),
             json!({"k":9,"p":0,"r":"textbox","n":"Block 1","o":11,"fs":1,"es":[1,2,false]}),
-            json!({"k":10,"p":0,"r":"group","n":"Quick add"}),
-            json!({"k":11,"p":9,"r":"textbox","n":"Task name","o":11,"fs":1,"es":[1,2,false]}),
-            json!({"k":12,"p":9,"r":"button","n":"Add task","o":1,"ak":1}),
+        ]);
+        let tasks = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"button","n":"Delete task","o":1,"ak":1}),
+            json!({"k":3,"p":0,"r":"group","n":"Quick add"}),
+            json!({"k":4,"p":2,"r":"textbox","n":"Task name","o":11,"fs":1,"es":[1,2,false]}),
+            json!({"k":5,"p":2,"r":"button","n":"Remove date","o":1,"ak":1}),
+            json!({"k":6,"p":2,"r":"button","n":"Add task","o":1,"ak":1}),
         ]);
         assert_eq!(
-            effect(&apps, 11, SemanticActionKind::Fill),
+            effect(&tasks, 4, SemanticActionKind::Fill),
             SiteEffect::Draft,
             "an inline editor drafts until its own Add button",
+        );
+        assert_eq!(
+            effect_key(
+                &tasks,
+                4,
+                SemanticActionKind::Press,
+                Some(SemanticPressKey::Enter)
+            ),
+            SiteEffect::Commit(Consequence::Save),
+            "Enter makes the drafted task, whatever else the editor offers to remove",
         );
         assert_eq!(
             effect(&apps, 2, SemanticActionKind::Fill),
