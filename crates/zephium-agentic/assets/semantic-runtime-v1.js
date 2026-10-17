@@ -3848,12 +3848,15 @@
           read(nodeConnectedGetter, target) !== true ||
           apply(nodeGetRoot, target, []) !== document) return false;
       const current = classify(target);
-      if (current === null || fillControlKind(current, value) !== kind ||
+      const now = current === null ? 0 : fillControlKind(current, value);
+      // An empty or text-only editor becomes a rich one once its first
+      // paragraph is typed, and that is the same editor.
+      if (now === 0 || (kind >= 3 ? now < 3 : now !== kind) ||
           disabledState(target, false) || has(target, "readonly") ||
           lower(attribute(target, "aria-readonly", 16) || "") === "true" ||
           credentialField(target, current, attribute(target, "aria-label", 512) || "")) return false;
-      if (kind === 3) return editingContextMatches(target, request, current.editingContext);
-      return kind !== 4 || read(nodeParentGetter, target) === parentAtAdmission;
+      if (kind === 3 && now === 3) return editingContextMatches(target, request, current.editingContext);
+      return kind < 3 || read(nodeParentGetter, target) === parentAtAdmission;
     };
     let focused = false;
     const revalidate = () => sameTarget() && (focused

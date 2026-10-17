@@ -14,7 +14,10 @@ pub(super) fn editor(path: &str) -> Option<&'static str> {
         "/edit/slack" | "/edit/slack-enter" => Some(SLACK),
         "/edit/linear" => Some(LINEAR),
         "/edit/notion" => Some(NOTION),
-        "/edit/webmail" | "/edit/webmail-swap" | "/edit/webmail-thread" => Some(WEBMAIL),
+        "/edit/webmail"
+        | "/edit/webmail-swap"
+        | "/edit/webmail-blocks"
+        | "/edit/webmail-thread" => Some(WEBMAIL),
         _ => None,
     }
 }
@@ -76,6 +79,15 @@ function mount(host, onChange){
   }).observe(host,{childList:true,subtree:true,characterData:true});
   render(false);
   return { text:text, clear:function(){ model=['']; render(); } };
+}
+// An editor with no model of its own, like a mail composer's body: the
+// browser's editing leaves a block per line (an empty line as <div><br></div>)
+// and the text is read back from what is rendered.
+function plain(host, onChange){
+  var inserts=0;
+  host.addEventListener('beforeinput', function(e){ if(e.inputType==='insertText') inserts++; });
+  host.addEventListener('input', function(){ onChange(); });
+  return { inserts:function(){ return inserts; }, text:function(){ return host.innerText.replace(/ /g,' ').replace(/\n+$/,''); } };
 }
 </script>"#;
 
@@ -207,12 +219,15 @@ const WEBMAIL: &str = concat!(
 </div>"#,
     "__EDITOR__",
     r#"<script>
-var dialog=document.getElementById('dialog'), body=mount(document.getElementById('body'),function(){ arm(); });
+var dialog=document.getElementById('dialog'), blocks=location.pathname.indexOf('blocks')>=0;
+var body=(blocks ? plain : mount)(document.getElementById('body'),function(){ arm(); });
 var swapping=location.pathname.indexOf('swap')>=0, swaps=[];
 location.hash='inbox';
 document.getElementById('compose').addEventListener('click',function(){ location.hash='inbox?compose=new'; dialog.hidden=false; document.getElementById('to').focus(); });
 function send(){
   var parts=[document.getElementById('to').value, document.getElementById('subject').value, body.text()];
+  // How many times the body was typed into: a retyped field counts again.
+  if(blocks) parts.push(body.inserts());
   fetch('/edit/webmail/send?text='+encodeURIComponent(parts.join('|')),{method:'POST'});
   dialog.hidden=true; document.getElementById('status').textContent='Message sent';
 }
@@ -272,6 +287,7 @@ mod tests {
             "/edit/notion",
             "/edit/webmail",
             "/edit/webmail-swap",
+            "/edit/webmail-blocks",
             "/edit/webmail-thread",
         ] {
             let page = super::page(path).unwrap();
