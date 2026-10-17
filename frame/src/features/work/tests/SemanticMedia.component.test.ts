@@ -222,7 +222,7 @@ test("record labels stop child iteration at the existing stack bound", async () 
   frame.srcdoc = `<script>${fixed}
     const label=globalThis.__zephiumRecordMediaV1.testLabel;
     let iterated=0,refused=false,threw=false;
-    const node=count=>({nodeType:1,getAttribute:()=>"",childNodes:{*[Symbol.iterator](){for(let i=0;i<count;i++){if(++iterated>1000)throw new Error();yield {nodeType:3,nodeValue:"x"};}}}});
+    const node=count=>({nodeType:1,getAttribute:()=>"",childNodes:new Proxy({},{get:(_,key)=>{if(key==="length")return count;if(++iterated>1000)throw new Error();return {nodeType:3,nodeValue:"x"};}})});
     const accepted=label(node(63))==="x".repeat(63)+"|";
     iterated=0;try{refused=label(node(1000000))===null;}catch(_){threw=true;}
     document.documentElement.dataset.result=JSON.stringify({accepted,refused,threw,iterated});
@@ -235,7 +235,7 @@ test("record labels stop child iteration at the existing stack bound", async () 
       accepted: true,
       refused: true,
       threw: false,
-      iterated: 65,
+      iterated: 64,
     });
   } finally {
     frame.remove();
