@@ -347,9 +347,8 @@
   --radius-panel: 22px; /* a floating sheet */
   --radius-capsule: 999px; /* only what is genuinely a pill, a disc or a hairline cap */
 
-  /* The shine family's corner: buttons, select triggers, the segmented control
-     and every text input. One line to square them back off. */
-  --radius-shine: var(--radius-capsule);
+  /* The shine family's corner: buttons, select triggers and every text input. */
+  --radius-shine: var(--radius-control-compact);
   --radius-field: var(--radius-shine);
   --radius-menu: var(--radius-panel);
 
@@ -453,13 +452,13 @@
   --text-overview-figure: 40px;
   --text-tile-title: 44px;
 
-  --control-height: 28px; /* every button, select trigger and text input in a row */
+  --control-height: 24px; /* every button, select trigger and text input in a row */
   --control-compact: var(--control-height);
   --control-regular: 30px;
   --control-large: 34px;
   --field-height: var(--control-height);
-  --control-inset: 14px; /* the text inset of a capsule, so a glyph clears the curve */
-  --search-height: var(--control-height);
+  --control-inset: 10px;
+  --search-height: 28px;
   --row-sidebar: 36px;
   --row-page: 58px;
 
