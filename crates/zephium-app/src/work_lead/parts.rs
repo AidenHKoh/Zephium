@@ -334,6 +334,14 @@ fn blocks(need: &WorkPartNeedV1) -> bool {
 /// A goal about what anyone sees on a service's site (its pricing, plans,
 /// features or docs), not the person's own workspace there: it reads the
 /// public site, and the person's connection is no way in to it.
+/// Whether exact words a page will type are the person's own: they appear
+/// in something the person wrote, however its lines were wrapped.
+fn person_wrote<'a>(text: &str, sources: impl IntoIterator<Item = &'a str>) -> bool {
+    let flat = |words: &str| words.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = flat(text);
+    !text.is_empty() && sources.into_iter().any(|source| flat(source).contains(&text))
+}
+
 fn public_goal(spec: &PartSpec) -> bool {
     const PUBLIC: [&str; 12] = [
         "pricing",
@@ -440,6 +448,22 @@ where
             .and_then(Value::as_str)
             .filter(|_| name == "browse")
         else {
+            if let Some(text) = arguments
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|_| name == "browse")
+            {
+                let projection = self.run.probe.runtime_projection().await.ok();
+                let earlier = projection.iter().flat_map(|projection| {
+                    projection
+                        .executions
+                        .iter()
+                        .filter_map(|execution| execution.spec.request.as_deref())
+                });
+                if !person_wrote(text, std::iter::once(self.objective.as_str()).chain(earlier)) {
+                    return Err("text is only the person's own words, copied character for character from their request; these words are not in it. Copy them exactly, or use draft for a draft on the canvas.".into());
+                }
+            }
             return Ok(arguments.clone());
         };
         if arguments.get("text").is_some() {
@@ -2731,6 +2755,16 @@ mod tests {
         ] {
             assert!(!plain_page(refused), "{refused}");
         }
+    }
+
+    #[test]
+    fn exact_words_must_be_the_persons_own() {
+        let request = "Send an email to ana@example.com:\n\nHi Ana,\n\nThe release is ready.\n\nBest";
+        assert!(person_wrote("Hi Ana,\n\nThe release is ready.\n\nBest", [request]));
+        assert!(person_wrote("Hi Ana, The release is ready.", [request]));
+        assert!(!person_wrote("Now: Saturday 17 October 2026, 15:53", [request]));
+        assert!(!person_wrote("Hi Ana, the release is ready.", [request]));
+        assert!(!person_wrote("  ", [request]));
     }
 
     #[test]
