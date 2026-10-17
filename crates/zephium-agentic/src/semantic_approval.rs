@@ -59,6 +59,11 @@ impl SemanticApprovalBinding {
         }
         Some(Self { target, option })
     }
+    /// Whether both identities come from one page instance: its elements may be
+    /// replaced, but a reload or a new document restarts the keyspace.
+    pub fn same_keyspace(&self, other: &Self) -> bool {
+        self.target.nonce == other.target.nonce
+    }
     pub(crate) fn guard_bytes(self) -> [u8; 20] {
         let mut bytes = [0; 20];
         bytes[..16].copy_from_slice(&self.target.nonce);

@@ -90,9 +90,10 @@ const PURCHASE_WORDS: [&str; 19] = [
     "zarezerwuj",
     "kupuję",
 ];
-const DESTRUCTIVE_WORDS: [&str; 20] = [
+const DESTRUCTIVE_WORDS: [&str; 21] = [
     "delete",
     "remove",
+    "discard",
     "archive",
     "trash",
     "erase",
@@ -318,6 +319,68 @@ fn in_search(node: &SemanticNode, snapshot: &SemanticSnapshot) -> bool {
         })
 }
 
+/// Words that name the thing a control belongs to, not a value inside it:
+/// removing one of these removes something the page keeps.
+const WHOLE_ITEM: [&str; 24] = [
+    "draft",
+    "message",
+    "email",
+    "mail",
+    "task",
+    "issue",
+    "post",
+    "comment",
+    "page",
+    "note",
+    "item",
+    "event",
+    "file",
+    "document",
+    "reply",
+    "thread",
+    "conversation",
+    "account",
+    "project",
+    "list",
+    "cart",
+    "basket",
+    "bag",
+    "wishlist",
+];
+
+/// A remove control inside an open editor that holds unsaved input ("Remove
+/// date" on a task being added) takes a value out of the draft: nothing the
+/// page keeps changes until the editor's own save. Taking out the whole item
+/// ("Discard draft", "Delete task") or anything outside an editor is not that.
+fn edits_unsaved_input(text: &str, node: &SemanticNode, snapshot: &SemanticSnapshot) -> bool {
+    let index = region_index(node, snapshot);
+    let Some(root) = snapshot.nodes().get(index) else {
+        return false;
+    };
+    if root.role() != SemanticRole::Dialog
+        && root.landmark_kind() != Some(SemanticLandmarkKind::Form)
+    {
+        return false;
+    }
+    let object = words(text);
+    let object = DESTRUCTIVE_WORDS.iter().fold(object, |left, word| {
+        left.replace(&format!(" {} ", words(word).trim()), " ")
+    });
+    if object.trim().is_empty() || names_any(&object, &WHOLE_ITEM) {
+        return false;
+    }
+    let region = subtree(snapshot, index);
+    region.iter().any(|part| {
+        !std::ptr::eq(part, node)
+            && (part.role() == SemanticRole::Textbox
+                || part.role() == SemanticRole::Combobox
+                || part.editable_structure().is_some())
+            && value_text(part).is_some()
+    }) && region.iter().any(|part| {
+        part.role() == SemanticRole::Button && !std::ptr::eq(part, node) && creates(&label(part))
+    })
+}
+
 /// The region a step acts in: its dialog, form or named region, else the page.
 fn region_index(node: &SemanticNode, snapshot: &SemanticSnapshot) -> usize {
     ancestors(node, snapshot)
@@ -515,7 +578,13 @@ pub(crate) fn classify(
                 // Creating what the dialog drafted puts it in the workspace.
                 SiteEffect::Commit(commits.unwrap_or(Consequence::Save))
             } else if let Some(consequence) = commits.or_else(|| dialog_commits(node, snapshot)) {
-                SiteEffect::Commit(consequence)
+                if consequence == Consequence::Destructive
+                    && edits_unsaved_input(&text, node, snapshot)
+                {
+                    SiteEffect::Draft
+                } else {
+                    SiteEffect::Commit(consequence)
+                }
             } else if node.activation() == Some(SemanticActivation::Submit) {
                 if in_search(node, snapshot) || queries(node) {
                     SiteEffect::Read
@@ -827,6 +896,7 @@ impl Preview {
 }
 
 const MAX_FACTS: usize = 12;
+const MAX_LEDGER: usize = 8;
 const MAX_LINE: usize = 300;
 const MAX_TEXT: usize = 4096;
 
@@ -1050,6 +1120,72 @@ pub(crate) fn fingerprint(
     node: &SemanticNode,
     snapshot: &SemanticSnapshot,
 ) -> Fingerprint {
+    Fingerprint {
+        approval: action.approval_binding(),
+        context: snapshot.frame().context().identity().id(),
+        profile: snapshot.frame().context().identity().profile(),
+        frame: snapshot.frame().frame(),
+        option: action.option_node(snapshot).map(|option| {
+            (
+                option.value().cloned(),
+                nonfocus_states(option),
+                Sha256::digest(label(option).as_bytes()).into(),
+            )
+        }),
+        structure: structure(action, node, snapshot),
+        verification: action.verification(),
+        value: node.value().cloned(),
+        nonfocus_states: nonfocus_states(node),
+    }
+}
+
+fn nonfocus_states(node: &SemanticNode) -> [bool; 6] {
+    [
+        SemanticState::Checked,
+        SemanticState::Selected,
+        SemanticState::Expanded,
+        SemanticState::Disabled,
+        SemanticState::Required,
+        SemanticState::Invalid,
+    ]
+    .map(|state| node.states().contains(state))
+}
+
+impl Fingerprint {
+    /// The same step, whichever native element currently carries it.
+    fn same_step(&self, other: &Self) -> bool {
+        let unbound = |fingerprint: &Self| Self {
+            approval: None,
+            ..fingerprint.clone()
+        };
+        unbound(self) == unbound(other)
+    }
+    fn same_page_instance(&self, other: &Self) -> bool {
+        matches!((self.approval, other.approval), (Some(a), Some(b)) if a.same_keyspace(&b))
+    }
+}
+
+/// Whether exactly one control on the page reads as this step's target.
+fn sole_match(
+    action: &SemanticPreparedAction,
+    snapshot: &SemanticSnapshot,
+    structure_hash: [u8; 32],
+) -> bool {
+    snapshot
+        .nodes()
+        .iter()
+        .filter(|node| structure(action, node, snapshot) == structure_hash)
+        .count()
+        == 1
+}
+
+/// What the step is, apart from which native element holds it: its kind and
+/// text, the control's role, label and ancestors.
+fn structure(
+    action: &SemanticPreparedAction,
+    node: &SemanticNode,
+    snapshot: &SemanticSnapshot,
+) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"ZEPHIUM-SITE-STEP-1\0");
     let mut part = |bytes: &[u8]| {
@@ -1079,42 +1215,7 @@ pub(crate) fn fingerprint(
         part(format!("{:?}|{:?}", ancestor.role(), ancestor.landmark_kind()).as_bytes());
         part(ancestor.name().map_or("", |name| name.as_str()).as_bytes());
     }
-    let states = |node: &SemanticNode| {
-        [
-            SemanticState::Checked,
-            SemanticState::Selected,
-            SemanticState::Expanded,
-            SemanticState::Disabled,
-            SemanticState::Required,
-            SemanticState::Invalid,
-        ]
-        .map(|state| node.states().contains(state))
-    };
-    Fingerprint {
-        approval: action.approval_binding(),
-        context: snapshot.frame().context().identity().id(),
-        profile: snapshot.frame().context().identity().profile(),
-        frame: snapshot.frame().frame(),
-        option: action.option_node(snapshot).map(|option| {
-            (
-                option.value().cloned(),
-                states(option),
-                Sha256::digest(label(option).as_bytes()).into(),
-            )
-        }),
-        structure: hasher.finalize().into(),
-        verification: action.verification(),
-        value: node.value().cloned(),
-        nonfocus_states: [
-            SemanticState::Checked,
-            SemanticState::Selected,
-            SemanticState::Expanded,
-            SemanticState::Disabled,
-            SemanticState::Required,
-            SemanticState::Invalid,
-        ]
-        .map(|state| node.states().contains(state)),
-    }
+    hasher.finalize().into()
 }
 
 /// A held step waiting for the person.
@@ -1153,6 +1254,13 @@ struct GateState {
     receipt: Option<Receipt>,
     verified_approval: bool,
     declined: Vec<[u8; 32]>,
+    /// Approved steps that never ran because the page changed under them, by
+    /// step and preview: the same step proposed again runs without a new card.
+    unspent: Vec<([u8; 32], [u8; 32])>,
+    /// The commit handed to the page and not yet verified.
+    in_flight: Option<(Consequence, String)>,
+    /// What this page task committed, in order, with the control's words.
+    committed: Vec<(Consequence, String)>,
     /// Add-to-cart controls already pressed: a second press adds a second item.
     carted: Vec<[u8; 32]>,
     /// Status lines seen before the last step, for the commit detector.
@@ -1330,6 +1438,29 @@ impl SiteGate {
             return Some(Receipt::NotSent);
         }
         state.receipt.take()
+    }
+    /// What this page task committed, one plain line each: "Saved on the page:
+    /// Add task". The lead reports an item as made by these, whatever the
+    /// page agent's findings say.
+    pub(crate) fn committed(&self) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        for (consequence, control) in &self.state().committed {
+            let verb = match consequence {
+                Consequence::Communication => "Sent",
+                Consequence::Destructive => "Deleted",
+                Consequence::Purchase => "Purchased",
+                Consequence::Save | Consequence::Edit | Consequence::Type => "Saved",
+            };
+            let line = if control.is_empty() {
+                format!("{verb} on the page")
+            } else {
+                format!("{verb} on the page: {control}")
+            };
+            if lines.last() != Some(&line) && lines.len() < MAX_LEDGER {
+                lines.push(line);
+            }
+        }
+        lines
     }
     pub(crate) fn unconfirmed(&self) -> Option<String> {
         self.state().unconfirmed.clone()
@@ -1634,6 +1765,7 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
         let node = action
             .target_node(snapshot)
             .ok_or(AgentWorkFailure::Contract)?;
+        self.gate.state().in_flight = None;
         if credential(node)
             && matches!(
                 action.kind(),
@@ -1735,27 +1867,50 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
         let site = state.site.clone();
         let preview = preview(consequence, action, node, snapshot, &site);
         let digest = preview.digest();
+        let fits = if consequence == Consequence::Type {
+            matches!(
+                declared,
+                SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
+            )
+        } else {
+            declared == consequence.class()
+        };
+        let control = clip(&label(node), 60);
+        // The person approved this step and the page then changed under it
+        // without changing what it is: it runs, once, without a new question.
+        if let Some(at) = state
+            .unspent
+            .iter()
+            .position(|(step, preview)| *step == fingerprint.structure && *preview == digest)
+        {
+            if !fits {
+                return Err(AgentWorkFailure::EffectRequired(consequence.class()));
+            }
+            state.unspent.remove(at);
+            state.dispatched = Some(consequence);
+            state.in_flight = Some((consequence, control));
+            state.status_before = status_lines(observation);
+            return accept_approved(current_binding);
+        }
         if let Some(confirmed) = state.confirmed.take() {
-            if confirmed.fingerprint == fingerprint && confirmed.digest == digest {
-                let fits = if consequence == Consequence::Type {
-                    matches!(
-                        declared,
-                        SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
-                    )
-                } else {
-                    declared == consequence.class()
-                };
+            let same_step =
+                confirmed.digest == digest && confirmed.fingerprint.same_step(&fingerprint);
+            // An SPA re-renders the node while the card waits: the approval
+            // follows the step to its new element when exactly one control
+            // on the page is that step.
+            if same_step
+                && (confirmed.fingerprint.approval == fingerprint.approval
+                    || (confirmed.fingerprint.same_page_instance(&fingerprint)
+                        && sole_match(action, snapshot, fingerprint.structure)))
+            {
                 if !fits {
                     state.confirmed = Some(confirmed);
                     return Err(AgentWorkFailure::EffectRequired(consequence.class()));
                 }
-                let original = confirmed
-                    .fingerprint
-                    .approval
-                    .ok_or(AgentWorkFailure::ActionDenied)?;
                 state.dispatched = Some(consequence);
+                state.in_flight = Some((consequence, control));
                 state.status_before = status_lines(observation);
-                return accept_approved(original);
+                return accept_approved(current_binding);
             }
             // Edits allowed for the run: the approval covers this edit too.
             if matches!(consequence, Consequence::Edit | Consequence::Save)
@@ -1769,11 +1924,20 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
                     ));
                 }
                 state.dispatched = Some(consequence);
+                state.in_flight = Some((consequence, control));
                 state.status_before = status_lines(observation);
                 return accept_approved(current_binding);
             }
             // The page changed since the person decided: that approval is spent.
             state.receipt = Some(Receipt::NotSent);
+            if same_step {
+                // The step is what they approved, but more than one control
+                // reads as it: the same proposal again runs, with no new card.
+                state
+                    .unspent
+                    .push((confirmed.fingerprint.structure, confirmed.digest));
+                return Err(AgentWorkFailure::ActionDenied);
+            }
         }
         // Saving or editing what the person asked for in their own app is
         // the request itself; sending, buying and deleting still wait.
@@ -1792,6 +1956,7 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
                 }
                 state.carted.push(item);
             }
+            state.in_flight = Some((consequence, control));
             state.status_before = status_lines(observation);
             return accept_approved(current_binding);
         }
@@ -1824,6 +1989,9 @@ impl SiteWorkPolicy {
     /// the page said a step Rust read as harmless committed something.
     fn after_step(&self, observation: &SemanticObservation) {
         let mut state = self.gate.state();
+        if let Some(flight) = state.in_flight.take() {
+            state.committed.push(flight);
+        }
         if state.dispatched.take().is_some() {
             state.receipt = Some(Receipt::Committed);
             state.verified_approval = true;
@@ -3407,6 +3575,143 @@ mod tests {
         assert_eq!(
             fingerprint(&a, source, snapshot),
             fingerprint(&a, &focused.frames()[0].nodes()[1], &focused.frames()[0])
+        );
+    }
+
+    fn composer(buttons: &[(u64, &str)]) -> SemanticObservation {
+        let mut nodes = vec![json!({"k":1,"r":"document","o":16,"fc":true})];
+        nodes.extend(buttons.iter().map(|(key, name)| {
+            json!({"k":key,"p":0,"r":"button","n":name,"o":9,"ak":1,"fc":true,
+                "b":{"x":1,"y":1,"w":100,"h":30}})
+        }));
+        page(nodes)
+    }
+
+    #[test]
+    fn an_approval_follows_its_step_to_the_control_the_page_renders_anew() {
+        let before = composer(&[(2, "Send")]);
+        let gate = Arc::new(SiteGate::default());
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        let held = click(&before, 2, SemanticEffectClass::Communication);
+        assert!(matches!(
+            policy.assess(&held, &before),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        gate.approve(false).unwrap();
+        // The single-page app replaced the node while the card waited.
+        let after = page(vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"paragraph","t":"Sending","fc":true}),
+            json!({"k":3,"p":0,"r":"button","n":"Send","o":9,"ak":1,"fc":true,
+                "b":{"x":1,"y":1,"w":100,"h":30}}),
+        ]);
+        let renewed = click(&after, 3, SemanticEffectClass::Communication);
+        assert_ne!(held.approval_binding(), renewed.approval_binding());
+        assert!(policy.assess(&renewed, &after).is_ok());
+        policy.after_step(&after);
+        assert_eq!(gate.take_receipt(), Some(Receipt::Committed));
+        assert_eq!(gate.committed(), vec!["Sent on the page: Send".to_owned()]);
+    }
+
+    #[test]
+    fn an_approved_step_that_two_controls_could_be_runs_when_proposed_again_without_a_new_card() {
+        let before = composer(&[(2, "Send")]);
+        let gate = Arc::new(SiteGate::default());
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        assert!(policy
+            .assess(
+                &click(&before, 2, SemanticEffectClass::Communication),
+                &before
+            )
+            .is_err());
+        gate.approve(false).unwrap();
+        let twins = composer(&[(2, "Send"), (3, "Send")]);
+        let again = click(&twins, 3, SemanticEffectClass::Communication);
+        assert!(matches!(
+            policy.assess(&again, &twins),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        assert_eq!(gate.take_receipt(), Some(Receipt::NotSent));
+        assert!(gate.pending().is_none(), "the person is not asked twice");
+        assert!(policy.assess(&again, &twins).is_ok());
+        assert!(matches!(
+            policy.assess(&again, &twins),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+    }
+
+    #[test]
+    fn removing_a_value_from_an_editor_being_filled_edits_the_draft() {
+        let editor = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"dialog","n":"Add task"}),
+            json!({"k":3,"p":1,"r":"textbox","n":"Task name","o":10,"v":{"k":"text","value":"Pay rent"}}),
+            json!({"k":4,"p":1,"r":"button","n":"Remove date","o":1,"ak":1}),
+            json!({"k":5,"p":1,"r":"button","n":"Discard draft","o":1,"ak":1}),
+            json!({"k":6,"p":1,"r":"button","n":"Add task","o":1,"ak":1}),
+        ]);
+        assert_eq!(
+            effect(&editor, 4, SemanticActionKind::Click),
+            SiteEffect::Draft
+        );
+        assert_eq!(
+            effect(&editor, 5, SemanticActionKind::Click),
+            SiteEffect::Commit(Consequence::Destructive)
+        );
+        let saved = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"dialog","n":"Task"}),
+            json!({"k":3,"p":1,"r":"textbox","n":"Task name","o":10,"v":{"k":"text","value":"Pay rent"}}),
+            json!({"k":4,"p":1,"r":"button","n":"Delete task","o":1,"ak":1}),
+            json!({"k":5,"p":1,"r":"button","n":"Remove date","o":1,"ak":1}),
+        ]);
+        assert_eq!(
+            effect(&saved, 4, SemanticActionKind::Click),
+            SiteEffect::Commit(Consequence::Destructive)
+        );
+        assert_eq!(
+            effect(&saved, 5, SemanticActionKind::Click),
+            SiteEffect::Commit(Consequence::Destructive),
+            "nothing unsaved to edit: the control removes what the page keeps"
+        );
+        let list = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"list","n":"Messages"}),
+            json!({"k":3,"p":1,"r":"button","n":"Delete","o":1,"ak":1}),
+            json!({"k":4,"p":0,"r":"button","n":"Remove from cart","o":1,"ak":1}),
+        ]);
+        for key in [3, 4] {
+            assert_eq!(
+                effect(&list, key, SemanticActionKind::Click),
+                SiteEffect::Commit(Consequence::Destructive)
+            );
+        }
+    }
+
+    #[test]
+    fn the_ledger_names_what_the_page_task_committed_in_order() {
+        let gate = Arc::new(SiteGate::new("example.com".into(), false, false));
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        assert!(gate.committed().is_empty());
+        let observation = booking("$1,240.00");
+        let action = click(&observation, 6, SemanticEffectClass::Purchase);
+        assert!(policy.assess(&action, &observation).is_err());
+        assert!(gate.committed().is_empty(), "a held step committed nothing");
+        gate.approve(false).unwrap();
+        assert!(policy.assess(&action, &observation).is_ok());
+        policy.after_step(&observation);
+        assert_eq!(
+            gate.committed(),
+            vec!["Purchased on the page: Request to book".to_owned()]
         );
     }
 }
