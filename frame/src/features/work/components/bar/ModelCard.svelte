@@ -2,7 +2,7 @@
   import type { WorkModelEntry, WorkModelReasoning } from "$shared/ipc/bindings";
   import type { Tier } from "./model-tier";
 
-  export type HeroSubject = {
+  export type CardSubject = {
     entry: WorkModelEntry;
     tier: Tier | null;
     levels: readonly WorkModelReasoning[];
@@ -18,6 +18,7 @@
   import { ArrowDown01Icon } from "../../lib/icons";
   import ModelEffort from "./ModelEffort.svelte";
   import ModelEffortMark from "./ModelEffortMark.svelte";
+  import "$shared/ui/Button/control.css";
   import "$shared/ui/Shine/shine.css";
 
   let {
@@ -28,10 +29,10 @@
     onEffort,
     pill = $bindable(),
   }: {
-    subject: HeroSubject;
-    /** The effort control is open in place under the model. */
+    subject: CardSubject;
+    /** The card shows the effort control in place of the model. */
     expanded: boolean;
-    /** The id of the region the effort button opens. */
+    /** The id of the face the effort button opens. */
     region: string;
     ontoggle: () => void;
     onEffort: (level: WorkModelReasoning) => void;
@@ -69,8 +70,13 @@
 
   const live = $derived(subject.levels.length > 1 && subject.effort !== null);
 
-  /** The control is built while it is open and for the moment it folds away, so its orb never turns unseen. */
+  /** The control is built while it shows and for the moment it leaves, so its orb never turns unseen. */
   let built = $state(false);
+  let face = $state<HTMLElement>();
+  $effect(() => {
+    if (expanded && built)
+      face?.querySelector<HTMLElement>('[role="slider"]')?.focus({ preventScroll: true });
+  });
   $effect(() => {
     if (expanded) {
       built = true;
@@ -81,12 +87,11 @@
   });
 </script>
 
-<section class="hero" aria-label={name}>
-  <div class="top">
+<!-- One card, two faces: the model, or how long it thinks. They never show together. -->
+<section class="card" aria-label={name} data-face={expanded ? "effort" : "model"}>
+  <div class="face model" inert={expanded}>
     {#key subject.entry.id}<div class="identity" aria-hidden="true">
-        <span class="tile ui-shine"
-          ><ProviderMark provider={subject.entry.model.provider} size={22} /></span
-        >
+        <span class="tile"><ProviderMark provider={subject.entry.model.provider} size={20} /></span>
         <span class="who">
           <span class="name" title={price}>{name}</span>
           {#if character}<span class="character">{character}</span>{/if}
@@ -95,7 +100,7 @@
     {#if live && subject.effort}<button
         bind:this={pill}
         type="button"
-        class="pill ui-shine ui-shine-press"
+        class="pill ui-control ui-shine ui-shine-press"
         aria-expanded={expanded}
         aria-controls={region}
         aria-label={m.model_effort_choose({ level: effortName(subject.effort) })}
@@ -105,74 +110,94 @@
           ><ModelEffortMark levels={subject.levels} level={subject.effort} /></span
         >
         <span class="pill-label" data-level={subject.effort}>{effortName(subject.effort)}</span>
-        <span class="pill-chevron" data-open={expanded}
-          ><Icon icon={ArrowDown01Icon} size={12} strokeWidth={2.2} /></span
+        <span class="pill-chevron"><Icon icon={ArrowDown01Icon} size={12} strokeWidth={2.2} /></span
         >
       </button>{:else}<span class="fixed">{m.model_effort_fixed()}</span>{/if}
   </div>
-  <div class="reveal" id={region} data-open={expanded}>
-    <div class="reveal-inner" inert={!expanded}>
-      <div class="reveal-body">
-        {#if built}<ModelEffort
-            levels={subject.levels}
-            value={subject.effort}
-            onchange={onEffort}
-          />{/if}
-      </div>
-    </div>
+  <div class="face effort" id={region} inert={!expanded} bind:this={face}>
+    {#if built}<ModelEffort
+        levels={subject.levels}
+        value={subject.effort}
+        onchange={onEffort}
+      />{/if}
   </div>
 </section>
 
 <style>
-  .hero {
-    display: flex;
+  .card {
+    display: grid;
     flex: none;
-    flex-direction: column;
-    padding: 14px 8px 8px;
+    margin: 8px 8px 0;
+    border-radius: var(--radius-row);
+    background: var(--color-fill);
   }
 
-  .top {
+  .face {
+    grid-area: 1 / 1;
     display: flex;
     align-items: center;
     gap: 10px;
-    min-block-size: 40px;
+    min-inline-size: 0;
+    block-size: 60px;
+    box-sizing: border-box;
+    transition:
+      opacity var(--motion-base) var(--ease-out),
+      transform var(--motion-slow) var(--ease-emphasized);
+  }
+
+  .model {
+    padding-inline: 12px 10px;
+  }
+
+  .effort {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+
+  .card[data-face="effort"] .model {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+
+  .card[data-face="effort"] .effort {
+    opacity: 1;
+    transform: none;
   }
 
   .identity {
     display: flex;
     flex: 1;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
     min-inline-size: 0;
-    animation: hero-in var(--motion-base) var(--ease-out);
+    animation: card-in var(--motion-base) var(--ease-out);
   }
 
   .tile {
-    --shine-radius: var(--radius-row);
-
     display: grid;
     flex: none;
-    inline-size: 40px;
-    block-size: 40px;
+    inline-size: 34px;
+    block-size: 34px;
     place-items: center;
-    animation: tile-in var(--motion-page) var(--ease-spring);
+    border-radius: var(--radius-control-compact);
+    background: var(--row-active);
   }
 
   .who {
     display: flex;
     flex: 1;
     flex-direction: column;
-    gap: 2px;
+    gap: 1px;
     min-inline-size: 0;
   }
 
   .name {
     overflow: hidden;
     color: var(--color-text);
-    font-size: 15px;
+    font-size: var(--text-body);
     font-weight: 600;
-    line-height: 19px;
-    letter-spacing: -0.012em;
+    line-height: 18px;
+    letter-spacing: -0.01em;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -180,31 +205,22 @@
   .character {
     overflow: hidden;
     color: var(--color-muted);
-    font-size: var(--text-label);
-    line-height: 16px;
+    font-size: var(--text-caption);
+    line-height: 14px;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .pill {
-    --shine-radius: var(--radius-capsule);
     --alive-a: color-mix(in oklab, var(--color-soft-sky) 66%, var(--color-text));
     --alive-b: color-mix(in oklab, var(--color-soft-lilac) 66%, var(--color-text));
 
-    display: inline-flex;
     flex: none;
-    align-items: center;
-    gap: 8px;
-    block-size: 30px;
-    padding-inline: 11px 9px;
-    border: 0;
+    padding-inline: 9px 7px;
     color: var(--color-muted);
-    font: inherit;
-    font-size: var(--text-label);
   }
 
-  .pill:hover,
-  .pill[aria-expanded="true"] {
+  .pill:hover {
     color: var(--color-text);
   }
 
@@ -229,11 +245,7 @@
   .pill-chevron {
     display: grid;
     place-items: center;
-    transition: rotate var(--motion-base) var(--ease-out);
-  }
-
-  .pill-chevron[data-open="true"] {
-    rotate: 180deg;
+    opacity: 0.7;
   }
 
   .fixed {
@@ -243,56 +255,25 @@
     font-size: var(--text-caption);
   }
 
-  /* The effort control opens in place: the rows below it give way as it grows. */
-  .reveal {
-    display: grid;
-    grid-template-rows: 0fr;
-    transition: grid-template-rows var(--motion-slow) var(--ease-emphasized);
-  }
-
-  .reveal[data-open="true"] {
-    grid-template-rows: 1fr;
-  }
-
-  .reveal-inner {
-    min-block-size: 0;
-    overflow: hidden;
-    opacity: 0;
-    transition: opacity var(--motion-fast) var(--ease-exit);
-  }
-
-  .reveal-body {
-    padding-block-start: 10px;
-  }
-
-  .reveal[data-open="true"] .reveal-inner {
-    opacity: 1;
-    transition: opacity var(--motion-base) var(--ease-out) 60ms;
-  }
-
-  @keyframes hero-in {
+  @keyframes card-in {
     from {
       opacity: 0;
       transform: translateY(3px);
     }
   }
 
-  @keyframes tile-in {
-    from {
-      transform: scale(0.86);
-    }
-  }
-
   @media (prefers-reduced-motion: reduce) {
-    .identity,
-    .tile {
+    .identity {
       animation: none;
     }
 
-    .reveal,
-    .reveal-inner,
-    .pill-chevron {
-      transition: none;
+    .face {
+      transition: opacity var(--motion-fast) linear;
+    }
+
+    .effort,
+    .card[data-face="effort"] .model {
+      transform: none;
     }
   }
 </style>

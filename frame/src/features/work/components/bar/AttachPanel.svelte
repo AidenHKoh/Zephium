@@ -61,8 +61,63 @@
   }
 </script>
 
-<!-- Everything that can join the canvas from outside it, one kind at a time. -->
+<!-- Everything that can join the canvas from outside it, one kind at a time. The panel keeps its height, so the kinds below never move. -->
 <div class="attach">
+  <div class="stage">
+    {#if kind === "tabs"}
+      {@render picker()}
+    {:else if kind === "folder"}
+      <div class="compose">
+        <span class="tile ui-shine" aria-hidden="true"><Icon icon={FolderAddIcon} size={22} /></span
+        >
+        <form
+          class="create ui-shine-field"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void addFolder();
+          }}
+        >
+          <input
+            aria-label={m.work_env_folder_placeholder()}
+            placeholder={m.work_env_folder_placeholder()}
+            bind:value={folder}
+            maxlength="1024"
+            disabled={busy || folderPending}
+          /><Button type="submit" size="compact" disabled={busy || folderPending || !folder.trim()}
+            >{m.work_env_folder_add()}</Button
+          >
+        </form>
+        <Button size="compact" disabled={busy || folderPending} onclick={onchoosefolder}
+          >{m.work_env_folder_choose()}</Button
+        >
+      </div>
+    {:else if kind === "link"}
+      <div class="compose">
+        <span class="tile ui-shine" aria-hidden="true"><Icon icon={Link04Icon} size={22} /></span>
+        <form
+          class="create ui-shine-field"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void addLink();
+          }}
+        >
+          <input
+            type="url"
+            aria-label={m.work_env_link_placeholder()}
+            placeholder={m.work_env_link_placeholder()}
+            bind:value={link}
+            maxlength="2048"
+            disabled={busy || linkPending}
+          /><Button type="submit" size="compact" disabled={busy || linkPending || !link.trim()}
+            >{m.work_env_link_add()}</Button
+          >
+        </form>
+        {#if linkFailed}<p class="note" role="alert">{m.work_env_link_failed()}</p>{/if}
+      </div>
+    {:else}
+      {@render media(kind)}
+    {/if}
+  </div>
   <div class="segments" role="group" aria-label={m.work_tool_attach()}>
     {#each segments as segment (segment.key)}
       <button
@@ -79,57 +134,6 @@
       </button>
     {/each}
   </div>
-  {#if kind === "tabs"}
-    {@render picker()}
-  {:else if kind === "folder"}
-    <form
-      class="create ui-shine-field"
-      onsubmit={(event) => {
-        event.preventDefault();
-        void addFolder();
-      }}
-    >
-      <span class="glyph"><Icon icon={FolderAddIcon} /></span>
-      <input
-        aria-label={m.work_env_folder_placeholder()}
-        placeholder={m.work_env_folder_placeholder()}
-        bind:value={folder}
-        maxlength="1024"
-        disabled={busy || folderPending}
-      /><Button type="submit" size="compact" disabled={busy || folderPending || !folder.trim()}
-        >{m.work_env_folder_add()}</Button
-      >
-    </form>
-    <div class="footer">
-      <Button size="compact" disabled={busy || folderPending} onclick={onchoosefolder}
-        >{m.work_env_folder_choose()}</Button
-      >
-    </div>
-    <p class="note">{m.work_env_folder_hint()}</p>
-  {:else if kind === "link"}
-    <form
-      class="create ui-shine-field"
-      onsubmit={(event) => {
-        event.preventDefault();
-        void addLink();
-      }}
-    >
-      <span class="glyph"><Icon icon={Link04Icon} /></span>
-      <input
-        type="url"
-        aria-label={m.work_env_link_placeholder()}
-        placeholder={m.work_env_link_placeholder()}
-        bind:value={link}
-        maxlength="2048"
-        disabled={busy || linkPending}
-      /><Button type="submit" size="compact" disabled={busy || linkPending || !link.trim()}
-        >{m.work_env_link_add()}</Button
-      >
-    </form>
-    {#if linkFailed}<p class="note" role="alert">{m.work_env_link_failed()}</p>{/if}
-  {:else}
-    {@render media(kind)}
-  {/if}
 </div>
 
 <style>
@@ -137,21 +141,29 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
-    min-block-size: 156px;
     min-inline-size: 0;
+  }
+
+  /* One height for every kind, so the switcher under it holds still. */
+  .stage {
+    display: flex;
+    flex-direction: column;
+    block-size: 340px;
+    min-block-size: 0;
   }
 
   /* The kinds of thing to add: the chosen one opens into its name, the rest stay glyphs. */
   .segments {
     display: flex;
+    flex: none;
     gap: 2px;
     padding: 3px;
-    border-radius: calc(var(--radius-menu) - var(--menu-pad));
+    border-radius: var(--radius-capsule);
     background: var(--color-fill);
   }
 
   .segment {
-    --shine-radius: var(--radius-control);
+    --shine-radius: var(--radius-capsule);
 
     display: inline-flex;
     align-items: center;
@@ -219,13 +231,38 @@
       padding-inline-start var(--motion-slow) var(--ease-emphasized);
   }
 
+  .compose {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: center;
+    gap: 14px;
+    padding: 0 8px 24px;
+  }
+
+  .compose > :global(.ui-button) {
+    align-self: center;
+  }
+
+  .tile {
+    --shine-radius: var(--radius-control-large);
+
+    display: grid;
+    align-self: center;
+    inline-size: 52px;
+    block-size: 52px;
+    color: var(--color-label-secondary);
+    place-items: center;
+  }
+
   .create {
     --shine-radius: var(--radius-control);
 
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 4px 4px 4px 12px;
+    padding: 4px 4px 4px 14px;
   }
 
   .create input {
@@ -242,25 +279,11 @@
     color: var(--color-faint);
   }
 
-  .glyph {
-    display: grid;
-    place-items: center;
-    flex: none;
-    inline-size: 16px;
-    color: var(--color-muted);
-  }
-
-  .footer {
-    display: flex;
-    justify-content: flex-end;
-    padding-inline: 4px;
-  }
-
   .note {
     margin: 0;
-    padding: 0 4px 4px;
-    color: var(--color-muted);
+    color: var(--color-danger);
     font-size: var(--text-caption);
+    text-align: center;
   }
 
   @media (prefers-reduced-motion: reduce) {

@@ -3,7 +3,9 @@ import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
 import type { WorkModelReasoning, WorkModelsReadyV1 } from "$shared/ipc/bindings";
+import { preferences } from "$domain/preferences";
 import ModelPicker from "../components/bar/ModelPicker.svelte";
+import ModelBarStage from "./ModelBarStage.svelte";
 import { PROFILE, models } from "$shared/testing/work-models";
 
 const native = vi.hoisted(() => ({
@@ -13,6 +15,7 @@ const native = vi.hoisted(() => ({
   more: vi.fn(),
   account: vi.fn(),
   command: vi.fn(async () => ({ operation_id: "op", accepted: true })),
+  settings: {} as Record<string, string>,
   ready: vi.fn(async (profile: string): Promise<WorkModelsReadyV1> => ({
     version: 1,
     profile,
@@ -31,6 +34,11 @@ vi.mock("$shared/ipc/bindings", async () => {
     workModelsReady: native.ready,
     accountGet: native.account,
     runCommand: native.command,
+    settingGet: async (key: string) => native.settings[key] ?? null,
+    settingSet: async (key: string, value: string) => {
+      native.settings[key] = value;
+      return { accepted: true, operation_id: null };
+    },
   });
 });
 
@@ -50,7 +58,7 @@ const ready = (value: boolean) => async (profile: string) => ({
   fault: null,
 });
 
-test("the trigger names the running model and its effort, and the menu changes the model", async () => {
+test("the trigger is words alone, and the menu changes the model", async () => {
   await page.viewport(1200, 800);
   native.ready.mockImplementation(ready(true));
   native.read.mockResolvedValue(view("anthropic/claude-opus-5-5"));
@@ -58,12 +66,13 @@ test("the trigger names the running model and its effort, and the menu changes t
   const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
 
   const trigger = screen.getByRole("button", { name: "Model: Claude Opus 5.5, Medium effort" });
-  await expect.element(trigger).toHaveTextContent("Opus 5.5");
+  await expect.element(trigger).toHaveTextContent(/Opus 5\.5\s*·\s*Medium/u);
+  expect(trigger.element().querySelector("svg")).toBeNull();
   await trigger.click();
 
-  await expect.element(page.getByRole("combobox", { name: "Search models" })).toHaveFocus();
-  const hero = page.getByRole("region", { name: "Claude Opus 5.5" });
-  await expect.element(hero).toHaveTextContent(/Deepest reasoning/u);
+  await expect.element(page.getByRole("listbox")).toHaveFocus();
+  const card = page.getByRole("region", { name: "Claude Opus 5.5" });
+  await expect.element(card).toHaveTextContent(/Deepest reasoning/u);
   await expect
     .element(page.getByRole("option", { name: /Claude Opus 5\.5/u }))
     .toHaveAttribute("aria-selected", "true");
@@ -123,8 +132,21 @@ test("a provider without a key leads to adding one", async () => {
   await expect
     .element(page.getByText("Connect a server of your own", { exact: false }))
     .toBeVisible();
+  document.querySelector<HTMLElement>(".model-menu [role=tabpanel]")!.focus();
   await userEvent.keyboard("{Enter}");
   expect(onsettings).toHaveBeenCalledTimes(2);
+});
+
+test("the header opens Settings, and no foot row asks for a key", async () => {
+  await page.viewport(1200, 800);
+  native.ready.mockImplementation(ready(true));
+  native.read.mockResolvedValue(view("anthropic/claude-opus-5-5"));
+  const onsettings = vi.fn();
+  const screen = await render(ModelPicker, { profile: PROFILE, onsettings });
+  await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
+  expect(page.getByRole("button", { name: /Add a key/u }).query()).toBeNull();
+  await page.getByRole("button", { name: "Models and keys" }).click();
+  expect(onsettings).toHaveBeenCalledTimes(1);
 });
 
 test("a provider whose key is refused says so", async () => {
@@ -139,7 +161,7 @@ test("a provider whose key is refused says so", async () => {
   await expect.element(page.getByText("Google refused the key", { exact: false })).toBeVisible();
 });
 
-test("the rail moves with the arrow keys, and arrowing the list previews a model in the hero", async () => {
+test("the rail moves with the arrow keys, and arrowing the list moves the row Enter takes", async () => {
   await page.viewport(1200, 800);
   native.choose.mockClear();
   native.ready.mockImplementation(ready(true));
@@ -149,12 +171,11 @@ test("the rail moves with the arrow keys, and arrowing the list previews a model
   );
   const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
   await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
-  const field = page.getByRole("combobox", { name: "Search models" });
-  await expect.element(field).toHaveFocus();
+  const list = page.getByRole("listbox");
+  await expect.element(list).toHaveFocus();
 
-  await userEvent.keyboard("{Shift>}{Tab}{/Shift}");
   const anthropic = page.getByRole("tab", { name: "Anthropic" });
-  await expect.element(anthropic).toHaveFocus();
+  (anthropic.element() as HTMLElement).focus();
   await userEvent.keyboard("{ArrowDown}");
   await expect.element(page.getByRole("tab", { name: "OpenAI" })).toHaveFocus();
   await expect.element(page.getByRole("option", { name: /GPT-6 Sol/u })).toBeVisible();
@@ -162,21 +183,16 @@ test("the rail moves with the arrow keys, and arrowing the list previews a model
   await expect.element(anthropic).toHaveFocus();
   await expect.element(page.getByRole("option", { name: /Claude Sonnet 5\.5/u })).toBeVisible();
 
-  (field.element() as HTMLElement).focus();
+  (list.element() as HTMLElement).focus();
   await userEvent.keyboard("{ArrowDown}");
-  const sonnet = page
-    .getByRole("group", { name: "Anthropic" })
-    .getByRole("option", { name: /Claude Sonnet 5\.5/u });
-  await expect.element(field).toHaveAttribute("aria-activedescendant", sonnet.element().id);
-  await expect
-    .element(page.getByRole("region", { name: "Claude Sonnet 5.5" }))
-    .toHaveTextContent(/Quick and capable/u);
+  const sonnet = page.getByRole("option", { name: /Claude Sonnet 5\.5/u });
+  await expect.element(list).toHaveAttribute("aria-activedescendant", sonnet.element().id);
   expect(native.choose).not.toHaveBeenCalled();
   await userEvent.keyboard("{Enter}");
   expect(native.choose).toHaveBeenCalledWith(PROFILE, "lead", "anthropic/claude-sonnet-5-5");
 });
 
-test("typing filters every provider, Enter takes the first match, Escape clears first", async () => {
+test("typing slides the search in over every provider, Enter takes the first match, Escape puts it away", async () => {
   await page.viewport(1200, 800);
   native.ready.mockImplementation(ready(true));
   native.read.mockResolvedValue(view("openai/gpt-6-luna"));
@@ -195,6 +211,9 @@ test("typing filters every provider, Enter takes the first match, Escape clears 
 
   await userEvent.keyboard("{Escape}");
   await expect.element(field).toHaveValue("");
+  await expect
+    .element(page.getByRole("button", { name: "Search models" }))
+    .toHaveAttribute("aria-expanded", "false");
   await expect.element(page.getByRole("option", { name: /GPT-6 Astra/u })).toBeVisible();
 
   await userEvent.keyboard("sonnet{Enter}");
@@ -214,7 +233,7 @@ test("the clear button empties the search and returns to the provider's list", a
   await expect.element(page.getByRole("option", { name: /GPT-6 Sol/u })).toBeVisible();
 });
 
-test("the effort shows compactly, steps from the keys, and opens in place to be set", async () => {
+test("the effort shows in a word, and the card turns into its control to set it", async () => {
   await page.viewport(1200, 800);
   native.ready.mockImplementation(ready(true));
   native.read.mockResolvedValue(view("openai/gpt-6-luna"));
@@ -224,20 +243,19 @@ test("the effort shows compactly, steps from the keys, and opens in place to be 
   const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
   await screen.getByRole("button", { name: /Model: GPT-6 Luna, Medium effort/u }).click();
 
-  // At rest the model shows its effort in a word, and the control is not there.
+  // At rest the card is the model, with its effort in a word; the control is not built.
   const pill = page.getByRole("button", { name: "Effort: Medium" });
   await expect.element(pill).toHaveAttribute("aria-expanded", "false");
   expect(page.getByRole("slider").query()).toBeNull();
   expect(document.querySelector(".model-menu .core")).toBeNull();
 
-  await userEvent.keyboard("{ArrowRight}");
-  await expect.element(page.getByRole("button", { name: "Effort: High" })).toBeVisible();
-  expect(native.effort).toHaveBeenLastCalledWith(PROFILE, "high");
-
-  await page.getByRole("button", { name: "Effort: High" }).click();
+  await pill.click();
   const effort = page.getByRole("slider", { name: "Effort" });
+  await expect.element(effort).toHaveFocus();
   await expect.element(effort).toHaveAttribute("aria-valuemax", "4");
-  await expect.element(effort).toHaveAttribute("aria-valuetext", "High");
+  await expect.element(effort).toHaveAttribute("aria-valuetext", "Medium");
+  // The model is never shown beside it.
+  expect(document.querySelector(".model-menu .face.model")?.hasAttribute("inert")).toBe(true);
   const pace = () =>
     document
       .querySelector(".model-menu .core")!
@@ -246,7 +264,6 @@ test("the effort shows compactly, steps from the keys, and opens in place to be 
   await expect.poll(pace).toBeGreaterThan(0);
   const calm = pace()!;
 
-  (effort.element() as HTMLElement).focus();
   await userEvent.keyboard("{End}");
   await expect.element(effort).toHaveAttribute("aria-valuetext", "Max");
   expect(native.effort).toHaveBeenLastCalledWith(PROFILE, "max");
@@ -255,13 +272,12 @@ test("the effort shows compactly, steps from the keys, and opens in place to be 
     .element(screen.getByRole("button", { name: /Model: GPT-6 Luna, Max effort/u }))
     .toBeInTheDocument();
 
-  // Used, it folds away and hands the keys back to the button that opened it.
-  await expect.element(effort).not.toBeInTheDocument();
+  // Used, it turns back to the model and hands the keys to the button that opened it.
   await expect.element(page.getByRole("button", { name: "Effort: Max" })).toHaveFocus();
-  expect(document.querySelector(".model-menu .core")).toBeNull();
+  expect(document.querySelector(".model-menu .face.effort")?.hasAttribute("inert")).toBe(true);
 });
 
-test("Escape folds the open effort first, and only then the menu", async () => {
+test("Escape turns the open effort back first, and only then closes the menu", async () => {
   await page.viewport(1200, 800);
   native.ready.mockImplementation(ready(true));
   native.read.mockResolvedValue(view("openai/gpt-6-luna"));
@@ -277,6 +293,32 @@ test("Escape folds the open effort first, and only then the menu", async () => {
   await expect.element(page.getByRole("region", { name: "GPT-6 Luna" })).toBeVisible();
   await userEvent.keyboard("{Escape}");
   await expect.element(page.getByRole("region", { name: "GPT-6 Luna" })).not.toBeInTheDocument();
+});
+
+test("a star on a row keeps the model under Favourites, across providers", async () => {
+  await page.viewport(1200, 800);
+  native.ready.mockImplementation(ready(true));
+  native.read.mockResolvedValue(view("anthropic/claude-opus-5-5"));
+  await preferences.init();
+  const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
+  await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
+  expect(page.getByRole("tab", { name: "Favourites" }).query()).toBeNull();
+
+  await page.getByRole("button", { name: "Add Claude Sonnet 5.5 to favourites" }).click();
+  await page.getByRole("tab", { name: "OpenAI" }).click();
+  await page.getByRole("button", { name: "Add GPT-6 Sol to favourites" }).click();
+  await expect.element(page.getByRole("tab", { name: "Favourites" })).toBeVisible();
+  await page.getByRole("tab", { name: "Favourites" }).click();
+  await expect.poll(() => page.getByRole("option").all().length).toBe(2);
+  await expect.element(page.getByRole("group", { name: "Anthropic" })).toBeVisible();
+  await expect.element(page.getByRole("group", { name: "OpenAI" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Remove GPT-6 Sol from favourites" }).click();
+  await expect.poll(() => page.getByRole("option").all().length).toBe(1);
+  await expect
+    .poll(() => native.settings["work.favourite-models"])
+    .toBe("anthropic/claude-sonnet-5-5");
+  preferences.dispose();
 });
 
 test("a model whose wire sets no effort shows no effort control", async () => {
@@ -371,4 +413,24 @@ test("the menu says so when no chosen model can search the web", async () => {
   const screen = await render(ModelPicker, { profile: PROFILE });
   await screen.getByRole("button", { name: /Model: DeepSeek V4 Pro/u }).click();
   await expect.element(page.getByText("Web search is off", { exact: false })).toBeVisible();
+});
+
+test("choosing a model leaves the composer open and the cursor in the words", async () => {
+  await page.viewport(1200, 800);
+  native.ready.mockImplementation(ready(true));
+  native.read.mockResolvedValue(view("anthropic/claude-opus-5-5"));
+  native.choose.mockResolvedValue(view("openai/gpt-6-sol", "openai/gpt-6-sol"));
+  const screen = await render(ModelBarStage, { profile: PROFILE });
+  const bar = () => screen.container.querySelector<HTMLElement>(".work-bar")!;
+  const words = screen.getByRole("textbox");
+  await words.click();
+  await words.fill("Plan the trip");
+  await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
+  await page.getByRole("tab", { name: "OpenAI" }).click();
+  await page.getByRole("option", { name: /GPT-6 Sol/u }).click();
+  await expect.element(page.getByRole("listbox")).not.toBeInTheDocument();
+  await expect.element(words).toHaveFocus();
+  expect(bar().dataset.engaged).toBe("true");
+  expect(bar().dataset.mode).toBe("focus");
+  await expect.element(words).toHaveValue("Plan the trip");
 });

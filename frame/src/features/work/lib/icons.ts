@@ -59,3 +59,6 @@ export { default as WorkHistoryIcon } from "@hugeicons/core-free-icons/WorkHisto
 export { default as Navigation03Icon } from "@hugeicons/core-free-icons/Navigation03Icon";
 export { default as Calendar03Icon } from "@hugeicons/core-free-icons/Calendar03Icon";
 export { default as ShapeCollectionIcon } from "@hugeicons/core-free-icons/ShapeCollectionIcon";
+export { default as StarIcon } from "@hugeicons/core-free-icons/StarIcon";
+export { default as Settings02Icon } from "@hugeicons/core-free-icons/Settings02Icon";
+export { default as ArrowLeft01Icon } from "@hugeicons/core-free-icons/ArrowLeft01Icon";

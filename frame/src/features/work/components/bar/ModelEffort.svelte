@@ -17,7 +17,7 @@
     return best;
   }
 
-  export function stepEffort(
+  function stepEffort(
     levels: readonly WorkModelReasoning[],
     from: WorkModelReasoning,
     step: number,
@@ -170,19 +170,18 @@
 
     display: flex;
     align-items: center;
-    gap: 12px;
-    min-block-size: 56px;
-    padding: 6px 8px;
-    border-radius: calc(var(--radius-menu) - var(--menu-pad));
-    background: var(--color-fill);
+    gap: 10px;
+    block-size: 100%;
+    box-sizing: border-box;
+    padding-inline: 12px 8px;
   }
 
   .well {
     position: relative;
     display: grid;
     flex: none;
-    inline-size: 40px;
-    block-size: 40px;
+    inline-size: 36px;
+    block-size: 36px;
     place-items: center;
   }
 
@@ -288,12 +287,14 @@
   }
 
   .hint {
+    display: -webkit-box;
     overflow: hidden;
     color: var(--color-muted);
     font-size: var(--text-caption);
     line-height: 14px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
     animation: word-in var(--motion-base) var(--ease-out) 30ms backwards;
   }
 
@@ -303,7 +304,7 @@
 
     position: relative;
     flex: none;
-    inline-size: 116px;
+    inline-size: 100px;
     block-size: 36px;
     margin-inline-end: 4px;
     outline: none;
@@ -366,7 +367,7 @@
     border-radius: 50%;
     background: var(--color-text);
     box-shadow:
-      0 0 0 3px color-mix(in oklab, var(--color-fill) 100%, transparent),
+      0 0 0 3px var(--card, var(--color-fill)),
       0 1px 3px color-mix(in oklab, black 36%, transparent);
     transition:
       inset-inline-start var(--motion-base) var(--ease-out),
@@ -376,7 +377,7 @@
   [data-level="max"] .thumb {
     background: linear-gradient(150deg, var(--alive-a), var(--alive-b));
     box-shadow:
-      0 0 0 3px color-mix(in oklab, var(--color-fill) 100%, transparent),
+      0 0 0 3px var(--card, var(--color-fill)),
       0 0 0 5px color-mix(in oklab, var(--alive-b) 24%, transparent);
   }
 

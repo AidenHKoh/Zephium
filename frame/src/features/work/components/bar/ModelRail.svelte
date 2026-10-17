@@ -4,29 +4,36 @@
   /** What the person can do with a provider now: choose its models, or the one step that opens them. */
   export type Standing = "ready" | "key" | "refused" | "sign_in" | "server";
   export type Seat = { provider: WorkModelProvider; standing: Standing };
+  /** What the rail shows: one provider's models, or the ones the person starred from all of them. */
+  export type View = "favourites" | WorkModelProvider;
 </script>
 
 <script lang="ts">
   import { untrack } from "svelte";
   import { providerName } from "$domain/ai";
+  import Icon from "$shared/ui/Icon";
   import ProviderMark from "$shared/ui/ProviderMark";
   import ZephiumTile from "$shared/ui/ZephiumTile";
   import * as m from "$shared/i18n/messages";
+  import { StarIcon } from "../../lib/icons";
 
   let {
     seats,
+    starred = false,
     current,
     hits = null,
     panel,
     onpick,
   }: {
     seats: readonly Seat[];
-    current: WorkModelProvider | null;
+    /** The person has starred a model: the favourites seat leads the rail. */
+    starred?: boolean;
+    current: View | null;
     /** The providers a search matched; null while nothing is searched. */
     hits?: ReadonlySet<WorkModelProvider> | null;
     /** The id of what the rail's selection shows. */
     panel: string;
-    onpick: (provider: WorkModelProvider) => void;
+    onpick: (view: View) => void;
   } = $props();
 
   const uid = $props.id();
@@ -60,20 +67,24 @@
     }
   }
 
+  type Stop = { view: View; seat: Seat | null };
+  const stops = $derived<Stop[]>([
+    ...(starred ? [{ view: "favourites" as const, seat: null }] : []),
+    ...seats.map((seat) => ({ view: seat.provider, seat })),
+  ]);
   const at = $derived(
     Math.max(
       0,
-      seats.findIndex((seat) => seat.provider === current),
+      stops.findIndex((stop) => stop.view === current),
     ),
   );
-  /** Zephium's own seat leads and stands apart; then what is ready; then what waits on a step. */
-  const own = $derived(seats[0]?.provider === "cloud");
-  const split = $derived(seats.findIndex((seat, index) => index > 0 && seat.standing !== "ready"));
+  /** The seats that lead (favourites, Zephium's own) stand apart from the providers by a hairline. */
+  const lead = $derived((starred ? 1 : 0) + (seats[0]?.provider === "cloud" ? 1 : 0));
 
   let list = $state<HTMLElement>();
   let plate = $state<{ y: number; h: number; glide: boolean } | null>(null);
   $effect(() => {
-    void seats;
+    void stops;
     const host = list;
     const seat = host?.querySelectorAll<HTMLElement>('[role="tab"]')[at];
     if (!host || !seat) return;
@@ -85,14 +96,14 @@
     const steps: Record<string, number> = { ArrowDown: 1, ArrowUp: -1 };
     let to: number;
     if (event.key === "Home") to = 0;
-    else if (event.key === "End") to = seats.length - 1;
+    else if (event.key === "End") to = stops.length - 1;
     else if (event.key in steps)
-      to = Math.max(0, Math.min(seats.length - 1, at + steps[event.key]!));
+      to = Math.max(0, Math.min(stops.length - 1, at + steps[event.key]!));
     else return;
     event.preventDefault();
-    const next = seats[to];
+    const next = stops[to];
     if (!next || to === at) return;
-    onpick(next.provider);
+    onpick(next.view);
     list?.querySelectorAll<HTMLElement>('[role="tab"]')[to]?.focus();
   }
 </script>
@@ -114,56 +125,56 @@
       style:transform="translateY({plate.y}px)"
       style:block-size="{plate.h}px"
     ></span>{/if}
-  {#each seats as seat, index (seat.provider)}
-    {#if (own && index === 1) || (index === split && split > 0 && !(own && split === 1))}<span
-        class="rule"
-        role="presentation"
-      ></span>{/if}
+  {#each stops as stop, index (stop.view)}
+    {#if lead > 0 && index === lead}<span class="rule" role="presentation"></span>{/if}
+    {@const seat = stop.seat}
     <button
       type="button"
       role="tab"
       class="seat"
-      id="{uid}-{seat.provider}"
-      title={caption(seat)}
-      aria-label={caption(seat)}
-      aria-selected={seat.provider === current}
+      id="{uid}-{stop.view}"
+      title={seat ? caption(seat) : m.model_favourites()}
+      aria-label={seat ? caption(seat) : m.model_favourites()}
+      aria-selected={stop.view === current}
       aria-controls={panel}
-      tabindex={seat.provider === current ? 0 : -1}
-      data-provider={seat.provider}
-      data-standing={seat.standing}
-      data-own={seat.provider === "cloud" ? "" : undefined}
-      data-miss={hits && !hits.has(seat.provider) ? "" : undefined}
-      style:--ink={INKS[seat.provider]}
+      tabindex={stop.view === current ? 0 : -1}
+      data-provider={stop.view}
+      data-standing={seat?.standing ?? "ready"}
+      data-miss={hits && (!seat || !hits.has(seat.provider)) ? "" : undefined}
+      style:--ink={seat ? INKS[seat.provider] : undefined}
       onpointerdown={(event) => event.preventDefault()}
-      onclick={() => onpick(seat.provider)}
+      onclick={() => onpick(stop.view)}
     >
       <span class="mark" aria-hidden="true"
-        >{#if seat.provider === "cloud"}<ZephiumTile size={26} />{:else}<ProviderMark
+        >{#if !seat}<span class="star"><Icon icon={StarIcon} size={16} strokeWidth={1.8} /></span
+          >{:else if seat.provider === "cloud"}<ZephiumTile size={24} />{:else}<ProviderMark
             provider={seat.provider}
-            size={20}
+            size={18}
           />{/if}</span
       >
-      {#if seat.standing === "refused"}<span class="badge" aria-hidden="true"></span>{/if}
+      {#if seat?.standing === "refused"}<span class="badge" aria-hidden="true"></span>{/if}
     </button>
   {/each}
 </div>
 
 <style>
+  /* A thin pill of round seats. It is not lit: the light belongs to the card and the chip. */
   .rail {
     position: relative;
     display: flex;
     flex: none;
     flex-direction: column;
+    align-items: center;
     gap: 2px;
     box-sizing: border-box;
-    inline-size: 52px;
+    inline-size: 42px;
     margin: 8px 0 8px 8px;
-    padding: 4px;
+    padding: 5px;
     align-self: stretch;
     contain: size;
     overflow-y: auto;
     overscroll-behavior: contain;
-    border-radius: calc(var(--radius-menu) - var(--menu-pad));
+    border-radius: var(--radius-capsule);
     background: var(--color-fill);
     outline: none;
     scrollbar-width: none;
@@ -172,10 +183,9 @@
   .plate {
     position: absolute;
     inset-block-start: 0;
-    inset-inline: 4px;
-    border-radius: var(--radius-row);
+    inset-inline: 5px;
+    border-radius: 50%;
     background: var(--row-active);
-    box-shadow: var(--shine-top);
     pointer-events: none;
   }
 
@@ -193,11 +203,11 @@
     position: relative;
     display: grid;
     flex: none;
-    inline-size: 44px;
+    inline-size: 32px;
     block-size: 32px;
     padding: 0;
     border: 0;
-    border-radius: var(--radius-row);
+    border-radius: 50%;
     background: transparent;
     color: var(--ink, var(--color-text));
     cursor: default;
@@ -207,13 +217,6 @@
       opacity var(--motion-fast) var(--ease-out),
       background-color var(--motion-fast) var(--ease-out),
       scale var(--motion-base) var(--ease-spring);
-  }
-
-  /* Zephium's own: a taller plate that is lit even when another seat is chosen. */
-  .seat[data-own] {
-    block-size: 40px;
-    box-shadow: var(--shine-top);
-    background: color-mix(in oklab, var(--row-active) 60%, transparent);
   }
 
   .seat:active {
@@ -228,10 +231,6 @@
     background: color-mix(in oklab, var(--row-active) 55%, transparent);
   }
 
-  .seat[data-own][aria-selected="true"] {
-    background: transparent;
-  }
-
   .seat[data-miss] {
     opacity: 0.3;
   }
@@ -241,9 +240,18 @@
     place-items: center;
   }
 
+  .star {
+    display: grid;
+    color: var(--color-label-secondary);
+  }
+
+  .star :global(path) {
+    fill: currentcolor;
+  }
+
   /* A step still to take is a softer mark, in its own colour; only a refused key is an alert. */
   .seat:not([data-standing="ready"]) .mark {
-    opacity: 0.6;
+    opacity: 0.55;
     transition: opacity var(--motion-fast) var(--ease-out);
   }
 
@@ -263,9 +271,11 @@
 
   .rule {
     flex: none;
+    inline-size: 16px;
     block-size: 1px;
-    margin: 4px 10px;
-    background: var(--color-border);
+    margin-block: 3px;
+    background: var(--color-border-strong, var(--color-border));
+    opacity: 0.7;
   }
 
   @media (prefers-reduced-motion: reduce) {

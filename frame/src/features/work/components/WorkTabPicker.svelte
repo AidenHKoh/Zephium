@@ -127,7 +127,6 @@
       </li>
     {:else}<li class="empty">{query ? m.work_env_no_matches() : m.work_env_no_tabs()}</li>{/each}
   </ul>
-  <p class="privacy">{m.work_env_tabs_privacy()}</p>
   {#if status}<p role="status">{status}</p>{/if}
   <footer>
     <Button size="compact" variant="ghost" disabled={pending} onclick={onnewtab}
@@ -145,8 +144,10 @@
 <style>
   .picker {
     display: flex;
+    flex: 1;
     flex-direction: column;
     gap: 8px;
+    min-block-size: 0;
     min-inline-size: 0;
   }
 
@@ -175,7 +176,6 @@
 
   header span,
   .where,
-  .privacy,
   .attached-mark,
   .empty {
     color: var(--color-muted);
@@ -215,12 +215,13 @@
   ul {
     list-style: none;
     display: flex;
+    flex: 1;
     flex-direction: column;
     gap: 1px;
+    min-block-size: 0;
     margin: 0;
     padding: 0;
     overflow-y: auto;
-    max-block-size: min(300px, 40vh);
   }
 
   /* A row is a tab: its mark, its title, and where it is. */
@@ -312,7 +313,6 @@
     flex: none;
   }
 
-  .privacy,
   p {
     margin: 0;
     padding-inline: 4px;
@@ -323,6 +323,7 @@
   }
 
   footer {
+    flex: none;
     flex-wrap: wrap;
     padding-block-start: 2px;
   }

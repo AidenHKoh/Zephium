@@ -9,6 +9,7 @@ import type {
   WorkModelRole,
   WorkModelsV1,
 } from "$shared/ipc/bindings";
+import { preferences } from "$domain/preferences";
 import { PROFILE, models } from "$shared/testing/work-models";
 import ModelPickerStage from "./ModelPickerStage.svelte";
 
@@ -16,6 +17,7 @@ const native = vi.hoisted(() => ({
   view: null as unknown as WorkModelsV1,
   ready: true,
   hosted: false,
+  settings: {} as Record<string, string>,
 }));
 
 vi.mock("$shared/ipc/bindings", async () => {
@@ -39,6 +41,11 @@ vi.mock("$shared/ipc/bindings", async () => {
       entries: [],
       fault: null,
     })),
+    settingGet: async (key: string) => native.settings[key] ?? null,
+    settingSet: async (key: string, value: string) => {
+      native.settings[key] = value;
+      return { accepted: true, operation_id: null };
+    },
     accountGet: vi.fn(async () => ({
       account: native.hosted
         ? accountFixture({ available: true, hosted_models: true, signed_in: false })
@@ -83,27 +90,33 @@ async function shoot(name: string, materials: readonly ("glass" | "solid")[] = [
 afterEach(() => {
   native.ready = true;
   native.hosted = false;
+  native.settings = {};
+  preferences.dispose();
 });
 
 const rail = (name: RegExp) => page.getByRole("tab", { name });
 
 test(
-  "the rail, the hero, a preview, search, and the providers that wait on a step",
+  "the chip, the card, a row's star, favourites, search, and the providers that wait on a step",
   { timeout: 60_000 },
   async () => {
     await page.viewport(1100, 700);
     native.hosted = true;
     native.view = keyed("anthropic/claude-opus-5-5");
+    native.settings["work.favourite-models"] = "anthropic/claude-sonnet-5-5\nopenai/gpt-6-sol";
+    await preferences.init();
     const screen = await render(ModelPickerStage, { profile: PROFILE });
     await shoot("rest");
     await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
-    await shoot("hero", ["glass", "solid"]);
-    await userEvent.hover(page.getByRole("option", { name: /Claude Sonnet 5\.5/u }));
-    await shoot("preview");
+    await shoot("card", ["glass", "solid"]);
+    await userEvent.hover(page.getByRole("option", { name: /Claude Fable 5\.1/u }));
+    await shoot("hover-row");
     await userEvent.unhover(page.getByRole("listbox"));
     await page.getByRole("button", { name: /^Effort: Medium/u }).click();
-    await shoot("effort-open");
+    await shoot("effort-face");
     await userEvent.keyboard("{Escape}");
+    await rail(/^Favourites/u).click();
+    await shoot("favourites");
     await rail(/^OpenAI/u).click();
     await shoot("openai");
     await rail(/^DeepSeek/u).click();
@@ -122,17 +135,18 @@ test(
   },
 );
 
-test("the effort at every level, from the keys", async () => {
+test("the effort at every level, from the slider's keys", async () => {
   await page.viewport(1100, 700);
   native.view = { ...keyed("openai/gpt-6-luna"), effort: "low" };
   const screen = await render(ModelPickerStage, { profile: PROFILE });
   await screen.getByRole("button", { name: /Model: GPT-6 Luna/u }).click();
+  await page.getByRole("button", { name: /^Effort: Low/u }).click();
   const levels = ["low", "medium", "high", "xhigh", "max"];
   for (const [index, level] of levels.entries()) {
     if (index) await userEvent.keyboard("{ArrowRight}");
     await shoot(`effort-${level}`, level === "max" ? ["glass", "solid"] : ["glass"]);
   }
-  await userEvent.keyboard("{Escape}");
+  await settle(1200);
   await shoot("rest-max");
 });
 
@@ -142,6 +156,7 @@ test("a model with two efforts, and one with none", async () => {
   const screen = await render(ModelPickerStage, { profile: PROFILE });
   await screen.getByRole("button", { name: /Model: DeepSeek V4 Pro/u }).click();
   await shoot("two-levels");
+  await page.getByRole("button", { name: /^Effort:/u }).click();
   await userEvent.keyboard("{ArrowRight}");
   await shoot("two-levels-high");
   await userEvent.keyboard("{Escape}");

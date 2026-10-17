@@ -10,6 +10,7 @@
     effortLevels,
     effortName,
     entryOf,
+    favourites,
     keyState,
     keyedProviders,
     locked,
@@ -17,24 +18,25 @@
     providerName,
     searchEntries,
     shortName,
+    toggleFavourite,
     usable,
   } from "$domain/ai";
   import Icon from "$shared/ui/Icon";
   import ProviderMark from "$shared/ui/ProviderMark";
   import { menuMaterialFor } from "$shared/ui/Menu/material";
   import {
-    ArrowRight01Icon,
     Cancel01Icon,
     Key01Icon,
     Search01Icon,
+    Settings02Icon,
+    StarIcon,
     Tick02Icon,
   } from "../../lib/icons";
   import * as m from "$shared/i18n/messages";
-  import { nearestEffort, stepEffort } from "./ModelEffort.svelte";
+  import { nearestEffort } from "./ModelEffort.svelte";
   import ModelAsk from "./ModelAsk.svelte";
-  import ModelEffortMark from "./ModelEffortMark.svelte";
-  import ModelHero, { type HeroSubject } from "./ModelHero.svelte";
-  import ModelRail, { type Seat } from "./ModelRail.svelte";
+  import ModelCard, { type CardSubject } from "./ModelCard.svelte";
+  import ModelRail, { type Seat, type View } from "./ModelRail.svelte";
   import { tiers, type Tier } from "./model-tier";
   import "$shared/ui/Menu/popover.css";
   import "$shared/ui/Shine/shine.css";
@@ -44,7 +46,7 @@
     onsettings = () => void commands.runCommand("settings.ai"),
   }: {
     profile: string;
-    /** Opens Settings → AI, where keys are added. */
+    /** Opens Settings → Models, where keys are added. */
     onsettings?: () => void;
   } = $props();
 
@@ -72,6 +74,7 @@
   let trigger = $state<HTMLElement | null>(null);
   let material = $state<"opaque" | undefined>();
   let list = $state<HTMLElement>();
+  let main = $state<HTMLElement>();
   let field = $state<HTMLInputElement>();
 
   const models = $derived(session?.models ?? null);
@@ -117,39 +120,51 @@
     return [...own, ...ready, ...rest];
   });
 
+  const starred = $derived(new Set(favourites()));
+  const hasStars = $derived(
+    groups.ready.some((group) => group.entries.some((e) => starred.has(e.id))),
+  );
+
   /** The sheet is as tall as its longest list needs, so it holds still as providers are chosen and searched. */
   const sheetHeight = $derived.by(() => {
     const rows = Math.max(0, ...groups.ready.map((group) => group.entries.length));
-    const own = seats[0]?.provider === "cloud";
-    // The rail's own height: its padding, Zephium's seat and rule, then a seat and a gap for each other.
-    const rail = 16 + (own ? 51 : 0) + (seats.length - (own ? 1 : 0)) * 34 + 20;
-    return Math.min(520, Math.max(rail, 214 + 34 * rows));
+    // The rail's own height: its padding, a seat and a gap for each, and the hairline after the leading seats.
+    const leading = (hasStars ? 1 : 0) + (seats[0]?.provider === "cloud" ? 1 : 0);
+    const rail = 26 + (seats.length + (hasStars ? 1 : 0)) * 34 + (leading ? 8 : 0);
+    return Math.min(520, Math.max(rail, 148 + 34 * rows));
   });
 
-  const allKeyed = $derived(seats.every((row) => row.standing === "ready"));
-  let picked = $state<WorkModelProvider | null>(null);
-  const shown = $derived(
-    seats.find((seat) => seat.provider === picked)?.provider ??
-      seats.find((seat) => seat.provider === current?.model.provider)?.provider ??
+  let picked = $state<View | null>(null);
+  const shown = $derived.by<View | null>(() => {
+    if (picked === "favourites" && hasStars) return "favourites";
+    return (
+      seats.find((row) => row.provider === picked)?.provider ??
+      seats.find((row) => row.provider === current?.model.provider)?.provider ??
       seats[0]?.provider ??
-      null,
-  );
+      null
+    );
+  });
   const seat = $derived(seats.find((row) => row.provider === shown) ?? null);
 
+  let searchOpen = $state(false);
   let query = $state("");
   const searching = $derived(query.trim().length > 0);
+  /** Favourites and search span providers, so their rows are grouped under each one's name. */
+  const spanning = $derived(searching || shown === "favourites");
   const sections = $derived.by<Section[]>(() => {
     const matched = searching
       ? new Set(searchEntries(groups.ready, query).map((entry) => entry.id))
       : null;
     return groups.ready
-      .filter((group) => searching || group.provider === shown)
+      .filter((group) => spanning || group.provider === shown)
       .map((group) => ({
         key: group.provider,
         label: nameOf(group.provider),
         provider: group.provider,
         items: group.entries
-          .filter((entry) => !matched || matched.has(entry.id))
+          .filter((entry) =>
+            matched ? matched.has(entry.id) : shown !== "favourites" || starred.has(entry.id),
+          )
           .map((entry) => ({ id: entry.id, entry })),
       }))
       .filter((section) => section.items.length);
@@ -158,7 +173,7 @@
   const items = $derived(sections.flatMap((section) => section.items));
   const slot = (id: string) => `${uid}-${items.findIndex((item) => item.id === id)}`;
 
-  /** What the hero shows and the plate marks: the pointer's or the arrows' row, else the running model. */
+  /** The row the pointer or the arrows are on, which Enter chooses. */
   let active = $state<string | null>(null);
   const home = $derived(items.find((item) => item.id === chosen)?.id ?? items[0]?.id ?? null);
   const focus = $derived(items.find((item) => item.id === active) ?? null);
@@ -170,21 +185,9 @@
     levels.length ? (intent ? nearestEffort(levels, intent) : (models?.effort ?? null)) : null,
   );
 
-  const hero = $derived.by<HeroSubject | null>(() => {
-    const entry = focus?.entry ?? current;
-    if (!entry) return null;
-    const own = effortLevels(models, entry.id);
-    return {
-      entry,
-      tier: tierOf[entry.id] ?? null,
-      levels: own,
-      effort:
-        entry.id === chosen
-          ? effort
-          : own.length
-            ? nearestEffort(own, intent ?? models?.effort ?? "medium")
-            : null,
-    };
+  const card = $derived.by<CardSubject | null>(() => {
+    if (!current) return null;
+    return { entry: current, tier: tierOf[current.id] ?? null, levels, effort };
   });
 
   /**
@@ -215,22 +218,24 @@
   /** No model can run yet: the one thing to do is add a key, so the control is that, not a menu. */
   const keyless = $derived(!!models && leadMissing);
 
-  /** The effort control stands open under the model until it is used or put away. */
+  /** The card shows the effort control until it is used or put away. */
   let effortOpen = $state(false);
   let pill = $state<HTMLElement>();
   let fold: ReturnType<typeof setTimeout> | undefined;
   let held = false;
   let moved = false;
+  /** The menu closed on a choice or Escape: the person is mid-sentence, so the words get the focus back. */
+  let toWords = false;
 
   function putAway() {
     clearTimeout(fold);
     moved = false;
     if (!effortOpen) return;
     effortOpen = false;
-    if (document.activeElement?.closest(".reveal")) pill?.focus();
+    if (main?.contains(document.activeElement)) void tick().then(() => pill?.focus());
   }
 
-  /** Left open a moment after a change so the new level is seen, then folded. */
+  /** Left a moment after a change so the new level is seen, then the card turns back to the model. */
   const foldSoon = () => {
     clearTimeout(fold);
     fold = setTimeout(putAway, 900);
@@ -252,6 +257,7 @@
 
   function reset() {
     query = "";
+    searchOpen = false;
     active = null;
     intent = null;
     picked = null;
@@ -271,15 +277,20 @@
     if (usable(models, "compatible")) void session?.listEndpoint();
     active = home;
     await tick();
-    field?.focus();
+    (list ?? main)?.focus({ preventScroll: true });
   }
 
-  /** The menu stays while the choice lands, so the hero and the trigger change before it closes. */
+  function close() {
+    toWords = true;
+    open = false;
+    reset();
+  }
+
+  /** The menu stays while the choice lands, so the card and the trigger change before it closes. */
   async function choose(entry: WorkModelEntry) {
     if (locked(models, entry.id) || session?.busy) return;
     if (entry.id !== chosen && !(await session?.choose("lead", entry.id))) return;
-    open = false;
-    reset();
+    close();
   }
 
   /** Each change goes to Rust in turn; a newer one waits for the last to land. */
@@ -324,12 +335,15 @@
     } else settings();
   }
 
-  async function pick(provider: WorkModelProvider) {
-    picked = provider;
+  async function pick(view: View) {
+    picked = view;
     query = "";
+    searchOpen = false;
     await tick();
     active = items.find((item) => item.id === chosen)?.id ?? items[0]?.id ?? null;
     reveal(active);
+    const at = document.activeElement;
+    if (!at || at === document.body) (list ?? main)?.focus({ preventScroll: true });
   }
 
   function reveal(id: string | null) {
@@ -349,6 +363,22 @@
     void tick().then(() => reveal(active));
   }
 
+  /** The search field slides in from its icon; typing anywhere in the menu opens it too. */
+  async function openSearch(text = "") {
+    searchOpen = true;
+    if (text) query += text;
+    await tick();
+    field?.focus({ preventScroll: true });
+    retyped();
+  }
+
+  function closeSearch() {
+    searchOpen = false;
+    query = "";
+    active = home;
+    (list ?? main)?.focus({ preventScroll: true });
+  }
+
   function keys(event: KeyboardEvent) {
     if (event.defaultPrevented || event.isComposing) return;
     const target = event.target as HTMLElement;
@@ -356,6 +386,7 @@
     const onButton = target instanceof HTMLButtonElement;
     if (
       !inField &&
+      !effortOpen &&
       event.key.length === 1 &&
       event.key !== " " &&
       !event.metaKey &&
@@ -363,14 +394,12 @@
       !event.altKey
     ) {
       event.preventDefault();
-      query += event.key;
-      field?.focus();
-      retyped();
+      void openSearch(event.key);
       return;
     }
     if (onButton && (event.key === "Enter" || event.key === " ")) return;
     if (target.getAttribute("role") === "tab" && event.key.startsWith("Arrow")) return;
-    if (target.getAttribute("role") === "slider" && event.key === "Enter") return;
+    if (target.getAttribute("role") === "slider") return;
     const at = items.findIndex((item) => item.id === active);
     switch (event.key) {
       case "ArrowDown":
@@ -384,19 +413,11 @@
         event.preventDefault();
         walk(event.key === "Home" ? 0 : items.length - 1);
         return;
-      case "ArrowLeft":
-      case "ArrowRight": {
-        if (query || !hero?.effort) return;
+      case " ":
+        if (inField || !focus) return;
         event.preventDefault();
-        const rtl = getComputedStyle(target).direction === "rtl";
-        const next = stepEffort(
-          hero.levels,
-          hero.effort,
-          (event.key === "ArrowRight") !== rtl ? 1 : -1,
-        );
-        if (next) void setEffort(next);
+        toggleFavourite(focus.id);
         return;
-      }
       case "Enter": {
         const item = focus ?? items[0];
         event.preventDefault();
@@ -413,11 +434,19 @@
       putAway();
       return;
     }
-    if (!query) return;
+    if (searchOpen) {
+      event.preventDefault();
+      closeSearch();
+      return;
+    }
+    toWords = true;
+  }
+
+  function returned(event: Event) {
+    if (!toWords) return;
+    toWords = false;
     event.preventDefault();
-    query = "";
-    active = home;
-    field?.focus();
+    trigger?.closest(".surface")?.querySelector("textarea")?.focus();
   }
 
   function pointed(event: PointerEvent) {
@@ -426,12 +455,18 @@
   }
 
   function clicked(event: MouseEvent) {
-    const id = (event.target as Element).closest<HTMLElement>("[data-id]")?.dataset.id;
+    const target = event.target as Element;
+    const id = target.closest<HTMLElement>("[data-id]")?.dataset.id;
+    if (!id) return;
+    if (target.closest(".star")) {
+      toggleFavourite(id);
+      return;
+    }
     const item = items.find((row) => row.id === id);
     if (item) void choose(item.entry);
   }
 
-  /** One plate glides under the row the hero shows, rather than each row lighting on its own. */
+  /** One plate glides under the row the pointer or the arrows are on, rather than each row lighting on its own. */
   let plate = $state<{ y: number; h: number; glide: boolean } | null>(null);
   $effect(() => {
     void items;
@@ -449,16 +484,19 @@
         : m.work_model_trigger({ model: current.display_name })
       : m.work_model_label(),
   );
+  const title = $derived(
+    shown === "favourites" ? m.model_favourites() : shown ? nameOf(shown) : m.work_model_label(),
+  );
 </script>
 
 {#snippet tierMark(tier: Tier | undefined)}
-  {#if tier}<span class="row-tier"
-      >{tier === "light"
+  <span class="tier"
+    >{#if tier}{tier === "light"
         ? m.model_tier_light()
         : tier === "balanced"
           ? m.model_tier_balanced()
-          : m.model_tier_flagship()}</span
-    >{/if}
+          : m.model_tier_flagship()}{/if}</span
+  >
 {/snippet}
 
 {#if keyless}
@@ -476,14 +514,9 @@
       disabled={!models}
     >
       {#if current}
-        <span class="trigger-mark" aria-hidden="true"
-          ><ProviderMark provider={current.model.provider} size={15} /></span
-        >
         <span class="trigger-name">{shortName(current)}</span>
-        {#if effort && levels.length > 1}<span class="trigger-effort" data-level={effort}
-            ><ModelEffortMark {levels} level={effort} /><span class="trigger-level"
-              >{effortName(effort)}</span
-            ></span
+        {#if effort && levels.length > 1}<span class="trigger-level"
+            ><span class="trigger-dot" aria-hidden="true">·</span>{effortName(effort)}</span
           >{/if}
       {:else}
         <span class="trigger-name empty">{m.work_model_none()}</span>
@@ -501,20 +534,52 @@
         collisionPadding={12}
         aria-label={m.work_model_label()}
         onOpenAutoFocus={(event) => event.preventDefault()}
+        onCloseAutoFocus={returned}
         onEscapeKeydown={escape}
         onkeydown={keys}
       >
-        <ModelRail {seats} current={shown} {hits} panel="{uid}-pane" onpick={(p) => void pick(p)} />
+        <ModelRail
+          {seats}
+          starred={hasStars}
+          current={shown}
+          {hits}
+          panel="{uid}-pane"
+          onpick={(view) => void pick(view)}
+        />
         <div
           class="main"
           id="{uid}-pane"
           role="tabpanel"
-          aria-label={searching ? m.model_search() : shown ? nameOf(shown) : m.work_model_label()}
+          tabindex="-1"
+          bind:this={main}
+          aria-label={searching ? m.model_search() : title}
         >
-          <div class="find ui-shine-field">
-            <label class="find-row">
+          <div class="head" data-search={searchOpen ? "" : undefined}>
+            <h2 class="title">{title}</h2>
+            <div class="tools">
+              <button
+                type="button"
+                class="tool"
+                aria-label={m.model_search()}
+                aria-expanded={searchOpen}
+                aria-controls="{uid}-find"
+                onpointerdown={(event) => event.preventDefault()}
+                onclick={() => (searchOpen ? closeSearch() : void openSearch())}
+                ><Icon icon={Search01Icon} size={15} strokeWidth={1.9} /></button
+              >
+              <button
+                type="button"
+                class="tool"
+                aria-label={m.model_settings()}
+                title={m.model_settings()}
+                onpointerdown={(event) => event.preventDefault()}
+                onclick={settings}
+                ><Icon icon={Settings02Icon} size={15} strokeWidth={1.8} /></button
+              >
+            </div>
+            <div class="find" id="{uid}-find" inert={!searchOpen}>
               <span class="find-icon" aria-hidden="true"
-                ><Icon icon={Search01Icon} size={15} strokeWidth={2} /></span
+                ><Icon icon={Search01Icon} size={14} strokeWidth={2} /></span
               >
               <input
                 bind:this={field}
@@ -542,21 +607,20 @@
                     query = "";
                     active = home;
                     field?.focus();
-                  }}><Icon icon={Cancel01Icon} size={11} strokeWidth={2.4} /></button
+                  }}><Icon icon={Cancel01Icon} size={10} strokeWidth={2.6} /></button
                 >{/if}
-            </label>
+            </div>
           </div>
-          {#if hero}
-            <div class="hero-host" onpointerdowncapture={() => (held = true)}>
-              <ModelHero
-                subject={hero}
-                expanded={effortOpen}
-                region="{uid}-effort"
-                bind:pill
-                ontoggle={toggleEffort}
-                onEffort={chose}
-              />
-            </div>{/if}
+          {#if card}
+            <ModelCard
+              subject={card}
+              expanded={effortOpen}
+              region="{uid}-effort"
+              bind:pill
+              ontoggle={toggleEffort}
+              onEffort={chose}
+            />
+          {/if}
           {#if seat && seat.standing !== "ready" && !searching}
             <ModelAsk
               provider={seat.provider}
@@ -565,18 +629,23 @@
               onact={() => step(seat)}
             />
           {:else}
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
             <div
               class="list"
               id="{uid}-list"
               role="listbox"
-              aria-label={searching ? m.model_search() : m.work_model_label()}
+              aria-label={searching ? m.model_search() : title}
+              aria-activedescendant={!searchOpen &&
+              active &&
+              items.some((item) => item.id === active)
+                ? slot(active)
+                : undefined}
               tabindex="-1"
               bind:this={list}
               onpointermove={pointed}
               onpointerleave={() => (active = home)}
               onpointerdown={(event) => event.preventDefault()}
               onclick={clicked}
-              onkeydown={keys}
             >
               {#if plate}<span
                   class="plate"
@@ -586,15 +655,20 @@
                   style:block-size="{plate.h}px"
                 ></span>{/if}
               {#each sections as section (section.key)}
-                <div class="section" role="group" aria-labelledby="{uid}-{section.key}">
-                  <div class="label" id="{uid}-{section.key}">
-                    {#if searching}<span class="label-mark" aria-hidden="true"
+                <div
+                  class="section"
+                  role={spanning ? "group" : undefined}
+                  aria-labelledby={spanning ? `${uid}-${section.key}` : undefined}
+                >
+                  {#if spanning}<div class="label" id="{uid}-{section.key}">
+                      <span class="label-mark" aria-hidden="true"
                         ><ProviderMark provider={section.provider} size={12} /></span
-                      >{/if}<span>{section.label}</span>
-                  </div>
+                      ><span>{section.label}</span>
+                    </div>{/if}
                   {#each section.items as item (item.id)}
                     {@const closed = locked(models, item.entry.id)}
                     {@const small = item.entry.context_window < 500_000}
+                    {@const starry = starred.has(item.id)}
                     <div
                       class="option"
                       id={slot(item.id)}
@@ -618,6 +692,17 @@
                           >{/if}
                         {@render tierMark(tierOf[item.entry.id])}
                       {/if}
+                      <button
+                        type="button"
+                        class="star"
+                        data-on={starry ? "" : undefined}
+                        tabindex="-1"
+                        aria-pressed={starry}
+                        aria-label={starry
+                          ? m.model_unfavourite({ model: item.entry.display_name })
+                          : m.model_favourite({ model: item.entry.display_name })}
+                        ><Icon icon={StarIcon} size={14} strokeWidth={1.8} /></button
+                      >
                     </div>
                   {/each}
                 </div>
@@ -625,7 +710,7 @@
               {#if searching && !items.length}<p class="empty">
                   {m.model_no_match({ query: query.trim() })}
                 </p>{:else if !searching && !items.length}<p class="empty">
-                  {m.model_empty()}
+                  {shown === "favourites" ? m.model_favourites_empty() : m.model_empty()}
                 </p>{/if}
             </div>
           {/if}
@@ -636,17 +721,6 @@
           {#if session?.fault?.action === "effort"}<p class="note failure" role="alert">
               {m.model_effort_failed()}
             </p>{/if}
-          {#if searching || seat?.standing === "ready"}<div class="foot">
-              <button type="button" class="foot-action" onclick={settings}
-                ><span class="foot-icon" aria-hidden="true"
-                  ><Icon icon={Key01Icon} size={14} strokeWidth={1.8} /></span
-                ><span class="foot-label"
-                  >{allKeyed ? m.work_model_manage() : m.work_model_add_key()}</span
-                ><span class="foot-go" aria-hidden="true"
-                  ><Icon icon={ArrowRight01Icon} size={13} strokeWidth={2} /></span
-                ></button
-              >
-            </div>{/if}
         </div>
       </Popover.Content>
     </Popover.Portal>
@@ -657,24 +731,29 @@
     held = false;
     if (moved && effortOpen) foldSoon();
   }}
+  onpointerdowncapture={(event) => {
+    if (effortOpen && event.target instanceof Element && event.target.closest("[role=slider]"))
+      held = true;
+  }}
 />
 
 <style>
-  /* The chip: the shine plate, round like the + and the send button beside it. */
+  /* The chip: the shine plate, round like the + and the send button beside it. Words only. */
   :global(.model-trigger) {
     --shine-radius: var(--radius-capsule);
 
     display: inline-flex;
-    align-items: center;
-    gap: 7px;
+    align-items: baseline;
+    gap: 5px;
     max-inline-size: 300px;
     block-size: 32px;
     margin-block: 1px;
-    padding-inline: 10px 12px;
+    padding-inline: 14px;
     border: 0;
     color: var(--color-text);
     font: inherit;
     font-size: var(--text-label);
+    line-height: 32px;
   }
 
   :global(.model-trigger:disabled) {
@@ -682,6 +761,9 @@
   }
 
   .add-key {
+    align-items: center;
+    gap: 7px;
+    padding-inline: 10px 12px;
     color: var(--color-label-secondary);
   }
 
@@ -703,42 +785,28 @@
     font-weight: 450;
   }
 
-  /* The effort in words and in small, after a hairline: it reads at a glance and says what it is. */
-  .trigger-effort {
-    --alive-a: color-mix(in oklab, var(--color-soft-sky) 66%, var(--color-text));
-    --alive-b: color-mix(in oklab, var(--color-soft-lilac) 66%, var(--color-text));
-
-    display: inline-flex;
+  .trigger-level {
     flex: none;
-    align-items: center;
-    gap: 7px;
-    margin-inline-start: 2px;
-    padding-inline-start: 10px;
-    border-inline-start: 1px solid var(--color-border);
     color: var(--color-muted);
+    font-weight: 450;
+    white-space: nowrap;
     transition: color var(--motion-fast) var(--ease-out);
   }
 
-  :global(.model-trigger:hover) .trigger-effort,
-  :global(.model-trigger[data-state="open"]) .trigger-effort {
-    color: var(--color-text);
+  .trigger-dot {
+    margin-inline-end: 5px;
+    color: var(--color-faint);
   }
 
-  .trigger-level {
-    font-weight: 500;
-    white-space: nowrap;
-  }
-
-  .trigger-effort[data-level="max"] .trigger-level {
-    background: linear-gradient(90deg, var(--alive-a), var(--alive-b));
-    background-clip: text;
-    color: transparent;
+  :global(.model-trigger:hover) .trigger-level,
+  :global(.model-trigger[data-state="open"]) .trigger-level {
+    color: var(--color-label-secondary, var(--color-text));
   }
 
   :global(.ui-menu.model-menu) {
     display: flex;
     flex-direction: row;
-    inline-size: 500px;
+    inline-size: 380px;
     block-size: min(var(--sheet, 400px), var(--bits-floating-available-height, 520px));
     max-block-size: none;
     padding: 0;
@@ -758,26 +826,117 @@
     flex-direction: column;
     min-inline-size: 0;
     min-block-size: 0;
+    outline: none;
   }
 
-  .find {
+  /* One row, 28px: the place's name and two small tools. The search field slides over the name. */
+  .head {
+    position: relative;
+    display: flex;
     flex: none;
-    margin: 8px 8px 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    block-size: 28px;
+    margin: 10px 8px 0 14px;
   }
 
-  .find-row {
+  .title {
+    min-inline-size: 0;
+    margin: 0;
+    overflow: hidden;
+    color: var(--color-text);
+    font-size: var(--text-body);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition:
+      opacity var(--motion-fast) var(--ease-out),
+      translate var(--motion-base) var(--ease-out);
+  }
+
+  .head[data-search] .title {
+    opacity: 0;
+    translate: -6px 0;
+  }
+
+  .tools {
+    display: flex;
+    flex: none;
+    gap: 2px;
+  }
+
+  .tool {
+    display: grid;
+    inline-size: 28px;
+    block-size: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--color-muted);
+    cursor: default;
+    place-items: center;
+    transition:
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out),
+      opacity var(--motion-fast) var(--ease-out),
+      scale var(--motion-base) var(--ease-spring);
+  }
+
+  .tool:hover {
+    background: var(--color-fill-hover);
+    color: var(--color-text);
+  }
+
+  .tool:active {
+    scale: 0.92;
+  }
+
+  .tool:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: -2px;
+  }
+
+  .head[data-search] .tool:first-child {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* Thin, and not lit: it unrolls from the icon it replaces. */
+  .find {
+    position: absolute;
+    inset-block: 0;
+    inset-inline: 0 30px;
     display: flex;
     align-items: center;
-    gap: 9px;
-    block-size: 36px;
-    box-sizing: border-box;
-    padding-inline: 12px 7px;
+    gap: 7px;
+    padding-inline: 10px 5px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-fill);
+    box-shadow: inset 0 0 0 1px transparent;
     color: var(--color-faint);
-    transition: color var(--motion-fast) var(--ease-out);
+    clip-path: inset(0 0 0 calc(100% - 28px) round 14px);
+    opacity: 0;
+    transition:
+      clip-path var(--motion-slow) var(--ease-emphasized),
+      opacity var(--motion-fast) var(--ease-exit),
+      box-shadow var(--motion-fast) var(--ease-out);
   }
 
-  .find:focus-within .find-row {
+  .find:focus-within {
+    box-shadow: var(--shadow-field-focus);
     color: var(--color-muted);
+  }
+
+  .head[data-search] .find {
+    clip-path: inset(0 0 0 0 round 14px);
+    opacity: 1;
+    transition:
+      clip-path var(--motion-slow) var(--ease-emphasized),
+      opacity var(--motion-fast) var(--ease-out),
+      box-shadow var(--motion-fast) var(--ease-out);
   }
 
   .find-icon {
@@ -794,7 +953,7 @@
     background: transparent;
     color: var(--color-text);
     font: inherit;
-    font-size: var(--text-body);
+    font-size: var(--text-label);
     caret-color: var(--color-text);
     outline: none;
   }
@@ -807,8 +966,8 @@
   .find-clear {
     display: grid;
     flex: none;
-    inline-size: 20px;
-    block-size: 20px;
+    inline-size: 18px;
+    block-size: 18px;
     padding: 0;
     border: 0;
     border-radius: 50%;
@@ -828,15 +987,12 @@
     outline: 2px solid var(--color-ring);
   }
 
-  .hero-host {
-    display: contents;
-  }
-
   .list {
     position: relative;
     flex: 1;
     min-block-size: 0;
-    padding: 4px 8px 12px;
+    margin-block-start: 6px;
+    padding: 2px 8px 12px;
     overflow-y: auto;
     overscroll-behavior: contain;
     outline: none;
@@ -848,7 +1004,7 @@
     position: absolute;
     inset-block-start: 0;
     inset-inline: 8px;
-    border-radius: calc(var(--radius-menu) - var(--menu-pad));
+    border-radius: var(--radius-row);
     background: var(--row-active);
     pointer-events: none;
   }
@@ -860,14 +1016,14 @@
   }
 
   .section + .section {
-    margin-block-start: 6px;
+    margin-block-start: 4px;
   }
 
   .label {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 8px 12px 4px;
+    gap: 7px;
+    padding: 8px 10px 3px;
     color: var(--color-faint);
     font-size: var(--text-caption);
     font-weight: 550;
@@ -882,13 +1038,14 @@
     opacity: 0.9;
   }
 
+  /* One grid down every row: the mark of the choice, the name, what limits it, its class, the star. */
   .option {
     position: relative;
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     min-block-size: 34px;
-    padding-inline: 12px;
+    padding-inline: 10px 6px;
     cursor: default;
   }
 
@@ -906,6 +1063,7 @@
 
   .option-name {
     flex: 1;
+    min-inline-size: 0;
     overflow: hidden;
     color: var(--color-label-secondary, var(--color-text));
     font-size: var(--text-body);
@@ -933,9 +1091,9 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .row-tier {
+  .tier {
     flex: none;
-    min-inline-size: 68px;
+    min-inline-size: 58px;
     color: var(--color-faint);
     font-size: var(--text-caption);
     line-height: 14px;
@@ -943,8 +1101,47 @@
     transition: color var(--motion-fast) var(--ease-out);
   }
 
-  .option[data-active] .row-tier {
+  .option[data-active] .tier {
     color: var(--color-muted);
+  }
+
+  /* Hidden until the pointer is on the row, unless the model is starred. */
+  .star {
+    display: grid;
+    flex: none;
+    inline-size: 24px;
+    block-size: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--color-faint);
+    cursor: default;
+    opacity: 0;
+    place-items: center;
+    scale: 0.85;
+    transition:
+      opacity var(--motion-fast) var(--ease-out),
+      scale var(--motion-base) var(--ease-spring),
+      color var(--motion-fast) var(--ease-out);
+  }
+
+  .star:hover {
+    color: var(--color-text);
+  }
+
+  .option[data-active] .star,
+  .star[data-on] {
+    opacity: 1;
+    scale: 1;
+  }
+
+  .star[data-on] {
+    color: var(--color-label-secondary);
+  }
+
+  .star[data-on] :global(path) {
+    fill: currentcolor;
   }
 
   .empty,
@@ -962,70 +1159,6 @@
 
   .failure {
     color: var(--color-danger);
-  }
-
-  /* Keys have a place of their own: the foot of the list, a row with the list's own grid. */
-  .foot {
-    flex: none;
-    padding: 6px 8px 8px;
-    box-shadow: inset 0 1px 0 var(--color-border);
-  }
-
-  .foot-action {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    inline-size: 100%;
-    block-size: 34px;
-    padding-inline: 12px;
-    border: 0;
-    border-radius: calc(var(--radius-menu) - var(--menu-pad));
-    background: transparent;
-    color: var(--color-muted);
-    font: inherit;
-    font-size: var(--text-label);
-    text-align: start;
-    cursor: default;
-    transition:
-      color var(--motion-fast) var(--ease-out),
-      background-color var(--motion-fast) var(--ease-out);
-  }
-
-  .foot-icon,
-  .foot-go {
-    display: grid;
-    flex: none;
-    place-items: center;
-  }
-
-  .foot-icon {
-    inline-size: 14px;
-  }
-
-  .foot-label {
-    flex: 1;
-  }
-
-  .foot-go {
-    opacity: 0.6;
-    transition:
-      translate var(--motion-base) var(--ease-out),
-      opacity var(--motion-fast) var(--ease-out);
-  }
-
-  .foot-action:hover {
-    background: var(--row-active);
-    color: var(--color-text);
-  }
-
-  .foot-action:hover .foot-go {
-    opacity: 1;
-    translate: 2px 0;
-  }
-
-  .foot-action:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: -2px;
   }
 
   /* stylelint-disable-next-line keyframes-name-pattern -- Svelte's global prefix. */
@@ -1049,7 +1182,9 @@
     }
 
     .plate[data-glide],
-    .foot-go {
+    .find,
+    .title,
+    .star {
       transition: none;
     }
 

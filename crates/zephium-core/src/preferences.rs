@@ -53,6 +53,7 @@ pub const KEYS: &[&str] = &[
     "notes.enabled",
     "tasks.enabled",
     "time.enabled",
+    "work.favourite-models",
 ];
 
 /// Interface languages a person may choose, by BCP 47 tag. One without a
@@ -198,6 +199,18 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
                 && sites.iter().enumerate().all(|(index, site)| {
                     crate::time::normalize_site(site).as_deref() == Some(*site)
                         && !sites[..index].contains(site)
+                })
+        }
+        // The models the person starred in Work's picker, one id per line.
+        "work.favourite-models" => {
+            let ids: Vec<&str> = value.lines().collect();
+            ids.len() <= 64
+                && !value.ends_with('\n')
+                && ids.iter().enumerate().all(|(index, id)| {
+                    !id.is_empty()
+                        && id.len() <= 160
+                        && id.bytes().all(|byte| byte.is_ascii_graphic())
+                        && !ids[..index].contains(id)
                 })
         }
         // The Zephium version a notice was last acknowledged at.
@@ -350,6 +363,28 @@ mod tests {
         ] {
             assert!(!value_allowed(key, value));
         }
+    }
+
+    #[test]
+    fn favourite_models_are_one_bounded_id_per_line() {
+        let key = "work.favourite-models";
+        assert!(KEYS.contains(&key));
+        for value in ["", "anthropic/claude-opus-5-5", "a/b\nc/d:e.f"] {
+            assert!(value_allowed(key, value), "{value:?}");
+        }
+        let many = (0..65).map(|n| format!("m/{n}")).collect::<Vec<_>>();
+        for value in [
+            "a\n",
+            "a\n\nb",
+            "a b",
+            "a\na",
+            "é",
+            &"x".repeat(161),
+            &many.join("\n"),
+        ] {
+            assert!(!value_allowed(key, value), "{value:?}");
+        }
+        assert!(value_allowed(key, &many[..64].join("\n")));
     }
 
     #[test]

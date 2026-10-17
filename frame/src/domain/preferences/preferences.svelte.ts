@@ -53,6 +53,7 @@ const defaults = {
   "notes.enabled": "true",
   "tasks.enabled": "true",
   "time.enabled": "true",
+  "work.favourite-models": "",
 } as const;
 export type PreferenceKey = keyof typeof defaults;
 const values = $state<Record<PreferenceKey, string>>({ ...defaults });

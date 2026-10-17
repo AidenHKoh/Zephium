@@ -2,6 +2,7 @@
   import type { WorkModelProvider } from "$shared/ipc/bindings";
   import ProviderMark from "$shared/ui/ProviderMark";
   import ZephiumTile from "$shared/ui/ZephiumTile";
+  import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
   import "$shared/ui/Shine/shine.css";
   import { Key01Icon, UserIcon } from "../../lib/icons";
@@ -45,13 +46,14 @@
         size={26}
       />{/if}</span
   >
+  <h3 class="title">{name}</h3>
   <p class="body" data-refused={standing === "refused" ? "" : undefined}>{body}</p>
-  <button type="button" class="act ui-shine ui-shine-press" onclick={onact}
+  <Button onclick={onact}
     ><Icon
       icon={standing === "sign_in" ? UserIcon : Key01Icon}
       size={14}
       strokeWidth={1.8}
-    />{action}</button
+    />{action}</Button
   >
 </div>
 
@@ -62,8 +64,8 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 12px;
-    padding: 16px 28px 28px;
+    gap: 10px;
+    padding: 8px 28px 36px;
     text-align: center;
   }
 
@@ -71,14 +73,22 @@
     --shine-radius: var(--radius-control-large);
 
     display: grid;
-    inline-size: 56px;
-    block-size: 56px;
+    inline-size: 52px;
+    block-size: 52px;
     place-items: center;
   }
 
+  .title {
+    margin: 4px 0 -4px;
+    color: var(--color-text);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.012em;
+  }
+
   .body {
-    max-inline-size: 250px;
-    margin: 0;
+    max-inline-size: 240px;
+    margin: 0 0 6px;
     color: var(--color-muted);
     font-size: var(--text-body);
     line-height: 19px;
@@ -87,20 +97,5 @@
 
   .body[data-refused] {
     color: var(--color-danger);
-  }
-
-  .act {
-    --shine-radius: var(--radius-capsule);
-
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    block-size: 32px;
-    padding-inline: 14px 16px;
-    border: 0;
-    color: var(--color-text);
-    font: inherit;
-    font-size: var(--text-label);
-    font-weight: 550;
   }
 </style>

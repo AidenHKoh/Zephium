@@ -38,9 +38,13 @@ const change = (take: number, rest: Partial<VoiceChanged>): VoiceChanged => ({
   ...rest,
 });
 
-async function listening(engine: VoiceStartV1["engine"] = "on_device", take = 7) {
+/** With words in the field the mic gives way to Send, so a take starts from the shortcut. */
+async function listening(engine: VoiceStartV1["engine"] = "on_device", take = 7, shortcut = false) {
   native.start.mockResolvedValue({ take, engine, fault: null });
-  await page.getByRole("button", { name: "Dictate" }).click();
+  if (shortcut) {
+    await uiCommands.init();
+    emitNativeEvent("uiCommand", "work.dictate");
+  } else await page.getByRole("button", { name: "Dictate" }).click();
   await expect.element(page.getByRole("button", { name: "Stop and insert" })).toBeVisible();
   await expect.poll(() => native.start.mock.calls.length).toBe(1);
 }
@@ -67,7 +71,7 @@ test("the mic opens a live take, and stopping lands the words in the field", asy
 test("dictated words join what was already typed, and other takes' changes are ignored", async () => {
   await page.viewport(1000, 600);
   const screen = await render(VoiceStage, { value: "Find flights " });
-  await listening();
+  await listening("on_device", 7, true);
   emitNativeEvent("voiceChanged", change(3, { phase: "done", text: "Ignored" }));
   emitNativeEvent("voiceChanged", change(7, { phase: "done", text: "to Lisbon" }));
   await expect.poll(() => field().value).toBe("Find flights to Lisbon");
@@ -77,7 +81,7 @@ test("dictated words join what was already typed, and other takes' changes are i
 test("Escape cancels the take and keeps what was typed", async () => {
   await page.viewport(1000, 600);
   const screen = await render(VoiceStage, { value: "Plan:" });
-  await listening();
+  await listening("on_device", 7, true);
   await userEvent.keyboard("{Escape}");
   await expect.poll(() => native.cancel.mock.calls.length).toBe(1);
   await expect.element(page.getByRole("button", { name: "Dictate" })).toBeVisible();

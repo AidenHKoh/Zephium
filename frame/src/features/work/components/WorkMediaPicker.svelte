@@ -146,15 +146,19 @@
 <style>
   .picker {
     display: flex;
+    flex: 1;
     flex-direction: column;
     gap: 12px;
+    min-block-size: 0;
     min-inline-size: 0;
   }
 
   ul {
-    display: grid;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
     gap: 2px;
-    max-block-size: 320px;
+    min-block-size: 0;
     margin: 0;
     padding: 0;
     overflow: auto;
@@ -207,6 +211,7 @@
 
   footer {
     display: flex;
+    flex: none;
     justify-content: space-between;
     gap: 8px;
   }
