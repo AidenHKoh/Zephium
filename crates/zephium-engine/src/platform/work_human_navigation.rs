@@ -68,7 +68,8 @@ pub(super) fn fragment_move(current: &ContextNavigationTarget, raw: &str) -> boo
 /// gate, where a fragment may carry a sign-in step.
 pub(super) fn same_document_move(current: &ContextNavigationTarget, raw: &str) -> bool {
     ContextNavigationTarget::parse(raw).is_ok_and(|next| {
-        next.as_url().fragment().is_some() && without_any_fragment(&next) == without_any_fragment(current)
+        next.as_url().fragment().is_some()
+            && without_any_fragment(&next) == without_any_fragment(current)
     })
 }
 

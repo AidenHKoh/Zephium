@@ -655,7 +655,10 @@ impl WorkDocumentNavigation {
         }
         state.navigation_epoch = state.navigation_epoch.checked_add(1).ok_or(())?;
         state.follow = None;
-        Ok(effective)
+        // The page the run resumes on is the document, not the route the app
+        // keeps in its fragment: the successor is admitted as a request.
+        ContextNavigationTarget::parse(human::without_any_fragment(&effective).as_str())
+            .map_err(|_| ())
     }
     /// The document is being replaced by a load the gate let an action's
     /// page start (a saved consent, a confirmed commit): reads and actions
@@ -2407,6 +2410,9 @@ mod tests {
         assert!(gate.ready(Some(compose)) && !gate.failed());
         assert!(gate.allows("https://mail.example.test/mail/u/0/#inbox"));
         assert!(!gate.allows("https://mail.example.test/mail/u/1/#inbox?compose=new"));
+        // Handed back after a person's decision, the page resumes as a
+        // document: the app's state in the fragment is not a request.
+        assert_eq!(gate.hand_back(compose).unwrap().as_url().as_str(), start);
     }
     #[cfg(target_os = "windows")]
     #[test]

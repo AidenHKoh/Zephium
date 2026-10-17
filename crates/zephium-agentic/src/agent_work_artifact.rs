@@ -918,9 +918,11 @@ fn valid_text(value: &str, limit: usize) -> Result<(), AgentWorkJournalError> {
     if value.len() > limit {
         return Err(AgentWorkJournalError::Capacity);
     }
-    if crate::semantic_wire::looks_like_secret_value(value)
-        || SemanticText::try_new(value.to_owned(), limit).is_err()
-    {
+    // A cited multi-line value (a message body) keeps its line breaks.
+    let plain = |character: char| {
+        matches!(character, '\n' | '\t') || !crate::semantic::invalid_semantic_char(character)
+    };
+    if crate::semantic_wire::looks_like_secret_value(value) || !value.chars().all(plain) {
         Err(AgentWorkJournalError::Uncertain)
     } else {
         Ok(())

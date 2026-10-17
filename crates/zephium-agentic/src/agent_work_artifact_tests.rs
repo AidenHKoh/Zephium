@@ -92,6 +92,20 @@ fn archived_page_title_is_optional_bounded_and_restart_readable() {
     }
 }
 
+#[test]
+fn a_cited_multi_line_value_keeps_its_line_breaks_and_other_controls_stay_out() {
+    let mut multi = document();
+    multi.sources[0].content = ArchivedSourceContent::Text {
+        value: "Hi Dana,\n\nThe release is ready.\n\tThanks".into(),
+    };
+    let (descriptor, bytes) = encode(&multi);
+    assert!(AgentWorkArchivedExtraction::decode(descriptor, &bytes).is_ok());
+    multi.sources[0].content = ArchivedSourceContent::Text {
+        value: "bell\u{7}".into(),
+    };
+    assert!(multi.validate().is_err());
+}
+
 fn encode(document: &ArchivedDocument) -> (AgentWorkArtifactDescriptor, Vec<u8>) {
     let bytes = serde_json::to_vec(document).unwrap();
     let descriptor = AgentWorkArtifactDescriptor::decode(
