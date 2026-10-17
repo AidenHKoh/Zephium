@@ -931,7 +931,7 @@ mod tests {
                 crate::platform::work_human_survey::program()
             )
         );
-        for code in 0..=23 {
+        for code in 0..=24 {
             let response = json!({"result":{"type":"string","value":code.to_string()}}).to_string();
             assert_eq!(
                 decode_human_wall_response(&response).unwrap(),
@@ -941,7 +941,7 @@ mod tests {
         for response in [
             r#"{"result":{"type":"boolean","value":false}}"#,
             r#"{"result":{"type":"number","value":0}}"#,
-            r#"{"result":{"type":"string","value":"24"}}"#,
+            r#"{"result":{"type":"string","value":"25"}}"#,
             r#"{"result":{"type":"string","value":"0","objectId":"foreign"}}"#,
             r#"{"result":{"type":"string","value":"0"},"exceptionDetails":{}}"#,
         ] {

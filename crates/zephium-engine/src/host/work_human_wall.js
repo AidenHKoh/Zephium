@@ -1,6 +1,6 @@
 // A fixed, read-only, content-free survey while the person owns this page.
 // Never read input values, follow frames, click, fill, or return page text.
-// Closed result: 0 is clear; 1..23 name only a structural reason to keep holding.
+// Closed result: 0 is clear; 1..24 name only a structural reason to keep holding.
 (() => {
   try {
     if (!document.body || !["interactive", "complete"].includes(document.readyState)) return 1;
@@ -130,7 +130,7 @@
     let heading = false, paragraph = false, links = 0, main = false, rows = 0;
     let authHeading = false, authControls = 0, editable = 0, unknownEntry = 0, busy = false;
     const cardGroups = new Map();
-    let cards = 0, lists = 0, composers = 0;
+    let cards = 0, lists = 0, composers = 0, chromeSignIn = false, accountControl = false;
     for (const node of nodes) {
       if (!visible(node)) continue;
       const tag = node.tagName.toLowerCase();
@@ -186,6 +186,13 @@
       if ((isHeading || role === "dialog") && /(?:choose|select|find|enter) (?:an? |your )?(?:account|workspace|organization)|workspace url/i.test(short)) return 12;
       if (isHeading || role === "dialog") authHeading ||= signIn.test(short);
       if ((tag === "button" || tag === "a" || role === "button" || role === "link") && signIn.test(short)) authControls++;
+      // A signed-out app's own landing page offers sign-in in its header and
+      // shows no account control; the person is not back in until it does.
+      if (tag === "button" || tag === "a" || role === "button" || role === "link") {
+        chromeSignIn ||= /^(?:sign[ -]?in|log[ -]?in|zaloguj)\b/i.test(short) &&
+          !!node.closest("header,nav,[role='banner'],[role='navigation']");
+        accountControl ||= /\b(?:account|profile|avatar|sign[ -]?out|log[ -]?out|logout|wyloguj|konto)\b/i.test(short);
+      }
       // Legal/help chrome is not evidence that the requested app loaded.
       if (node.closest("nav,footer,aside,[role='navigation'],[role='contentinfo'],[role='complementary']")) continue;
       if ((["ul", "ol"].includes(tag) || ["list", "log", "feed"].includes(role)) && !invalidLists.has(node) &&
@@ -236,6 +243,7 @@
     }
     if (busy && !(main && (links >= 3 || rows >= 3)) && !conversation) return 15;
     if (authControls > 0 && editable > 0 && !(heading && paragraph) && rows < 3) return 16;
+    if (chromeSignIn && !accountControl) return 24;
     // A settled URL and the absence of a field are insufficient: require
     // visible page content, so an empty SPA shell/spinner cannot resume it.
     return ((heading && (paragraph || cards >= 3)) || (main && (links >= 3 || rows >= 3))) ? 0 : 17;

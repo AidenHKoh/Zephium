@@ -4,7 +4,7 @@ const HUMAN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn wall_survey_outcome(wire: &str) -> Option<u8> {
     let code = wire.parse::<u8>().ok()?;
-    (code <= 23 && wire == code.to_string()).then_some(code)
+    (code <= 24 && wire == code.to_string()).then_some(code)
 }
 
 #[cfg(test)]
@@ -12,7 +12,7 @@ mod wall_survey_wire_tests {
     use super::wall_survey_outcome;
     #[test]
     fn only_closed_structural_codes_are_admitted() {
-        for code in 0..=23 {
+        for code in 0..=24 {
             assert_eq!(wall_survey_outcome(&code.to_string()), Some(code));
         }
         for wire in [
@@ -21,7 +21,7 @@ mod wall_survey_wire_tests {
             "0.0",
             "00",
             " 0",
-            "24",
+            "25",
             "255",
             "-1",
             "null",
