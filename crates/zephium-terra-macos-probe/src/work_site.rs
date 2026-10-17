@@ -61,6 +61,7 @@ const CHURN_FACT: &str = "Churn list holds 12 items";
 const CONSENT_FACT: &str = "Fares list shows 4 flights";
 const DESIGN_FACT: &str = "Mira shipped the new onboarding flow";
 const AGENDA_FACT: &str = "Design review at 14:30";
+const LANDING_FACT: &str = "Your notes, docs and projects in one place";
 const BOARD_FACT: &str = "Ticket ZP-42 is due Thursday";
 const DAY_FACT: &str = "Standup at 09:15";
 const SHELF_FACT: &str = "Shelf total is 9 products";
@@ -142,6 +143,10 @@ enum Check {
     /// Six daily apps' main views (Slack, Gmail, Calendar, Linear, Notion,
     /// GitHub) read as records with no model call.
     Views,
+    /// An app that shows its public landing page to a signed-out visitor: a
+    /// task about the person's own account hands over for sign-in instead of
+    /// reading the landing page.
+    SignedOutApp,
     /// A message typed into a rich composer and sent with Enter, after the
     /// person approves it: the channel receives exactly that text.
     SlackWrite,
@@ -172,7 +177,7 @@ enum Check {
 }
 /// Freeze leaves a lost page's debt, which the probe's exit reports as an
 /// unclean shutdown; it runs on its own.
-const ALL: [Check; 23] = [
+const ALL: [Check; 24] = [
     Check::Memory,
     Check::Session,
     Check::Always,
@@ -196,6 +201,7 @@ const ALL: [Check; 23] = [
     Check::Heavy,
     Check::Apps,
     Check::Views,
+    Check::SignedOutApp,
 ];
 static CHECKS: OnceLock<Vec<Check>> = OnceLock::new();
 /// The engine, to ask which store holds a site's cookies.
@@ -362,6 +368,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("webmail") => vec![Check::Webmail],
         Some("apps") => vec![Check::Apps],
         Some("views") => vec![Check::Views],
+        Some("signed-out-app") => vec![Check::SignedOutApp],
         Some("memory") => vec![Check::Memory],
         Some("slackwrite") => vec![Check::SlackWrite],
         Some("slack-request") => vec![Check::SlackRequest],
@@ -875,6 +882,14 @@ const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.
                 page("Results", &format!("<h1>Results</h1>{found}")),
             )
         }
+        (Site::Account, _, "/app/landing") => (
+            "200 OK",
+            String::new(),
+            page(
+                "Notes and docs for your team",
+                &format!("<header><nav aria-label=\"Main\"><a href=\"/product\">Product</a><a href=\"/pricing\">Pricing</a><a href=\"/login\">Log in</a><a href=\"/signup\">Get started free</a></nav></header><h1>{LANDING_FACT}</h1><p>Write, plan and share in one workspace.</p>"),
+            ),
+        ),
         (Site::Account, _, _) if !signed_in => (
             "200 OK",
             String::new(),
@@ -2775,6 +2790,40 @@ pub(super) async fn workflow(
                     && run.opened.len() == super::work_app_views::VIEWS.len()
                     && run.opened.iter().all(|page| page.model_calls == Some(0))
                     && calls == 0
+            }
+            Check::SignedOutApp => {
+                zephium_app::work_sites::set_standing(handle, profile, SITE.into(), None)
+                    .await
+                    .map_err(|_| "signed_out_app_standing")?;
+                let run = context
+                    .lead_run(
+                        "List my 3 most recent pages",
+                        "https://account.probe.test/app/landing",
+                        "Allow",
+                    )
+                    .await?;
+                let execution = run.state.executions.last();
+                let sign_in = execution.is_some_and(|execution| {
+                    execution.parts.iter().any(|part| {
+                        matches!(
+                            part.need,
+                            Some(zephium_core::work::parts::WorkPartNeedV1::SignIn { .. })
+                        )
+                    })
+                });
+                let read = says(&run, LANDING_FACT);
+                let calls: u32 = run
+                    .opened
+                    .iter()
+                    .filter_map(|page| page.model_calls)
+                    .map(u32::from)
+                    .sum();
+                line(format!(
+                    "check=signed-out-app sign_in_need={sign_in} read_landing_page={read} model_calls={calls} pages=[{}]",
+                    pages_of(&run)
+                ));
+                last = run.state;
+                sign_in && !read && calls == 0
             }
             Check::Churn => {
                 let first = context
