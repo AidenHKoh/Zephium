@@ -1475,6 +1475,9 @@ struct GateState {
     unknown: Vec<Flight>,
     /// Add-to-cart controls already pressed: a second press adds a second item.
     carted: Vec<[u8; 32]>,
+    /// Messages sent, by where and what: the same words to the same place
+    /// are never sent twice in one task.
+    sent: Vec<(String, String)>,
     /// Status lines seen before the last step, for the commit detector.
     status_before: Vec<String>,
     unconfirmed: Option<String>,
@@ -1518,6 +1521,8 @@ struct Flight {
     /// The words a message sends: still in a box on the page after the
     /// step, they were not sent.
     message: Option<String>,
+    /// Where the message goes, as its card names it.
+    place: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2269,7 +2274,20 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             message: (consequence == Consequence::Communication)
                 .then(|| preview.text.clone())
                 .flatten(),
+            place: preview.headline.clone(),
         };
+        // A small model that cannot find its posted message types it again
+        // and asks again: the person would approve a duplicate.
+        if consequence == Consequence::Communication
+            && preview.text.as_ref().is_some_and(|text| {
+                state
+                    .sent
+                    .iter()
+                    .any(|(place, sent)| *place == preview.headline && sent == text)
+            })
+        {
+            return Err(AgentWorkFailure::AlreadyDone);
+        }
         // It reached the page before and its outcome was never seen: it may
         // have committed, so it is not run again.
         if consequence != Consequence::Type
@@ -2427,6 +2445,9 @@ impl SiteWorkPolicy {
                 state.unknown.push(flight);
                 state.status_before = status_lines(observation);
                 return;
+            }
+            if let Some(message) = flight.message.clone() {
+                state.sent.push((flight.place.clone(), message));
             }
             state.committed.push((flight.consequence, flight.control));
         }
@@ -3004,6 +3025,46 @@ mod tests {
                 assert!(matches!(result, Err(AgentWorkFailure::WrongRecipient)));
             }
         }
+    }
+
+    #[test]
+    fn the_same_words_are_never_sent_twice_to_the_same_place_in_one_task() {
+        let chat = |name: &str, value: &str| {
+            page(vec![
+                json!({"k":1,"r":"document","o":16,"fc":true}),
+                json!({"k":2,"p":0,"r":"group","n":"Composer","fc":true}),
+                json!({"k":3,"p":1,"r":"textbox","n":name,"o":11,"fs":1,"es":[1,2,false],"fc":true,
+                    "v":{"k":"text","value":value},"b":{"x":1,"y":80,"w":300,"h":60}}),
+                json!({"k":4,"p":1,"r":"button","n":"Send now","o":9,"ak":1,"fc":true,
+                    "b":{"x":1,"y":150,"w":80,"h":30}}),
+            ])
+        };
+        let gate = Arc::new(SiteGate::new("slack.com".into(), false, false));
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        let look = chat("Message to launch", "Hello team");
+        let send = click(&look, 4, SemanticEffectClass::Communication);
+        assert!(policy.assess(&send, &look).is_err());
+        gate.approve(false).unwrap();
+        assert!(policy.assess(&send, &look).is_ok());
+        policy.after_step(&chat("Message to launch", ""));
+        assert_eq!(gate.take_receipt(), Some(Receipt::Committed));
+        // The model did not find its post and typed the same words again.
+        let again = click(&look, 4, SemanticEffectClass::Communication);
+        assert_eq!(
+            policy.assess(&again, &look).err(),
+            Some(AgentWorkFailure::AlreadyDone)
+        );
+        assert!(gate.pending().is_none(), "no card for a duplicate");
+        let elsewhere = chat("Message to design", "Hello team");
+        let other = click(&elsewhere, 4, SemanticEffectClass::Communication);
+        assert_eq!(
+            policy.assess(&other, &elsewhere).err(),
+            Some(AgentWorkFailure::ActionDenied)
+        );
+        assert!(gate.pending().is_some(), "the same words elsewhere are asked");
     }
 
     #[test]

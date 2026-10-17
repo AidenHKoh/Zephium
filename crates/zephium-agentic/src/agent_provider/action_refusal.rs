@@ -482,7 +482,7 @@ impl AgentProviderActionRefusal {
             ),
             SemanticActionBindingError::OutcomeAlreadySatisfied => (
                 "outcome_already_satisfied",
-                "The proposed postcondition already holds in the supplied observation. Choose a meaningfully different operation or input with a verifiable change, request a genuinely fresh observation if state may have changed, or extract the result if the objective is complete. Do not repeat this exact proposal.",
+                "The proposed postcondition already holds in the supplied observation. Choose a meaningfully different operation or input with a verifiable change, request a genuinely fresh observation if state may have changed, or extract the result if the objective is complete. A message this task already sent, or an item it already added, is done: do not type or send it again. Do not repeat this exact proposal.",
             ),
             SemanticActionBindingError::ValueUnobserved => (
                 "value_unobserved",
