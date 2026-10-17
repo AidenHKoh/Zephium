@@ -445,14 +445,14 @@ impl State {
 impl State {
     /// A move to a fragment of the committed document itself (a script's
     /// `#inbox`, an app's hash route) loads nothing: it is admitted in place
-    /// and `location_changed` records the new address.
+    /// and `location_changed` records the new address. The document an
+    /// armed load committed routes itself the same way before it settles.
     fn route_move(&self, raw: &str) -> bool {
         self.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
             && matches!(
                 self.phase,
                 Phase::Committed | Phase::Finalizing | Phase::Sampling | Phase::Ready
             )
-            && self.operation.is_none()
             && self
                 .document
                 .as_ref()
@@ -1943,6 +1943,30 @@ mod tests {
         let (operation, outcome) = gate.take_successor_terminal().unwrap();
         assert_eq!(operation, request.operation());
         assert_eq!(outcome, Ok(departure));
+    }
+    #[test]
+    fn the_document_a_model_load_committed_may_route_itself_before_it_settles() {
+        let gate = armed_policy(zephium_agentic::WorkBrowserDocumentPolicy::SiteSession);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, URL)).unwrap();
+        }
+        settle(&gate, URL);
+        let (source, request) =
+            next_request_with_policy(zephium_agentic::WorkBrowserDocumentPolicy::SiteSession);
+        gate.arm_successor(source, &request).unwrap();
+        let next = request.target().as_url().as_str();
+        let routed = "https://example.test/next#inbox";
+        assert!(gate.allows(next));
+        gate.observe(event(2, E::Started, next)).unwrap();
+        gate.observe(event(2, E::Committed, next)).unwrap();
+        assert!(gate.allows(routed));
+        assert_eq!(gate.location_changed(Some(routed)), Ok(false));
+        gate.observe(event(2, E::Finished, next)).unwrap();
+        settle(&gate, routed);
+        assert!(gate.ready(Some(routed)) && !gate.failed());
+        let (operation, outcome) = gate.take_successor_terminal().unwrap();
+        assert_eq!(operation, request.operation());
+        assert_eq!(outcome.unwrap().as_url().as_str(), routed);
     }
     fn site_gate(url: &str) -> WorkDocumentNavigation {
         let gate = WorkDocumentNavigation::default();
