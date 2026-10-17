@@ -339,7 +339,10 @@ fn blocks(need: &WorkPartNeedV1) -> bool {
 fn person_wrote<'a>(text: &str, sources: impl IntoIterator<Item = &'a str>) -> bool {
     let flat = |words: &str| words.split_whitespace().collect::<Vec<_>>().join(" ");
     let text = flat(text);
-    !text.is_empty() && sources.into_iter().any(|source| flat(source).contains(&text))
+    !text.is_empty()
+        && sources
+            .into_iter()
+            .any(|source| flat(source).contains(&text))
 }
 
 fn public_goal(spec: &PartSpec) -> bool {
@@ -460,7 +463,10 @@ where
                         .iter()
                         .filter_map(|execution| execution.spec.request.as_deref())
                 });
-                if !person_wrote(text, std::iter::once(self.objective.as_str()).chain(earlier)) {
+                if !person_wrote(
+                    text,
+                    std::iter::once(self.objective.as_str()).chain(earlier),
+                ) {
                     return Err("text is only the person's own words, copied character for character from their request; these words are not in it. Copy them exactly, or use draft for a draft on the canvas.".into());
                 }
             }
@@ -2759,10 +2765,17 @@ mod tests {
 
     #[test]
     fn exact_words_must_be_the_persons_own() {
-        let request = "Send an email to ana@example.com:\n\nHi Ana,\n\nThe release is ready.\n\nBest";
-        assert!(person_wrote("Hi Ana,\n\nThe release is ready.\n\nBest", [request]));
+        let request =
+            "Send an email to ana@example.com:\n\nHi Ana,\n\nThe release is ready.\n\nBest";
+        assert!(person_wrote(
+            "Hi Ana,\n\nThe release is ready.\n\nBest",
+            [request]
+        ));
         assert!(person_wrote("Hi Ana, The release is ready.", [request]));
-        assert!(!person_wrote("Now: Saturday 17 October 2026, 15:53", [request]));
+        assert!(!person_wrote(
+            "Now: Saturday 17 October 2026, 15:53",
+            [request]
+        ));
         assert!(!person_wrote("Hi Ana, the release is ready.", [request]));
         assert!(!person_wrote("  ", [request]));
     }

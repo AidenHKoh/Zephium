@@ -154,12 +154,17 @@ pub(crate) fn site(brand: &str) -> Option<&'static str> {
 /// goal before this.
 pub(crate) fn reaches_own_app(brand: &str, host: Option<&str>) -> bool {
     host.is_none_or(|host| {
+        let site_of = |host: &str| crate::work_sites::site_of(&format!("https://{host}/"));
         site(brand).is_some_and(|app| {
-            let site = |host: &str| crate::work_sites::site_of(&format!("https://{host}/"));
-            app == host || site(app).is_some_and(|app| site(host).as_deref() == Some(&*app))
-        })
+            app == host || site_of(app).is_some_and(|app| site_of(host).as_deref() == Some(&*app))
+        }) || FORMER_SITES
+            .iter()
+            .any(|(key, former)| *key == brand && site_of(host).as_deref() == Some(*former))
     })
 }
+
+/// Sites an app moved away from, which models still name it by.
+const FORMER_SITES: [(&str, &str); 1] = [("notion", "notion.so")];
 
 /// The person's connection for the service: gh for GitHub when it is
 /// installed and signed in, else an enabled MCP server named for it.
@@ -275,7 +280,8 @@ mod tests {
         assert_eq!(offer("sla", false, &servers), None);
         assert!(reaches_own_app("notion", Some("app.notion.com")));
         assert!(reaches_own_app("slack", None));
-        assert!(!reaches_own_app("notion", Some("www.notion.so")));
+        assert!(reaches_own_app("notion", Some("www.notion.so")));
+        assert!(!reaches_own_app("notion", Some("notion.site")));
         assert!(reaches_own_app("todoist", Some("todoist.com")));
         assert!(!reaches_own_app("todoist", Some("doist.com")));
 
