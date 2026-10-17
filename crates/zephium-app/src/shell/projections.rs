@@ -185,6 +185,7 @@ impl Shell {
 
     pub(super) fn items_snapshot(&self) -> Option<ItemsState> {
         let win = self.windows.focused()?;
+        self.select_icon_profile(zephium_ipc::IconSurface::Chrome, win.profile);
         self.items_snapshot_from(
             &self.profiles,
             &self.spaces,

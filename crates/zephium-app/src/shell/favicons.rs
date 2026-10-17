@@ -55,6 +55,7 @@ pub(super) struct FaviconState {
     /// Revision each privileged surface currently holds for an origin.
     /// Interior mutability because the paths that reference icons take `&self`.
     pub(super) delivered: std::cell::RefCell<std::collections::HashMap<IconKey, String>>,
+    surface_profiles: std::cell::RefCell<std::collections::HashMap<IconSurface, ProfileId>>,
     /// References made since the last publish whose pixels the surface lacks.
     pub(super) undelivered: std::cell::RefCell<Vec<IconKey>>,
     pub(super) icon_attempts: std::collections::HashMap<ItemId, IconAttempt>,
@@ -597,6 +598,13 @@ impl Shell {
             Vec<zephium_ipc::FaviconEntry>,
         > = std::collections::HashMap::new();
         for key in pending {
+            if self
+                .windows
+                .focused()
+                .is_none_or(|window| window.profile != key.1)
+            {
+                continue;
+            }
             let Some(record) = self.favicons.icon_values.get(&(key.1, key.2.clone())) else {
                 continue;
             };
@@ -631,6 +639,14 @@ impl Shell {
         profile: ProfileId,
         origin: &str,
     ) -> Option<zephium_ipc::IconRef> {
+        if self
+            .windows
+            .focused()
+            .is_none_or(|window| window.profile != profile)
+        {
+            return None;
+        }
+        self.select_icon_profile(surface, profile);
         let record = self
             .favicons
             .icon_values
@@ -646,6 +662,30 @@ impl Shell {
             origin: origin.to_owned(),
             revision: record.revision.clone(),
         })
+    }
+
+    pub(super) fn select_icon_profile(&self, surface: IconSurface, profile: ProfileId) {
+        if self
+            .favicons
+            .surface_profiles
+            .borrow_mut()
+            .insert(surface, profile)
+            == Some(profile)
+        {
+            return;
+        }
+        // Each webview holds one profile's rasters. Returning to a profile must
+        // resend its pixels, even though their revisions have not changed.
+        self.forget_delivered_icons(surface);
+        self.favicons
+            .undelivered
+            .borrow_mut()
+            .retain(|(owner, candidate, _)| *owner != surface || *candidate == profile);
+        (self.emit)(Projection::Favicons(zephium_ipc::FaviconsView {
+            surface,
+            profile_id: profile.to_string(),
+            entries: Vec::new(),
+        }));
     }
 
     /// A surface reattached with an empty raster cache, so nothing it
