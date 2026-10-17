@@ -551,3 +551,17 @@ test("closing the menu from the chip leaves an empty composer engaged and focuse
   await new Promise((done) => setTimeout(done, 100));
   expect(bar().dataset.mode).toBe("focus");
 });
+
+test("a press on the words while the menu is open closes it and puts the cursor there", async () => {
+  await page.viewport(1200, 800);
+  native.ready.mockImplementation(ready(true));
+  native.read.mockResolvedValue(view("anthropic/claude-opus-5-5"));
+  const screen = await render(ModelBarStage, { profile: PROFILE });
+  const words = screen.getByRole("textbox");
+  await words.click();
+  await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
+  await expect.element(page.getByRole("listbox")).toBeVisible();
+  await words.click();
+  await expect.element(page.getByRole("listbox")).not.toBeInTheDocument();
+  await expect.element(words).toHaveFocus();
+});

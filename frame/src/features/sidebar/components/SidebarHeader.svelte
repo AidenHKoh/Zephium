@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { surface as browserPage } from "$domain/surface";
   import * as m from "$shared/i18n/messages";
   import {
     ArrowLeft02Icon,
@@ -63,9 +64,10 @@
     );
   }
 
-  // With a page in front the search opens on its address, as the field would.
+  // With a page in front the search opens on its address, as the field would. Work has no
+  // page in front, whatever tab Browse left behind, so there it opens empty.
   function editAddress() {
-    const tab = tabs.activeTab();
+    const tab = browserPage.currentPage() === "work" ? null : tabs.activeTab();
     if (tab?.url && (tab.content ?? "web") === "web") void commands.launcherEdit(tab.id, tab.url);
     else void commands.runCommand("launcher.toggle");
   }

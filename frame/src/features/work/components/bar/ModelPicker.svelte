@@ -294,6 +294,20 @@
     setTimeout(home, 0);
   }
 
+  // The menu hangs from the whole sheet, which the popover counts as its own trigger: a press
+  // anywhere else on the sheet is the person going back to their words, so it closes here.
+  $effect(() => {
+    if (!open) return;
+    const sheet = trigger?.closest<HTMLElement>(".surface");
+    if (!sheet) return;
+    const away = (event: PointerEvent) => {
+      if (!(event.target instanceof Node) || trigger?.contains(event.target)) return;
+      close();
+    };
+    sheet.addEventListener("pointerdown", away, true);
+    return () => sheet.removeEventListener("pointerdown", away, true);
+  });
+
   async function opened(next: boolean) {
     open = next;
     if (!next) {

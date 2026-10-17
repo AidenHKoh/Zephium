@@ -92,7 +92,10 @@
     // At rail width the field is not drawn; the launcher stands in for it.
     const tab = untrack(() => tabs.activeTab());
     if (compact && tab?.url && (tab.content ?? "web") === "web") {
-      void commands.launcherEdit(tab.id, tab.url);
+      // Work has no page in front, so there the launcher opens empty.
+      if (untrack(() => surface.currentPage()) === "work")
+        void commands.runCommand("launcher.toggle");
+      else void commands.launcherEdit(tab.id, tab.url);
       return;
     }
     input.focus();

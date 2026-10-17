@@ -103,6 +103,7 @@
       <Field
         label={m.account_email()}
         labelHidden
+        size="large"
         type="email"
         placeholder={m.account_email_placeholder()}
         autocomplete="email"
@@ -135,6 +136,7 @@
         class="code"
         label={m.account_code()}
         labelHidden
+        size="large"
         inputmode="numeric"
         autocomplete="one-time-code"
         placeholder="000000"

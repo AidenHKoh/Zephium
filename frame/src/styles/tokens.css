@@ -452,12 +452,12 @@
   --text-overview-figure: 40px;
   --text-tile-title: 44px;
 
-  --control-height: 24px; /* every button, select trigger and text input in a row */
+  --control-height: 28px; /* every button, select trigger and text input in a row */
   --control-compact: var(--control-height);
   --control-regular: 30px;
   --control-large: 34px;
   --field-height: var(--control-height);
-  --control-inset: 10px;
+  --control-inset: 12px;
   --search-height: 28px;
   --row-sidebar: 36px;
   --row-page: 58px;
