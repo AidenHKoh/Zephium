@@ -1663,6 +1663,34 @@ fn public_page_diagnostic(
     ));
 }
 
+/// Shows the person the card's content in the terminal and waits for their
+/// own yes or no.
+async fn person_approves(confirm: &zephium_core::work::runtime::WorkConfirmV1) -> bool {
+    use std::io::Write as _;
+    let mut card = format!(
+        "\n=== {} ({:?} on {}) ===\n{}\n",
+        confirm.headline, confirm.category, confirm.site, confirm.action
+    );
+    for fact in &confirm.facts {
+        card.push_str(&format!("{}: {}\n", fact.label, fact.value));
+    }
+    if let Some(text) = &confirm.text {
+        card.push_str(&format!("---\n{text}\n---\n"));
+    }
+    card.push_str("Type yes to approve, anything else to decline: ");
+    // The terminal itself, past whatever the run's output is piped into.
+    match std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+        Ok(mut tty) => drop(tty.write_all(card.as_bytes())),
+        Err(_) => drop(std::io::stderr().lock().write_all(card.as_bytes())),
+    }
+    tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).is_ok() && line.trim().eq_ignore_ascii_case("yes")
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// Stands in for the person: answers the lead's questions with the
 /// scenario's answer, lets sites in for this run, approves file changes
 /// and commands in the granted folder, and declines every held step that
@@ -1773,14 +1801,19 @@ async fn stand_in(
                     let consent = ["reject", "accept", "cookie", "odrzuć", "necessary"]
                         .iter()
                         .any(|word| action.contains(word));
+                    // A person at the terminal decides, as they would on the card.
+                    let approve = !public_eval
+                        && !consent
+                        && std::env::var_os("ZEPHIUM_PROBE_PERSON").is_some()
+                        && person_approves(confirm).await;
                     say(format_args!(
-                        "lead-person: declined held step category={:?} consent_miss={consent}",
+                        "lead-person: held step category={:?} approved={approve} consent_miss={consent}",
                         confirm.category
                     ));
                     WorkRuntimeIntent::ApproveStep {
                         execution: execution.id,
                         step: step.id,
-                        approve: false,
+                        approve,
                         for_run: false,
                     }
                 }
