@@ -190,6 +190,8 @@ pub struct WorkBrowserOutcome {
     pub helped: bool,
     /// The page agent was stopped before a step that would commit something.
     pub held_back: bool,
+    /// What this page task committed, one plain line each ("Saved on the page: Add task").
+    pub committed: Vec<String>,
     /// The page ended so that its task can start over once: the person
     /// finished a sign-in in a tab while it waited, or saving a cookie
     /// refusal replaced the page. The site counts as allowed for the rerun.
@@ -1966,6 +1968,11 @@ impl Driver {
                                 })
                                 .to_owned(),
                         };
+                        let note = if outcome.committed.is_empty() {
+                            note
+                        } else {
+                            format!("{note}\n{}", outcome.committed.join("\n"))
+                        };
                         if let Some(destination) = outcome.redirect.clone() {
                             self.redirects.push((id, destination, None));
                         } else if status == WorkStepStatus::Failed {
@@ -2989,6 +2996,28 @@ fn sources_note(count: usize) -> String {
         n => format!("Found {n} sources"),
     }
 }
+/// A page step's note without the lines that say what the page task
+/// committed ("Saved on the page: Add task"), and those lines.
+pub(crate) fn split_ledger(note: &str) -> (&str, Vec<&str>) {
+    let is_ledger = |line: &str| {
+        ["Saved", "Sent", "Deleted", "Purchased"]
+            .iter()
+            .any(|verb| {
+                line.strip_prefix(verb)
+                    .is_some_and(|rest| rest.starts_with(" on the page"))
+            })
+    };
+    let (mut head, mut lines) = (note, Vec::new());
+    while let Some((rest, last)) = head.rsplit_once('\n') {
+        if !is_ledger(last) {
+            break;
+        }
+        lines.push(last);
+        head = rest;
+    }
+    lines.reverse();
+    (head, lines)
+}
 fn read_note(artifacts: &[WorkArtifactV1]) -> String {
     if let [artifact] = artifacts {
         match &artifact.data {
@@ -3230,6 +3259,24 @@ fn execution_summary(execution: &WorkExecutionFact) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_ledger_rides_a_page_note_and_comes_back_out() {
+        let note = "Read the page\nSaved on the page: Add task\nSent on the page: Send";
+        assert_eq!(
+            super::split_ledger(note),
+            (
+                "Read the page",
+                vec!["Saved on the page: Add task", "Sent on the page: Send"]
+            )
+        );
+        for plain in [
+            "The page took too long",
+            "Placed 3 cited records\nOne more line",
+        ] {
+            assert_eq!(super::split_ledger(plain), (plain, vec![]));
+        }
+    }
+
     #[test]
     fn legacy_local_steps_withhold_recognized_secrets_before_admission() {
         let secret = "sk-fixture-never-a-real-credential-value";

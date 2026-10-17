@@ -789,7 +789,7 @@ where
             });
             if let Some(note) = &step.note {
                 out.push_str(": ");
-                out.push_str(note);
+                out.push_str(crate::work_agent::split_ledger(note).0);
             }
             out.push('\n');
         }
@@ -903,16 +903,22 @@ where
                         ));
                     }
                 }
-                if step.artifacts.is_empty() && !failed {
-                    out.push_str("The page gave nothing usable.\n");
-                }
-                if let Some((_, said)) = step
+                let (note, committed) = step
                     .note
                     .as_deref()
+                    .map_or(("", Vec::new()), crate::work_agent::split_ledger);
+                if step.artifacts.is_empty() && !failed && committed.is_empty() {
+                    out.push_str("The page gave nothing usable.\n");
+                }
+                if let Some((_, said)) = Some(note)
                     .filter(|_| !failed)
                     .and_then(|note| note.split_once(" · "))
                 {
                     out.push_str(said);
+                    out.push('\n');
+                }
+                for line in committed {
+                    out.push_str(line);
                     out.push('\n');
                 }
             }
@@ -1313,6 +1319,7 @@ fn not_opened(why: String) -> WorkBrowserOutcome {
         measurements: None,
         helped: false,
         held_back: false,
+        committed: Vec::new(),
         rerun: false,
         search: None,
         redirect: None,

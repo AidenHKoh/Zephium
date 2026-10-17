@@ -75,6 +75,7 @@ async fn open(
                 measurements: None,
                 helped: false,
                 held_back: false,
+                committed: Vec::new(),
                 rerun: false,
                 search: None,
                 redirect: None,

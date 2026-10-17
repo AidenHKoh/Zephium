@@ -212,6 +212,17 @@ impl PartReport {
     }
 }
 
+/// The digest with the commit lines the helper's own words left out.
+fn with_committed(mut digest: String, committed: &[String]) -> String {
+    for line in committed {
+        if !digest.contains(line.as_str()) {
+            digest.push('\n');
+            digest.push_str(line);
+        }
+    }
+    digest
+}
+
 /// A browser part this run started on a site, and how it ended.
 pub(crate) struct SitePart {
     pub site: String,
@@ -968,6 +979,7 @@ where
         let mut messages = vec![WorkModelMessage::User(vec![WorkModelPart::Text(brief)])];
         let mut placed: Vec<WorkArtifactId> = Vec::new();
         let mut last_text = String::new();
+        let mut committed: Vec<String> = Vec::new();
         let mut spent = WorkUsage::default();
         let mut warned = false;
         let mut idle = 0u8;
@@ -1196,6 +1208,11 @@ where
                     Ok(done) => {
                         for (id, content, error) in done {
                             let search = asked.iter().any(|(call, search)| *call == id && *search);
+                            for line in crate::work_agent::split_ledger(content.trim_end()).1 {
+                                if !committed.iter().any(|seen| seen == line) {
+                                    committed.push(line.into());
+                                }
+                            }
                             if search && !error && found.len() < FOUND_CHARS {
                                 found.push_str(&clip(&content, 1_500));
                                 found.push('\n');
@@ -1231,6 +1248,9 @@ where
                 .collect();
             messages.push(WorkModelMessage::ToolResults(results));
             if let Some((summary, digest, found, need)) = finished {
+                // What the page task committed is a fact of the run, not of
+                // the helper's wording.
+                let found = found || !committed.is_empty();
                 return PartReport {
                     state: if found && need.is_none() {
                         WorkPartStateV1::Done
@@ -1238,7 +1258,7 @@ where
                         WorkPartStateV1::Failed
                     },
                     summary: Some(summary),
-                    digest: clip(&digest, 3_000),
+                    digest: with_committed(clip(&digest, 3_000), &committed),
                     judged_empty: !found,
                     objects: placed,
                     need,
@@ -1252,11 +1272,14 @@ where
                 WorkPartStateV1::Done
             },
             summary: None,
-            digest: if last_text.is_empty() {
-                "It ran out of turns before it reported.".into()
-            } else {
-                clip(&last_text, 2_000)
-            },
+            digest: with_committed(
+                if last_text.is_empty() {
+                    "It ran out of turns before it reported.".into()
+                } else {
+                    clip(&last_text, 2_000)
+                },
+                &committed,
+            ),
             objects: placed,
             need: None,
             judged_empty: false,
@@ -2312,7 +2335,7 @@ fn step_reason(
 fn note_reason(note: Option<&str>, search: bool) -> Option<WorkPartReasonV1> {
     use zephium_core::work::runtime::read_note;
     use WorkPartReasonV1 as R;
-    let note = note.unwrap_or("");
+    let note = note.map_or("", |note| crate::work_agent::split_ledger(note).0);
     Some(match note {
         SIGN_IN_NOTE => R::SignedOut,
         read_note::HUMAN_CHECK => R::BlockedByCheck,
@@ -2341,6 +2364,22 @@ fn note_reason(note: Option<&str>, search: bool) -> Option<WorkPartReasonV1> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_digest_states_every_commit_the_helper_left_out() {
+        let committed = vec![
+            "Saved on the page: Add task".to_owned(),
+            "Sent on the page: Send".to_owned(),
+        ];
+        assert_eq!(
+            with_committed(
+                "Added the task.\nSaved on the page: Add task".into(),
+                &committed
+            ),
+            "Added the task.\nSaved on the page: Add task\nSent on the page: Send"
+        );
+        assert_eq!(with_committed("Done".into(), &[]), "Done");
+    }
 
     #[test]
     fn a_part_gets_the_same_calls_on_a_pricier_model() {

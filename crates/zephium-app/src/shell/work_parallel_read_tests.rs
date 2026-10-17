@@ -212,6 +212,7 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
                                     }]
                                 },
                                 held_back: false,
+                                committed: Vec::new(),
                                 rerun: false,
                                 search: None,
                                 redirect: None,
