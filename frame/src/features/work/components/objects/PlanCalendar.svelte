@@ -7,7 +7,6 @@
   import type { ObjectActions, OwnedData, PlanView } from "../../lib/board/types";
   import {
     CALENDAR,
-    MONTH_LINES,
     SHOWN,
     firstWeekday,
     weekHeight,
@@ -111,8 +110,8 @@
     for (const index of slot.steps) actions.check?.(object.id, index, !slot.done);
   }
   const barTitle = (slot: CalendarSlot) => `${slot.title} · ${range(slot.from, slot.to)}`;
-  const height = (week: CalendarWeek) =>
-    weekHeight(week.lanes, week.lines, month ? MONTH_LINES : 0);
+  // A month's weeks all stand as tall as a full day: room to click into and type in.
+  const height = (week: CalendarWeek) => weekHeight(week.lanes, week.lines, month ? SHOWN : 0);
 </script>
 
 {#snippet event(index: number)}

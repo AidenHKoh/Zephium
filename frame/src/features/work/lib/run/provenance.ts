@@ -39,7 +39,7 @@ function readOf(runs: readonly WorkExecutionFact[], extraction: string): string 
  * The most things a set stands under their pages: one row of cards. More
  * would stand pages between rows of cards, so the part keeps them stacked.
  */
-export const SOURCED_MOST = 3;
+const SOURCED_MOST = 3;
 
 /**
  * Where each thing a part found was taken from, among the part's own pages:

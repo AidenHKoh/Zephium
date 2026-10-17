@@ -44,7 +44,7 @@ export type CalendarWeek = {
   /** `YYYY-MM` of the month this week opens, where it differs from the week before. */
   month: string | null;
 };
-export type CalendarQuiet = { kind: "quiet"; weeks: number; from: string; to: string };
+type CalendarQuiet = { kind: "quiet"; weeks: number; from: string; to: string };
 export type CalendarRow = CalendarWeek | CalendarQuiet;
 
 /** Steps a day lists before it keeps two and counts the rest. */
@@ -159,8 +159,6 @@ export function weekHeight(lanes: number, lines: number, floor = 0): number {
   const list = items ? CALENDAR.gap + items * CALENDAR.item + (items - 1) * CALENDAR.between : 0;
   return 2 * CALENDAR.pad + CALENDAR.number + list + CALENDAR.rule;
 }
-/** A month's weeks all stand as tall as a full day: the room to click into and type in. */
-export const MONTH_LINES = SHOWN;
 
 export const calendarHeight = (rows: readonly CalendarRow[], month = false) =>
   CALENDAR.head +
@@ -169,7 +167,7 @@ export const calendarHeight = (rows: readonly CalendarRow[], month = false) =>
       sum +
       (row.kind === "quiet"
         ? CALENDAR.quiet + CALENDAR.rule
-        : weekHeight(row.lanes, row.lines, month ? MONTH_LINES : 0)),
+        : weekHeight(row.lanes, row.lines, month ? SHOWN : 0)),
     0,
   );
 
