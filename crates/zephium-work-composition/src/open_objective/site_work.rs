@@ -1309,6 +1309,17 @@ impl Fingerprint {
         };
         unbound(self) == unbound(other)
     }
+    /// The same step on the same open page after the app reshuffled the
+    /// controls around it: everything the step is and requires still matches
+    /// (its value, states, option and proof); only where it sits moved.
+    fn same_step_moved(&self, other: &Self) -> bool {
+        let placed = |fingerprint: &Self| Self {
+            approval: None,
+            structure: [0; 32],
+            ..fingerprint.clone()
+        };
+        self.same_page_instance(other) && placed(self) == placed(other)
+    }
     fn same_page_instance(&self, other: &Self) -> bool {
         matches!((self.approval, other.approval), (Some(a), Some(b)) if a.same_keyspace(&b))
     }
@@ -1341,7 +1352,11 @@ fn structure(
         hasher.update((bytes.len() as u64).to_be_bytes());
         hasher.update(bytes);
     };
-    part(snapshot.frame().origin().as_url().as_str().as_bytes());
+    // An app moves its own route fragment as it works (a mail draft saved
+    // under a new id): the page, not that fragment, holds the step.
+    let mut page = snapshot.frame().origin().as_url().clone();
+    page.set_fragment(None);
+    part(page.as_str().as_bytes());
     part(format!("{:?}", action.kind()).as_bytes());
     part(format!("{:?}", action.bound_action().press_key()).as_bytes());
     part(
@@ -2170,8 +2185,12 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             return accept_approved(current_binding);
         }
         if let Some(confirmed) = state.confirmed.take() {
-            let same_step =
-                confirmed.digest == digest && confirmed.fingerprint.same_step(&fingerprint);
+            // What the person approved is what the card showed (where it goes,
+            // the words, the control): the same card on the same open page is
+            // that step, however the app reshuffled the controls around it.
+            let same_step = confirmed.digest == digest
+                && (confirmed.fingerprint.same_step(&fingerprint)
+                    || confirmed.fingerprint.same_step_moved(&fingerprint));
             // An SPA re-renders the node while the card waits: the approval
             // follows the step to its new element when exactly one control
             // on the page is that step.
@@ -4009,6 +4028,38 @@ mod tests {
         policy.after_step(&after);
         assert_eq!(gate.take_receipt(), Some(Receipt::Committed));
         assert_eq!(gate.committed(), vec!["Sent on the page: Send".to_owned()]);
+    }
+
+    #[test]
+    fn an_approval_holds_when_the_app_renames_the_box_around_the_same_message() {
+        let compose = |title: &str| {
+            page(vec![
+                json!({"k":1,"r":"document","o":16,"fc":true}),
+                json!({"k":2,"p":0,"r":"dialog","n":title,"fc":true}),
+                json!({"k":3,"p":1,"r":"textbox","n":"Message Body","o":11,"fs":1,"es":[1,2,false],"fc":true,
+                    "v":{"k":"text","value":"Hi Ana"},"b":{"x":1,"y":40,"w":300,"h":80}}),
+                json!({"k":4,"p":1,"r":"button","n":"Send","o":9,"ak":1,"fc":true,
+                    "b":{"x":1,"y":130,"w":80,"h":30}}),
+            ])
+        };
+        let gate = Arc::new(SiteGate::default());
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        let before = compose("New Message");
+        let held = click(&before, 4, SemanticEffectClass::Communication);
+        assert!(matches!(
+            policy.assess(&held, &before),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        gate.approve(false).unwrap();
+        // The mail app titles the box after its subject once the draft saves.
+        let after = compose("Status");
+        let again = click(&after, 4, SemanticEffectClass::Communication);
+        assert!(policy.assess(&again, &after).is_ok(), "no second card");
+        policy.after_step(&after);
+        assert_eq!(gate.take_receipt(), Some(Receipt::Committed));
     }
 
     #[test]
