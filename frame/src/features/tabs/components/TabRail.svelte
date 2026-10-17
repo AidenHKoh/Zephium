@@ -4,13 +4,7 @@
   import { tabs } from "$domain/tabs";
   import FavIcon from "$shared/ui/FavIcon";
   import { favicons } from "$domain/favicons";
-  import {
-    Add01Icon,
-    Cancel01Icon,
-    Globe02Icon,
-    Layers01Icon,
-    PuzzleIcon,
-  } from "@hugeicons/core-free-icons";
+  import { Add01Icon, Cancel01Icon, Globe02Icon, PuzzleIcon } from "@hugeicons/core-free-icons";
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
   import { untrack } from "svelte";
@@ -19,7 +13,7 @@
   import { RowDrag } from "$session/row-drag.svelte";
   import DragMark from "$shared/ui/DragMark";
   import SpacePeek from "./SpacePeek.svelte";
-  import SpaceGlyph from "./SpaceGlyph.svelte";
+  import RailSpaces from "./RailSpaces.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { remember } from "../lib/space-memory";
   import * as requests from "../lib/space-requests.svelte";
@@ -116,25 +110,14 @@
 
 <!--
   The rail reads top-down like the expanded list it stands in for. It opens
-  with the spaces, which take the column in place to show their list, and ends
+  with the spaces, which switch from a short stack and take the column in place
+  to be made or edited, and ends
   the way the list does, with the row that opens a new tab after the last one.
   `title` gives a real OS tooltip, which is the only label that can appear
   outside the chrome WebView's rectangle.
 -->
 {#if space}<div class="rail-spaces-slot" data-cascade style:--cascade={0}>
-    <button
-      type="button"
-      class="rail-item rail-spaces"
-      title={space.name}
-      aria-label={m.space_open_switcher({ name: space.name })}
-      aria-haspopup="dialog"
-      onclick={() => requests.openInColumn("list")}
-    >
-      {#if space.icon}<SpaceGlyph icon={space.icon} color={space.color} size={18} />{:else}<Icon
-          icon={Layers01Icon}
-          size={16}
-        />{/if}
-    </button>
+    <RailSpaces active={space} />
   </div>{/if}
 <div
   bind:this={stage}
@@ -275,7 +258,7 @@
 
   /* The expanded row with its label taken away: the same plate, corner, rim
      and fills, never a disc of its own. */
-  .rail-item {
+  :global(.rail-item) {
     display: grid;
     place-items: center;
     width: 40px;
@@ -292,17 +275,18 @@
       scale var(--motion-slow) var(--ease-spring);
   }
 
-  .rail-item:hover {
+  :global(.rail-item:hover),
+  :global(.rail-item[data-state="open"]) {
     background: var(--row-hover);
     color: var(--color-label-secondary);
   }
 
-  .rail-item:active {
+  :global(.rail-item:active) {
     scale: 0.94;
     transition-duration: var(--motion-instant);
   }
 
-  .rail-item[aria-current="page"] {
+  :global(.rail-item[aria-current="page"]) {
     background: var(--row-active);
     box-shadow: var(--row-rim);
   }

@@ -1627,6 +1627,59 @@ fn a_new_tab_opened_from_settings_fills_the_window_with_the_new_tab() {
 }
 
 #[test]
+fn a_new_tab_opened_from_work_fills_the_window_with_the_new_tab() {
+    let (mut shell, engine, chrome, screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    let page = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: page,
+        input: "example.com".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id: page,
+        url: "https://example.com/".into(),
+    }));
+    present_committed(&mut shell, page, "https://example.com/");
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Work)));
+    assert_eq!(shell.active_browser_page(), Some(crate::BrowserPage::Work));
+    assert!(chrome.last_frame().unwrap().fill_width);
+
+    assert_eq!(
+        shell.handle_operation(Command::Open).outcome,
+        OperationOutcome::Deferred
+    );
+    let (revision, _) = chrome.complete_browser_return(true);
+    let before = engine.calls().len();
+    shell.browser_chrome_restored(revision, true);
+
+    let opened = active_id(&screen);
+    assert_ne!(opened, page);
+    assert_eq!(shell.active_browser_page(), None);
+    let frame = chrome.last_frame().expect("chrome was placed");
+    assert!(
+        frame.fill_width,
+        "the frame draws the new tab across the window: {frame:?}"
+    );
+    assert!(
+        !engine.calls()[before..]
+            .iter()
+            .any(|call| call.starts_with("layout@") && call.contains(&page.to_string())),
+        "the page left behind is never laid out on the way to the new tab"
+    );
+    let last_layout = engine
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|call| call.starts_with("layout@"))
+        .unwrap();
+    assert!(!last_layout.contains(&page.to_string()), "{last_layout}");
+    assert_eq!(
+        engine.layout_regions.lock().unwrap().last().copied().flatten(),
+        None
+    );
+}
+
+#[test]
 fn a_page_retitling_itself_while_settings_closes_still_opens_the_new_tab() {
     let (mut shell, _engine, chrome, screen) = setup_with_async_chrome();
     shell.handle(Command::Bootstrap);

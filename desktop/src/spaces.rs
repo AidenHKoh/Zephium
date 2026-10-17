@@ -53,6 +53,20 @@ struct Shown {
     private: bool,
 }
 
+impl Shown {
+    /// Whether the menus need rebuilding rather than updating: which spaces
+    /// there are, or whether the window can use them at all, changed.
+    fn reshaped_by(&self, next: &Shown) -> bool {
+        self.private != next.private
+            || self.spaces.len() != next.spaces.len()
+            || self
+                .spaces
+                .iter()
+                .zip(&next.spaces)
+                .any(|(was, now)| was.0 != now.0)
+    }
+}
+
 #[derive(Default)]
 struct Followed {
     shown: Shown,
@@ -111,21 +125,27 @@ pub(crate) fn follow(app: &AppHandle, state: &ItemsState) {
         let mut followed = FOLLOWED.lock().unwrap_or_else(|e| e.into_inner());
         let followed = followed.get_or_insert_with(Followed::default);
         let menus = followed.shown != next;
+        let membership = followed.shown.reshaped_by(&next);
         let ground = followed.theme != theme;
         followed.shown = next;
         followed.theme = theme;
-        (menus, ground)
+        (menus.then_some(membership), ground)
     };
     if ground {
         super::reinstall_native_materials(app);
     }
+    // Switching only moves the check: the menu bar is never set again for it,
+    // since setting it makes every title flash.
     #[cfg(target_os = "macos")]
-    if menus {
+    if let Some(membership) = menus {
         let handle = app.clone();
         let queued = app.run_on_main_thread(move || {
             let Some(keymap) = handle.try_state::<super::keymap::Keymap>() else {
                 return;
             };
+            if !membership && sync_menu_bar(&handle).is_ok_and(|synced| synced) {
+                return;
+            }
             if super::install_menu_bar(&handle, &keymap.overrides(), keymap.work_pane_shown())
                 .is_err()
             {
@@ -138,6 +158,55 @@ pub(crate) fn follow(app: &AppHandle, state: &ItemsState) {
     }
     #[cfg(not(target_os = "macos"))]
     let _ = menus;
+}
+
+/// Brings the installed Spaces menu up to date in place: the check, the names,
+/// and the spaces a tab can move to. False when the menu is not the shape the
+/// spaces describe, which asks for a rebuild instead. Main thread only.
+#[cfg(target_os = "macos")]
+fn sync_menu_bar(app: &AppHandle) -> tauri::Result<bool> {
+    use tauri::menu::MenuItemKind;
+
+    let Some(menu) = app.menu() else {
+        return Ok(false);
+    };
+    let shown = shown();
+    for entry in menu.items()? {
+        let MenuItemKind::Submenu(section) = entry else {
+            continue;
+        };
+        let items = section.items()?;
+        if !items
+            .iter()
+            .any(|item| matches!(item, MenuItemKind::MenuItem(item) if item.id() == NEW))
+        {
+            continue;
+        }
+        let mut checks = 0;
+        let mut moved = false;
+        for item in &items {
+            match item {
+                MenuItemKind::Check(check) => {
+                    let Some((id, name)) = shown.spaces.get(checks) else {
+                        return Ok(false);
+                    };
+                    check.set_checked(shown.active.as_deref() == Some(id.as_str()))?;
+                    check.set_text(super::extension_menu_label(name))?;
+                    checks += 1;
+                }
+                MenuItemKind::Submenu(moves) => {
+                    while moves.remove_at(0)?.is_some() {}
+                    for item in move_items(app, MOVE_ACTIVE, &shown)? {
+                        moves.append(item.as_ref())?;
+                    }
+                    moved = true;
+                }
+                _ => {}
+            }
+        }
+        return Ok(checks == shown.spaces.len() && moved);
+    }
+    Ok(false)
 }
 
 fn space_of(value: &str) -> Option<SpaceId> {
@@ -492,6 +561,24 @@ mod tests {
                 .look()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn switching_or_renaming_never_reshapes_the_menus() {
+        let shown = |active: &str, names: [&str; 2]| Shown {
+            spaces: vec![("a".into(), names[0].into()), ("b".into(), names[1].into())],
+            active: Some(active.into()),
+            private: false,
+        };
+        let before = shown("a", ["Home", "Work"]);
+        assert!(!before.reshaped_by(&shown("b", ["Home", "Work"])));
+        assert!(!before.reshaped_by(&shown("a", ["Home", "Studio"])));
+        let mut added = shown("a", ["Home", "Work"]);
+        added.spaces.push(("c".into(), "New".into()));
+        assert!(before.reshaped_by(&added));
+        let mut private = shown("a", ["Home", "Work"]);
+        private.private = true;
+        assert!(before.reshaped_by(&private));
     }
 
     #[test]

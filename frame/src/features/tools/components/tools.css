@@ -41,8 +41,8 @@
   gap: 6px;
   box-sizing: border-box;
   height: var(--search-height);
-  padding-inline: 10px 6px;
-  border-radius: var(--radius-control-compact);
+  padding-inline: 12px 6px;
+  border-radius: var(--radius-field);
   background: var(--color-field);
   color: var(--color-faint);
   transition:

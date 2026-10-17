@@ -8,6 +8,10 @@
   min-width: 0;
   height: 100%;
   padding-inline-start: 8px;
+
+  /* Nothing here scrolls sideways: clipped, not hidden, so a focus reveal has
+     no offset to leave behind and the page cannot slide off its column. */
+  overflow: clip;
 }
 /* The new tab sits above the sidebar, as a native page does: whatever the
    column lets go of while it changes shape passes beneath it. The sidebar's
@@ -29,6 +33,18 @@
   from {
     opacity: 0;
     scale: 0.985;
+  }
+}
+
+/* Work places native panes from measured rects, and a scale in flight would be
+   measured: the pane would land off by the amount the page had left to grow,
+   with no resize to say so. Its page only fades. */
+.stage-page[data-page="work"] {
+  animation-name: stage-fade;
+}
+@keyframes stage-fade {
+  from {
+    opacity: 0;
   }
 }
 .settings-shell,
@@ -373,9 +389,9 @@
   align-items: center;
   gap: 6px;
   min-height: var(--search-height);
-  padding-inline: 10px;
+  padding-inline: var(--control-inset);
   background: var(--color-field);
-  border-radius: var(--radius-control-compact);
+  border-radius: var(--radius-field);
   margin-bottom: 10px;
   color: var(--color-faint);
 }

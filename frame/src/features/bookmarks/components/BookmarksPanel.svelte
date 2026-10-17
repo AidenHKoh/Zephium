@@ -755,13 +755,13 @@
   .rename {
     box-sizing: border-box;
     min-width: 0;
-    padding: 0 10px;
+    padding: 0 var(--control-inset);
     border: 0;
-    border-radius: var(--radius-inset);
+    border-radius: var(--radius-field);
     background: var(--color-field);
     color: var(--color-text);
     font: inherit;
-    font-size: var(--text-body);
+    font-size: var(--text-label);
     outline: none;
     user-select: text;
     transition:

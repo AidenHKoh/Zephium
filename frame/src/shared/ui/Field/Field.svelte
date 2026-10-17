@@ -54,14 +54,14 @@
     width: 100%;
     min-width: 0;
     min-height: var(--field-height);
-    padding: 5px 14px;
+    padding: 0 var(--control-inset);
     border: 0;
-    border-radius: var(--radius-control);
+    border-radius: var(--radius-field);
     background: var(--color-field);
     color: var(--color-text);
     font: inherit;
-    font-size: var(--text-body);
-    line-height: 20px;
+    font-size: var(--text-label);
+    line-height: 16px;
     transition:
       background-color var(--motion-instant) var(--ease-smooth),
       box-shadow var(--motion-instant) var(--ease-smooth);

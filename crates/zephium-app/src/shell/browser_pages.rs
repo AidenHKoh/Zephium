@@ -351,20 +351,26 @@ impl Shell {
         if let Some(window) = self.windows.focused().map(|window| window.id) {
             let _ = self.engine.hint_stage_motion(window, StageMotion::Arrive);
         }
-        if self.relayout() != NativeDispatch::Scheduled {
+        let next = self.browser_after_return.take();
+        // A command that follows decides what the window shows: laying out the
+        // page left behind first would bring it into view for a frame, and
+        // under a new tab it could stay there.
+        self.browser_return_hidden = next.is_some();
+        let scheduled = self.relayout() == NativeDispatch::Scheduled;
+        self.browser_return_hidden = false;
+        if !scheduled {
             self.browser_page = previous;
             let _ = self.relayout();
             self.project_browser_page();
             (self.emit)(Projection::UiCommand("browser.return-failed".into()));
+        } else if let Some(next) = next {
+            self.browser_return_ready = true;
+            self.handle(*next);
+            self.browser_return_ready = false;
+            let _ = self.relayout();
+            self.project_browser_page_if_changed();
         } else {
-            if let Some(next) = self.browser_after_return.take() {
-                self.browser_return_ready = true;
-                self.handle(*next);
-                self.browser_return_ready = false;
-                self.project_browser_page_if_changed();
-            } else {
-                self.project_browser_page();
-            }
+            self.project_browser_page();
         }
     }
 }

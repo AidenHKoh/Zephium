@@ -57,7 +57,7 @@
     min-height: var(--search-height);
     padding: 0 10px;
     border: 0;
-    border-radius: var(--radius-control-compact);
+    border-radius: var(--radius-field);
     color: var(--color-faint);
     background: var(--color-field);
     transition:

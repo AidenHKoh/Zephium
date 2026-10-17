@@ -122,13 +122,13 @@
   .segmented[data-size="regular"] {
     --seg-height: var(--control-regular);
     --seg-pad: 3px;
-    --seg-radius: var(--radius-control);
+    --seg-radius: var(--radius-shine);
   }
 
   .segmented[data-size="compact"] {
     --seg-height: var(--control-compact);
     --seg-pad: 2px;
-    --seg-radius: var(--radius-control-compact);
+    --seg-radius: var(--radius-shine);
   }
 
   .segmented[data-full="true"] {

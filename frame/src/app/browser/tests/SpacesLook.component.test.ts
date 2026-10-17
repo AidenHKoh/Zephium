@@ -271,12 +271,12 @@ for (const theme of ["light", "dark"] as const) {
     sidebar.adoptMode("compact");
     await settle();
     await crop(`${theme}-rail`);
-    // The rail's first button opens the list in the column, in place.
+    // The rail's first button opens a short stack beside it; editing takes the column in place.
     await screen.getByRole("button", { name: "Spaces — Reading" }).click();
     await settle();
+    await crop(`${theme}-rail-stack`);
+    await screen.getByRole("menuitem", { name: "Edit Reading" }).click();
     await settle();
-    await wide(`${theme}-rail-switcher`);
-    await screen.getByRole("button", { name: "Edit Studio" }).click();
     await settle();
     await wide(`${theme}-rail-editor`);
     await screen.getByRole("button", { name: "Done" }).click();

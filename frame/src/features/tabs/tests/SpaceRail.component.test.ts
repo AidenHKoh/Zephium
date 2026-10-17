@@ -11,6 +11,8 @@ import * as sidebar from "$session/sidebar-mode.svelte";
 import TabRail from "../components/TabRail.svelte";
 import * as requests from "../lib/space-requests.svelte";
 
+const switched = vi.hoisted((): string[] => []);
+
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   const ok = async () => ({ accepted: true, operation_id: null });
@@ -20,11 +22,16 @@ vi.mock("$shared/ipc/bindings", async () => {
     settingSet: ok,
     settingGet: async () => null,
     spacesStep: ok,
+    spacesSwitch: async (id: string) => {
+      switched.push(id);
+      return { accepted: true, operation_id: null };
+    },
     keymapEntries: async () => [],
   });
 });
 
 afterEach(() => {
+  switched.length = 0;
   sidebar.adoptMode("default");
   tabs.dispose();
   uiCommands.dispose();
@@ -63,11 +70,22 @@ test("the spaces button leads the rail and the new tab button follows the last t
   expect(rows).toHaveLength(2);
 });
 
-test("the spaces button opens the list in the column and shows the space's own icon only when it has one", async () => {
+test("the spaces button opens a stack beside the rail and switching happens there", async () => {
   const screen = await rail();
   expect(screen.container.querySelector(".rail-spaces .space-glyph")).toBeNull();
   await screen.getByRole("button", { name: "Spaces — Home" }).click();
-  expect(requests.pending()?.kind).toBe("list");
+  expect(sidebar.isCompact()).toBe(true);
+  expect(requests.pending()).toBeNull();
+  await screen.getByRole("menuitem", { name: "Studio" }).click();
+  expect(switched).toEqual(["studio"]);
+  expect(sidebar.isCompact()).toBe(true);
+});
+
+test("New Space and Edit from the stack open the column in place", async () => {
+  const screen = await rail();
+  await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  await screen.getByRole("menuitem", { name: "New Space" }).click();
+  expect(requests.pending()?.kind).toBe("new");
   expect(sidebar.isCompact()).toBe(false);
 });
 

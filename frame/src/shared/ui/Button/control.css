@@ -14,10 +14,10 @@
   justify-content: center;
   gap: 6px;
   box-sizing: border-box;
-  min-height: var(--control-compact);
-  padding: 0 10px;
+  min-height: var(--control-height);
+  padding: 0 var(--control-inset);
   border: 0;
-  border-radius: var(--radius-control-compact);
+  border-radius: var(--radius-shine);
   color: var(--color-text);
   font: inherit;
   font-size: var(--text-label);
@@ -31,11 +31,11 @@
 }
 
 .ui-control.ui-shine {
-  --shine-radius: var(--radius-control-compact);
+  --shine-radius: var(--radius-shine);
 }
 
 .ui-control-icon {
-  inline-size: var(--control-compact);
+  inline-size: var(--control-height);
   padding: 0;
 }
 

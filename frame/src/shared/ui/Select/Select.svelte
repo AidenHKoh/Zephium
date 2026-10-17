@@ -5,6 +5,7 @@
   import "../Shine/shine.css";
   import "../Button/control.css";
   import { menuMaterialFor } from "../Menu/material";
+  import { layoutAnchor } from "../Menu/anchor";
   let {
     label,
     labelHidden = false,
@@ -66,6 +67,7 @@
         data-menu-material={material}
         class="ui-menu ui-select-menu"
         align="start"
+        customAnchor={layoutAnchor(triggerElement)}
         sideOffset={6}
         collisionPadding={12}
       >
@@ -108,7 +110,7 @@
     justify-content: space-between;
     gap: 8px;
     min-width: 120px;
-    padding-inline: 10px 6px;
+    padding-inline: var(--control-inset) 10px;
     font-weight: 450;
   }
 

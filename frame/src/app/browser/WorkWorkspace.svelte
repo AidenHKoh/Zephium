@@ -68,7 +68,7 @@
     height: 100%;
     min-width: 0;
     min-height: 0;
-    overflow: hidden;
+    overflow: clip;
     background: transparent;
   }
 

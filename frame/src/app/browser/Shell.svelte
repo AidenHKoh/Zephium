@@ -506,7 +506,10 @@
       <main class="internal-stage">
         <!-- Each destination arrives as its own page: the ground settles in
            while its content rises onto it. -->
-        {#key browserPage.currentPage()}<div class="stage-page">
+        {#key browserPage.currentPage()}<div
+            class="stage-page"
+            data-page={browserPage.currentPage()}
+          >
             <RenderBoundary title={m.surface_render_failed()} retryLabel={m.surface_retry()}>
               {#if browserPage.currentPage() === "settings"}
                 <LazyView

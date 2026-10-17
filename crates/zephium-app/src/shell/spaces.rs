@@ -266,11 +266,11 @@ impl Shell {
         self.switch_space(space)
     }
 
-    /// Shows `space` in the focused window. Work keeps its canvas, and a
-    /// browser page steps back to browsing first.
+    /// Shows `space` in the focused window. Work stays on its canvas, which
+    /// follows the space, and any other browser page steps back to browsing first.
     fn switch_space(&mut self, space: SpaceId) -> OperationDisposition {
         match self.active_browser_page() {
-            Some(crate::BrowserPage::Work) => return rejected(OperationReason::InvalidScope),
+            Some(crate::BrowserPage::Work) => {}
             Some(_) if !self.browser_return_ready => {
                 self.browser_after_return = Some(Box::new(Command::Space(Box::new(
                     SpaceCommand::Switch(space),

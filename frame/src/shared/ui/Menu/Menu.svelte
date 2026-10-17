@@ -22,6 +22,7 @@
   import Mark from "./Mark.svelte";
   import "./popover.css";
   import { menuMaterialFor } from "./material";
+  import { layoutAnchor } from "./anchor";
   let {
     label,
     entries,
@@ -67,6 +68,7 @@
       class={["ui-menu ui-menu-scroll", contentClass].filter(Boolean).join(" ")}
       {side}
       {align}
+      customAnchor={layoutAnchor(triggerElement)}
       sideOffset={6}
       collisionPadding={10}
       onCloseAutoFocus={(event) => {

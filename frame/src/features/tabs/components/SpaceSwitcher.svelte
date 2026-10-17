@@ -5,12 +5,10 @@
   import type { SpaceView } from "$shared/ipc/bindings";
   import { tabs } from "$domain/tabs";
   import { favicons } from "$domain/favicons";
-  import { keymap } from "$domain/keymap";
-  import { acceleratorKeys } from "$shared/lib/accelerator";
-  import { IS_MAC } from "$shared/platform";
   import Icon from "$shared/ui/Icon";
   import FavIcon from "$shared/ui/FavIcon";
   import SpaceGlyph from "./SpaceGlyph.svelte";
+  import { spaceKeys } from "../lib/space-keys";
 
   let {
     spaces,
@@ -33,13 +31,6 @@
     onedit: (space: SpaceView, rename?: boolean) => void;
     onnew: () => void;
   } = $props();
-
-  function keysFor(index: number) {
-    const accelerator = keymap
-      .all()
-      .find((entry) => entry.id === `space.select.${index + 1}`)?.accelerator;
-    return accelerator ? acceleratorKeys(accelerator, IS_MAC).join(IS_MAC ? "" : "+") : null;
-  }
 
   // Holding Control names the key of every row, as a menu's alternates appear.
   let ctrl = $state(false);
@@ -121,7 +112,7 @@
 >
   {#each spaces as space, index (space.id)}
     {@const current = space.id === active}
-    {@const keys = keysFor(index)}
+    {@const keys = spaceKeys(index)}
     {@const shown = Math.min(space.tabs, 3)}
     <div
       role="presentation"
@@ -222,7 +213,7 @@
     min-width: 0;
     width: 100%;
     min-height: 34px;
-    padding: 5px 4px 5px 10px;
+    padding: 5px 10px;
     border: 0;
     background: transparent;
     font: inherit;
@@ -318,13 +309,16 @@
     opacity: 0;
   }
 
-  /* A pencil at the row's end on approach; its place is always kept. */
+  /* The pencil takes the stack's place on approach: the stack fades out as it
+     fades in, so a row at rest has no hole. */
   .switch-edit {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-end: 4px;
     display: grid;
-    flex: none;
     width: 24px;
     height: 24px;
-    margin-inline-end: 4px;
+    margin-block: auto;
     padding: 0;
     border: 0;
     border-radius: var(--radius-control-compact);
@@ -348,10 +342,18 @@
     pointer-events: auto;
   }
 
-  .switch-row:hover .switch-edit,
-  .switch-row:focus-within .switch-edit {
+  .switch-row:is(:hover, :focus-within) .switch-edit {
     opacity: 1;
     pointer-events: auto;
+  }
+
+  .switch-row:is(:hover, :focus-within) .switch-stack {
+    opacity: 0;
+  }
+
+  .switcher[data-keys] .switch-edit {
+    opacity: 0;
+    pointer-events: none;
   }
 
   .switch-row[data-held] {

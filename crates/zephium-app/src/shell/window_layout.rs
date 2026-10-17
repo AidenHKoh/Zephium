@@ -45,6 +45,8 @@ impl Shell {
             Some(Pane::Leaf(id))
         } else if browser_page_active {
             self.work_pane_tree()
+        } else if self.browser_return_hidden {
+            None
         } else {
             self.pane_tree()
         };

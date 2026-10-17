@@ -243,6 +243,8 @@ pub struct Shell {
     browser_return_revision: u64,
     browser_after_return: Option<Box<Command>>,
     browser_return_ready: bool,
+    /// Set while the window lays out for a return that a queued command is about to change.
+    browser_return_hidden: bool,
     browser_return: Option<browser_pages::PendingBrowserReturn>,
     work_pane: Option<work_pane::WorkPane>,
     work_pane_generation: u32,
@@ -472,6 +474,7 @@ impl Shell {
             browser_return_revision: 0,
             browser_after_return: None,
             browser_return_ready: false,
+            browser_return_hidden: false,
             browser_return: None,
             work_pane: None,
             work_pane_generation: 0,

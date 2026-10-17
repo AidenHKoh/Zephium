@@ -12,6 +12,8 @@
     triggerClass = "",
     panelClass = "",
     onopen,
+    onclose,
+    triggerTitle,
   }: {
     label: string;
     trigger: Snippet;
@@ -22,6 +24,9 @@
     triggerClass?: string;
     panelClass?: string;
     onopen?: () => void;
+    onclose?: () => void;
+    /** A native tooltip, the only label that can appear outside a narrow chrome. */
+    triggerTitle?: string;
   } = $props();
 
   let open = $state(false);
@@ -45,6 +50,7 @@
   function dismiss(restore: boolean) {
     if (!open) return;
     open = false;
+    onclose?.();
     if (restore) button?.focus();
   }
 
@@ -123,6 +129,7 @@
     type="button"
     class={triggerClass}
     aria-label={label}
+    title={triggerTitle}
     aria-haspopup={menu ? "menu" : "dialog"}
     aria-expanded={open}
     data-state={open ? "open" : "closed"}
