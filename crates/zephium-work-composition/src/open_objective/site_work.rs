@@ -1069,6 +1069,7 @@ pub(crate) fn preview(
     node: &SemanticNode,
     snapshot: &SemanticSnapshot,
     site: &str,
+    typed: &[String],
 ) -> Preview {
     let message = consequence == Consequence::Communication;
     let region = subtree(
@@ -1113,6 +1114,13 @@ pub(crate) fn preview(
             })
     } else {
         Vec::new()
+    };
+    // A mail app can turn a typed address into a contact name: the
+    // addresses this task typed into the message are its recipients then.
+    let recipients = if message && recipients.is_empty() {
+        typed.to_vec()
+    } else {
+        recipients
     };
     // A message addressed in its own box names those people; the page's
     // headings then belong to other conversations (a mail list beside it).
@@ -2112,7 +2120,12 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
         };
         let fingerprint = fingerprint(action, node, snapshot);
         let site = state.site.clone();
-        let preview = preview(consequence, action, node, snapshot, &site);
+        let typed = if state.typed_recipient {
+            state.recipients.clone()
+        } else {
+            Vec::new()
+        };
+        let preview = preview(consequence, action, node, snapshot, &site, &typed);
         let digest = preview.digest();
         let fits = if consequence == Consequence::Type {
             matches!(
@@ -2795,6 +2808,7 @@ mod tests {
             &snapshot.nodes()[7],
             snapshot,
             "mail.example.test",
+            &[],
         );
         assert_eq!(shown.headline, "Send to ana@example.test as you?");
         assert_eq!(shown.text.as_deref(), Some("Hi Ana, The release is ready."));
@@ -3532,7 +3546,14 @@ mod tests {
             SemanticEffectClass::ExternalWrite,
         );
         let node = &snapshot.nodes()[1];
-        let shown = preview(Consequence::Edit, &action, node, snapshot, "example.test");
+        let shown = preview(
+            Consequence::Edit,
+            &action,
+            node,
+            snapshot,
+            "example.test",
+            &[],
+        );
         assert_eq!(shown.action, "press Backspace in Document body");
         let gate = Arc::new(SiteGate::default());
         gate.state().pending = Some(Pending {
@@ -4109,7 +4130,11 @@ mod tests {
             policy.assess(&send, &compose),
             Err(AgentWorkFailure::ActionDenied)
         ));
-        assert!(policy.gate.pending().is_some(), "held for the person");
+        assert_eq!(
+            policy.gate.pending().unwrap().preview.headline,
+            "Send to dana@example.test as you?",
+            "the card names the address the task typed, not a heading elsewhere"
+        );
     }
 
     #[test]
