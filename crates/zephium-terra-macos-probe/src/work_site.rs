@@ -68,6 +68,7 @@ const KETTLE_FACT: &str = "Kettle price is 37 credits";
 const WEBMAIL_GOAL: &str = "Compose a new email to dana@example.test with the subject Status, then send it. The body, where \\n stands for a real line break to type, is: Hi Dana,\\n\\nThe release is ready.\\nThanks, Hayk";
 const WEBMAIL_SENT: &str =
     "dana@example.test|Status|Hi Dana,\n\nThe release is ready.\nThanks, Hayk";
+const ROUTES_FACT: &str = "Dana: Quarterly report";
 const DESK_FACT: &str = "Desk bell rings twice at noon";
 const HOURS_FACT: &str = "Doors open at half past eight";
 /// The vault's own sign-in, kept by the server: a tab sign-in stands for it.
@@ -169,6 +170,10 @@ enum Check {
     /// The same compose with Send replaced by an identical new node while
     /// the confirmation waits: the approved step runs once.
     WebmailSwap,
+    /// The model's own Navigate to a page whose script routes itself with a
+    /// fragment as soon as it commits: that move loads nothing, so the
+    /// load settles on it.
+    WebmailRoutes,
     /// A consent choice a page outside the person's session saved in one run
     /// reaches the site in the next run from Work's own memory; the profile's
     /// own store holds none.
@@ -384,6 +389,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("media-held") => vec![Check::Media(media_fixture::Scenario::Held)],
         Some("webmail-compose") => vec![Check::WebmailCompose],
         Some("webmail-swap") => vec![Check::WebmailSwap],
+        Some("webmail-routes") => vec![Check::WebmailRoutes],
         Some("linearwrite") => vec![Check::LinearWrite],
         Some("notionwrite") => vec![Check::NotionWrite],
         Some("writes") => vec![
@@ -893,6 +899,13 @@ const c=document.getElementById('chart').getContext('2d');c.fillStyle='white';c.
             "200 OK",
             String::new(),
             super::work_app_editors::page(path).unwrap_or_default(),
+        ),
+        (Site::Account, _, path) if super::work_app_views::routed(path).is_some() => (
+            "200 OK",
+            String::new(),
+            super::work_app_views::routed(path)
+                .map(str::to_owned)
+                .unwrap_or_default(),
         ),
         (Site::Account, _, path) if super::work_app_views::view(path).is_some() => (
             "200 OK",
@@ -2399,6 +2412,29 @@ pub(super) async fn workflow(
                             Some(WorkConfirmDecisionV1::Approved),
                             WorkStepStatus::Succeeded,
                         )]
+            }
+            Check::WebmailRoutes => {
+                let path = super::work_app_views::ROUTED_PATH;
+                let before = context.sites.hits(Site::Account, path).len();
+                let run = context
+                    .run(
+                        "My drafts",
+                        false,
+                        "Allow",
+                        vec![vec![browse(
+                            path,
+                            "Click the Drafts button and note the draft. Then use the Navigate tool (not a click) to open the Inbox link, and report the first message in the inbox.",
+                        )]],
+                    )
+                    .await?;
+                let read = says(&run, ROUTES_FACT) || mentions(&run, &["quarterly"]);
+                let loads = context.sites.hits(Site::Account, path).len() - before;
+                line(format!(
+                    "check=webmail_routes read={read} loads={loads} pages=[{}]",
+                    pages_of(&run)
+                ));
+                last = run.state;
+                read && loads == 2
             }
             Check::NotionWrite => {
                 let before = context.sites.written("/edit/notion/save").len();
