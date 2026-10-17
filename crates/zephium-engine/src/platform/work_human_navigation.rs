@@ -63,6 +63,21 @@ pub(super) fn fragment_move(current: &ContextNavigationTarget, raw: &str) -> boo
     })
 }
 
+/// A change to the fragment alone loads no document, whatever the fragment
+/// holds (`#inbox?compose=new`). The stricter `fragment_move` guards the human
+/// gate, where a fragment may carry a sign-in step.
+pub(super) fn same_document_move(current: &ContextNavigationTarget, raw: &str) -> bool {
+    ContextNavigationTarget::parse(raw).is_ok_and(|next| {
+        next.as_url().fragment().is_some() && without_any_fragment(&next) == without_any_fragment(current)
+    })
+}
+
+pub(super) fn without_any_fragment(target: &ContextNavigationTarget) -> url::Url {
+    let mut url = target.as_url().clone();
+    url.set_fragment(None);
+    url
+}
+
 pub(super) fn without_fragment(target: &ContextNavigationTarget) -> ContextNavigationTarget {
     // Only an app's route (`#inbox`, `#/projects`) is dropped; a fragment
     // with state or a sign-in step in it stays part of the address.

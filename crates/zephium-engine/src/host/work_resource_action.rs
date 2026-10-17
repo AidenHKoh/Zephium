@@ -316,6 +316,21 @@ impl EngineHost {
         let Some(action) = resource.action.as_ref() else {
             return;
         };
+        if expired {
+            let loading = resource
+                .view
+                .as_ref()
+                .and_then(|view| view.work_navigation())
+                .is_some_and(|gate| gate.loading());
+            crate::agent_context_port::note_action_timeout_stage(
+                match (action.dispatched, action.terminal.is_some()) {
+                    (false, _) => "dispatch",
+                    (true, true) => "settle",
+                    (true, false) if loading => "navigation",
+                    (true, false) => "page",
+                },
+            );
+        }
         if expired && action.dispatched && action.terminal.is_none() {
             if let Some(semantic) = resource.view.as_ref().and_then(|view| view.semantic()) {
                 semantic.timeout_action(action.attempt);

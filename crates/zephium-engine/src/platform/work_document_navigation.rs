@@ -456,7 +456,7 @@ impl State {
             && self
                 .document
                 .as_ref()
-                .is_some_and(|document| human::fragment_move(document, raw))
+                .is_some_and(|document| human::same_document_move(document, raw))
     }
     /// A same-site GET a ready site-session page starts by itself (a bot
     /// check that cleared, a timed refresh, a script redirect) while no
@@ -1596,10 +1596,16 @@ impl WorkDocumentNavigation {
                             .and_then(|current| ContextNavigationTarget::parse(current).ok())
                             .is_some_and(|current| {
                                 target.as_url().fragment().is_none()
-                                    && *target == human::without_fragment(&current)
+                                    && *target.as_url() == human::without_any_fragment(&current)
                             })
                 })
         })
+    }
+    /// A document load is under way or unsettled; the page is not ready to read.
+    pub(crate) fn loading(&self) -> bool {
+        self.0
+            .lock()
+            .map_or(true, |state| state.phase != Phase::Ready)
     }
     pub(crate) fn failed(&self) -> bool {
         self.0.lock().map_or(true, |state| {
@@ -2386,6 +2392,21 @@ mod tests {
         assert!(gate.ready(Some(routed)) && !gate.failed());
         assert!(gate.allows("https://mail.example.test/mail/u/0/#sent"));
         assert!(!gate.allows("https://mail.example.test/mail/u/1/"));
+    }
+    #[test]
+    fn a_route_that_holds_state_is_still_no_new_load() {
+        let start = "https://mail.example.test/mail/u/0/";
+        let gate = site_gate(start);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        let compose = "https://mail.example.test/mail/u/0/#inbox?compose=new";
+        assert!(gate.allows(compose));
+        assert_eq!(gate.location_changed(Some(compose)), Ok(false));
+        assert!(gate.ready(Some(compose)) && !gate.failed());
+        assert!(gate.allows("https://mail.example.test/mail/u/0/#inbox"));
+        assert!(!gate.allows("https://mail.example.test/mail/u/1/#inbox?compose=new"));
     }
     #[cfg(target_os = "windows")]
     #[test]

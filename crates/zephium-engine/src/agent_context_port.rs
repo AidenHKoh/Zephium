@@ -60,6 +60,24 @@ pub(crate) use work_resource::{
     WorkNotificationPermit, WorkObservationTask, WorkResourceGuard,
 };
 
+/// Where the last action ran out of time: a closed stage, never page content,
+/// so a failed page task can name what it was waiting for.
+static ACTION_TIMEOUT_STAGE: std::sync::Mutex<&'static str> = std::sync::Mutex::new("");
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) fn note_action_timeout_stage(stage: &'static str) {
+    *ACTION_TIMEOUT_STAGE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = stage;
+}
+
+/// The stage the most recent action deadline expired in.
+pub fn last_action_timeout_stage() -> &'static str {
+    *ACTION_TIMEOUT_STAGE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 pub(crate) type AgentContextEventSink = Arc<dyn Fn(ContextNativeEvent) + Send + Sync>;
 
 /// Cloneable fail-stop authority retained by bounded native callbacks.

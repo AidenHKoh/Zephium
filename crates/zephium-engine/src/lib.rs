@@ -6,7 +6,9 @@ mod agent_context_port;
 ))]
 pub use agent_context_port::{work_browser_monotonic_deadline, work_browser_monotonic_now};
 #[cfg(feature = "agentic-browser")]
-pub use agent_context_port::{AgentBrowserLifetimeFactory, MAX_AGENT_BROWSER_LIFETIMES};
+pub use agent_context_port::{
+    last_action_timeout_stage, AgentBrowserLifetimeFactory, MAX_AGENT_BROWSER_LIFETIMES,
+};
 #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 mod diagnostics;
 mod erasure;
