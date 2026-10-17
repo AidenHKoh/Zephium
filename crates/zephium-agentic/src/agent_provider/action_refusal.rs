@@ -516,6 +516,10 @@ impl AgentProviderActionRefusal {
                 "outcome_unknown",
                 "Nothing executed now. This step reached the page earlier in this task, or just now, and its outcome was not seen: it may already have taken effect, so it is not run again in this task, in this form or another. Look at the page (snapshot initial) for whether it happened (a sent message in its thread or folder, a new item in its list), then report what it shows.",
             ),
+            SemanticActionBindingError::WrongRecipient => (
+                "wrong_recipient",
+                "Nothing executed. This message is not addressed to the recipient the task names, so it is not sent. Open a new message addressed to them (the page's compose or new-message control), or add them in its To field, then send that one. Do not send in a conversation with someone else.",
+            ),
             SemanticActionBindingError::TargetCovered => (
                 "target_covered",
                 "Nothing executed. The target was covered by another element (a banner, a sticky header, a dialog or a popover) even after it was brought into view. Do not click it again: press it with Enter instead (act press, key enter), which reaches it without the pointer, close what covers it with its own close or reject control, or use the page's search box, its links or the site's search results address. A dialog whose own controls are refused does not block the rest of the page.",

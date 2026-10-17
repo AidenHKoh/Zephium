@@ -2434,6 +2434,10 @@ pub enum SemanticActionBindingError {
     /// effect, so it is never issued again.
     #[error("semantic action outcome is unknown")]
     OutcomeUnknown,
+    /// A send whose message is not addressed to the recipient the task
+    /// names: nothing was issued.
+    #[error("semantic action message is not addressed to the requested recipient")]
+    WrongRecipient,
 }
 
 /// Typed structural refusal before backend visibility/occlusion revalidation.

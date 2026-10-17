@@ -4118,6 +4118,9 @@ impl AgentWorkController {
                                     Err(AgentWorkFailure::OutcomeUnknown) => Err(proposal
                                         .into_refusal(SemanticActionBindingError::OutcomeUnknown)
                                         .ok_or_else(|| crate::contract!())?),
+                                    Err(AgentWorkFailure::WrongRecipient) => Err(proposal
+                                        .into_refusal(SemanticActionBindingError::WrongRecipient)
+                                        .ok_or_else(|| crate::contract!())?),
                                     Err(failure) => return Err(failure),
                                 }
                             }
@@ -5065,7 +5068,8 @@ impl AgentWorkController {
                 error @ (AgentWorkFailure::ActionDenied
                 | AgentWorkFailure::EffectRequired(_)
                 | AgentWorkFailure::AlreadyDone
-                | AgentWorkFailure::OutcomeUnknown),
+                | AgentWorkFailure::OutcomeUnknown
+                | AgentWorkFailure::WrongRecipient),
             ) => {
                 #[cfg(feature = "probe-harness")]
                 eprintln!("owned-read: none=assess {error:?}");
@@ -7591,6 +7595,9 @@ pub enum AgentWorkFailure {
     /// The proposal repeats a step whose outcome this page task did not
     /// see: it may already have taken effect, so it is not issued again.
     OutcomeUnknown,
+    /// The proposed send is not addressed to the recipient the task names;
+    /// nothing is issued.
+    WrongRecipient,
 }
 
 pub(super) struct WorkEvents {
