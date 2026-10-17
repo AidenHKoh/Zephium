@@ -672,6 +672,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         if super::work_account::active().is_some()
             || matches!(mode, Mode::AgentHumanGovernment)
             || (mode == Mode::LoopbackSite && super::work_site::needs_human_presentation())
+            // A person sits at the window to sign in or pass a check.
+            || (mode == Mode::Lead && std::env::var_os("ZEPHIUM_PROBE_PERSON").is_some())
         {
             zephium_engine::MacosWorkProbeInput::Human
         } else {

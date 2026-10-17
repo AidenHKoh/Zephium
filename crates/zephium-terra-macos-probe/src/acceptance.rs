@@ -2419,7 +2419,10 @@ pub(super) async fn lead_workflow(
                 _ = account.person(handle, composition, profile, work) => Err(WorkError::Unavailable),
             }
         } else {
-            running.await
+            tokio::select! {
+                result = running => result,
+                () = super::work_account::present_human_pages(composition, profile, work) => Err(WorkError::Unavailable),
+            }
         };
         let projection = match result {
             Ok(projection) => projection,

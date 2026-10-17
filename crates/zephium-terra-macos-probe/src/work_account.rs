@@ -143,6 +143,47 @@ fn origin(url: &str) -> Option<&'static str> {
                 .any(|b| b.is_ascii_control() || b == b' ' || b == b'\\' || b == b'?' || b == b'#')
     })
 }
+/// Shows every sign-in or check page a lead run hands to the person in the
+/// probe window, so they can sign in once; the run resumes by itself.
+pub(super) async fn present_human_pages(
+    composition: &MacosWorkComposition,
+    profile: ProfileId,
+    work: WorkId,
+) {
+    let mut presented = Vec::new();
+    loop {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let Ok(pages) = composition.human_pages(profile, work) else {
+            continue;
+        };
+        for page in pages {
+            if presentable_reason(page.reason)
+                && page.phase == WorkHumanPhaseV1::WaitingForHuman
+                && !presented.contains(&page.id)
+            {
+                let result = composition.present_human_page(
+                    profile,
+                    work,
+                    page.id,
+                    WorkHumanRegionV1 {
+                        x: 0,
+                        y: 0,
+                        width: 760,
+                        height: 640,
+                    },
+                );
+                let _ = writeln!(
+                    std::io::stdout().lock(),
+                    "lead-person: presented {:?} page ok={}; content=redacted",
+                    page.reason,
+                    result.is_ok()
+                );
+                presented.push(page.id);
+            }
+        }
+    }
+}
+
 fn presentable_reason(reason: WorkHumanReasonV1) -> bool {
     matches!(
         reason,
