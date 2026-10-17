@@ -67,6 +67,7 @@
     document.querySelector<HTMLInputElement>(`[data-adding="${date}"]`)?.focus();
   }
   function commitNew(field: HTMLInputElement, date: string) {
+    if (adding !== date) return;
     const title = field.value.trim();
     adding = null;
     if (!title) return;
@@ -85,6 +86,7 @@
     field?.select();
   }
   function commitName(field: HTMLInputElement, index: number) {
+    if (renaming !== index) return;
     const title = field.value.trim();
     renaming = null;
     if (title === object.steps[index]?.title) return;
@@ -96,6 +98,7 @@
   }
   const keys =
     (commit: (field: HTMLInputElement) => void, cancel: () => void) => (event: KeyboardEvent) => {
+      if (event.isComposing) return;
       const field = event.currentTarget as HTMLInputElement;
       if (event.key === "Enter") {
         event.preventDefault();

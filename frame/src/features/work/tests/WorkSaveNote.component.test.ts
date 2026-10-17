@@ -163,6 +163,7 @@ test("an answer lifts as a reading page and is saved as its own Markdown under i
   const lift = screen.getByRole("dialog", { name: "Dependency findings" });
   await expect.element(lift).toBeVisible();
   // The header says what it is and what it answers; the page reads whole.
+  await expect.poll(() => lift.element().querySelector(".lift-header")).not.toBeNull();
   const header = lift.element().querySelector(".lift-header")!;
   expect(header.querySelector(".kind")?.textContent).toBe("Answer");
   expect(header.querySelector(".meta")).toBeNull();
