@@ -14,7 +14,7 @@ pub(super) fn editor(path: &str) -> Option<&'static str> {
         "/edit/slack" | "/edit/slack-enter" => Some(SLACK),
         "/edit/linear" => Some(LINEAR),
         "/edit/notion" => Some(NOTION),
-        "/edit/webmail" | "/edit/webmail-swap" => Some(WEBMAIL),
+        "/edit/webmail" | "/edit/webmail-swap" | "/edit/webmail-thread" => Some(WEBMAIL),
         _ => None,
     }
 }
@@ -190,11 +190,12 @@ document.querySelectorAll('.block').forEach(add);
 /// holds state (`#inbox?compose=new`), which loads no document, and opens a
 /// dialog with To and Subject inputs, a contenteditable body and Send. The
 /// swap variant re-renders Send as an identical new node, as a single-page app
-/// does while a confirmation waits.
+/// does while a confirmation waits. The thread variant opens a newsletter's
+/// conversation with its own Reply box and Send beside Compose.
 const WEBMAIL: &str = concat!(
     r#"<!doctype html><html><head><meta charset="utf-8"><title>Inbox - Mail</title></head><body>
 <nav aria-label="Mailboxes"><a href="/edit/webmail">Inbox</a></nav>
-<main><h1>Inbox</h1><button id="compose">Compose</button>
+<main>__THREAD__<h1>Inbox</h1><button id="compose">Compose</button>
 <div role="list" aria-label="Messages"><div role="listitem">Dana: Quarterly report</div></div>
 <div id="status" role="status"></div></main>
 <div id="dialog" role="dialog" aria-modal="true" aria-label="New Message" hidden>
@@ -220,6 +221,11 @@ function rerender(){
   fresh.addEventListener('click',send); old.replaceWith(fresh);
 }
 document.getElementById('send').addEventListener('click',send);
+var reply=document.getElementById('reply-send');
+if(reply) reply.addEventListener('click',function(){
+  fetch('/edit/webmail/reply?text='+encodeURIComponent(document.getElementById('reply').value),{method:'POST'});
+  document.getElementById('status').textContent='Reply sent';
+});
 function arm(){
   if(!swapping) return;
   swaps.forEach(clearTimeout); swaps=[3500].map(function(ms){ return setTimeout(rerender,ms); });
@@ -227,9 +233,22 @@ function arm(){
 </script></body></html>"#
 );
 
+const THREAD: &str = r#"<section role="region" aria-label="Conversation"><h2>Weekly digest</h2>
+<p>From: news@sender.test</p>
+<textarea id="reply" aria-label="Reply" autofocus></textarea>
+<button id="reply-send">Send</button></section>"#;
+
 /// The replica with the shared editor in place.
 pub(super) fn page(path: &str) -> Option<String> {
     let page = editor(path).map(|html| html.replace("__EDITOR__", EDITOR))?;
+    let page = page.replace(
+        "__THREAD__",
+        if path == "/edit/webmail-thread" {
+            THREAD
+        } else {
+            ""
+        },
+    );
     // A composer that only Enter sends, as Slack's is with its button hidden.
     Some(if path == "/edit/slack-enter" {
         page.replace("<button id=\"send\"", "<button id=\"send\" hidden")
@@ -253,6 +272,7 @@ mod tests {
             "/edit/notion",
             "/edit/webmail",
             "/edit/webmail-swap",
+            "/edit/webmail-thread",
         ] {
             let page = super::page(path).unwrap();
             assert!(page.contains("function mount") && !page.contains("__EDITOR__"));

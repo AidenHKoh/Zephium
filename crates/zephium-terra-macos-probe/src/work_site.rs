@@ -67,6 +67,7 @@ const DAY_FACT: &str = "Standup at 09:15";
 const SHELF_FACT: &str = "Shelf total is 9 products";
 const KETTLE_FACT: &str = "Kettle price is 37 credits";
 const WEBMAIL_GOAL: &str = "Compose a new email to dana@example.test with the subject Status, then send it. The body, where \\n stands for a real line break to type, is: Hi Dana,\\n\\nThe release is ready.\\nThanks, Hayk";
+const WEBMAIL_THREAD_GOAL: &str = "Send a new email to dana@example.test with the subject Status. The body, where \\n stands for a real line break to type, is: Hi Dana,\\n\\nThe release is ready.\\nThanks, Hayk";
 const WEBMAIL_SENT: &str =
     "dana@example.test|Status|Hi Dana,\n\nThe release is ready.\nThanks, Hayk";
 const ROUTES_FACT: &str = "Dana: Quarterly report";
@@ -175,6 +176,9 @@ enum Check {
     /// The same compose with Send replaced by an identical new node while
     /// the confirmation waits: the approved step runs once.
     WebmailSwap,
+    /// The same compose beside an open newsletter thread with its own Reply
+    /// box and Send: the new message is sent, the thread is never answered.
+    WebmailThread,
     /// The model's own Navigate to a page whose script routes itself with a
     /// fragment as soon as it commits: that move loads nothing, so the
     /// load settles on it.
@@ -397,6 +401,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("media-held") => vec![Check::Media(media_fixture::Scenario::Held)],
         Some("webmail-compose") => vec![Check::WebmailCompose],
         Some("webmail-swap") => vec![Check::WebmailSwap],
+        Some("webmail-thread") => vec![Check::WebmailThread],
         Some("webmail-routes") => vec![Check::WebmailRoutes],
         Some("linearwrite") => vec![Check::LinearWrite],
         Some("notionwrite") => vec![Check::NotionWrite],
@@ -2408,20 +2413,25 @@ pub(super) async fn workflow(
                 last = run.state;
                 made.len() == 1 && made[0] == expected && approved_once
             }
-            Check::WebmailCompose | Check::WebmailSwap => {
+            Check::WebmailCompose | Check::WebmailSwap | Check::WebmailThread => {
                 let before = context.sites.written("/edit/webmail/send").len();
+                let replies = context.sites.written("/edit/webmail/reply").len();
                 let run = context
                     .run_deciding(
                         "Send Dana the status",
                         false,
                         "Allow",
                         vec![vec![browse(
-                            if check == Check::WebmailSwap {
-                                "/edit/webmail-swap"
-                            } else {
-                                "/edit/webmail"
+                            match check {
+                                Check::WebmailSwap => "/edit/webmail-swap",
+                                Check::WebmailThread => "/edit/webmail-thread",
+                                _ => "/edit/webmail",
                             },
-                            WEBMAIL_GOAL,
+                            if check == Check::WebmailThread {
+                                WEBMAIL_THREAD_GOAL
+                            } else {
+                                WEBMAIL_GOAL
+                            },
                         )]],
                         vec![(true, false)],
                     )
@@ -2429,8 +2439,9 @@ pub(super) async fn workflow(
                 let sent = context.sites.written("/edit/webmail/send");
                 let sent = &sent[before.min(sent.len())..];
                 let held = confirms(&run);
+                let replied = context.sites.written("/edit/webmail/reply").len() - replies;
                 line(format!(
-                    "check=webmail_compose sent={} exact={} confirms={held:?} headline={:?} pages=[{}]",
+                    "check=webmail_compose sent={} replied={replied} exact={} confirms={held:?} headline={:?} pages=[{}]",
                     sent.len(),
                     sent.first().is_some_and(|text| text == WEBMAIL_SENT),
                     run.confirmed.first(),
@@ -2438,6 +2449,7 @@ pub(super) async fn workflow(
                 ));
                 last = run.state;
                 sent.len() == 1
+                    && replied == 0
                     && sent[0] == WEBMAIL_SENT
                     && held
                         == vec![(

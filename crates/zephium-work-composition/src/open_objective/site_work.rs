@@ -381,6 +381,55 @@ fn edits_unsaved_input(text: &str, node: &SemanticNode, snapshot: &SemanticSnaps
     })
 }
 
+/// The email addresses a text names, lowercased, each once.
+pub(crate) fn email_addresses(text: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for token in text.split(|ch: char| {
+        ch.is_whitespace()
+            || matches!(
+                ch,
+                '<' | '>' | '(' | ')' | '[' | ']' | ',' | ';' | '"' | '\''
+            )
+    }) {
+        let token = token.trim_matches(|ch: char| matches!(ch, '.' | ':' | '!' | '?'));
+        let Some((local, domain)) = token.split_once('@') else {
+            continue;
+        };
+        let domain_ok = domain.contains('.')
+            && !domain.contains('@')
+            && !domain.starts_with('.')
+            && domain
+                .chars()
+                .all(|ch| ch.is_alphanumeric() || matches!(ch, '.' | '-'));
+        if local.is_empty() || !domain_ok {
+            continue;
+        }
+        let address = token.to_lowercase();
+        if !found.contains(&address) {
+            found.push(address);
+        }
+    }
+    found
+}
+
+/// Whether the region a send acts in shows one of the addresses: in a
+/// recipient field's value, a recipient chip or the conversation's header.
+fn addressed_to(recipients: &[String], node: &SemanticNode, snapshot: &SemanticSnapshot) -> bool {
+    subtree(snapshot, region_index(node, snapshot))
+        .iter()
+        .filter(|part| part.sensitivity() != SemanticSensitivity::Secret)
+        .any(|part| {
+            let shown = label(part).to_lowercase();
+            let typed = match part.value() {
+                Some(SemanticValueSummary::Text(text)) => text.preview().text().to_lowercase(),
+                _ => String::new(),
+            };
+            recipients
+                .iter()
+                .any(|address| shown.contains(address) || typed.contains(address))
+        })
+}
+
 /// The region a step acts in: its dialog, form or named region, else the page.
 fn region_index(node: &SemanticNode, snapshot: &SemanticSnapshot) -> usize {
     ancestors(node, snapshot)
@@ -1311,6 +1360,9 @@ struct GateState {
     entry: EntryCheck,
     /// Rust pressed a cookie banner's refusal on this page.
     consent_pressed: bool,
+    /// The addresses the task names as recipients: a send whose message
+    /// shows none of them goes back to the model.
+    recipients: Vec<String>,
     /// The task reads a daily app's view as its records.
     view: bool,
     /// The original task expects the person's account, even outside app views.
@@ -1364,6 +1416,11 @@ impl SiteGate {
     /// the views its goal asks for.
     pub(crate) fn expecting_account(self, expected: bool) -> Self {
         self.state().account_expected = expected;
+        self
+    }
+    /// Sending needs the message to be addressed to one of these.
+    pub(crate) fn addressed_to(self, recipients: Vec<String>) -> Self {
+        self.state().recipients = recipients;
         self
     }
     pub(crate) fn reading_view(self, url: &str, goal: &str) -> Self {
@@ -1591,7 +1648,10 @@ fn says_done(line: &str) -> bool {
         return false;
     }
     // An editor keeping what is being written ("Draft saved") commits nothing.
-    if names_any(&line, &["draft", "drafts", "autosaved", "szkic", "wersja robocza"]) {
+    if names_any(
+        &line,
+        &["draft", "drafts", "autosaved", "szkic", "wersja robocza"],
+    ) {
         return false;
     }
     let edge = |word: &str| {
@@ -1957,6 +2017,12 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             }
         };
         let mut state = self.gate.state();
+        if consequence == Consequence::Communication
+            && !state.recipients.is_empty()
+            && !addressed_to(&state.recipients, node, snapshot)
+        {
+            return Err(AgentWorkFailure::WrongRecipient);
+        }
         let Some(current_binding) = action.approval_binding() else {
             state.held = true;
             return Err(AgentWorkFailure::ActionDenied);
@@ -3845,6 +3911,97 @@ mod tests {
             policy.assess(&again, &twins),
             Err(AgentWorkFailure::ActionDenied)
         ));
+    }
+
+    fn mail(thread: bool) -> SemanticObservation {
+        let mut nodes = vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"button","n":"Compose","o":1,"ak":1,"fc":true}),
+        ];
+        if thread {
+            nodes.extend([
+                json!({"k":3,"p":0,"r":"landmark","lm":"region","n":"Conversation","fc":true}),
+                json!({"k":4,"p":2,"r":"heading","l":2,"n":"Weekly digest","fc":true}),
+                json!({"k":5,"p":2,"r":"paragraph","t":"From: news@sender.test","fc":true}),
+                json!({"k":6,"p":2,"r":"textbox","n":"Reply","o":10,"fc":true,
+                    "v":{"k":"text","value":"hello"}}),
+                json!({"k":7,"p":2,"r":"button","n":"Send","o":9,"ak":1,"fc":true,
+                    "b":{"x":1,"y":1,"w":100,"h":30}}),
+            ]);
+        } else {
+            nodes.extend([
+                json!({"k":3,"p":0,"r":"dialog","n":"New message","fc":true}),
+                json!({"k":4,"p":2,"r":"combobox","n":"To","o":10,"fc":true,
+                    "v":{"k":"text","value":"Dana@Example.test"}}),
+                json!({"k":5,"p":2,"r":"textbox","n":"Subject","o":10,"fc":true,
+                    "v":{"k":"text","value":"Hi"}}),
+                json!({"k":6,"p":2,"r":"button","n":"Send","o":9,"ak":1,"fc":true,
+                    "b":{"x":1,"y":1,"w":100,"h":30}}),
+            ]);
+        }
+        page(nodes)
+    }
+
+    #[test]
+    fn a_send_must_show_the_recipient_the_task_names() {
+        let named = || {
+            Arc::new(SiteGate::default().addressed_to(email_addresses(
+                "Send a new email to <dana@example.test>, then stop.",
+            )))
+        };
+        let compose = mail(false);
+        let policy = SiteWorkPolicy {
+            gate: named(),
+            asks: true,
+        };
+        let send = click(&compose, 6, SemanticEffectClass::Communication);
+        assert!(matches!(
+            policy.assess(&send, &compose),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        assert!(
+            policy.gate.pending().is_some(),
+            "a message to the named recipient is held for the person as before"
+        );
+
+        let thread = mail(true);
+        let policy = SiteWorkPolicy {
+            gate: named(),
+            asks: true,
+        };
+        let reply = click(&thread, 7, SemanticEffectClass::Communication);
+        assert!(matches!(
+            policy.assess(&reply, &thread),
+            Err(AgentWorkFailure::WrongRecipient)
+        ));
+        assert!(policy.gate.pending().is_none(), "no card is raised");
+    }
+
+    #[test]
+    fn a_send_in_a_task_that_names_no_address_is_unaffected() {
+        let thread = mail(true);
+        let policy = SiteWorkPolicy {
+            gate: Arc::new(
+                SiteGate::default()
+                    .addressed_to(email_addresses("Reply to the digest thread with a thanks.")),
+            ),
+            asks: true,
+        };
+        let reply = click(&thread, 7, SemanticEffectClass::Communication);
+        assert!(matches!(
+            policy.assess(&reply, &thread),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        assert!(policy.gate.pending().is_some());
+    }
+
+    #[test]
+    fn addresses_are_found_in_prose_and_headers() {
+        assert_eq!(
+            email_addresses("Mail Dana <Dana@Example.test>, cc: ops@example.test. Not a@b or @c.d"),
+            vec!["dana@example.test", "ops@example.test"]
+        );
+        assert!(email_addresses("no address here, 5 @ 6").is_empty());
     }
 
     #[test]

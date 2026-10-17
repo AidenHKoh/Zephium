@@ -699,7 +699,29 @@ impl NativeWorkComposition {
             request.entry,
         )
         .holding_typing(request.hold_typing)
-        .expecting_account(signed_in.is_some() || request.entry);
+        .expecting_account(signed_in.is_some() || request.entry)
+        .addressed_to(match &request.step {
+            WorkStepKindV1::Read { goal, verbatim, .. } => {
+                let to = verbatim
+                    .iter()
+                    .flat_map(|words| words.lines())
+                    .filter(|line| {
+                        line.get(..3)
+                            .is_some_and(|head| head.eq_ignore_ascii_case("to:"))
+                    });
+                let mut found = goal
+                    .iter()
+                    .flat_map(|goal| crate::open_objective::site_work::email_addresses(goal))
+                    .collect::<Vec<_>>();
+                for address in to.flat_map(crate::open_objective::site_work::email_addresses) {
+                    if !found.contains(&address) {
+                        found.push(address);
+                    }
+                }
+                found
+            }
+            _ => Vec::new(),
+        });
         let gate = std::sync::Arc::new(match &request.step {
             WorkStepKindV1::Read {
                 url,
