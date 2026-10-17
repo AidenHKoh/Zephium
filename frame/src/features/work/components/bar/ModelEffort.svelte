@@ -305,14 +305,16 @@
     animation-play-state: paused;
   }
 
-  /* The words hold one size for every level, so nothing moves while the thumb does. */
+  /* The words hold one size for every level, so nothing moves while the thumb does: two lines,
+     centred on the orb and the track. */
   .words {
     display: flex;
     flex: 1;
     flex-direction: column;
+    justify-content: center;
     gap: 1px;
     min-inline-size: 0;
-    block-size: 46px;
+    block-size: 32px;
     contain: strict;
   }
 
@@ -333,16 +335,14 @@
   }
 
   .hint {
-    display: -webkit-box;
     flex: none;
-    block-size: 28px;
+    block-size: 14px;
     overflow: hidden;
     color: var(--color-muted);
+    white-space: nowrap;
+    text-overflow: ellipsis;
     font-size: var(--text-caption);
     line-height: 14px;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
   }
 
   /* A groove with a bead on it: one detent for each level the model takes. */
