@@ -1079,12 +1079,13 @@ impl AgentBrowserPort for Port {
             return scoped_tests::capture(self, invocation, fault);
         }
         let correlation = invocation.correlation();
+        let third_call_generation = matches!(self.fault, Fault::CompoundFields(_));
+        #[cfg(feature = "probe-harness")]
+        let third_call_generation =
+            third_call_generation || matches!(self.fault, Fault::DecisionRefresh);
         assert_eq!(
             correlation.snapshot_generation().get(),
-            if matches!(
-                self.fault,
-                Fault::CompoundFields(_) | Fault::DecisionRefresh
-            ) {
+            if third_call_generation {
                 lock(&self.calls).iter().filter(|&&call| call == 3).count() as u64
             } else if matches!(
                 self.fault,
