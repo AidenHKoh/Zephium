@@ -16,6 +16,7 @@
   transition:
     color var(--motion-instant) var(--ease-smooth),
     background-color var(--motion-instant) var(--ease-smooth),
+    opacity var(--motion-base) var(--ease-smooth),
     transform var(--motion-fast) var(--ease-smooth);
 }
 

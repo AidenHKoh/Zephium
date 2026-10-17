@@ -2,6 +2,8 @@
   import { Select } from "bits-ui";
   import Mark from "../Menu/Mark.svelte";
   import "../Menu/popover.css";
+  import "../Shine/shine.css";
+  import "../Button/control.css";
   import { menuMaterialFor } from "../Menu/material";
   let {
     label,
@@ -36,14 +38,19 @@
     items={[...options]}
     onValueChange={(next) => onchange?.(next)}
   >
-    <Select.Trigger bind:ref={triggerElement} id={uid} class="ui-select" aria-label={label}>
+    <Select.Trigger
+      bind:ref={triggerElement}
+      id={uid}
+      class="ui-select ui-control ui-shine ui-shine-press"
+      aria-label={label}
+    >
       <span class="value">{current}</span>
       <svg
         class="chevron"
         aria-hidden="true"
         viewBox="0 0 12 16"
-        width="12"
-        height="16"
+        width="11"
+        height="14"
         fill="none"
         stroke="currentColor"
         stroke-width="1.6"
@@ -95,49 +102,14 @@
     color: var(--color-muted);
   }
 
+  /* The one control size, on the shine plate. The text inset matches the
+     menu's own, so the label does not move when it opens. */
   .field :global(.ui-select) {
-    display: inline-flex;
-    align-items: center;
     justify-content: space-between;
     gap: 8px;
-    box-sizing: border-box;
     min-width: 120px;
-    min-height: var(--field-height);
-    padding: 5px 8px 5px 14px;
-    border: 0;
-
-    /* Almost round, and no ring. A hairline around a control this small draws
-       a shape the fill has already drawn, and two edges a pixel apart is what
-       makes a field look like a widget rather than a surface. The text inset
-       matches the menu's own, so the label does not move when it opens. */
-    border-radius: var(--radius-field);
-    background: var(--color-field);
-    color: var(--color-text);
-    font: inherit;
-    font-size: var(--text-body);
+    padding-inline: 10px 6px;
     font-weight: 450;
-    line-height: 16px;
-    cursor: default;
-    /* stylelint-disable-next-line property-no-vendor-prefix */
-    -webkit-user-select: none;
-    user-select: none;
-    transition:
-      background-color var(--motion-instant) var(--ease-smooth),
-      box-shadow var(--motion-instant) var(--ease-smooth);
-  }
-
-  .field :global(.ui-select:disabled) {
-    opacity: 0.5;
-  }
-
-  .field :global(.ui-select:hover:not(:disabled)) {
-    background: var(--color-field-hover);
-  }
-
-  /* While its menu is up the trigger is held rather than hovered — and it is
-     usually underneath the panel anyway, since the chosen row opens over it. */
-  .field :global(.ui-select[data-state="open"]) {
-    background: var(--color-field-hover);
   }
 
   .value {
@@ -161,11 +133,5 @@
      move sideways to fit. */
   :global(.ui-select-menu) {
     min-width: var(--bits-floating-anchor-width, 0);
-  }
-
-  @media (forced-colors: active) {
-    .field :global(.ui-select) {
-      border: 1px solid ButtonText;
-    }
   }
 </style>

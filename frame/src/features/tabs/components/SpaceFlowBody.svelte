@@ -18,10 +18,11 @@
   {#await loadSwitcher() then { default: SpaceSwitcher }}<SpaceSwitcher
       spaces={flow.spaces}
       active={flow.active?.id ?? null}
+      open={flow.open}
       making={flow.making !== null}
       failed={flow.makeFailed}
       onchoose={(id) => flow.choose(id)}
-      onedit={(space) => flow.edit(space.id)}
+      onedit={(space, rename) => flow.edit(space.id, rename)}
       onnew={() => void flow.make()}
     />{/await}
 {/if}

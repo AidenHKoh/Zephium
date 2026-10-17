@@ -33,7 +33,10 @@
     onsubmit?.(value.trim());
   }}
 >
-  <label class="sr-only" for={uid}>{label}</label><Icon icon={Search01Icon} size={16} /><input
+  <label class="sr-only" for={uid}>{label}</label><Icon
+    icon={Search01Icon}
+    size={size === "page" ? 16 : 14}
+  /><input
     id={uid}
     bind:this={ref}
     type="search"
@@ -49,12 +52,12 @@
   .ui-search {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     box-sizing: border-box;
-    min-height: var(--field-height);
-    padding: 0 14px;
+    min-height: var(--search-height);
+    padding: 0 10px;
     border: 0;
-    border-radius: var(--radius-control);
+    border-radius: var(--radius-control-compact);
     color: var(--color-faint);
     background: var(--color-field);
     transition:
@@ -77,7 +80,7 @@
     outline: none;
     min-width: 0;
     width: 100%;
-    height: var(--field-height);
+    height: var(--search-height);
     background: transparent;
     color: var(--color-text);
     font: inherit;

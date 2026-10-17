@@ -1,7 +1,7 @@
 import { untrack } from "svelte";
 import { tabs } from "$domain/tabs";
 import * as requests from "./space-requests.svelte";
-import { freshLook } from "./space-look";
+import { FRESH_LOOK } from "./space-look";
 
 /**
  * The switcher and the editor behind it, as one flow for whichever surface
@@ -72,9 +72,9 @@ export class SpaceFlow {
     this.open = true;
   }
 
-  edit(id: string) {
+  edit(id: string, rename = false) {
     this.editingId = id;
-    this.fresh = false;
+    this.fresh = rename;
     this.fromList = true;
   }
 
@@ -96,7 +96,7 @@ export class SpaceFlow {
     this.open = true;
     this.makeFailed = false;
     this.making = this.spaces.map((space) => space.id);
-    const result = await tabs.createSpace("", freshLook(this.spaces));
+    const result = await tabs.createSpace("", FRESH_LOOK);
     if (result.outcome === "failed" || result.outcome === "rejected") {
       this.making = null;
       this.makeFailed = true;

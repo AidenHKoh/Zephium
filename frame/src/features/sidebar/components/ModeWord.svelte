@@ -74,8 +74,8 @@
     inset-inline-start: 2px;
     inline-size: var(--cell);
     border-radius: var(--radius-capsule);
-    background: var(--segment-thumb);
-    box-shadow: var(--shadow-segment-thumb);
+    background: var(--row-active);
+    box-shadow: var(--shine-top);
     transition: translate var(--motion-base) var(--ease-spring);
   }
 

@@ -132,8 +132,8 @@
   /* The chosen face lifts the way a segment's thumb does, rather than
      taking a ring. */
   .face[aria-checked="true"] {
-    background: var(--segment-thumb-card);
-    box-shadow: var(--shadow-segment-thumb-card);
+    background: var(--row-active);
+    box-shadow: var(--shine-top);
     color: var(--color-text);
   }
 

@@ -38,11 +38,11 @@
 .shared-tool-search {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   box-sizing: border-box;
-  height: 30px;
-  padding-inline: 9px 6px;
-  border-radius: var(--radius-inset);
+  height: var(--search-height);
+  padding-inline: 10px 6px;
+  border-radius: var(--radius-control-compact);
   background: var(--color-field);
   color: var(--color-faint);
   transition:

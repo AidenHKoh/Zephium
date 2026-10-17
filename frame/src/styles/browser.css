@@ -371,14 +371,16 @@
 .settings-sidebar-search {
   display: flex;
   align-items: center;
-  gap: 7px;
-  min-height: 28px;
-  padding-inline: 9px;
-  background: var(--color-fill);
-  border-radius: var(--radius-row);
-  box-shadow: var(--shadow-field);
+  gap: 6px;
+  min-height: var(--search-height);
+  padding-inline: 10px;
+  background: var(--color-field);
+  border-radius: var(--radius-control-compact);
   margin-bottom: 10px;
   color: var(--color-faint);
+}
+.settings-sidebar-search:hover {
+  background: var(--color-field-hover);
 }
 .settings-sidebar-search input {
   min-width: 0;
@@ -387,11 +389,12 @@
   border: 0;
   outline: none;
   color: var(--color-text);
-  font-size: 12px;
+  font-size: var(--text-body);
 }
 .settings-sidebar-search:focus-within {
-  outline: 2px solid var(--color-ring);
-  outline-offset: 2px;
+  background: var(--color-field-hover);
+  box-shadow: var(--shadow-field-focus);
+  color: var(--color-muted);
 }
 .settings-sidebar-navigation .settings-nav-item {
   font-size: 13px;

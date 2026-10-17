@@ -1,17 +1,21 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
-  import { Add01Icon, PencilEdit02Icon } from "@hugeicons/core-free-icons";
+  import "$shared/ui/Shine/shine.css";
+  import { Add01Icon, Globe02Icon, PencilEdit02Icon } from "@hugeicons/core-free-icons";
   import type { SpaceView } from "$shared/ipc/bindings";
   import { tabs } from "$domain/tabs";
+  import { favicons } from "$domain/favicons";
   import { keymap } from "$domain/keymap";
   import { acceleratorKeys } from "$shared/lib/accelerator";
   import { IS_MAC } from "$shared/platform";
   import Icon from "$shared/ui/Icon";
+  import FavIcon from "$shared/ui/FavIcon";
   import SpaceGlyph from "./SpaceGlyph.svelte";
 
   let {
     spaces,
     active,
+    open = true,
     onchoose,
     making = false,
     failed = false,
@@ -20,20 +24,15 @@
   }: {
     spaces: SpaceView[];
     active: string | null;
+    /** The panel is showing, which is when the keys are listened for. */
+    open?: boolean;
     /** A new space was asked for and has not appeared yet. */
     making?: boolean;
     failed?: boolean;
     onchoose: (id: string) => void;
-    onedit: (space: SpaceView) => void;
+    onedit: (space: SpaceView, rename?: boolean) => void;
     onnew: () => void;
   } = $props();
-
-  const countOf = (count: number) =>
-    count === 0
-      ? m.space_tabs_none()
-      : count === 1
-        ? m.space_tabs_one()
-        : m.space_tabs_other({ count });
 
   function keysFor(index: number) {
     const accelerator = keymap
@@ -41,6 +40,26 @@
       .find((entry) => entry.id === `space.select.${index + 1}`)?.accelerator;
     return accelerator ? acceleratorKeys(accelerator, IS_MAC).join(IS_MAC ? "" : "+") : null;
   }
+
+  // Holding Control names the key of every row, as a menu's alternates appear.
+  let ctrl = $state(false);
+  $effect(() => {
+    if (!open) {
+      ctrl = false;
+      return;
+    }
+    const read = (event: KeyboardEvent) => (ctrl = event.ctrlKey);
+    const lost = () => (ctrl = false);
+    window.addEventListener("keydown", read, true);
+    window.addEventListener("keyup", read, true);
+    window.addEventListener("blur", lost);
+    return () => {
+      window.removeEventListener("keydown", read, true);
+      window.removeEventListener("keyup", read, true);
+      window.removeEventListener("blur", lost);
+      ctrl = false;
+    };
+  });
 
   // Rows reorder by dragging them, or with Option and the arrows.
   let list = $state<HTMLElement>();
@@ -93,12 +112,21 @@
   }
 </script>
 
-<div class="switcher" role="menu" aria-label={m.space_switcher()} bind:this={list}>
+<div
+  class="switcher"
+  role="menu"
+  aria-label={m.space_switcher()}
+  bind:this={list}
+  data-keys={ctrl || undefined}
+>
   {#each spaces as space, index (space.id)}
     {@const current = space.id === active}
     {@const keys = keysFor(index)}
+    {@const shown = Math.min(space.tabs, 3)}
     <div
+      role="presentation"
       class="switch-row"
+      class:ui-shine={current}
       data-space-row
       data-current={current || undefined}
       data-held={held?.id === space.id && moved ? "" : undefined}
@@ -106,13 +134,17 @@
       data-drop-after={held && moved && held.to === spaces.length && index === spaces.length - 1
         ? ""
         : undefined}
-      style:--step={index}
+      oncontextmenu={(event) => {
+        event.preventDefault();
+        onedit(space, true);
+      }}
     >
       <button
         type="button"
         role="menuitemradio"
         class="ui-menu-item switch-pick"
         aria-checked={current}
+        aria-keyshortcuts={keys ?? undefined}
         onpointerdown={(event) => down(event, space.id, index)}
         onpointermove={move}
         onpointerup={up}
@@ -120,27 +152,31 @@
         onkeydown={(event) => keydown(event, index)}
         onclick={() => choose(space.id)}
       >
-        <span class="switch-tile" data-space-hue={space.color}
-          ><SpaceGlyph
-            icon={space.icon}
-            color={space.color}
-            name={space.name}
-            size={16}
-            fallback="monogram"
-          /></span
-        >
-        <span class="switch-text">
-          <span class="switch-name">{space.name}</span>
-          <span class="switch-count">{countOf(space.tabs)}</span>
+        <SpaceGlyph icon={space.icon} color={space.color} size={16} />
+        <span class="switch-name">{space.name}</span>
+        <span class="switch-tail">
+          {#if shown > 0}<span class="switch-stack" aria-hidden="true"
+              >{#each { length: shown }, at (at)}{@const ref = space.previews[at] ?? null}<span
+                  class="switch-fav"
+                  style:--at={at}
+                  ><FavIcon
+                    image={favicons.image(ref)}
+                    tone={favicons.tone(ref)}
+                    size={16}
+                    fallback={Globe02Icon}
+                  /></span
+                >{/each}{#if space.tabs > 3}<span class="switch-more">+{space.tabs - 3}</span
+                >{/if}</span
+            >{/if}
+          {#if keys}<span class="switch-keys" aria-hidden="true">{keys}</span>{/if}
         </span>
-        {#if keys}<span class="switch-keys">{keys}</span>{/if}
       </button>
       <button
         type="button"
         class="switch-edit"
         title={m.space_edit_label({ name: space.name })}
         aria-label={m.space_edit_label({ name: space.name })}
-        onclick={() => onedit(space)}><Icon icon={PencilEdit02Icon} size={14} /></button
+        onclick={() => onedit(space)}><Icon icon={PencilEdit02Icon} size={13} /></button
       >
     </div>
   {/each}
@@ -149,13 +185,10 @@
     type="button"
     role="menuitem"
     class="ui-menu-item switch-new"
-    style:--step={spaces.length}
     aria-disabled={making || undefined}
     onclick={() => !making && onnew()}
   >
-    <span class="switch-tile switch-tile-new"
-      ><Icon icon={Add01Icon} size={15} strokeWidth={1.8} /></span
-    >
+    <Icon icon={Add01Icon} size={16} strokeWidth={1.8} />
     <span class="switch-name">{m.space_new()}</span>
   </button>
   {#if failed}<p class="switch-error" role="alert">{m.space_new_failed()}</p>{/if}
@@ -170,17 +203,17 @@
   }
 
   .switch-row {
+    --shine-radius: calc(var(--radius-menu) - var(--menu-pad));
+
     position: relative;
     display: flex;
     align-items: center;
-    border-radius: calc(var(--radius-menu) - var(--menu-pad));
-    animation: switch-in var(--motion-slow) var(--ease-out) both;
-    animation-delay: calc(var(--step) * 16ms);
+    border-radius: var(--shine-radius);
+    transition: background-color var(--motion-instant) var(--ease-smooth);
   }
 
-  .switch-row[data-current] {
-    background: var(--row-active);
-    box-shadow: var(--row-rim);
+  .switch-row:not([data-current]):is(:hover, :focus-within) {
+    background: var(--row-hover);
   }
 
   .switch-pick,
@@ -188,8 +221,8 @@
     flex: 1;
     min-width: 0;
     width: 100%;
-    min-height: 46px;
-    padding: 5px 10px 5px 8px;
+    min-height: 34px;
+    padding: 5px 4px 5px 10px;
     border: 0;
     background: transparent;
     font: inherit;
@@ -198,23 +231,24 @@
   }
 
   .switch-new {
-    min-height: 40px;
     color: var(--color-muted);
-    animation: switch-in var(--motion-slow) var(--ease-out) both;
-    animation-delay: calc(var(--step) * 16ms);
+    padding-inline-start: 10px;
+  }
+
+  .switch-pick:focus-visible,
+  .switch-new:focus-visible {
+    outline: none;
+    background: var(--row-hover);
+  }
+
+  .switch-new:hover,
+  .switch-new:focus-visible {
+    background: var(--row-hover);
+    color: var(--color-text);
   }
 
   .switch-new[aria-disabled] {
     opacity: 0.55;
-  }
-
-  .switch-pick:hover,
-  .switch-pick:focus-visible,
-  .switch-new:hover,
-  .switch-new:focus-visible {
-    outline: none;
-    background: var(--row-active);
-    color: var(--color-text);
   }
 
   .switch-pick:active,
@@ -222,80 +256,50 @@
     background: var(--row-pressed);
   }
 
-  .switch-row[data-current] .switch-pick:hover {
-    background: transparent;
-  }
-
-  /* The space's own colour in a tile, one column for every mark so names line
-     up whatever a space wears. The one in front is filled solid. */
-  .switch-tile {
-    display: grid;
-    flex: none;
-    inline-size: 30px;
-    block-size: 30px;
-    border-radius: var(--radius-inset);
-    background: color-mix(in srgb, var(--space-hue) 17%, transparent);
-    place-items: center;
-    transition: background-color var(--motion-fast) var(--ease-out);
-  }
-
-  .switch-row[data-current] .switch-tile {
-    background: var(--space-hue);
-    box-shadow: var(--shine-top);
-  }
-
-  .switch-row[data-current] .switch-tile :global(.space-glyph) {
-    color: var(--color-on-accent);
-  }
-
-  .switch-tile[data-space-hue="0"] {
-    background: var(--color-fill);
-  }
-
-  .switch-row[data-current] .switch-tile[data-space-hue="0"] {
-    background: var(--color-fill-hover);
-  }
-
-  .switch-row[data-current] .switch-tile[data-space-hue="0"] :global(.space-glyph) {
-    color: var(--color-text);
-  }
-
-  .switch-tile-new {
-    border: 1px dashed var(--color-border);
-    background: transparent;
-    color: var(--color-faint);
-  }
-
-  .switch-new:hover .switch-tile-new,
-  .switch-new:focus-visible .switch-tile-new {
-    border-style: solid;
-    color: var(--color-text);
-  }
-
-  .switch-text {
-    display: flex;
-    flex: 1;
-    flex-direction: column;
-    gap: 1px;
-    min-width: 0;
-  }
-
   .switch-name {
+    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     line-height: 18px;
   }
 
-  .switch-pick[aria-checked="true"] .switch-name {
-    font-weight: 600;
+  /* The stack and the keys share one place; holding Control swaps them. */
+  .switch-tail {
+    display: grid;
+    flex: none;
+    place-items: center end;
   }
 
-  .switch-count {
+  .switch-tail > * {
+    grid-area: 1 / 1;
+    transition: opacity var(--motion-fast) var(--ease-out);
+  }
+
+  .switch-stack {
+    display: flex;
+    align-items: center;
+  }
+
+  /* Each icon sits over the one after it, ringed in the panel's own ground. */
+  .switch-fav {
+    display: grid;
+    border-radius: 5px;
+    background: var(--color-float);
+    box-shadow: 0 0 0 1.5px var(--color-float);
+    z-index: calc(4 - var(--at));
+  }
+
+  .switch-fav + .switch-fav {
+    margin-inline-start: -6px;
+  }
+
+  .switch-more {
+    margin-inline-start: 5px;
     color: var(--color-faint);
     font-size: var(--text-label);
     font-variant-numeric: tabular-nums;
-    line-height: 14px;
   }
 
   .switch-keys {
@@ -303,23 +307,31 @@
     font-size: var(--text-label);
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.02em;
-    transition: opacity var(--motion-instant) var(--ease-out);
+    opacity: 0;
   }
 
-  /* Edit stands where the key does and takes its place on approach. */
+  .switcher[data-keys] .switch-keys {
+    opacity: 1;
+  }
+
+  .switcher[data-keys] .switch-stack {
+    opacity: 0;
+  }
+
+  /* A pencil at the row's end on approach; its place is always kept. */
   .switch-edit {
-    position: absolute;
     display: grid;
-    width: 30px;
-    height: 30px;
+    flex: none;
+    width: 24px;
+    height: 24px;
+    margin-inline-end: 4px;
     padding: 0;
     border: 0;
-    border-radius: var(--radius-inset);
+    border-radius: var(--radius-control-compact);
     background: transparent;
     color: var(--color-muted);
     opacity: 0;
     place-items: center;
-    inset-inline-end: 6px;
     pointer-events: none;
     transition:
       opacity var(--motion-fast) var(--ease-out),
@@ -340,11 +352,6 @@
   .switch-row:focus-within .switch-edit {
     opacity: 1;
     pointer-events: auto;
-  }
-
-  .switch-row:hover .switch-keys,
-  .switch-row:focus-within .switch-keys {
-    opacity: 0;
   }
 
   .switch-row[data-held] {
@@ -382,22 +389,11 @@
     line-height: 16px;
   }
 
-  @keyframes switch-in {
-    from {
-      opacity: 0;
-      translate: 0 -5px;
-    }
-  }
-
   @media (prefers-reduced-motion: reduce) {
     .switch-edit,
-    .switch-tile {
-      transition: none;
-    }
-
     .switch-row,
-    .switch-new {
-      animation: none;
+    .switch-tail > * {
+      transition: none;
     }
   }
 </style>

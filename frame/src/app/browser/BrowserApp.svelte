@@ -73,7 +73,7 @@
     };
     const space = tabs.activeSpaceId();
     untrack(() =>
-      applySpaceTheme(space, `${next.theme} ${next.custom}`, () => theme.applyCustomization(next)),
+      applySpaceTheme(space, JSON.stringify(next), () => theme.applyCustomization(next)),
     );
   });
 

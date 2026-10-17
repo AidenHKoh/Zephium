@@ -11,6 +11,14 @@
   import * as requests from "../lib/space-requests.svelte";
   import { SpaceFlow } from "../lib/space-flow.svelte";
 
+  // The switcher loads the first time the chip is approached or opened, and
+  // stays, so reopening is the panel's motion alone.
+  let loaded = $state(false);
+  const load = () => (loaded = true);
+  $effect(() => {
+    if (flow.open) load();
+  });
+
   let panel = $state<HTMLElement>();
   let chip = $state<HTMLButtonElement>();
   const flow = new SpaceFlow((restore) => {
@@ -65,13 +73,11 @@
     aria-expanded={flow.open}
     aria-label={m.space_open_switcher({ name: flow.active?.name ?? "" })}
     data-state={flow.open ? "open" : "closed"}
+    onpointerenter={load}
+    onfocus={load}
     onclick={() => (flow.open ? flow.dismiss() : flow.show())}
   >
-    {#if flow.active}<SpaceGlyph
-        icon={flow.active.icon}
-        color={flow.active.color}
-        name={flow.active.name}
-      />{/if}
+    {#if flow.active}<SpaceGlyph icon={flow.active.icon} color={flow.active.color} />{/if}
     <span class="space-name">{flow.active?.name ?? ""}</span>
     <span class="space-chevron"><Icon icon={ArrowDown01Icon} size={12} strokeWidth={2} /></span>
   </button>
@@ -91,7 +97,7 @@
     data-editing={flow.editing !== null || undefined}
     inert={!flow.open}
   >
-    {#if flow.open}<div class="space-panel-body"><SpaceFlowBody {flow} /></div>{/if}
+    {#if loaded}<div class="space-panel-body"><SpaceFlowBody {flow} /></div>{/if}
   </div>
 </div>
 
@@ -198,8 +204,9 @@
     padding: 0;
     transform-origin: 44px -10px;
 
-    /* It lies over the list's text: near-solid, so nothing under it reads. */
-    background: color-mix(in srgb, var(--color-float) 96%, transparent);
+    /* It lies over the list's text: solid, so nothing under it reads. */
+    background: var(--color-float);
+    backdrop-filter: none;
   }
 
   /* The list scrolls inside the still material when it runs long; the

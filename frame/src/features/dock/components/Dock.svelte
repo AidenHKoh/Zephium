@@ -8,7 +8,6 @@
     compact = false,
     tools = true,
     foot,
-    spaces,
   }: {
     sites?: Snippet;
     /** Kept sites that did not fit beside the shelf, in rows over it. */
@@ -18,8 +17,6 @@
     tools?: boolean;
     /** What closes the rail at its very foot, below the kept sites. */
     foot?: Snippet;
-    /** The spaces in the rail's tool stack, which has no other place for them. */
-    spaces?: Snippet<[number]>;
   } = $props();
 </script>
 
@@ -47,7 +44,6 @@
       </div>{/if}
     {#if tools && compact}<span class="dock-rule" aria-hidden="true"></span><ToolShelf
         compact
-        {spaces}
       />{/if}
     {#if foot}<span class="dock-rule" aria-hidden="true"></span>{@render foot()}{/if}
   </div>

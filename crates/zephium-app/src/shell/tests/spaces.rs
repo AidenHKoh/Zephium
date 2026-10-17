@@ -384,3 +384,29 @@ fn private_browsing_keeps_one_space_and_profiles_return_to_theirs() {
     shell.handle(Command::SwitchProfile(personal));
     assert_eq!(current(&shell), studio);
 }
+
+#[test]
+fn a_space_names_up_to_three_tab_icons_for_the_switcher() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    navigate_and_commit(&mut shell, active_id(&screen), "home.example");
+    for _ in 0..4 {
+        shell.handle(Command::Open);
+    }
+    let state = last(&screen);
+    assert_eq!(state.spaces[0].tabs, 5);
+    assert_eq!(state.spaces[0].previews.len(), 3);
+}
+
+#[test]
+fn the_tab_arrows_walk_the_sidebar_and_wrap() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "one.example");
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    assert_ne!(first, second);
+    shell.handle(Command::Run("tab.below".into()));
+    assert_eq!(active_id(&screen), first);
+    shell.handle(Command::Run("tab.above".into()));
+    assert_eq!(active_id(&screen), second);
+}

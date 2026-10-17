@@ -2,6 +2,7 @@
   import * as m from "$shared/i18n/messages";
   import { Add01Icon } from "@hugeicons/core-free-icons";
   import type { SpaceView } from "$shared/ipc/bindings";
+  import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
   import SpaceGlyph from "./SpaceGlyph.svelte";
 
@@ -9,13 +10,12 @@
 </script>
 
 <div class="space-empty">
-  <SpaceGlyph icon={space.icon} color={space.color} name={space.name} size={28} />
+  <SpaceGlyph icon={space.icon} color={space.color} size={28} />
   <p class="space-empty-title">{m.space_empty_title({ name: space.name })}</p>
   <p class="space-empty-body">{m.space_empty_body()}</p>
-  {#if onopen}<button type="button" class="space-empty-open" onclick={onopen}>
-      <Icon icon={Add01Icon} size={14} />
-      <span>{m.new_tab()}</span>
-    </button>{/if}
+  {#if onopen}<Button class="space-empty-open" onclick={onopen}
+      ><Icon icon={Add01Icon} size={14} />{m.new_tab()}</Button
+    >{/if}
 </div>
 
 <style>
@@ -42,27 +42,7 @@
     line-height: 16px;
   }
 
-  .space-empty-open {
-    display: flex;
-    align-items: center;
-    gap: 6px;
+  .space-empty :global(.space-empty-open) {
     margin-block-start: 8px;
-    padding: 6px 12px;
-    border: 0;
-    border-radius: var(--radius-capsule);
-    background: var(--row-active);
-    box-shadow: var(--shine-top);
-    color: var(--color-text);
-    font: inherit;
-    font-size: var(--text-label);
-    font-weight: 500;
-    cursor: default;
-    transition: background-color var(--motion-fast) var(--ease-out);
-  }
-
-  .space-empty-open:hover,
-  .space-empty-open:focus-visible {
-    outline: none;
-    background: var(--row-pressed);
   }
 </style>

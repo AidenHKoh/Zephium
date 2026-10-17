@@ -23,7 +23,7 @@
   import { sidebarTree } from "$features/tabs";
   import { SidebarBody } from "$features/tabs";
   import { TabList } from "$features/tabs";
-  import { TabRail, SpaceShelf } from "$features/tabs";
+  import { TabRail } from "$features/tabs";
   import { loadNavigationError, loadTabCapacityState } from "$features/tabs";
   import { selectionGlide } from "$features/tabs";
   import * as tabDrag from "$session/tab-drag.svelte";
@@ -341,9 +341,9 @@
             <UpdateNotice view="cards" />
           {/if}
         </div>{/key}
-    {/snippet}{#snippet dock(compact)}{#snippet railSpaces(step: number)}<SpaceShelf
-          {step}
-        />{/snippet}{#snippet accountFoot()}{#await loadAccountButton() then { default: AccountButton }}<AccountButton
+    {/snippet}{#snippet dock(
+      compact,
+    )}{#snippet accountFoot()}{#await loadAccountButton() then { default: AccountButton }}<AccountButton
             name={tabs.profile()?.name ?? ""}
           />{/await}{/snippet}{#if compact && incognito}<PrivateBar
           compact
@@ -353,7 +353,6 @@
           compact
           tools={!inWork}
           foot={inWork ? accountFoot : undefined}
-          spaces={railSpaces}
         >
           {#snippet sites()}<EssentialsRail
               entries={railEssentials}

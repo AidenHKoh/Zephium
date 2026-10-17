@@ -117,6 +117,29 @@ impl Shell {
                 origins.push(origin);
             }
         }
+        // The switcher stacks the first tabs' icons of the other spaces too.
+        for other in self
+            .spaces
+            .of(profile)
+            .into_iter()
+            .filter(|other| *other != space)
+        {
+            for id in self.space_first_tabs(other) {
+                if origins.len() == MAX_FAVICON_BATCH_ORIGINS {
+                    break;
+                }
+                let origin = self
+                    .items
+                    .tab(id)
+                    .and_then(|tab| tab.url.as_ref())
+                    .and_then(origin_of);
+                if let Some(origin) = origin {
+                    if seen.insert(origin.clone()) {
+                        origins.push(origin);
+                    }
+                }
+            }
+        }
         origins
     }
 

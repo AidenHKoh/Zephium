@@ -908,8 +908,8 @@ impl Shell {
                 |id| self.operation_activate(id),
             ),
             "tab.reopen" => self.operation_reopen_closed_tab(),
-            "tab.next" => self.operation_cycle_tab(1),
-            "tab.previous" => self.operation_cycle_tab(-1),
+            "tab.next" | "tab.below" => self.operation_cycle_tab(1),
+            "tab.previous" | "tab.above" => self.operation_cycle_tab(-1),
             "nav.back" => active.map_or_else(
                 || operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow),
                 |id| self.operation_history(id, false),

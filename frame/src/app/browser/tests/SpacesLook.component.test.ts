@@ -112,15 +112,26 @@ vi.mock("$shared/ipc/bindings", async () => {
   });
 });
 
+const mark = (key: string) => ({ origin: `https://${key}.example`, revision: "a" });
 const SPACES: SpaceView[] = [
-  spaceFixture("home", "Personal", { color: 1, tabs: 4 }),
+  spaceFixture("home", "Personal", {
+    color: 1,
+    tabs: 4,
+    previews: [mark("github"), mark("spotify"), mark("ddg")],
+  }),
   spaceFixture("work", "Studio", {
     icon: { kind: "emoji", text: "🎨" },
     color: 4,
     theme: { kind: "preset", id: "rose-pine" },
     tabs: 6,
+    previews: [mark("slack"), mark("github"), mark("ddg")],
   }),
-  spaceFixture("read", "Reading", { icon: { kind: "symbol", index: 5 }, color: 6, tabs: 2 }),
+  spaceFixture("read", "Reading", {
+    icon: { kind: "symbol", index: 5 },
+    color: 6,
+    tabs: 2,
+    previews: [mark("spotify"), mark("ddg")],
+  }),
   spaceFixture("side", "Side project", { icon: { kind: "symbol", index: 3 }, color: 8 }),
 ];
 
@@ -260,12 +271,8 @@ for (const theme of ["light", "dark"] as const) {
     sidebar.adoptMode("compact");
     await settle();
     await crop(`${theme}-rail`);
-    // The rail has no spaces control of its own: they live in its menu, and
-    // the full flow opens the column in place.
-    await screen.getByRole("button", { name: /^Tools/ }).click();
-    await settle();
-    await crop(`${theme}-rail-menu`);
-    await screen.getByRole("menuitem", { name: "All Spaces" }).click();
+    // The rail's first button opens the list in the column, in place.
+    await screen.getByRole("button", { name: "Spaces — Reading" }).click();
     await settle();
     await settle();
     await wide(`${theme}-rail-switcher`);

@@ -22,16 +22,7 @@
   import { acceleratorKeys } from "$shared/lib/accelerator";
   import { IS_MAC, IS_WINDOWS } from "$shared/platform";
 
-  import type { Snippet } from "svelte";
-
-  let {
-    compact = false,
-    spaces,
-  }: {
-    compact?: boolean;
-    /** At rail width, the spaces: they have no control of their own there. */
-    spaces?: Snippet<[number]>;
-  } = $props();
+  let { compact = false }: { compact?: boolean } = $props();
   onMount(() => {
     void profiles.retain();
     return () => profiles.release();
@@ -169,10 +160,6 @@
             >{/if}
         </div>{/if}
     </div>
-    {#if compact && spaces && !privately}
-      <div class="shelf-rule" role="separator"></div>
-      {@render spaces(toolRows + 2 + below)}
-    {/if}
     {#each groups as group, at (at)}
       {@const before = groups.slice(0, at).reduce((sum, earlier) => sum + earlier.length, 0)}
       <div class="shelf-rule" role="separator"></div>

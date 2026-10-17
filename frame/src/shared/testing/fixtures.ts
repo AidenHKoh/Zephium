@@ -20,5 +20,5 @@ export function spaceFixture(
   name: string,
   overrides: Partial<SpaceView> = {},
 ): SpaceView {
-  return { id, name, icon: null, color: 0, theme: null, tabs: 0, ...overrides };
+  return { id, name, icon: null, color: 0, theme: null, tabs: 0, previews: [], ...overrides };
 }

@@ -8,6 +8,9 @@ use std::collections::HashMap;
 use zephium_core::spaces::{SpaceIcon, SpaceLook, SpaceTheme};
 use zephium_ipc::{SpaceIconView, SpaceThemeView};
 
+/// How many tabs of a space the switcher stacks icons for.
+pub(super) const SPACE_PREVIEWS: usize = 3;
+
 #[derive(Default)]
 pub(super) struct SpaceMemory {
     /// The tab each space had in front when the window last left it.
@@ -49,7 +52,38 @@ impl Shell {
             color: space.look.color,
             theme: space.look.theme.as_ref().map(theme_view),
             tabs: self.space_tab_count(space.id),
+            previews: self.space_previews(space),
         }
+    }
+
+    /// The first tabs of a space in sidebar order, pinned then open, with the
+    /// icon cached for each.
+    pub(super) fn space_previews(&self, space: &Space) -> Vec<Option<zephium_ipc::IconRef>> {
+        self.space_first_tabs(space.id)
+            .into_iter()
+            .map(|id| {
+                self.items.tab(id).and_then(|tab| {
+                    self.icon_ref(zephium_ipc::IconSurface::Chrome, tab, Some(space.profile))
+                })
+            })
+            .collect()
+    }
+
+    pub(super) fn space_first_tabs(&self, space: SpaceId) -> Vec<ItemId> {
+        let mut roots = self.space_roots(space);
+        roots.reverse();
+        let mut found = Vec::new();
+        while let Some(id) = roots.pop() {
+            if self.items.tab(id).is_some() {
+                found.push(id);
+                if found.len() == SPACE_PREVIEWS {
+                    break;
+                }
+            } else {
+                roots.extend(self.items.children(id).iter().rev().copied());
+            }
+        }
+        found
     }
 
     fn space_roots(&self, space: SpaceId) -> Vec<ItemId> {

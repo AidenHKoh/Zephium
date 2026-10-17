@@ -109,6 +109,50 @@ test("the switcher lists every space, checks the one shown and moves to another"
   expect(native.switchTo).toHaveBeenCalledWith("studio");
 });
 
+test("a row is a name, with the icons of its first tabs and a count of the rest, and nothing for an empty space", async () => {
+  const screen = await mount();
+  project({
+    spaces: [
+      HOME,
+      spaceFixture("busy", "Busy", {
+        tabs: 5,
+        previews: [null, { origin: "https://a.example", revision: "a" }, null],
+      }),
+      spaceFixture("blank", "Blank"),
+    ],
+  });
+  await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  const rows = [...screen.container.querySelectorAll<HTMLElement>("[data-space-row]")];
+  expect(rows).toHaveLength(3);
+  expect(rows[1]!.querySelectorAll(".switch-fav")).toHaveLength(3);
+  expect(rows[1]!.querySelector(".switch-more")?.textContent).toBe("+2");
+  expect(rows[2]!.querySelector(".switch-stack")).toBeNull();
+  // A space no one dressed gets no mark and no tile of its own.
+  expect(rows[2]!.querySelector(".space-glyph")).toBeNull();
+  expect(screen.container.querySelector(".switch-tile")).toBeNull();
+});
+
+test("holding Control names the keys on every row", async () => {
+  const screen = await mount();
+  await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  const list = screen.container.querySelector<HTMLElement>(".switcher")!;
+  expect(list.dataset.keys).toBeUndefined();
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Control", ctrlKey: true }));
+  await expect.poll(() => list.dataset.keys).toBeDefined();
+  window.dispatchEvent(new KeyboardEvent("keyup", { key: "Control", ctrlKey: false }));
+  await expect.poll(() => list.dataset.keys).toBeUndefined();
+});
+
+test("a right-click on a row opens its name to be typed over", async () => {
+  const screen = await mount();
+  await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  const row = screen.container.querySelectorAll<HTMLElement>("[data-space-row]")[1]!;
+  row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  const name = screen.getByRole("textbox", { name: "Name" });
+  await expect.element(name).toHaveValue("Studio");
+  await expect.element(name).toHaveFocus();
+});
+
 test("a space changes as it is edited, and Done keeps it", async () => {
   const screen = await mount();
   await screen.getByRole("button", { name: "Spaces — Home" }).click();
@@ -170,9 +214,9 @@ test("New Space makes one at once, with no icon, and opens it to be named", asyn
   const screen = await mount();
   await screen.getByRole("button", { name: "Spaces — Home" }).click();
   await screen.getByRole("menuitem", { name: "New Space" }).click();
-  expect(native.create).toHaveBeenCalledWith("", { icon: null, color: 2, theme: null });
+  expect(native.create).toHaveBeenCalledWith("", { icon: null, color: 0, theme: null });
   project({
-    spaces: [HOME, STUDIO, spaceFixture("made", "Space 3", { color: 2, tabs: 1 })],
+    spaces: [HOME, STUDIO, spaceFixture("made", "Space 3", { tabs: 1 })],
     active_space_id: "made",
   });
   const name = screen.getByRole("textbox", { name: "Name" });

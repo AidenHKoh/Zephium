@@ -4,7 +4,13 @@
   import { tabs } from "$domain/tabs";
   import FavIcon from "$shared/ui/FavIcon";
   import { favicons } from "$domain/favicons";
-  import { Add01Icon, Cancel01Icon, Globe02Icon, PuzzleIcon } from "@hugeicons/core-free-icons";
+  import {
+    Add01Icon,
+    Cancel01Icon,
+    Globe02Icon,
+    Layers01Icon,
+    PuzzleIcon,
+  } from "@hugeicons/core-free-icons";
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
   import { untrack } from "svelte";
@@ -13,6 +19,7 @@
   import { RowDrag } from "$session/row-drag.svelte";
   import DragMark from "$shared/ui/DragMark";
   import SpacePeek from "./SpacePeek.svelte";
+  import SpaceGlyph from "./SpaceGlyph.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { remember } from "../lib/space-memory";
   import * as requests from "../lib/space-requests.svelte";
@@ -108,24 +115,27 @@
 </script>
 
 <!--
-  The rail reads top-down like the expanded list it stands in for, and ends
-  the same way, with the row that opens a new tab. `title` gives a real OS
-  tooltip, which is the only label that can appear outside the chrome
-  WebView's rectangle.
+  The rail reads top-down like the expanded list it stands in for. It opens
+  with the spaces, which take the column in place to show their list, and ends
+  the way the list does, with the row that opens a new tab after the last one.
+  `title` gives a real OS tooltip, which is the only label that can appear
+  outside the chrome WebView's rectangle.
 -->
-<!-- Like the expanded list, the rail opens with the way to a new tab, which
-     stays put while the tabs below it scroll. -->
-<div class="rail-new-slot" data-cascade style:--cascade={0}>
-  <button
-    type="button"
-    class="rail-item rail-new"
-    title={m.new_tab()}
-    aria-label={m.new_tab()}
-    onclick={tabs.open}
-  >
-    <Icon icon={Add01Icon} size={16} />
-  </button>
-</div>
+{#if space}<div class="rail-spaces-slot" data-cascade style:--cascade={0}>
+    <button
+      type="button"
+      class="rail-item rail-spaces"
+      title={space.name}
+      aria-label={m.space_open_switcher({ name: space.name })}
+      aria-haspopup="dialog"
+      onclick={() => requests.openInColumn("list")}
+    >
+      {#if space.icon}<SpaceGlyph icon={space.icon} color={space.color} size={18} />{:else}<Icon
+          icon={Layers01Icon}
+          size={16}
+        />{/if}
+    </button>
+  </div>{/if}
 <div
   bind:this={stage}
   class="rail-stage"
@@ -190,6 +200,17 @@
               >{/if}
           </li>
         {/each}
+        <li data-cascade style:--cascade={entries.length + 1}>
+          <button
+            type="button"
+            class="rail-item rail-new"
+            title={m.new_tab()}
+            aria-label={m.new_tab()}
+            onclick={tabs.open}
+          >
+            <Icon icon={Add01Icon} size={16} />
+          </button>
+        </li>
       </ul>
     </div>
     {#if peeking && after}<SpacePeek space={after} side="next" rail />{/if}
@@ -205,9 +226,9 @@
   />{/if}
 
 <style>
-  /* Close under the head's rule, so the way to a new tab reads as the
-     first thing of the list rather than a thing apart from it. */
-  .rail-new-slot {
+  /* Close under the head's rule, so the spaces read as the first thing of
+     the column rather than a thing apart from it. */
+  .rail-spaces-slot {
     display: flex;
     flex: none;
     flex-direction: column;

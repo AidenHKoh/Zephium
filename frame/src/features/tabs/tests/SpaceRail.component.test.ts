@@ -51,10 +51,24 @@ async function rail() {
   return render(TabRail, { entries: open, onSelect: () => {} });
 }
 
-test("the rail has no spaces control of its own", async () => {
+test("the spaces button leads the rail and the new tab button follows the last tab", async () => {
   const screen = await rail();
-  expect(screen.container.querySelector(".rail-space")).toBeNull();
+  const buttons = [...screen.container.querySelectorAll<HTMLElement>(".rail-item")];
+  expect(buttons[0]!.classList.contains("rail-spaces")).toBe(true);
+  expect(buttons.at(-1)!.classList.contains("rail-new")).toBe(true);
   expect(screen.container.querySelectorAll(".rail-new")).toHaveLength(1);
+  // The rail's list ends with the new-tab row, after the one tab.
+  const rows = [...screen.container.querySelectorAll(".rail-list > li")];
+  expect(rows.at(-1)!.querySelector(".rail-new")).not.toBeNull();
+  expect(rows).toHaveLength(2);
+});
+
+test("the spaces button opens the list in the column and shows the space's own icon only when it has one", async () => {
+  const screen = await rail();
+  expect(screen.container.querySelector(".rail-spaces .space-glyph")).toBeNull();
+  await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  expect(requests.pending()?.kind).toBe("list");
+  expect(sidebar.isCompact()).toBe(false);
 });
 
 test("the full flow opens the column in place and hands the rail back when it is done", async () => {

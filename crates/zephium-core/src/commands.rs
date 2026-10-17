@@ -248,6 +248,21 @@ pub const REGISTRY: &[CommandSpec] = &[
         Keys::same("Ctrl+Shift+Tab"),
         Group::Window,
     ),
+    // The same walk down the sidebar as Ctrl+Tab, on the arrows that point
+    // along it. Ctrl+Alt stays clear of text: only letters and digits are
+    // AltGr's.
+    command(
+        "tab.above",
+        "Select Tab Above",
+        Keys::same("CmdOrCtrl+Alt+Up"),
+        Group::Window,
+    ),
+    command(
+        "tab.below",
+        "Select Tab Below",
+        Keys::same("CmdOrCtrl+Alt+Down"),
+        Group::Window,
+    ),
     // The tool panels, each on Shift and its own letter, as Bookmarks is.
     // Never Alt on Windows: Ctrl+Alt is AltGr on many layouts. History takes
     // the browser's own key; its full page moves to Shift.
@@ -398,8 +413,18 @@ pub const REGISTRY: &[CommandSpec] = &[
         split("Ctrl+9", "Ctrl+Shift+9"),
         Group::Keys,
     ),
-    command("space.next", "Next Space", Keys::NONE, Group::Keys),
-    command("space.previous", "Previous Space", Keys::NONE, Group::Keys),
+    command(
+        "space.next",
+        "Next Space",
+        Keys::same("CmdOrCtrl+Alt+Right"),
+        Group::Keys,
+    ),
+    command(
+        "space.previous",
+        "Previous Space",
+        Keys::same("CmdOrCtrl+Alt+Left"),
+        Group::Keys,
+    ),
     command(
         "work.pane.close",
         "Close Pane",
