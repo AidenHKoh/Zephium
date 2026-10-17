@@ -430,6 +430,25 @@ fn draft_dialog(node: &SemanticNode, snapshot: &SemanticSnapshot) -> Option<usiz
     (drafts && creates).then_some(index)
 }
 
+/// An editor set in the page rather than a dialog (an inline "add task" row):
+/// a small part of the page around the field holds the button that creates
+/// what is typed, so typing drafts. The page itself never counts: a page of
+/// blocks with a "New page" button elsewhere still saves as it is typed.
+fn draft_editor(node: &SemanticNode, snapshot: &SemanticSnapshot) -> bool {
+    const SMALL: usize = 80;
+    ancestors(node, snapshot)
+        .take_while(|(_, ancestor)| ancestor.parent().is_some())
+        .map(|(index, _)| subtree(snapshot, index))
+        .take_while(|region| region.len() <= SMALL)
+        .any(|region| {
+            region.iter().any(|part| {
+                part.role() == SemanticRole::Button
+                    && !std::ptr::eq(part, node)
+                    && creates(&label(part))
+            })
+        })
+}
+
 /// "Create issue", "Add task", "Save page": the control that makes it.
 fn creates(text: &str) -> bool {
     let text = words(text);
@@ -485,6 +504,7 @@ fn typing_effect(node: &SemanticNode, snapshot: &SemanticSnapshot) -> SiteEffect
         && !composer_has_send(snapshot)
         && !composer(node)
         && draft_dialog(node, snapshot).is_none()
+        && !draft_editor(node, snapshot)
     {
         // A document that saves as it is typed commits on the first key.
         SiteEffect::Commit(Consequence::Edit)
@@ -1449,7 +1469,9 @@ impl SiteGate {
                 Consequence::Communication => "Sent",
                 Consequence::Destructive => "Deleted",
                 Consequence::Purchase => "Purchased",
-                Consequence::Save | Consequence::Edit | Consequence::Type => "Saved",
+                Consequence::Save | Consequence::Edit => "Saved",
+                // Typing that waited for the person commits nothing itself.
+                Consequence::Type => continue,
             };
             let line = if control.is_empty() {
                 format!("{verb} on the page")
@@ -2267,7 +2289,15 @@ mod tests {
             json!({"k":7,"p":3,"r":"button","n":"Team: Backlog","o":1,"ak":1}),
             json!({"k":8,"p":3,"r":"button","n":"Create issue","o":1,"ak":1}),
             json!({"k":9,"p":0,"r":"textbox","n":"Block 1","o":11,"fs":1,"es":[1,2,false]}),
+            json!({"k":10,"p":0,"r":"group","n":"Quick add"}),
+            json!({"k":11,"p":9,"r":"textbox","n":"Task name","o":11,"fs":1,"es":[1,2,false]}),
+            json!({"k":12,"p":9,"r":"button","n":"Add task","o":1,"ak":1}),
         ]);
+        assert_eq!(
+            effect(&apps, 11, SemanticActionKind::Fill),
+            SiteEffect::Draft,
+            "an inline editor drafts until its own Add button",
+        );
         assert_eq!(
             effect(&apps, 2, SemanticActionKind::Fill),
             SiteEffect::Draft
