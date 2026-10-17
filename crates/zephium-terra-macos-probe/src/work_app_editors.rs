@@ -209,8 +209,8 @@ document.querySelectorAll('.block').forEach(add);
 /// variant saves the draft as Gmail does while a confirmation waits: the
 /// fragment takes the draft's id, the box takes the subject as its title.
 /// The inbox variant lists more messages than one look holds before the
-/// compose box, which floats over them without being modal and closes with
-/// "Save & close", as Gmail's does.
+/// compose box, which floats over them without being modal, closes with
+/// "Save & close" and names Send inside direction marks, as Gmail's does.
 const WEBMAIL: &str = concat!(
     r#"<!doctype html><html><head><meta charset="utf-8"><title>Inbox - Mail</title></head><body>
 <nav aria-label="Mailboxes"><a href="/edit/webmail">Inbox</a></nav>
@@ -295,6 +295,10 @@ pub(super) fn page(path: &str) -> Option<String> {
         page.replace(
             "<div role=\"listitem\">Dana: Quarterly report</div>",
             &format!("<div role=\"listitem\">Dana: Quarterly report</div>{rows}"),
+        )
+        .replace(
+            "<button id=\"send\">Send</button>",
+            "<button id=\"send\" aria-label=\"Send \u{202a}(\u{2318}Enter)\u{202c}\">Send</button>",
         )
         .replace(
             "<h2>New Message</h2>",

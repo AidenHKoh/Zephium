@@ -1863,8 +1863,9 @@
 
   function boundedCredentialMetadata(raw, limit) {
     if (typeof raw !== "string") return null;
-    let bytes = 0;
+    let bytes = 0, kept = "", from = 0;
     for (let index = 0; index < raw.length; index += 1) {
+      const start = index;
       const first = apply(stringCharCodeAt, raw, [index]);
       let point = first;
       if (first >= 0xd800 && first <= 0xdbff) {
@@ -1876,16 +1877,18 @@
       } else if (first >= 0xdc00 && first <= 0xdfff) {
         return null;
       }
-      if (
-        (isForbiddenTextPoint(point) && point !== 0x09 && point !== 0x0a) ||
-        point === 0x0d
-      ) {
-        return null;
+      if (point < 0x20 ? point !== 0x09 && point !== 0x0a : point >= 0x7f && point <= 0x9f) return null;
+      // Invisible marks (Gmail wraps its Send label in direction marks) are
+      // dropped, so "pass\u200bword" still reads as password.
+      if (point > 0x0a && isForbiddenTextPoint(point)) {
+        kept += apply(stringSlice, raw, [from, start]);
+        from = index + 1;
+        continue;
       }
       bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
       if (bytes > limit) return null;
     }
-    return raw;
+    return kept + apply(stringSlice, raw, [from]);
   }
 
   function boundedCredentialLabelText(root) {
