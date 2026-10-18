@@ -66,7 +66,19 @@ function mount(host, onChange){
   }
   function fromDom(){
     var lines=[];
-    for(var i=0;i<host.childNodes.length;i++){ var c=host.childNodes[i]; if(c.nodeType!==1||c.tagName!=='P') return null; lines.push(c.textContent.replace(/ /g,' ')); }
+    function read(node){
+      if(node.nodeType===3) return node.data;
+      if(node.nodeName==='BR') return '\n';
+      var value=''; for(var j=0;j<node.childNodes.length;j++) value+=read(node.childNodes[j]);
+      return value;
+    }
+    for(var i=0;i<host.childNodes.length;i++){
+      var c=host.childNodes[i]; if(c.nodeType!==1||c.tagName!=='P') return null;
+      // Chromium's Shift+Enter uses BRs within a paragraph. A final BR is
+      // its caret placeholder; preceding BRs are real line breaks.
+      var value=read(c); if(c.lastChild&&c.lastChild.nodeName==='BR') value=value.slice(0,-1);
+      lines.push(value.replace(/ /g,' '));
+    }
     return lines.length?lines:[''];
   }
   host.addEventListener('input', function(){
