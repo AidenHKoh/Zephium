@@ -267,6 +267,138 @@ from leaving the window black. Competing page slides are suppressed while the
 cover is active. Engine tests pass 267 cases with three opt-in tests excluded.
 Automatic PiP remains a separate implementation on the integrated branch.
 
+## October 18 integrated branch
+
+The Windows work was committed and pushed independently at `f937e2db` before
+merging into `feat/work-production` (`ce746743`). Merge `f1328d0a` preserves the
+integrated preview cleanup and clipping alongside fullscreen slide suppression,
+and retains both profile handling and Windows chrome-renderer recovery. The
+split drop bar and recorded bundle budgets were not replaced or re-recorded.
+
+Automatic video PiP now follows ordinary tab selection through a native engine
+port. Windows evaluates the fixed presentation program in a dedicated CDP world;
+macOS uses a named public WKContentWorld. Neither exposes a page-callable chrome
+command or copies media into another browser window. Only a substantial playing
+video with sound is eligible, and site PiP opt-outs remain effective. Returning
+closes only presentation opened by this feature. Manual dismissal is respected,
+rapid switches share pending native entry, visible split panes are excluded,
+and profile/private-context changes cancel automatic presentation. The switch
+is in Settings > Tabs; disabling it closes existing automatic presentation.
+Existing discard protection now treats native PiP as active media even when
+paused or muted.
+
+The Windows native fixture opens PiP after hiding its source WebView2 and closes
+it on return. JavaScript regression cases also exercise pending-entry races,
+manual ownership, dismissal, opt-out, rejection and WebKit presentation dispatch.
+This does not qualify native macOS behavior. The bounded video scan includes
+the main document and accessible same-origin frames; cross-origin embeds and
+sites that disable native PiP are not claimed as supported.
+
+The integration exposed Chromium model-menu focus loss. Focus is now assigned
+in the popover's opening lifecycle rather than an earlier render tick, and
+closing from the trigger preserves focus restored to the composer. Existing
+interaction assertions are retained. Windows Work qualification also needed
+macOS-only profile seeding separated from shared loopback requests. Windows
+refuses that optional seeding mode explicitly; it does not fake cookie-store
+inspection results.
+
+Correctness logs for this integration live under `target/review-qa/integrated-*`,
+with native PiP evidence in `automatic-pip-native.log`. These are debug-build
+checks, not release performance measurements. Final Windows appearance and
+native macOS PiP still require owner acceptance.
+
+### Integrated Windows verification and blockers
+
+This integration is not release-qualified. The machine is Windows 11 Pro
+10.0.26200 (build 26200), Intel Core i3-1115G4, four logical processors,
+approximately 12 GiB installed RAM. WebView2 155.0.4283.45 and 155.0.4283.62
+are installed; installation inventory alone does not identify which runtime
+each completed fixture used. The final running Review QA process uses
+155.0.4283.62, verified from its actual child executable. All native evidence
+below uses debug builds.
+
+Verified changes are `50e6a8c1` (automatic PiP), `5e727e94` (model-picker
+keyboard focus), `9e4cc00a` (calendar edits commit only once on Enter/blur),
+`e9079b0b` (build/test portability), `56a7f4d8` (Windows Work probe), and
+`92c1bdf2` (Chromium editor fixture line breaks).
+The earlier Windows branch remains available independently at `f937e2db`.
+
+| Check | Observed result |
+| --- | --- |
+| Workspace/all-target check | Passed on the integrated tree; subsequent formatting and test portability changes are recorded separately |
+| Engine with `agentic-browser` | 532 passed, 3 opt-in tests ignored |
+| Composition with `durable-runtime` | 135 passed |
+| Controller with `provider-transport,probe-harness` | 127 passed |
+| Agentic with `provider-transport` | 1,110 passed after retaining SystemRoot in the isolated Windows proxy subprocess |
+| App with `work-runtime,work-execution` | Initial 859 passed/41 failed/14 ignored; using safe temporary fixtures: 893 passed/7 failed/14 ignored |
+| Frontend unit tests | Initial 907 passed and two load-related timeouts; both failing files passed a serial rerun (10 tests) |
+| Scoped Chromium components | Initial 427 passed/5 failed/6 skipped; four affected files passed all 12 tests after the calendar fix and test portability/readiness corrections |
+| Final frontend typecheck, scoped lint, build | Passed, zero Svelte diagnostics; existing bundle budgets retained |
+| Native automatic PiP | Entry after hiding the page and exit on return passed |
+| Final-tree native download and media fixture | Passed, including download provenance after browser exit and automatic PiP round trip |
+| Rust formatting, compact semantic runtime, PiP JavaScript | Passed; all seven PiP policy/race tests passed |
+| Native Work lifecycle, first preview, action guard | Passed |
+| Native Work `webmail-inbox`, `writes`, `human` | Initial runs failed; fresh narrow reruns and limits are detailed below |
+| Workspace source-contract tests (`xtask`) | 159 passed, 14 failed; the first workspace run stopped here |
+| Remaining workspace targets (`--exclude xtask --no-fail-fast`) | Completed; only `zephium-app --lib` failed (the default AppData temporary-directory run described above) |
+| Strict workspace Clippy | Failed: oversized variants, boolean-expression lints, argument count and an `unreachable!` in the integrated Work code |
+| Frame emitted-style check | Failed on the integrated Work input glow (`0 -10px 40px -20px var(--glow)`); the checker still requires at most a 3px contact-shadow blur |
+
+Application tests must place disposable fixtures outside AppData. Work
+intentionally rejects every AppData descendant, including the default Windows
+temporary directory. Set `TMP` and `TEMP` for the test process to a dedicated
+directory such as `target/review-qa/work-test-temp`. This does not change the
+product policy. The seven remaining failures are one git-index test attempting
+to overwrite a handle-pinned index (Windows sharing violation), two CLI tests
+expecting execution despite `ensure_available()` refusing that capability, and
+four trash-retention tests requiring a private namespace unavailable on Windows.
+Do not enable those capabilities or loosen their guards to satisfy the tests.
+
+The native mail fixture initially lost exactly three newlines: Chromium's
+Shift+Enter inserts BR elements inside a paragraph, whereas the fixture read
+`textContent`, which omits them. The controlled fixture now serializes those
+breaks and excludes the trailing caret placeholder. `node --test
+scripts/test-work-editor.mjs` verifies native paragraph insertion, Shift+Enter,
+trailing breaks and rejection of unadmitted raw DOM replacement. The exact
+native send assertion passes after rebuilding the probe: one approved send,
+unchanged expected multiline content, no reply, clean native teardown.
+The final run still reports failure to read/preserve the result after sending;
+it explicitly refuses automatic repetition. Thus the fixture's exact-send
+success is not evidence of complete end-to-end result extraction. Logs:
+`work-webmail-diagnostic.log` and `work-webmail-final.log`.
+
+The native `writes` and `human` fixtures encounter a selected-profile browser
+generation mismatch after a temporary cookie-presence controller closes. The
+new controller reports another browser PID while the retained process handle
+still reports its original process running and its exit observer remains
+pending. Admission correctly refuses and retains the uncertain owners; later
+cases in the same fixture then fail because the profile is quarantined. This
+does not establish a vendor defect. Fresh narrow `slackwrite` and `human-signin`
+runs subsequently pass with clean exact teardown; the generation failure is
+intermittent and remains unresolved. The sign-in fixture preserves the native
+page through its hold, resumes with the original limits, and refuses a retired
+check. This is synthetic handover evidence, not manual move/resize acceptance.
+Reproduce in a fresh disposable session
+with `windows-work-probe --loopback-site slackwrite` or `human-signin`; never
+accept a different PID without exact retirement proof for the old generation.
+
+The 14 source-contract failures are in `agent_controller_boundary`,
+`agentic_probe_boundary`, and `work_resource_boundary`. Several assertions
+search for implementation literals that moved in the integrated Work branch.
+They still need a security-boundary review; no assertion was rewritten just
+to obtain a passing gate. Full details are retained in
+`target/review-qa/integrated-workspace-tests.log` and
+`target/review-qa/integrated-clippy-4.log`.
+
+The final QA executable is `target/review-qa/Zephium Review QA.exe`, built with
+`--debug --no-bundle --config ../target/review-qa/tauri.review-qa.conf.json`.
+Its identifier is `app.zephium.review-qa`; its security configuration matches
+the integrated product configuration. Direct launch from the packaged development
+host redirects newly created Roaming descendants into that host's MSIX cache,
+which correctly fails the runtime canonical-parent check. Launching through
+`explorer.exe` opens the app normally outside that inherited package identity;
+the window is responding. No ownership check or product storage policy changed.
+
 ## Remaining acceptance and engineering work
 
 The extension delivery issue above is an engineering follow-up. The inventory
@@ -278,8 +410,11 @@ Existing denied/gated capabilities must not be advertised as Windows parity.
 Owner acceptance should concentrate on video fullscreen versus F11 (including
 Snap/maximize restoration and monitor changes), keyboard focus/IME across the
 address field and pages, and minimize/lock/sleep/wake with active media. Use a
-separate QA identity for a desktop build. No packaged QA build or installer was
-produced by this pass.
+separate QA identity for a desktop build. A debug Review QA executable is open;
+no release package or installer was produced by this pass. Check download
+Open/Show in Folder, slow video fullscreen entry/exit, and automatic PiP when
+switching tabs and returning. Native macOS automatic PiP still needs its own
+build and acceptance run.
 
 For resource measurements, use a release build with the same tabs and settings,
 record WebView2 version and hardware, and include all child WebView2 processes.
