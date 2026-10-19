@@ -539,3 +539,78 @@ negative monitor coordinates, and isolation after owner-handle reuse. Formatting
 and the isolated debug application build pass. The emitted-style gate still
 rejects the existing Work glow (`0 -10px 40px -20px var(--glow)`) against its 3px
 contact-shadow limit; that unrelated visual treatment was left unchanged.
+
+## Alpha caption rendering and lighter material (2026-10-20)
+
+This supersedes the preceding color-keyed caption implementation. A small,
+cached, premultiplied-alpha bitmap now draws the three controls with antialiased
+glyphs, rounded hover surfaces and focus rings. Native BUTTONs retain input and
+accessibility on a separate input host; their default theme painting cannot
+appear in the visible surface. Both owned windows hide before close or a window
+state command can trigger focus repaint. A vetoed close restores the reveal
+target. High contrast uses the system's opaque colors.
+
+The window wash is 28%, down from 68%; raised surfaces use 56%, while launcher
+contrast is retained. Windows 10's additional acrylic tint is also reduced.
+This remains Windows native acrylic, not an implementation of refractive glass.
+
+Caption travel is 32 DIP over 220 ms, with 44-by-26 DIP button targets. Page
+containers still move without resizing the WebView2 viewport. A press or native
+move loop holds the current position until release; dragging no longer retires
+the caption. Hover works on an inactive window without deliberately raising or
+activating it. Clicking activates the owner. Keyboard access exposes the full
+target before focusing it, and accessibility invocation does not depend on the
+cursor position. Stationary hover uses leave tracking instead of periodic
+dismissal polling. Geometry and bitmap updates are skipped when unchanged.
+
+The alpha buffer occupies 17,664 bytes at 100% scaling and 70,656 bytes at 200%.
+These figures exclude the input host, Windows and compositor allocations.
+On this Windows 11 build 26200 / Core i3-1115G4 machine, an optimized isolated
+benchmark of the exact `raster` function measured:
+
+| Scale | Mean redraw | Median | p95 |
+| --- | --- | --- | --- |
+| 100% | 223.18 us | 215.60 us | 242.50 us |
+| 200% | 863.45 us | 815.90 us | 969.70 us |
+
+Method: compile the constants, Appearance, dimensions and pure raster helpers
+from `windows_caption_paint.rs` with `rustc -O --edition=2021`; allocate the
+buffer once, vary the hovered button and maximized glyph each iteration, and
+pass input/output through `std::hint::black_box`. Discard 100 warmups and record
+2,000 timed redraws per DPI. Local harness and output are in
+`target/review-qa/caption_raster_bench.rs` and `caption-raster-bench.log`.
+Animation reuses the rasterized pixels until appearance changes. This measures
+neither layered-window upload nor page movement, full-app CPU/GPU, or battery
+use. It is not release-performance qualification.
+
+The implementation follows Microsoft's advice to keep an
+[UpdateLayeredWindow surface small](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-updatelayeredwindow).
+The visible surface never calls SetLayeredWindowAttributes, which is incompatible
+with subsequent UpdateLayeredWindow calls until the layered style is reset.
+The engine still positions HWND containers; a compositor-only page animation
+would require a separate WebView2 hosting change. Existing page-container corner
+regions are unchanged; the new alpha edges belong to the caption controls.
+
+Focused visual acceptance: compare material over the same wallpaper; reveal the
+caption in Browse, Work and Settings; hover and press each button, drag while
+holding the caption, repeat with an inactive window, then close. Check for white
+flashes, stable hit targets and smooth rounded edges at fractional DPI. Repeat
+maximize/restore, Snap, Alt+F10, reduced motion and high contrast. Automated pixel
+and native-surface tests do not substitute for this owner acceptance.
+
+Validation: all five focused native caption tests pass, including real hidden
+layered-window presentation, cropping and DPI changes on this machine. Rust
+formatting and strict desktop Clippy (`--lib --tests --no-deps -- -D warnings`)
+pass. `frame check` passes all 909 unit tests and its type/lint/style/format
+checks; both focused Windows chrome component tests and both UI builds pass.
+Bundle budgets are unchanged. Dependency-inclusive Clippy still stops on the
+seven existing agent-controller diagnostics (large variant, boolean expressions,
+argument count and `unreachable!`). The emitted-style gate still rejects the
+existing Work glow's 40px shadow. Neither gate was weakened.
+
+The isolated debug Review QA build succeeded and opened with a responding
+window. Its SHA-256 is
+`425b34603c4e3b39a466de7edf9f3d0bcdceb145ccb0dc8748788707457c68da`.
+After testing it, the owner reported it was mostly okay and requested committing
+and pushing the completed work. This feedback does not establish every optional
+visual check above or broader release qualification.
