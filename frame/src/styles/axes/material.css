@@ -37,12 +37,12 @@
   --wash-launcher: 48%;
 }
 
-/* Acrylic on Win11 22H2+ ignores the native tint parameter entirely, so the
-   whole colour layer is ours and the wash carries more here than anywhere. */
+/* Let the native acrylic carry the depth; a light theme wash preserves text
+   contrast without stacking an almost opaque color over the system material. */
 :root[data-material="acrylic"] {
-  --wash-window: 68%;
+  --wash-window: 28%;
   --material-window-ground: color-mix(in srgb, var(--color-chrome) var(--wash-window), transparent);
-  --wash-raised: 66%;
+  --wash-raised: 56%;
   --wash-launcher: 82%;
 }
 
