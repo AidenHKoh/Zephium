@@ -173,6 +173,8 @@ struct State {
     /// Motion asked of the next `apply`, and the slide it started.
     pending_motion: Option<StageMotion>,
     slide: Option<Slide>,
+    caption_offset: f64,
+    caption_moving: bool,
     /// Paint covers by view, each with the token of the handoff that owns it.
     covers: HashMap<ItemId, (HWND, u64)>,
     /// The page shown fullscreen: square corners, above everything else.
@@ -242,11 +244,73 @@ impl PreviewMove {
 }
 
 thread_local! {
+    static CAPTION_STAGES: RefCell<Vec<(isize, Weak<RefCell<State>>)>> = const { RefCell::new(Vec::new()) };
+    static CAPTION_OFFSETS: RefCell<HashMap<isize, (f64, bool)>> = RefCell::new(HashMap::new());
     /// `SetTimer` callbacks run on the window thread. A thread-local weak map
     /// keeps pending layout work non-owning and avoids making COM controllers
     /// or `Rc` state cross-thread.
     static LAYOUT_TIMERS: RefCell<HashMap<usize, Weak<RefCell<State>>>> = RefCell::new(HashMap::new());
     static DWELL_TIMERS: RefCell<HashMap<usize, Weak<RefCell<State>>>> = RefCell::new(HashMap::new());
+}
+
+/// Translate page containers on their owning UI thread, preserving controller
+/// dimensions. The caption's single animation clock drives both page and controls.
+/// A weak registry cannot extend a stage or a WebView's lifetime.
+pub fn set_window_caption_offset(parent: isize, offset: f64, moving: bool) {
+    if !offset.is_finite() || !(0.0..=64.0).contains(&offset) {
+        return;
+    }
+    CAPTION_OFFSETS.with(|offsets| {
+        let mut offsets = offsets.borrow_mut();
+        if offset == 0.0 && !moving {
+            offsets.remove(&parent);
+        } else {
+            offsets.insert(parent, (offset, moving));
+        }
+    });
+    let stages = CAPTION_STAGES.with(|stages| {
+        let mut stages = stages.borrow_mut();
+        stages.retain(|(_, stage)| stage.strong_count() > 0);
+        stages
+            .iter()
+            .filter(|(owner, _)| *owner == parent)
+            .filter_map(|(_, stage)| stage.upgrade())
+            .collect::<Vec<_>>()
+    });
+    for stage in stages {
+        let changed = if let Ok(mut state) = stage.try_borrow_mut() {
+            if state.parent.0 as isize != parent
+                || (state.caption_offset == offset && state.caption_moving == moving)
+            {
+                false
+            } else {
+                state.caption_offset = offset;
+                state.caption_moving = moving;
+                state.revision = state.revision.wrapping_add(1);
+                let visible = state.visible.clone();
+                state.dirty.extend(visible);
+                if offset == 0.0 {
+                    for view in state.views.values() {
+                        let mut applied = view.applied.get();
+                        applied.rounded = None;
+                        view.applied.set(applied);
+                    }
+                }
+                true
+            }
+        } else {
+            false
+        };
+        if changed {
+            sync(&stage);
+        }
+    }
+}
+
+/// Retire window-local motion without touching child HWNDs during destruction.
+pub fn forget_window_caption_offset(parent: isize) {
+    CAPTION_OFFSETS.with(|offsets| offsets.borrow_mut().remove(&parent));
+    CAPTION_STAGES.with(|stages| stages.borrow_mut().retain(|(owner, _)| *owner != parent));
 }
 
 impl Drop for State {
@@ -284,6 +348,13 @@ impl Stage {
         gap: f64,
         on_placement_failure: impl Fn(ItemId, Arc<AtomicBool>) + 'static,
     ) -> Self {
+        let (caption_offset, caption_moving) = CAPTION_OFFSETS.with(|offsets| {
+            offsets
+                .borrow()
+                .get(&(parent.0 as isize))
+                .copied()
+                .unwrap_or_default()
+        });
         let state = Rc::new(RefCell::new(State {
             fullscreen_transition: None,
             fullscreen_restore: None,
@@ -310,9 +381,16 @@ impl Stage {
             on_placement_failure: Rc::new(on_placement_failure),
             pending_motion: None,
             slide: None,
+            caption_offset,
+            caption_moving,
             covers: HashMap::new(),
             fullscreen: None,
         }));
+        CAPTION_STAGES.with(|stages| {
+            stages
+                .borrow_mut()
+                .push((parent.0 as isize, Rc::downgrade(&state)))
+        });
         Self { state }
     }
 
@@ -1246,6 +1324,8 @@ fn sync(state: &Rc<RefCell<State>>) {
         revision,
         fullscreen,
         preview,
+        caption_offset,
+        caption_moving,
     ) = {
         let Ok(mut state) = state.try_borrow_mut() else {
             return;
@@ -1301,9 +1381,15 @@ fn sync(state: &Rc<RefCell<State>>) {
             state.revision,
             state.fullscreen,
             preview,
+            if state.fullscreen.is_some() {
+                0.0
+            } else {
+                state.caption_offset
+            },
+            state.caption_moving && state.fullscreen.is_none(),
         )
     };
-    let sliding = offset != 0.0 || preview.is_some_and(|(_, _, moving)| moving);
+    let sliding = caption_moving || offset != 0.0 || preview.is_some_and(|(_, _, moving)| moving);
 
     let scale = scale_of(parent);
     let local = Rect::new(0.0, 0.0, size.0, size.1);
@@ -1319,7 +1405,7 @@ fn sync(state: &Rc<RefCell<State>>) {
                 .filter(|(shifted, _, _)| *shifted == id)
                 .map_or((0.0, 0.0), |(_, shift, _)| shift);
             let x = (origin.0 + rect.x + offset + shift.0) * scale;
-            let y = (origin.1 + rect.y + shift.1) * scale;
+            let y = (origin.1 + rect.y + shift.1 + caption_offset) * scale;
             (x.is_finite() && y.is_finite())
                 .then_some((id, (x.round() as i32, y.round() as i32, width, height)))
         })
@@ -1391,15 +1477,20 @@ fn sync(state: &Rc<RefCell<State>>) {
     }
     // A displaced page is clipped to the stage, so what slides out of it
     // never covers the chrome around.
-    if let Some((id, _, _)) = preview {
+    if state.borrow().revision != revision {
+        return;
+    }
+    if preview.is_some() || caption_offset > 0.0 {
         let stage = (
             (origin.0 * scale).round() as i32,
             (origin.1 * scale).round() as i32,
             (size.0 * scale).round() as i32,
             (size.1 * scale).round() as i32,
         );
-        if let Some(rect) = pane_rects.get(&id) {
-            clip_to_stage(state, id, *rect, stage, radius);
+        for (id, rect) in &pane_rects {
+            if caption_offset > 0.0 || preview.is_some_and(|(shifted, _, _)| shifted == *id) {
+                clip_to_stage(state, *id, *rect, stage, radius);
+            }
         }
     }
     let transition = state.borrow().fullscreen_transition.clone();
@@ -1911,6 +2002,65 @@ mod tests {
         assert!(!delta.controller_size);
         assert!(!delta.rounded);
         assert!(!delta.notify_parent_position);
+    }
+
+    #[test]
+    fn caption_translation_preserves_the_webview_viewport_at_every_scale() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let width = (800.0 * scale) as i32;
+            let height = (600.0 * scale) as i32;
+            let radius = (16.0 * scale) as i32;
+            let applied = AppliedPlacement {
+                window_visible: Some(true),
+                controller_visible: Some(true),
+                container_rect: Some((10, 20, width, height)),
+                controller_size: Some((width, height)),
+                rounded: Some((width, height, radius)),
+                notified_screen_origin: Some((110, 220)),
+                raised: Some(false),
+            };
+            for offset in [1.0, 20.0, 40.0] {
+                let delta = placement_delta(
+                    applied,
+                    true,
+                    Some((10, 20 + (offset * scale) as i32, width, height)),
+                    radius,
+                    false,
+                    Some((100, 200)),
+                );
+                assert!(delta.container_rect);
+                assert!(delta.notify_parent_position);
+                assert!(!delta.controller_size);
+                assert!(!delta.window_visibility);
+                assert!(!delta.controller_visibility);
+                assert!(!delta.rounded);
+                assert!(!delta.raise);
+            }
+        }
+    }
+
+    #[test]
+    fn caption_motion_is_window_local_and_retirement_does_not_reuse_it() {
+        use super::{forget_window_caption_offset, set_window_caption_offset, Stage};
+        use windows::Win32::Foundation::HWND;
+        let parent = 101_isize;
+        let other = Stage::new(HWND(102_isize as *mut _), 8.0, |_, _| {});
+        set_window_caption_offset(parent, 20.0, true);
+        let stage = Stage::new(HWND(parent as *mut _), 8.0, |_, _| {});
+        assert_eq!(stage.state.borrow().caption_offset, 20.0);
+        assert!(stage.state.borrow().caption_moving);
+        assert_eq!(other.state.borrow().caption_offset, 0.0);
+        set_window_caption_offset(parent, 0.0, false);
+        assert_eq!(stage.state.borrow().caption_offset, 0.0);
+        assert!(!stage.state.borrow().caption_moving);
+        set_window_caption_offset(parent, 40.0, false);
+        forget_window_caption_offset(parent);
+        let replacement = Stage::new(HWND(parent as *mut _), 8.0, |_, _| {});
+        assert_eq!(replacement.state.borrow().caption_offset, 0.0);
+        set_window_caption_offset(parent, 20.0, false);
+        assert_eq!(replacement.state.borrow().caption_offset, 20.0);
+        assert_eq!(stage.state.borrow().caption_offset, 40.0);
+        forget_window_caption_offset(parent);
     }
 
     #[test]

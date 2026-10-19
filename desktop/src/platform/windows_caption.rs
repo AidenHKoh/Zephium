@@ -1,5 +1,6 @@
-//! A fading native caption above the child WebViews. Revealing it never
-//! changes page bounds; the top gutter remains a resize and reveal target.
+//! A native caption revealed by translating page containers without reflow.
+//! Color-keyed paint exposes the owner's acrylic. A separate input surface
+//! covers complete button rectangles, including their transparent pixels.
 use tauri::WebviewWindow;
 use windows::core::w;
 use windows::Win32::{
@@ -16,6 +17,8 @@ use windows::Win32::{
 const ID: usize = 0x5a434150;
 const HIDE: usize = ID + 1;
 const FADE: usize = ID + 2;
+const CLEAR: COLORREF = COLORREF(0x010002);
+const TRAVEL: f64 = 40.0;
 struct State {
     owner: HWND,
     strip: HWND,
@@ -33,6 +36,9 @@ struct State {
     opacity: u8,
     fade_from: u8,
     fade_started: std::time::Instant,
+    pressed_button: HWND,
+    drag_start: Option<POINT>,
+    motion_paused: Option<std::time::Instant>,
 }
 
 pub fn install(window: &WebviewWindow) -> bool {
@@ -121,6 +127,9 @@ pub fn install(window: &WebviewWindow) -> bool {
             opacity: 0,
             fade_from: 0,
             fade_started: std::time::Instant::now(),
+            pressed_button: HWND::default(),
+            drag_start: None,
+            motion_paused: None,
         }));
         let mut installed =
             SetWindowSubclass(owner, Some(owner_proc), ID, pointer as usize).as_bool();
@@ -193,11 +202,11 @@ unsafe fn layout(p: *mut State) {
     (*p).laying_out = true;
     let owner = (*p).owner;
     let scale = GetDpiForWindow(owner).max(96) as f64 / 96.0;
-    let button = (28.0 * scale).round() as i32;
-    let padding = (5.0 * scale).round() as i32;
-    let gap = (4.0 * scale).round() as i32;
-    let controls_width = button * 3 + padding * 2 + gap * 2;
-    let height = button + padding * 2;
+    let button_width = (46.0 * scale).round() as i32;
+    let padding = (4.0 * scale).round() as i32;
+    let controls_width = button_width * 3 + padding * 2;
+    let height = (TRAVEL * scale).round() as i32;
+    let button_height = height - padding * 2;
     let mut rect = RECT::default();
     let _ = GetClientRect(owner, &mut rect);
     let left = (*p)
@@ -218,20 +227,38 @@ unsafe fn layout(p: *mut State) {
     if !show {
         (*p).expanded = false;
         (*p).opacity = 0;
+        (*p).pressed_button = HWND::default();
+        (*p).drag_start = None;
+        (*p).motion_paused = None;
+        if GetCapture() == (*p).edge {
+            let _ = ReleaseCapture();
+        }
         let _ = KillTimer(Some((*p).strip), FADE);
         let _ = KillTimer(Some((*p).strip), HIDE);
     }
+    let progress = f64::from((*p).opacity) / 255.0;
+    let displacement = (f64::from(height) * progress).round() as i32;
+    zephium_engine::set_window_caption_offset(
+        owner.0 as isize,
+        if (*p).page_left.is_some() {
+            TRAVEL * progress
+        } else {
+            0.0
+        },
+        (*p).page_left.is_some() && (*p).opacity > 0 && (*p).opacity < 255,
+    );
     let _ = SetWindowPos(
         (*p).strip,
         None,
         origin.x + left,
-        origin.y,
+        origin.y + displacement - height,
         width,
         height,
         SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
     );
-    let radius = (24.0 * scale).round() as i32;
-    let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius, radius);
+    // Clip the part travelling above the owner; no popup may paint over the
+    // desktop while the caption slides into view.
+    let region = CreateRectRgn(0, height - displacement, width, height);
     if SetWindowRgn((*p).strip, Some(region), true) == 0 {
         let _ = DeleteObject(region.into());
     }
@@ -240,26 +267,33 @@ unsafe fn layout(p: *mut State) {
     let reveal_height = (8.0 * scale).round() as i32;
     let _ = SetWindowPos(
         (*p).edge,
-        None,
+        Some(HWND_TOP),
         origin.x,
         origin.y,
         rect.right.max(1),
-        reveal_height,
-        SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
+        displacement.max(reveal_height),
+        SWP_NOACTIVATE | SWP_NOOWNERZORDER,
     );
+    let region = CreateRectRgn(0, 0, rect.right.max(1), reveal_height);
+    let band = CreateRectRgn(left, 0, rect.right.max(1), displacement);
+    let _ = CombineRgn(Some(region), Some(region), Some(band), RGN_OR);
+    let _ = DeleteObject(band.into());
+    if SetWindowRgn((*p).edge, Some(region), true) == 0 {
+        let _ = DeleteObject(region.into());
+    }
     for (index, hwnd) in (*p).buttons.into_iter().enumerate() {
         let _ = SetWindowPos(
             hwnd,
             None,
-            width - controls_width + padding + index as i32 * (button + gap),
+            width - controls_width + padding + index as i32 * button_width,
             padding,
-            button,
-            button,
+            button_width,
+            button_height,
             SWP_NOZORDER | SWP_NOACTIVATE,
         );
         let _ = ShowWindow(hwnd, SW_SHOWNA);
     }
-    let _ = SetLayeredWindowAttributes((*p).strip, COLORREF(0), (*p).opacity, LWA_ALPHA);
+    let _ = SetLayeredWindowAttributes((*p).strip, CLEAR, (*p).opacity, LWA_ALPHA | LWA_COLORKEY);
     let _ = ShowWindow(
         (*p).strip,
         if show && ((*p).expanded || (*p).opacity > 0) {
@@ -268,16 +302,9 @@ unsafe fn layout(p: *mut State) {
             SW_HIDE
         },
     );
-    // Once visible, the caption itself owns resize hit testing. Keeping the
-    // reveal target above it would intercept the tops of the buttons.
-    let _ = ShowWindow(
-        (*p).edge,
-        if show && !(*p).expanded && (*p).opacity == 0 {
-            SW_SHOWNA
-        } else {
-            SW_HIDE
-        },
-    );
+    // This input surface stays above the color-keyed controls. Transparent
+    // pixels must have the same hit area as the painted button glyphs.
+    let _ = ShowWindow((*p).edge, if show { SW_SHOWNA } else { SW_HIDE });
     let _ = InvalidateRect(Some((*p).strip), None, false);
     (*p).laying_out = false;
 }
@@ -345,6 +372,10 @@ unsafe fn prepare_state_change(p: *mut State) {
     (*p).opacity = 0;
     (*p).hot_button = HWND::default();
     (*p).fade_from = 0;
+    (*p).pressed_button = HWND::default();
+    (*p).drag_start = None;
+    (*p).motion_paused = None;
+    zephium_engine::set_window_caption_offset((*p).owner.0 as isize, 0.0, false);
     let _ = KillTimer(Some((*p).strip), FADE);
     let _ = KillTimer(Some((*p).strip), HIDE);
     let _ = SetLayeredWindowAttributes((*p).strip, COLORREF(0), 0, LWA_ALPHA);
@@ -380,6 +411,138 @@ unsafe fn reveal(p: *mut State) {
     let _ = KillTimer(Some((*p).strip), HIDE);
     transition(p, true);
 }
+unsafe fn button_at_cursor(p: *mut State) -> HWND {
+    let mut cursor = POINT::default();
+    let _ = GetCursorPos(&mut cursor);
+    button_at_point(p, cursor)
+}
+fn button_hit(rects: &[RECT; 3], point: POINT) -> Option<usize> {
+    rects.iter().position(|rect| {
+        point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
+    })
+}
+unsafe fn button_at_point(p: *mut State, point: POINT) -> HWND {
+    if (*p).opacity == 0 || (*p).suppressed {
+        return HWND::default();
+    }
+    let mut rects = [RECT::default(); 3];
+    for (button, rect) in (*p).buttons.into_iter().zip(&mut rects) {
+        let _ = GetWindowRect(button, rect);
+    }
+    button_hit(&rects, point).map_or(HWND::default(), |index| (*p).buttons[index])
+}
+unsafe fn update_hot(p: *mut State, hot: HWND) {
+    if (*p).hot_button != hot {
+        let previous = (*p).hot_button;
+        (*p).hot_button = hot;
+        for button in [previous, hot] {
+            if !button.0.is_null() {
+                let _ = InvalidateRect(Some(button), None, false);
+            }
+        }
+    }
+}
+unsafe fn resume_motion(p: *mut State) {
+    if let Some(paused) = (*p).motion_paused.take() {
+        (*p).fade_started += paused.elapsed();
+    }
+}
+// The same press/capture/release path covers the entire button, regardless of
+// whether Windows delivered a client or nonclient message (Snap's HTMAXBUTTON).
+unsafe fn pointer_input(
+    p: *mut State,
+    hwnd: HWND,
+    msg: u32,
+    w: WPARAM,
+    l: LPARAM,
+) -> Option<LRESULT> {
+    match msg {
+        WM_LBUTTONDOWN | WM_NCLBUTTONDOWN => {
+            let button = button_at_cursor(p);
+            if !button.0.is_null() && resize_hit_from_cursor(p).is_none() {
+                (*p).pressed_button = button;
+                (*p).motion_paused = Some(std::time::Instant::now());
+                SetCapture(hwnd);
+                let _ = InvalidateRect(Some(button), None, false);
+                return Some(LRESULT(0));
+            }
+        }
+        WM_LBUTTONUP | WM_NCLBUTTONUP if !(*p).pressed_button.0.is_null() => {
+            let pressed = (*p).pressed_button;
+            let activate = button_at_cursor(p) == pressed;
+            (*p).pressed_button = HWND::default();
+            resume_motion(p);
+            let _ = ReleaseCapture();
+            let _ = InvalidateRect(Some(pressed), None, false);
+            if activate {
+                let index = (*p)
+                    .buttons
+                    .iter()
+                    .position(|button| *button == pressed)
+                    .unwrap();
+                let _ = SendMessageW(
+                    (*p).strip,
+                    WM_COMMAND,
+                    Some(WPARAM(index + 1)),
+                    Some(LPARAM(pressed.0 as isize)),
+                );
+            }
+            return Some(LRESULT(0));
+        }
+        WM_CAPTURECHANGED | WM_CANCELMODE => {
+            let pressed = (*p).pressed_button;
+            (*p).pressed_button = HWND::default();
+            (*p).drag_start = None;
+            resume_motion(p);
+            if !pressed.0.is_null() {
+                let _ = InvalidateRect(Some(pressed), None, false);
+            }
+        }
+        WM_MOUSEMOVE | WM_NCMOUSEMOVE => {
+            if let Some(start) = (*p).drag_start {
+                let mut point = POINT::default();
+                let _ = GetCursorPos(&mut point);
+                if (point.x - start.x).abs() >= GetSystemMetrics(SM_CXDRAG)
+                    || (point.y - start.y).abs() >= GetSystemMetrics(SM_CYDRAG)
+                {
+                    (*p).drag_start = None;
+                    let _ = ReleaseCapture();
+                    let _ = PostMessageW(
+                        Some((*p).owner),
+                        WM_SYSCOMMAND,
+                        WPARAM((SC_MOVE | HTCAPTION) as usize),
+                        LPARAM(0),
+                    );
+                    return Some(LRESULT(0));
+                }
+            }
+            reveal(p);
+            track(hwnd, msg == WM_NCMOUSEMOVE);
+            let hot = button_at_cursor(p);
+            update_hot(p, hot);
+            if hot == (*p).buttons[1] && msg == WM_NCMOUSEMOVE {
+                // Let the owner offer Snap layouts; clicks stay on our explicit
+                // capture path instead of DefWindowProc tracking another HWND.
+                let _ = SendMessageW((*p).owner, msg, Some(w), Some(l));
+            }
+            return Some(LRESULT(0));
+        }
+        WM_MOUSELEAVE | WM_NCMOUSELEAVE => {
+            update_hot(p, HWND::default());
+            SetTimer(Some((*p).strip), HIDE, 450, None);
+        }
+        _ => {}
+    }
+    None
+}
+unsafe fn resize_hit_from_cursor(p: *mut State) -> Option<u32> {
+    let mut cursor = POINT::default();
+    let _ = GetCursorPos(&mut cursor);
+    resize_hit(
+        p,
+        LPARAM(((cursor.y as u16 as u32) << 16 | cursor.x as u16 as u32) as isize),
+    )
+}
 unsafe extern "system" fn edge_proc(
     hwnd: HWND,
     msg: u32,
@@ -389,10 +552,23 @@ unsafe extern "system" fn edge_proc(
     data: usize,
 ) -> LRESULT {
     let p = data as *mut State;
+    if let Some(result) = pointer_input(p, hwnd, msg, w, l) {
+        return result;
+    }
     match msg {
         WM_NCHITTEST => {
             if let Some(hit) = resize_hit(p, l) {
                 return LRESULT(hit as isize);
+            }
+            if button_at_point(
+                p,
+                POINT {
+                    x: l.0 as i16 as i32,
+                    y: (l.0 >> 16) as i16 as i32,
+                },
+            ) == (*p).buttons[1]
+            {
+                return LRESULT(HTMAXBUTTON as isize);
             }
         }
         WM_NCLBUTTONDOWN if resize_direction(w.0 as u32).is_some() => {
@@ -412,24 +588,31 @@ unsafe extern "system" fn edge_proc(
             return LRESULT(1);
         }
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
-        WM_MOUSEMOVE => {
-            reveal(p);
-            track(hwnd, false);
-        }
-        WM_NCMOUSEMOVE => {
-            reveal(p);
-            track(hwnd, true);
-        }
-        WM_MOUSELEAVE | WM_NCMOUSELEAVE => {
-            SetTimer(Some((*p).strip), HIDE, 450, None);
-        }
         // Keep the edge useful as a native drag handle.
         WM_LBUTTONDOWN => {
+            // Entering the move loop on the first click would hide the band
+            // before a second click could maximize it.
+            let mut point = POINT::default();
+            let _ = GetCursorPos(&mut point);
+            (*p).drag_start = Some(point);
+            (*p).motion_paused = Some(std::time::Instant::now());
+            SetCapture(hwnd);
+            return LRESULT(0);
+        }
+        WM_LBUTTONUP if (*p).drag_start.take().is_some() => {
             let _ = ReleaseCapture();
+            return LRESULT(0);
+        }
+        WM_LBUTTONDBLCLK => {
+            let command = if IsZoomed((*p).owner).as_bool() {
+                SC_RESTORE
+            } else {
+                SC_MAXIMIZE
+            };
             let _ = PostMessageW(
                 Some((*p).owner),
                 WM_SYSCOMMAND,
-                WPARAM((SC_MOVE | HTCAPTION) as usize),
+                WPARAM(command as usize),
                 LPARAM(0),
             );
             return LRESULT(0);
@@ -474,6 +657,7 @@ unsafe extern "system" fn owner_proc(
     let p = data as *mut State;
     if msg == WM_NCDESTROY {
         let _ = RemoveWindowSubclass(hwnd, Some(owner_proc), ID);
+        zephium_engine::forget_window_caption_offset(hwnd.0 as isize);
         // Owned popups are explicitly torn down before freeing subclass state.
         if IsWindow(Some((*p).strip)).as_bool() {
             let _ = DestroyWindow((*p).strip);
@@ -600,13 +784,17 @@ unsafe extern "system" fn strip_proc(
             SetTimer(Some(hwnd), HIDE, 450, None);
         }
         WM_TIMER if w.0 == FADE => {
-            let t = ((*p).fade_started.elapsed().as_secs_f64() / 0.16).min(1.0);
+            // A press owns a stable target even when it begins mid-reveal.
+            if (*p).motion_paused.is_some() {
+                return LRESULT(0);
+            }
+            let t = ((*p).fade_started.elapsed().as_secs_f64() / 0.4).min(1.0);
             let eased = 1.0 - (1.0 - t).powi(3);
             let target = if (*p).expanded { 255.0 } else { 0.0 };
             (*p).opacity = (f64::from((*p).fade_from)
                 + (target - f64::from((*p).fade_from)) * eased)
                 .round() as u8;
-            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), (*p).opacity, LWA_ALPHA);
+            layout(p);
             if t >= 1.0 {
                 let _ = KillTimer(Some(hwnd), FADE);
                 if !(*p).expanded {
@@ -625,14 +813,18 @@ unsafe extern "system" fn strip_proc(
             let focus = GetFocus();
             let mut edge = RECT::default();
             let _ = GetWindowRect((*p).edge, &mut edge);
+            edge.bottom =
+                edge.top + (8.0 * GetDpiForWindow((*p).owner).max(96) as f64 / 96.0).round() as i32;
             edge.top += resize_border((*p).owner);
             // Moving along the reveal strip must not dismiss the controls.
             if !PtInRect(&rect, cursor).as_bool()
                 && !PtInRect(&edge, cursor).as_bool()
                 && !(*p).buttons.contains(&focus)
+                && (*p).pressed_button.0.is_null()
+                && (*p).drag_start.is_none()
             {
                 transition(p, false);
-            } else if !PtInRect(&rect, cursor).as_bool() && PtInRect(&edge, cursor).as_bool() {
+            } else {
                 // The hidden reveal window cannot report a later leave from
                 // the sidebar's gutter. Keep checking only during this hold.
                 SetTimer(Some(hwnd), HIDE, 450, None);
@@ -678,13 +870,10 @@ unsafe extern "system" fn strip_proc(
             let dc = BeginPaint(hwnd, &mut paint);
             let mut rect = RECT::default();
             let _ = GetClientRect(hwnd, &mut rect);
-            let dark = !matches!((*p).window.theme(), Ok(tauri::Theme::Light));
             let brush = CreateSolidBrush(if super::menus::high_contrast() {
                 COLORREF(GetSysColor(COLOR_WINDOW))
-            } else if dark {
-                COLORREF(0x272727)
             } else {
-                COLORREF(0xf8f8f8)
+                CLEAR
             });
             FillRect(dc, &rect, brush);
             let _ = EndPaint(hwnd, &paint);
@@ -709,6 +898,9 @@ unsafe extern "system" fn button_proc(
     data: usize,
 ) -> LRESULT {
     let p = data as *mut State;
+    if let Some(result) = pointer_input(p, hwnd, msg, w, l) {
+        return result;
+    }
     match msg {
         WM_NCHITTEST => {
             if let Some(hit) = resize_hit(p, l) {
@@ -717,16 +909,6 @@ unsafe extern "system" fn button_proc(
             if hwnd == (*p).buttons[1] {
                 return LRESULT(HTMAXBUTTON as isize);
             }
-        }
-        WM_NCMOUSEMOVE | WM_NCLBUTTONDOWN | WM_NCLBUTTONUP if w.0 == HTMAXBUTTON as usize => {
-            // Snap layouts must target the resizable owner, not this popup.
-            if msg == WM_NCMOUSEMOVE {
-                reveal(p);
-                track(hwnd, true);
-                (*p).hot_button = hwnd;
-                let _ = InvalidateRect(Some(hwnd), None, false);
-            }
-            return SendMessageW((*p).owner, msg, Some(w), Some(l));
         }
         WM_NCLBUTTONDOWN if resize_direction(w.0 as u32).is_some() => {
             let _ = ReleaseCapture();
@@ -750,15 +932,7 @@ unsafe extern "system" fn button_proc(
                 (*p).previous_focus = previous;
             }
         }
-        WM_MOUSEMOVE => {
-            reveal(p);
-            track(hwnd, false);
-            if (*p).hot_button != hwnd {
-                (*p).hot_button = hwnd;
-                let _ = InvalidateRect(Some(hwnd), None, false);
-            }
-        }
-        WM_MOUSELEAVE | WM_NCMOUSELEAVE | WM_KILLFOCUS => {
+        WM_KILLFOCUS => {
             if (*p).hot_button == hwnd {
                 (*p).hot_button = HWND::default();
             }
@@ -795,7 +969,7 @@ unsafe fn paint(p: *mut State, draw: &DRAWITEMSTRUCT) {
     let _ = ScreenToClient(draw.hwndItem, &mut cursor);
     let hot = PtInRect(&draw.rcItem, cursor).as_bool();
     let close = draw.CtlID == 3;
-    let pressed = draw.itemState.0 & ODS_SELECTED.0 != 0;
+    let pressed = draw.itemState.0 & ODS_SELECTED.0 != 0 || (*p).pressed_button == draw.hwndItem;
     let contrast = super::menus::high_contrast();
     let bg = if contrast {
         COLORREF(GetSysColor(if hot {
@@ -811,10 +985,8 @@ unsafe fn paint(p: *mut State, draw: &DRAWITEMSTRUCT) {
         } else {
             COLORREF(if pressed { 0xd5d5d5 } else { 0xe5e5e5 })
         }
-    } else if dark {
-        COLORREF(0x272727)
     } else {
-        COLORREF(0xf8f8f8)
+        CLEAR
     };
     let ink = if contrast {
         COLORREF(GetSysColor(if hot {
@@ -829,10 +1001,8 @@ unsafe fn paint(p: *mut State, draw: &DRAWITEMSTRUCT) {
     };
     let base = if contrast {
         COLORREF(GetSysColor(COLOR_WINDOW))
-    } else if dark {
-        COLORREF(0x272727)
     } else {
-        COLORREF(0xf8f8f8)
+        CLEAR
     };
     let brush = CreateSolidBrush(base);
     FillRect(draw.hDC, &draw.rcItem, brush);
@@ -896,6 +1066,46 @@ unsafe fn paint(p: *mut State, draw: &DRAWITEMSTRUCT) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn complete_button_rectangles_hit_at_fractional_dpi_and_negative_monitor_coordinates() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let width = (46.0_f64 * scale).round() as i32;
+            let height = (32.0_f64 * scale).round() as i32;
+            let rects = std::array::from_fn(|index| RECT {
+                left: -800 + index as i32 * width,
+                right: -800 + (index as i32 + 1) * width,
+                top: -100,
+                bottom: -100 + height,
+            });
+            for (index, rect) in rects.iter().enumerate() {
+                for x in rect.left..rect.right {
+                    for y in rect.top..rect.bottom {
+                        assert_eq!(button_hit(&rects, POINT { x, y }), Some(index));
+                    }
+                }
+            }
+            assert_eq!(
+                button_hit(
+                    &rects,
+                    POINT {
+                        x: rects[2].right,
+                        y: -90
+                    }
+                ),
+                None
+            );
+            assert_eq!(
+                button_hit(
+                    &rects,
+                    POINT {
+                        x: -790,
+                        y: rects[0].bottom
+                    }
+                ),
+                None
+            );
+        }
+    }
     #[test]
     fn top_resize_band_precedes_reveal_and_preserves_corners() {
         for border in [2, 3, 4] {

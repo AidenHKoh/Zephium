@@ -60,6 +60,7 @@ mod paint;
 #[allow(dead_code)]
 mod semantic_screenshot;
 mod stage;
+pub use stage::{forget_window_caption_offset, set_window_caption_offset};
 #[cfg(feature = "agentic-browser")]
 mod work_rendering;
 pub(crate) use native_paths::{webview2_download_path, webview2_user_data_path};

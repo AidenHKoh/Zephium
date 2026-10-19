@@ -493,3 +493,49 @@ The final debug Review QA build succeeded and was launched through Explorer;
 the isolated executable has a responding window. Its SHA-256 is
 `b4c2726a4e4c1cb65b382f19a4bf7df816d361b3885f60dae153243d632a9305`.
 No installer or release-performance measurement was produced.
+
+## Caption refinement after owner feedback (2026-10-19)
+
+This supersedes the preceding caption appearance and acceptance notes. The
+window's theme wash is now 68% rather than 78%. The caption exposes the same
+acrylic as the sidebar: its background is color-keyed instead of painting a
+separate opaque grey band. High contrast retains the system's opaque colors.
+
+Revealing the caption translates the native page containers downward by 40 DIP
+over 400 ms. The WebView2 controller keeps its dimensions, and the stage clips
+the displaced page to its original bounds. This uses the split preview's native
+window positioning mechanism, not a screenshot or a compositor-only transform.
+One animation clock drives the controls and the page. Reduced motion skips the
+animation. Fullscreen suppression and native move/size transitions restore the
+page's original position; translation remains local to each window.
+
+The input surface covers each complete 46-by-32 DIP button rectangle, including
+transparent pixels. A press captures input and activates only after release in
+the same button. Motion pauses during a press so a moving target cannot escape
+the pointer. Maximize clicks now issue an explicit owner system command rather
+than forwarding nonclient button tracking between different HWNDs. Maximize
+hover still forwards to the resizable owner for Snap. Caption dragging waits
+for the system drag threshold, preserving the second click of a double-click.
+
+Focused owner acceptance:
+
+- Reveal and dismiss the caption over a web page and a split. Check for smooth
+  travel in both directions, unchanged page layout, and matching acrylic.
+- Click maximize near each corner and in the center of its button; repeat to
+  restore. Press, move outside, and release: it must not activate. Try a press
+  during reveal, caption double-click/drag, and the maximize-hover Snap menu.
+- Repeat at fractional DPI, after maximize/minimize, and after video fullscreen
+  or F11. Check a second window, internal pages, and keyboard caption access.
+
+Native visual/input acceptance remains owner-run: desktop automation did not
+expose the existing Review QA window in this session. This pass does not replace
+the broader release qualification and open failures recorded above.
+
+Validation: `frame check` passes, including all 909 unit tests; both focused
+Windows chrome component tests pass. Both frontend builds pass without budget
+changes. Eight Windows stage tests and two native caption geometry tests pass,
+including unchanged controller dimensions during translation, fractional DPI,
+negative monitor coordinates, and isolation after owner-handle reuse. Formatting
+and the isolated debug application build pass. The emitted-style gate still
+rejects the existing Work glow (`0 -10px 40px -20px var(--glow)`) against its 3px
+contact-shadow limit; that unrelated visual treatment was left unchanged.
