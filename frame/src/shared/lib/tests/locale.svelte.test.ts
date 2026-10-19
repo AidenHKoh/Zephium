@@ -50,7 +50,9 @@ describe("interface language", () => {
     { timeout: 30_000 },
     async () => {
       const { locale, runtime, root } = await load(["fr-CA", "en"]);
-      const m = await import("$shared/i18n/messages");
+      // Exercise translation of one message without transforming the entire
+      // generated message graph in this unbundled test runtime.
+      const m = await import("$shared/i18n/messages/new_tab.js");
       expect(locale.interfaceLanguages()).toContain("fr");
       await locale.applyLanguage("system");
       expect(runtime.getLocale()).toBe("fr");
