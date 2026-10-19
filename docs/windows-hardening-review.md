@@ -437,3 +437,59 @@ No migration, installer-scope change, signing implementation, or release-blocker
 change is part of this pass. This change is suitable for draft review of the
 verified fixes, not release approval. Merging remains a separate owner decision;
 the existing pending-vendor-fix publication block remains active.
+
+## Windows chrome polish (2026-10-19)
+
+The acrylic wash was overridden by the more specific transparent-material
+reset. Its ground now lives in the material axis, retaining the existing 78%
+theme tint instead of exposing bare system acrylic. Vibrancy and the opaque
+fallback keep their previous grounds.
+
+Windows now reveals a fading native caption across the top of the page.
+It leaves sidebar navigation accessible; internal pages reveal corner controls.
+The page retains its 8 DIP gutter, with no reserved title band and no page
+resize on hover. The existing native overlay handles pointer input above
+WebView2, dragging, resize edges, minimize/restore/close and keyboard focus.
+Maximize nonclient messages target the resizable owner for Snap integration.
+The reveal target also works when maximized and retires while the caption
+is visible so it cannot intercept the buttons. Fullscreen suppression is
+per window. Reduced motion and high contrast skip the fade.
+The retired DOM caption no longer receives JavaScript state updates on
+every resize and focus event. A reveal originating above the sidebar keeps
+checking for departure until the pointer leaves that otherwise hidden target.
+
+The Windows rail beside Downloads and other tool panels puts Browse/Work
+in its top row and search below it. Settings keeps the same ordering;
+macOS keeps its traffic-light and search layout.
+
+Owner acceptance for this pass:
+
+- Compare dark and light material over the same wallpaper and over another
+  window; check the sidebar and outer gutter for a visible seam.
+- Hover the top edge, then leave it. The caption must fade over a stationary
+  page. Repeat maximized and after moving between monitors with different DPI.
+- Use caption drag, double-click, minimize, restore, close and maximize-hover
+  Snap. Check Alt+Space and Alt+F10 keyboard access, and return focus to the page.
+- Enter and exit video fullscreen and F11; a second browser window must keep
+  its controls. Check Browse/Work and search in Downloads, Bookmarks and Settings.
+
+These are native visual/input acceptance checks, not claims established by
+the component tests. The broader engineering limitations above remain open.
+
+Validation for this UI pass: all 10 scoped shell/sidebar component tests pass,
+including the computed acrylic ground and Windows rail ordering. The eight
+core layout tests and the native caption resize-hit test pass on Windows.
+Frontend type checking, lint, stylelint, formatting, unused-code checks and
+both UI builds pass; bundle budgets are unchanged. The unit run passed 908
+of 909 tests; its locale test imported the entire generated message catalog
+and timed out even on a focused rerun. Importing only the message that test
+exercises preserves its assertions and makes all five locale tests pass in
+1.61 seconds (909 unit tests passed across the run and focused recheck).
+The emitted-style gate still rejects the existing Work glow's 40px shadow;
+that previously recorded failure is unchanged.
+
+Implementation: `03bab7f2` (Windows chrome) and `d4507b04` (locale test).
+The final debug Review QA build succeeded and was launched through Explorer;
+the isolated executable has a responding window. Its SHA-256 is
+`b4c2726a4e4c1cb65b382f19a4bf7df816d361b3885f60dae153243d632a9305`.
+No installer or release-performance measurement was produced.
