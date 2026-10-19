@@ -13,12 +13,9 @@ pub struct Metrics {
     pub sidebar_width: f64,
     pub padding: f64,
     pub gap: f64,
-    /// The title band above the page. Windows draws the window's controls in
-    /// it; elsewhere the platform's own controls sit over the sidebar.
+    /// Optional reserved title band. Native overlay controls reserve no space.
     pub caption: f64,
 }
-
-pub const WINDOWS_CAPTION: f64 = 32.0;
 
 impl Default for Metrics {
     fn default() -> Self {
@@ -26,11 +23,7 @@ impl Default for Metrics {
             sidebar_width: 240.0,
             padding: 8.0,
             gap: 8.0,
-            caption: if cfg!(target_os = "windows") {
-                WINDOWS_CAPTION
-            } else {
-                0.0
-            },
+            caption: 0.0,
         }
     }
 }
@@ -150,13 +143,21 @@ mod tests {
 
     #[test]
     fn a_title_band_lowers_the_page_and_leaves_the_sidebar_full_height() {
-        let m = Metrics {
-            caption: WINDOWS_CAPTION,
-            ..M
-        };
+        let m = Metrics { caption: 32.0, ..M };
         let l = compute(Size::new(1200.0, 800.0), Mode::Sidebar, m, true);
         assert_eq!(l.chrome, Rect::new(0.0, 0.0, 248.0, 800.0));
         assert_eq!(l.content, Some(Rect::new(256.0, 40.0, 936.0, 752.0)));
+    }
+
+    #[test]
+    fn native_overlay_controls_reserve_no_page_space() {
+        let l = compute(
+            Size::new(1200.0, 800.0),
+            Mode::Sidebar,
+            Metrics::default(),
+            true,
+        );
+        assert_eq!(l.content, Some(Rect::new(256.0, 8.0, 936.0, 784.0)));
     }
 
     #[test]

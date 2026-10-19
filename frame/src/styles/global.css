@@ -74,12 +74,8 @@ button {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* The chrome is the native material and nothing else. A wash here paints a
-   rectangle that does not reach the window's own edges, so the tint stops
-   short of the frame and the seam it was meant to remove reappears as a
-   visible plate. Tinting the window belongs to the native layer, not to us.
-   The opaque tier is the exception: with no material there is nothing to
-   look through, so the column has to supply its own ground. */
+/* Material grounds belong to the material axis. The opaque tier below
+   supplies its own ground when no native backdrop is available. */
 
 /* The chrome WebView is only as wide as the column while a page is shown, and
    the resize handle straddles the column's edge, so the document is a few

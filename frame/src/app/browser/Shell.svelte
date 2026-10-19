@@ -51,9 +51,15 @@
   import { focus } from "$domain/time";
   import { loadNewTabSearch } from "$features/search";
   import { loadNewTab } from "$features/newtab";
-  import { ModeTabs, PrivateBar, Sidebar, SidebarNotice, UtilityTray } from "$features/sidebar";
+  import {
+    ModeTabs,
+    PrivateBar,
+    Sidebar,
+    SidebarSearch,
+    SidebarNotice,
+    UtilityTray,
+  } from "$features/sidebar";
   import { IS_WINDOWS } from "$shared/platform";
-  import { CaptionButtons } from "$shared/ui/WindowControls";
   import { installChromeMenu } from "$shared/lib/chrome-menu";
   import { tabs } from "$domain/tabs";
   import { preferences } from "$domain/preferences";
@@ -286,7 +292,6 @@
   class="shell flex h-screen w-screen p-2"
   data-tauri-drag-region
   class:pb-0={inWork}
-  class:pt-0={IS_WINDOWS}
   data-caption={IS_WINDOWS || undefined}
   data-zephium-active-tab={tabs.activeId() ?? ""}
   data-zephium-surface={browserPage.currentPage() ?? "browse"}
@@ -296,7 +301,10 @@
     >{#snippet browserBody(compact)}
       {#if compact && (inWork || paneled)}
         {#if !inWork}<AddressField {compact} /><StoreInstallRail />{/if}
-        {#if paneled}<ModeTabs compact standalone />{/if}
+        {#if paneled && IS_WINDOWS}
+          {#if browserPage.currentPage() === "settings"}<ModeTabs compact standalone />{/if}
+          <div class="rail-search"><SidebarSearch /></div>
+        {:else if paneled}<ModeTabs compact standalone />{/if}
       {:else if compact}<AddressField {compact} /><StoreInstallRail />
       {:else if !incognito && preferences.enabled("work")}<div class="sidebar-head">
           <ModeTabs />
@@ -420,11 +428,6 @@
       >{/snippet}</Sidebar
   >
   <div class="stage-column">
-    {#if IS_WINDOWS}
-      <!-- The window's title band: the page starts below it, and the controls
-         stand in its corner. Native lowers the page by the same height. -->
-      <div class="title-band" data-tauri-drag-region><CaptionButtons /></div>
-    {/if}
     {#if browserPage.navigationFailed()}<div class="navigation-error" role="alert">
         {m.browser_nav_failed()}
       </div>{/if}
@@ -586,14 +589,6 @@
 </div>
 
 <style>
-  /* One continuous tint over the native acrylic, including the outer gutter.
-     Windows ignores the backdrop's own tint, so this layer is the window's
-     colour: deep enough that the desktop reads as light in it, not as the
-     window's colour. */
-  :global(html[data-material="acrylic"] body) {
-    background: color-mix(in srgb, var(--color-chrome) var(--wash-window), transparent);
-  }
-
   .stage-column {
     display: flex;
     flex: 1;
@@ -607,19 +602,10 @@
     min-height: 0;
   }
 
-  /* 8px of window gutter and the 32px band native keeps above the page. The
-     controls run to the window's own corner, through the gutter. */
-  .title-band {
+  .rail-search {
     display: flex;
-    flex: none;
-    justify-content: flex-end;
-    height: 40px;
-    margin-inline-end: -8px;
-  }
-
-  /* The column's head centres on the band, level with the caption glyphs. */
-  .shell[data-caption] > :global(.browser-sidebar) {
-    margin-block-start: 4px;
+    justify-content: center;
+    margin-block: 8px 14px;
   }
 
   .sidebar-mode-body {

@@ -492,8 +492,12 @@ struct ChromeAdapter {
 }
 
 impl Chrome for ChromeAdapter {
-    fn position(&self, _frame: ChromeFrame) -> bool {
-        true
+    fn position(&self, frame: ChromeFrame) -> bool {
+        let window = self.window.clone();
+        let page_left = (!frame.fill_width).then_some(frame.rect.x + frame.rect.width);
+        self.window
+            .run_on_main_thread(move || caption::set_page_left(&window, page_left))
+            .is_ok()
     }
 }
 

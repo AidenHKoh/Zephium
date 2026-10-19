@@ -1,12 +1,10 @@
 <script lang="ts">
-  import { surface as browserPage } from "$domain/surface";
   import * as m from "$shared/i18n/messages";
   import {
     ArrowLeft02Icon,
     ArrowRight02Icon,
     EllipsisIcon,
     Refresh01Icon,
-    Search01Icon,
     SidebarLeftIcon,
   } from "@hugeicons/core-free-icons";
   import { tabs } from "$domain/tabs";
@@ -19,6 +17,7 @@
   import { IS_MAC, IS_WINDOWS } from "$shared/platform";
   import IconButton from "$shared/ui/IconButton";
   import ModeTabs from "./ModeTabs.svelte";
+  import SidebarSearch from "./SidebarSearch.svelte";
   import WindowControls from "$shared/ui/WindowControls";
 
   let {
@@ -62,14 +61,6 @@
       listed,
       webext.isAvailable(),
     );
-  }
-
-  // With a page in front the search opens on its address, as the field would. Work has no
-  // page in front, whatever tab Browse left behind, so there it opens empty.
-  function editAddress() {
-    const tab = browserPage.currentPage() === "work" ? null : tabs.activeTab();
-    if (tab?.url && (tab.content ?? "web") === "web") void commands.launcherEdit(tab.id, tab.url);
-    else void commands.runCommand("launcher.toggle");
   }
 
   let handledCommand = 0;
@@ -118,13 +109,7 @@
           haspopup
           onclick={openSidebarMenu}
         />{/if}
-      <IconButton
-        icon={Search01Icon}
-        label={m.ui_search_or_enter_an_address()}
-        size={15}
-        buttonSize={26}
-        onclick={editAddress}
-      />
+      <SidebarSearch small />
     </div>
     <span class="mt-[6px] mb-[7px] h-px w-[22px] rounded-full bg-border" aria-hidden="true"></span>
   </header>
@@ -132,19 +117,19 @@
   <header
     class="flex shrink-0 items-center gap-px pe-1.5"
     style:height="var(--titlebar-height)"
-    style:padding-inline-start={IS_MAC ? "var(--traffic-light-inset)" : "6px"}
+    style:padding-inline-start={IS_MAC
+      ? "var(--traffic-light-inset)"
+      : launcher && IS_WINDOWS
+        ? "0"
+        : "6px"}
     aria-label={m.ui_navigation()}
   >
     <!-- Beside a tool panel the panel's own close button already gives the
          column back, so a second way to the same shape would only crowd the
          lights; search stands there instead. -->
-    {#if launcher}<span class="ms-1.5 flex"
-        ><IconButton
-          icon={Search01Icon}
-          label={m.ui_search_or_enter_an_address()}
-          onclick={editAddress}
-        /></span
-      >{:else}<IconButton
+    {#if launcher && IS_WINDOWS}<span class="flex w-14 shrink-0 justify-center"
+        ><ModeTabs compact /></span
+      >{:else if launcher}<span class="ms-1.5 flex"><SidebarSearch /></span>{:else}<IconButton
         icon={SidebarLeftIcon}
         label={m.ui_compact_mode()}
         onclick={ontoggle}

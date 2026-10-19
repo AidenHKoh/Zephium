@@ -3,7 +3,7 @@
  * never re-derives the platform from the user agent.
  *
  * macOS keeps AppKit's traffic lights through an overlay title bar; Windows
- * draws its controls in a title band above the page. Linux uses sidebar
+ * reveals native controls over the page at the top edge. Linux uses sidebar
  * controls.
  */
 const userAgent = navigator.userAgent;

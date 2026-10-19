@@ -1,6 +1,5 @@
-//! The window's controls are drawn by chrome in its title band. What stays
-//! native is the top resize grip: a near-transparent edge target above the
-//! child WebViews, which would otherwise consume the frameless top border.
+//! A fading native caption above the child WebViews. Revealing it never
+//! changes page bounds; the top gutter remains a resize and reveal target.
 use tauri::WebviewWindow;
 use windows::core::w;
 use windows::Win32::{
@@ -17,15 +16,14 @@ use windows::Win32::{
 const ID: usize = 0x5a434150;
 const HIDE: usize = ID + 1;
 const FADE: usize = ID + 2;
-// A page filling the screen owns every pixel, the top edge included.
-static SUPPRESSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-const CHROME_OWNS_CONTROLS: bool = true;
 struct State {
     owner: HWND,
     strip: HWND,
     edge: HWND,
     buttons: [HWND; 3],
     expanded: bool,
+    suppressed: bool,
+    page_left: Option<f64>,
     window: WebviewWindow,
     previous_focus: HWND,
     laying_out: bool,
@@ -112,6 +110,8 @@ pub fn install(window: &WebviewWindow) -> bool {
             edge,
             buttons,
             expanded: false,
+            suppressed: false,
+            page_left: None,
             window: window.clone(),
             previous_focus: HWND::default(),
             laying_out: false,
@@ -144,7 +144,6 @@ pub fn install(window: &WebviewWindow) -> bool {
 /// Hides the caption and its reveal edge while page content fills the
 /// screen. Runs on the window's UI thread.
 pub fn set_suppressed(window: &WebviewWindow, suppressed: bool) {
-    SUPPRESSED.store(suppressed, std::sync::atomic::Ordering::Relaxed);
     let Ok(owner) = window.hwnd() else {
         return;
     };
@@ -161,7 +160,29 @@ pub fn set_suppressed(window: &WebviewWindow, suppressed: bool) {
         .as_bool()
             && data != 0
         {
-            layout(data as *mut State);
+            let state = data as *mut State;
+            (*state).suppressed = suppressed;
+            layout(state);
+        }
+    }
+}
+
+/// The shell's admitted chrome boundary, in logical coordinates. Internal
+/// pages need only the corner controls; web pages get a band over the page.
+pub fn set_page_left(window: &WebviewWindow, page_left: Option<f64>) {
+    let Ok(owner) = window.hwnd() else {
+        return;
+    };
+    unsafe {
+        let mut data = 0usize;
+        if GetWindowSubclass(HWND(owner.0), Some(owner_proc), ID, Some(&mut data)).as_bool()
+            && data != 0
+        {
+            let state = data as *mut State;
+            if (*state).page_left != page_left {
+                (*state).page_left = page_left;
+                layout(state);
+            }
         }
     }
 }
@@ -175,15 +196,21 @@ unsafe fn layout(p: *mut State) {
     let button = (28.0 * scale).round() as i32;
     let padding = (5.0 * scale).round() as i32;
     let gap = (4.0 * scale).round() as i32;
-    let width = button * 3 + padding * 2 + gap * 2;
+    let controls_width = button * 3 + padding * 2 + gap * 2;
     let height = button + padding * 2;
     let mut rect = RECT::default();
     let _ = GetClientRect(owner, &mut rect);
+    let left = (*p)
+        .page_left
+        .map(|left| (left * scale).round() as i32)
+        .unwrap_or(rect.right - controls_width)
+        .clamp(0, (rect.right - controls_width).max(0));
+    let width = (rect.right - left).max(controls_width);
     let mut origin = POINT::default();
     let _ = ClientToScreen(owner, &mut origin);
     let foreground = GetForegroundWindow();
     let show = !(*p).changing_state
-        && !SUPPRESSED.load(std::sync::atomic::Ordering::Relaxed)
+        && !(*p).suppressed
         && !(*p).sizing
         && IsWindowVisible(owner).as_bool()
         && !IsIconic(owner).as_bool()
@@ -197,7 +224,7 @@ unsafe fn layout(p: *mut State) {
     let _ = SetWindowPos(
         (*p).strip,
         None,
-        origin.x + rect.right - width,
+        origin.x + left,
         origin.y,
         width,
         height,
@@ -208,21 +235,23 @@ unsafe fn layout(p: *mut State) {
     if SetWindowRgn((*p).strip, Some(region), true) == 0 {
         let _ = DeleteObject(region.into());
     }
-    let border = resize_border(owner);
+    // The first pixels resize; the remainder of the existing page gutter
+    // reveals the caption, including when maximized (no resize border).
+    let reveal_height = (8.0 * scale).round() as i32;
     let _ = SetWindowPos(
         (*p).edge,
         None,
         origin.x,
         origin.y,
         rect.right.max(1),
-        border,
+        reveal_height,
         SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
     );
     for (index, hwnd) in (*p).buttons.into_iter().enumerate() {
         let _ = SetWindowPos(
             hwnd,
             None,
-            padding + index as i32 * (button + gap),
+            width - controls_width + padding + index as i32 * (button + gap),
             padding,
             button,
             button,
@@ -239,7 +268,16 @@ unsafe fn layout(p: *mut State) {
             SW_HIDE
         },
     );
-    let _ = ShowWindow((*p).edge, if show { SW_SHOWNA } else { SW_HIDE });
+    // Once visible, the caption itself owns resize hit testing. Keeping the
+    // reveal target above it would intercept the tops of the buttons.
+    let _ = ShowWindow(
+        (*p).edge,
+        if show && !(*p).expanded && (*p).opacity == 0 {
+            SW_SHOWNA
+        } else {
+            SW_HIDE
+        },
+    );
     let _ = InvalidateRect(Some((*p).strip), None, false);
     (*p).laying_out = false;
 }
@@ -336,7 +374,7 @@ unsafe fn transition(p: *mut State, expanded: bool) {
     layout(p);
 }
 unsafe fn reveal(p: *mut State) {
-    if CHROME_OWNS_CONTROLS || (*p).changing_state || (*p).sizing {
+    if (*p).suppressed || (*p).changing_state || (*p).sizing {
         return;
     }
     let _ = KillTimer(Some((*p).strip), HIDE);
@@ -378,7 +416,11 @@ unsafe extern "system" fn edge_proc(
             reveal(p);
             track(hwnd, false);
         }
-        WM_MOUSELEAVE => {
+        WM_NCMOUSEMOVE => {
+            reveal(p);
+            track(hwnd, true);
+        }
+        WM_MOUSELEAVE | WM_NCMOUSELEAVE => {
             SetTimer(Some((*p).strip), HIDE, 450, None);
         }
         // Keep the edge useful as a native drag handle.
@@ -442,7 +484,7 @@ unsafe extern "system" fn owner_proc(
         drop(Box::from_raw(p));
         return DefSubclassProc(hwnd, msg, w, l);
     }
-    if !CHROME_OWNS_CONTROLS && msg == WM_SYSKEYDOWN && w.0 == VK_F10.0 as usize {
+    if !(*p).suppressed && msg == WM_SYSKEYDOWN && w.0 == VK_F10.0 as usize {
         reveal(p);
         let _ = SetFocus(Some((*p).buttons[0]));
         return LRESULT(0);
@@ -515,6 +557,10 @@ unsafe extern "system" fn strip_proc(
             if let Some(hit) = resize_hit(p, l) {
                 return LRESULT(hit as isize);
             }
+            return LRESULT(HTCAPTION as isize);
+        }
+        WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK if w.0 == HTCAPTION as usize => {
+            return SendMessageW((*p).owner, msg, Some(w), Some(l));
         }
         WM_NCLBUTTONDOWN if resize_direction(w.0 as u32).is_some() => {
             let _ = ReleaseCapture();
@@ -546,7 +592,11 @@ unsafe extern "system" fn strip_proc(
             reveal(p);
             track(hwnd, false);
         }
-        WM_MOUSELEAVE => {
+        WM_NCMOUSEMOVE => {
+            reveal(p);
+            track(hwnd, true);
+        }
+        WM_MOUSELEAVE | WM_NCMOUSELEAVE => {
             SetTimer(Some(hwnd), HIDE, 450, None);
         }
         WM_TIMER if w.0 == FADE => {
@@ -561,6 +611,7 @@ unsafe extern "system" fn strip_proc(
                 let _ = KillTimer(Some(hwnd), FADE);
                 if !(*p).expanded {
                     let _ = ShowWindow(hwnd, SW_HIDE);
+                    layout(p);
                 }
             }
             return LRESULT(0);
@@ -581,6 +632,10 @@ unsafe extern "system" fn strip_proc(
                 && !(*p).buttons.contains(&focus)
             {
                 transition(p, false);
+            } else if !PtInRect(&rect, cursor).as_bool() && PtInRect(&edge, cursor).as_bool() {
+                // The hidden reveal window cannot report a later leave from
+                // the sidebar's gutter. Keep checking only during this hold.
+                SetTimer(Some(hwnd), HIDE, 450, None);
             }
         }
         WM_COMMAND if (w.0 >> 16) == BN_CLICKED as usize => {
@@ -659,6 +714,19 @@ unsafe extern "system" fn button_proc(
             if let Some(hit) = resize_hit(p, l) {
                 return LRESULT(hit as isize);
             }
+            if hwnd == (*p).buttons[1] {
+                return LRESULT(HTMAXBUTTON as isize);
+            }
+        }
+        WM_NCMOUSEMOVE | WM_NCLBUTTONDOWN | WM_NCLBUTTONUP if w.0 == HTMAXBUTTON as usize => {
+            // Snap layouts must target the resizable owner, not this popup.
+            if msg == WM_NCMOUSEMOVE {
+                reveal(p);
+                track(hwnd, true);
+                (*p).hot_button = hwnd;
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            return SendMessageW((*p).owner, msg, Some(w), Some(l));
         }
         WM_NCLBUTTONDOWN if resize_direction(w.0 as u32).is_some() => {
             let _ = ReleaseCapture();
@@ -690,7 +758,7 @@ unsafe extern "system" fn button_proc(
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
         }
-        WM_MOUSELEAVE | WM_KILLFOCUS => {
+        WM_MOUSELEAVE | WM_NCMOUSELEAVE | WM_KILLFOCUS => {
             if (*p).hot_button == hwnd {
                 (*p).hot_button = HWND::default();
             }

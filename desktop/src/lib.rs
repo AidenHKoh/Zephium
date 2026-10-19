@@ -3355,16 +3355,6 @@ fn apply_native_theme(app: &tauri::AppHandle, mode: &str) {
     reinstall_native_materials(app);
 }
 
-/// The title band's caption buttons draw from this; the chrome is not granted
-/// the window state commands or event listening.
-#[cfg(target_os = "windows")]
-fn publish_window_state(window: &WebviewWindow, focused: bool) {
-    let maximized = window.is_maximized().unwrap_or(false);
-    let _ = window.eval(format!(
-        "window.__zephiumWindow={{maximized:{maximized},focused:{focused}}};window.dispatchEvent(new CustomEvent('zephium:window-state'))"
-    ));
-}
-
 fn accepted_ui_operation() -> zephium_ipc::OperationAdmission {
     zephium_ipc::OperationAdmission {
         operation_id: None,
@@ -6641,8 +6631,6 @@ pub fn run() {
                         if minimized {
                             return;
                         }
-                        #[cfg(target_os = "windows")]
-                        publish_window_state(&resize_window, resize_window.is_focused().unwrap_or(true));
                         let size = platform::imp::content_size(&resize_window)
                             .unwrap_or_else(|| inner_logical(&resize_window));
                         resize_shell.dispatch(Command::SetWindowSize(size));
@@ -6736,8 +6724,6 @@ pub fn run() {
                         }
                     }
                     tauri::WindowEvent::Focused(true) => {
-                        #[cfg(target_os = "windows")]
-                        publish_window_state(&resize_window, true);
                         resize_shell.dispatch(Command::SetWindowFocused(true));
                         // Some window managers restore without a distinct
                         // resize notification. Wake content before it can be
@@ -6749,8 +6735,6 @@ pub fn run() {
                     // background work: audio and timers must continue. Only
                     // an OS-minimized window hides all content views.
                     tauri::WindowEvent::Focused(false) => {
-                        #[cfg(target_os = "windows")]
-                        publish_window_state(&resize_window, false);
                         resize_shell.dispatch(Command::SetWindowFocused(false));
                         voice::window_blurred(resize_window.app_handle());
                         if resize_window.is_minimized().unwrap_or(false) {
