@@ -293,7 +293,6 @@
   .surface {
     --flare: 20px;
     --edge: var(--color-border-strong);
-    --glow: color-mix(in srgb, black 26%, transparent);
     --fill: var(--color-chrome);
 
     position: relative;
@@ -306,7 +305,7 @@
     padding: 8px 8px 10px;
     border-radius: var(--radius-panel) var(--radius-panel) 0 0;
     isolation: isolate;
-    box-shadow: 0 -10px 40px -20px var(--glow);
+    box-shadow: var(--shadow-sheet);
     transition: grid-template-columns var(--motion-slow) var(--ease-emphasized);
   }
 

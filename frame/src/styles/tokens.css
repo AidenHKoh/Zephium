@@ -391,6 +391,8 @@
   --shadow-float: 0 6px 22px rgb(0 0 0 / 0.34), 0 0 0 0.5px rgb(255 255 255 / 0.08);
   --shadow-overlay: 0 12px 36px rgb(0 0 0 / 0.3), 0 0 0 0.5px rgb(255 255 255 / 0.08);
   --shadow-popover: var(--shadow-float);
+  /* The composer sheet rises from the window's foot, so its lift is a soft upward spread. */
+  --shadow-sheet: 0 -10px 40px -20px rgb(0 0 0 / 0.26);
 
   /* A rim and one wide soft drop, and nothing else. Stacked or tight shadows
      read as weight pressing down rather than as height, which is what makes a
