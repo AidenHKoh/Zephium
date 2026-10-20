@@ -808,7 +808,9 @@ pub(crate) fn classify(
                                     .filter(|part| creates(&label(part)))
                                     .find_map(|part| commit_words(&label(part)))
                             })
-                            .unwrap_or(if composer_has_send(snapshot) {
+                            // A Send or Comment elsewhere on the page makes
+                            // Enter a message only in a message box.
+                            .unwrap_or(if composer(node) && composer_has_send(snapshot) {
                                 Consequence::Communication
                             } else {
                                 Consequence::Save
@@ -2861,6 +2863,25 @@ mod tests {
             ),
             SiteEffect::Commit(Consequence::Save),
             "Enter in the editor saves the task, never shares the page",
+        );
+        // A task list whose tasks carry Comment buttons, with the add row's
+        // own button out of the look.
+        let listed = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"button","n":"Comment","o":1,"ak":1}),
+            json!({"k":3,"p":0,"r":"group","n":"Quick add"}),
+            json!({"k":4,"p":2,"r":"textbox","n":"Task name","o":11,"fs":1,"es":[1,2,false],
+                "v":{"k":"text","value":"Zephium test"}}),
+        ]);
+        assert_eq!(
+            effect_key(
+                &listed,
+                4,
+                SemanticActionKind::Press,
+                Some(SemanticPressKey::Enter)
+            ),
+            SiteEffect::Commit(Consequence::Save),
+            "a Comment button elsewhere does not make a task a message",
         );
         assert_eq!(
             effect_key(
