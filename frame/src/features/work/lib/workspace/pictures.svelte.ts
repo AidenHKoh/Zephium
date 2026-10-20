@@ -56,6 +56,8 @@ export class PictureQueue {
   readonly #admissions = new SvelteSet<string>();
   readonly #refusals = new SvelteMap<string, { count: number; after: number }>();
   readonly #admittedFor = new SvelteSet<string>();
+  /** The media element the backend placed for a candidate address, so the next subject sharing it relates instead of asking again. */
+  readonly #admittedMedia = new SvelteMap<string, string>();
   readonly #gallery = new SvelteSet<string>();
   #running = false;
   #again = false;
@@ -71,6 +73,8 @@ export class PictureQueue {
 
   /** The media element on this canvas that already holds one candidate. */
   #placed(snapshot: WorkEnvironmentSnapshot, address: string): string | undefined {
+    const admitted = this.#admittedMedia.get(`${snapshot.id} ${address}`);
+    if (admitted && snapshot.elements.some((element) => element.id === admitted)) return admitted;
     const media = this.#deps.media();
     for (const element of snapshot.elements) {
       if (element.reference.kind !== "resource") continue;
@@ -144,9 +148,11 @@ export class PictureQueue {
         element,
         candidate,
       );
-      return result.status === "ok" && result.data.kind === "admitted";
+      return result.status === "ok" && result.data.kind === "admitted"
+        ? result.data.element
+        : undefined;
     } catch {
-      return false;
+      return undefined;
     }
   }
 
@@ -185,7 +191,9 @@ export class PictureQueue {
               continue;
             }
             this.#admissions.add(key);
-            if (await this.#admit(current.id, element, candidate)) {
+            const admitted = await this.#admit(current.id, element, candidate);
+            if (admitted) {
+              this.#admittedMedia.set(key, admitted);
               this.#admittedFor.add(`${current.id} ${owed}`);
               break;
             }
