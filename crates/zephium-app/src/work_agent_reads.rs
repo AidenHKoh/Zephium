@@ -303,11 +303,10 @@ impl Driver {
                 };
                 let outcome = checked_outcome(outcome, request.limits);
                 // A page task may have drafted something: it is never run
-                // twice, unless it ended to start over (a sign-in finished in
-                // a tab, or a saved cookie refusal replaced the page) or lost
-                // its page before acting.
-                let signed_in =
-                    matches!(&outcome, Ok(outcome) if outcome.rerun && outcome.usage.is_some());
+                // twice, unless it ended to start over (the person signed in
+                // or passed a check on it, or a saved cookie refusal replaced
+                // the page) or lost its page before acting.
+                let signed_in = matches!(&outcome, Ok(outcome) if starts_over(outcome));
                 let retry = prior.is_none()
                     && terminal.is_none()
                     && failure.is_none()
@@ -1466,6 +1465,20 @@ fn job_listing(kind: WorkStepKindV1) -> WorkStepKindV1 {
     }
 }
 
+/// A read that ended so it can start over on a fresh page in the same
+/// session: a saved cookie refusal replaced its page, or the person signed in
+/// or passed a check on it and the page then failed (a sign-in that moves on
+/// to the site's app loses the page it began on) before it sent or saved
+/// anything.
+fn starts_over(outcome: &WorkBrowserOutcome) -> bool {
+    outcome.usage.is_some()
+        && (outcome.rerun
+            || (outcome.helped
+                && outcome.status == WorkStepStatus::Failed
+                && outcome.committed.is_empty()
+                && !outcome.held_back))
+}
+
 fn retryable_read(step: &WorkStepKindV1, outcome: &Result<WorkBrowserOutcome, WorkError>) -> bool {
     let Ok(outcome) = outcome else {
         return false;
@@ -1511,7 +1524,7 @@ fn retry_request(
         request.construction_attempt
     };
     // A sign-in the person finished counts as their yes for the site.
-    let entry = request.entry && !matches!(outcome, Ok(outcome) if outcome.rerun);
+    let entry = request.entry && !matches!(outcome, Ok(outcome) if starts_over(outcome));
     WorkAgentBrowseRequest {
         limits,
         construction_attempt,
@@ -1717,6 +1730,15 @@ mod tests {
             redirect: None,
         };
         assert!(retryable_read(&step, &Ok(outcome(read_note::UNSETTLED, 0))));
+        let mut helped = outcome("The page asked to sign in", 3);
+        assert!(!starts_over(&helped));
+        helped.helped = true;
+        assert!(
+            starts_over(&helped),
+            "the person signed in, then the page moved on"
+        );
+        helped.committed = vec!["Sent on the page: hi".into()];
+        assert!(!starts_over(&helped), "never twice once it sent something");
         assert!(!retryable_read(
             &step,
             &Ok(outcome(read_note::UNSETTLED, 1))
