@@ -114,8 +114,9 @@ test("upgrading opens checkout and says the plan will update on its own", async 
   native.buy.mockResolvedValue(reply({ ...signedIn, checkout_open: true }));
   const screen = await render(AccountPage);
 
-  await expect.element(screen.getByText("$20 a month")).toBeVisible();
-  await screen.getByRole("button", { name: "Upgrade" }).click();
+  await screen.getByRole("button", { name: "Upgrade", exact: true }).click();
+  await expect.element(screen.getByText("$20")).toBeVisible();
+  await screen.getByRole("button", { name: "Upgrade to Pro" }).click();
   expect(native.buy).toHaveBeenCalledWith({ kind: "plan", plan: "pro", interval: "monthly" });
   await expect
     .element(screen.getByText("Finish checkout in the new tab. Your plan updates here on its own."))

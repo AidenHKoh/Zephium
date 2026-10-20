@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { tick } from "svelte";
-  import { PencilEdit02Icon } from "@hugeicons/core-free-icons";
+  import { tick, type Component } from "svelte";
+  import { Camera01Icon, PencilEdit02Icon } from "@hugeicons/core-free-icons";
   import { accountSession as session, initials, planName } from "$domain/account";
   import { identityAvatar, profiles } from "$domain/profiles";
   import * as m from "$shared/i18n/messages";
@@ -21,6 +21,8 @@
   let name = $state("");
   let form = $state<HTMLFormElement | null>(null);
   let opener = $state<HTMLButtonElement | null>(null);
+  let Picture = $state.raw<Component | null>(null);
+  let picking = $state(false);
   const faultText = $derived(
     fault?.action === "name" ? explainAccountFault(fault.fault, fault.retryAfter) : null,
   );
@@ -31,6 +33,11 @@
     editing = true;
     await tick();
     form?.querySelector("input")?.select();
+  }
+
+  async function pick() {
+    Picture ??= (await import("./AccountPicture.svelte")).default;
+    picking = true;
   }
 
   async function stop() {
@@ -46,7 +53,17 @@
 </script>
 
 <header class="account-identity">
-  <ProfileAvatar view={avatar} size={64} />
+  {#if profiles.current()}<button
+      type="button"
+      class="picture"
+      aria-label={m.account_picture_change()}
+      onclick={() => void pick()}
+    >
+      <ProfileAvatar view={avatar} size={64} />
+      <span class="badge" aria-hidden="true"><Icon icon={Camera01Icon} size={12} /></span>
+    </button>
+    {#if Picture}<Picture bind:open={picking} />{/if}
+  {:else}<ProfileAvatar view={avatar} size={64} />{/if}
   <div class="who">
     {#if editing}<form
         class="editor"
@@ -100,6 +117,53 @@
     align-items: center;
     gap: 20px;
     padding: 4px 0 34px;
+  }
+
+  .picture {
+    position: relative;
+    display: grid;
+    flex: none;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    cursor: default;
+    transition: scale var(--motion-base) var(--ease-spring);
+  }
+
+  .picture:active {
+    scale: 0.96;
+  }
+
+  .picture:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  /* Always there, so changing the picture is discoverable without hovering. */
+  .badge {
+    position: absolute;
+    inset-block-end: -2px;
+    inset-inline-end: -2px;
+    display: grid;
+    inline-size: 24px;
+    block-size: 24px;
+    border-radius: 50%;
+    background: var(--color-raised);
+    box-shadow:
+      0 0 0 2px var(--color-canvas),
+      var(--shine-top);
+    color: var(--color-label-secondary);
+    place-items: center;
+    transition:
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out);
+  }
+
+  .picture:hover .badge,
+  .picture:focus-visible .badge {
+    background: var(--row-pressed);
+    color: var(--color-text);
   }
 
   .who {
@@ -182,5 +246,12 @@
   .error {
     color: var(--color-danger);
     font-size: var(--text-label);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .picture,
+    .badge {
+      transition: none;
+    }
   }
 </style>

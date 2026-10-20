@@ -185,6 +185,8 @@ test("a paid account sees the way to the other plan, and a quote shows its price
   const screen = await render(AccountPage);
 
   expect(screen.getByRole("button", { name: "Upgrade" }).elements()).toHaveLength(0);
+  await screen.getByRole("button", { name: "Change plan" }).click();
+  expect(screen.getByRole("button", { name: /^Upgrade to/u }).elements()).toHaveLength(0);
   await screen.getByRole("button", { name: "Switch to Max" }).click();
   expect(native.preview).toHaveBeenCalledWith("max", "monthly");
   await expect.element(screen.getByRole("heading", { name: "Upgrade to Max" })).toBeVisible();
@@ -312,9 +314,10 @@ test("under billing review there are no purchase buttons, but the portal and a d
     .toBeVisible();
   await expect.element(screen.getByText("support@zephium.app")).toBeVisible();
   expect(screen.getByRole("button", { name: "Upgrade" }).elements()).toHaveLength(0);
-  expect(screen.getByRole("button", { name: "Switch to Max" }).elements()).toHaveLength(0);
-  expect(screen.getByText("Credits", { exact: true }).elements()).toHaveLength(0);
+  expect(screen.getByRole("button", { name: "Buy credits" }).elements()).toHaveLength(0);
   await expect.element(screen.getByRole("button", { name: "Manage subscription" })).toBeVisible();
+  await screen.getByRole("button", { name: "Change plan" }).click();
+  expect(screen.getByRole("button", { name: "Switch to Max" }).elements()).toHaveLength(0);
   await expect.element(screen.getByRole("button", { name: "Switch to Pro" })).toBeVisible();
   await screen.unmount();
 
@@ -322,8 +325,8 @@ test("under billing review there are no purchase buttons, but the portal and a d
   native.get.mockResolvedValue(reply({ ...free, billing_review: true }));
   const unpaid = await render(AccountPage);
   await expect.element(unpaid.getByText("Your account is under billing review")).toBeVisible();
-  expect(unpaid.getByRole("button", { name: "Upgrade" }).elements()).toHaveLength(0);
-  expect(unpaid.getByRole("button", { name: "Switch to Max" }).elements()).toHaveLength(0);
+  expect(unpaid.getByRole("button", { name: "Upgrade", exact: true }).elements()).toHaveLength(0);
+  expect(unpaid.getByRole("button", { name: "Buy credits" }).elements()).toHaveLength(0);
 });
 
 test("a checkout already open is explained, and an existing subscription turns buying into switching", async () => {
@@ -331,15 +334,50 @@ test("a checkout already open is explained, and an existing subscription turns b
   native.get.mockResolvedValue(reply(free));
   native.buy.mockResolvedValueOnce(reply(free, "checkout_in_progress"));
   const screen = await render(AccountPage);
-  await screen.getByRole("button", { name: "Upgrade" }).first().click();
+  await screen.getByRole("button", { name: "Upgrade", exact: true }).click();
+  await screen.getByRole("button", { name: "Upgrade to Pro" }).click();
   await expect
     .element(screen.getByText("A checkout is already open.", { exact: false }))
     .toBeVisible();
 
   native.buy.mockResolvedValueOnce(reply(free, "subscription_change_required"));
   native.refresh.mockImplementation(async () => reply(pro));
-  await screen.getByRole("button", { name: "Upgrade" }).first().click();
+  await screen.getByRole("button", { name: "Upgrade", exact: true }).click();
+  await screen.getByRole("button", { name: "Upgrade to Pro" }).click();
+  await screen.getByRole("button", { name: "Change plan" }).click();
   await expect.element(screen.getByRole("button", { name: "Switch to Max" })).toBeVisible();
+});
+
+test("credits are bought from a dialog of packs, the chosen one named on the button", async () => {
+  await page.viewport(1100, 1600);
+  native.get.mockResolvedValue(reply(free));
+  native.buy.mockResolvedValue(reply(free));
+  const screen = await render(AccountPage);
+  await screen.getByRole("button", { name: "Buy credits" }).click();
+  await expect.element(screen.getByText("Lasts 365 days")).toBeVisible();
+  await expect.element(screen.getByRole("radio", { name: /200/u })).toBeChecked();
+  await screen.getByRole("button", { name: "Buy 200 credits · $1" }).click();
+  expect(native.buy).toHaveBeenCalledWith({ kind: "top_up", id: "staging-topup" });
+  await expect.element(screen.getByRole("dialog")).not.toBeInTheDocument();
+});
+
+test("the plans dialog marks the current plan, offers each other plan, and closes with Escape", async () => {
+  await page.viewport(1100, 1600);
+  native.get.mockResolvedValue(reply(free));
+  const screen = await render(AccountPage);
+  const { userEvent } = await import("vitest/browser");
+  // Opened from the keyboard, since WebKit does not focus a button a mouse presses.
+  screen.getByRole("button", { name: "Upgrade", exact: true }).element().focus();
+  await userEvent.keyboard("{Enter}");
+  await expect.element(screen.getByRole("dialog", { name: "Plans" })).toBeVisible();
+  await expect.element(screen.getByText("Current plan")).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Upgrade to Pro" })).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Upgrade to Max" })).toBeVisible();
+  // Monthly alone is on sale here, so there is nothing to toggle or to call a saving.
+  expect(screen.getByRole("radio", { name: "Yearly" }).elements()).toHaveLength(0);
+  await userEvent.keyboard("{Escape}");
+  await expect.element(screen.getByRole("dialog")).not.toBeInTheDocument();
+  await expect.element(screen.getByRole("button", { name: "Upgrade", exact: true })).toHaveFocus();
 });
 
 test("the portal waits quietly for changes made there", async () => {

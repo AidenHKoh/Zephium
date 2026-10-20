@@ -4,22 +4,21 @@
     accountSession as session,
     creditsLeft,
     creditsTotal,
-    offerKey,
     planName,
     positive,
-    priceLabel,
     shortDate,
     usageTone,
   } from "$domain/account";
-  import type { AccountOfferV1 } from "$shared/ipc/bindings";
   import { preferences } from "$domain/preferences";
   import * as m from "$shared/i18n/messages";
   import Button from "$shared/ui/Button";
-  import SegmentedControl from "$shared/ui/SegmentedControl";
   import SettingsRow from "$shared/ui/SettingsRow";
   import { commands } from "$shared/ipc/bindings";
   import { explainAccountFault, SUPPORT_MAIL } from "../../lib/account";
+  import { canChangePlan, intervalsOf, planCards, planOffers, topUpOffers } from "../../lib/plans";
+  import type AccountCredits from "./AccountCredits.svelte";
   import AccountDailyLimit from "./AccountDailyLimit.svelte";
+  import type AccountPlans from "./AccountPlans.svelte";
 
   const account = $derived(session.account());
   const busy = $derived(session.pending());
@@ -37,70 +36,30 @@
   /** Credits exist only where the server states how many units make one. */
   const per = $derived(usage?.credit_units ?? null);
 
-  type Plan = Extract<AccountOfferV1, { kind: "plan" }>;
-  type TopUp = Extract<AccountOfferV1, { kind: "top_up" }>;
-  const plans = $derived(
-    (account?.offers ?? []).filter((offer): offer is Plan => offer.kind === "plan"),
-  );
-  const topups = $derived(
-    (account?.offers ?? []).filter((offer): offer is TopUp => offer.kind === "top_up"),
-  );
-  /** Each plan once, in the server's order, with the intervals it is sold in. */
-  const planIds = $derived([...new Set(plans.map((plan) => plan.plan))]);
+  const plans = $derived(planOffers(account?.offers ?? []));
+  const topups = $derived(topUpOffers(account?.offers ?? []));
   const currentPlan = $derived(account?.plan ?? null);
-  const others = $derived(planIds.filter((id) => id !== currentPlan));
-  let interval = $state<string>("yearly");
-  const intervals = $derived(
-    [...new Set(plans.map((plan) => plan.interval))].sort(
-      (a, b) => Number(b === "monthly") - Number(a === "monthly"),
-    ),
-  );
   /** A subscription changes plan, not billing interval; a first purchase picks one. */
   const held = $derived(paid ? (subscription?.interval ?? null) : null);
-  const shownInterval = $derived(held && intervals.includes(held) ? held : interval);
-  $effect(() => {
-    if (intervals.length && !intervals.includes(interval)) interval = intervals[0]!;
-  });
-
-  function offerFor(id: string): Plan | undefined {
-    return (
-      plans.find((plan) => plan.plan === id && plan.interval === shownInterval) ??
-      plans.find((plan) => plan.plan === id)
-    );
-  }
-
-  /** Cheaper than the plan held is a downgrade, which waits for renewal and stays open under review. */
-  function downgrade(id: string): boolean {
-    const target = offerFor(id)?.price?.amount_minor;
-    const now = currentPlan ? offerFor(currentPlan)?.price?.amount_minor : undefined;
-    return target !== undefined && now !== undefined && target < now;
-  }
-
-  const moves = $derived(others.filter((id) => !review || (paid && downgrade(id))));
-
-  function priced(plan: Plan): string | null {
-    const price = priceLabel(plan.price);
-    if (!price) return null;
-    return plan.interval === "yearly"
-      ? m.account_price_year({ price })
-      : m.account_price_month({ price });
-  }
-
-  function intervalName(value: string) {
-    if (value === "monthly") return m.account_interval_monthly();
-    if (value === "yearly") return m.account_interval_yearly();
-    return planName(value) ?? value;
-  }
-
-  function topUpLine(offer: TopUp) {
-    const added = creditsLeft(offer.units, per);
-    if (added && offer.expires_days)
-      return m.account_topup_adds_days({ amount: added, days: offer.expires_days });
-    if (added) return m.account_topup_adds({ amount: added });
-    return offer.expires_days
-      ? m.account_topup_desc_days({ days: offer.expires_days })
-      : m.account_topup_desc();
-  }
+  const settled = $derived(!change && billing);
+  const canPlans = $derived(
+    settled &&
+      canChangePlan(
+        planCards({
+          plans,
+          currentPlan,
+          paid,
+          interval: held ?? intervalsOf(plans)[0] ?? "monthly",
+          review,
+        }),
+      ),
+  );
+  const canCredits = $derived(settled && ai && !review && topups.length > 0);
+  /** The dialogs load when first asked for; most visits never open them. */
+  let Plans = $state.raw<typeof AccountPlans | null>(null);
+  let Credits = $state.raw<typeof AccountCredits | null>(null);
+  let plansOpen = $state(false);
+  let creditsOpen = $state(false);
 
   const usageLine = $derived.by(() => {
     const percent = usage?.used_percent;
@@ -155,6 +114,16 @@
     (account?.unsettled ?? []).some((request) => request.state !== "settled"),
   );
 
+  async function showPlans() {
+    Plans ??= (await import("./AccountPlans.svelte")).default;
+    plansOpen = true;
+  }
+
+  async function showCredits() {
+    Credits ??= (await import("./AccountCredits.svelte")).default;
+    creditsOpen = true;
+  }
+
   /** Usage history is loaded only when someone asks to see it. */
   let History = $state.raw<Component | null>(null);
   let loadingHistory = $state(false);
@@ -179,27 +148,6 @@
       ? explainAccountFault(fault.fault, fault.retryAfter)
       : null,
   );
-  let buying = $state<string | null>(null);
-
-  async function buy(offer: AccountOfferV1) {
-    buying = offerKey(offer);
-    const bought = await session.buy(
-      offer.kind === "plan"
-        ? { kind: "plan", plan: offer.plan, interval: offer.interval }
-        : { kind: "top_up", id: offer.id },
-    );
-    buying = null;
-    // The service already has a subscription for this account: read it again,
-    // and the plan rows turn into switches.
-    if (!bought && session.fault()?.fault === "subscription_change_required")
-      void session.refresh();
-  }
-
-  async function move(id: string) {
-    buying = `move:${id}`;
-    await session.previewPlanChange(id, shownInterval);
-    buying = null;
-  }
 </script>
 
 {#if !hosted}{#if ai}<p class="note">{m.account_hosted_off()}</p>{/if}
@@ -239,6 +187,17 @@
             </p>{/if}{/if}
         {#if pausedLine}<p class="caption" role="status">{pausedLine}</p>{/if}
       </div>{/if}
+    {#if canPlans || canCredits}<div class="actions">
+        {#if canCredits}<Button disabled={!!busy} onclick={() => void showCredits()}
+            >{m.account_credits_open()}</Button
+          >{/if}
+        {#if canPlans}<Button
+            variant={paid ? "secondary" : "primary"}
+            disabled={!!busy}
+            onclick={() => void showPlans()}
+            >{paid ? m.account_plans_change() : m.account_upgrade()}</Button
+          >{/if}
+      </div>{/if}
     {#if review}<div class="review" role="status">
         <h4>{m.account_review_title()}</h4>
         <p>
@@ -253,8 +212,8 @@
         </p>
       </div>{/if}
     {#if Change && change}<Change />{/if}
-    <div class="rows">
-      {#if ai}{#if bonusLine}<SettingsRow title={m.account_bonus_title()}
+    {#if ai}<div class="rows">
+        {#if bonusLine}<SettingsRow title={m.account_bonus_title()}
             ><span class="value">{bonusLine}</span></SettingsRow
           >{/if}
         {#if per}<SettingsRow title={m.account_extra_title()}
@@ -275,47 +234,18 @@
             ><Button size="compact" pending={loadingHistory} onclick={() => void showHistory()}
               >{m.account_history_show()}</Button
             ></SettingsRow
-          >{/if}{/if}
-      {#if billing && !change}
-        {#each moves as id (id)}
-          {@const offer = offerFor(id)}
-          {#if offer}<SettingsRow
-              title={offer.name ?? planName(id) ?? id}
-              description={[priced(offer), ...offer.features].filter(Boolean).join(" · ")}
-            >
-              {#if !paid && intervals.length > 1}<SegmentedControl
-                  label={m.account_plan_group()}
-                  size="compact"
-                  options={intervals.map((value) => ({ value, label: intervalName(value) }))}
-                  bind:value={interval}
-                />{/if}
-              {#if paid}<Button
-                  variant={downgrade(id) ? "secondary" : "primary"}
-                  pending={buying === `move:${id}`}
-                  disabled={!!busy}
-                  onclick={() => void move(id)}
-                  >{m.account_switch_to({ plan: planName(id) ?? id })}</Button
-                >{:else}<Button
-                  variant="primary"
-                  pending={buying === offerKey(offer)}
-                  disabled={!!busy}
-                  onclick={() => void buy(offer)}>{m.account_upgrade()}</Button
-                >{/if}
-            </SettingsRow>{/if}
-        {/each}
-        {#each ai && !review ? topups : [] as offer (offer.id)}
-          {@const price = priceLabel(offer.price)}
-          <SettingsRow title={offer.name ?? m.account_topup_title()} description={topUpLine(offer)}>
-            <Button
-              pending={buying === offerKey(offer)}
-              disabled={!!busy}
-              onclick={() => void buy(offer)}>{price ?? m.account_topup_buy()}</Button
-            >
-          </SettingsRow>
-        {/each}
-      {/if}
-    </div>
+          >{/if}
+      </div>{/if}
   </section>
+  {#if canPlans && Plans}<Plans
+      bind:open={plansOpen}
+      {plans}
+      {currentPlan}
+      {paid}
+      {held}
+      {review}
+    />{/if}
+  {#if canCredits && Credits}<Credits bind:open={creditsOpen} packs={topups} {per} />{/if}
   {#if unconfirmed}<p class="note" role="status">{m.account_unsettled()}</p>{/if}
   {#if billing && account?.checkout_open}<p class="note" role="status">
       {account.portal_open ? m.account_portal_waiting() : m.account_checkout_waiting()}
@@ -422,6 +352,17 @@
 
   .meter[data-tone="full"] span {
     background: var(--color-danger);
+  }
+
+  .actions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+    padding: 0 18px 20px;
+  }
+
+  .head + .actions {
+    padding-block-start: 18px;
   }
 
   .review {

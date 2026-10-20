@@ -1,11 +1,11 @@
 export * as accountSession from "./account.svelte";
+export { accountFoot } from "./foot.svelte";
 export {
   creditsCall,
   creditsLeft,
   creditsToUnits,
   creditsTotal,
   initials,
-  offerKey,
   planName,
   positive,
   priceLabel,

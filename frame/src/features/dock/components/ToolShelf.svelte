@@ -10,11 +10,13 @@
   import { commands } from "$shared/ipc/bindings";
   import * as tools from "$session/tools.svelte";
   import type { ToolKind } from "$session/tools.svelte";
+  import { accountFoot, accountSession } from "$domain/account";
   import { preferences } from "$domain/preferences";
   import { tabs } from "$domain/tabs";
   import { drawn, profiles } from "$domain/profiles";
   import Disclosure from "$shared/ui/Disclosure";
   import Icon from "$shared/ui/Icon";
+  import AccountRow from "$shared/ui/AccountRow";
   import ProfileAvatar from "$shared/ui/ProfileAvatar";
   import { RECORD_TOOLS, SHELF_TOOLS, toolPresentation } from "../lib/dock-tools";
   import NoticePip from "./NoticePip.svelte";
@@ -25,16 +27,17 @@
   let { compact = false }: { compact?: boolean } = $props();
   onMount(() => {
     void profiles.retain();
-    return () => profiles.release();
+    void accountSession.retain();
+    return () => {
+      profiles.release();
+      accountSession.release();
+    };
   });
   const name = $derived(tabs.profile()?.name ?? profiles.current()?.name ?? "");
   const others = $derived(profiles.inPrivate() ? [] : profiles.others());
   const privately = $derived(profiles.inPrivate() || tabs.profile()?.kind === "incognito");
-  /** The avatar the person chose; until then the foot is the account glyph. */
-  const chosen = $derived.by(() => {
-    const current = profiles.inPrivate() ? null : profiles.current();
-    return current && current.avatar.revision > 0 ? drawn(current) : null;
-  });
+  /** The avatar the person chose, else the account's initials; a private window shows neither. */
+  const foot = accountFoot({ private: () => privately });
   // A tool whose feature is off is not offered here either.
   const shelf = $derived(SHELF_TOOLS.filter((kind) => preferences.enabled(kind)));
   const groups = $derived([shelf, RECORD_TOOLS].filter((group) => group.length > 0));
@@ -43,7 +46,9 @@
   const toolRows = $derived(groups.reduce((sum, group) => sum + group.length, 0));
   // Windows has no menu bar to hold Help, so it stands beneath Settings.
   const below = IS_WINDOWS ? 1 : 0;
-  const headStep = $derived(toolRows + 1 + below);
+  const accountStep = $derived(toolRows + 1 + below);
+  const accountRow = $derived(foot.available && !privately);
+  const headStep = $derived(accountStep + (accountRow ? 1 : 0));
   function pick(kind: ToolKind) {
     if (tools.activeTool() === kind) tools.close();
     else tools.open(kind);
@@ -87,7 +92,7 @@
   </button>
 {/snippet}
 
-{#snippet me(size: number)}{#if chosen}<ProfileAvatar view={chosen} {size} />{:else}<span
+{#snippet me(size: number)}{#if foot.face}<ProfileAvatar view={foot.face} {size} />{:else}<span
       class="avatar"
       style:--size={`${size}px`}
       aria-hidden="true"
@@ -116,8 +121,8 @@
     triggerClass={["case", tools.activeTool() !== null && "case-lit"].filter(Boolean).join(" ")}
     panelClass="shelf-stack sidebar-softens"
   >
-    {#snippet trigger()}{#if chosen}<ProfileAvatar
-          view={chosen}
+    {#snippet trigger()}{#if foot.face}<ProfileAvatar
+          view={foot.face}
           size={compact ? 36 : 40}
         />{:else}<Icon
           icon={UserIcon}
@@ -160,6 +165,14 @@
             >{/if}
         </div>{/if}
     </div>
+    {#if accountRow}<AccountRow
+        signedIn={foot.signedIn}
+        standing={foot.standing}
+        tone={foot.tone}
+        step={accountStep}
+        {compact}
+        onclick={() => run("settings.account")}
+      />{/if}
     {#each groups as group, at (at)}
       {@const before = groups.slice(0, at).reduce((sum, earlier) => sum + earlier.length, 0)}
       <div class="shelf-rule" role="separator"></div>

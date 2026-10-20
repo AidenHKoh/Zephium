@@ -1,12 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import {
-    AccountSetting01Icon,
-    CubeIcon,
-    Settings02Icon,
-    UserIcon,
-  } from "@hugeicons/core-free-icons";
-  import { accountSession, planName, usageTone } from "$domain/account";
+  import { CubeIcon, Settings02Icon, UserIcon } from "@hugeicons/core-free-icons";
+  import { accountFoot, accountSession } from "$domain/account";
   import { keymap } from "$domain/keymap";
   import { drawn, profiles } from "$domain/profiles";
   import { tabs } from "$domain/tabs";
@@ -14,6 +9,7 @@
   import * as m from "$shared/i18n/messages";
   import { acceleratorKeys } from "$shared/lib/accelerator";
   import { IS_MAC } from "$shared/platform";
+  import AccountRow from "$shared/ui/AccountRow";
   import Disclosure from "$shared/ui/Disclosure";
   import Icon from "$shared/ui/Icon";
   import ProfileAvatar from "$shared/ui/ProfileAvatar";
@@ -31,26 +27,11 @@
     };
   });
 
-  const account = $derived(accountSession.account());
-  const signedIn = $derived(account?.signed_in === true);
+  const foot = accountFoot();
   const who = $derived(tabs.profile()?.name || profiles.current()?.name || name);
   const shown = $derived(who || m.browse_profile_settings());
   const others = $derived(profiles.others());
-  const chosen = $derived.by(() => {
-    const current = profiles.current();
-    return current && current.avatar.revision > 0 ? drawn(current) : null;
-  });
-
-  const used = $derived(signedIn ? (account?.usage?.used_percent ?? null) : null);
-  const tone = $derived(usageTone(used));
-  const standing = $derived.by(() => {
-    if (!signedIn || !account) return null;
-    const parts = [
-      planName(account.plan),
-      used != null ? m.ai_cloud_used({ percent: used }) : null,
-    ].filter(Boolean);
-    return parts.join(" · ") || account.email || null;
-  });
+  const tone = $derived(foot.tone);
 
   function keysFor(command: string) {
     const accelerator = keymap.all().find((entry) => entry.id === command)?.accelerator;
@@ -59,7 +40,7 @@
   const run = (id: string) => void commands.runCommand(id).catch(() => {});
 </script>
 
-{#snippet face(size: number)}{#if chosen}<ProfileAvatar view={chosen} {size} />{:else}<span
+{#snippet face(size: number)}{#if foot.face}<ProfileAvatar view={foot.face} {size} />{:else}<span
       class="plain"
       style:--size="{size}px"
       aria-hidden="true"
@@ -72,12 +53,11 @@
   caption: string | null,
   step: number,
   go: () => void,
-  tint?: string,
 )}
   <button type="button" role="menuitem" class="ui-menu-item row" style:--step={step} onclick={go}>
     <span class="ui-menu-icon"><Icon {icon} size={16} /></span>
     <span class="label">{label}</span>
-    {#if caption}<span class="caption" data-tone={tint}>{caption}</span>{/if}
+    {#if caption}<span class="caption">{caption}</span>{/if}
   </button>
 {/snippet}
 
@@ -93,7 +73,7 @@
   triggerClass="work-case"
   panelClass="work-menu ui-shine-sheet sidebar-softens"
 >
-  {#snippet trigger()}{#if chosen}<ProfileAvatar view={chosen} size={36} />{:else}<Icon
+  {#snippet trigger()}{#if foot.face}<ProfileAvatar view={foot.face} size={36} />{:else}<Icon
         icon={UserIcon}
         size={16}
         strokeWidth={1.7}
@@ -126,16 +106,13 @@
       </div>{/if}
   </div>
   <div class="rule" role="separator"></div>
-  {#if account?.available}
-    {@render row(
-      signedIn ? AccountSetting01Icon : UserIcon,
-      signedIn ? m.account_menu() : m.ai_cloud_sign_in(),
-      standing,
-      2,
-      () => run("settings.account"),
-      tone,
-    )}
-  {/if}
+  {#if foot.available}<AccountRow
+      signedIn={foot.signedIn}
+      standing={foot.standing}
+      tone={foot.tone}
+      step={2}
+      onclick={() => run("settings.account")}
+    />{/if}
   {@render row(CubeIcon, m.settings_models(), null, 1, () => run("settings.ai"))}
   <div class="rule" role="separator"></div>
   {@render row(Settings02Icon, m.command_browser_settings(), keysFor("browser.settings"), 0, () =>
@@ -333,14 +310,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     transition: color var(--motion-instant) var(--ease-smooth);
-  }
-
-  .caption[data-tone="high"] {
-    color: var(--color-warning, var(--color-muted));
-  }
-
-  .caption[data-tone="full"] {
-    color: var(--color-danger);
   }
 
   .row:hover .caption,
