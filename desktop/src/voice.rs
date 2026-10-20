@@ -849,11 +849,20 @@ mod tests {
             (HostedRefusal::PlanRequired, VoiceFaultV1::PlanRequired),
             (HostedRefusal::BillingReview, VoiceFaultV1::BillingReview),
             (HostedRefusal::DailyLimit, VoiceFaultV1::DailyLimit),
-            (HostedRefusal::FreeUsagePaused, VoiceFaultV1::FreeUsagePaused),
-            (HostedRefusal::ConfirmationLimited, VoiceFaultV1::RateLimited),
+            (
+                HostedRefusal::FreeUsagePaused,
+                VoiceFaultV1::FreeUsagePaused,
+            ),
+            (
+                HostedRefusal::ConfirmationLimited,
+                VoiceFaultV1::RateLimited,
+            ),
             (HostedRefusal::Paused, VoiceFaultV1::HostedPaused),
             (HostedRefusal::InvalidAudio, VoiceFaultV1::InvalidAudio),
-            (HostedRefusal::UnsupportedAudio, VoiceFaultV1::UnsupportedAudio),
+            (
+                HostedRefusal::UnsupportedAudio,
+                VoiceFaultV1::UnsupportedAudio,
+            ),
             (HostedRefusal::AudioTooLong, VoiceFaultV1::AudioTooLong),
             (HostedRefusal::AlreadySent, VoiceFaultV1::Unavailable),
         ] {
