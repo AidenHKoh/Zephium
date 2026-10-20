@@ -2365,10 +2365,12 @@ fn refusal_line(snapshot: &zephium_app::RetainedWorkSnapshot, yours: bool) -> St
 /// waits briefly for the person: the part then ends with what it has. A
 /// sign-in or a decision keeps the long wait.
 const HUMAN_CHECK_WAIT_MILLIS: u64 = 90_000;
-/// A research read (one page, no task) behind a bot check waits for the
-/// person like a page task, since only they can pass it; another of its
-/// site's pages that meets the check while one already waits is skipped at
-/// once. An anonymous research read that wants anything else of a person is
+/// A research read is one source among several, and its whole batch waits
+/// with it, so its bot check is offered to the person only briefly.
+const RESEARCH_CHECK_WAIT_MILLIS: u64 = 30_000;
+/// A research read (one page, no task) behind a bot check waits briefly for
+/// the person, since only they can pass it; another of its site's pages that
+/// meets the check while one already waits is skipped at once. An anonymous research read that wants anything else of a person is
 /// skipped at once: its part reads its other sources instead of waiting.
 fn human_wait_cap(
     intervention: Option<&WorkInterventionV1>,
@@ -2379,6 +2381,7 @@ fn human_wait_cap(
     use zephium_core::work::runtime::WorkInterventionKindV1 as Kind;
     match intervention.map(|intervention| intervention.kind) {
         Some(Kind::Challenge) if !task && check_waiting_elsewhere => 0,
+        Some(Kind::Challenge) if !task => RESEARCH_CHECK_WAIT_MILLIS,
         Some(Kind::Challenge) => HUMAN_CHECK_WAIT_MILLIS,
         Some(Kind::SignIn) => MAX_WORK_HUMAN_WAIT_MILLIS,
         _ if !task && anonymous => 0,
@@ -3075,7 +3078,7 @@ mod closed_result_tests {
     }
 
     #[test]
-    fn a_bot_check_nobody_takes_ends_its_page_within_a_minute_and_a_half() {
+    fn a_bot_check_nobody_takes_ends_a_page_task_in_90s_and_a_research_read_in_30s() {
         use zephium_core::work::runtime::{WorkInterventionKindV1 as Kind, WorkInterventionV1};
         let check = WorkInterventionV1 {
             kind: Kind::Challenge,
@@ -3089,11 +3092,12 @@ mod closed_result_tests {
             human_wait_cap(Some(&check), true, false, false),
             HUMAN_CHECK_WAIT_MILLIS
         );
-        // A research read's check goes to the person too, once per site.
+        // A research read's check goes to the person too, briefly, once per
+        // site.
         for anonymous in [false, true] {
             assert_eq!(
                 human_wait_cap(Some(&check), false, anonymous, false),
-                HUMAN_CHECK_WAIT_MILLIS
+                RESEARCH_CHECK_WAIT_MILLIS
             );
             assert_eq!(human_wait_cap(Some(&check), false, anonymous, true), 0);
         }
