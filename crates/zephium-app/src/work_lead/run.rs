@@ -63,6 +63,8 @@ struct State {
     /// Sites the person named in the request or while it ran, and sites they
     /// let the run open addresses on.
     trusted_sites: Vec<String>,
+    /// The person's own words: the request and what they added while it ran.
+    said: String,
     /// What the person asked the run to create or change in their own
     /// apps: the sites they named, or every site they let it work in when
     /// they named none ("create the issue").
@@ -156,6 +158,7 @@ impl LeadRun {
                 allowed: Vec::new(),
                 private: false,
                 trusted_sites: Vec::new(),
+                said: String::new(),
                 asked_saves: None,
                 entries: Vec::new(),
                 waits: 0,
@@ -723,6 +726,11 @@ impl LeadRun {
     /// what they add while it runs, never attached text, which can quote
     /// anyone's links.
     pub(crate) fn trust_sites_in(&self, text: &str) {
+        {
+            let mut state = self.state();
+            state.said.push_str(text);
+            state.said.push('\n');
+        }
         let named = crate::work_sites::named_services(text);
         if asks_to_save(text) {
             let mut state = self.state();
@@ -761,6 +769,11 @@ impl LeadRun {
             .asked_saves
             .as_ref()
             .is_some_and(|sites| sites.is_empty() || sites.iter().any(|known| known == site))
+    }
+
+    /// The person's own words in this run, never attached text.
+    pub(crate) fn said(&self) -> String {
+        self.state().said.clone()
     }
 
     /// Whether the person named this site or let the run work on it.

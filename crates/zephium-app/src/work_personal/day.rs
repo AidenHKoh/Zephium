@@ -189,7 +189,15 @@ pub(crate) async fn day_sources(
     context: LeadToolContext<'_>,
     _arguments: &Value,
 ) -> LeadToolOutcome {
-    let (keys, zephium) = match remembered(&context).await {
+    // Apps the person named ("check my Slack") are the sources: nothing
+    // else is offered, asked or remembered.
+    let said = named(&context.run.said());
+    let remembered = match said.0.is_empty() {
+        true => remembered(&context).await,
+        false => None,
+    };
+    let (keys, zephium) = match remembered {
+        _ if !said.0.is_empty() => said,
         Some(choice) => {
             context
                 .input(super::tools::input(
