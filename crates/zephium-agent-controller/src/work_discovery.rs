@@ -118,6 +118,10 @@ pub trait AgentWorkLocalActionPolicy: Send {
     fn results_page(&self, _: &SemanticObservation) -> Vec<Vec<SemanticReferenceId>> {
         Vec::new()
     }
+    /// Whether the results page has drawn its results or a wall yet.
+    fn results_drawn(&self, _: &SemanticObservation) -> bool {
+        true
+    }
 
     /// Narrows the model effect vocabulary when the assignment has one effect.
     fn model_action_effect(&self) -> Option<SemanticEffectClass> {
@@ -315,6 +319,11 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
             .as_ref()
             .map(|policy| policy.results_page(observation))
             .unwrap_or_default()
+    }
+    fn results_drawn(&self, observation: &SemanticObservation) -> bool {
+        self.local_actions
+            .as_ref()
+            .is_none_or(|policy| policy.results_drawn(observation))
     }
 
     fn allows_baseline_read(&self) -> bool {

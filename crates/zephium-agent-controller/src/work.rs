@@ -468,6 +468,11 @@ pub trait AgentWorkTask: Send {
     fn results_page(&self, _: &SemanticObservation) -> Vec<Vec<SemanticReferenceId>> {
         Vec::new()
     }
+    /// Whether a results page has drawn its results or a wall yet; an engine
+    /// that draws them by script shows an empty shell at first.
+    fn results_drawn(&self, _: &SemanticObservation) -> bool {
+        true
+    }
     /// The field this fill or choice types into commits nothing by itself
     /// (a search box, a place or date picker, a filter): the page may rewrite
     /// what was typed, and an unverified result is shown to the model as the
@@ -1253,6 +1258,10 @@ const MAX_APP_VIEWS: usize = 3;
 const APP_VIEW_QUIET_MILLIS: u32 = 300;
 /// Virtual lists render their rows a beat after the pane itself.
 const APP_VIEW_RENDER_MILLIS: u64 = 400;
+/// Looks a results page gets to draw what its engine fills in by script,
+/// and the pause before each.
+const RESULTS_DRAW_LOOKS: usize = 5;
+const RESULTS_DRAW_LOOK_MILLIS: u64 = 500;
 
 impl AgentWorkController {
     /// Immutable session storage selected in the trusted input, while dormant.
@@ -4700,6 +4709,25 @@ impl AgentWorkController {
             .extraction_schema
             .clone()
             .ok_or_else(|| crate::contract!())?;
+        let mut look = look;
+        for _ in 0..RESULTS_DRAW_LOOKS {
+            if state.task.results_drawn(&look) {
+                break;
+            }
+            let wake = Instant::now() + Duration::from_millis(RESULTS_DRAW_LOOK_MILLIS);
+            if wake >= state.native.deadline {
+                break;
+            }
+            tokio::select! {
+                biased;
+                event = state.native.next_event(worker, browser) => {
+                    state.native.retain(event?)?;
+                    return Err(AgentWorkFailure::Mailbox);
+                }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+            }
+            look = Box::pin(Self::observe(state, worker, browser)).await?;
+        }
         let cited = state.task.results_page(&look);
         state.refresh_account(worker, browser)?;
         let captured_at = SemanticCaptureInstant::from_millis(

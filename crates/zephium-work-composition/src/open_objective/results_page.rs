@@ -65,6 +65,13 @@ impl AgentWorkLocalActionPolicy for ResultsPagePolicy {
         true
     }
 
+    fn results_drawn(&self, observation: &SemanticObservation) -> bool {
+        !matches!(
+            read_search_page(self.reader.engine, self.reader.own.as_deref(), observation).page,
+            WorkSearchPage::Wall(zephium_core::work::search::WorkSearchWall::Unreadable)
+        )
+    }
+
     fn results_page(&self, observation: &SemanticObservation) -> Vec<Vec<SemanticReferenceId>> {
         let read = read_search_page(self.reader.engine, self.reader.own.as_deref(), observation);
         *self
