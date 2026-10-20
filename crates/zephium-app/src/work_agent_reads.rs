@@ -66,20 +66,16 @@ impl Driver {
                 // Another part may have asked while this batch was being built.
                 let fresh = self.probe.runtime_projection().await?;
                 let decision = site_retry(&fresh, self.probe.execution(), blocked);
-                let allowed = match decision {
-                    Some(allowed) => allowed,
-                    None => match self
-                        .ask_person(
-                            retry_prompt(&site),
-                            vec![OPEN_BLOCKED_SITE.into(), DEFER_BLOCKED_SITE.into()],
-                            WorkAskPurposeV1::Confirm,
-                        )
-                        .await?
-                    {
-                        Ok(answer) => answer == OPEN_BLOCKED_SITE,
-                        Err(status) => return Ok(Some(status)),
-                    },
-                };
+                // A request that names the site again ("Try Slack again") is
+                // the person's retry: its page task opens, and a wall there
+                // hands the page to them. Otherwise the recorded need stands
+                // without a question; a research read never reopens it.
+                let allowed = decision.unwrap_or_else(|| {
+                    goal.is_some()
+                        && attempt
+                            .disclosure_objective()
+                            .is_ok_and(|objective| names_site(&objective, &site))
+                });
                 if !allowed {
                     self.notice(&blocked.notice());
                     continue;
@@ -553,6 +549,20 @@ impl Drop for SiteRetryClaim {
     }
 }
 
+/// Whether the person's words name a site: its address, a known service's
+/// name, or the site's own name (nvidia for nvidia.com).
+fn names_site(text: &str, site: &str) -> bool {
+    let lower = text.to_lowercase();
+    let name = site.split('.').next().unwrap_or(site);
+    lower.contains(site)
+        || crate::work_sites::named_services(text)
+            .iter()
+            .any(|named| named == site)
+        || lower
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|word| word == name)
+}
+
 const OPEN_BLOCKED_SITE: &str = "Open the page";
 const DEFER_BLOCKED_SITE: &str = "Not now";
 
@@ -624,7 +634,7 @@ impl WorkAgentService {
         if blocked.is_empty() {
             return String::new();
         }
-        let mut text = "\nUnresolved site access in this Work (durable observations):\nExplain these facts without opening pages. Retrying requires the person to choose Open the page; that choice is not resolution. Public help/docs do not stand for personal account content.\n".to_owned();
+        let mut text = "\nUnresolved site access in this Work (durable observations):\nExplain these facts without opening pages. A site opens again only when the person asks for it again (names it, or Try again on its row); that is not resolution. Public help/docs do not stand for personal account content.\n".to_owned();
         for site in blocked.iter().take(16) {
             text.push_str(&format!("{}: {}", site.site, site.reason()));
             text.push('\n');
