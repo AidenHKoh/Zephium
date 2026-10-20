@@ -1679,6 +1679,18 @@ pub enum WorkModelFaultV1 {
     ProviderCredit,
     /// The account's included Zephium AI usage, and any extra, is spent.
     HostedUsage,
+    /// The chosen Zephium AI model needs another plan.
+    PlanRequired,
+    /// The Zephium account is under billing review.
+    BillingReview,
+    /// The account's daily Zephium AI limit is reached.
+    DailyLimit,
+    /// Free Zephium AI usage is paused for now; credits and keys still work.
+    FreeUsagePaused,
+    /// Earlier Zephium AI requests are still being confirmed.
+    HostedBusy,
+    /// Zephium AI is paused as a spending protection.
+    HostedPaused,
     /// The Zephium account's session ended.
     SignedOut,
     RateLimited,

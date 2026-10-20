@@ -354,6 +354,7 @@ where
                         WorkModelError::MissingKey
                             | WorkModelError::Unauthorized
                             | WorkModelError::OverBudget
+                            | WorkModelError::Hosted { .. }
                     );
                     if fatal {
                         return Ok(WorkAttemptStatus::Failed);
@@ -1613,6 +1614,30 @@ where
                 CallFailure::Refused(WorkModelError::OverBudget) if hosted => {
                     "Zephium AI's included usage is spent; upgrade, buy extra usage or use your own key"
                 }
+                CallFailure::Refused(WorkModelError::Hosted { refusal, .. }) => match refusal {
+                    HostedRefusal::PlanRequired => {
+                        "The chosen Zephium AI model needs another plan; see plans in Settings → Account"
+                    }
+                    HostedRefusal::BillingReview => {
+                        "The Zephium account is under billing review; open Settings → Account"
+                    }
+                    HostedRefusal::OutOfCredits => {
+                        "Zephium AI's included usage is spent; upgrade, buy extra usage or use your own key"
+                    }
+                    HostedRefusal::DailyLimit => {
+                        "The daily Zephium AI limit is reached; it resets at 00:00 UTC"
+                    }
+                    HostedRefusal::FreeUsagePaused => {
+                        "Free Zephium AI usage is paused for now; credits and your own key still work"
+                    }
+                    HostedRefusal::ConfirmationLimited => {
+                        "Zephium AI is still confirming earlier requests; wait a moment"
+                    }
+                    HostedRefusal::Paused => {
+                        "Zephium AI is paused as a spending protection; try later or use your own key"
+                    }
+                    _ => "The model's turn could not be used",
+                },
                 CallFailure::Refused(WorkModelError::Unauthorized) if hosted => {
                     "The Zephium account's session ended; sign in again in Settings → Account"
                 }
@@ -2061,6 +2086,19 @@ fn model_fault(error: WorkModelError, hosted: bool) -> Option<WorkModelFaultV1> 
         WorkModelError::Unauthorized => WorkModelFaultV1::KeyRefused,
         WorkModelError::OverBudget if hosted => WorkModelFaultV1::HostedUsage,
         WorkModelError::OverBudget => WorkModelFaultV1::ProviderCredit,
+        WorkModelError::Hosted { refusal, .. } => match refusal {
+            HostedRefusal::PlanRequired => WorkModelFaultV1::PlanRequired,
+            HostedRefusal::BillingReview => WorkModelFaultV1::BillingReview,
+            HostedRefusal::OutOfCredits => WorkModelFaultV1::HostedUsage,
+            HostedRefusal::DailyLimit => WorkModelFaultV1::DailyLimit,
+            HostedRefusal::FreeUsagePaused => WorkModelFaultV1::FreeUsagePaused,
+            HostedRefusal::ConfirmationLimited => WorkModelFaultV1::HostedBusy,
+            HostedRefusal::Paused => WorkModelFaultV1::HostedPaused,
+            HostedRefusal::AlreadySent
+            | HostedRefusal::InvalidAudio
+            | HostedRefusal::UnsupportedAudio
+            | HostedRefusal::AudioTooLong => return None,
+        },
         WorkModelError::RateLimited { .. } => WorkModelFaultV1::RateLimited,
         WorkModelError::Overloaded => WorkModelFaultV1::ProviderDown,
         WorkModelError::Network => WorkModelFaultV1::Unreachable,
@@ -2248,6 +2286,45 @@ mod compact_tests {
             Some(WorkModelFaultV1::KeyRefused)
         );
         assert_eq!(fault(WorkModelError::Cancelled, false), None);
+    }
+
+    #[test]
+    fn each_hosted_refusal_has_its_own_fault_and_the_rest_have_none() {
+        let hosted = |refusal| WorkModelError::Hosted {
+            refusal,
+            retry_after_ms: None,
+        };
+        for (refusal, expected) in [
+            (
+                HostedRefusal::PlanRequired,
+                Some(WorkModelFaultV1::PlanRequired),
+            ),
+            (
+                HostedRefusal::BillingReview,
+                Some(WorkModelFaultV1::BillingReview),
+            ),
+            (
+                HostedRefusal::OutOfCredits,
+                Some(WorkModelFaultV1::HostedUsage),
+            ),
+            (
+                HostedRefusal::DailyLimit,
+                Some(WorkModelFaultV1::DailyLimit),
+            ),
+            (
+                HostedRefusal::FreeUsagePaused,
+                Some(WorkModelFaultV1::FreeUsagePaused),
+            ),
+            (
+                HostedRefusal::ConfirmationLimited,
+                Some(WorkModelFaultV1::HostedBusy),
+            ),
+            (HostedRefusal::Paused, Some(WorkModelFaultV1::HostedPaused)),
+            (HostedRefusal::AlreadySent, None),
+            (HostedRefusal::AudioTooLong, None),
+        ] {
+            assert_eq!(model_fault(hosted(refusal), true), expected, "{refusal:?}");
+        }
     }
 
     #[test]

@@ -79,6 +79,11 @@
       case "settings":
         void commands.runCommand("settings.ai");
         return cancel();
+      case "plans":
+      case "account":
+      case "limit":
+        void commands.runCommand("settings.account");
+        return cancel();
       case "microphone":
       case "recognition":
       case "dictation":
@@ -92,13 +97,19 @@
   const remedyLabel = $derived(
     problem?.remedy === "settings"
       ? m.voice_remedy_settings()
-      : problem?.remedy === "microphone" || problem?.remedy === "recognition"
-        ? m.voice_remedy_privacy()
-        : problem?.remedy === "dictation"
-          ? m.voice_remedy_keyboard()
-          : problem?.remedy === "retry"
-            ? m.voice_remedy_retry()
-            : null,
+      : problem?.remedy === "plans"
+        ? m.work_fault_fix_plans()
+        : problem?.remedy === "account"
+          ? m.work_fault_fix_account()
+          : problem?.remedy === "limit"
+            ? m.work_fault_fix_limit()
+            : problem?.remedy === "microphone" || problem?.remedy === "recognition"
+              ? m.voice_remedy_privacy()
+              : problem?.remedy === "dictation"
+                ? m.voice_remedy_keyboard()
+                : problem?.remedy === "retry"
+                  ? m.voice_remedy_retry()
+                  : null,
   );
 </script>
 

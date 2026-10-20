@@ -225,6 +225,7 @@ pub async fn fetch_cloud_catalog(
         upstream: WorkModelProvider::Cloud,
         base: join(&root, "v1")?,
         cloud: true,
+        search_calls: None,
     };
     let (status, body) = get(&target, "models", None, secret).await?;
     match status {

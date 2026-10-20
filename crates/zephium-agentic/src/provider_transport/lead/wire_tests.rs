@@ -5,6 +5,10 @@ use serde_json::{json, Value};
 use super::tests::request;
 use super::*;
 
+fn google() -> LeadTarget {
+    LeadTarget::direct(WorkModelProvider::Google).unwrap()
+}
+
 fn decode(
     wire: WorkModelWire,
     fixture: &str,
@@ -391,7 +395,7 @@ fn gemini_streams_signed_calls_grounding_and_usage() {
             is_error: true,
         },
     ]));
-    let body = gemini::body(&next).unwrap();
+    let body = gemini::body(&next, &google()).unwrap();
     let model = body["contents"][1]["parts"].as_array().unwrap();
     assert_eq!(model.len(), 3);
     assert_eq!(model[0]["text"], "Flights from WAW start at $610.");
@@ -706,7 +710,7 @@ fn every_wire_forces_the_tool_it_is_told_to() {
     assert!(body.get("thinking").is_none());
     assert!(body.get("output_config").is_none());
 
-    let body = gemini::body(&named(WorkModelWire::Gemini)).unwrap();
+    let body = gemini::body(&named(WorkModelWire::Gemini), &google()).unwrap();
     assert_eq!(
         body["toolConfig"]["functionCallingConfig"],
         json!({"mode": "ANY", "allowedFunctionNames": ["web_fetch"]})
@@ -735,7 +739,7 @@ fn every_wire_forces_the_tool_it_is_told_to() {
     );
     required.model.wire = WorkModelWire::Gemini;
     assert_eq!(
-        gemini::body(&required).unwrap()["toolConfig"]["functionCallingConfig"],
+        gemini::body(&required, &google()).unwrap()["toolConfig"]["functionCallingConfig"],
         json!({"mode": "ANY"})
     );
     required.model.wire = WorkModelWire::ChatCompletions;
@@ -860,7 +864,7 @@ fn every_offered_effort_reaches_its_wire_request() {
         match wire {
             WorkModelWire::OpenAiResponses => openai::body(&call, &target),
             WorkModelWire::AnthropicMessages => anthropic::body(&call, &target),
-            WorkModelWire::Gemini => gemini::body(&call),
+            WorkModelWire::Gemini => gemini::body(&call, &google()),
             WorkModelWire::ChatCompletions => chat::body(&call, &target),
         }
         .unwrap()

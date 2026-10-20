@@ -11,7 +11,10 @@ use super::*;
 
 const WIRE: &str = "gemini";
 
-pub(super) fn body(request: &WorkModelRequest) -> Result<Value, WorkModelError> {
+pub(super) fn body(
+    request: &WorkModelRequest,
+    target: &LeadTarget,
+) -> Result<Value, WorkModelError> {
     // Function responses name their function; find it from the call's id.
     let mut names: HashMap<&str, &str> = HashMap::new();
     for message in &request.messages {
@@ -91,7 +94,7 @@ pub(super) fn body(request: &WorkModelRequest) -> Result<Value, WorkModelError> 
             .collect();
         tools.push(json!({"functionDeclarations": declarations}));
     }
-    if request.native_search {
+    if target.native_search(request) {
         tools.push(json!({"googleSearch": {}}));
     }
     let mut generation = json!({"maxOutputTokens": request.max_output_tokens});

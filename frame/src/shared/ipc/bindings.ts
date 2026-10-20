@@ -2504,7 +2504,23 @@ export type VoiceFaultV1 = "microphone_denied" | "recognition_denied" | "no_micr
  */
 "dictation_off" |
 /**  No engine can run: nothing on this device and no account or key. */
-"no_engine" | "key_refused" | "signed_out" | "out_of_credit" | "rate_limited" | "offline" | "provider_down" | "too_long" | "busy" | "unavailable";
+"no_engine" | "key_refused" | "signed_out" | "out_of_credit" |
+/**  The chosen Zephium AI speech model needs another plan. */
+"plan_required" |
+/**  The Zephium account is under billing review. */
+"billing_review" |
+/**  The account's daily Zephium AI limit is reached. */
+"daily_limit" |
+/**  Free Zephium AI usage is paused for now. */
+"free_usage_paused" |
+/**  Zephium AI is paused as a spending protection. */
+"hosted_paused" |
+/**  The server could not read the recording. */
+"invalid_audio" |
+/**  The server does not take the recording's encoding. */
+"unsupported_audio" |
+/**  The recording is longer than Zephium AI takes. */
+"audio_too_long" | "rate_limited" | "offline" | "provider_down" | "too_long" | "busy" | "unavailable";
 
 /**
  *  Input levels in percent, one per 40 ms of audio, oldest first; they
@@ -4762,6 +4778,18 @@ export type WorkModelFaultV1 =
 "provider_credit" |
 /**  The account's included Zephium AI usage, and any extra, is spent. */
 "hosted_usage" |
+/**  The chosen Zephium AI model needs another plan. */
+"plan_required" |
+/**  The Zephium account is under billing review. */
+"billing_review" |
+/**  The account's daily Zephium AI limit is reached. */
+"daily_limit" |
+/**  Free Zephium AI usage is paused for now; credits and keys still work. */
+"free_usage_paused" |
+/**  Earlier Zephium AI requests are still being confirmed. */
+"hosted_busy" |
+/**  Zephium AI is paused as a spending protection. */
+"hosted_paused" |
 /**  The Zephium account's session ended. */
 "signed_out" | "rate_limited" | "provider_down" | "unreachable" | "too_large";
 

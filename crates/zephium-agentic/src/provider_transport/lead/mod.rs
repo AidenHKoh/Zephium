@@ -30,12 +30,13 @@ use serde_json::Value;
 use zephium_core::work::model::*;
 use zeroize::Zeroizing;
 
+use cloud::classify_cloud;
 pub use cloud::{LeadCloudAccounting, LeadCloudObserver, LeadCloudRecord};
 pub use listing::{
     check_key, detect_local_servers, fetch_cloud_catalog, list_models, CloudCatalog, LeadKeyCheck,
     LocalServer, LocalServerKind,
 };
-pub use transcribe::{transcribe, Transcript, TranscriptionTarget};
+pub use transcribe::{transcribe, transcribe_observed, Transcript, TranscriptionTarget};
 
 const OPENAI_BASE: &str = "https://api.openai.com/v1";
 const ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1";
@@ -54,6 +55,8 @@ const USER_AGENT: &str = "Zephium/1 (lead)";
 const MAX_RETRIES: u32 = 2;
 /// A longer Retry-After goes back to the caller instead of holding the call.
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(20);
+/// How long past the server's own limits a Cloud call waits for its cut-off.
+const LIMIT_GRACE: Duration = Duration::from_secs(15);
 const MAX_PAUSE_CONTINUATIONS: u32 = 3;
 /// How long a finished Cloud stream is read on for its accounting trailer.
 const TRAILER_WAIT: Duration = Duration::from_secs(10);
@@ -139,6 +142,8 @@ pub struct LeadTarget {
     upstream: WorkModelProvider,
     base: Url,
     cloud: bool,
+    /// Native search calls one request may make, as Cloud's catalog row says.
+    search_calls: Option<u32>,
 }
 
 impl LeadTarget {
@@ -163,6 +168,7 @@ impl LeadTarget {
             upstream: provider,
             base: Url::parse(base).map_err(|_| WorkModelError::BadRequest)?,
             cloud: false,
+            search_calls: None,
         })
     }
 
@@ -174,6 +180,7 @@ impl LeadTarget {
             upstream: WorkModelProvider::Compatible,
             base: compatible_base(base).ok_or(WorkModelError::BadRequest)?,
             cloud: false,
+            search_calls: None,
         })
     }
 
@@ -201,6 +208,7 @@ impl LeadTarget {
             upstream,
             base: join(&root, path)?,
             cloud: true,
+            search_calls: None,
         })
     }
 
@@ -223,6 +231,14 @@ impl LeadTarget {
         } else {
             slug.to_owned()
         }
+    }
+
+    /// Whether this request carries the provider's own search tool. Cloud
+    /// admits it only as the row's call cap allows, and never for Google.
+    pub(super) fn native_search(&self, request: &WorkModelRequest) -> bool {
+        request.native_search
+            && !(self.cloud && self.upstream == WorkModelProvider::Google)
+            && self.search_calls != Some(0)
     }
 
     /// Whether this endpoint holds calls to tools marked strict to their
@@ -350,6 +366,8 @@ pub struct LeadClient {
     search_fee_micros: u64,
     cloud_observer: Option<LeadCloudObserver>,
     max_request_bytes: Option<u64>,
+    idle_timeout: Option<Duration>,
+    call_timeout: Option<Duration>,
     #[cfg(test)]
     backoff: Duration,
 }
@@ -368,6 +386,8 @@ impl LeadClient {
             price,
             cloud_observer: None,
             max_request_bytes: None,
+            idle_timeout: None,
+            call_timeout: None,
             #[cfg(test)]
             backoff: Duration::from_millis(1),
         }
@@ -376,6 +396,21 @@ impl LeadClient {
     /// Reports every Cloud call's accounting record when the call ends.
     pub fn with_cloud_observer(mut self, observer: LeadCloudObserver) -> Self {
         self.cloud_observer = Some(observer);
+        self
+    }
+
+    /// Gives up on a silent stream, or a call that runs on, a little after
+    /// the server would: its own cut-off arrives first, with the accounting.
+    pub fn with_call_limits(mut self, idle_ms: Option<u64>, max_ms: Option<u64>) -> Self {
+        let grace = |ms: u64| Duration::from_millis(ms).saturating_add(LIMIT_GRACE);
+        self.idle_timeout = idle_ms.map(grace);
+        self.call_timeout = max_ms.map(grace);
+        self
+    }
+
+    /// Holds searches to the Cloud row's call cap.
+    pub fn with_search_limit(mut self, calls: u32) -> Self {
+        self.target.search_calls = Some(calls);
         self
     }
 
@@ -472,7 +507,7 @@ impl LeadClient {
         let body = match self.target.wire {
             WorkModelWire::OpenAiResponses => openai::body(request, &self.target)?,
             WorkModelWire::AnthropicMessages => anthropic::body(request, &self.target)?,
-            WorkModelWire::Gemini => gemini::body(request)?,
+            WorkModelWire::Gemini => gemini::body(request, &self.target)?,
             WorkModelWire::ChatCompletions => chat::body(request, &self.target)?,
         };
         serde_json::to_vec(&body).map_err(|_| WorkModelError::BadRequest)
@@ -521,11 +556,11 @@ impl LeadClient {
             if self.target.cloud {
                 headers.insert("idempotency-key", key.clone());
             }
-            let send = client
-                .post(url.clone())
-                .headers(headers)
-                .body(body.to_vec())
-                .send();
+            let mut post = client.post(url.clone()).headers(headers);
+            if let Some(limit) = self.call_timeout {
+                post = post.timeout(limit);
+            }
+            let send = post.body(body.to_vec()).send();
             let sent = image_fence::fenced(image_fence, send)
                 .await
                 .map_err(|()| WorkModelError::Cancelled)?;
@@ -570,7 +605,15 @@ impl LeadClient {
                         cloud::Refusal::Final => {}
                         cloud::Refusal::Uncertain => {
                             self.record(&key, answered, request_id, LeadCloudAccounting::Unknown);
-                            return Err(WorkModelError::Protocol);
+                            // A 409 says the server already holds this call; that is
+                            // not a protocol fault, and the receipt settles it.
+                            return Err(match failure.error {
+                                WorkModelError::Hosted {
+                                    refusal: HostedRefusal::AlreadySent,
+                                    ..
+                                } => failure.error,
+                                _ => WorkModelError::Protocol,
+                            });
                         }
                     }
                     failure
@@ -689,7 +732,14 @@ impl LeadClient {
         };
         let mut done = false;
         while !done {
-            let chunk = match body.next().await {
+            let next = match self.idle_timeout {
+                Some(idle) => match tokio::time::timeout(idle, body.next()).await {
+                    Ok(next) => next,
+                    Err(_) => return Err(fail(emitted, WorkModelError::Network)),
+                },
+                None => body.next().await,
+            };
+            let chunk = match next {
                 Some(Ok(chunk)) => chunk,
                 Some(Err(error)) => {
                     return Err(fail(emitted, Failure::from_transport(&error).error))
@@ -770,19 +820,9 @@ impl Failure {
     /// The failure, and the bounded body it was read from.
     async fn from_response(response: reqwest::Response, cloud: bool) -> (Self, Vec<u8>) {
         let status = response.status();
-        let retry_after = retry_after(response.headers());
+        let headers = response.headers().clone();
         let body = bounded_body(response).await;
-        let error = if cloud {
-            classify_cloud(status, &body)
-        } else {
-            classify(status, &body)
-        };
-        let error = match error {
-            WorkModelError::RateLimited { .. } => WorkModelError::RateLimited {
-                retry_after_ms: retry_after.map(|wait| wait.as_millis() as u64),
-            },
-            other => other,
-        };
+        let (error, retry_after) = refused(status, &headers, &body, cloud);
         (Self { error, retry_after }, body)
     }
 
@@ -834,6 +874,23 @@ fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     )
 }
 
+/// A failed answer as a closed error, with the wait the server named: the
+/// larger of its header and, for Cloud, its body.
+fn refused(
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+    cloud: bool,
+) -> (WorkModelError, Option<Duration>) {
+    let wait = cloud::server_wait(headers, body, cloud);
+    let error = if cloud {
+        classify_cloud(status, body)
+    } else {
+        classify(status, body)
+    };
+    (cloud::with_wait(error, wait, cloud), wait)
+}
+
 /// Maps a failed HTTP answer to a closed error. The body is read only for
 /// provider error codes; none of its text leaves this function.
 fn classify(status: StatusCode, body: &[u8]) -> WorkModelError {
@@ -879,28 +936,6 @@ fn classify(status: StatusCode, body: &[u8]) -> WorkModelError {
         400 | 404 | 422 if too_long => WorkModelError::ContextTooLong,
         400..=499 => WorkModelError::BadRequest,
         _ => WorkModelError::Protocol,
-    }
-}
-
-/// Zephium Cloud's own refusals come before the provider's: only a 401 means
-/// the session is over, and a model outside the plan is not a bad bearer.
-fn classify_cloud(status: StatusCode, body: &[u8]) -> WorkModelError {
-    let json: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
-    let code = json
-        .get("error")
-        .and_then(|error| error.get("code"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    match (status.as_u16(), code) {
-        (401, _) => WorkModelError::Unauthorized,
-        (402, _) | (403, "billing_review_required") => WorkModelError::OverBudget,
-        (403, _) | (409, _) => WorkModelError::BadRequest,
-        (_, "insufficient_credits" | "daily_limit_reached") => WorkModelError::OverBudget,
-        (_, "input_limit_exceeded" | "body_too_large" | "request_structure_limit") => {
-            WorkModelError::ContextTooLong
-        }
-        (503, "cloud_disabled" | "cloud_policy_changed") => WorkModelError::Overloaded,
-        _ => classify(status, body),
     }
 }
 

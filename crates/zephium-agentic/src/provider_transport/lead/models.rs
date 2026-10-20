@@ -591,6 +591,12 @@ pub struct CloudModel {
     pub tier: Option<String>,
     /// The largest request body the server admits for it.
     pub max_request_bytes: Option<u64>,
+    /// Native search calls one request may make; zero means the row has none.
+    pub max_search_calls: Option<u32>,
+    /// How long the server waits on a silent provider stream before ending it.
+    pub idle_timeout_ms: Option<u64>,
+    /// The longest the server lets one call run.
+    pub max_duration_ms: Option<u64>,
 }
 
 /// The server's model per role for this account; `None` where it names none.
@@ -691,6 +697,11 @@ fn cloud_row(row: &Value) -> Option<CloudModel> {
             .and_then(Value::as_u64)
             .and_then(|n| u32::try_from(n).ok())
     };
+    let limit = |key: &str| {
+        row.get("limits")
+            .and_then(|limits| limits.get(key))
+            .and_then(Value::as_u64)
+    };
     Some(CloudModel {
         entry: WorkModelEntry {
             id: format!("zephium/{id}"),
@@ -734,11 +745,10 @@ fn cloud_row(row: &Value) -> Option<CloudModel> {
         tier: text("tier")
             .filter(|tier| matches!(*tier, "fast" | "balanced" | "frontier"))
             .map(str::to_owned),
-        max_request_bytes: row
-            .get("limits")
-            .and_then(|limits| limits.get("max_request_bytes"))
-            .and_then(Value::as_u64)
-            .filter(|bytes| *bytes > 0),
+        max_request_bytes: limit("max_request_bytes").filter(|bytes| *bytes > 0),
+        max_search_calls: limit("max_search_calls").and_then(|n| u32::try_from(n).ok()),
+        idle_timeout_ms: limit("idle_timeout_ms").filter(|ms| *ms > 0),
+        max_duration_ms: limit("max_duration_ms").filter(|ms| *ms > 0),
     })
 }
 
@@ -967,6 +977,10 @@ mod tests {
         assert!(parsed[0].available);
         assert_eq!(parsed[0].max_request_bytes, Some(1_048_576));
         assert_eq!(parsed[0].tier.as_deref(), Some("fast"));
+        assert_eq!(parsed[0].max_search_calls, Some(2));
+        assert_eq!(parsed[0].idle_timeout_ms, Some(90_000));
+        assert_eq!(parsed[0].max_duration_ms, Some(600_000));
+        assert_eq!(parsed[1].max_search_calls, None);
         assert!(!parsed[1].available);
         let defaults = parse_cloud_defaults(&body).unwrap();
         assert_eq!(defaults.get(R::Lead), Some("zephium/fast"));
