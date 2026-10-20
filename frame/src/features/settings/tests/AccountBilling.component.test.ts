@@ -310,7 +310,7 @@ test("under billing review there are no purchase buttons, but the portal and a d
   await expect
     .element(screen.getByRole("heading", { name: "Your account is under billing review" }))
     .toBeVisible();
-  await expect.element(screen.getByText("Contact Zephium support", { exact: false })).toBeVisible();
+  await expect.element(screen.getByText("support@zephium.app")).toBeVisible();
   expect(screen.getByRole("button", { name: "Upgrade" }).elements()).toHaveLength(0);
   expect(screen.getByRole("button", { name: "Switch to Max" }).elements()).toHaveLength(0);
   expect(screen.getByText("Credits", { exact: true }).elements()).toHaveLength(0);

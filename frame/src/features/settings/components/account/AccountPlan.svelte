@@ -17,7 +17,8 @@
   import Button from "$shared/ui/Button";
   import SegmentedControl from "$shared/ui/SegmentedControl";
   import SettingsRow from "$shared/ui/SettingsRow";
-  import { explainAccountFault } from "../../lib/account";
+  import { commands } from "$shared/ipc/bindings";
+  import { explainAccountFault, SUPPORT_MAIL } from "../../lib/account";
   import AccountDailyLimit from "./AccountDailyLimit.svelte";
 
   const account = $derived(session.account());
@@ -240,7 +241,16 @@
       </div>{/if}
     {#if review}<div class="review" role="status">
         <h4>{m.account_review_title()}</h4>
-        <p>{m.account_review_body()}</p>
+        <p>
+          {m.account_review_body()}
+          <a
+            href={SUPPORT_MAIL}
+            onclick={(event) => {
+              event.preventDefault();
+              void commands.browserOpenUrl(SUPPORT_MAIL, true).catch(() => {});
+            }}>{m.account_review_contact()}</a
+          >.
+        </p>
       </div>{/if}
     {#if Change && change}<Change />{/if}
     <div class="rows">

@@ -3,6 +3,7 @@ import * as m from "$shared/i18n/messages";
 
 export const TERMS_URL = "https://zephium.app/terms";
 export const PRIVACY_URL = "https://zephium.app/privacy";
+export const SUPPORT_MAIL = "mailto:support@zephium.app";
 
 /** What a fault means to the person, in one sentence. */
 export function explainAccountFault(
