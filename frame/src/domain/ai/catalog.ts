@@ -119,6 +119,11 @@ export function locked(models: WorkModelsV1 | null, id: string): boolean {
   return !!models?.cloud.locked.includes(id);
 }
 
+/** The plan a locked hosted model needs, as the server names it; null when it does not say. */
+export function requiredPlan(models: WorkModelsV1 | null, id: string): string | null {
+  return models?.cloud.required.find((row) => row.id === id)?.plan ?? null;
+}
+
 export function entryOf(models: WorkModelsV1 | null, id: string | null | undefined) {
   if (!models || !id) return null;
   return models.entries.find((entry) => entry.id === id) ?? null;

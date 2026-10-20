@@ -11,6 +11,7 @@ export {
   locked,
   pickerGroups,
   providerName,
+  requiredPlan,
   searchEntries,
   shortName,
   usable,

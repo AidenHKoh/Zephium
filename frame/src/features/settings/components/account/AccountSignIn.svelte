@@ -37,9 +37,11 @@
     if (pendingEmail) focus(codeForm);
   });
 
+  /** An invited-only server sends no code to an address it has not invited, and says nothing. */
+  const mode = $derived(account?.signup_mode ?? null);
   const faultText = $derived(
     fault && (fault.action === "send" || fault.action === "verify")
-      ? explainAccountFault(fault.fault, fault.retryAfter)
+      ? explainAccountFault(fault.fault, fault.retryAfter, mode)
       : null,
   );
   const emailValid = $derived(plausibleEmail(email));
@@ -121,6 +123,10 @@
         disabled={!emailValid}>{m.account_continue()}</Button
       >
     </form>
+    {#if mode === "allowlist"}<p class="note" role="note">{m.account_signup_invite_note()}</p>
+    {:else if mode === "closed"}<p class="note" role="note">
+        {m.account_signup_closed_note()}
+      </p>{/if}
   {:else}
     <h2>{m.account_code_title()}</h2>
     <p class="body">{m.account_code_body({ email: pendingEmail })}</p>
@@ -171,6 +177,9 @@
       >
     </div>
     {#if resent && !faultText}<p class="note" role="status">{m.account_code_sent()}</p>{/if}
+    {#if mode === "allowlist" && !faultText}<p class="note" role="note">
+        {m.account_signup_invite_note()}
+      </p>{/if}
   {/if}
   {#if faultText}<p class="note" data-tone="error" role="alert">{faultText}</p>{/if}
   {#if !pendingEmail}<p class="terms">

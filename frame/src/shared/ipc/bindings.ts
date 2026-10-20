@@ -3431,6 +3431,8 @@ export type WorkCloudStatusV1 = {
 	 *  to explain the plan, never choosable.
 	 */
 	locked: string[],
+	/**  The cheapest plan each locked entry needs, when the server states it. */
+	required: WorkLockedPlanV1[],
 };
 
 /**  Lines `from..=to` of the code text, counted from 1. */
@@ -4681,6 +4683,11 @@ export type WorkLocalStepV1_Serialize = {
 	before_digest?: string | null,
 	/**  A folder question's known starting path; absent for a choose-any-folder picker. */
 	folder?: string | null,
+};
+
+export type WorkLockedPlanV1 = {
+	id: string,
+	plan: string | null,
 };
 
 export type WorkMeasurementBasis = WorkMeasurementBasis_Serialize | WorkMeasurementBasis_Deserialize;

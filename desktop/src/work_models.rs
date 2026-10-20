@@ -62,6 +62,14 @@ pub(crate) struct WorkCloudStatusV1 {
     /// Hosted entries listed for this account but locked by its plan: shown
     /// to explain the plan, never choosable.
     pub(crate) locked: Vec<String>,
+    /// The cheapest plan each locked entry needs, when the server states it.
+    pub(crate) required: Vec<WorkLockedPlanV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
+pub(crate) struct WorkLockedPlanV1 {
+    pub(crate) id: String,
+    pub(crate) plan: Option<String>,
 }
 
 /// The efforts one entry takes as the lead, weakest first.
@@ -227,6 +235,11 @@ mod product {
                 signed_in: view.cloud_signed_in,
                 plan: view.cloud_plan,
                 locked: view.cloud_locked,
+                required: view
+                    .cloud_locked_plans
+                    .into_iter()
+                    .map(|(id, plan)| WorkLockedPlanV1 { id, plan })
+                    .collect(),
             },
             fault,
             efforts: view

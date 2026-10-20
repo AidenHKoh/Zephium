@@ -1001,6 +1001,8 @@ pub struct WorkModelsView {
     pub cloud_plan: Option<String>,
     /// Hosted models listed for this account but locked by its plan.
     pub cloud_locked: Vec<String>,
+    /// The cheapest plan each locked model needs, when the server says.
+    pub cloud_locked_plans: Vec<(String, Option<String>)>,
     /// The efforts each entry takes as a lead, for entries that take any.
     pub efforts: Vec<(String, Vec<WorkModelReasoning>)>,
     /// The effort the lead runs at now; `None` when its model takes none.
@@ -1044,6 +1046,12 @@ pub async fn view(profile: ProfileId) -> WorkModelsView {
         providers,
         cloud_signed_in: cloud().is_some(),
         cloud_plan: cloud().and_then(|session| session.plan()),
+        cloud_locked_plans: state
+            .cloud
+            .iter()
+            .filter(|model| !model.available)
+            .map(|model| (model.entry.id.clone(), model.plan_min.clone()))
+            .collect(),
         cloud_locked: state
             .cloud
             .iter()
@@ -1645,6 +1653,10 @@ mod tests {
         assert_eq!(
             super::view(hosted).await.cloud_locked,
             vec!["zephium/deep".to_owned()]
+        );
+        assert_eq!(
+            super::view(hosted).await.cloud_locked_plans,
+            vec![("zephium/deep".to_owned(), None)]
         );
 
         // Signing out takes the hosted catalog with it; the choice stays for later.

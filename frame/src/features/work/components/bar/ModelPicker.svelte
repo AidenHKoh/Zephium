@@ -1,7 +1,7 @@
 <script lang="ts">
   import { Popover } from "bits-ui";
   import { onDestroy, onMount, tick, untrack } from "svelte";
-  import { accountSession } from "$domain/account";
+  import { accountSession, planName } from "$domain/account";
   import type { WorkModelEntry, WorkModelProvider, WorkModelReasoning } from "$shared/ipc/bindings";
   import { commands } from "$shared/ipc/bindings";
   import {
@@ -15,6 +15,7 @@
     locked,
     pickerGroups,
     providerName,
+    requiredPlan,
     searchEntries,
     shortName,
     toggleFavourite,
@@ -336,7 +337,8 @@
 
   /** The menu stays while the choice lands, so the card and the trigger change before it closes. */
   async function choose(entry: WorkModelEntry) {
-    if (locked(models, entry.id) || session?.busy) return;
+    if (locked(models, entry.id)) return upgrade();
+    if (session?.busy) return;
     if (entry.id !== chosen && !(await session?.choose("lead", entry.id))) return;
     close();
   }
@@ -366,6 +368,13 @@
     } finally {
       sending = false;
     }
+  }
+
+  /** A model the plan does not include opens Account, where the plans are. */
+  function upgrade() {
+    open = false;
+    reset();
+    void commands.runCommand("settings.account");
   }
 
   function settings() {
@@ -740,6 +749,7 @@
                     </div>{/if}
                   {#each section.items as item (item.id)}
                     {@const closed = locked(models, item.entry.id)}
+                    {@const needed = closed ? requiredPlan(models, item.entry.id) : null}
                     {@const starry = starred.has(item.id)}
                     <div
                       class="option"
@@ -749,12 +759,21 @@
                       data-active={item.id === active ? "" : undefined}
                       data-walk={item.id === active && walked ? "" : undefined}
                       aria-selected={item.id === chosen}
-                      aria-disabled={closed ||
-                        (!!session?.busy && session.busy !== "effort") ||
+                      aria-label={closed
+                        ? needed
+                          ? m.work_model_upgrade_plan_label({
+                              model: item.entry.display_name,
+                              plan: planName(needed) ?? needed,
+                            })
+                          : m.work_model_upgrade_label({ model: item.entry.display_name })
+                        : undefined}
+                      aria-disabled={(!closed && !!session?.busy && session.busy !== "effort") ||
                         undefined}
                     >
                       <span class="option-name">{item.entry.display_name}</span>
-                      {#if closed}<span class="aside">{m.work_model_locked()}</span>{/if}
+                      {#if closed}<span class="upgrade" data-plan={needed ?? undefined}
+                          >{needed ? (planName(needed) ?? needed) : m.work_model_upgrade()}</span
+                        >{/if}
                       <span class="slot">
                         <span class="check" aria-hidden="true"
                           >{#if item.id === chosen}<Icon
@@ -1168,10 +1187,15 @@
     font-weight: 550;
   }
 
-  .aside {
+  /* A locked model names the plan that opens it; the row is the way there. */
+  .upgrade {
     flex: none;
-    color: var(--color-faint);
+    padding: 1px 7px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-fill);
+    color: var(--color-muted);
     font-size: var(--text-caption);
+    font-weight: 500;
     line-height: 14px;
   }
 

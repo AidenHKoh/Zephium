@@ -1,11 +1,15 @@
-import type { AccountFaultV1 } from "$shared/ipc/bindings";
+import type { AccountFaultV1, AccountSignupModeV1 } from "$shared/ipc/bindings";
 import * as m from "$shared/i18n/messages";
 
 export const TERMS_URL = "https://zephium.app/terms";
 export const PRIVACY_URL = "https://zephium.app/privacy";
 
 /** What a fault means to the person, in one sentence. */
-export function explainAccountFault(fault: AccountFaultV1, retryAfter: number | null): string {
+export function explainAccountFault(
+  fault: AccountFaultV1,
+  retryAfter: number | null,
+  signupMode?: AccountSignupModeV1 | null,
+): string {
   switch (fault) {
     case "offline":
       return m.account_fault_offline();
@@ -16,7 +20,9 @@ export function explainAccountFault(fault: AccountFaultV1, retryAfter: number | 
     case "invalid_code":
       return m.account_fault_invalid_code();
     case "signup_closed":
-      return m.account_fault_signup_closed();
+      return signupMode === "allowlist"
+        ? m.account_fault_signup_invite_only()
+        : m.account_fault_signup_closed();
     case "unavailable":
       return m.account_fault_unavailable();
     case "no_billing_account":
@@ -33,6 +39,32 @@ export function explainAccountFault(fault: AccountFaultV1, retryAfter: number | 
       return m.account_fault_email_taken();
     case "not_found":
       return m.account_fault_not_found();
+    case "billing_review":
+      return m.account_fault_billing_review();
+    case "checkout_in_progress":
+      return m.account_fault_checkout_in_progress();
+    case "subscription_change_required":
+      return m.account_fault_subscription_change_required();
+    case "billing_refresh_required":
+      return m.account_fault_billing_refresh_required();
+    case "plan_change_in_progress":
+      return m.account_fault_plan_change_in_progress();
+    case "plan_change_expired":
+      return m.account_fault_plan_change_expired();
+    case "plan_change_unavailable":
+      return m.account_fault_plan_change_unavailable();
+  }
+}
+
+/** Why a plan change ended as `failed`, from its stable code. */
+export function explainChangeError(code: string | null): string {
+  switch (code) {
+    case "payment_failed":
+      return m.account_change_failed_payment();
+    case "billing_review_required":
+      return m.account_fault_billing_review();
+    default:
+      return m.account_change_failed_other();
   }
 }
 

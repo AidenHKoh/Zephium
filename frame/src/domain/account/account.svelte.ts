@@ -37,6 +37,10 @@ type AccountAction =
   | "reauth"
   | "email_code"
   | "email_change"
+  | "limit"
+  | "plan_preview"
+  | "plan_confirm"
+  | "plan_dismiss"
   | "export";
 
 type AccountFault = {
@@ -162,6 +166,14 @@ export async function refresh() {
 }
 export const buy = (purchase: AccountPurchaseV1) => act("buy", () => commands.accountBuy(purchase));
 export const manage = () => act("manage", () => commands.accountManage());
+/** The daily limit in units, or null to remove it. */
+export const setDailyLimit = (limit: string | null) =>
+  act("limit", () => commands.accountSetDailyLimit(limit));
+/** Asks for a quote to move to another paid plan; nothing is charged. */
+export const previewPlanChange = (plan: string, interval: string) =>
+  act("plan_preview", () => commands.accountPlanPreview(plan, interval));
+export const confirmPlanChange = () => act("plan_confirm", () => commands.accountPlanConfirm());
+export const dismissPlanChange = () => act("plan_dismiss", () => commands.accountPlanDismiss());
 export const setServer = (server: string | null) =>
   act("server", () => commands.accountSetServer(server));
 export const sendDeletionCode = () => act("deletion_code", () => commands.accountDeletionCode());

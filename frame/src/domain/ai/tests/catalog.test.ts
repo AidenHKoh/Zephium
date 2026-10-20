@@ -36,7 +36,7 @@ describe("the picker's list", () => {
     expect(needsKey).toEqual(["google"]);
     // Signed out, hosted models are neither offered nor listed as needing a key.
     const signedOut = pickerGroups(
-      { ...view, cloud: { signed_in: false, plan: null, locked: [] } },
+      { ...view, cloud: { signed_in: false, plan: null, locked: [], required: [] } },
       "lead",
     );
     expect(signedOut.ready.map((group) => group.provider)).toEqual(["anthropic", "open_ai"]);

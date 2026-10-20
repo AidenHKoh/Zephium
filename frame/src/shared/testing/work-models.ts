@@ -174,7 +174,12 @@ export function models(options: {
       key: options.keys?.[provider] ?? "missing",
       base: provider === "compatible" ? (options.base ?? null) : null,
     })),
-    cloud: { signed_in: !!options.cloud, plan: options.cloud ? "Pro" : null, locked: [] },
+    cloud: {
+      signed_in: !!options.cloud,
+      plan: options.cloud ? "Pro" : null,
+      locked: [],
+      required: [],
+    },
     fault: null,
     efforts,
     effort: lead?.length
