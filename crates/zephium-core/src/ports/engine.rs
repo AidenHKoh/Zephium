@@ -1368,6 +1368,8 @@ pub enum EngineEvent {
         id: ItemId,
         url: String,
         app: Option<String>,
+        /// The person clicked, rather than the page navigating by itself.
+        user_gesture: bool,
     },
     /// A top-level load was shut because a focus round is running.
     FocusBlocked {

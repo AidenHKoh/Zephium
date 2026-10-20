@@ -707,14 +707,32 @@ impl EngineHost {
         // request the person answers in chrome. One per second per view, so
         // a page cannot flood it.
         #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let page_asked = Rc::new(std::cell::RefCell::new(
+            std::collections::HashSet::<String>::new(),
+        ));
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let app_link = {
             let permit = event_permit.clone();
             let sink = self.sink.clone();
             let item = id.clone();
             let last = Cell::new(None::<std::time::Instant>);
-            Rc::new(move |target: &str| -> bool {
-                if zephium_core::navigation::external_app_link(target).is_none() {
+            let page_asked = page_asked.clone();
+            Rc::new(move |target: &str, user_gesture: bool| -> bool {
+                use zephium_core::navigation::{app_link_outcome, AppLinkOutcome};
+                let Some(link) = zephium_core::navigation::external_app_link(target) else {
                     return false;
+                };
+                // A page acting alone is heard once per kind of link until
+                // the person follows one themselves; checked before the app
+                // lookup so a looping script costs nothing.
+                if user_gesture {
+                    page_asked.borrow_mut().clear();
+                } else if !page_asked.borrow_mut().insert(link.scheme().to_owned()) {
+                    return true;
+                }
+                let app = crate::platform::imp::external_app_name(target);
+                if app_link_outcome(app.is_some(), user_gesture) == AppLinkOutcome::Silent {
+                    return true;
                 }
                 let now = std::time::Instant::now();
                 if last
@@ -727,7 +745,8 @@ impl EngineHost {
                         EngineEvent::ExternalAppRequested {
                             id: item.get(),
                             url: target.to_owned(),
-                            app: crate::platform::imp::external_app_name(target),
+                            app,
+                            user_gesture,
                         },
                     );
                 }
@@ -1042,7 +1061,7 @@ impl EngineHost {
                 // shared one-per-second limit keeps that to one request.
                 #[cfg(target_os = "windows")]
                 if !admitted {
-                    navigation_app_link(&target);
+                    navigation_app_link(&target, false);
                 }
                 // WebView2 asks only about top-level loads here; WebKit asks
                 // about frames too, so focus is checked for it below, where
@@ -1125,7 +1144,11 @@ impl EngineHost {
                 }
                 let admitted = frame_permit.allows_navigation(&target)
                     && frame_navigation.admits_target(&target);
-                if !admitted && action_app_link(&target) {
+                let gesture = matches!(
+                    action.navigation_type,
+                    wry::AppleNavigationType::LinkActivated
+                );
+                if !admitted && action_app_link(&target, gesture) {
                     return false;
                 }
                 if admitted
@@ -1196,7 +1219,7 @@ impl EngineHost {
             let popup_sink = self.sink.clone();
             let popup_app_link = app_link.clone();
             builder = builder.with_new_window_req_handler(move |url, features| {
-                if features.user_initiated && popup_app_link(&url) {
+                if features.user_initiated && popup_app_link(&url, true) {
                     return wry::NewWindowResponse::Deny;
                 }
                 // Bound script-triggered bursts without delaying ordinary rapid
@@ -1803,8 +1826,8 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         {
             let link = app_link.clone();
-            if let Err(error) = security_policy.route_external_uris(move |uri| {
-                link(uri);
+            if let Err(error) = security_policy.route_external_uris(move |uri, user_gesture| {
+                link(uri, user_gesture);
             }) {
                 eprintln!("security: content WebView2 app-link routing failed: {error}");
                 if report_failure {

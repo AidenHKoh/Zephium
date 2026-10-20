@@ -467,7 +467,7 @@ impl SecurityPolicy {
     /// one goes to `request`, so the browser can ask the person first.
     pub fn route_external_uris(
         &mut self,
-        request: impl Fn(&str) + 'static,
+        request: impl Fn(&str, bool) + 'static,
     ) -> windows_core::Result<()> {
         let handler = LaunchingExternalUriSchemeEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else {
@@ -475,12 +475,14 @@ impl SecurityPolicy {
             };
             unsafe {
                 args.SetCancel(true)?;
+                let mut user_gesture = windows_core::BOOL::default();
+                args.IsUserInitiated(&mut user_gesture)?;
                 let mut uri = PWSTR::null();
                 args.Uri(&mut uri)?;
                 if let Some(uri) =
                     take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
                 {
-                    request(&uri);
+                    request(&uri, user_gesture.as_bool());
                 }
             }
             Ok(())

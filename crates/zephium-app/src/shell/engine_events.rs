@@ -377,9 +377,12 @@ impl Shell {
                     self.project_tab(id);
                 }
             }
-            EngineEvent::ExternalAppRequested { id, url, app } => {
-                self.on_external_app_requested(id, url, app)
-            }
+            EngineEvent::ExternalAppRequested {
+                id,
+                url,
+                app,
+                user_gesture,
+            } => self.on_external_app_requested(id, url, app, user_gesture),
             EngineEvent::FocusBlocked { id, url } => self.on_focus_blocked(id, url),
             EngineEvent::LinkedDownloadStarted { id } => {
                 if self.items.tab(id).is_some_and(|tab| {

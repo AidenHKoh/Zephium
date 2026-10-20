@@ -13,10 +13,16 @@ impl Shell {
         id: ItemId,
         url: String,
         app: Option<String>,
+        user_gesture: bool,
     ) {
         let Some(url) = navigation::external_app_link(&url) else {
             return;
         };
+        if navigation::app_link_outcome(app.is_some(), user_gesture)
+            == navigation::AppLinkOutcome::Silent
+        {
+            return;
+        }
         if !self.item_in_focused_scope(id) {
             return;
         }
