@@ -1557,6 +1557,9 @@ struct GateState {
     entry: EntryCheck,
     /// Rust pressed a cookie banner's refusal on this page.
     consent_pressed: bool,
+    /// The person loaded this site in a tab while the page waited on their
+    /// sign-in: the task starts over on a fresh page.
+    signed_in_elsewhere: bool,
     /// The addresses the task names as recipients: a send whose message
     /// shows none of them goes back to the model.
     recipients: Vec<String>,
@@ -1698,6 +1701,15 @@ impl SiteGate {
     }
     pub(crate) fn consent_pressing(&self, pressing: bool) {
         self.state().consent_pressed |= pressing;
+    }
+    pub(crate) fn site(&self) -> String {
+        self.state().site.clone()
+    }
+    pub(crate) fn signed_in_now(&self) {
+        self.state().signed_in_elsewhere = true;
+    }
+    pub(crate) fn signed_in_elsewhere(&self) -> bool {
+        self.state().signed_in_elsewhere
     }
     pub(crate) fn pressed_consent(&self) -> bool {
         self.state().consent_pressed

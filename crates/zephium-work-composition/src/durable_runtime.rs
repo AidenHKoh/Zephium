@@ -823,9 +823,9 @@ impl NativeWorkComposition {
         // Saving a cookie refusal that loads another document ends the page
         // before the model ever worked on it: it runs again once, with the
         // choice in place.
-        let rerun = gate.pressed_consent()
-            && run.status == WorkAttemptStatus::Failed
-            && run.measurements.planner_calls == 0;
+        let rerun = run.status == WorkAttemptStatus::Failed
+            && ((gate.pressed_consent() && run.measurements.planner_calls == 0)
+                || (gate.signed_in_elsewhere() && gate.committed().is_empty()));
         Ok(WorkBrowserOutcome {
             status: match run.status {
                 WorkAttemptStatus::Running => WorkStepStatus::Running,
@@ -1063,6 +1063,8 @@ impl NativeWorkComposition {
         let mut handing: Option<u32> = None;
         let mut entry_asked = false;
         let mut entry_told = false;
+        // Tab loads on the site while the page waits on a sign-in.
+        let mut site_loads: Option<(u64, Instant)> = None;
         let task = resume_plan
             .as_ref()
             .is_some_and(|plan| page_task(&plan.request));
@@ -1379,6 +1381,34 @@ impl NativeWorkComposition {
                             entry_told = true;
                             if resume_plan.as_ref().is_some_and(|plan| plan.request.entry) {
                                 port.signed_out();
+                            }
+                        }
+                        // The person signed in from a tab instead of this
+                        // page: a load of the site there ends the wait, and
+                        // the task starts over on a fresh page, which reads
+                        // or meets the wall again for itself.
+                        if guard.0.human_snapshot().is_some_and(|human| {
+                            human.reason == AgentBrowserHumanReason::SignIn
+                                && human.phase == Phase::WaitingForHuman
+                        }) && task
+                            && !requested_close
+                            && site_loads.is_none_or(|(_, at)| now >= at + SITE_LOAD_POLL)
+                        {
+                            if let Some(count) = zephium_app::work_context::site_loads(
+                                attempt.profile(),
+                                gate.site(),
+                            )
+                            .await
+                            {
+                                match site_loads {
+                                    Some((before, _)) if count > before => {
+                                        trace("close:signed_in_elsewhere");
+                                        gate.signed_in_now();
+                                        requested_close = true;
+                                    }
+                                    Some((before, _)) => site_loads = Some((before, now)),
+                                    None => site_loads = Some((count, now)),
+                                }
                             }
                         }
                         if let Some(human) = guard.0.human_snapshot() {
@@ -3636,6 +3666,8 @@ const MAX_SEAT_WAIT: Duration = Duration::from_secs(120);
 /// A page held for a person, or while the window is hidden, moves at a
 /// person's pace: looked at four times a second instead of twenty, for the
 /// minutes a sign-in can take.
+/// How often a page held on a sign-in looks for the person's tab loads.
+const SITE_LOAD_POLL: Duration = Duration::from_secs(2);
 const HELD_PAGE_POLL: Duration = Duration::from_millis(250);
 /// A page task's own working time and step ceilings. Held time for the
 /// person does not count against it.
