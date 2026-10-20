@@ -829,6 +829,12 @@
     const sheet = composerSurface;
     if (!card || !sheet) return;
     const root = document.documentElement;
+    // The hole follows the bar on every frame of its width change. On a card that paints with the
+    // canvas, each new clip repaints the whole card, which at a large window is the animation's
+    // whole cost. A layer of its own for the moment the hole moves turns the clip into a mask the
+    // compositor reapplies, and it is let go again once the hole has held still.
+    let settle = 0;
+    let shape = "";
     const cut = () => {
       const area = card.getBoundingClientRect();
       const bar = sheet.getBoundingClientRect();
@@ -847,8 +853,16 @@
         for (const path of edge.querySelectorAll("path")) path.setAttribute("d", d);
       }
       const material = root.dataset.material;
-      card.style.clipPath =
+      const clip =
         !material || material === "none" ? "" : composerHole(reach, place, radius, flare);
+      if (clip === shape) return;
+      shape = clip;
+      if (clip) {
+        card.style.willChange = "transform";
+        clearTimeout(settle);
+        settle = window.setTimeout(() => (card.style.willChange = ""), 180);
+      }
+      card.style.clipPath = clip;
     };
     const observer = new ResizeObserver(cut);
     observer.observe(card);
@@ -862,7 +876,9 @@
       observer.disconnect();
       materials.disconnect();
       window.removeEventListener("resize", cut);
+      clearTimeout(settle);
       card.style.clipPath = "";
+      card.style.willChange = "";
     };
   });
   $effect(() => {

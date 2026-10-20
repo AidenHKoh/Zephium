@@ -63,7 +63,7 @@
     border-radius: var(--radius-card);
     background: var(--color-raised);
     box-shadow: var(--shadow-float);
-    animation: ask-in var(--motion-slow) var(--ease-emphasized);
+    animation: ask-in var(--motion-fast) var(--ease-out);
   }
 
   .island {

@@ -82,7 +82,7 @@
     box-shadow: var(--shadow-menu);
     color: var(--color-text);
     cursor: default;
-    animation: needs-arrive var(--motion-base) var(--ease-emphasized) both;
+    animation: needs-arrive var(--motion-fast) var(--ease-out) both;
   }
 
   .what {
@@ -195,7 +195,7 @@
   @keyframes needs-arrive {
     from {
       opacity: 0;
-      transform: translateY(4px);
+      transform: translateY(3px);
     }
   }
 

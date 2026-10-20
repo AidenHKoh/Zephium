@@ -410,8 +410,9 @@
      down either side on its own, with nothing drawn below. */
   --shine-top: inset 0 1px 0 0 rgb(255 255 255 / 0.1);
 
-  /* A sheet standing on the bottom edge: its rim, and height cast upward. */
-  --shadow-sheet: 0 0 0 0.5px rgb(255 255 255 / 0.08), 0 -10px 40px -20px rgb(0 0 0 / 0.4);
+  /* A sheet standing on the bottom edge: height cast upward. It has no rim of its own: the sheet
+     draws its hairline along its own shape, and a box ring cannot follow that shape's fillets. */
+  --shadow-sheet: 0 -10px 40px -20px rgb(0 0 0 / 0.4);
 
   /* Light crossing the name on the new tab as it arrives. */
   --color-glint: rgb(255 255 255 / 0.34);
@@ -772,7 +773,7 @@
   --shadow-menu: 0 0 0 1px rgb(24 24 27 / 0.09), 0 14px 44px -10px rgb(24 24 27 / 0.16);
   --shine: inset 0 1px 0 0 rgb(255 255 255 / 0.3);
   --shine-top: inset 0 1px 0 0 rgb(255 255 255 / 0.55);
-  --shadow-sheet: 0 0 0 0.5px rgb(24 24 27 / 0.08), 0 -10px 40px -20px rgb(24 24 27 / 0.14);
+  --shadow-sheet: 0 -10px 40px -20px rgb(24 24 27 / 0.14);
   --shadow-badge: 0 0 0 0.5px var(--color-border-strong), 0 1px 3px rgb(24 24 27 / 0.14);
   --color-glint: rgb(255 255 255 / 0.62);
 

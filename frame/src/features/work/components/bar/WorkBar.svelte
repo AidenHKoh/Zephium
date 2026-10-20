@@ -269,6 +269,7 @@
     box-sizing: border-box;
     inline-size: min(var(--bar-width), calc(100% - 48px));
     pointer-events: none;
+    contain: layout style;
     transition: inline-size var(--motion-slow) var(--ease-emphasized);
   }
 

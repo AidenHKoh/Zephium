@@ -68,10 +68,7 @@
     font-size: var(--text-label);
     line-height: 16px;
     pointer-events: none;
-  }
-
-  .part-agent.running {
-    animation: agent-in var(--motion-slow) var(--ease-spring);
+    animation: agent-in var(--motion-fast) var(--ease-out);
   }
 
   .face {
@@ -102,7 +99,7 @@
   @keyframes agent-in {
     from {
       opacity: 0;
-      transform: translateY(4px);
+      transform: translateY(3px);
     }
   }
 </style>

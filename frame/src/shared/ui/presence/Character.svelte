@@ -349,8 +349,8 @@
     background: radial-gradient(closest-side, var(--color-agent-ground), transparent);
   }
 
-  /* Only a live character moves: a slow float, a glance, a blink. Waiting asks
-     twice, then keeps still until the person answers. */
+  /* Only a live character moves: a slow float, a glance, a blink. Waiting is
+     a pose, not motion: it keeps perfectly still until the person answers. */
   .live {
     --beat: 3.4s;
     --beats: infinite;
@@ -358,7 +358,7 @@
 
   .waiting {
     --beat: 1.6s;
-    --beats: 2;
+    --beats: 0;
     --float-beats: 0;
   }
 
