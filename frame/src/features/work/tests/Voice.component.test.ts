@@ -155,3 +155,34 @@ test("a Mac with Dictation off says so and opens Keyboard settings, not a retry"
   expect(native.privacy).toHaveBeenCalledWith("dictation");
   await screen.unmount();
 });
+
+test("a hosted take refused for its plan opens the account, not a retry", async () => {
+  await page.viewport(1000, 600);
+  const screen = await render(VoiceStage);
+  await listening("zephium");
+  emitNativeEvent(
+    "voiceChanged",
+    change(7, { phase: "failed", engine: "zephium", fault: "plan_required" }),
+  );
+  await expect
+    .element(page.getByRole("alert"))
+    .toHaveTextContent("Dictation needs a different Zephium plan.");
+  await page.getByRole("button", { name: "See plans" }).click();
+  expect(native.run).toHaveBeenCalledWith("settings.account");
+  await screen.unmount();
+});
+
+test("a recording that runs past four minutes says so and offers another take", async () => {
+  await page.viewport(1000, 600);
+  const screen = await render(VoiceStage);
+  await listening("zephium");
+  emitNativeEvent(
+    "voiceChanged",
+    change(7, { phase: "failed", engine: "zephium", fault: "audio_too_long" }),
+  );
+  await expect
+    .element(page.getByRole("alert"))
+    .toHaveTextContent("Recordings can be up to 4 minutes.");
+  await expect.element(page.getByRole("button", { name: "Try again" })).toBeVisible();
+  await screen.unmount();
+});

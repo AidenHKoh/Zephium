@@ -5,6 +5,7 @@
   import type { WorkHumanReasonV1, WorkModelFaultV1 } from "$shared/ipc/bindings";
   import { currentActivity } from "$domain/work";
   import { agentLine, endingFault, endingNote, isLive } from "../lib/agent-steps";
+  import { dailyResetTime } from "../lib/daily-reset";
   import { cardCountdown } from "../lib/work-human";
   import type { WorkHumanSession } from "$domain/work-human";
   import RunAsks from "./asks/RunAsks.svelte";
@@ -303,6 +304,12 @@
   const fault = $derived(execution && !live ? endingFault(execution) : null);
   const faultLines: Partial<Record<WorkModelFaultV1, () => string>> = {
     hosted_usage: m.work_fault_hosted_usage,
+    plan_required: m.work_fault_plan_required,
+    billing_review: m.work_fault_billing_review,
+    daily_limit: () => m.work_fault_daily_limit({ time: dailyResetTime() }),
+    free_usage_paused: m.work_fault_free_usage_paused,
+    hosted_busy: m.work_fault_hosted_busy,
+    hosted_paused: m.work_fault_hosted_paused,
     signed_out: m.work_fault_signed_out,
     missing_key: m.work_fault_missing_key,
     key_refused: m.work_fault_key_refused,
@@ -312,6 +319,15 @@
     switch (fault) {
       case "hosted_usage":
         return { label: m.work_fault_fix_plan(), command: "settings.account" };
+      case "plan_required":
+      case "free_usage_paused":
+        return { label: m.work_fault_fix_plans(), command: "settings.account" };
+      case "billing_review":
+        return { label: m.work_fault_fix_account(), command: "settings.account" };
+      case "daily_limit":
+        return { label: m.work_fault_fix_limit(), command: "settings.account" };
+      case "hosted_paused":
+        return { label: m.work_fault_fix_key(), command: "settings.ai" };
       case "signed_out":
         return { label: m.work_fault_fix_sign_in(), command: "settings.account" };
       case "missing_key":
