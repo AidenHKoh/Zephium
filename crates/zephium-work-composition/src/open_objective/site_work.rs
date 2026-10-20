@@ -1129,6 +1129,15 @@ fn verb(text: &str, fallback: &str) -> String {
     }
 }
 
+/// Where a message card's headline says it goes ("launch as you?"), past
+/// the control's own verb ("Send now to ", "Send to ").
+fn destination(headline: &str) -> Option<&str> {
+    headline
+        .split_once(" to ")
+        .or_else(|| headline.split_once(" on "))
+        .map(|(_, place)| place)
+}
+
 /// Builds the person's card from the observed region around the target.
 pub(crate) fn preview(
     consequence: Consequence,
@@ -1225,7 +1234,13 @@ pub(crate) fn preview(
     });
     let headline = match consequence {
         Consequence::Communication => {
-            let verb = verb(&name, "Send");
+            // Enter in a message box sends: the box's own name is not a verb.
+            let verb =
+                if node.role() == SemanticRole::Textbox || node.editable_structure().is_some() {
+                    "Send".to_owned()
+                } else {
+                    verb(&name, "Send")
+                };
             match (recipients.as_slice(), &heading) {
                 ([first], _) => format!("{verb} to {first} as you?"),
                 ([first, rest @ ..], _) => {
@@ -2359,17 +2374,39 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             state.status_before = status_lines(observation);
             return accept_approved(current_binding);
         }
+        // An approved message is the person's answer for those words to that
+        // place: Enter in its box sends it as its Send button would.
+        let same_message = state.confirmed.as_ref().is_some_and(|confirmed| {
+            confirmed.preview.consequence == Consequence::Communication
+                && consequence == Consequence::Communication
+                && destination(&confirmed.preview.headline) == destination(&preview.headline)
+                && confirmed.preview.text.is_some()
+                && confirmed.preview.text == preview.text
+        });
         // An approval is the person's answer for one control. Another one
         // proposed meanwhile (a close button Rust tries, a detour the model
         // takes) is refused without a card and leaves the approval waiting.
-        if state.confirmed.as_ref().is_some_and(|confirmed| {
-            matches!(
-                confirmed.preview.consequence,
-                Consequence::Communication | Consequence::Purchase | Consequence::Destructive
-            ) && (confirmed.preview.consequence != consequence
-                || confirmed.preview.action != preview.action)
-        }) {
+        if !same_message
+            && state.confirmed.as_ref().is_some_and(|confirmed| {
+                matches!(
+                    confirmed.preview.consequence,
+                    Consequence::Communication | Consequence::Purchase | Consequence::Destructive
+                ) && (confirmed.preview.consequence != consequence
+                    || confirmed.preview.action != preview.action)
+            })
+        {
             return Err(AgentWorkFailure::ActionDenied);
+        }
+        if same_message && fits {
+            if let Some(confirmed) = state.confirmed.take() {
+                state.dispatched = Some(consequence);
+                state.in_flight = Some(flight(Some((
+                    confirmed.fingerprint.structure,
+                    confirmed.digest,
+                ))));
+                state.status_before = status_lines(observation);
+                return accept_approved(current_binding);
+            }
         }
         if let Some(confirmed) = state.confirmed.take() {
             // What the person approved is what the card showed (where it goes,
@@ -3149,6 +3186,66 @@ mod tests {
         assert!(
             policy.assess(&send, &look).is_ok(),
             "the approval still holds"
+        );
+    }
+
+    #[test]
+    fn an_approved_message_goes_out_by_enter_as_by_its_send_button() {
+        let chat = |value: &str| {
+            page(vec![
+                json!({"k":1,"r":"document","o":16,"fc":true}),
+                json!({"k":2,"p":0,"r":"group","n":"Composer","fc":true}),
+                json!({"k":3,"p":1,"r":"textbox","n":"Message to launch","o":11,"fs":1,"es":[1,2,false],"fc":true,
+                    "v":{"k":"text","value":value},"b":{"x":1,"y":80,"w":300,"h":60}}),
+                json!({"k":4,"p":1,"r":"button","n":"Send now","o":9,"ak":1,"fc":true,
+                    "b":{"x":1,"y":150,"w":80,"h":30}}),
+            ])
+        };
+        let enter = |observation: &SemanticObservation| {
+            let snapshot = &observation.frames()[0];
+            let proposal = SemanticActionProposal::try_new(
+                SemanticActionIntent::Press {
+                    target: snapshot.nodes()[2].reference(),
+                    key: SemanticPressKey::Enter,
+                },
+                SemanticEffectClass::Communication,
+                SemanticWaitCondition::Immediate,
+                SemanticVerification::PageChanged,
+                SemanticSettleBudget::try_new(2000).unwrap(),
+            )
+            .unwrap();
+            SemanticActionBatch::bind(
+                SemanticActionBatchId::new(1).unwrap(),
+                observation,
+                &[snapshot.frame().clone()],
+                vec![proposal],
+            )
+            .unwrap()
+            .actions()[0]
+                .prepare(snapshot)
+                .unwrap()
+        };
+        let policy = |gate: &Arc<SiteGate>| SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        let look = chat("Hello team");
+        let gate = Arc::new(SiteGate::new("slack.com".into(), false, false));
+        assert!(policy(&gate)
+            .assess(&click(&look, 4, SemanticEffectClass::Communication), &look)
+            .is_err());
+        gate.approve(false).unwrap();
+        assert!(policy(&gate).assess(&enter(&look), &look).is_ok());
+        // Other words are another message: the approval does not cover them.
+        let gate = Arc::new(SiteGate::new("slack.com".into(), false, false));
+        assert!(policy(&gate)
+            .assess(&click(&look, 4, SemanticEffectClass::Communication), &look)
+            .is_err());
+        gate.approve(false).unwrap();
+        let changed = chat("Hello everyone");
+        assert_eq!(
+            policy(&gate).assess(&enter(&changed), &changed).err(),
+            Some(AgentWorkFailure::ActionDenied)
         );
     }
 
