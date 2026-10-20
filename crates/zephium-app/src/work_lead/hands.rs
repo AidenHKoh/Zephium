@@ -736,7 +736,7 @@ where
                 let mine = request.mine
                     && (self.run.trusts(&site)
                         || self.run.asked_to_save(&site)
-                        || super::route::site(&site.split('.').next().unwrap_or_default())
+                        || super::route::site(site.split('.').next().unwrap_or_default())
                             .is_some());
                 if !(mine || self.personal || crate::work_sites::personal_page(url)) {
                     if !public.contains(&site) {
