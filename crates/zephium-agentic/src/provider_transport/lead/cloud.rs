@@ -6,11 +6,12 @@
 //! its outcome is reported, and the caller's receipt lookup decides the rest.
 
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
 use serde_json::Value;
-use zephium_core::work::model::WorkModelError;
+use zephium_core::work::model::{HostedRefusal, WorkModelError};
 
 const REQUEST_ID_HEADER: &str = "x-zephium-request-id";
 const POLICY_HEADER: &str = "x-zephium-policy-revision";
@@ -167,6 +168,103 @@ pub(crate) fn error_request_id(body: &[u8], headers: &Answered) -> Option<String
         .and_then(|json| json.get("request_id")?.as_str().map(str::to_owned))
         .filter(|id| token(id))
         .or_else(|| headers.request_id.clone())
+}
+
+/// Zephium Cloud's own refusals come before the provider's: only a 401 means
+/// the session is over, and a model outside the plan is not a bad bearer.
+pub(crate) fn classify_cloud(status: StatusCode, body: &[u8]) -> WorkModelError {
+    let json: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    let code = json
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let hosted = |refusal| WorkModelError::Hosted {
+        refusal,
+        retry_after_ms: None,
+    };
+    match (status.as_u16(), code) {
+        (401, _) => WorkModelError::Unauthorized,
+        (_, "plan_required") => hosted(HostedRefusal::PlanRequired),
+        (_, "billing_review_required") => hosted(HostedRefusal::BillingReview),
+        (_, "insufficient_credits") => hosted(HostedRefusal::OutOfCredits),
+        (_, "daily_limit_reached") => hosted(HostedRefusal::DailyLimit),
+        (_, "free_usage_limit_reached") => hosted(HostedRefusal::FreeUsagePaused),
+        (_, "usage_confirmation_limited") => hosted(HostedRefusal::ConfirmationLimited),
+        (_, "cloud_budget_exhausted") => hosted(HostedRefusal::Paused),
+        (_, "invalid_audio") => hosted(HostedRefusal::InvalidAudio),
+        (_, "unsupported_audio_format") => hosted(HostedRefusal::UnsupportedAudio),
+        (_, "audio_too_long") => hosted(HostedRefusal::AudioTooLong),
+        (402, _) => hosted(HostedRefusal::OutOfCredits),
+        (409, _) => hosted(HostedRefusal::AlreadySent),
+        (403, _) => WorkModelError::BadRequest,
+        (
+            _,
+            "input_limit_exceeded"
+            | "body_too_large"
+            | "request_structure_limit"
+            | "context_limit_exceeded",
+        ) => WorkModelError::ContextTooLong,
+        _ => super::classify(status, body),
+    }
+}
+
+/// How long the server said to wait: the larger of `Retry-After(-Ms)` and,
+/// for Cloud, the error body's `retry_after` seconds.
+pub(crate) fn server_wait(headers: &HeaderMap, body: &[u8], cloud: bool) -> Option<Duration> {
+    let header = super::retry_after(headers);
+    let in_body = cloud
+        .then(|| {
+            let json: Value = serde_json::from_slice(body).ok()?;
+            let seconds = json.get("error")?.get("retry_after")?.as_f64()?;
+            (seconds.is_finite() && seconds >= 0.0)
+                .then(|| Duration::from_secs_f64(seconds.min(86_400.0)))
+        })
+        .flatten();
+    header.max(in_body)
+}
+
+/// Puts the server's wait on the error that can carry one. A Cloud 503 that
+/// names a wait says when to come back, so it reads as a wait, not an outage.
+pub(crate) fn with_wait(
+    error: WorkModelError,
+    wait: Option<Duration>,
+    cloud: bool,
+) -> WorkModelError {
+    with_wait_at(error, wait, cloud, SystemTime::now())
+}
+
+pub(super) fn with_wait_at(
+    error: WorkModelError,
+    wait: Option<Duration>,
+    cloud: bool,
+    now: SystemTime,
+) -> WorkModelError {
+    let ms = wait.map(|wait| u64::try_from(wait.as_millis()).unwrap_or(u64::MAX));
+    match error {
+        WorkModelError::RateLimited { .. } => WorkModelError::RateLimited { retry_after_ms: ms },
+        WorkModelError::Overloaded if cloud && ms.is_some() => {
+            WorkModelError::RateLimited { retry_after_ms: ms }
+        }
+        // The daily limit counts UTC days, so its reset is known without being told.
+        WorkModelError::Hosted {
+            refusal: HostedRefusal::DailyLimit,
+            ..
+        } => WorkModelError::Hosted {
+            refusal: HostedRefusal::DailyLimit,
+            retry_after_ms: ms.or_else(|| until_utc_midnight(now)),
+        },
+        WorkModelError::Hosted { refusal, .. } => WorkModelError::Hosted {
+            refusal,
+            retry_after_ms: ms,
+        },
+        other => other,
+    }
+}
+
+fn until_utc_midnight(now: SystemTime) -> Option<u64> {
+    let since = now.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs();
+    Some((86_400 - since % 86_400) * 1_000)
 }
 
 /// After a Cloud stream started, a failure the caller would retry must not

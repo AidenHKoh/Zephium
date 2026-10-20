@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use sha2::{Digest as _, Sha256};
 use zephium_core::work::model::{
-    WorkModelClient, WorkModelEntry, WorkModelError, WorkModelEvent, WorkModelPrice, WorkModelRef,
-    WorkModelUsage,
+    HostedRefusal, WorkModelClient, WorkModelEntry, WorkModelError, WorkModelEvent, WorkModelPrice,
+    WorkModelRef, WorkModelUsage,
 };
 
 use super::*;
@@ -326,6 +326,16 @@ const fn failure_for(error: WorkModelError) -> AgentProviderFailure {
         WorkModelError::Protocol => AgentProviderFailureClass::Protocol,
         WorkModelError::Cancelled => AgentProviderFailureClass::Cancelled,
         WorkModelError::OverBudget => AgentProviderFailureClass::Provider,
+        WorkModelError::Hosted { refusal, .. } => match refusal {
+            HostedRefusal::PlanRequired | HostedRefusal::BillingReview => {
+                AgentProviderFailureClass::Permission
+            }
+            HostedRefusal::AlreadySent => AgentProviderFailureClass::Conflict,
+            HostedRefusal::InvalidAudio
+            | HostedRefusal::UnsupportedAudio
+            | HostedRefusal::AudioTooLong => AgentProviderFailureClass::InvalidRequest,
+            _ => AgentProviderFailureClass::Provider,
+        },
     };
     AgentProviderFailure::new(class)
 }

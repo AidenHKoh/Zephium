@@ -416,7 +416,12 @@ pub async fn refresh_cloud_catalog() {
                 "max_output": model.entry.max_output,
                 "supports": model.entry.supports,
                 "plan_min": model.plan_min,
-                "limits": {"max_request_bytes": model.max_request_bytes},
+                "limits": {
+                    "max_request_bytes": model.max_request_bytes,
+                    "max_search_calls": model.max_search_calls,
+                    "idle_timeout_ms": model.idle_timeout_ms,
+                    "max_duration_ms": model.max_duration_ms,
+                },
             })
         })
         .collect();
@@ -868,6 +873,10 @@ fn client(
             if let Some(max) = hosted.max_request_bytes {
                 client = client.with_request_limit(max);
             }
+            if let Some(calls) = hosted.max_search_calls {
+                client = client.with_search_limit(calls);
+            }
+            client = client.with_call_limits(hosted.idle_timeout_ms, hosted.max_duration_ms);
             return Ok(Arc::new(Observed {
                 inner: client,
                 provider,

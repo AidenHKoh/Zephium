@@ -11,8 +11,8 @@ use serde_json::Value;
 use zephium_core::work::model::{WorkModelError, WorkModelProvider};
 
 use super::{
-    bounded_body, classify, classify_cloud, http, idempotency_key, is_loopback, join,
-    LeadCredential, GROQ_BASE, OPENAI_BASE,
+    bounded_body, cloud, http, idempotency_key, is_loopback, join, LeadCloudAccounting,
+    LeadCloudObserver, LeadCloudRecord, LeadCredential, GROQ_BASE, OPENAI_BASE,
 };
 
 /// OpenAI's and Groq's upload ceiling.
@@ -98,6 +98,8 @@ pub struct Transcript {
     pub text: String,
     /// The gateway's request id, for a hosted take's receipt.
     pub request_id: Option<String>,
+    /// What the gateway said the take cost so far: `Pending` until settled.
+    pub accounting: Option<LeadCloudAccounting>,
 }
 
 fn part(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
@@ -141,6 +143,18 @@ pub async fn transcribe(
     wav: &[u8],
     language: Option<&str>,
 ) -> Result<Transcript, WorkModelError> {
+    transcribe_observed(target, credential, wav, language, None).await
+}
+
+/// [`transcribe`], reporting a hosted take's accounting to `observer` however
+/// it ends, so the account's usage can refresh and the receipt be checked.
+pub async fn transcribe_observed(
+    target: &TranscriptionTarget,
+    credential: &dyn LeadCredential,
+    wav: &[u8],
+    language: Option<&str>,
+    observer: Option<&LeadCloudObserver>,
+) -> Result<Transcript, WorkModelError> {
     if wav.is_empty() {
         return Err(WorkModelError::BadRequest);
     }
@@ -162,9 +176,24 @@ pub async fn transcribe(
         HeaderValue::from_str(&format!("multipart/form-data; boundary={boundary}"))
             .map_err(|_| WorkModelError::Protocol)?,
     );
-    if target.cloud {
-        headers.insert("idempotency-key", idempotency_key()?);
-    }
+    let key = if target.cloud {
+        let key = idempotency_key()?;
+        headers.insert("idempotency-key", key.clone());
+        Some(key)
+    } else {
+        None
+    };
+    let record =
+        |answered: cloud::Answered, request_id: Option<String>, accounting: LeadCloudAccounting| {
+            if let (Some(observer), Some(key)) = (observer, &key) {
+                observer(LeadCloudRecord {
+                    idempotency_key: key.to_str().unwrap_or_default().to_owned(),
+                    request_id: request_id.or(answered.request_id),
+                    policy_revision: answered.policy_revision,
+                    accounting,
+                });
+            }
+        };
     let response = http(is_loopback(&target.url))?
         .post(target.url.clone())
         .headers(headers)
@@ -176,34 +205,34 @@ pub async fn transcribe(
             if error.is_builder() {
                 WorkModelError::Protocol
             } else {
+                // The take may have arrived; the caller never sends it again on its own.
+                record(Default::default(), None, LeadCloudAccounting::Unknown);
                 WorkModelError::Network
             }
         })?;
     let status = response.status();
-    let request_id = response
-        .headers()
-        .get("x-zephium-request-id")
-        .and_then(|value| value.to_str().ok())
-        .filter(|id| id.len() <= 64 && id.bytes().all(|b| b.is_ascii_graphic()))
-        .map(str::to_owned);
-    let retry_after = super::retry_after(response.headers());
+    let headers = response.headers().clone();
+    let answered = cloud::Answered::read(&headers);
+    let request_id = answered.request_id.clone();
     let body = bounded_body(response).await;
     if !status.is_success() {
-        let error = if target.cloud {
-            classify_cloud(status, &body)
-        } else {
-            classify(status, &body)
-        };
+        let (error, _) = super::refused(status, &headers, &body, target.cloud);
         if error == WorkModelError::Unauthorized {
             credential.rejected();
         }
-        return Err(match error {
-            WorkModelError::RateLimited { .. } => WorkModelError::RateLimited {
-                retry_after_ms: retry_after.map(|wait| wait.as_millis() as u64),
-            },
-            other => other,
-        });
+        let request_id = cloud::error_request_id(&body, &answered);
+        let accounting = match cloud::refusal(status, request_id.as_deref()) {
+            cloud::Refusal::Uncertain => LeadCloudAccounting::Unknown,
+            _ => LeadCloudAccounting::Refused,
+        };
+        record(answered, request_id, accounting);
+        return Err(error);
     }
+    let accounting = answered
+        .usage
+        .clone()
+        .unwrap_or(LeadCloudAccounting::Unknown);
+    record(answered, request_id.clone(), accounting.clone());
     let json: Value = serde_json::from_slice(&body).map_err(|_| WorkModelError::Protocol)?;
     let text = json
         .get("text")
@@ -216,6 +245,7 @@ pub async fn transcribe(
     Ok(Transcript {
         text: text.to_owned(),
         request_id,
+        accounting: target.cloud.then_some(accounting),
     })
 }
 
@@ -224,6 +254,8 @@ mod tests {
     use super::super::tests::{http_reply, serve};
     use super::super::{LeadSecret, LeadStaticCredential};
     use super::*;
+    use std::sync::{Arc, Mutex};
+    use zephium_core::work::model::HostedRefusal;
 
     fn credential() -> LeadStaticCredential {
         LeadStaticCredential::new(LeadSecret::new("sk-test".into()).unwrap())
@@ -318,6 +350,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_hosted_takes_usage_header_says_whether_the_charge_is_final() {
+        let reply = |usage: &str| {
+            http_reply(
+                "200 OK",
+                &format!(
+                    "content-type: application/json\r\nx-zephium-request-id: r-1\r\nx-zephium-policy-revision: 4\r\nx-zephium-usage: {usage}\r\n"
+                ),
+                "{\"text\":\"\"}",
+            )
+        };
+        let (base, _) = serve(vec![reply("pending"), reply("settled")]);
+        let target = at(&base, true);
+        let records: Arc<Mutex<Vec<LeadCloudRecord>>> = Default::default();
+        let log = records.clone();
+        let observer: LeadCloudObserver = Arc::new(move |record| log.lock().unwrap().push(record));
+        let wav = zephium_wav();
+        let pending = transcribe_observed(&target, &credential(), &wav, None, Some(&observer))
+            .await
+            .unwrap();
+        assert_eq!(pending.text, "", "an empty take is valid");
+        assert_eq!(pending.accounting, Some(LeadCloudAccounting::Pending));
+        let settled = transcribe_observed(&target, &credential(), &wav, None, Some(&observer))
+            .await
+            .unwrap();
+        assert_eq!(
+            settled.accounting,
+            Some(LeadCloudAccounting::Settled { charged: None })
+        );
+        let records = records.lock().unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(
+            records[0].unsettled(),
+            "pending is checked against its receipt"
+        );
+        assert!(!records[1].unsettled());
+        assert_eq!(records[0].request_id.as_deref(), Some("r-1"));
+        assert_eq!(records[0].policy_revision.as_deref(), Some("4"));
+        assert_eq!(records[0].idempotency_key.len(), 36);
+    }
+
+    #[tokio::test]
+    async fn the_recorders_own_refusals_and_hosted_codes_stay_distinct() {
+        let error = |status: &str, code: &str, extra: &str| {
+            http_reply(
+                status,
+                extra,
+                &format!("{{\"error\":{{\"code\":\"{code}\"}},\"request_id\":null}}"),
+            )
+        };
+        let (base, seen) = serve(vec![
+            error("400 Bad Request", "invalid_audio", ""),
+            error("415 Unsupported Media Type", "unsupported_audio_format", ""),
+            error("422 Unprocessable Entity", "audio_too_long", ""),
+            error("403 Forbidden", "plan_required", ""),
+            error("403 Forbidden", "billing_review_required", ""),
+            error("402 Payment Required", "daily_limit_reached", ""),
+            error(
+                "429 Too Many Requests",
+                "free_usage_limit_reached",
+                "retry-after: 600\r\n",
+            ),
+            error(
+                "503 Service Unavailable",
+                "cloud_budget_exhausted",
+                "retry-after: 3600\r\n",
+            ),
+        ]);
+        let target = at(&base, true);
+        let wav = zephium_wav();
+        let mut got = Vec::new();
+        for _ in 0..8 {
+            got.push(
+                transcribe(&target, &credential(), &wav, None)
+                    .await
+                    .unwrap_err(),
+            );
+        }
+        let hosted = |refusal, retry_after_ms| WorkModelError::Hosted {
+            refusal,
+            retry_after_ms,
+        };
+        assert_eq!(got[0], hosted(HostedRefusal::InvalidAudio, None));
+        assert_eq!(got[1], hosted(HostedRefusal::UnsupportedAudio, None));
+        assert_eq!(got[2], hosted(HostedRefusal::AudioTooLong, None));
+        assert_eq!(got[3], hosted(HostedRefusal::PlanRequired, None));
+        assert_eq!(got[4], hosted(HostedRefusal::BillingReview, None));
+        assert!(matches!(
+            got[5],
+            WorkModelError::Hosted {
+                refusal: HostedRefusal::DailyLimit,
+                retry_after_ms: Some(_)
+            }
+        ));
+        assert_eq!(
+            got[6],
+            hosted(HostedRefusal::FreeUsagePaused, Some(600_000))
+        );
+        assert_eq!(got[7], hosted(HostedRefusal::Paused, Some(3_600_000)));
+        assert_eq!(seen.lock().unwrap().len(), 8, "no take is ever sent again");
+    }
+
+    #[tokio::test]
     async fn refusals_are_closed_errors_and_never_retried() {
         let (base, seen) = serve(vec![
             http_reply(
@@ -336,7 +470,10 @@ mod tests {
         let wav = zephium_wav();
         assert_eq!(
             transcribe(&target, &credential(), &wav, None).await,
-            Err(WorkModelError::OverBudget)
+            Err(WorkModelError::Hosted {
+                refusal: HostedRefusal::OutOfCredits,
+                retry_after_ms: None
+            })
         );
         assert_eq!(
             transcribe(&target, &credential(), &wav, None).await,

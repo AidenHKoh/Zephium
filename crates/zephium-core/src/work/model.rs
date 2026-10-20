@@ -228,14 +228,51 @@ pub struct WorkModelOutcome {
 pub enum WorkModelError {
     MissingKey,
     Unauthorized,
-    RateLimited { retry_after_ms: Option<u64> },
+    RateLimited {
+        retry_after_ms: Option<u64>,
+    },
     Overloaded,
     ContextTooLong,
     BadRequest,
     Network,
     Protocol,
     Cancelled,
+    /// The person's own provider account is out of credit.
     OverBudget,
+    /// Zephium Cloud's own refusal. `retry_after_ms` is the server's word on
+    /// when to ask again, never a guess.
+    Hosted {
+        refusal: HostedRefusal,
+        retry_after_ms: Option<u64>,
+    },
+}
+
+/// Why Zephium Cloud refused, by its stable error codes. None of these is
+/// retried on its own: each needs the person, or the clock.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostedRefusal {
+    /// The selected model needs another plan.
+    PlanRequired,
+    /// The account is under billing review.
+    BillingReview,
+    /// Included and purchased usage are spent.
+    OutOfCredits,
+    /// The account's daily limit is reached; it resets at 00:00 UTC.
+    DailyLimit,
+    /// The free usage pool is exhausted for now.
+    FreeUsagePaused,
+    /// Too many earlier requests are still being confirmed.
+    ConfirmationLimited,
+    /// The hosted service is stopped for spending protection.
+    Paused,
+    /// The same logical call already reached the server.
+    AlreadySent,
+    /// A recording the server could not read.
+    InvalidAudio,
+    /// A recording in an encoding the server does not take.
+    UnsupportedAudio,
+    /// A recording longer than the server takes.
+    AudioTooLong,
 }
 
 /// A cache key for one conversation, from what stays fixed across its calls:

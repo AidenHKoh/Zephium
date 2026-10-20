@@ -139,9 +139,21 @@ pub async fn transcribe(
                 transcriber.max_request_bytes,
             )?;
             let credential = session.credential();
-            return lead::transcribe(&target, credential.as_ref(), wav, language)
-                .await
-                .map(|transcript| transcript.text);
+            // The take's usage settles server-side: the account refreshes and
+            // checks the receipt however the take ended.
+            let observer: lead::LeadCloudObserver = {
+                let session = session.clone();
+                std::sync::Arc::new(move |record| session.recorded(record))
+            };
+            return lead::transcribe_observed(
+                &target,
+                credential.as_ref(),
+                wav,
+                language,
+                Some(&observer),
+            )
+            .await
+            .map(|transcript| transcript.text);
         }
         VoiceEngine::OpenAi => WorkModelProvider::OpenAi,
         VoiceEngine::Groq => WorkModelProvider::Groq,

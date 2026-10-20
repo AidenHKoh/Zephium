@@ -94,7 +94,8 @@ pub(super) fn body(
             })
         })
         .collect();
-    if request.native_search {
+    let native_search = target.native_search(request);
+    if native_search {
         tools.push(json!({"type": "web_search"}));
     }
     let mut body = Map::new();
@@ -113,9 +114,12 @@ pub(super) fn body(
         }
     }
     body.insert("max_output_tokens".into(), json!(request.max_output_tokens));
+    if let Some(calls) = target.search_calls.filter(|_| native_search) {
+        body.insert("max_tool_calls".into(), json!(calls));
+    }
     let mut include = vec![json!("reasoning.encrypted_content")];
     // xAI's Responses API documents no search include.
-    if request.native_search && target.upstream() != WorkModelProvider::XAi {
+    if native_search && target.upstream() != WorkModelProvider::XAi {
         include.push(json!("web_search_call.action.sources"));
     }
     body.insert("include".into(), Value::Array(include));

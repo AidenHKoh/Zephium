@@ -36,7 +36,6 @@ pub(super) fn body(
     request: &WorkModelRequest,
     target: &LeadTarget,
 ) -> Result<Value, WorkModelError> {
-    let _ = target;
     let mut breakpoints = 0;
     let system: Vec<Value> = request
         .system
@@ -133,8 +132,11 @@ pub(super) fn body(
         .map(|tool| json!({"name": tool.name, "description": tool.description, "input_schema": tool.schema}))
         .collect();
     let model = request.model.model.as_str();
-    if request.native_search {
-        tools.push(json!({"type": SEARCH_TOOL, "name": "web_search", "max_uses": SEARCH_MAX_USES}));
+    if target.native_search(request) {
+        let uses = target
+            .search_calls
+            .map_or(SEARCH_MAX_USES, |calls| calls.min(SEARCH_MAX_USES));
+        tools.push(json!({"type": SEARCH_TOOL, "name": "web_search", "max_uses": uses}));
     }
     let mut body = Map::new();
     body.insert("model".into(), json!(model));

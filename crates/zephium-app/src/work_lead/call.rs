@@ -174,9 +174,11 @@ pub(crate) async fn call(
             return Err(CallFailure::Lost);
         }
         let wait = match error {
-            WorkModelError::RateLimited { retry_after_ms } => Some(Duration::from_millis(
-                retry_after_ms.unwrap_or(4_000).clamp(1_000, 30_000),
-            )),
+            WorkModelError::RateLimited { retry_after_ms } => rate_limit_wait(retry_after_ms),
+            WorkModelError::Hosted {
+                refusal: HostedRefusal::AlreadySent,
+                ..
+            } => return Err(CallFailure::Lost),
             WorkModelError::Overloaded | WorkModelError::Network => {
                 Some(Duration::from_secs(2 + 3 * attempt as u64))
             }
@@ -199,6 +201,13 @@ pub(crate) async fn call(
             _ => return Err(CallFailure::Refused(error)),
         }
     }
+}
+
+/// How long to wait out a rate limit, or none when the server asked for more
+/// than a run holds a call for: it is never asked again sooner than it said.
+fn rate_limit_wait(retry_after_ms: Option<u64>) -> Option<Duration> {
+    let wait = retry_after_ms.unwrap_or(4_000).max(1_000);
+    (wait <= 30_000).then(|| Duration::from_millis(wait))
 }
 
 /// The text of an assistant turn, joined.
@@ -271,6 +280,15 @@ pub(crate) fn clip(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rate_limit_is_waited_out_or_handed_back_never_cut_short() {
+        assert_eq!(rate_limit_wait(None), Some(Duration::from_secs(4)));
+        assert_eq!(rate_limit_wait(Some(250)), Some(Duration::from_secs(1)));
+        assert_eq!(rate_limit_wait(Some(30_000)), Some(Duration::from_secs(30)));
+        assert_eq!(rate_limit_wait(Some(30_001)), None);
+        assert_eq!(rate_limit_wait(Some(3_600_000)), None);
+    }
 
     fn entry(price: Option<WorkModelPrice>) -> WorkModelEntry {
         WorkModelEntry {
