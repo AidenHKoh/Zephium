@@ -751,12 +751,14 @@ pub(crate) fn classify(
                 SiteEffect::Commit(Consequence::Edit)
             }
             Some(SemanticPressKey::Enter) => {
+                // Enter in a suggesting field picks a suggestion, unless the
+                // field drafts an item its own create button makes (a quick
+                // add box that suggests dates and labels as it is typed).
                 if in_search(node, snapshot)
                     || queries(node)
-                    || matches!(
-                        node.role(),
-                        SemanticRole::Combobox | SemanticRole::Listbox | SemanticRole::Option
-                    )
+                    || matches!(node.role(), SemanticRole::Listbox | SemanticRole::Option)
+                    || (node.role() == SemanticRole::Combobox
+                        && draft_creator(node, snapshot).is_none())
                 {
                     SiteEffect::Read
                 } else if composer(node)
@@ -2863,6 +2865,24 @@ mod tests {
             ),
             SiteEffect::Commit(Consequence::Save),
             "Enter in the editor saves the task, never shares the page",
+        );
+        let quick = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"dialog","n":"Quick Add"}),
+            json!({"k":3,"p":1,"r":"combobox","n":"Task name","o":11,"fs":1,
+                "v":{"k":"text","value":"Zephium test tomorrow"}}),
+            json!({"k":4,"p":1,"r":"button","n":"Cancel","o":1,"ak":1}),
+            json!({"k":5,"p":1,"r":"button","n":"Add task","o":1,"ak":1}),
+        ]);
+        assert_eq!(
+            effect_key(
+                &quick,
+                3,
+                SemanticActionKind::Press,
+                Some(SemanticPressKey::Enter)
+            ),
+            SiteEffect::Commit(Consequence::Save),
+            "Enter in a suggesting quick-add box makes the task",
         );
         // A task list whose tasks carry Comment buttons, with the add row's
         // own button out of the look.
