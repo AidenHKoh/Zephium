@@ -1957,7 +1957,9 @@ pub(super) async fn workflow(
         return journey_fixture::run(&context).await;
     }
     // Before any session the site opens as an empty session without a
-    // question; the seed page signs the person in, in the profile's store.
+    // question. With no cookies a site opens in Work's own store, so this
+    // seed's cookie stays there; checks that need the person signed in sign
+    // them in through a native profile visit (`media_fixture::seed_session`).
     let seed = context
         .run(
             "Open the account site",
@@ -2834,6 +2836,11 @@ pub(super) async fn workflow(
                 read
             }
             Check::Apps => {
+                // macOS cookies are shared by host, so one native profile
+                // visit to the seed page signs the person in on all three
+                // apps (they share 127.0.0.1) in the profile's own store.
+                #[cfg(target_os = "macos")]
+                media_fixture::seed_session(&context).await?;
                 // Windows Work stores isolate origins including their ports.
                 // The initial Account seed was a Work view, so its cookie is
                 // not in the ordinary Browse profile for cross-origin import.
@@ -2906,6 +2913,8 @@ pub(super) async fn workflow(
                 run.asked.len() == 1 && named && cookies && read
             }
             Check::Views => {
+                #[cfg(target_os = "macos")]
+                media_fixture::seed_session(&context).await?;
                 zephium_app::work_sites::set_standing(handle, profile, SITE.into(), None)
                     .await
                     .map_err(|_| "views_standing")?;
