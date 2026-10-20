@@ -876,7 +876,11 @@ impl AgentWorkController {
         // A step that loaded a new page on the site is verified once that
         // page has settled; a page still loading is looked at again, briefly.
         let mut waits = 0u8;
+        // Evidence is dated by when its look began: a slow capture on a
+        // throttled page still shows the page as it was within the window.
+        let mut looked;
         let current = loop {
+            looked = Self::look_begins(state)?;
             match Self::observe(state, worker, browser).await {
                 Err(AgentWorkFailure::Observation(
                     SemanticRuntimePortFailure::NotReady
@@ -935,6 +939,7 @@ impl AgentWorkController {
                 }
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
             }
+            looked = Self::look_begins(state)?;
             current = Self::observe(state, worker, browser).await?;
         }
         // A tab's panel or a sheet a click opened can still be drawing when
@@ -960,6 +965,7 @@ impl AgentWorkController {
                 }
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
             }
+            looked = Self::look_begins(state)?;
             let next = Self::observe(state, worker, browser).await?;
             let settled = look_digest(&next) == look_digest(&current);
             current = next;
@@ -972,19 +978,27 @@ impl AgentWorkController {
         // action is verified on that same look.
         let current = Self::fit_model_observation(current)?;
         let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
-        let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
         let (_, transition) = session
             .verify_action_settlement(
                 baseline,
                 &current,
-                SemanticSettleInstant::from_millis(now.millis()),
+                SemanticSettleInstant::from_millis(looked.millis()),
             )
             .map_err(AgentWorkFailure::Browser)?;
         Ok((
             current,
-            SemanticCaptureInstant::from_millis(now.millis()),
+            SemanticCaptureInstant::from_millis(looked.millis()),
             transition,
         ))
+    }
+
+    fn look_begins(state: &mut WorkState) -> Result<AgentPolicyInstant, AgentWorkFailure> {
+        state
+            .session
+            .as_mut()
+            .ok_or_else(|| crate::contract!())?
+            .policy_now()
+            .map_err(AgentWorkFailure::Browser)
     }
 }
 
