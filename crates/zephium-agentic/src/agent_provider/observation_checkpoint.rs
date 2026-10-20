@@ -224,6 +224,25 @@ impl AgentProviderContinuation {
         ))
     }
 
+    /// A person asked for on a page that had barely drawn is not asked: the
+    /// planner gets a fresh look taken a moment later, told so.
+    pub fn into_unfinished_page_refresh(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderObservationCheckpoint, Box<Self>> {
+        if config != &self.config
+            || self.correlation.kind() != AgentBrowserToolKind::ShowForHuman
+            || !AgentProviderObservationCheckpoint::refreshable(&self, observation)
+        {
+            return Err(Box::new(self));
+        }
+        Ok(AgentProviderObservationCheckpoint::refresh(
+            self,
+            "page_still_drawing: nobody was asked. The page had barely drawn when you asked for the person; this is a fresh look taken a moment later. Continue from it, opening what the goal needs with the page's own controls. Ask for the person only when the page itself shows a sign-in form, a human check or a permission prompt that stands between you and the goal.".to_owned(),
+        ))
+    }
+
     /// A wait asked for while the planner holds a look of one section has
     /// no whole page to compare: it is answered with a fresh whole look
     /// taken a moment later, told so.

@@ -1258,6 +1258,10 @@ const MAX_APP_VIEWS: usize = 3;
 const APP_VIEW_QUIET_MILLIS: u32 = 300;
 /// Virtual lists render their rows a beat after the pane itself.
 const APP_VIEW_RENDER_MILLIS: u64 = 400;
+/// Below this many nodes a look is of a page still drawing, and the pause
+/// before the look a refused request for the person gets on it.
+const UNFINISHED_PAGE_NODES: usize = 24;
+const UNFINISHED_PAGE_WAIT_MILLIS: u64 = 1_500;
 /// Looks a results page gets to draw what its engine fills in by script,
 /// and the pause before each.
 const RESULTS_DRAW_LOOKS: usize = 5;
@@ -3673,17 +3677,34 @@ impl AgentWorkController {
             }
             if turn.turn.proposal().kind() == AgentBrowserToolKind::ShowForHuman {
                 let sign_in = Self::sign_in_optional(state, &turn, &observation);
-                if sign_in || Self::own_decision(state, &turn, &observation) {
+                let unfinished = !sign_in && Self::unfinished_page(state, &turn, &observation);
+                if sign_in || unfinished || Self::own_decision(state, &turn, &observation) {
                     state.sign_in_refusals = state.sign_in_refusals.saturating_add(1);
                     let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
                     let continuation = turn.into_tool_turn().into_parts().1;
                     let checkpoint = if sign_in {
                         continuation.into_optional_sign_in_refresh(&observation, &session.config)
+                    } else if unfinished {
+                        continuation.into_unfinished_page_refresh(&observation, &session.config)
                     } else {
                         continuation.into_own_decision_refresh(&observation, &session.config)
                     }
                     .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()))?;
                     fruitless.refused(state)?;
+                    if unfinished {
+                        let wake =
+                            Instant::now() + Duration::from_millis(UNFINISHED_PAGE_WAIT_MILLIS);
+                        if wake < state.native.deadline {
+                            tokio::select! {
+                                biased;
+                                event = state.native.next_event(worker, browser) => {
+                                    state.native.retain(event?)?;
+                                    return Err(AgentWorkFailure::Mailbox);
+                                }
+                                () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+                            }
+                        }
+                    }
                     let next =
                         Self::inspect_current(state, worker, browser, checkpoint, &observation)
                             .await?;
@@ -5176,6 +5197,27 @@ impl AgentWorkController {
         ) && state.actions_before_extraction
             && state.sign_in_refusals < MAX_SIGN_IN_REFUSALS
             && state.task.sign_in_optional(observation)
+    }
+
+    /// A page agent's request for an interaction it cannot perform, made on
+    /// a look of a page that had barely drawn (an app's shell before its
+    /// view loads), is refused a couple of times with a later look.
+    fn unfinished_page(
+        state: &WorkState,
+        turn: &AgentBrowserProviderTurn,
+        observation: &SemanticObservation,
+    ) -> bool {
+        matches!(
+            turn.turn.proposal(),
+            AgentBrowserToolProposal::ShowForHuman(AgentBrowserHumanReason::UnsupportedInteraction)
+        ) && state.sign_in_refusals < MAX_SIGN_IN_REFUSALS
+            && observation
+                .frames()
+                .iter()
+                .map(|frame| frame.nodes().len())
+                .sum::<usize>()
+                < UNFINISHED_PAGE_NODES
+            && state.task.human_wall(observation).is_none()
     }
 
     /// A page agent's request for the person's decision while the page
