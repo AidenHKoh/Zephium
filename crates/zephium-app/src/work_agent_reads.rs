@@ -406,10 +406,11 @@ impl Driver {
             if consumed > 0 {
                 capacity_races = 0;
             }
-            if at_capacity && consumed == 0 {
-                if !self.wait_for_step_capacity(&mut capacity_races).await? {
-                    return Ok(Some(WorkAttemptStatus::Cancelled));
-                }
+            if at_capacity
+                && consumed == 0
+                && !self.wait_for_step_capacity(&mut capacity_races).await?
+            {
+                return Ok(Some(WorkAttemptStatus::Cancelled));
             }
         }
         Ok(None)

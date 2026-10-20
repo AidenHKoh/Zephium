@@ -392,7 +392,7 @@ where
             self.run.report(super::WorkLeadDiagnostic::Turn {
                 turn: self.run.turn(),
                 calls: calls.len(),
-                tool_kinds: std::array::from_fn(|index| {
+                tool_kinds: Box::new(std::array::from_fn(|index| {
                     calls.get(index).map(|call| match call.name.as_str() {
                         "web_fetch" => "web_fetch",
                         "web_search" => "web_search",
@@ -408,7 +408,7 @@ where
                         "revise_block" => "revise_block",
                         _ => "other",
                     })
-                }),
+                })),
                 tokens: usage.model_tokens,
                 cost_micro_usd: usage.cost_micro_usd,
                 input: u32::try_from(outcome.usage.input_tokens).unwrap_or(u32::MAX),
@@ -1032,7 +1032,6 @@ where
                 }
             }
         }
-        let mut proposed = proposed;
         let run_honesty = honesty(&projection, execution, &proposed);
         if let Err(fault) = objects::honest(&proposed.data, &run_honesty) {
             match objects::mend(&proposed.data, &run_honesty).filter(|_| lenient) {

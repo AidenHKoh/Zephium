@@ -587,6 +587,87 @@ mod shared {
         }
     }
 
+    pub(super) fn next(
+        key: Key,
+        scope: &WorkPublicSearchScope,
+        terms: &SearchQueryTerms,
+        checked: &[u64],
+        may_check: bool,
+    ) -> Next {
+        let mut works = WORK_SEARCHES.lock().unwrap_or_else(PoisonError::into_inner);
+        let position = match works.iter().position(|(known, _)| *known == key) {
+            Some(position) => position,
+            None => {
+                if works.len() >= WORKS {
+                    works.remove(0);
+                }
+                works.push((key, Vec::new()));
+                works.len() - 1
+            }
+        };
+        let (_, entries) = &mut works[position];
+        entries.retain(|entry| match &entry.state {
+            State::Known { at, .. } => at.elapsed() < FRESH_FOR,
+            State::Running(done) => !*done.borrow(),
+        });
+        let comparable =
+            |entry: &&Entry| entry.provider == scope.provider && entry.model == scope.model;
+        if let Some(State::Known { evidence, .. }) = entries
+            .iter()
+            .filter(comparable)
+            .find(|entry| same_request(&entry.query, &scope.query))
+            .map(|entry| &entry.state)
+        {
+            return Next::Same(evidence.clone());
+        }
+        if let Some(State::Running(done)) = entries
+            .iter()
+            .filter(comparable)
+            .find(|entry| {
+                matches!(entry.state, State::Running(_)) && same_request(&entry.query, &scope.query)
+            })
+            .map(|entry| &entry.state)
+        {
+            return Next::Wait(done.clone());
+        }
+        if may_check {
+            let candidate = entries
+                .iter()
+                .filter(comparable)
+                .filter(|entry| !checked.contains(&entry.id))
+                .filter_map(|entry| match &entry.state {
+                    State::Known { evidence, .. } if terms.served_by(evidence) => {
+                        Some((entry.terms.overlap(terms), entry, evidence))
+                    }
+                    _ => None,
+                })
+                .filter(|(overlap, ..)| *overlap >= OVERLAP)
+                .max_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((_, entry, evidence)) = candidate {
+                return Next::Check(entry.id, entry.query.clone(), evidence.clone());
+            }
+        }
+        if entries.len() >= SEARCHES {
+            if let Some(oldest) = entries
+                .iter()
+                .position(|entry| matches!(entry.state, State::Known { .. }))
+            {
+                entries.remove(oldest);
+            }
+        }
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (done, running) = tokio::sync::watch::channel(false);
+        entries.push(Entry {
+            id,
+            query: scope.query.clone(),
+            terms: terms.clone(),
+            provider: scope.provider,
+            model: scope.model.clone(),
+            state: State::Running(running),
+        });
+        Next::Run(Slot { key, id, done })
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -677,87 +758,6 @@ mod shared {
                     .retain(|(known, _)| *known != key);
             }
         }
-    }
-
-    pub(super) fn next(
-        key: Key,
-        scope: &WorkPublicSearchScope,
-        terms: &SearchQueryTerms,
-        checked: &[u64],
-        may_check: bool,
-    ) -> Next {
-        let mut works = WORK_SEARCHES.lock().unwrap_or_else(PoisonError::into_inner);
-        let position = match works.iter().position(|(known, _)| *known == key) {
-            Some(position) => position,
-            None => {
-                if works.len() >= WORKS {
-                    works.remove(0);
-                }
-                works.push((key, Vec::new()));
-                works.len() - 1
-            }
-        };
-        let (_, entries) = &mut works[position];
-        entries.retain(|entry| match &entry.state {
-            State::Known { at, .. } => at.elapsed() < FRESH_FOR,
-            State::Running(done) => !*done.borrow(),
-        });
-        let comparable =
-            |entry: &&Entry| entry.provider == scope.provider && entry.model == scope.model;
-        if let Some(State::Known { evidence, .. }) = entries
-            .iter()
-            .filter(comparable)
-            .find(|entry| same_request(&entry.query, &scope.query))
-            .map(|entry| &entry.state)
-        {
-            return Next::Same(evidence.clone());
-        }
-        if let Some(State::Running(done)) = entries
-            .iter()
-            .filter(comparable)
-            .find(|entry| {
-                matches!(entry.state, State::Running(_)) && same_request(&entry.query, &scope.query)
-            })
-            .map(|entry| &entry.state)
-        {
-            return Next::Wait(done.clone());
-        }
-        if may_check {
-            let candidate = entries
-                .iter()
-                .filter(comparable)
-                .filter(|entry| !checked.contains(&entry.id))
-                .filter_map(|entry| match &entry.state {
-                    State::Known { evidence, .. } if terms.served_by(evidence) => {
-                        Some((entry.terms.overlap(terms), entry, evidence))
-                    }
-                    _ => None,
-                })
-                .filter(|(overlap, ..)| *overlap >= OVERLAP)
-                .max_by(|a, b| a.0.total_cmp(&b.0));
-            if let Some((_, entry, evidence)) = candidate {
-                return Next::Check(entry.id, entry.query.clone(), evidence.clone());
-            }
-        }
-        if entries.len() >= SEARCHES {
-            if let Some(oldest) = entries
-                .iter()
-                .position(|entry| matches!(entry.state, State::Known { .. }))
-            {
-                entries.remove(oldest);
-            }
-        }
-        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let (done, running) = tokio::sync::watch::channel(false);
-        entries.push(Entry {
-            id,
-            query: scope.query.clone(),
-            terms: terms.clone(),
-            provider: scope.provider,
-            model: scope.model.clone(),
-            state: State::Running(running),
-        });
-        Next::Run(Slot { key, id, done })
     }
 }
 

@@ -1190,7 +1190,7 @@ pub(crate) fn preview(
         Consequence::Communication => {
             let verb = verb(&name, "Send");
             match (recipients.as_slice(), &heading) {
-                ([first, rest @ ..], _) if rest.is_empty() => format!("{verb} to {first} as you?"),
+                ([first], _) => format!("{verb} to {first} as you?"),
                 ([first, rest @ ..], _) => {
                     format!("{verb} to {first} and {} more as you?", rest.len())
                 }

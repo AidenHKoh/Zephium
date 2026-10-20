@@ -15,7 +15,8 @@ use zephium_core::{
 };
 
 const MAX_ORIGINS: usize = 4096;
-static ORIGINS: OnceLock<Mutex<BTreeMap<(ProfileId, String), Arc<Origin>>>> = OnceLock::new();
+type OriginMap = BTreeMap<(ProfileId, String), Arc<Origin>>;
+static ORIGINS: OnceLock<Mutex<OriginMap>> = OnceLock::new();
 struct Origin {
     // Starts closed. A stored row is not itself a model-image fence.
     gate: ModelImageGate,

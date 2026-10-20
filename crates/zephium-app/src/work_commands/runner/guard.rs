@@ -284,7 +284,8 @@ fn request(input: &mut impl Read) -> Result<Request, Failure> {
     }
     Ok(value)
 }
-fn validate(operation: Operation) -> Result<(Vec<String>, BTreeMap<PathBuf, Vec<u8>>), Failure> {
+type SelectedFiles = BTreeMap<PathBuf, Vec<u8>>;
+fn validate(operation: Operation) -> Result<(Vec<String>, SelectedFiles), Failure> {
     let Operation::SelectedUnittest { modules, files } = operation else {
         return Err(Failure::Input);
     };
@@ -306,7 +307,7 @@ fn validate(operation: Operation) -> Result<(Vec<String>, BTreeMap<PathBuf, Vec<
     }
     Ok((modules, file_map(files)?))
 }
-fn file_map(files: BTreeMap<String, String>) -> Result<BTreeMap<PathBuf, Vec<u8>>, Failure> {
+fn file_map(files: BTreeMap<String, String>) -> Result<SelectedFiles, Failure> {
     let mut total = 0usize;
     let mut result = BTreeMap::new();
     for (name, text) in files {

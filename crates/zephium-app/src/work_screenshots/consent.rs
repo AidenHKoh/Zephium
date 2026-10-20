@@ -70,7 +70,7 @@ impl RunScreenshots {
         crate::work_sites::site_of(origin).is_some_and(|site| {
             self.granted
                 .lock()
-                .is_ok_and(|granted| granted.iter().any(|known| *known == site))
+                .is_ok_and(|granted| granted.contains(&site))
         })
     }
     pub(crate) fn request(

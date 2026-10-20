@@ -718,7 +718,7 @@ fn current_index_tool_records_scoped_diff_and_honest_failures() {
         index.extend(oid);
         index.extend(10u16.to_be_bytes());
         index.extend(b"src/lib.rs\0");
-        while (index.len() - start) % 8 != 0 {
+        while !(index.len() - start).is_multiple_of(8) {
             index.push(0);
         }
         index.extend(Sha1::digest(&index));

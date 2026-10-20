@@ -454,8 +454,9 @@ impl WorkBrowseCollectionSchema {
                     .map(ArchivedField::value)
                 {
                     Some(ArchivedValue::ImageUrl { value, .. }) => {
-                        if !withheld && zephium_core::work::media::is_public_image_candidate(value)
-                        {
+                        let public = !withheld
+                            && zephium_core::work::media::is_public_image_candidate(value);
+                        if public {
                             subject.image_candidates.push(value.clone());
                         }
                     }

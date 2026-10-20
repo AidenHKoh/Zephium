@@ -18,7 +18,7 @@ fn index_bytes(entries: &[(&str, Oid, u32)]) -> Vec<u8> {
         out.extend((name.len().min(0xfff) as u16).to_be_bytes());
         out.extend(name.as_bytes());
         out.push(0);
-        while (out.len() - start) % 8 != 0 {
+        while !(out.len() - start).is_multiple_of(8) {
             out.push(0);
         }
     }

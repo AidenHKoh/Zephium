@@ -360,6 +360,17 @@ where
     })
 }
 
+pub(super) async fn monitor_single_custodied<C, CF>(
+    cancelled: &C,
+    spawn: impl FnOnce() -> Result<super::macos_spawn::Child, Failure>,
+) -> Result<Output, Failure>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+{
+    monitor_mode(cancelled, false, true, None::<fn(u32)>, spawn).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -866,15 +877,4 @@ mod tests {
         assert!(!PROFILE.contains("/Users/"));
         assert!(!PROFILE.contains("(subpath \"/\")"));
     }
-}
-
-pub(super) async fn monitor_single_custodied<C, CF>(
-    cancelled: &C,
-    spawn: impl FnOnce() -> Result<super::macos_spawn::Child, Failure>,
-) -> Result<Output, Failure>
-where
-    C: Fn() -> CF,
-    CF: Future<Output = bool>,
-{
-    monitor_mode(cancelled, false, true, None::<fn(u32)>, spawn).await
 }

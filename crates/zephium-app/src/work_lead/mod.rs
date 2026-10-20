@@ -59,7 +59,7 @@ impl std::fmt::Debug for SchemaPath {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum WorkLeadDiagnostic {
     Stopped {
         cause: crate::work_runtime::WorkCancelCause,
@@ -75,7 +75,7 @@ pub enum WorkLeadDiagnostic {
     Turn {
         turn: u8,
         calls: usize,
-        tool_kinds: [Option<&'static str>; 16],
+        tool_kinds: Box<[Option<&'static str>; 16]>,
         tokens: u32,
         cost_micro_usd: u32,
         input: u32,
@@ -309,7 +309,7 @@ impl WorkLeadService {
             .filter(|e| e.id != receipt.execution)
             .collect();
         for site_text in earlier_site_texts(&earlier) {
-            run.trust_named(&site_text);
+            run.trust_named(site_text);
         }
         // A site an earlier request of this work already worked in as the
         // person was let in by them: a follow-up does not ask again.

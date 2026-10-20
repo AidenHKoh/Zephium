@@ -123,10 +123,11 @@ where
     let mut tick = tokio::time::interval(Duration::from_millis(25));
     let reason = loop {
         tokio::select! {
-            result=&mut worker=>return result.unwrap_or_else(|_|Err(Failure::CleanupPending.into())),
-            _=&mut deadline=>break Failure::Limit,
-            _=tick.tick()=>{if super::cancellation_requested(cancelled).await{break Failure::Stopped}if let Err(error)=control.check(){break error}}
-        }
+                   result=&mut worker=>return result.unwrap_or_else(|_|Err(Failure::CleanupPending.into())),
+                   _=&mut deadline=>break Failure::Limit,
+                   _=tick.tick()=>{if super::cancellation_requested(cancelled).await{break Failure::Stopped}
+        if let Err(error)=control.check(){break error}}
+               }
     };
     control.cancelled.store(true, Ordering::Release);
     match tokio::time::timeout(grace, &mut worker).await {

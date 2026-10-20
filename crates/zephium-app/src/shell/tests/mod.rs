@@ -945,14 +945,14 @@ pub(crate) struct FakeStore {
             zephium_core::permissions::PagePermissionPatch,
         )>,
     >,
-    pub(super) avatars: Mutex<
-        Vec<(
-            ProfileId,
-            zephium_core::profiles::ProfileAvatar,
-            Option<Arc<Vec<u8>>>,
-        )>,
-    >,
+    pub(super) avatars: Mutex<Vec<AvatarWrite>>,
 }
+
+type AvatarWrite = (
+    ProfileId,
+    zephium_core::profiles::ProfileAvatar,
+    Option<Arc<Vec<u8>>>,
+);
 
 impl FakeStore {
     fn complete_blocker_update(&self, outcome: BlockerConfigUpdateOutcome) {

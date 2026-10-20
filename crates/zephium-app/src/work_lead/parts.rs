@@ -382,8 +382,8 @@ fn public_source_retry(spec: &PartSpec) -> bool {
         && spec.declined.is_none()
         && spec.helper != WorkHelperV1::Connection
         && (public_goal(spec)
-            || !super::route::brand(spec.service.as_ref(), &spec.title)
-                .is_some_and(|brand| super::route::site(&brand).is_some()))
+            || super::route::brand(spec.service.as_ref(), &spec.title)
+                .is_none_or(|brand| super::route::site(&brand).is_none()))
 }
 
 fn account_goal(spec: &PartSpec) -> bool {

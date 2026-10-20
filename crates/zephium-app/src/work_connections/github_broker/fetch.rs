@@ -100,11 +100,11 @@ async fn receive(mut response: reqwest::Response) -> Result<Vec<u8>, Failure> {
         || response
             .content_length()
             .is_some_and(|length| length > LIMIT as u64)
-        || !response
+        || response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.split(';').next() == Some("application/json"))
+            .is_none_or(|value| value.split(';').next() != Some("application/json"))
     {
         return Err(Failure::Failed);
     }
@@ -196,7 +196,7 @@ mod tests {
         let server = async {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0; 4096];
-            stream.read(&mut request).await.unwrap();
+            let _ = stream.read(&mut request).await.unwrap();
             stream.write_all(&reply).await.unwrap();
         };
         let client = client(Arc::new(Resolver)).unwrap();
@@ -261,7 +261,7 @@ mod tests {
             for name in ["NO_PROXY","no_proxy"]{std::env::set_var(name,"");}
             let client=client(Arc::new(InertResolver(target.local_addr().unwrap()))).unwrap();
             let read=client.get(format!("http://api.github.com:{}/inert",target.local_addr().unwrap().port())).send();
-            let server=async {let (mut stream,_)=target.accept().await.unwrap();let mut bytes=[0;4096];stream.read(&mut bytes).await.unwrap();stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();};
+            let server=async {let (mut stream,_)=target.accept().await.unwrap();let mut bytes=[0;4096];let _=stream.read(&mut bytes).await.unwrap();stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();};
             let (_,response)=tokio::time::timeout(Duration::from_secs(2),async{tokio::join!(server,read)}).await.unwrap();
             assert!(response.unwrap().status().is_success());
             assert!(tokio::time::timeout(Duration::from_millis(30),proxy.accept()).await.is_err());

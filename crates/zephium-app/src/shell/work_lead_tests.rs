@@ -1279,7 +1279,8 @@ async fn a_draft_reaches_the_page_exactly_with_its_line_breaks_and_not_through_t
         page: lead.clone(),
         light: lead,
     };
-    let seen: Arc<Mutex<Vec<(Option<String>, Option<String>)>>> = Arc::default();
+    type SeenPair = (Option<String>, Option<String>);
+    let seen: Arc<Mutex<Vec<SeenPair>>> = Arc::default();
     let record = seen.clone();
     let answering = answer_asks(&handle, profile, work, "Allow");
     drive(
@@ -2300,11 +2301,19 @@ impl WorkModelClient for FolderHandoffModel {
     }
 }
 
-#[tokio::test]
-async fn zero_folder_computer_parts_share_picker_and_only_accept_real_choice() {
+#[test]
+fn zero_folder_computer_parts_share_picker_and_only_accept_real_choice() {
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(zero_folder_computer_parts_body());
+}
+
+async fn zero_folder_computer_parts_body() {
     let folder = tempfile::Builder::new()
         .prefix("zephium-picker-home-")
         .tempdir()

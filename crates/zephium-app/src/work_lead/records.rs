@@ -983,7 +983,7 @@ mod tests {
         let WorkArtifactDataV1::Picks { items, .. } = picks.data else {
             panic!()
         };
-        assert_eq!(items[0].image_candidates, [image.clone()]);
+        assert_eq!(items[0].image_candidates, std::slice::from_ref(&image));
         assert!(
             items[0].media_attempted && items[0].record_media.is_none(),
             "a withheld native image must stay withheld"

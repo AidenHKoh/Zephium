@@ -26,16 +26,9 @@ struct Response {
     challenge: [u8; 16],
     body: Option<String>,
 }
+type BodyReceiver = tokio::sync::oneshot::Receiver<Result<Vec<u8>, Failure>>;
 impl Broker {
-    fn begin(
-        &self,
-    ) -> Result<
-        (
-            [u8; 16],
-            tokio::sync::oneshot::Receiver<Result<Vec<u8>, Failure>>,
-        ),
-        Failure,
-    > {
+    fn begin(&self) -> Result<([u8; 16], BodyReceiver), Failure> {
         if self.used.swap(true, Ordering::AcqRel) {
             return Err(Failure::Input);
         }

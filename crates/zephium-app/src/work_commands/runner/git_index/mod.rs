@@ -362,7 +362,7 @@ fn capture(
             }) {
                 return Err(Error::Unsupported);
             }
-            if std::str::from_utf8(&bytes).is_ok_and(zephium_agentic::contains_recognized_secret) {
+            if std::str::from_utf8(bytes).is_ok_and(zephium_agentic::contains_recognized_secret) {
                 return Err(Error::Denied);
             }
             total = total.checked_add(bytes.len()).ok_or(Error::Limit)?;

@@ -496,7 +496,6 @@ fn proposal(base: &ResourceRecord, args: &ReviseArgs) -> Result<ResourceDraft, S
         }
         rows.push(row.clone());
     }
-    let mut data = data;
     super::objects::strip_native_media(&mut data);
     let data: WorkArtifactDataV1 = serde_json::from_value(data)
         .map_err(|_| "The changes do not match this block's structure")?;

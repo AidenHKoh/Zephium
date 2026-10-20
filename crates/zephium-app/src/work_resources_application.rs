@@ -1898,52 +1898,6 @@ fn historical_record_admissible(record: AgentWorkRecord) -> bool {
             ))
 }
 
-#[cfg(test)]
-mod group_tests {
-    use super::*;
-
-    #[test]
-    fn work_group_accepts_only_its_live_manifest_under_the_original_process_fence() {
-        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let group = RetainedWorkGroup::try_new(WorkId::generate(), 3).unwrap();
-        let owner = AgentWorkIncarnation::generate();
-        let mut bytes = [0; AGENT_WORK_RECORD_BYTES];
-        bytes[0] = 1;
-        bytes[1] = AgentWorkDisposition::Admitted as u8;
-        bytes[2] = AgentWorkDebt::UNKNOWN.bits();
-        bytes[15] = 1;
-        bytes[16..32].copy_from_slice(&owner.bytes());
-        bytes[47] = 1;
-        let record = AgentWorkRecord::decode(bytes).unwrap();
-        let context = ContextId::generate();
-        assert!(!group.owns_running(owner, record));
-        group.remember(context, record).unwrap();
-        assert!(group.owns_running(owner, record));
-        let running = record.transition(AgentWorkDisposition::Running).unwrap();
-        assert!(group.owns_running(owner, running));
-        assert!(!group.owns_running(AgentWorkIncarnation::generate(), running));
-        let mut foreign = bytes;
-        foreign[95] ^= 1;
-        assert!(!group.owns_running(owner, AgentWorkRecord::decode(foreign).unwrap()));
-        foreign = bytes;
-        foreign[47] = 2;
-        let foreign = AgentWorkRecord::decode(foreign).unwrap();
-        assert!(!group.owns_running(owner, foreign));
-        assert!(group.remember(context, foreign).is_err());
-        assert!(!group.owns_running(
-            owner,
-            running
-                .transition(AgentWorkDisposition::RecoveryRequired)
-                .unwrap()
-        ));
-        group.fail();
-        assert!(!group.owns_running(owner, running));
-        assert!(group.admit(ContextId::generate(), foreign).is_err());
-    }
-}
-
 struct MediaReadState {
     pending: PendingLifecycle,
     progress: zephium_agentic::WorkBrowserMediaProgress,
@@ -2020,5 +1974,51 @@ impl RetainedWork {
         &mut self,
     ) -> Option<Vec<zephium_agentic::WorkBrowserRecordImage>> {
         self.media_result.take()
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+
+    #[test]
+    fn work_group_accepts_only_its_live_manifest_under_the_original_process_fence() {
+        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let group = RetainedWorkGroup::try_new(WorkId::generate(), 3).unwrap();
+        let owner = AgentWorkIncarnation::generate();
+        let mut bytes = [0; AGENT_WORK_RECORD_BYTES];
+        bytes[0] = 1;
+        bytes[1] = AgentWorkDisposition::Admitted as u8;
+        bytes[2] = AgentWorkDebt::UNKNOWN.bits();
+        bytes[15] = 1;
+        bytes[16..32].copy_from_slice(&owner.bytes());
+        bytes[47] = 1;
+        let record = AgentWorkRecord::decode(bytes).unwrap();
+        let context = ContextId::generate();
+        assert!(!group.owns_running(owner, record));
+        group.remember(context, record).unwrap();
+        assert!(group.owns_running(owner, record));
+        let running = record.transition(AgentWorkDisposition::Running).unwrap();
+        assert!(group.owns_running(owner, running));
+        assert!(!group.owns_running(AgentWorkIncarnation::generate(), running));
+        let mut foreign = bytes;
+        foreign[95] ^= 1;
+        assert!(!group.owns_running(owner, AgentWorkRecord::decode(foreign).unwrap()));
+        foreign = bytes;
+        foreign[47] = 2;
+        let foreign = AgentWorkRecord::decode(foreign).unwrap();
+        assert!(!group.owns_running(owner, foreign));
+        assert!(group.remember(context, foreign).is_err());
+        assert!(!group.owns_running(
+            owner,
+            running
+                .transition(AgentWorkDisposition::RecoveryRequired)
+                .unwrap()
+        ));
+        group.fail();
+        assert!(!group.owns_running(owner, running));
+        assert!(group.admit(ContextId::generate(), foreign).is_err());
     }
 }

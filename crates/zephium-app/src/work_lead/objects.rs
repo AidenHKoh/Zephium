@@ -584,9 +584,9 @@ pub(crate) fn propose(
     if kind == "list" {
         items_mut(&mut data, |item| {
             if item.get("record_source").is_some_and(|value| {
-                !value
+                value
                     .as_str()
-                    .is_some_and(|key| run.source(key.trim()).is_some())
+                    .is_none_or(|key| run.source(key.trim()).is_none())
             }) {
                 item.remove("record_source");
                 left_out.push("items[].record_source (no source of this request)".into());

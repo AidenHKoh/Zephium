@@ -154,15 +154,16 @@ async fn native_public_github_cli_consent_result_and_receipt_are_connected() {
         !response.content.contains("127.0.0.1")
             && !response.content.contains("work-local-broker-placeholder")
     );
-    let records = host.records.lock().unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].service, "github");
-    assert_eq!(records[0].tool, "github_cli_issue");
-    assert_eq!(
-        records[0].url.as_deref(),
-        Some("https://github.com/fixture/project/issues/3")
-    );
-    drop(records);
+    {
+        let records = host.records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].service, "github");
+        assert_eq!(records[0].tool, "github_cli_issue");
+        assert_eq!(
+            records[0].url.as_deref(),
+            Some("https://github.com/fixture/project/issues/3")
+        );
+    }
     let withheld = call_with_fetch(&host, "github_cli_issue", &args, |_| async {
         Ok(br#"{"number":3,"title":"Fixture","body":"ghp_inertFixtureToken"}"#.to_vec())
     })
