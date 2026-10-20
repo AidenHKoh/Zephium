@@ -308,7 +308,8 @@ impl Driver {
                 let outcome = checked_outcome(outcome, request.limits);
                 // A page task may have drafted something: it is never run
                 // twice, unless it ended to start over (a sign-in finished in
-                // a tab, or a saved cookie refusal replaced the page).
+                // a tab, or a saved cookie refusal replaced the page) or lost
+                // its page before acting.
                 let signed_in =
                     matches!(&outcome, Ok(outcome) if outcome.rerun && outcome.usage.is_some());
                 let retry = prior.is_none()
@@ -1456,13 +1457,22 @@ fn job_listing(kind: WorkStepKindV1) -> WorkStepKindV1 {
 }
 
 fn retryable_read(step: &WorkStepKindV1, outcome: &Result<WorkBrowserOutcome, WorkError>) -> bool {
-    if !matches!(step, WorkStepKindV1::Read { goal: None, .. }) {
-        return false;
-    }
     let Ok(outcome) = outcome else {
         return false;
     };
     if outcome.status != WorkStepStatus::Failed || outcome.usage.is_none() {
+        return false;
+    }
+    if matches!(step, WorkStepKindV1::Read { goal: Some(_), .. }) {
+        // A page task that lost its page before it acted on anything has
+        // drafted nothing, so it starts over once on a fresh page.
+        return outcome.note.as_deref() == Some(read_note::UNSETTLED)
+            && outcome
+                .measurements
+                .as_ref()
+                .is_some_and(|m| m.native_actions == 0);
+    }
+    if !matches!(step, WorkStepKindV1::Read { goal: None, .. }) {
         return false;
     }
     let steps = outcome
@@ -1669,6 +1679,42 @@ mod tests {
             }
             assert!(!retryable_read(&step, &Err(WorkError::OutcomeUnknown)));
         }
+    }
+
+    #[test]
+    fn a_page_task_starts_over_once_only_when_it_lost_its_page_before_acting() {
+        let step = WorkStepKindV1::Read {
+            verbatim: None,
+            url: "https://www.ebay.com/".into(),
+            goal: Some("Find the listed GPUs".into()),
+            collection: None,
+        };
+        let outcome = |note: &str, native_actions: u16| WorkBrowserOutcome {
+            status: WorkStepStatus::Failed,
+            usage: Some(WorkUsage::default()),
+            artifacts: vec![],
+            intervention: None,
+            note: Some(note.into()),
+            measurements: Some(WorkStepMeasurementsV1 {
+                native_actions,
+                ..Default::default()
+            }),
+            helped: false,
+            held_back: false,
+            committed: Vec::new(),
+            rerun: false,
+            search: None,
+            redirect: None,
+        };
+        assert!(retryable_read(&step, &Ok(outcome(read_note::UNSETTLED, 0))));
+        assert!(!retryable_read(
+            &step,
+            &Ok(outcome(read_note::UNSETTLED, 1))
+        ));
+        assert!(!retryable_read(
+            &step,
+            &Ok(outcome(read_note::CONSTRUCTION_TIMEOUT, 0))
+        ));
     }
 
     #[test]
