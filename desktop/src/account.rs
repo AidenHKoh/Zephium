@@ -1,11 +1,16 @@
 //! The optional Zephium account, as the frame sees it. The bearer stays in
 //! native code; the frame gets the account's state and closed faults only.
 use super::*;
-use zephium_account::wire::{self, Billing, Purchase, Receipt, Usage};
-use zephium_account::{AccountError, AccountSettings, Service, SystemVault, View};
+use zephium_account::wire::{self, Billing, PlanChange, Purchase, Receipt, SignupMode, Usage};
+use zephium_account::{AccountError, AccountSettings, CallSource, Service, SystemVault, View};
 
 /// Four a minute, under the service's six, so a refresh by hand still fits.
 const CHECKOUT_POLL: std::time::Duration = std::time::Duration::from_secs(15);
+/// How often a queued or running plan change is read, and a slower pace for
+/// one whose payment is unconfirmed; the wait ends after this long.
+const PLAN_CHANGE_POLL: std::time::Duration = std::time::Duration::from_secs(4);
+const PLAN_CHANGE_UNCERTAIN: std::time::Duration = std::time::Duration::from_secs(20);
+const PLAN_CHANGE_WATCH: std::time::Duration = std::time::Duration::from_secs(12 * 60 * 60);
 const MAX_EMAIL_INPUT_BYTES: usize = 320;
 const MAX_SERVER_INPUT_BYTES: usize = 512;
 const MAX_NAME_INPUT_BYTES: usize = 512;
@@ -42,6 +47,18 @@ pub(crate) enum AccountFaultV1 {
     /// Another account already uses that address.
     EmailTaken,
     NotFound,
+    /// Under billing review: no purchase or upgrade; export, the portal and
+    /// downgrades still work.
+    BillingReview,
+    /// A subscription checkout is already open.
+    CheckoutInProgress,
+    /// There is a subscription already: change it instead of buying another.
+    SubscriptionChangeRequired,
+    /// Billing is read again before another try.
+    BillingRefreshRequired,
+    PlanChangeInProgress,
+    PlanChangeExpired,
+    PlanChangeUnavailable,
 }
 
 impl From<AccountError> for AccountFaultV1 {
@@ -60,6 +77,13 @@ impl From<AccountError> for AccountFaultV1 {
             AccountError::ReauthRequired => Self::ReauthRequired,
             AccountError::EmailTaken => Self::EmailTaken,
             AccountError::NotFound => Self::NotFound,
+            AccountError::BillingReview => Self::BillingReview,
+            AccountError::CheckoutInProgress => Self::CheckoutInProgress,
+            AccountError::SubscriptionChangeRequired => Self::SubscriptionChangeRequired,
+            AccountError::BillingRefreshRequired => Self::BillingRefreshRequired,
+            AccountError::PlanChangeInProgress => Self::PlanChangeInProgress,
+            AccountError::PlanChangeExpired => Self::PlanChangeExpired,
+            AccountError::PlanChangeUnavailable => Self::PlanChangeUnavailable,
         }
     }
 }
@@ -86,6 +110,17 @@ pub(crate) struct AccountUsageV1 {
     pub(crate) spent_today: Option<String>,
     /// The daily cap; null when there is none.
     pub(crate) daily_limit: Option<String>,
+    /// Units to one credit as the server states it. Null: show percentages
+    /// only, never credit numbers.
+    pub(crate) credit_units: Option<String>,
+    /// What the plan's allowance still holds, in units.
+    pub(crate) allowance_left: Option<String>,
+    /// The allowance is a one-time grant that never refills.
+    pub(crate) one_time: bool,
+    /// The free allowance is used up for now; purchased credit still works.
+    pub(crate) free_paused: bool,
+    /// Purchased credit can be spent while the free allowance is paused.
+    pub(crate) purchased_usable: Option<bool>,
 }
 
 /// One hosted request's accounting; never its content.
@@ -101,6 +136,58 @@ pub(crate) struct AccountRequestV1 {
     pub(crate) started_at: Option<String>,
     pub(crate) finished_at: Option<String>,
     pub(crate) error_class: Option<String>,
+    /// Which balance paid: `allowance`, `purchased` or `mixed`.
+    pub(crate) funding: Option<String>,
+    /// What the call was made for, from this computer's own record.
+    pub(crate) source: Option<AccountCallSourceV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum AccountCallSourceV1 {
+    Task { profile: String, work: String },
+    Voice,
+}
+
+impl From<CallSource> for AccountCallSourceV1 {
+    fn from(source: CallSource) -> Self {
+        match source {
+            CallSource::Task { profile, work } => Self::Task { profile, work },
+            CallSource::Voice => Self::Voice,
+        }
+    }
+}
+
+/// How the server takes new accounts.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, specta::Type, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AccountSignupModeV1 {
+    Open,
+    /// By invitation only.
+    Allowlist,
+    Closed,
+    Unknown,
+}
+
+/// A Pro/Max change: a quote to confirm, or the operation after it.
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
+pub(crate) struct AccountPlanChangeV1 {
+    pub(crate) id: String,
+    /// `quoted`, `queued`, `executing`, `uncertain`, `applied`, `scheduled` or `failed`.
+    pub(crate) status: String,
+    pub(crate) current_plan: String,
+    pub(crate) target_plan: String,
+    pub(crate) interval: String,
+    /// `upgrade` or `downgrade`.
+    pub(crate) direction: String,
+    /// Null for an immediate upgrade; the renewal for a downgrade.
+    pub(crate) effective_at: Option<String>,
+    /// An estimate before tax; the provider decides the final charge.
+    pub(crate) charge: Option<AccountPriceV1>,
+    pub(crate) recurring: Option<AccountPriceV1>,
+    pub(crate) expires_at: Option<String>,
+    /// The stable code of a failed change.
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
@@ -193,6 +280,12 @@ pub(crate) struct AccountV1 {
     pub(crate) offers: Vec<AccountOfferV1>,
     /// A checkout was opened and is being watched for completion.
     pub(crate) checkout_open: bool,
+    /// The billing portal was opened and billing is being read until it changes.
+    pub(crate) portal_open: bool,
+    pub(crate) signup_mode: Option<AccountSignupModeV1>,
+    /// Under billing review: a calm state in place of purchase buttons.
+    pub(crate) billing_review: bool,
+    pub(crate) plan_change: Option<AccountPlanChangeV1>,
     pub(crate) notice: Option<AccountNoticeV1>,
     /// Hosted calls whose charge was not confirmed when they ended.
     pub(crate) unsettled: Vec<AccountRequestV1>,
@@ -306,6 +399,10 @@ pub(crate) fn install(app: &tauri::AppHandle) {
         if let Err(error) = service.refresh(true).await {
             write_diagnostic(format_args!("account: refresh fault={error:?}"));
         }
+        // A plan change started before the app closed is followed to its end.
+        if service.plan_change_open() {
+            watch_plan_change(service);
+        }
     });
 }
 
@@ -319,7 +416,7 @@ fn contacted(service: &Service) -> bool {
 mod hosted {
     use super::*;
     use zephium_agentic::lead::{LeadCloudRecord, LeadCredential, LeadSecret, LeadSecretFuture};
-    use zephium_app::work_models::{self, WorkCloudSession};
+    use zephium_app::work_models::{self, WorkCallSource, WorkCloudSession};
     use zephium_core::work::model::WorkModelError;
 
     static SIGNED_IN: AtomicBool = AtomicBool::new(false);
@@ -338,6 +435,18 @@ mod hosted {
         }
         fn credential(&self) -> Arc<dyn LeadCredential> {
             Arc::new(Bearer(self.0.clone()))
+        }
+        fn sourced(&self, request_id: &str, source: &WorkCallSource) {
+            self.0.record_call_source(
+                request_id,
+                match source {
+                    WorkCallSource::Task { profile, work } => CallSource::Task {
+                        profile: profile.clone(),
+                        work: work.clone(),
+                    },
+                    WorkCallSource::Voice => CallSource::Voice,
+                },
+            );
         }
         fn recorded(&self, record: LeadCloudRecord) {
             self.0.usage_changed();
@@ -459,6 +568,10 @@ fn project(view: View) -> AccountV1 {
             .map(offers)
             .unwrap_or_default(),
         checkout_open: view.checkout_open,
+        portal_open: view.portal_open,
+        signup_mode: config.and_then(|c| c.signup_mode).map(signup_mode),
+        billing_review: view.billing_review,
+        plan_change: view.plan_change.as_ref().map(plan_change),
         notice: config
             .and_then(|c| c.notice.as_ref())
             .map(|notice| AccountNoticeV1 {
@@ -470,11 +583,45 @@ fn project(view: View) -> AccountV1 {
     }
 }
 
+fn signup_mode(mode: SignupMode) -> AccountSignupModeV1 {
+    match mode {
+        SignupMode::Open => AccountSignupModeV1::Open,
+        SignupMode::Allowlist => AccountSignupModeV1::Allowlist,
+        SignupMode::Closed => AccountSignupModeV1::Closed,
+        SignupMode::Unknown => AccountSignupModeV1::Unknown,
+    }
+}
+
+fn plan_change(change: &PlanChange) -> AccountPlanChangeV1 {
+    AccountPlanChangeV1 {
+        id: change.id.clone(),
+        status: change.status.clone(),
+        current_plan: change.current_plan.clone(),
+        target_plan: change.target_plan.clone(),
+        interval: change.interval.clone(),
+        direction: change.direction.clone(),
+        effective_at: change.effective_at.clone(),
+        charge: price(&change.amount_due_estimate),
+        recurring: price(&change.recurring_price),
+        expires_at: change.expires_at.clone(),
+        error: change.error.as_ref().map(|fault| fault.code.clone()),
+    }
+}
+
 fn usage(usage: &Usage) -> AccountUsageV1 {
     let units = |value: &Option<String>| wire::amount(value.as_deref());
     AccountUsageV1 {
         used_percent: usage.used_percent(),
-        resets_at: usage.period_end.clone(),
+        // A one-time allowance never renews, whatever a date field says.
+        resets_at: usage
+            .period_end
+            .clone()
+            .filter(|_| !usage.one_time_allowance()),
+        credit_units: usage.credit_units().map(|units| units.to_string()),
+        allowance_left: usage.allowance_left(),
+        one_time: usage.one_time_allowance(),
+        free_paused: usage.free_usage_paused,
+        purchased_usable: usage.purchased_usage_available,
         extra: usage.has_extra(),
         unit_scale: u32::try_from(usage.scale()).unwrap_or(1_000_000),
         remaining: units(&usage.credits_remaining),
@@ -499,7 +646,16 @@ fn request(receipt: &Receipt) -> AccountRequestV1 {
         started_at: receipt.started_at.clone(),
         finished_at: receipt.finished_at.clone(),
         error_class: receipt.error_class.clone(),
+        funding: funding(receipt.funding_source.as_deref()),
+        source: None,
     }
+}
+
+/// The funding source the contract names; anything else reads as unknown.
+fn funding(source: Option<&str>) -> Option<String> {
+    source
+        .filter(|source| matches!(*source, "allowance" | "purchased" | "mixed"))
+        .map(str::to_owned)
 }
 
 fn price(price: &Option<zephium_account::wire::Price>) -> Option<AccountPriceV1> {
@@ -554,6 +710,10 @@ fn unavailable_view() -> AccountV1 {
         subscription: None,
         offers: Vec::new(),
         checkout_open: false,
+        portal_open: false,
+        signup_mode: None,
+        billing_review: false,
+        plan_change: None,
         notice: None,
         unsettled: Vec::new(),
     }
@@ -606,6 +766,9 @@ pub(crate) async fn account_get(caller: WebviewWindow) -> AccountReplyV1 {
                 let _ = background.load_config().await;
             }
             let _ = background.refresh(false).await;
+            if background.plan_change_in_flight() {
+                watch_plan_change(background);
+            }
         });
     }
     reply(Ok(()))
@@ -709,6 +872,99 @@ pub(crate) async fn account_manage(caller: WebviewWindow) -> AccountReplyV1 {
     };
     log("manage", &result);
     reply(result)
+}
+
+/// Sets the daily spending limit, in units, or removes it with null.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn account_set_daily_limit(
+    caller: WebviewWindow,
+    limit: Option<String>,
+) -> AccountReplyV1 {
+    let result = match admitted(&caller, "account_set_daily_limit") {
+        Ok(_) if limit.as_ref().is_some_and(|limit| limit.len() > 20) => Err(AccountError::Invalid),
+        Ok(service) => service.set_daily_limit(limit.as_deref()).await,
+        Err(error) => Err(error),
+    };
+    log("set_daily_limit", &result);
+    reply(result)
+}
+
+/// Asks for a quote to move to another paid plan. Nothing is charged.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn account_plan_preview(
+    caller: WebviewWindow,
+    plan: String,
+    interval: String,
+) -> AccountReplyV1 {
+    let result = match admitted(&caller, "account_plan_preview") {
+        Ok(_) if plan.len() > 64 || interval.len() > 16 => Err(AccountError::Invalid),
+        Ok(service) => service
+            .preview_plan_change(&plan, &interval)
+            .await
+            .map(drop),
+        Err(error) => Err(error),
+    };
+    log("plan_preview", &result);
+    reply(result)
+}
+
+/// Confirms the quote on the account page and follows the change to its end.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn account_plan_confirm(caller: WebviewWindow) -> AccountReplyV1 {
+    let result = match admitted(&caller, "account_plan_confirm") {
+        Ok(service) => match service.confirm_plan_change().await {
+            Ok(_) => {
+                watch_plan_change(service);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        },
+        Err(error) => Err(error),
+    };
+    log("plan_confirm", &result);
+    reply(result)
+}
+
+/// Puts away a quote or a finished change.
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn account_plan_dismiss(caller: WebviewWindow) -> AccountReplyV1 {
+    reply(admitted(&caller, "account_plan_dismiss").map(|service| service.dismiss_plan_change()))
+}
+
+/// Reads a held plan change until it ends. `uncertain` is waited on, never
+/// paid again; the wait is slower and survives a long outage.
+fn watch_plan_change(service: Arc<Service>) {
+    static WATCHING: AtomicBool = AtomicBool::new(false);
+    if WATCHING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let started = std::time::Instant::now();
+        while started.elapsed() < PLAN_CHANGE_WATCH {
+            let wait = match service.refresh_plan_change().await {
+                Ok(Some(change)) if change.in_flight() => {
+                    if change.status == "uncertain" {
+                        PLAN_CHANGE_UNCERTAIN
+                    } else {
+                        PLAN_CHANGE_POLL
+                    }
+                }
+                // A quote is read once; there is nothing to wait for.
+                Ok(_) => break,
+                Err(AccountError::SignedOut | AccountError::NotFound) => break,
+                Err(AccountError::RateLimited { retry_after }) => {
+                    std::time::Duration::from_secs(retry_after.into())
+                }
+                Err(_) => PLAN_CHANGE_UNCERTAIN,
+            };
+            tokio::time::sleep(wait).await;
+        }
+        WATCHING.store(false, Ordering::Release);
+    });
 }
 
 fn open_tab(caller: &WebviewWindow, url: &str) {
@@ -983,24 +1239,33 @@ pub(crate) async fn account_usage_history(
         Err(error) => Err(error),
     };
     match result {
-        Ok(page) => AccountHistoryV1 {
-            requests: page
-                .requests
-                .into_iter()
-                .map(|row| AccountRequestV1 {
-                    id: row.id,
-                    model_id: row.model_id,
-                    state: row.state,
-                    charged: wire::amount(row.units.as_deref()),
-                    reserved: wire::amount(row.reserved.as_deref()),
-                    started_at: row.started_at,
-                    finished_at: row.finished_at,
-                    error_class: None,
-                })
-                .collect(),
-            next_cursor: page.next_cursor,
-            fault: None,
-        },
+        Ok(page) => {
+            let ids: Vec<String> = page.requests.iter().map(|row| row.id.clone()).collect();
+            let sources = service()
+                .map(|service| service.call_sources(&ids))
+                .unwrap_or_default();
+            AccountHistoryV1 {
+                requests: page
+                    .requests
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, row)| AccountRequestV1 {
+                        id: row.id,
+                        model_id: row.model_id,
+                        state: row.state,
+                        charged: wire::amount(row.units.as_deref()),
+                        reserved: wire::amount(row.reserved.as_deref()),
+                        started_at: row.started_at,
+                        finished_at: row.finished_at,
+                        error_class: None,
+                        funding: funding(row.funding_source.as_deref()),
+                        source: sources.get(index).cloned().flatten().map(Into::into),
+                    })
+                    .collect(),
+                next_cursor: page.next_cursor,
+                fault: None,
+            }
+        }
         Err(error) => {
             log("usage_history", &Err(error));
             AccountHistoryV1 {
@@ -1106,5 +1371,120 @@ mod tests {
         assert_eq!(usage.remaining.as_deref(), Some("2500000"));
         assert_eq!(usage.daily_limit, None);
         assert_eq!(usage.unit_scale, 1_000_000);
+    }
+
+    fn staging_usage() -> Usage {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "cloud_enabled": true, "policy_revision": 3, "plan": "free",
+            "unit_scale": 1_000_000, "credit_units": "10000", "credits_remaining": "1880000",
+            "reserved_units": "0", "spent_today": "120000", "bonus_remaining": "0",
+            "bonus_expires_at": null, "purchased_remaining": "0", "period_end": null,
+            "daily_limit_units": null, "by_model": [], "purchased_balance": null,
+            "free_usage_paused": true, "purchased_usage_available": true,
+            "allowance": {"total_units": "2000000", "used_units": "120000", "reserved_units": "0",
+                          "renews": false, "expires_at": null}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn credits_come_from_the_servers_factor_and_a_trial_has_no_renewal() {
+        let usage = usage(&staging_usage());
+        assert_eq!(usage.credit_units.as_deref(), Some("10000"));
+        assert_eq!(usage.allowance_left.as_deref(), Some("1880000"));
+        assert_eq!(usage.used_percent, Some(6));
+        assert!(usage.one_time && usage.free_paused);
+        assert_eq!(usage.purchased_usable, Some(true));
+        assert_eq!(usage.resets_at, None);
+
+        // Without the factor there are percentages and no credit numbers.
+        let mut older = staging_usage();
+        older.credit_units = None;
+        assert_eq!(super::usage(&older).credit_units, None);
+        assert_eq!(super::usage(&older).used_percent, Some(6));
+
+        // A renewing plan keeps its date; a date on a one-time grant is dropped.
+        let mut paid = staging_usage();
+        paid.allowance.renews = Some(true);
+        paid.period_end = Some("2026-11-01T00:00:00Z".into());
+        assert_eq!(
+            super::usage(&paid).resets_at.as_deref(),
+            Some("2026-11-01T00:00:00Z")
+        );
+        paid.allowance.renews = Some(false);
+        assert_eq!(super::usage(&paid).resets_at, None);
+    }
+
+    #[test]
+    fn review_signup_mode_and_plan_change_reach_the_frame() {
+        let change: PlanChange = serde_json::from_value(serde_json::json!({
+            "id": "7d3c1f0e-5a42-4c8e-9b61-0f2d8a4e6b13", "status": "scheduled",
+            "current_plan": "max", "target_plan": "pro", "interval": "monthly",
+            "direction": "downgrade", "effective_at": "2026-11-19T00:00:00Z",
+            "amount_due_estimate": {"amount_minor": 0, "currency": "USD", "tax_excluded": true},
+            "recurring_price": {"amount_minor": 2000, "currency": "USD"},
+            "expires_at": "2026-10-20T12:05:00Z", "error": null
+        }))
+        .unwrap();
+        let view = View {
+            server: "https://staging-api.zephium.app".into(),
+            config: Some(wire::ClientConfig {
+                signup_mode: Some(SignupMode::Allowlist),
+                billing_enabled: true,
+                ..Default::default()
+            }),
+            signed_in: true,
+            billing_review: true,
+            plan_change: Some(change),
+            ..Default::default()
+        };
+        let account = project(view);
+        assert!(account.billing_review);
+        assert_eq!(account.signup_mode, Some(AccountSignupModeV1::Allowlist));
+        let change = account.plan_change.unwrap();
+        assert_eq!(change.status, "scheduled");
+        assert_eq!(change.effective_at.as_deref(), Some("2026-11-19T00:00:00Z"));
+        assert_eq!(change.charge.unwrap().amount_minor, 0);
+        assert_eq!(change.recurring.unwrap().amount_minor, 2000);
+        assert_eq!(change.error, None);
+    }
+
+    #[test]
+    fn funding_shows_only_the_sources_the_contract_names() {
+        assert_eq!(funding(Some("mixed")).as_deref(), Some("mixed"));
+        assert_eq!(funding(Some("purchased")).as_deref(), Some("purchased"));
+        assert_eq!(funding(Some("<script>")), None);
+        assert_eq!(funding(None), None);
+    }
+
+    #[test]
+    fn new_faults_and_sources_have_stable_wire_shapes() {
+        for (fault, text) in [
+            (AccountFaultV1::BillingReview, "billing_review"),
+            (AccountFaultV1::CheckoutInProgress, "checkout_in_progress"),
+            (
+                AccountFaultV1::SubscriptionChangeRequired,
+                "subscription_change_required",
+            ),
+            (AccountFaultV1::PlanChangeExpired, "plan_change_expired"),
+        ] {
+            assert_eq!(serde_json::to_value(fault).unwrap(), text);
+        }
+        assert_eq!(
+            AccountFaultV1::from(AccountError::PlanChangeInProgress),
+            AccountFaultV1::PlanChangeInProgress
+        );
+        let task = AccountCallSourceV1::from(CallSource::Task {
+            profile: "p".into(),
+            work: "w".into(),
+        });
+        assert_eq!(
+            serde_json::to_value(task).unwrap(),
+            serde_json::json!({"kind": "task", "profile": "p", "work": "w"})
+        );
+        assert_eq!(
+            serde_json::to_value(AccountCallSourceV1::from(CallSource::Voice)).unwrap(),
+            serde_json::json!({"kind": "voice"})
+        );
     }
 }

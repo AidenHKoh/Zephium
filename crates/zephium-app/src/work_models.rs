@@ -65,6 +65,18 @@ pub trait WorkModelSettings: Send + Sync {
     fn set(&self, key: String, value: String) -> bool;
 }
 
+/// What a hosted call is made for, kept on this computer so the usage history
+/// can group calls. The service never learns it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkCallSource {
+    /// A Work task: the profile that owns it and its id.
+    Task {
+        profile: String,
+        work: String,
+    },
+    Voice,
+}
+
 /// A signed-in Zephium Cloud session, installed by the sign-in flow.
 pub trait WorkCloudSession: Send + Sync {
     /// Whether a session is active now.
@@ -77,6 +89,8 @@ pub trait WorkCloudSession: Send + Sync {
     fn credential(&self) -> Arc<dyn LeadCredential>;
     /// A hosted call ended; `record` says what is known of its charge.
     fn recorded(&self, _record: LeadCloudRecord) {}
+    /// The hosted request `request_id` was made for `source`.
+    fn sourced(&self, _request_id: &str, _source: &WorkCallSource) {}
 }
 
 static SETTINGS: RwLock<Option<Arc<dyn WorkModelSettings>>> = RwLock::new(None);
@@ -865,9 +879,18 @@ pub(crate) fn key_refused(provider: WorkModelProvider) {
     record_failure(provider, generation(provider), Some(WorkKeyFault::WrongKey));
 }
 
+#[cfg(test)]
 fn client(
     state: &State,
     entry: &WorkModelEntry,
+) -> Result<Arc<dyn WorkModelClient>, WorkModelError> {
+    client_for(state, entry, None)
+}
+
+fn client_for(
+    state: &State,
+    entry: &WorkModelEntry,
+    source: Option<WorkCallSource>,
 ) -> Result<Arc<dyn WorkModelClient>, WorkModelError> {
     let provider = entry.model.provider;
     let (target, credential): (LeadTarget, Arc<dyn LeadCredential>) = match provider {
@@ -885,7 +908,12 @@ fn client(
             }
             let observer = session.clone();
             let mut client = LeadClient::new(target, session.credential(), entry.price.clone())
-                .with_cloud_observer(Arc::new(move |record| observer.recorded(record)));
+                .with_cloud_observer(Arc::new(move |record| {
+                    if let (Some(id), Some(source)) = (&record.request_id, &source) {
+                        observer.sourced(id, source);
+                    }
+                    observer.recorded(record);
+                }));
             if let Some(max) = hosted.max_request_bytes {
                 client = client.with_request_limit(max);
             }
@@ -933,10 +961,20 @@ pub async fn resolve_entry(
     profile: ProfileId,
     role: WorkModelRole,
 ) -> Result<(WorkModelEntry, Arc<dyn WorkModelClient>), WorkModelError> {
+    resolve_entry_for(profile, role, None).await
+}
+
+/// Like [`resolve_entry`], with the task a hosted model's calls are made for,
+/// so its request ids can be grouped by task in the usage history.
+pub async fn resolve_entry_for(
+    profile: ProfileId,
+    role: WorkModelRole,
+    source: Option<WorkCallSource>,
+) -> Result<(WorkModelEntry, Arc<dyn WorkModelClient>), WorkModelError> {
     ensure_presence().await;
     let state = state();
     let entry = effective(&state, profile, role).ok_or(WorkModelError::MissingKey)?;
-    let client = client(&state, &entry)?;
+    let client = client_for(&state, &entry, source)?;
     Ok((entry, client))
 }
 

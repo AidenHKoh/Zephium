@@ -12,14 +12,17 @@ use serde_json::Value;
 use url::Url;
 
 use crate::client::{Client, ConfigReply, Origin};
+use crate::tasks::{CallSource, Ledger};
 use crate::vault::{AccountVault, VaultFault};
 use crate::wire::{
-    Billing, ClientConfig, Profile, Purchase, Receipt, Session, Usage, UsageHistory,
+    Billing, ClientConfig, PlanChange, Profile, Purchase, Receipt, Session, Usage, UsageHistory,
 };
 use crate::{older_than, AccountError, AccountToken, DEFAULT_ORIGIN};
 
 const SERVER_KEY: &str = "account.server";
 const CACHE_KEY: &str = "account.cache";
+const CHANGE_KEY: &str = "account.plan_change";
+const TASKS_KEY: &str = "account.call_tasks";
 const MAX_CACHE_BYTES: usize = 64 * 1024;
 const MAX_EMAIL_BYTES: usize = 254;
 const MAX_NAME_CHARS: usize = 100;
@@ -28,6 +31,9 @@ const RESEND_AFTER: Duration = Duration::from_secs(60);
 /// Plan and usage older than this are fetched again when someone looks.
 const STALE_AFTER: Duration = Duration::from_secs(60);
 const CHECKOUT_WATCH: Duration = Duration::from_secs(15 * 60);
+/// How long a received checkout link is offered again instead of asking the
+/// service for another, which it refuses while one is open.
+const CHECKOUT_LINK: Duration = Duration::from_secs(30 * 60);
 const MAX_DEVICE_CHARS: usize = 64;
 /// The service allows six billing refreshes a minute per account.
 const BILLING_REFRESHES: usize = 6;
@@ -59,9 +65,30 @@ pub struct View {
     pub usage: Option<Usage>,
     /// A checkout was opened and has not been seen to complete.
     pub checkout_open: bool,
+    /// The billing portal was opened and billing is being read until it changes.
+    pub portal_open: bool,
     /// Hosted calls whose charge was not confirmed when they ended, as last
     /// read from their receipts.
     pub unsettled: Vec<Receipt>,
+    /// The account is under billing review: no purchase or upgrade is taken.
+    pub billing_review: bool,
+    /// A Pro/Max change this account has started and not dismissed.
+    pub plan_change: Option<PlanChange>,
+}
+
+/// A plan change kept across restarts, for one account on one server. It holds
+/// ids and prices only.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct HeldChange {
+    origin: String,
+    account: String,
+    change: PlanChange,
+}
+
+struct HeldLink {
+    purchase: Purchase,
+    url: Url,
+    at: Instant,
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -93,8 +120,14 @@ struct Inner {
     usage: Option<Usage>,
     refreshed: Option<Instant>,
     checkout_until: Option<Instant>,
+    portal_until: Option<Instant>,
     billing_refreshes: VecDeque<Instant>,
     unsettled: Vec<Receipt>,
+    billing_review: bool,
+    checkout_link: Option<HeldLink>,
+    /// Outlives a re-authentication: the quote is confirmed after it.
+    change: Option<HeldChange>,
+    tasks: Ledger,
 }
 
 impl Inner {
@@ -109,8 +142,27 @@ impl Inner {
         self.usage = None;
         self.refreshed = None;
         self.checkout_until = None;
+        self.portal_until = None;
         self.billing_refreshes.clear();
         self.unsettled.clear();
+        self.billing_review = false;
+        self.checkout_link = None;
+    }
+
+    /// The held change, when it belongs to the account signed in on this server.
+    fn visible_change(&self) -> Option<&PlanChange> {
+        let held = self.change.as_ref()?;
+        let account = self.profile.as_ref()?;
+        (held.origin == self.origin() && held.account == account.id).then_some(&held.change)
+    }
+
+    /// Billing review is a fact of the last usage answer, kept until another says otherwise.
+    fn note_usage(&mut self, usage: &Result<Usage, AccountError>) {
+        match usage {
+            Ok(_) => self.billing_review = false,
+            Err(AccountError::BillingReview) => self.billing_review = true,
+            Err(_) => {}
+        }
     }
 }
 
@@ -145,6 +197,7 @@ impl Service {
             None => Origin::parse(DEFAULT_ORIGIN)?,
         };
         let signed_in = matches!(vault.present(origin.as_str()), Ok(true));
+        let origin_text = origin.as_str().to_owned();
         let cache: Cache = settings
             .get(CACHE_KEY)
             .filter(|_| signed_in)
@@ -156,6 +209,11 @@ impl Service {
             .filter(|c| !c.is_control())
             .take(MAX_DEVICE_CHARS)
             .collect();
+        let change = settings
+            .get(CHANGE_KEY)
+            .and_then(|text| serde_json::from_str::<HeldChange>(&text).ok())
+            .filter(|held| held.origin == origin_text);
+        let tasks = Ledger::load(settings.get(TASKS_KEY).as_deref());
         Ok(Self {
             settings,
             vault,
@@ -176,8 +234,13 @@ impl Service {
                 usage: cache.usage,
                 refreshed: None,
                 checkout_until: None,
+                portal_until: None,
                 billing_refreshes: VecDeque::new(),
                 unsettled: Vec::new(),
+                billing_review: false,
+                checkout_link: None,
+                change,
+                tasks,
             }),
             observer: OnceLock::new(),
         })
@@ -223,7 +286,10 @@ impl Service {
             billing: inner.billing.clone(),
             usage: inner.usage.clone(),
             checkout_open: inner.checkout_until.is_some_and(|until| until > now),
+            portal_open: inner.portal_until.is_some_and(|until| until > now),
             unsettled: inner.unsettled.clone(),
+            billing_review: inner.billing_review,
+            plan_change: inner.visible_change().cloned(),
         }
     }
 
@@ -465,6 +531,7 @@ impl Service {
                 return Ok(());
             }
             inner.profile = Some(profile);
+            inner.note_usage(&usage);
             // A server with billing or hosted models turned off answers those
             // with an error; the account itself still works.
             inner.billing = billing.ok().or(inner.billing.take());
@@ -627,17 +694,20 @@ impl Service {
             }
             other => other?,
         };
-        let usage = client.usage(&token).await.ok();
+        let usage = client.usage(&token).await;
         {
             let mut inner = self.lock();
             if inner.epoch == epoch {
                 let before = inner.billing.clone();
                 inner.billing = Some(billing.clone());
-                if usage.is_some() {
-                    inner.usage = usage;
+                inner.note_usage(&usage);
+                if let Ok(usage) = usage {
+                    inner.usage = Some(usage);
                 }
                 if before.is_some_and(|before| before != billing) {
                     inner.checkout_until = None;
+                    inner.portal_until = None;
+                    inner.checkout_link = None;
                 }
                 self.persist(&inner);
             }
@@ -646,28 +716,232 @@ impl Service {
         Ok(billing)
     }
 
-    /// A checkout link on the billing provider, to open in a browser tab.
+    /// A checkout link on the billing provider, to open in a browser tab. The
+    /// link received for a purchase is offered again while it is fresh: the
+    /// service refuses a second subscription checkout while one is open.
     pub async fn checkout(&self, purchase: &Purchase) -> Result<Url, AccountError> {
+        if let Some(url) = self.held_link(purchase) {
+            self.lock().checkout_until = Some(Instant::now() + CHECKOUT_WATCH);
+            self.notify();
+            return Ok(url);
+        }
         let token = self.bearer()?;
         let (client, epoch) = self.client();
-        let url = self.signed_out_on_401(epoch, client.checkout(&token, purchase).await)?;
-        self.lock().checkout_until = Some(Instant::now() + CHECKOUT_WATCH);
+        let result = client.checkout(&token, purchase).await;
+        self.note_review(&result);
+        let url = self.signed_out_on_401(epoch, result)?;
+        {
+            let mut inner = self.lock();
+            inner.checkout_until = Some(Instant::now() + CHECKOUT_WATCH);
+            inner.checkout_link = Some(HeldLink {
+                purchase: purchase.clone(),
+                url: url.clone(),
+                at: Instant::now(),
+            });
+        }
         self.notify();
         Ok(url)
     }
 
-    /// The billing provider's portal for managing the subscription.
+    fn held_link(&self, purchase: &Purchase) -> Option<Url> {
+        let inner = self.lock();
+        inner
+            .checkout_link
+            .as_ref()
+            .filter(|held| held.purchase == *purchase && held.at.elapsed() < CHECKOUT_LINK)
+            .map(|held| held.url.clone())
+    }
+
+    /// The billing provider's portal for managing the subscription. Billing is
+    /// read for a while afterwards, as after a checkout, so a change made
+    /// there shows up here.
     pub async fn portal(&self) -> Result<Url, AccountError> {
         let token = self.bearer()?;
         let (client, epoch) = self.client();
-        self.signed_out_on_401(epoch, client.portal(&token).await)
+        let url = self.signed_out_on_401(epoch, client.portal(&token).await)?;
+        self.lock().portal_until = Some(Instant::now() + CHECKOUT_WATCH);
+        self.notify();
+        Ok(url)
     }
 
-    /// Whether an opened checkout is still being watched for.
+    /// Whether an opened checkout or portal is still being watched for.
     pub fn checkout_open(&self) -> bool {
+        let inner = self.lock();
+        let now = Instant::now();
+        [inner.checkout_until, inner.portal_until]
+            .into_iter()
+            .flatten()
+            .any(|until| until > now)
+    }
+
+    /// Sets the daily spending limit in units, or removes it with `None`.
+    pub async fn set_daily_limit(&self, units: Option<&str>) -> Result<(), AccountError> {
+        let token = self.bearer()?;
+        let (client, epoch) = self.client();
+        self.signed_out_on_401(epoch, client.set_daily_limit(&token, units).await)?;
+        self.refresh(true).await
+    }
+
+    /// Asks for a quote to move to `plan` on `interval`. Nothing is charged.
+    pub async fn preview_plan_change(
+        &self,
+        plan: &str,
+        interval: &str,
+    ) -> Result<PlanChange, AccountError> {
+        let (account, origin) = {
+            let inner = self.lock();
+            if inner.visible_change().is_some_and(PlanChange::in_flight) {
+                return Err(AccountError::PlanChangeInProgress);
+            }
+            let account = inner
+                .profile
+                .as_ref()
+                .map(|profile| profile.id.clone())
+                .ok_or(AccountError::Invalid)?;
+            (account, inner.origin())
+        };
+        let token = self.bearer()?;
+        let (client, epoch) = self.client();
+        let result = client.preview_plan_change(&token, plan, interval).await;
+        self.note_review(&result);
+        let change = self.signed_out_on_401(epoch, result)?;
+        self.hold_change(epoch, origin, account, &change);
+        Ok(change)
+    }
+
+    /// Confirms the quote held. A session older than ten minutes answers
+    /// `ReauthRequired`; the quote stays, and confirming again after signing
+    /// in resumes the same operation, as does a retry after a lost answer.
+    pub async fn confirm_plan_change(&self) -> Result<PlanChange, AccountError> {
+        let (held, account, origin) = {
+            let inner = self.lock();
+            let held = inner
+                .visible_change()
+                .filter(|change| change.status == "quoted" || change.in_flight())
+                .cloned()
+                .ok_or(AccountError::NotFound)?;
+            let account = inner.profile.as_ref().map(|p| p.id.clone());
+            (held, account.ok_or(AccountError::Invalid)?, inner.origin())
+        };
+        let token = self.bearer()?;
+        let (client, epoch) = self.client();
+        let result = client.confirm_plan_change(&token, &held.id).await;
+        self.note_review(&result);
+        if result.as_ref().err() == Some(&AccountError::PlanChangeExpired) {
+            self.release_change(epoch);
+        }
+        let change = self.signed_out_on_401(epoch, result)?;
+        self.hold_change(epoch, origin, account, &change);
+        Ok(change)
+    }
+
+    /// Reads where the held change stands. When it has just finished, billing
+    /// and usage are read again so the page shows the plan it ended on.
+    pub async fn refresh_plan_change(&self) -> Result<Option<PlanChange>, AccountError> {
+        let (held, account, origin) = {
+            let inner = self.lock();
+            let Some(held) = inner.visible_change().cloned() else {
+                return Ok(None);
+            };
+            let account = inner.profile.as_ref().map(|p| p.id.clone());
+            (held, account.ok_or(AccountError::Invalid)?, inner.origin())
+        };
+        let token = self.bearer()?;
+        let (client, epoch) = self.client();
+        let change = match client.plan_change(&token, &held.id).await {
+            Err(AccountError::NotFound) => {
+                self.release_change(epoch);
+                return Ok(None);
+            }
+            other => self.signed_out_on_401(epoch, other)?,
+        };
+        self.hold_change(epoch, origin, account, &change);
+        if change.finished() && !held.finished() {
+            // The limiter may refuse; the periodic read catches up.
+            if self.refresh_billing().await.is_err() {
+                self.usage_changed();
+            }
+        }
+        Ok(Some(change))
+    }
+
+    /// Puts away a quote, or a change that has finished. One still being
+    /// carried out stays: it cannot be taken back.
+    pub fn dismiss_plan_change(&self) {
+        let epoch = {
+            let inner = self.lock();
+            if inner.visible_change().is_some_and(PlanChange::in_flight) {
+                return;
+            }
+            inner.epoch
+        };
+        self.release_change(epoch);
+    }
+
+    /// Whether a held change is being carried out.
+    pub fn plan_change_in_flight(&self) -> bool {
         self.lock()
-            .checkout_until
-            .is_some_and(|until| until > Instant::now())
+            .visible_change()
+            .is_some_and(PlanChange::in_flight)
+    }
+
+    /// Whether a held change is awaiting a read, such as after a restart.
+    pub fn plan_change_open(&self) -> bool {
+        self.lock()
+            .visible_change()
+            .is_some_and(|change| change.in_flight() || change.status == "quoted")
+    }
+
+    fn note_review<T>(&self, result: &Result<T, AccountError>) {
+        if result.as_ref().err() == Some(&AccountError::BillingReview) {
+            self.lock().billing_review = true;
+            self.notify();
+        }
+    }
+
+    fn hold_change(&self, epoch: u64, origin: String, account: String, change: &PlanChange) {
+        {
+            let mut inner = self.lock();
+            if inner.epoch != epoch {
+                return;
+            }
+            let held = HeldChange {
+                origin,
+                account,
+                change: change.clone(),
+            };
+            if let Ok(text) = serde_json::to_string(&held) {
+                self.settings.set(CHANGE_KEY.to_owned(), text);
+            }
+            inner.change = Some(held);
+        }
+        self.notify();
+    }
+
+    fn release_change(&self, epoch: u64) {
+        {
+            let mut inner = self.lock();
+            if inner.epoch != epoch {
+                return;
+            }
+            inner.change = None;
+            self.settings.set(CHANGE_KEY.to_owned(), String::new());
+        }
+        self.notify();
+    }
+
+    /// Notes what a hosted call was made for, so history can group by it.
+    /// Stays on this computer.
+    pub fn record_call_source(&self, request_id: &str, source: CallSource) {
+        let mut inner = self.lock();
+        if inner.tasks.record(request_id, source) {
+            self.settings.set(TASKS_KEY.to_owned(), inner.tasks.text());
+        }
+    }
+
+    /// What each of these calls was made for, when known.
+    pub fn call_sources(&self, request_ids: &[String]) -> Vec<Option<CallSource>> {
+        self.lock().tasks.lookup(request_ids)
     }
 
     pub async fn sessions(&self) -> Result<Vec<Session>, AccountError> {
@@ -691,10 +965,19 @@ impl Service {
             let _ = client.sign_out(&token).await;
         }
         self.forget(epoch);
+        self.forget_local_history();
         if self.vault.clear(&origin).is_err() {
             return Err(AccountError::Vault);
         }
         Ok(())
+    }
+
+    /// What this computer kept about the account's use: which task made which call.
+    fn forget_local_history(&self) {
+        let mut inner = self.lock();
+        if inner.tasks.clear() {
+            self.settings.set(TASKS_KEY.to_owned(), String::new());
+        }
     }
 
     /// Ends every session of the account, this one included. Unlike signing
@@ -705,6 +988,7 @@ impl Service {
         match client.sign_out_everywhere(&token).await {
             Ok(()) | Err(AccountError::SignedOut) => {
                 self.forget(epoch);
+                self.forget_local_history();
                 Ok(())
             }
             Err(error) => Err(error),
@@ -727,6 +1011,9 @@ impl Service {
         let (client, epoch) = self.client();
         self.signed_out_on_401(epoch, client.delete_account(&token, code).await)?;
         self.forget(epoch);
+        self.forget_local_history();
+        let epoch = self.lock().epoch;
+        self.release_change(epoch);
         Ok(())
     }
 

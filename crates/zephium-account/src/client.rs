@@ -13,7 +13,8 @@ use serde_json::{json, Value};
 use url::Url;
 
 use crate::wire::{
-    self, Billing, ClientConfig, Profile, Purchase, Receipt, Session, Usage, UsageHistory,
+    self, Billing, ClientConfig, PlanChange, Profile, Purchase, Receipt, Session, Usage,
+    UsageHistory,
 };
 use crate::{AccountError, AccountToken};
 
@@ -324,6 +325,81 @@ impl Client {
         billing_link(&link.url)
     }
 
+    /// Sets the daily spending limit in units, or removes it with `None`. The
+    /// service refuses one above the plan's own cap.
+    pub async fn set_daily_limit(
+        &self,
+        token: &AccountToken,
+        units: Option<&str>,
+    ) -> Result<(), AccountError> {
+        if units.is_some_and(|units| wire::amount(Some(units)).is_none()) {
+            return Err(AccountError::Invalid);
+        }
+        let body = json!({ "daily_limit_units": units });
+        self.call(Method::PUT, "/v1/usage/limits", Some(token), Some(body))
+            .await
+            .map(drop)
+    }
+
+    /// A five-minute quote for moving between paid plans. Charges nothing.
+    pub async fn preview_plan_change(
+        &self,
+        token: &AccountToken,
+        plan: &str,
+        interval: &str,
+    ) -> Result<PlanChange, AccountError> {
+        if !plan_id(plan) || !matches!(interval, "monthly" | "yearly") {
+            return Err(AccountError::Invalid);
+        }
+        let body = json!({ "plan": plan, "interval": interval });
+        let change: PlanChange = self
+            .json(
+                Method::POST,
+                "/v1/billing/subscription/preview",
+                Some(token),
+                Some(body),
+            )
+            .await?;
+        checked(change, None)
+    }
+
+    /// Confirms a quote. The quote id is the idempotency key, so asking again
+    /// after a lost answer returns the same operation. The first confirmation
+    /// needs a session from the last ten minutes.
+    pub async fn confirm_plan_change(
+        &self,
+        token: &AccountToken,
+        quote: &str,
+    ) -> Result<PlanChange, AccountError> {
+        if !uuid(quote) {
+            return Err(AccountError::Invalid);
+        }
+        let body = json!({ "quote_id": quote });
+        let change: PlanChange = self
+            .json(
+                Method::POST,
+                "/v1/billing/subscription/change",
+                Some(token),
+                Some(body),
+            )
+            .await?;
+        checked(change, Some(quote))
+    }
+
+    /// Where a plan change stands.
+    pub async fn plan_change(
+        &self,
+        token: &AccountToken,
+        id: &str,
+    ) -> Result<PlanChange, AccountError> {
+        if !uuid(id) {
+            return Err(AccountError::Invalid);
+        }
+        let path = format!("/v1/billing/subscription/changes/{id}");
+        let change: PlanChange = self.json(Method::GET, &path, Some(token), None).await?;
+        checked(change, Some(id))
+    }
+
     pub async fn portal(&self, token: &AccountToken) -> Result<Url, AccountError> {
         let link: wire::Link = self
             .json(Method::POST, "/v1/billing/portal", Some(token), None)
@@ -436,6 +512,23 @@ struct Reply {
     body: Vec<u8>,
 }
 
+/// A plan id as the service names them: short, no spaces or separators that
+/// could change the request.
+fn plan_id(text: &str) -> bool {
+    (1..=40).contains(&text.len())
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// A change the service described, held to the id it was asked about.
+fn checked(change: PlanChange, expected: Option<&str>) -> Result<PlanChange, AccountError> {
+    let same = expected.is_none_or(|id| change.id.eq_ignore_ascii_case(id));
+    (uuid(&change.id) && same)
+        .then_some(change)
+        .ok_or(AccountError::Protocol)
+}
+
 fn billing_link(text: &str) -> Result<Url, AccountError> {
     let url = Url::parse(text).map_err(|_| AccountError::Protocol)?;
     let host = url.host_str().unwrap_or_default();
@@ -488,6 +581,15 @@ fn classify(status: StatusCode, headers: &HeaderMap, body: &[u8]) -> AccountErro
         (409, "email_unavailable") => AccountError::EmailTaken,
         (_, "signup_closed" | "signup_disabled") => AccountError::SignupClosed,
         (_, "no_billing_account") => AccountError::NoBillingAccount,
+        (403, "billing_review_required") => AccountError::BillingReview,
+        (409, "checkout_in_progress") => AccountError::CheckoutInProgress,
+        (409, "subscription_change_required") => AccountError::SubscriptionChangeRequired,
+        (409, "billing_refresh_required") => AccountError::BillingRefreshRequired,
+        (409, "plan_change_in_progress") => AccountError::PlanChangeInProgress,
+        (409, "plan_change_expired") => AccountError::PlanChangeExpired,
+        (400, "invalid_plan_change") | (409, "subscription_change_unavailable") => {
+            AccountError::PlanChangeUnavailable
+        }
         (_, "billing_not_enabled" | "cloud_disabled") => AccountError::Unavailable,
         (401, _) => AccountError::SignedOut,
         (429, _) => AccountError::RateLimited {
@@ -579,6 +681,68 @@ mod tests {
         assert_eq!(
             classify(StatusCode::SERVICE_UNAVAILABLE, &HeaderMap::new(), taken),
             AccountError::Unavailable
+        );
+    }
+
+    #[test]
+    fn billing_and_plan_change_refusals_have_their_own_closed_faults() {
+        let none = HeaderMap::new();
+        let body = |code: &str| format!(r#"{{"error":{{"code":"{code}"}},"request_id":null}}"#);
+        for (status, code, expected) in [
+            (403, "billing_review_required", AccountError::BillingReview),
+            (
+                409,
+                "checkout_in_progress",
+                AccountError::CheckoutInProgress,
+            ),
+            (
+                409,
+                "subscription_change_required",
+                AccountError::SubscriptionChangeRequired,
+            ),
+            (
+                409,
+                "billing_refresh_required",
+                AccountError::BillingRefreshRequired,
+            ),
+            (
+                409,
+                "plan_change_in_progress",
+                AccountError::PlanChangeInProgress,
+            ),
+            (409, "plan_change_expired", AccountError::PlanChangeExpired),
+            (
+                409,
+                "subscription_change_unavailable",
+                AccountError::PlanChangeUnavailable,
+            ),
+            (
+                400,
+                "invalid_plan_change",
+                AccountError::PlanChangeUnavailable,
+            ),
+            (404, "plan_change_not_found", AccountError::NotFound),
+            (
+                401,
+                "reauthentication_required",
+                AccountError::ReauthRequired,
+            ),
+        ] {
+            let status = StatusCode::from_u16(status).unwrap();
+            assert_eq!(
+                classify(status, &none, body(code).as_bytes()),
+                expected,
+                "{code}"
+            );
+        }
+        // An unknown 409 stays a plain refusal, never one of these.
+        assert_eq!(
+            classify(
+                StatusCode::CONFLICT,
+                &none,
+                body("something_new").as_bytes()
+            ),
+            AccountError::Invalid
         );
     }
 

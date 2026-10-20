@@ -139,9 +139,11 @@ pub async fn transcribe(
                 transcriber.max_request_bytes,
             )?;
             let credential = session.credential();
-            return lead::transcribe(&target, credential.as_ref(), wav, language)
-                .await
-                .map(|transcript| transcript.text);
+            let transcript = lead::transcribe(&target, credential.as_ref(), wav, language).await?;
+            if let Some(id) = &transcript.request_id {
+                session.sourced(id, &work_models::WorkCallSource::Voice);
+            }
+            return Ok(transcript.text);
         }
         VoiceEngine::OpenAi => WorkModelProvider::OpenAi,
         VoiceEngine::Groq => WorkModelProvider::Groq,
