@@ -549,6 +549,25 @@ fn draft_creator<'a>(
         .find_map(|(index, _)| creator(index))
 }
 
+/// A create button set in a small inline editor whose field already holds
+/// what was drafted (a quick "add task" row): pressing it makes the item, as
+/// in a dialog. An opener beside an empty field only opens the editor.
+fn inline_draft(node: &SemanticNode, snapshot: &SemanticSnapshot) -> bool {
+    const SMALL: usize = 80;
+    let drafted = |part: &&SemanticNode| {
+        (matches!(part.role(), SemanticRole::Textbox | SemanticRole::Combobox)
+            || part.editable_structure().is_some())
+            && (value_text(part).is_some()
+                || part
+                    .text()
+                    .is_some_and(|text| !text.as_str().trim().is_empty()))
+    };
+    ancestors(node, snapshot)
+        .take_while(|(_, ancestor)| ancestor.parent().is_some())
+        .take_while(|(index, _)| subtree(snapshot, *index).len() <= SMALL)
+        .any(|(index, _)| subtree(snapshot, index).iter().any(|part| drafted(&part)))
+}
+
 /// "Create issue", "Add task", "Save page": the control that makes it.
 fn creates(text: &str) -> bool {
     let text = words(text);
@@ -692,9 +711,10 @@ pub(crate) fn classify(
                 SiteEffect::Commit(Consequence::Purchase)
             } else if node.role() == SemanticRole::Button
                 && creates(&text)
-                && draft_dialog(node, snapshot).is_some()
+                && (draft_dialog(node, snapshot).is_some() || inline_draft(node, snapshot))
             {
-                // Creating what the dialog drafted puts it in the workspace.
+                // Creating what the dialog or inline editor drafted puts it
+                // in the workspace.
                 SiteEffect::Commit(commits.unwrap_or(Consequence::Save))
             } else if let Some(consequence) = commits.or_else(|| dialog_commits(node, snapshot)) {
                 if consequence == Consequence::Destructive
@@ -764,13 +784,30 @@ pub(crate) fn classify(
                             .unwrap_or(Consequence::Save),
                     )
                 } else {
-                    // Enter commits what the region's own control would.
+                    // Enter commits what the region's own create control
+                    // would. A payment or deletion beside it keeps the higher
+                    // bar; a Share or Comment elsewhere in it is not that.
                     let region = subtree(snapshot, region_index(node, snapshot));
-                    SiteEffect::Commit(
+                    let buttons = || {
                         region
                             .iter()
                             .filter(|part| part.role() == SemanticRole::Button)
-                            .find_map(|part| commit_words(&label(part)))
+                    };
+                    SiteEffect::Commit(
+                        buttons()
+                            .find_map(|part| {
+                                commit_words(&label(part)).filter(|consequence| {
+                                    matches!(
+                                        consequence,
+                                        Consequence::Purchase | Consequence::Destructive
+                                    )
+                                })
+                            })
+                            .or_else(|| {
+                                buttons()
+                                    .filter(|part| creates(&label(part)))
+                                    .find_map(|part| commit_words(&label(part)))
+                            })
                             .unwrap_or(if composer_has_send(snapshot) {
                                 Consequence::Communication
                             } else {
@@ -2759,6 +2796,34 @@ mod tests {
             effect(&tasks, 4, SemanticActionKind::Fill),
             SiteEffect::Draft,
             "an inline editor drafts until its own Add button",
+        );
+        assert_eq!(
+            effect(&tasks, 6, SemanticActionKind::Click),
+            SiteEffect::Draft,
+            "Add task beside an empty field only opens the editor",
+        );
+        let drafted = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"button","n":"Share","o":1,"ak":1}),
+            json!({"k":3,"p":0,"r":"group","n":"Quick add"}),
+            json!({"k":4,"p":2,"r":"textbox","n":"Task name","o":11,"fs":1,"es":[1,2,false],
+                "v":{"k":"text","value":"Zephium test"}}),
+            json!({"k":5,"p":2,"r":"button","n":"Add task","o":1,"ak":1}),
+        ]);
+        assert_eq!(
+            effect(&drafted, 5, SemanticActionKind::Click),
+            SiteEffect::Commit(Consequence::Save),
+            "Add task in an inline editor holding a draft makes the task",
+        );
+        assert_eq!(
+            effect_key(
+                &drafted,
+                4,
+                SemanticActionKind::Press,
+                Some(SemanticPressKey::Enter)
+            ),
+            SiteEffect::Commit(Consequence::Save),
+            "Enter in the editor saves the task, never shares the page",
         );
         assert_eq!(
             effect_key(
