@@ -164,9 +164,6 @@ fn host_token() -> Result<(bool, bool), ()> {
     Ok((restricted, elevation.TokenIsElevated != 0))
 }
 
-pub(crate) fn seed_initialized() {
-    let _ = writeln!(std::io::stderr().lock(), "windows-work-cookies: stage=seed_admission exact_origin_initialized=true; content=redacted");
-}
 pub(crate) fn observe_profile(core: &ICoreWebView2, expected_udf: &std::path::Path) {
     use std::io::Write as _;
     let observed = (|| -> Result<_, ()> {

@@ -511,6 +511,8 @@ pub(crate) fn install(
             anonymous_work_environments: HashMap::new(),
             #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
             work_site_stores: HashMap::new(),
+            #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+            work_profile_cookie_sources: HashMap::new(),
             #[cfg(target_os = "windows")]
             browser_processes: HashMap::new(),
             #[cfg(target_os = "windows")]

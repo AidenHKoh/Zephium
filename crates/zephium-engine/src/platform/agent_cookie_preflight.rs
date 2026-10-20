@@ -171,7 +171,8 @@ impl AgentCookieFields {
             && self.path.as_text() == other.path.as_text()
     }
 
-    fn same_snapshot(&self, other: &Self) -> bool {
+    /// Same identity and every exposed attribute, including the value.
+    pub(crate) fn same_snapshot(&self, other: &Self) -> bool {
         self.same_identity(other)
             && self.value.as_text() == other.value.as_text()
             && self.expires.to_bits() == other.expires.to_bits()

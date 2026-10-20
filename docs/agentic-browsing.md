@@ -291,8 +291,8 @@ with a default or temporary profile.
 Before navigation, copy the bounded cookie set needed for the target origins
 from the selected user profile into the automation subprofile through supported
 cookie APIs, including HttpOnly cookies where the native API exposes them. A
-sign-in handoff may repeat that one-way copy after the person completes
-authentication. There is no automatic reverse synchronization. The complete
+sign-in made in a retained Work page is copied back to the selected profile
+for that page's site only (below). The complete
 native attempt, including cleanup proof after a partial write, uses one
 trusted-shell absolute deadline under a fixed product ceiling. Correlation
 retains that exact request/deadline window; native adapters cannot widen or
@@ -310,26 +310,47 @@ the context.
 
 Retained Work pages use stable `work-site-<digest>` subprofiles in the selected
 profile's user-data environment. The digest binds the approved registrable
-site, scheme and port. Pages for that site share the person's Work sign-in and
-origin storage across parts and runs, while independent apps can run in
-parallel. Each construction still verifies the extension-free inventory.
-Pages without the person's session use Work's own website data (4.3) and never
-seed from the person's profile. Private runs and loopback qualification
-fixtures use separate ephemeral environments.
+site, scheme and port. Pages for that site share one store across parts and
+runs, while independent apps can run in parallel. Each construction still
+verifies the extension-free inventory. A per-site store also keeps a page's
+requests from carrying the person's cookies for every other site, which the
+selected profile itself would. Pages without the person's session use Work's
+own website data (4.3) and never touch the person's profile. Private runs and
+loopback qualification fixtures use separate ephemeral environments.
 
-The retained Work cookie bridge keeps existing destination-origin cookies.
-Initial seeding is serialized per site store; a new origin waits for that
-store to become idle within the original construction deadline. A failed seed
-removes only newly attempted cookie identities and proves their absence; it
-never clears retained profile data. Failure to prove cleanup quarantines the
-logical profile. A profile-owned, nonsecret initialization stamp is published
-after a successful seed and before the page becomes available. Reopening a
-page or restarting the browser therefore preserves an intentional Work logout
-instead of reseeding stale Browse cookies. These stamps are erased with the
-profile. Session presence checks both Browse and Work cookie stores, including
-previously used HTTP and custom-port stores, within one bounded request.
-This preserves Work sign-ins without claiming full Browse origin-storage
-equivalence or cross-site Work storage sharing with macOS.
+To the person the store and their tabs hold one session per site, as on
+macOS. The bridge is a scoped add-or-update over the page's document origin,
+the site's own origin and, on a return, the page's current origin on the same
+site; it writes only cookies whose value or attributes differ and never deletes
+a cookie the other side lacks:
+
+- Before each page opens, the profile's site cookies are added to the store,
+  so a sign-in made in a tab reaches the next Work page.
+- A sign-in handoff marks the store's return pending. When the handoff
+  resolves, the store's site cookies are added to the profile, so the person's
+  tabs are signed in too. A return that cannot run then (no live page, a busy
+  store, a failure) stays pending, and the site's next page returns before it
+  refreshes; while a return is pending and fails, the page opens on the store
+  as it is so the profile's older cookies cannot replace that sign-in.
+- With no tab of the profile open, the construction's own page-inert
+  controller of the profile is the profile's cookie authority for the length
+  of that one bounded sync, then closes.
+- While another page of the site is open on the store nothing is written into
+  it: no cookie compare-and-swap exists, and the open page may be mid sign-in.
+
+Each sync is serialized per site store and bounded by the construction or
+return deadline. Destination cookies in scope are listed before the first
+write; a failed sync deletes the identities it created and restores the ones
+it overwrote, then proves both by a scoped readback. It never clears a
+profile. Failure to prove cleanup quarantines the logical profile. A refused
+refresh opens the page on the store as it was and leaves the origin
+unstamped, so the next page tries again. A sign-out inside a Work page is not
+carried to the tabs, and a sign-out in a tab does not delete the store's
+copy; the site's own server-side session end governs both. Session presence
+checks the profile's and the remembered Work stores' cookies within one
+bounded request; since a page opens with both, presence in either is
+presence on the page. Each sync writes one content-free line
+(`windows-work-session: stage=… outcome=… profile=tab|work_bootstrap|none`).
 
 ### 4.3 Work's own website data
 
@@ -343,9 +364,10 @@ consent, and site preferences. Earlier Work kept these pages in per-run
 ephemeral storage, so every run met the same consent wall and bot check again
 and failed on sites that only let a returning browser through. Work's store
 holds no session of the person's. A site the run works on as the person (their
-inbox, issues, messages) opens in the profile's own store even when they are
-signed out there, after the run's entry question, so a sign-in they make during
-Work is theirs in normal browsing too, and the reverse.
+inbox, issues, messages) opens in the profile's own store (on Windows, the
+site's Work store kept in step with it, 4.2) even when they are signed out
+there, after the run's entry question, so a sign-in they make during Work is
+theirs in normal browsing too, and the reverse.
 
 - macOS: a persistent `WKWebsiteDataStore` from `dataStoreForIdentifier:` with
   an identifier derived from the profile (SHA-256 of a domain tag and the

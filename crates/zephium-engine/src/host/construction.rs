@@ -2210,13 +2210,32 @@ pub(super) enum WindowsProfileEnvironmentFailure {
 }
 
 /// A page-inert, counted native owner that bridges environment bootstrap
-/// into real Work controller construction. It never loads a site or survives
-/// the synchronous constructor; failed close retains the exact native debt.
+/// into real Work controller construction. It never loads a site. It ends
+/// with the synchronous constructor unless a Work site page borrows it, while
+/// no tab of the profile is open, as the person's own profile for one bounded
+/// cookie sync; failed close retains the exact native debt.
 #[cfg(target_os = "windows")]
 pub(super) struct WindowsWorkEnvironmentBootstrap {
     view: wry::WebView,
     profile: zephium_core::ids::ProfileId,
     resource: Option<super::resources::NativeResourceLease>,
+}
+#[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+impl WindowsWorkEnvironmentBootstrap {
+    /// The person's own profile cookies, through this controller of that
+    /// profile in the exact expected environment.
+    pub(super) fn profile_cookie_manager(
+        &self,
+        expected_environment: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment,
+    ) -> Result<
+        webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2CookieManager,
+        zephium_agentic::ContextCookieTransferFailure,
+    > {
+        crate::platform::imp::selected_profile_cookie_manager(&self.view, expected_environment)
+    }
+    pub(super) const fn profile(&self) -> zephium_core::ids::ProfileId {
+        self.profile
+    }
 }
 #[cfg(target_os = "windows")]
 impl Drop for WindowsWorkEnvironmentBootstrap {

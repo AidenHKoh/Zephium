@@ -1584,6 +1584,8 @@ impl EngineHost {
                 let task = resource.destruction.take();
                 drop(resource);
                 #[cfg(target_os = "windows")]
+                self.release_work_profile_cookie_source(id);
+                #[cfg(target_os = "windows")]
                 self.retire_windows_anonymous_work_sessions();
                 if let Some(task) = task {
                     task.complete(Outcome::Destroyed);

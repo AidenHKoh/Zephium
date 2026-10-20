@@ -177,64 +177,7 @@ impl ICoreWebView2CookieManager_Impl for TestManager_Impl {
     }
 }
 
-#[windows_core::implement(ICoreWebView2Profile2)]
-struct TestProfile(Rc<Store>);
-impl ICoreWebView2Profile_Impl for TestProfile_Impl {
-    fn ProfileName(&self, _: *mut PWSTR) -> windows_core::Result<()> {
-        Err(native_failure())
-    }
-    fn ProfilePath(&self, _: *mut PWSTR) -> windows_core::Result<()> {
-        Err(native_failure())
-    }
-    fn IsInPrivateModeEnabled(&self, _: *mut BOOL) -> windows_core::Result<()> {
-        Err(native_failure())
-    }
-    fn DefaultDownloadFolderPath(&self, _: *mut PWSTR) -> windows_core::Result<()> {
-        Err(native_failure())
-    }
-    fn SetDefaultDownloadFolderPath(&self, _: &PCWSTR) -> windows_core::Result<()> {
-        Err(native_failure())
-    }
-    fn PreferredColorScheme(
-        &self,
-        _: *mut COREWEBVIEW2_PREFERRED_COLOR_SCHEME,
-    ) -> windows_core::Result<()> {
-        Err(native_failure())
-    }
-    fn SetPreferredColorScheme(
-        &self,
-        _: COREWEBVIEW2_PREFERRED_COLOR_SCHEME,
-    ) -> windows_core::Result<()> {
-        Err(native_failure())
-    }
-}
-impl ICoreWebView2Profile2_Impl for TestProfile_Impl {
-    fn ClearBrowsingData(
-        &self,
-        _: COREWEBVIEW2_BROWSING_DATA_KINDS,
-        _: Ref<'_, ICoreWebView2ClearBrowsingDataCompletedHandler>,
-    ) -> windows_core::Result<()> {
-        Err(native_failure())
-    }
-    fn ClearBrowsingDataInTimeRange(
-        &self,
-        _: COREWEBVIEW2_BROWSING_DATA_KINDS,
-        _: f64,
-        _: f64,
-        _: Ref<'_, ICoreWebView2ClearBrowsingDataCompletedHandler>,
-    ) -> windows_core::Result<()> {
-        Err(native_failure())
-    }
-    fn ClearBrowsingDataAll(
-        &self,
-        _: Ref<'_, ICoreWebView2ClearBrowsingDataCompletedHandler>,
-    ) -> windows_core::Result<()> {
-        self.0.broad_clears.set(self.0.broad_clears.get() + 1);
-        Err(native_failure())
-    }
-}
-
-fn seed(source: Vec<ICoreWebView2Cookie>, destination: Rc<Store>) -> WindowsAgentCookieTerminal {
+fn sync(source: Vec<ICoreWebView2Cookie>, destination: Rc<Store>) -> WindowsAgentCookieTerminal {
     let source = Rc::new(Store {
         cookies: RefCell::new(source),
         ..Store::default()
@@ -243,12 +186,12 @@ fn seed(source: Vec<ICoreWebView2Cookie>, destination: Rc<Store>) -> WindowsAgen
     let completed = completion.clone();
     let panicked = Rc::new(Cell::new(false));
     let panic_flag = panicked.clone();
-    let owner = WindowsAgentCookieTransfer::start_work_scoped(
+    let owner = WindowsAgentCookieTransfer::start_work_sync(
         TestManager(source).into(),
-        TestManager(destination.clone()).into(),
-        TestProfile(destination).into(),
+        TestManager(destination).into(),
         ContextCookieScope::try_new(vec![
-            ContextCookieOrigin::parse("https://example.test/").unwrap()
+            ContextCookieOrigin::parse("https://example.test/").unwrap(),
+            ContextCookieOrigin::parse("https://app.example.test/").unwrap(),
         ])
         .unwrap(),
         Instant::now() + Duration::from_secs(30),
@@ -261,48 +204,66 @@ fn seed(source: Vec<ICoreWebView2Cookie>, destination: Rc<Store>) -> WindowsAgen
     completion.get().expect("synchronous adapter terminal")
 }
 
-fn assert_only_preserved(store: &Store, preserved: &ICoreWebView2Cookie) {
+fn holds(store: &Store, expected: &[&ICoreWebView2Cookie]) {
     let cookies = store.cookies.borrow();
-    assert_eq!(cookies.len(), 1);
-    // The same exact object proves the prior value and attributes were retained.
-    assert_eq!(cookies[0].as_raw(), preserved.as_raw());
+    assert_eq!(cookies.len(), expected.len());
+    // The same exact objects prove each value and its attributes.
+    for cookie in expected {
+        assert!(cookies.iter().any(|held| held.as_raw() == cookie.as_raw()));
+    }
     assert_eq!(store.broad_clears.get(), 0);
 }
 
 #[test]
-fn retained_work_seed_conflict_refuses_before_any_write() {
-    let preserved = cookie("session", "work-human-session");
+fn work_sync_updates_changed_identities_and_keeps_destination_only_ones() {
+    let kept = cookie("work-only", "signed-in-in-work");
     let destination = Rc::new(Store {
-        cookies: RefCell::new(vec![preserved.clone()]),
+        cookies: RefCell::new(vec![kept.clone(), cookie("session", "old")]),
         ..Store::default()
     });
-    let terminal = seed(
-        vec![
-            cookie("unrelated", "browse-new"),
-            cookie("session", "stale-browse"),
-        ],
+    let session = cookie("session", "new");
+    let unrelated = cookie("unrelated", "tab");
+    let terminal = sync(
+        vec![session.clone(), unrelated.clone()],
         destination.clone(),
     );
-    assert_eq!(
+    assert!(matches!(
         terminal.outcome(),
-        ContextCookieTransferOutcome::Refused(ContextCookieTransferFailure::DestinationUnavailable)
-    );
+        ContextCookieTransferOutcome::Applied(_)
+    ));
     assert_eq!(terminal.cleanup(), WindowsAgentCookieCleanup::NotRequired);
-    assert_eq!(destination.writes.get(), 0);
+    assert_eq!(destination.writes.get(), 2);
     assert_eq!(destination.deletes.get(), 0);
-    assert_only_preserved(&destination, &preserved);
+    holds(&destination, &[&kept, &session, &unrelated]);
 }
 
 #[test]
-fn retained_work_seed_partial_failure_rolls_back_only_attempted_identities() {
-    let preserved = cookie("work", "work-human-session");
+fn work_sync_leaves_an_unchanged_cookie_unwritten() {
+    let held = cookie("session", "same");
     let destination = Rc::new(Store {
-        cookies: RefCell::new(vec![preserved.clone()]),
+        cookies: RefCell::new(vec![held.clone()]),
+        ..Store::default()
+    });
+    let terminal = sync(vec![cookie("session", "same")], destination.clone());
+    assert!(matches!(
+        terminal.outcome(),
+        ContextCookieTransferOutcome::Applied(_)
+    ));
+    assert_eq!(destination.writes.get(), 0);
+    holds(&destination, &[&held]);
+}
+
+#[test]
+fn work_sync_partial_failure_deletes_new_and_restores_overwritten_identities() {
+    let kept = cookie("work", "work-human-session");
+    let prior = cookie("session", "old");
+    let destination = Rc::new(Store {
+        cookies: RefCell::new(vec![kept.clone(), prior.clone()]),
         fail_write: Cell::new(Some(2)),
         ..Store::default()
     });
-    let terminal = seed(
-        vec![cookie("first", "one"), cookie("second", "two")],
+    let terminal = sync(
+        vec![cookie("first", "one"), cookie("session", "new")],
         destination.clone(),
     );
     assert!(matches!(
@@ -313,41 +274,40 @@ fn retained_work_seed_partial_failure_rolls_back_only_attempted_identities() {
         }
     ));
     assert_eq!(terminal.cleanup(), WindowsAgentCookieCleanup::Proven);
-    assert_eq!(destination.writes.get(), 2);
-    assert_eq!(destination.deletes.get(), 2);
-    assert_only_preserved(&destination, &preserved);
+    assert_eq!(destination.deletes.get(), 1);
+    holds(&destination, &[&kept, &prior]);
 }
 
 #[test]
-fn retained_work_seed_first_failed_native_write_is_also_journaled() {
-    let preserved = cookie("work", "work-human-session");
+fn work_sync_first_failed_native_write_is_also_journaled() {
+    let kept = cookie("work", "work-human-session");
     let destination = Rc::new(Store {
-        cookies: RefCell::new(vec![preserved.clone()]),
+        cookies: RefCell::new(vec![kept.clone()]),
         fail_write: Cell::new(Some(1)),
         ..Store::default()
     });
-    let terminal = seed(vec![cookie("first", "one")], destination.clone());
+    let terminal = sync(vec![cookie("first", "one")], destination.clone());
     assert_eq!(
         terminal.outcome(),
         ContextCookieTransferOutcome::Refused(ContextCookieTransferFailure::ApplicationFailed)
     );
     assert_eq!(terminal.cleanup(), WindowsAgentCookieCleanup::Proven);
     assert_eq!(destination.deletes.get(), 1);
-    assert_only_preserved(&destination, &preserved);
+    holds(&destination, &[&kept]);
 }
 
 #[test]
-fn retained_work_seed_failed_rollback_requires_quarantine_without_broad_clear() {
-    let preserved = cookie("work", "work-human-session");
+fn work_sync_failed_rollback_requires_quarantine_without_broad_clear() {
+    let kept = cookie("work", "work-human-session");
     let destination = Rc::new(Store {
-        cookies: RefCell::new(vec![preserved.clone()]),
+        cookies: RefCell::new(vec![kept.clone()]),
         fail_write: Cell::new(Some(1)),
         fail_delete: Cell::new(true),
         ..Store::default()
     });
-    let terminal = seed(vec![cookie("first", "one")], destination.clone());
+    let terminal = sync(vec![cookie("first", "one")], destination.clone());
     assert_eq!(terminal.cleanup(), WindowsAgentCookieCleanup::Unproven);
     assert_eq!(destination.broad_clears.get(), 0);
     assert_eq!(destination.cookies.borrow().len(), 2);
-    assert_eq!(destination.cookies.borrow()[0].as_raw(), preserved.as_raw());
+    assert_eq!(destination.cookies.borrow()[0].as_raw(), kept.as_raw());
 }

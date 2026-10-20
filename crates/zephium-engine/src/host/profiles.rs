@@ -848,6 +848,8 @@ impl EngineHost {
         #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
         self.work_site_stores
             .retain(|(selected, _), _| *selected != profile);
+        #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+        self.release_work_profile_cookie_sources(Some(profile));
         // Durable erasure tombstones the profile and synchronously retires
         // every transient extension routing projection before native cleanup.
         self.retire_extension_browser_surface(profile);

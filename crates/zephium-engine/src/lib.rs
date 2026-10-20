@@ -24,6 +24,8 @@ mod pane_geometry;
 mod platform;
 #[cfg(target_os = "windows")]
 pub use platform::windows::{forget_window_caption_offset, set_window_caption_offset};
+#[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
+mod work_site_session;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod work_website_data;
 

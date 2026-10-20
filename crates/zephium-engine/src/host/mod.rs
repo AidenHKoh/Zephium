@@ -650,6 +650,11 @@ pub(crate) struct EngineHost {
     #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
     work_site_stores:
         HashMap<(ProfileId, String), std::rc::Rc<crate::platform::windows::WorkStoreSeed>>,
+    /// The person's own profile, borrowed by a Work site page's cookie sync
+    /// while no tab of that profile is open; released when the sync ends.
+    #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+    work_profile_cookie_sources:
+        HashMap<zephium_agentic::ContextId, construction::WindowsWorkEnvironmentBootstrap>,
     #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
     anonymous_work_environments:
         HashMap<zephium_agentic::ContextRunId, work_windows::AnonymousWorkEnvironment>,

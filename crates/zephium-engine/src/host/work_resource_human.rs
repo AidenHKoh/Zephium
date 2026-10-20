@@ -62,6 +62,10 @@ impl WorkNativeResource {
                         deadline,
                         request.human_sign_in(),
                     )?;
+                    #[cfg(target_os = "windows")]
+                    if request.human_sign_in() {
+                        view.note_work_sign_in();
+                    }
                     self.human_presentation = Some(presentation);
                     self.human_progress = request.human_progress();
                     if let Some(progress) = &self.human_progress {
@@ -148,6 +152,16 @@ impl WorkNativeResource {
             Ok(Some(document)) => {
                 #[cfg(target_os = "windows")]
                 if let Some(view) = self.view.as_ref() {
+                    // The sign-in lives in this site's Work store until it is
+                    // added to the person's profile, so their tabs have it too.
+                    if view.work_session_return_pending() {
+                        let returning = self.guard.clone();
+                        self.guard.dispatch_notification(move || {
+                            crate::host::best_effort_with(move |host| {
+                                host.return_work_site_session(&returning);
+                            });
+                        });
+                    }
                     let guard = self.guard.clone();
                     view.finish_work_human_activity(move |clean| {
                         if clean {

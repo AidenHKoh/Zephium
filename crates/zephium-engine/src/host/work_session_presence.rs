@@ -200,6 +200,9 @@ impl EngineHost {
 
 #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
 impl EngineHost {
+    /// A site's Work page opens on its site store after the profile's site
+    /// cookies were added to it, so it holds what either one holds: present
+    /// in the profile or in a remembered store is present on the page.
     pub(crate) fn work_sessions_present(
         &mut self,
         profile: ProfileId,
