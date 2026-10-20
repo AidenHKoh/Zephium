@@ -515,7 +515,20 @@ impl Shell {
         profile: Option<ProfileId>,
     ) -> Option<zephium_ipc::IconRef> {
         let origin = tab.url.as_ref().and_then(origin_of)?;
-        self.icon_ref_for(surface, profile?, &origin)
+        let profile = profile?;
+        if let Some(icon) = self.icon_ref_for(surface, profile, &origin) {
+            return Some(icon);
+        }
+        let sibling = super::favicons::same_site_icon_origin(
+            &origin,
+            self.favicons
+                .icon_cache_order
+                .iter()
+                .rev()
+                .filter(|(owner, _)| *owner == profile)
+                .map(|(_, candidate)| candidate.as_str()),
+        )?;
+        self.icon_ref_for(surface, profile, sibling)
     }
 
     pub(super) fn icon_ref_for_url(

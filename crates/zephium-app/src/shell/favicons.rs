@@ -755,6 +755,36 @@ impl Shell {
     }
 }
 
+/// The registrable domain of an origin, so `app.slack.com` and `slack.com`
+/// are one site. Hosts without a known suffix (`localhost`, addresses) match
+/// only themselves.
+fn site_of_origin(origin: &str) -> Option<String> {
+    let url = url::Url::parse(origin).ok()?;
+    let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
+    if host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[') {
+        return Some(host);
+    }
+    Some(
+        psl::domain(host.as_bytes())
+            .filter(|domain| domain.suffix().is_known())
+            .and_then(|domain| std::str::from_utf8(domain.as_bytes()).ok())
+            .map_or_else(|| host.clone(), str::to_owned),
+    )
+}
+
+/// Another origin of the same site that already has an icon, newest first
+/// in `recent`. Used when a page has none of its own yet, so a redirect or
+/// login page keeps the site's icon instead of the generic globe.
+pub(super) fn same_site_icon_origin<'a>(
+    origin: &str,
+    recent: impl Iterator<Item = &'a str>,
+) -> Option<&'a str> {
+    let site = site_of_origin(origin)?;
+    recent
+        .filter(|candidate| *candidate != origin)
+        .find(|candidate| site_of_origin(candidate).as_deref() == Some(site.as_str()))
+}
+
 pub(super) fn origin_of(url: &url::Url) -> Option<String> {
     if !matches!(url.scheme(), "http" | "https") {
         return None;
@@ -762,5 +792,44 @@ pub(super) fn origin_of(url: &url::Url) -> Option<String> {
     match url.origin() {
         url::Origin::Tuple(..) => Some(url.origin().ascii_serialization()),
         url::Origin::Opaque(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod same_site_tests {
+    use super::same_site_icon_origin;
+
+    #[test]
+    fn a_page_borrows_the_newest_icon_of_its_own_site_only() {
+        let recent = [
+            "https://example.org",
+            "https://slack.com",
+            "https://app.slack.com",
+        ];
+        assert_eq!(
+            same_site_icon_origin("https://zephiumdev.slack.com", recent.into_iter()),
+            Some("https://slack.com")
+        );
+        assert_eq!(
+            same_site_icon_origin("https://notslack.com", recent.into_iter()),
+            None
+        );
+        assert_eq!(
+            same_site_icon_origin("https://slack.com", ["https://slack.com"].into_iter()),
+            None
+        );
+    }
+
+    #[test]
+    fn hosts_without_a_registrable_domain_match_only_themselves() {
+        let recent = ["http://127.0.0.2:3000", "http://localhost:8080"];
+        assert_eq!(
+            same_site_icon_origin("http://127.0.0.1:3000", recent.into_iter()),
+            None
+        );
+        assert_eq!(
+            same_site_icon_origin("http://localhost:3000", recent.into_iter()),
+            Some("http://localhost:8080")
+        );
     }
 }
