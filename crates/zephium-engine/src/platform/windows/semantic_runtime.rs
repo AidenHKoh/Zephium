@@ -59,13 +59,13 @@ use crate::platform::record_media::{MediaCompletion, MediaInvocation, NativeMedi
 use crate::platform::semantic_pixel_privacy::{PixelPrivacyProof, PrivacyCompletion};
 enum ReadResult {
     HumanWall(String),
-    Observation(SemanticSnapshot),
+    Observation(Box<SemanticSnapshot>),
     Privacy(PixelPrivacyProof),
     Media(NativeMediaResult),
 }
 enum ReadInvocation {
     HumanWall,
-    Observation(SemanticRuntimeInvocation),
+    Observation(Box<SemanticRuntimeInvocation>),
     Privacy(bool),
     Media(MediaInvocation),
 }
@@ -101,9 +101,8 @@ impl ReadInvocation {
                 crate::platform::agent_semantic_cdp_protocol::decode_human_wall_response(response)
                     .map(ReadResult::HumanWall)
             }
-            Self::Observation(value) => {
-                decode_invocation_response(value, response).map(ReadResult::Observation)
-            }
+            Self::Observation(value) => decode_invocation_response(value, response)
+                .map(|snapshot| ReadResult::Observation(Box::new(snapshot))),
             Self::Privacy(public) => {
                 crate::platform::agent_semantic_cdp_protocol::decode_privacy_response_mode(
                     response, *public,
@@ -440,10 +439,10 @@ impl AgentSemanticRuntimeController {
         completion: impl FnOnce(Result<SemanticSnapshot, SemanticRuntimePortFailure>) + 'static,
     ) -> Result<(), SemanticRuntimePortFailure> {
         self.native.dispatch(
-            ReadInvocation::Observation(invocation),
+            ReadInvocation::Observation(Box::new(invocation)),
             Box::new(move |result| {
                 completion(result.and_then(|result| match result {
-                    ReadResult::Observation(snapshot) => Ok(snapshot),
+                    ReadResult::Observation(snapshot) => Ok(*snapshot),
                     ReadResult::Privacy(_) | ReadResult::Media(_) | ReadResult::HumanWall(_) => {
                         Err(SemanticRuntimePortFailure::Transport)
                     }

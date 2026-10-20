@@ -477,6 +477,69 @@ where
     })
 }
 
+impl Profile {
+    pub(super) fn grant_socket(
+        &self,
+        snapshot: &Snapshot,
+        path: &Path,
+    ) -> Result<fs::File, Failure> {
+        if path != snapshot.root.join("broker.sock") {
+            return Err(Failure::Input);
+        }
+        let file = fs::OpenOptions::new()
+            .access_mode(0x000c_0080)
+            .share_mode(3)
+            .custom_flags(0x0020_0000)
+            .open(path)
+            .map_err(|_| Failure::Storage)?;
+        Self::verify_socket(&file)?;
+        let owner = owner_sid()?;
+        let package = sid_string(PSID(self.sid.as_ptr().cast_mut().cast()))?;
+        let sddl = wide(OsStr::new(&format!(
+            "D:P(A;;FA;;;{owner})(A;;FA;;;SY)(A;;GRGW;;;{package})S:(ML;;NW;;;LW)"
+        )))?;
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(sddl.as_ptr()),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                None,
+            )
+        }
+        .map_err(|_| Failure::Storage)?;
+        let assigned = assign_security(&file, descriptor, true);
+        unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
+        assigned?;
+        Self::verify_socket(&file)?;
+        Ok(file)
+    }
+    pub(super) fn verify_socket(file: &fs::File) -> Result<(), Failure> {
+        use ::windows::Win32::Storage::FileSystem::{
+            FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_TAG_INFO,
+        };
+        let mut tag = FILE_ATTRIBUTE_TAG_INFO::default();
+        unsafe {
+            GetFileInformationByHandleEx(
+                HANDLE(file.as_raw_handle()),
+                FileAttributeTagInfo,
+                (&mut tag as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+                size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+            )
+        }
+        .map_err(|_| Failure::Storage)?;
+        // IO_REPARSE_TAG_AF_UNIX from the Windows SDK; no symlink/junction exception.
+        if tag.ReparseTag != 0x8000_0023
+            || tag.FileAttributes & 0x400 == 0
+            || tag.FileAttributes & 0x10 != 0
+            || !crate::work_files::single_link(file).map_err(|_| Failure::Storage)?
+        {
+            return Err(Failure::Storage);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,68 +674,5 @@ mod tests {
             &[],
             &cancelled,
         ));
-    }
-}
-
-impl Profile {
-    pub(super) fn grant_socket(
-        &self,
-        snapshot: &Snapshot,
-        path: &Path,
-    ) -> Result<fs::File, Failure> {
-        if path != snapshot.root.join("broker.sock") {
-            return Err(Failure::Input);
-        }
-        let file = fs::OpenOptions::new()
-            .access_mode(0x000c_0080)
-            .share_mode(3)
-            .custom_flags(0x0020_0000)
-            .open(path)
-            .map_err(|_| Failure::Storage)?;
-        Self::verify_socket(&file)?;
-        let owner = owner_sid()?;
-        let package = sid_string(PSID(self.sid.as_ptr().cast_mut().cast()))?;
-        let sddl = wide(OsStr::new(&format!(
-            "D:P(A;;FA;;;{owner})(A;;FA;;;SY)(A;;GRGW;;;{package})S:(ML;;NW;;;LW)"
-        )))?;
-        let mut descriptor = PSECURITY_DESCRIPTOR::default();
-        unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                PCWSTR(sddl.as_ptr()),
-                SDDL_REVISION_1,
-                &mut descriptor,
-                None,
-            )
-        }
-        .map_err(|_| Failure::Storage)?;
-        let assigned = assign_security(&file, descriptor, true);
-        unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
-        assigned?;
-        Self::verify_socket(&file)?;
-        Ok(file)
-    }
-    pub(super) fn verify_socket(file: &fs::File) -> Result<(), Failure> {
-        use ::windows::Win32::Storage::FileSystem::{
-            FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_TAG_INFO,
-        };
-        let mut tag = FILE_ATTRIBUTE_TAG_INFO::default();
-        unsafe {
-            GetFileInformationByHandleEx(
-                HANDLE(file.as_raw_handle()),
-                FileAttributeTagInfo,
-                (&mut tag as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
-                size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
-            )
-        }
-        .map_err(|_| Failure::Storage)?;
-        // IO_REPARSE_TAG_AF_UNIX from the Windows SDK; no symlink/junction exception.
-        if tag.ReparseTag != 0x8000_0023
-            || tag.FileAttributes & 0x400 == 0
-            || tag.FileAttributes & 0x10 != 0
-            || !crate::work_files::single_link(file).map_err(|_| Failure::Storage)?
-        {
-            return Err(Failure::Storage);
-        }
-        Ok(())
     }
 }
