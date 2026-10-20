@@ -80,13 +80,13 @@ test("the menu leads with who you are, then account, models and settings", async
     "Ada Lovelace — Profile Settings",
     "Switch to Work",
     "Switch to Side Project",
-    expect.stringContaining("Account"),
+    "Account — ada@example.com",
     "Models",
     expect.stringContaining("Settings"),
   ]);
   await expect
     .element(page.getByRole("menuitem", { name: /^Account/u }))
-    .toHaveTextContent(/Pro · 42% used/u);
+    .toHaveTextContent(/ada@example\.com.*Pro · 42% used/u);
   expect(page.getByText("History").query()).toBeNull();
   expect(page.getByText("Downloads").query()).toBeNull();
 
@@ -115,7 +115,7 @@ test("a lone profile has no one to switch to, and signed out offers to sign in",
   await page.viewport(520, 420);
   await open(accountFixture(), solo);
   expect(page.getByRole("menuitem", { name: /Switch to/u }).query()).toBeNull();
-  await expect.element(page.getByRole("menuitem", { name: "Sign in…" })).toBeVisible();
+  await expect.element(page.getByRole("menuitem", { name: "Sign in", exact: true })).toBeVisible();
   expect(page.getByRole("menuitem", { name: /^Account/u }).query()).toBeNull();
 });
 

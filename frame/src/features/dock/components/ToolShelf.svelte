@@ -16,7 +16,7 @@
   import { drawn, profiles } from "$domain/profiles";
   import Disclosure from "$shared/ui/Disclosure";
   import Icon from "$shared/ui/Icon";
-  import AccountRow from "$shared/ui/AccountRow";
+  import AccountCard from "$shared/ui/AccountCard";
   import ProfileAvatar from "$shared/ui/ProfileAvatar";
   import { RECORD_TOOLS, SHELF_TOOLS, toolPresentation } from "../lib/dock-tools";
   import NoticePip from "./NoticePip.svelte";
@@ -36,7 +36,7 @@
   const name = $derived(tabs.profile()?.name ?? profiles.current()?.name ?? "");
   const others = $derived(profiles.inPrivate() ? [] : profiles.others());
   const privately = $derived(profiles.inPrivate() || tabs.profile()?.kind === "incognito");
-  /** The avatar the person chose, else the account's initials; a private window shows neither. */
+  /** The avatar the profile chose; a private window shows none. */
   const foot = accountFoot({ private: () => privately });
   // A tool whose feature is off is not offered here either.
   const shelf = $derived(SHELF_TOOLS.filter((kind) => preferences.enabled(kind)));
@@ -165,10 +165,14 @@
             >{/if}
         </div>{/if}
     </div>
-    {#if accountRow}<AccountRow
+    {#if accountRow}<div class="shelf-rule" role="separator"></div>
+      <AccountCard
         signedIn={foot.signedIn}
-        standing={foot.standing}
+        email={foot.email}
+        plan={foot.plan}
+        used={foot.used}
         tone={foot.tone}
+        mark={foot.mark}
         step={accountStep}
         {compact}
         onclick={() => run("settings.account")}
@@ -275,7 +279,7 @@
   .shelf :global(.shelf-stack) {
     top: auto;
     bottom: calc(100% + 8px);
-    min-width: 232px;
+    min-width: min(232px, calc(var(--sidebar-width, 320px) - 8px));
     max-height: calc(100vh - 120px);
     overflow-y: auto;
     overscroll-behavior: contain;

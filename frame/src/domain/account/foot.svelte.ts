@@ -1,33 +1,26 @@
 import * as accountSession from "./account.svelte";
 import { initials, planName, usageTone } from "./account-model";
-import * as m from "$shared/i18n/messages";
 import { drawn, identityAvatar, profiles } from "$domain/profiles";
 
 /**
- * What the account shows at the foot of Browse and Work: one reading of the
- * session for the trigger's face and the menu's account row, so the two feet
- * cannot drift. Call it during component initialisation.
+ * What the foot of Browse and Work shows: the profile's picture for the
+ * trigger, and the account (the same in every profile) for the card in the
+ * menu. One reading of both, so the two feet cannot drift. Call it during
+ * component initialisation.
  */
 export function accountFoot(options: { private?: () => boolean } = {}) {
   const account = $derived(accountSession.account());
   const signedIn = $derived(account?.signed_in === true);
   const used = $derived(signedIn ? (account?.usage?.used_percent ?? null) : null);
-  const tone = $derived(usageTone(used));
-  const standing = $derived.by(() => {
-    if (!signedIn || !account) return null;
-    const parts = [
-      planName(account.plan),
-      used != null ? m.ai_cloud_used({ percent: used }) : null,
-    ].filter(Boolean);
-    return parts.join(" · ") || account.email || null;
-  });
-  /** The picture the profile chose; until then the account's initials once signed in. */
+  /** Only the picture the profile chose; the account never stands in for it. */
   const face = $derived.by((): ReturnType<typeof drawn> | null => {
     if (options.private?.()) return null;
     const current = profiles.current();
-    if (current && current.avatar.revision > 0) return drawn(current);
-    return signedIn ? identityAvatar(null, initials(account?.email, account?.name)) : null;
+    return current && current.avatar.revision > 0 ? drawn(current) : null;
   });
+  const mark = $derived(
+    signedIn ? identityAvatar(null, initials(account?.email, account?.name)) : null,
+  );
 
   return {
     get available() {
@@ -36,11 +29,20 @@ export function accountFoot(options: { private?: () => boolean } = {}) {
     get signedIn() {
       return signedIn;
     },
-    get tone() {
-      return tone;
+    get email() {
+      return account?.email ?? null;
     },
-    get standing() {
-      return standing;
+    get plan() {
+      return signedIn ? planName(account?.plan) : null;
+    },
+    get used() {
+      return used;
+    },
+    get tone() {
+      return usageTone(used);
+    },
+    get mark() {
+      return mark;
     },
     get face() {
       return face;

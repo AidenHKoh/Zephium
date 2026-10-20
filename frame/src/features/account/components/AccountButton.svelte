@@ -9,7 +9,7 @@
   import * as m from "$shared/i18n/messages";
   import { acceleratorKeys } from "$shared/lib/accelerator";
   import { IS_MAC } from "$shared/platform";
-  import AccountRow from "$shared/ui/AccountRow";
+  import AccountCard from "$shared/ui/AccountCard";
   import Disclosure from "$shared/ui/Disclosure";
   import Icon from "$shared/ui/Icon";
   import ProfileAvatar from "$shared/ui/ProfileAvatar";
@@ -27,7 +27,8 @@
     };
   });
 
-  const foot = accountFoot();
+  const privately = $derived(profiles.inPrivate() || tabs.profile()?.kind === "incognito");
+  const foot = accountFoot({ private: () => privately });
   const who = $derived(tabs.profile()?.name || profiles.current()?.name || name);
   const shown = $derived(who || m.browse_profile_settings());
   const others = $derived(profiles.others());
@@ -106,13 +107,19 @@
       </div>{/if}
   </div>
   <div class="rule" role="separator"></div>
-  {#if foot.available}<AccountRow
+  {#if foot.available && !privately}<div class="rule" role="separator"></div>
+    <AccountCard
       signedIn={foot.signedIn}
-      standing={foot.standing}
+      email={foot.email}
+      plan={foot.plan}
+      used={foot.used}
       tone={foot.tone}
+      mark={foot.mark}
       step={2}
       onclick={() => run("settings.account")}
-    />{/if}
+    />
+    <div class="rule" role="separator"></div>
+  {/if}
   {@render row(CubeIcon, m.settings_models(), null, 1, () => run("settings.ai"))}
   <div class="rule" role="separator"></div>
   {@render row(Settings02Icon, m.command_browser_settings(), keysFor("browser.settings"), 0, () =>
@@ -127,8 +134,8 @@
     top: auto;
     bottom: calc(100% + 12px);
     inset-inline-start: 0;
-    min-width: 232px;
-    max-width: 320px;
+    min-width: min(232px, calc(100vw - 16px));
+    max-width: min(320px, calc(100vw - 16px));
     max-height: calc(100vh - 140px);
     overflow-y: auto;
     overscroll-behavior: contain;
