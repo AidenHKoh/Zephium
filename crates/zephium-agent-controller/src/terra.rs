@@ -3251,7 +3251,8 @@ impl AgentBrowserSession {
         observation: Option<&zephium_agentic::SemanticObservation>,
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
         let started = Instant::now();
-        for repair in 0..=1 {
+        let mut repaired = false;
+        loop {
             let (mut terminal, input, _) = self.drive_terminal(request_input, None).await?;
             if let Some(refusal) = terminal.take_rejected_action() {
                 let error = refusal.error();
@@ -3260,7 +3261,7 @@ impl AgentBrowserSession {
                         .emit(work::AgentWorkEventKind::ModelActionRejected(error))
                         .map_err(|_| AgentBrowserProviderError::Journal)?;
                 }
-                if repair == 1 || observation.is_none() {
+                if repaired || observation.is_none() {
                     return Err(AgentBrowserProviderError::ModelProtocol(
                         zephium_agentic::AgentProviderProtocolError::ToolContract(
                             refusal.kind(),
@@ -3292,6 +3293,7 @@ impl AgentBrowserSession {
                     )
                     .map_err(AgentBrowserProviderError::from_request)?;
                 request_input = prepared.into_transport_input();
+                repaired = true;
                 continue;
             }
             let receipt = terminal.receipt();
@@ -3305,7 +3307,6 @@ impl AgentBrowserSession {
                 provider_elapsed: started.elapsed(),
             });
         }
-        unreachable!("one bounded repair")
     }
 
     async fn drive_terminal(

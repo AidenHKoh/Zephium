@@ -7,78 +7,6 @@ fn wall_survey_outcome(wire: &str) -> Option<u8> {
     (code <= 24 && wire == code.to_string()).then_some(code)
 }
 
-#[cfg(test)]
-mod wall_survey_wire_tests {
-    use super::wall_survey_outcome;
-    #[test]
-    fn only_closed_structural_codes_are_admitted() {
-        for code in 0..=24 {
-            assert_eq!(wall_survey_outcome(&code.to_string()), Some(code));
-        }
-        for wire in [
-            "true",
-            "false",
-            "0.0",
-            "00",
-            " 0",
-            "25",
-            "255",
-            "-1",
-            "null",
-            "{}",
-            "private detail",
-        ] {
-            assert_eq!(wall_survey_outcome(wire), None);
-        }
-    }
-}
-
-#[cfg(all(
-    target_os = "macos",
-    feature = "agentic-browser-qa",
-    feature = "native-agentic-semantic-probe"
-))]
-impl EngineHost {
-    pub(crate) fn navigate_human_fixture(
-        &mut self,
-        resource: &zephium_agentic::WorkBrowserResourceJoin,
-    ) -> bool {
-        let Some(resource) = self
-            .work_resources
-            .get(&resource.identity().context())
-            .filter(|owned| owned.guard.resource() == resource)
-        else {
-            return false;
-        };
-        let Some(view) = resource.view.as_ref() else {
-            return false;
-        };
-        if !resource
-            .human_presentation
-            .as_ref()
-            .is_some_and(|presentation| presentation.current())
-            || !resource.guard.document().is_some_and(|target| {
-                target.as_url().host_str() == Some("127.0.0.1")
-                    && target.as_url().scheme() == "http"
-                    && target.as_url().path() == "/"
-            })
-        {
-            return false;
-        }
-        if !resource
-            .human_presentation
-            .as_ref()
-            .is_some_and(|presentation| presentation.qualify_geometry_invalidation())
-        {
-            return false;
-        }
-        eprintln!("human_probe changed_parent_geometry_kept=true");
-        view.view()
-            .evaluate_script("location.assign('/verified')")
-            .is_ok()
-    }
-}
-
 impl WorkNativeResource {
     pub(super) fn handle_human(
         &mut self,
@@ -443,5 +371,77 @@ impl WorkNativeResource {
             self.guard.fail();
         }
         clean
+    }
+}
+
+#[cfg(test)]
+mod wall_survey_wire_tests {
+    use super::wall_survey_outcome;
+    #[test]
+    fn only_closed_structural_codes_are_admitted() {
+        for code in 0..=24 {
+            assert_eq!(wall_survey_outcome(&code.to_string()), Some(code));
+        }
+        for wire in [
+            "true",
+            "false",
+            "0.0",
+            "00",
+            " 0",
+            "25",
+            "255",
+            "-1",
+            "null",
+            "{}",
+            "private detail",
+        ] {
+            assert_eq!(wall_survey_outcome(wire), None);
+        }
+    }
+}
+
+#[cfg(all(
+    target_os = "macos",
+    feature = "agentic-browser-qa",
+    feature = "native-agentic-semantic-probe"
+))]
+impl EngineHost {
+    pub(crate) fn navigate_human_fixture(
+        &mut self,
+        resource: &zephium_agentic::WorkBrowserResourceJoin,
+    ) -> bool {
+        let Some(resource) = self
+            .work_resources
+            .get(&resource.identity().context())
+            .filter(|owned| owned.guard.resource() == resource)
+        else {
+            return false;
+        };
+        let Some(view) = resource.view.as_ref() else {
+            return false;
+        };
+        if !resource
+            .human_presentation
+            .as_ref()
+            .is_some_and(|presentation| presentation.current())
+            || !resource.guard.document().is_some_and(|target| {
+                target.as_url().host_str() == Some("127.0.0.1")
+                    && target.as_url().scheme() == "http"
+                    && target.as_url().path() == "/"
+            })
+        {
+            return false;
+        }
+        if !resource
+            .human_presentation
+            .as_ref()
+            .is_some_and(|presentation| presentation.qualify_geometry_invalidation())
+        {
+            return false;
+        }
+        eprintln!("human_probe changed_parent_geometry_kept=true");
+        view.view()
+            .evaluate_script("location.assign('/verified')")
+            .is_ok()
     }
 }

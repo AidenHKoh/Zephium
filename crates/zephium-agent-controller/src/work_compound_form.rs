@@ -5,7 +5,7 @@ const MAX_FORM_ACTIONS: usize = 24;
 const MAX_FORM_MILLIS: u64 = 12_000;
 
 pub(super) enum PreparedForm {
-    Refresh(AgentProviderObservationCheckpoint),
+    Refresh(Box<AgentProviderObservationCheckpoint>),
     Ready(Box<SemanticObservation>),
     Follow(Box<(AgentProviderContinuation, ContextNavigationTarget)>),
 }
@@ -119,7 +119,7 @@ impl AgentWorkController {
             Err(error) if error.fault != AgentBrowserFormFault::Authority => {
                 return continuation
                     .into_form_refresh(original, &config, 0, false, Some(error))
-                    .map(PreparedForm::Refresh)
+                    .map(|checkpoint| PreparedForm::Refresh(Box::new(checkpoint)))
                     .map_err(|_| crate::contract!())
             }
             Err(_) => return Err(crate::contract!()),
@@ -293,10 +293,9 @@ impl AgentWorkController {
         // before submission; successful earlier typing is not enough.
         if failure.is_none() {
             for index in 0..binding.field_count() {
-                if !chosen_suggestions[index]
-                    && !(committed_choices[index] && binding.value_matches(index, &current))
-                    && !matches!(binding.field_action(index, &current), Ok(None))
-                {
+                let settled = chosen_suggestions[index]
+                    || (committed_choices[index] && binding.value_matches(index, &current));
+                if !settled && !matches!(binding.field_action(index, &current), Ok(None)) {
                     failure = Some(AgentBrowserFormError {
                         field: Some((index + 1) as u8),
                         fault: AgentBrowserFormFault::Stale,
@@ -346,7 +345,7 @@ impl AgentWorkController {
         }
         continuation
             .into_form_refresh(original, &config, completed, submitted, failure)
-            .map(PreparedForm::Refresh)
+            .map(|checkpoint| PreparedForm::Refresh(Box::new(checkpoint)))
             .map_err(|_| crate::contract!())
     }
 

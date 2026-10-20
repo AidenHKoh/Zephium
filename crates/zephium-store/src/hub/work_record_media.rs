@@ -112,11 +112,14 @@ fn validate_png(media: &WorkRecordMediaRefV1, png: &[u8]) -> Result<(), WorkErro
     Ok(())
 }
 
+/// Metadata and PNG bytes as stored.
+type StoredMedia = (Vec<u8>, Vec<u8>);
+
 fn stored(
     connection: &Connection,
     profile: ProfileId,
     media: &WorkRecordMediaRefV1,
-) -> Result<Option<(Vec<u8>, Vec<u8>)>, WorkError> {
+) -> Result<Option<StoredMedia>, WorkError> {
     connection.query_row(
         "SELECT CASE WHEN length(metadata)<=2048 THEN metadata END,
                 CASE WHEN length(png)<=65536 THEN png END

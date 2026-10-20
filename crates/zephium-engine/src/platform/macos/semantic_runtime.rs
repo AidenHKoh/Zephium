@@ -1890,8 +1890,8 @@ impl AgentSemanticRuntimeRegistration {
                     state.active_world == Some(Retained::as_ptr(&source_world).addr())
                         && state.phase != DocumentPhase::Retired
                 });
-                // SAFETY: WebKit provides live callback objects on this original main-thread view.
                 let wire = if current && error.is_null() {
+                    // SAFETY: WebKit provides live callback objects on this original main-thread view.
                     unsafe { value.as_ref() }
                         .and_then(AnyObject::downcast_ref::<NSString>)
                         .filter(|value| value.length() <= 2)

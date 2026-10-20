@@ -546,7 +546,7 @@ impl AgentBrowserAction {
         self,
         site_session: bool,
     ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
-        if !(site_session || !commits(self.proposal.action.effect()))
+        if !site_session && commits(self.proposal.action.effect())
             || self.proposal.continuation.is_none()
         {
             return Err(Box::new(self));

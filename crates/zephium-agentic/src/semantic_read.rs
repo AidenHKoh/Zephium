@@ -3294,7 +3294,8 @@ mod tests {
         assert!(total <= SemanticReadBudget::LISTING.max_items());
 
         let mut evidence = SemanticRetainedReadEvidence::default();
-        for (id, first_card) in [(1, 0)] {
+        {
+            let (id, first_card) = (1, 0);
             let observation = look(id, first_card);
             let ack = acknowledgement(&observation);
             let read = read_semantic_observation_for_schema(

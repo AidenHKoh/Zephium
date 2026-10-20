@@ -1548,6 +1548,13 @@ impl AgentWorkController {
     }
 }
 
+/// What a record crop needs from the live session to carry its permission.
+struct RecordCropGrant<'a> {
+    baseline: &'a SemanticObservationAcknowledgement,
+    config: &'a AgentProviderCallConfig,
+    account: AgentContextAccountBinding,
+}
+
 struct WorkState {
     retained_read_evidence: SemanticRetainedReadEvidence,
     /// A same-site load the page started during the last action.
@@ -3944,7 +3951,7 @@ impl AgentWorkController {
                 let checkpoint = match prepared {
                     compound_form::PreparedForm::Refresh(checkpoint) => {
                         state.moved_on();
-                        checkpoint
+                        *checkpoint
                     }
                     compound_form::PreparedForm::Follow(follow) => {
                         state.moved_on();
@@ -5655,9 +5662,11 @@ impl AgentWorkController {
             browser,
             &mut owned,
             observation,
-            &crop_baseline,
-            &crop_config,
-            crop_account,
+            RecordCropGrant {
+                baseline: &crop_baseline,
+                config: &crop_config,
+                account: crop_account,
+            },
         )?;
         state.extraction = Some(owned);
         if dropped > 0 {
@@ -5974,9 +5983,11 @@ impl AgentWorkController {
             browser,
             &mut owned,
             observation,
-            &record_crop_baseline,
-            &record_crop_config,
-            record_crop_account,
+            RecordCropGrant {
+                baseline: &record_crop_baseline,
+                config: &record_crop_config,
+                account: record_crop_account,
+            },
         )?;
         state.extraction = Some(owned);
         if dropped > 0 {
@@ -5993,10 +6004,13 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
         owned: &mut SemanticOwnedExtractionResult,
         observation: &SemanticObservation,
-        record_crop_baseline: &SemanticObservationAcknowledgement,
-        record_crop_config: &AgentProviderCallConfig,
-        record_crop_account: AgentContextAccountBinding,
+        grant: RecordCropGrant<'_>,
     ) -> Result<(), AgentWorkFailure> {
+        let RecordCropGrant {
+            baseline: record_crop_baseline,
+            config: record_crop_config,
+            account: record_crop_account,
+        } = grant;
         if state.viewport_screenshot && record_crop_config.permits_viewport_screenshot() {
             state.native.check_control(worker, browser)?;
             if let Some(current) = state

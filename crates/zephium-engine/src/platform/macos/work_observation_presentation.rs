@@ -460,6 +460,7 @@ fn human_owners(app: &NSApplication) -> HumanOwners {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     use super::*;
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     #[test]
