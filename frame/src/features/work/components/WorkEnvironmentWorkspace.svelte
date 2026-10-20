@@ -2600,9 +2600,9 @@
     <div class="canvas-top">
       <WorksMenu {session} untitled={m.work_env_default_title()} live={!!runStatus} />
       <span class="canvas-top-gap"></span>
-      {#if runningObjective && objectiveSession}<div class="island">
-          {@render agentLine()}
-        </div>{/if}
+      <div class="island" class:gone={!(runningObjective && objectiveSession)}>
+        {#if runningObjective && objectiveSession}{@render agentLine()}{/if}
+      </div>
       {#if troubled}<div class="status" role="status">
           <span
             >{session.failure
@@ -3051,19 +3051,22 @@
     max-inline-size: min(520px, calc(100% - 560px));
     translate: -50% 0;
     pointer-events: auto;
-    animation: island-in var(--motion-slow) var(--ease-spring) backwards;
+    transition:
+      opacity var(--motion-base) var(--ease-out),
+      visibility var(--motion-base);
   }
 
-  @keyframes island-in {
-    from {
-      opacity: 0;
-      scale: 0.9;
-    }
+  /* The island stays mounted across a run's waits and resumes, so it fades
+     rather than replaying an entrance each time its contents return. */
+  .island.gone {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
   }
 
   @media (prefers-reduced-motion: reduce) {
     .island {
-      animation: none;
+      transition: none;
     }
   }
 

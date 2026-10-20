@@ -359,14 +359,15 @@
   .waiting {
     --beat: 1.6s;
     --beats: 2;
+    --float-beats: 0;
   }
 
   .live .figure {
-    animation: float var(--beat) var(--ease-in-out) var(--beats);
+    animation: float var(--beat) var(--ease-in-out) var(--float-beats, var(--beats));
   }
 
   .live .ground {
-    animation: ground var(--beat) var(--ease-in-out) var(--beats);
+    animation: ground var(--beat) var(--ease-in-out) var(--float-beats, var(--beats));
   }
 
   .live .eyes {

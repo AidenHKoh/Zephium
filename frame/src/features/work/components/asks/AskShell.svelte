@@ -141,7 +141,7 @@
   @keyframes ask-in {
     from {
       opacity: 0;
-      translate: 0 6px;
+      translate: 0 3px;
     }
   }
 
