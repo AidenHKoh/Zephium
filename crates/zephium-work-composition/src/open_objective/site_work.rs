@@ -1539,8 +1539,8 @@ struct GateState {
     unknown: Vec<Flight>,
     /// Add-to-cart controls already pressed: a second press adds a second item.
     carted: Vec<[u8; 32]>,
-    /// Messages sent, by where and what: the same words to the same place
-    /// are never sent twice in one task.
+    /// Messages sent and items made, by where and what: the same words to
+    /// the same place are never sent or made twice in one task.
     sent: Vec<(String, String)>,
     /// Status lines seen before the last step, for the commit detector.
     status_before: Vec<String>,
@@ -1585,7 +1585,9 @@ struct Flight {
     /// The words a message sends: still in a box on the page after the
     /// step, they were not sent.
     message: Option<String>,
-    /// Where the message goes, as its card names it.
+    /// What a create step makes (a task's or issue's typed title).
+    made: Option<String>,
+    /// Where the message goes or the item is made, as its card names it.
     place: String,
 }
 
@@ -2329,6 +2331,24 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             declared == consequence.class()
         };
         let control = clip(&label(node), 60);
+        // What a create step makes: the drafted fields, and the box Enter
+        // was pressed in.
+        let made = (consequence == Consequence::Save)
+            .then(|| {
+                let fields: Vec<String> = value_text(node)
+                    .filter(|_| action.kind() == SemanticActionKind::Press)
+                    .map(str::to_owned)
+                    .into_iter()
+                    .chain(
+                        preview
+                            .facts
+                            .iter()
+                            .map(|(name, value)| format!("{name}: {value}")),
+                    )
+                    .collect();
+                fields.join("\n")
+            })
+            .filter(|made| !made.is_empty());
         let flight = |approved| Flight {
             consequence,
             control: control.clone(),
@@ -2338,18 +2358,26 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             message: (consequence == Consequence::Communication)
                 .then(|| preview.text.clone())
                 .flatten(),
+            made: made.clone(),
             place: preview.headline.clone(),
         };
         // A small model that cannot find its posted message types it again
-        // and asks again: the person would approve a duplicate.
-        if consequence == Consequence::Communication
-            && preview.text.as_ref().is_some_and(|text| {
-                state
-                    .sent
-                    .iter()
-                    .any(|(place, sent)| *place == preview.headline && sent == text)
-            })
-        {
+        // and asks again: the person would approve a duplicate. An app that
+        // clears its add box after adding reads to it as if nothing was.
+        let words = if consequence == Consequence::Save {
+            made.as_ref()
+        } else {
+            preview
+                .text
+                .as_ref()
+                .filter(|_| consequence == Consequence::Communication)
+        };
+        if words.is_some_and(|text| {
+            state
+                .sent
+                .iter()
+                .any(|(place, sent)| *place == preview.headline && sent == text)
+        }) {
             return Err(AgentWorkFailure::AlreadyDone);
         }
         // It reached the page before and its outcome was never seen: it may
@@ -2544,8 +2572,8 @@ impl SiteWorkPolicy {
                 state.status_before = status_lines(observation);
                 return;
             }
-            if let Some(message) = flight.message.clone() {
-                state.sent.push((flight.place.clone(), message));
+            if let Some(words) = flight.message.clone().or_else(|| flight.made.clone()) {
+                state.sent.push((flight.place.clone(), words));
             }
             state.committed.push((flight.consequence, flight.control));
         }
@@ -3228,6 +3256,44 @@ mod tests {
             policy.assess(&send, &look).is_ok(),
             "the approval still holds"
         );
+    }
+
+    #[test]
+    fn an_item_made_is_not_made_again_when_its_add_box_comes_back_empty() {
+        let row = |value: &str| {
+            page(vec![
+                json!({"k":1,"r":"document","o":16,"fc":true}),
+                json!({"k":2,"p":0,"r":"group","n":"Quick add","fc":true}),
+                json!({"k":3,"p":1,"r":"textbox","n":"Task name","o":11,"fs":1,"es":[1,2,false],"fc":true,
+                    "v":{"k":"text","value":value},"b":{"x":1,"y":80,"w":300,"h":30}}),
+                json!({"k":4,"p":1,"r":"button","n":"Add task","o":9,"ak":1,"fc":true,
+                    "b":{"x":1,"y":120,"w":80,"h":30}}),
+            ])
+        };
+        let gate = Arc::new(SiteGate::new("todoist.com".into(), true, false));
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        let drafted = row("Zephium test");
+        let add = click(&drafted, 4, SemanticEffectClass::ExternalWrite);
+        assert!(
+            policy.assess(&add, &drafted).is_ok(),
+            "a requested add runs"
+        );
+        policy.after_step(&row(""));
+        // The box is empty again: the model types the same task once more.
+        assert_eq!(
+            policy.assess(&add, &drafted).err(),
+            Some(AgentWorkFailure::AlreadyDone)
+        );
+        let other = row("Another task");
+        assert!(policy
+            .assess(
+                &click(&other, 4, SemanticEffectClass::ExternalWrite),
+                &other
+            )
+            .is_ok());
     }
 
     #[test]
