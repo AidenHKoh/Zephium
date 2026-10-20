@@ -28,14 +28,19 @@ const FILE_TEXT_BYTES: usize = 6 * 1024;
 /// A page's note when it waited its whole turn and the browser never took it.
 const NOT_READY: &str = "The browser was not ready for this page";
 
+/// Page tasks at once on one public site the run only reads, in Work's own
+/// website data. A site the run works on as the person, was let in to, or
+/// saves to takes all of them: one session there means one actor.
+const SITE_PAGES: u32 = 2;
+
 /// The browser closure the host gives the run, shared by every part, with
-/// its gates: at most three pages live, and at most one page task per site,
-/// since one session means one actor per site.
+/// its gates: at most three pages live, and per site at most two page tasks,
+/// or one where the run acts in a session.
 pub(crate) struct SharedBrowser<B> {
     browser: Mutex<B>,
     pages: tokio::sync::Semaphore,
     searches: tokio::sync::Semaphore,
-    sites: Mutex<Vec<(String, std::sync::Arc<tokio::sync::Mutex<()>>)>>,
+    sites: Mutex<Vec<(String, std::sync::Arc<tokio::sync::Semaphore>)>>,
     entries: EntryDesk,
 }
 impl<B> SharedBrowser<B> {
@@ -48,7 +53,7 @@ impl<B> SharedBrowser<B> {
             entries: EntryDesk::default(),
         }
     }
-    fn site_lane(&self, site: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    fn site_lane(&self, site: &str) -> std::sync::Arc<tokio::sync::Semaphore> {
         let mut sites = self
             .sites
             .lock()
@@ -56,7 +61,7 @@ impl<B> SharedBrowser<B> {
         if let Some((_, lane)) = sites.iter().find(|(known, _)| known == site) {
             return lane.clone();
         }
-        let lane = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let lane = std::sync::Arc::new(tokio::sync::Semaphore::new(SITE_PAGES as usize));
         sites.push((site.to_owned(), lane.clone()));
         lane
     }
@@ -443,11 +448,34 @@ where
                 }
             }
         }
+        // Sites where the run reads only, in its own website data, as the
+        // batch is sent; a site a redirect leads to is not among them.
+        let shared: Vec<String> = requests
+            .iter()
+            .filter_map(|request| match &request.kind {
+                WorkStepKindV1::Read {
+                    url, goal: Some(_), ..
+                } => crate::work_sites::site_of(url),
+                _ => None,
+            })
+            .filter(|site| {
+                !self.run.trusts(site)
+                    && !self.run.asked_to_save(site)
+                    && !driver.works_as_person(site)
+            })
+            .collect();
         let mut gate = |probe: WorkAttemptProbe, request: WorkAgentBrowseRequest| {
             let lane = match &request.step {
                 WorkStepKindV1::Read {
                     url, goal: Some(_), ..
-                } => crate::work_sites::site_of(url).map(|site| self.browser.site_lane(&site)),
+                } => crate::work_sites::site_of(url).map(|site| {
+                    let permits = if shared.contains(&site) && request.redirected_from.is_none() {
+                        1
+                    } else {
+                        SITE_PAGES
+                    };
+                    (self.browser.site_lane(&site), permits)
+                }),
                 _ => None,
             };
             // A read the driver opens where an earlier read was redirected
@@ -472,7 +500,7 @@ where
                     }
                 }
                 let _site = match &lane {
-                    Some(lane) => Some(lane.lock().await),
+                    Some((lane, permits)) => lane.acquire_many(*permits).await.ok(),
                     None => None,
                 };
                 let future = {
