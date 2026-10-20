@@ -144,7 +144,7 @@ impl WorkProviders {
                     grant.validate()?;
                     // Retired: sessions are decided per site inside the run.
                     let _ = signed_in;
-                    let Some(models) = lead::models(profile).await else {
+                    let Some(models) = lead::models(profile, Some(command.work)).await else {
                         record_diagnostic(format_args!("work: phase=lead state=no_model"));
                         return Err(WorkError::Unavailable);
                     };

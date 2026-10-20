@@ -2,7 +2,7 @@ import "$styles/global.css";
 import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
-import type { AccountReplyV1, AccountV1 } from "$shared/ipc/bindings";
+import type { AccountReplyV1, AccountRequestV1, AccountV1 } from "$shared/ipc/bindings";
 import { accountFixture as account, usageFixture } from "$shared/testing/account";
 import { preferences } from "$domain/preferences";
 import AccountPage from "../components/sections/AccountPage.svelte";
@@ -20,6 +20,7 @@ const native = vi.hoisted(() => ({
   changeEmail: vi.fn(),
   history: vi.fn(),
   receipt: vi.fn(),
+  workCall: vi.fn(),
   settings: {} as Record<string, string>,
 }));
 vi.mock("$shared/ipc/bindings", async () => {
@@ -37,6 +38,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     accountChangeEmail: native.changeEmail,
     accountUsageHistory: native.history,
     accountReceipt: native.receipt,
+    workCall: native.workCall,
     profilesGet: async () => ({ status: "ok" as const, data: null }),
     settingGet: async (key: string) => native.settings[key] ?? null,
   });
@@ -102,8 +104,8 @@ test("signing in takes an address, then the emailed code, with no password", asy
   await userEvent.keyboard("123456");
   expect(native.verify).toHaveBeenLastCalledWith("123456");
   await expect.element(screen.getByRole("heading", { name: "ada@example.com" })).toBeVisible();
-  await expect.element(screen.getByText("42% used", { exact: false })).toBeVisible();
-  await expect.element(screen.getByText("0.84 of 2 credits")).toBeVisible();
+  await expect.element(screen.getByText("116 credits left · 42% used")).toBeVisible();
+  await expect.element(screen.getByText("84 of 200 credits", { exact: false })).toBeVisible();
 });
 
 test("upgrading opens checkout and says the plan will update on its own", async () => {
@@ -124,7 +126,7 @@ test("a server that sells nothing shows usage but no purchase", async () => {
   await page.viewport(1100, 1200);
   native.get.mockResolvedValue(reply({ ...signedIn, billing: false, offers: [] }));
   const screen = await render(AccountPage);
-  await expect.element(screen.getByText("Included usage")).toBeVisible();
+  await expect.element(screen.getByText("Included credits")).toBeVisible();
   expect(screen.getByRole("button", { name: "Upgrade" }).elements()).toHaveLength(0);
   expect(screen.getByRole("button", { name: "Manage subscription" }).elements()).toHaveLength(0);
 });
@@ -152,24 +154,31 @@ test("welcome credit, holds and the daily limit read apart, holds never as charg
           started_at: "2026-10-09T10:00:00Z",
           finished_at: null,
           error_class: "client_disconnected",
+          funding: null,
+          source: null,
         },
       ],
     }),
   );
   const screen = await render(AccountPage);
-  await expect.element(screen.getByText(/^1\.5 left · expires Oct (19|20)$/u)).toBeVisible();
-  await expect.element(screen.getByText("5 credits left")).toBeVisible();
-  await expect.element(screen.getByText("0.12 · not charged yet")).toBeVisible();
-  await expect.element(screen.getByText("0.3 of 1 credits used today")).toBeVisible();
+  await expect.element(screen.getByText(/^150 left · expires Oct (19|20)$/u)).toBeVisible();
+  await expect.element(screen.getByText("500 credits left")).toBeVisible();
+  await expect.element(screen.getByText("12 · not charged yet")).toBeVisible();
+  await expect.element(screen.getByText("30 of 100 credits used today")).toBeVisible();
   await expect
     .element(screen.getByText("A request ended before its charge was confirmed.", { exact: false }))
     .toBeVisible();
 });
 
-test("usage history loads on request, pages by its cursor, and opens a receipt", async () => {
+test("usage history loads on request, groups calls by task, pages by its cursor and opens a receipt", async () => {
   await page.viewport(1100, 1400);
   native.get.mockResolvedValue(reply(signedIn));
-  const row = (id: string, state: string, charged: string) => ({
+  const row = (
+    id: string,
+    state: string,
+    charged: string,
+    source: AccountRequestV1["source"],
+  ): AccountRequestV1 => ({
     id,
     model_id: "fast",
     state,
@@ -178,35 +187,68 @@ test("usage history loads on request, pages by its cursor, and opens a receipt",
     started_at: "2026-10-09T10:00:00Z",
     finished_at: "2026-10-09T10:00:05Z",
     error_class: null,
+    funding: charged === "0" ? null : "mixed",
+    source,
   });
+  const task = { kind: "task" as const, profile: "p1", work: "w1" };
   native.history
     .mockResolvedValueOnce({
-      requests: [row("a", "settled", "812000"), row("b", "running", "0")],
+      requests: [row("a", "settled", "812000", task), row("b", "running", "0", task)],
       next_cursor: "opaque/+cursor",
       fault: null,
     })
     .mockResolvedValueOnce({
-      requests: [row("c", "released", "0")],
+      requests: [
+        row("c", "settled", "400000", task),
+        row("d", "settled", "30000", { kind: "voice" }),
+        row("e", "released", "0", null),
+      ],
       next_cursor: null,
       fault: null,
     });
-  native.receipt.mockResolvedValue({ request: row("a", "settled", "812000"), fault: null });
+  native.receipt.mockResolvedValue({
+    request: row("a", "settled", "812000", task),
+    fault: null,
+  });
+  native.workCall.mockResolvedValue({
+    version: 1,
+    profile: "p1",
+    reply: {
+      kind: "projection",
+      projection: {
+        work: { objective: "Compare standing desks" },
+        executions: [{ title: "Standing desks, compared" }],
+      },
+    },
+  });
   const screen = await render(AccountPage);
 
   expect(native.history).not.toHaveBeenCalled();
   await screen.getByRole("button", { name: "Show" }).first().click();
-  await expect.element(screen.getByText("0.81 credits")).toBeVisible();
-  await expect.element(screen.getByText("In progress")).toBeVisible();
+  // One row per task: its name comes from this computer's own store, and a
+  // call still running is not added to its total.
+  await expect.element(screen.getByText("Standing desks, compared")).toBeVisible();
   expect(native.history).toHaveBeenLastCalledWith(null);
+  await expect.element(screen.getByText("81 credits · In progress")).toBeVisible();
+  expect(native.workCall).toHaveBeenCalledTimes(1);
 
   await screen.getByRole("button", { name: "Show more" }).click();
   expect(native.history).toHaveBeenLastCalledWith("opaque/+cursor");
-  await expect.element(screen.getByText("Not charged")).toBeVisible();
+  // The next page joins the same task, and voice and the rest have their own rows.
+  await expect.element(screen.getByText("121 credits · In progress")).toBeVisible();
+  await expect.element(screen.getByText("Voice")).toBeVisible();
+  await expect.element(screen.getByText("Other", { exact: true })).toBeVisible();
   expect(screen.getByRole("button", { name: "Show more" }).elements()).toHaveLength(0);
+  expect(native.workCall).toHaveBeenCalledTimes(1);
 
+  await screen.getByRole("button", { name: /Standing desks, compared/u }).click();
+  await expect.element(screen.getByText("81.2 credits")).toBeVisible();
+  await expect.element(screen.getByText("In progress", { exact: true })).toBeVisible();
   await screen.getByRole("button", { name: "Details for this request" }).first().click();
   expect(native.receipt).toHaveBeenCalledWith("a");
-  await expect.element(screen.getByText(/^Charged 0\.81 credits · Finished /u)).toBeVisible();
+  await expect
+    .element(screen.getByText(/^Charged 81\.2 credits · Plan \+ purchased · Finished /u))
+    .toBeVisible();
 });
 
 test("changing email asks for a fresh sign-in first, then signs in at the new address", async () => {
@@ -274,8 +316,8 @@ test("with Work and AI off the plan stays and Zephium AI's usage and credits go"
   const screen = await render(AccountPage);
   await expect.element(screen.getByText("Plan", { exact: true })).toBeVisible();
   await expect.element(screen.getByRole("button", { name: "Upgrade" })).toBeVisible();
-  expect(screen.getByText("Included usage").elements()).toHaveLength(0);
-  expect(screen.getByText("Extra usage").elements()).toHaveLength(0);
+  expect(screen.getByText("Included credits").elements()).toHaveLength(0);
+  expect(screen.getByText("Purchased credits").elements()).toHaveLength(0);
   expect(screen.getByText("Zephium AI").elements()).toHaveLength(0);
   screen.unmount();
   preferences.dispose();

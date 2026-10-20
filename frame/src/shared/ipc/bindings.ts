@@ -124,6 +124,14 @@ export const commands = {
 	accountBuy: (purchase: AccountPurchaseV1) => __TAURI_INVOKE<AccountReplyV1>("account_buy", { purchase }),
 	/**  Opens the billing provider's portal, where the subscription is managed. */
 	accountManage: () => __TAURI_INVOKE<AccountReplyV1>("account_manage"),
+	/**  Sets the daily spending limit, in units, or removes it with null. */
+	accountSetDailyLimit: (limit: string | null) => __TAURI_INVOKE<AccountReplyV1>("account_set_daily_limit", { limit }),
+	/**  Asks for a quote to move to another paid plan. Nothing is charged. */
+	accountPlanPreview: (plan: string, interval: string) => __TAURI_INVOKE<AccountReplyV1>("account_plan_preview", { plan, interval }),
+	/**  Confirms the quote on the account page and follows the change to its end. */
+	accountPlanConfirm: () => __TAURI_INVOKE<AccountReplyV1>("account_plan_confirm"),
+	/**  Puts away a quote or a finished change. */
+	accountPlanDismiss: () => __TAURI_INVOKE<AccountReplyV1>("account_plan_dismiss"),
 	accountSessions: () => __TAURI_INVOKE<AccountSessionsV1>("account_sessions"),
 	accountRevokeSession: (id: string) => __TAURI_INVOKE<AccountReplyV1>("account_revoke_session", { id }),
 	/**  Points accounts at another server, or back at Zephium's with null. */
@@ -580,6 +588,8 @@ export type AboutInfo = {
 	arch: string,
 };
 
+export type AccountCallSourceV1 = { kind: "task"; profile: string; work: string } | { kind: "voice" };
+
 /**  The account changed; read it again. */
 export type AccountChanged = {
 	version: number,
@@ -603,7 +613,18 @@ export type AccountFaultV1 = "offline" |
 /**  The change needs a fresh sign-in; the session itself is still valid. */
 "reauth_required" |
 /**  Another account already uses that address. */
-"email_taken" | "not_found";
+"email_taken" | "not_found" |
+/**
+ *  Under billing review: no purchase or upgrade; export, the portal and
+ *  downgrades still work.
+ */
+"billing_review" |
+/**  A subscription checkout is already open. */
+"checkout_in_progress" |
+/**  There is a subscription already: change it instead of buying another. */
+"subscription_change_required" |
+/**  Billing is read again before another try. */
+"billing_refresh_required" | "plan_change_in_progress" | "plan_change_expired" | "plan_change_unavailable";
 
 export type AccountHistoryV1 = {
 	requests: AccountRequestV1[],
@@ -621,6 +642,26 @@ export type AccountNoticeV1 = {
 export type AccountOfferV1 = { kind: "plan"; plan: string; interval: string; name: string | null; price: AccountPriceV1 | null; features: string[] } | { kind: "top_up"; id: string; name: string | null;
 /**  Credit it adds, in units of the usage's scale. */
 units: string | null; price: AccountPriceV1 | null; expires_days: number | null };
+
+/**  A Pro/Max change: a quote to confirm, or the operation after it. */
+export type AccountPlanChangeV1 = {
+	id: string,
+	/**  `quoted`, `queued`, `executing`, `uncertain`, `applied`, `scheduled` or `failed`. */
+	status: string,
+	current_plan: string,
+	target_plan: string,
+	interval: string,
+	/**  `upgrade` or `downgrade`. */
+	direction: string,
+	/**  Null for an immediate upgrade; the renewal for a downgrade. */
+	effective_at: string | null,
+	/**  An estimate before tax; the provider decides the final charge. */
+	charge: AccountPriceV1 | null,
+	recurring: AccountPriceV1 | null,
+	expires_at: string | null,
+	/**  The stable code of a failed change. */
+	error: string | null,
+};
 
 export type AccountPriceV1 = {
 	/**  In the currency's minor unit, as the billing provider states it. */
@@ -654,6 +695,10 @@ export type AccountRequestV1 = {
 	started_at: string | null,
 	finished_at: string | null,
 	error_class: string | null,
+	/**  Which balance paid: `allowance`, `purchased` or `mixed`. */
+	funding: string | null,
+	/**  What the call was made for, from this computer's own record. */
+	source: AccountCallSourceV1 | null,
 };
 
 export type AccountSessionV1 = {
@@ -668,6 +713,11 @@ export type AccountSessionsV1 = {
 	sessions: AccountSessionV1[],
 	fault: AccountFaultV1 | null,
 };
+
+/**  How the server takes new accounts. */
+export type AccountSignupModeV1 = "open" |
+/**  By invitation only. */
+"allowlist" | "closed" | "unknown";
 
 export type AccountSubscriptionV1 = {
 	/**  `active`, `inactive` or `unknown`. */
@@ -700,6 +750,19 @@ export type AccountUsageV1 = {
 	spent_today: string | null,
 	/**  The daily cap; null when there is none. */
 	daily_limit: string | null,
+	/**
+	 *  Units to one credit as the server states it. Null: show percentages
+	 *  only, never credit numbers.
+	 */
+	credit_units: string | null,
+	/**  What the plan's allowance still holds, in units. */
+	allowance_left: string | null,
+	/**  The allowance is a one-time grant that never refills. */
+	one_time: boolean,
+	/**  The free allowance is used up for now; purchased credit still works. */
+	free_paused: boolean,
+	/**  Purchased credit can be spent while the free allowance is paused. */
+	purchased_usable: boolean | null,
 };
 
 export type AccountV1 = {
@@ -727,6 +790,12 @@ export type AccountV1 = {
 	offers: AccountOfferV1[],
 	/**  A checkout was opened and is being watched for completion. */
 	checkout_open: boolean,
+	/**  The billing portal was opened and billing is being read until it changes. */
+	portal_open: boolean,
+	signup_mode: AccountSignupModeV1 | null,
+	/**  Under billing review: a calm state in place of purchase buttons. */
+	billing_review: boolean,
+	plan_change: AccountPlanChangeV1 | null,
 	notice: AccountNoticeV1 | null,
 	/**  Hosted calls whose charge was not confirmed when they ended. */
 	unsettled: AccountRequestV1[],
@@ -3378,6 +3447,8 @@ export type WorkCloudStatusV1 = {
 	 *  to explain the plan, never choosable.
 	 */
 	locked: string[],
+	/**  The cheapest plan each locked entry needs, when the server states it. */
+	required: WorkLockedPlanV1[],
 };
 
 /**  Lines `from..=to` of the code text, counted from 1. */
@@ -4628,6 +4699,11 @@ export type WorkLocalStepV1_Serialize = {
 	before_digest?: string | null,
 	/**  A folder question's known starting path; absent for a choose-any-folder picker. */
 	folder?: string | null,
+};
+
+export type WorkLockedPlanV1 = {
+	id: string,
+	plan: string | null,
 };
 
 export type WorkMeasurementBasis = WorkMeasurementBasis_Serialize | WorkMeasurementBasis_Deserialize;

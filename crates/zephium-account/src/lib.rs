@@ -8,6 +8,7 @@
 
 mod client;
 mod service;
+mod tasks;
 mod vault;
 mod version;
 pub mod wire;
@@ -17,6 +18,7 @@ use zeroize::Zeroizing;
 
 pub use client::{Client, ConfigReply, Origin};
 pub use service::{AccountSettings, Service, View};
+pub use tasks::CallSource;
 pub use vault::{AccountVault, SystemVault, VaultFault};
 pub use version::older_than;
 
@@ -57,6 +59,21 @@ pub enum AccountError {
     EmailTaken,
     /// The service does not know that request, or it is someone else's.
     NotFound,
+    /// The account is under billing review: no new purchase or upgrade, while
+    /// export, the portal and downgrades still work.
+    BillingReview,
+    /// A subscription checkout is already open for this account.
+    CheckoutInProgress,
+    /// The account already has a subscription: change it, do not buy another.
+    SubscriptionChangeRequired,
+    /// Billing is behind the provider; read it again before trying.
+    BillingRefreshRequired,
+    /// Another plan change is still being carried out.
+    PlanChangeInProgress,
+    /// The quote has run out; ask for a new one.
+    PlanChangeExpired,
+    /// This subscription cannot be changed that way right now.
+    PlanChangeUnavailable,
 }
 
 /// The session bearer, zeroized on drop and never printed.

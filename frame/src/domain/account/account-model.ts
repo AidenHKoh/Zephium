@@ -70,23 +70,84 @@ export function offerKey(offer: AccountOfferV1): string {
 }
 
 const UNITS = /^\d{1,30}$/u;
+const FACTOR = /^[1-9]\d{0,11}$/u;
+
+/** A unit count and the server's units-per-credit, when both are well-formed. */
+function amounts(
+  units: string | null | undefined,
+  creditUnits: string | null | undefined,
+): { value: bigint; per: bigint } | null {
+  if (!units || !UNITS.test(units) || !creditUnits || !FACTOR.test(creditUnits)) return null;
+  return { value: BigInt(units), per: BigInt(creditUnits) };
+}
+
+const whole = (locale?: string) => new Intl.NumberFormat(locale, { maximumFractionDigits: 0 });
 
 /**
- * Integer units as display credits, `scale` units to one credit. The units
- * stay strings for accounting; only this display is rounded.
+ * A balance in whole credits, rounded down so it never promises more than is
+ * there. `creditUnits` is the server's units to one credit; without it there
+ * is no credit to state, and the answer is null.
  */
-export function credits(
+export function creditsLeft(
   units: string | null | undefined,
-  scale: number,
+  creditUnits: string | null | undefined,
   locale?: string,
 ): string | null {
-  if (!units || !UNITS.test(units) || !Number.isSafeInteger(scale) || scale <= 0) return null;
-  const value = BigInt(units);
-  const whole = value / BigInt(scale);
-  const part = Number(value % BigInt(scale)) / scale;
-  const format = new Intl.NumberFormat(locale, { maximumFractionDigits: 2 });
-  if (whole === 0n && part > 0 && part < 0.01) return `<${format.format(0.01)}`;
-  return format.format(Number(whole) + part);
+  const at = amounts(units, creditUnits);
+  return at ? whole(locale).format(at.value / at.per) : null;
+}
+
+/** A total, such as a task's cost, in whole credits; a little is "<1", never "0". */
+export function creditsTotal(
+  units: string | null | undefined,
+  creditUnits: string | null | undefined,
+  locale?: string,
+): string | null {
+  const at = amounts(units, creditUnits);
+  if (!at) return null;
+  if (at.value === 0n) return whole(locale).format(0);
+  const rounded = (at.value * 2n + at.per) / (at.per * 2n);
+  return rounded === 0n ? `<${whole(locale).format(1)}` : whole(locale).format(rounded);
+}
+
+/** One call's cost to a tenth of a credit; below that, "<0.1". */
+export function creditsCall(
+  units: string | null | undefined,
+  creditUnits: string | null | undefined,
+  locale?: string,
+): string | null {
+  const at = amounts(units, creditUnits);
+  if (!at) return null;
+  const format = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
+  if (at.value === 0n) return format.format(0);
+  const tenths = (at.value * 20n + at.per) / (at.per * 2n);
+  return tenths === 0n ? `<${format.format(0.1)}` : format.format(Number(tenths) / 10);
+}
+
+/** Unit counts added exactly; anything that is not a count is ignored. */
+export function sumUnits(values: ReadonlyArray<string | null | undefined>): string {
+  let total = 0n;
+  for (const value of values) if (value && UNITS.test(value)) total += BigInt(value);
+  return total.toString();
+}
+
+/** Whole credits the person typed, as units; null if it is not a plain count. */
+export function creditsToUnits(
+  text: string,
+  creditUnits: string | null | undefined,
+): string | null {
+  const digits = text.trim();
+  if (!/^\d{1,9}$/u.test(digits) || !creditUnits || !FACTOR.test(creditUnits)) return null;
+  return (BigInt(digits) * BigInt(creditUnits)).toString();
+}
+
+/** Units as the whole credits a field shows; null without the factor. */
+export function unitsToCredits(
+  units: string | null | undefined,
+  creditUnits: string | null | undefined,
+): string | null {
+  const at = amounts(units, creditUnits);
+  return at ? (at.value / at.per).toString() : null;
 }
 
 /** Whether a unit amount is above zero. */

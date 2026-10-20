@@ -2,7 +2,8 @@
   import type { Component } from "svelte";
   import {
     accountSession as session,
-    credits,
+    creditsLeft,
+    creditsTotal,
     offerKey,
     planName,
     positive,
@@ -17,6 +18,7 @@
   import SegmentedControl from "$shared/ui/SegmentedControl";
   import SettingsRow from "$shared/ui/SettingsRow";
   import { explainAccountFault } from "../../lib/account";
+  import AccountDailyLimit from "./AccountDailyLimit.svelte";
 
   const account = $derived(session.account());
   const busy = $derived(session.pending());
@@ -26,10 +28,13 @@
   const paid = $derived(subscription?.status === "active");
   const billing = $derived(account?.billing === true);
   const hosted = $derived(account?.hosted_models !== false);
+  /** Under billing review nothing new is bought; export, the portal and downgrades remain. */
+  const review = $derived(account?.billing_review === true);
+  const change = $derived(account?.plan_change ?? null);
   // Off, the plan stays and Zephium AI's usage and credits leave with Work.
   const ai = $derived(preferences.aiEnabled());
-  const amount = (units: string | null | undefined) =>
-    usage ? credits(units, usage.unit_scale) : null;
+  /** Credits exist only where the server states how many units make one. */
+  const per = $derived(usage?.credit_units ?? null);
 
   type Plan = Extract<AccountOfferV1, { kind: "plan" }>;
   type TopUp = Extract<AccountOfferV1, { kind: "top_up" }>;
@@ -42,23 +47,35 @@
   /** Each plan once, in the server's order, with the intervals it is sold in. */
   const planIds = $derived([...new Set(plans.map((plan) => plan.plan))]);
   const currentPlan = $derived(account?.plan ?? null);
-  const upgrades = $derived(paid ? [] : planIds.filter((id) => id !== currentPlan));
+  const others = $derived(planIds.filter((id) => id !== currentPlan));
   let interval = $state<string>("yearly");
   const intervals = $derived(
     [...new Set(plans.map((plan) => plan.interval))].sort(
       (a, b) => Number(b === "monthly") - Number(a === "monthly"),
     ),
   );
+  /** A subscription changes plan, not billing interval; a first purchase picks one. */
+  const held = $derived(paid ? (subscription?.interval ?? null) : null);
+  const shownInterval = $derived(held && intervals.includes(held) ? held : interval);
   $effect(() => {
     if (intervals.length && !intervals.includes(interval)) interval = intervals[0]!;
   });
 
   function offerFor(id: string): Plan | undefined {
     return (
-      plans.find((plan) => plan.plan === id && plan.interval === interval) ??
+      plans.find((plan) => plan.plan === id && plan.interval === shownInterval) ??
       plans.find((plan) => plan.plan === id)
     );
   }
+
+  /** Cheaper than the plan held is a downgrade, which waits for renewal and stays open under review. */
+  function downgrade(id: string): boolean {
+    const target = offerFor(id)?.price?.amount_minor;
+    const now = currentPlan ? offerFor(currentPlan)?.price?.amount_minor : undefined;
+    return target !== undefined && now !== undefined && target < now;
+  }
+
+  const moves = $derived(others.filter((id) => !review || (paid && downgrade(id))));
 
   function priced(plan: Plan): string | null {
     const price = priceLabel(plan.price);
@@ -75,7 +92,7 @@
   }
 
   function topUpLine(offer: TopUp) {
-    const added = offer.units ? credits(offer.units, usage?.unit_scale ?? 1_000_000) : null;
+    const added = creditsLeft(offer.units, per);
     if (added && offer.expires_days)
       return m.account_topup_adds_days({ amount: added, days: offer.expires_days });
     if (added) return m.account_topup_adds({ amount: added });
@@ -87,33 +104,43 @@
   const usageLine = $derived.by(() => {
     const percent = usage?.used_percent;
     if (percent == null) return usage ? m.account_usage_none() : m.account_usage_loading();
-    const date = shortDate(usage?.resets_at);
-    return date
-      ? m.account_usage_used({ percent, date })
+    const left = creditsLeft(usage?.allowance_left, per);
+    return left
+      ? m.account_usage_left({ amount: left, percent })
       : m.account_usage_used_nodate({ percent });
   });
+  /** A trial says it is one; a plan's allowance says when it refills. */
+  const renewalLine = $derived.by(() => {
+    if (usage?.used_percent == null) return null;
+    if (usage.one_time) return m.account_usage_trial();
+    const date = shortDate(usage.resets_at);
+    return date ? m.account_usage_refills({ date }) : null;
+  });
   const allowanceLine = $derived.by(() => {
-    const used = amount(usage?.allowance_used ?? "0");
-    const total = amount(usage?.allowance_total);
+    const used = creditsTotal(usage?.allowance_used ?? "0", per);
+    const total = creditsLeft(usage?.allowance_total, per);
     return used && total && positive(usage?.allowance_total)
       ? m.account_allowance_value({ used, total })
       : null;
   });
+  const purchased = $derived(creditsLeft(usage?.purchased_remaining, per));
+  const hasPurchased = $derived(positive(usage?.purchased_remaining) && !!purchased);
+  const pausedLine = $derived.by(() => {
+    if (!usage?.free_paused) return null;
+    return hasPurchased && usage.purchased_usable !== false
+      ? m.account_usage_paused_purchased()
+      : m.account_usage_paused();
+  });
   const bonusLine = $derived.by(() => {
     if (!positive(usage?.bonus_remaining)) return null;
-    const left = amount(usage?.bonus_remaining);
+    const left = creditsLeft(usage?.bonus_remaining, per);
     if (!left) return null;
     const date = shortDate(usage?.bonus_expires_at);
     return date
       ? m.account_bonus_value({ amount: left, date })
       : m.account_bonus_value_nodate({ amount: left });
   });
-  const held = $derived(positive(usage?.held) ? amount(usage?.held) : null);
-  const dailyLine = $derived.by(() => {
-    const limit = amount(usage?.daily_limit);
-    if (!limit) return null;
-    return m.account_daily_value({ spent: amount(usage?.spent_today ?? "0") ?? "0", limit });
-  });
+  const heldCredits = $derived(positive(usage?.held) ? creditsTotal(usage?.held, per) : null);
   const planLine = $derived.by(() => {
     if (!subscription || subscription.status === "inactive") return undefined;
     if (subscription.status === "unknown") return m.account_plan_unknown();
@@ -139,8 +166,15 @@
     }
   }
 
+  /** A change in progress, or a quote waiting to be confirmed, is shown where it is read. */
+  let Change = $state.raw<Component | null>(null);
+  $effect(() => {
+    if (!change || Change) return;
+    void import("./AccountPlanChange.svelte").then((module) => (Change = module.default));
+  });
+
   const billingFault = $derived(
-    fault && (fault.action === "buy" || fault.action === "manage")
+    fault && ["buy", "manage", "plan_preview"].includes(fault.action)
       ? explainAccountFault(fault.fault, fault.retryAfter)
       : null,
   );
@@ -148,11 +182,21 @@
 
   async function buy(offer: AccountOfferV1) {
     buying = offerKey(offer);
-    await session.buy(
+    const bought = await session.buy(
       offer.kind === "plan"
         ? { kind: "plan", plan: offer.plan, interval: offer.interval }
         : { kind: "top_up", id: offer.id },
     );
+    buying = null;
+    // The service already has a subscription for this account: read it again,
+    // and the plan rows turn into switches.
+    if (!bought && session.fault()?.fault === "subscription_change_required")
+      void session.refresh();
+  }
+
+  async function move(id: string) {
+    buying = `move:${id}`;
+    await session.previewPlanChange(id, shownInterval);
     buying = null;
   }
 </script>
@@ -166,7 +210,7 @@
         <h3>{planName(currentPlan) ?? m.account_plan_free()}</h3>
         {#if planLine}<p>{planLine}</p>{/if}
       </div>
-      {#if billing && paid}<Button
+      {#if billing && (paid || subscription?.status === "unknown")}<Button
           pending={busy === "manage"}
           disabled={!!busy && busy !== "manage"}
           onclick={() => void session.manage()}>{m.account_billing_manage()}</Button
@@ -184,30 +228,36 @@
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={usage.used_percent}
-            aria-valuetext={allowanceLine ?? undefined}
+            aria-valuetext={usageLine}
             data-tone={usageTone(usage.used_percent)}
           >
             <span style:inline-size={`${usage.used_percent}%`}></span>
           </div>
-          {#if allowanceLine}<p class="caption">{allowanceLine}</p>{/if}{/if}
+          {#if renewalLine || allowanceLine}<p class="caption">
+              {[renewalLine, allowanceLine].filter(Boolean).join(" · ")}
+            </p>{/if}{/if}
+        {#if pausedLine}<p class="caption" role="status">{pausedLine}</p>{/if}
       </div>{/if}
+    {#if review}<div class="review" role="status">
+        <h4>{m.account_review_title()}</h4>
+        <p>{m.account_review_body()}</p>
+      </div>{/if}
+    {#if Change && change}<Change />{/if}
     <div class="rows">
       {#if ai}{#if bonusLine}<SettingsRow title={m.account_bonus_title()}
             ><span class="value">{bonusLine}</span></SettingsRow
           >{/if}
-        <SettingsRow title={m.account_extra_title()}
-          ><span class="value"
-            >{positive(usage?.purchased_remaining) && amount(usage?.purchased_remaining)
-              ? m.account_extra_value({ amount: amount(usage?.purchased_remaining)! })
-              : m.account_extra_none()}</span
-          ></SettingsRow
-        >
-        {#if held}<SettingsRow title={m.account_held_title()}
-            ><span class="value">{m.account_held_value({ amount: held })}</span></SettingsRow
+        {#if per}<SettingsRow title={m.account_extra_title()}
+            ><span class="value"
+              >{hasPurchased
+                ? m.account_extra_value({ amount: purchased ?? "0" })
+                : m.account_extra_none()}</span
+            ></SettingsRow
           >{/if}
-        {#if dailyLine}<SettingsRow title={m.account_daily_title()}
-            ><span class="value">{dailyLine}</span></SettingsRow
+        {#if heldCredits}<SettingsRow title={m.account_held_title()}
+            ><span class="value">{m.account_held_value({ amount: heldCredits })}</span></SettingsRow
           >{/if}
+        <AccountDailyLimit />
         {#if History}<History />
         {:else}<SettingsRow
             title={m.account_history_row()}
@@ -216,28 +266,34 @@
               >{m.account_history_show()}</Button
             ></SettingsRow
           >{/if}{/if}
-      {#if billing}
-        {#each upgrades as id (id)}
+      {#if billing && !change}
+        {#each moves as id (id)}
           {@const offer = offerFor(id)}
           {#if offer}<SettingsRow
               title={offer.name ?? planName(id) ?? id}
               description={[priced(offer), ...offer.features].filter(Boolean).join(" · ")}
             >
-              {#if intervals.length > 1}<SegmentedControl
+              {#if !paid && intervals.length > 1}<SegmentedControl
                   label={m.account_plan_group()}
                   size="compact"
                   options={intervals.map((value) => ({ value, label: intervalName(value) }))}
                   bind:value={interval}
                 />{/if}
-              <Button
-                variant="primary"
-                pending={buying === offerKey(offer)}
-                disabled={!!busy}
-                onclick={() => void buy(offer)}>{m.account_upgrade()}</Button
-              >
+              {#if paid}<Button
+                  variant={downgrade(id) ? "secondary" : "primary"}
+                  pending={buying === `move:${id}`}
+                  disabled={!!busy}
+                  onclick={() => void move(id)}
+                  >{m.account_switch_to({ plan: planName(id) ?? id })}</Button
+                >{:else}<Button
+                  variant="primary"
+                  pending={buying === offerKey(offer)}
+                  disabled={!!busy}
+                  onclick={() => void buy(offer)}>{m.account_upgrade()}</Button
+                >{/if}
             </SettingsRow>{/if}
         {/each}
-        {#each ai ? topups : [] as offer (offer.id)}
+        {#each ai && !review ? topups : [] as offer (offer.id)}
           {@const price = priceLabel(offer.price)}
           <SettingsRow title={offer.name ?? m.account_topup_title()} description={topUpLine(offer)}>
             <Button
@@ -252,7 +308,7 @@
   </section>
   {#if unconfirmed}<p class="note" role="status">{m.account_unsettled()}</p>{/if}
   {#if billing && account?.checkout_open}<p class="note" role="status">
-      {m.account_checkout_waiting()}
+      {account.portal_open ? m.account_portal_waiting() : m.account_checkout_waiting()}
     </p>{/if}
   {#if billingFault}<p class="note" data-tone="error" role="alert">{billingFault}</p>{/if}
 {/if}
@@ -356,6 +412,26 @@
 
   .meter[data-tone="full"] span {
     background: var(--color-danger);
+  }
+
+  .review {
+    display: grid;
+    gap: 4px;
+    margin: 0 18px 18px;
+    padding: 14px 16px;
+    border-radius: var(--radius-control);
+    background: var(--color-fill);
+  }
+
+  .review h4 {
+    font-size: var(--text-body);
+  }
+
+  .review p {
+    margin: 0;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    line-height: 1.5;
   }
 
   .rows {

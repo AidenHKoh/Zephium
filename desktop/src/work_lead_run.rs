@@ -9,12 +9,24 @@ use zephium_core::work::model::WorkModelRole;
 
 /// The models for each role; a helper role without its own model uses the
 /// lead's. `None` when no lead model resolves, and the run is refused.
-pub(crate) async fn models(profile: ProfileId) -> Option<WorkLeadModels> {
-    let resolve = |role| async move {
-        zephium_app::work_models::resolve_entry(profile, role)
-            .await
-            .ok()
-            .map(|(entry, client)| LeadModel { entry, client })
+pub(crate) async fn models(
+    profile: ProfileId,
+    work: Option<zephium_core::work::WorkId>,
+) -> Option<WorkLeadModels> {
+    // Hosted calls are noted against their task on this computer, for the
+    // usage history; the service is never told the task.
+    let source = work.map(|work| zephium_app::work_models::WorkCallSource::Task {
+        profile: profile.to_string(),
+        work: work.to_string(),
+    });
+    let resolve = |role| {
+        let source = source.clone();
+        async move {
+            zephium_app::work_models::resolve_entry_for(profile, role, source)
+                .await
+                .ok()
+                .map(|(entry, client)| LeadModel { entry, client })
+        }
     };
     let lead = resolve(WorkModelRole::Lead).await?;
     let page = resolve(WorkModelRole::Page)

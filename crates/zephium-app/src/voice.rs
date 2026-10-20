@@ -145,15 +145,18 @@ pub async fn transcribe(
                 let session = session.clone();
                 std::sync::Arc::new(move |record| session.recorded(record))
             };
-            return lead::transcribe_observed(
+            let transcript = lead::transcribe_observed(
                 &target,
                 credential.as_ref(),
                 wav,
                 language,
                 Some(&observer),
             )
-            .await
-            .map(|transcript| transcript.text);
+            .await?;
+            if let Some(id) = &transcript.request_id {
+                session.sourced(id, &work_models::WorkCallSource::Voice);
+            }
+            return Ok(transcript.text);
         }
         VoiceEngine::OpenAi => WorkModelProvider::OpenAi,
         VoiceEngine::Groq => WorkModelProvider::Groq,

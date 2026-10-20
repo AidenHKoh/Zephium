@@ -489,3 +489,306 @@ async fn changing_server_remembers_only_custom_servers() {
     assert!(!account.view().custom_server);
     assert!(vault.present("http://127.0.0.1:9").unwrap());
 }
+
+const QUOTE: &str = "7d3c1f0e-5a42-4c8e-9b61-0f2d8a4e6b13";
+
+fn change(status: &str) -> String {
+    format!(
+        r#"{{"id":"{QUOTE}","status":"{status}","current_plan":"pro","target_plan":"max","interval":"monthly","direction":"upgrade","effective_at":null,"amount_due_estimate":{{"amount_minor":6500,"currency":"USD","tax_excluded":true}},"recurring_price":{{"amount_minor":10000,"currency":"USD"}},"expires_at":"2026-10-20T12:05:00.000Z","error":null}}"#
+    )
+}
+
+#[derive(Default)]
+struct Billing {
+    fresh: bool,
+    polls: usize,
+    expire: bool,
+    review: bool,
+    checkouts: usize,
+}
+
+fn refusal(status: u16, code: &str) -> (u16, String, String) {
+    (
+        status,
+        String::new(),
+        format!(r#"{{"error":{{"code":"{code}"}},"request_id":null}}"#),
+    )
+}
+
+/// The account routes plus the Pro/Max change contract. Confirmation needs a
+/// sign-in since the server was started, as the real one needs a fresh session.
+fn billing_server(state: Arc<Mutex<Billing>>) -> Route {
+    Box::new(move |seen| {
+        let mut state = state.lock().unwrap();
+        let line = seen.line.split(' ').take(2).collect::<Vec<_>>().join(" ");
+        match line.as_str() {
+            "POST /api/auth/sign-in/email-otp" if seen.body.contains("\"123456\"") => {
+                state.fresh = true;
+                account_routes(seen)
+            }
+            "POST /v1/billing/subscription/preview" => ok(&change("quoted")),
+            "POST /v1/billing/subscription/change" if state.expire => {
+                refusal(409, "plan_change_expired")
+            }
+            "POST /v1/billing/subscription/change" if !state.fresh => {
+                refusal(401, "reauthentication_required")
+            }
+            "POST /v1/billing/subscription/change" => (202, String::new(), change("queued")),
+            "GET /v1/usage" if state.review => refusal(403, "billing_review_required"),
+            "POST /v1/billing/checkout" => {
+                state.checkouts += 1;
+                if state.review {
+                    return refusal(403, "billing_review_required");
+                }
+                if state.checkouts > 1 {
+                    return refusal(409, "checkout_in_progress");
+                }
+                ok(r#"{"url":"https://sandbox.polar.sh/checkout/first"}"#)
+            }
+            "PUT /v1/usage/limits" => (204, String::new(), String::new()),
+            path if path == format!("GET /v1/billing/subscription/changes/{QUOTE}") => {
+                state.polls += 1;
+                let status = match state.polls {
+                    1 => "executing",
+                    2 => "uncertain",
+                    _ => "applied",
+                };
+                ok(&change(status))
+            }
+            _ => account_routes(seen),
+        }
+    })
+}
+
+type Held = (
+    Service,
+    Arc<Mutex<Billing>>,
+    Log,
+    Arc<MemorySettings>,
+    Arc<MemoryVault>,
+);
+
+async fn billing_account() -> Held {
+    let state = Arc::new(Mutex::new(Billing::default()));
+    let (origin, seen) = server(billing_server(state.clone())).await;
+    let vault = MemoryVault::with(&origin, "token-1");
+    let settings = Arc::new(MemorySettings::default());
+    let account = service(&origin, vault.clone(), settings.clone());
+    account.refresh(true).await.unwrap();
+    (account, state, seen, settings, vault)
+}
+
+#[tokio::test]
+async fn a_plan_change_is_confirmed_after_a_fresh_sign_in_and_followed_to_its_end() {
+    let (account, _, seen, settings, vault) = billing_account().await;
+
+    let quote = account.preview_plan_change("max", "monthly").await.unwrap();
+    assert_eq!(quote.status, "quoted");
+    assert_eq!(
+        quote.amount_due_estimate.as_ref().unwrap().amount_minor,
+        6500
+    );
+    let preview = &requests(&seen, "POST /v1/billing/subscription/preview")[0];
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&preview.body).unwrap(),
+        serde_json::json!({"plan": "max", "interval": "monthly"})
+    );
+    assert_eq!(account.view().plan_change.unwrap().id, QUOTE);
+
+    // An old session cannot confirm; the quote waits and the session stays.
+    assert_eq!(
+        account.confirm_plan_change().await,
+        Err(AccountError::ReauthRequired)
+    );
+    assert!(account.signed_in());
+    assert_eq!(account.view().plan_change.unwrap().status, "quoted");
+
+    account.send_reauth_code().await.unwrap();
+    account.verify("123456").await.unwrap();
+    let held = account
+        .view()
+        .plan_change
+        .expect("the quote survives signing in again");
+    assert_eq!(held.id, QUOTE);
+
+    let started = account.confirm_plan_change().await.unwrap();
+    assert_eq!(started.status, "queued");
+    assert!(account.plan_change_in_flight());
+    let confirm = requests(&seen, "POST /v1/billing/subscription/change");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&confirm.last().unwrap().body).unwrap(),
+        serde_json::json!({"quote_id": QUOTE})
+    );
+
+    // Another quote is refused while this one is carried out.
+    assert_eq!(
+        account.preview_plan_change("pro", "monthly").await.err(),
+        Some(AccountError::PlanChangeInProgress)
+    );
+    // Closing the app does not lose it.
+    let again = Service::new(settings.clone(), vault.clone(), "x", "1.0.0").unwrap();
+    assert_eq!(again.view().plan_change.unwrap().status, "queued");
+    assert!(again.plan_change_open());
+
+    // It cannot be put away while in flight; `uncertain` is only waited on.
+    account.dismiss_plan_change();
+    assert!(account.view().plan_change.is_some());
+    let next = account.refresh_plan_change().await.unwrap().unwrap();
+    assert_eq!(next.status, "executing");
+    let next = account.refresh_plan_change().await.unwrap().unwrap();
+    assert_eq!(next.status, "uncertain");
+    assert!(account.plan_change_in_flight());
+    assert_eq!(
+        requests(&seen, "POST /v1/billing/subscription/change").len(),
+        confirm.len()
+    );
+
+    let done = account.refresh_plan_change().await.unwrap().unwrap();
+    assert_eq!(done.status, "applied");
+    assert!(!account.plan_change_in_flight());
+    // Finishing reads billing and usage again.
+    assert!(!requests(&seen, "POST /v1/billing/refresh").is_empty());
+    account.dismiss_plan_change();
+    assert!(account.view().plan_change.is_none());
+    assert_eq!(settings.get("account.plan_change"), None);
+}
+
+#[tokio::test]
+async fn a_held_change_belongs_to_one_account_on_one_server() {
+    let (account, _, _, settings, vault) = billing_account().await;
+    account.preview_plan_change("max", "yearly").await.unwrap();
+    let held = settings.get("account.plan_change").unwrap();
+    let cache = settings.get("account.cache").unwrap();
+    assert!(held.contains(&account.origin()));
+
+    // Another server never sees it, and another account's session hides it.
+    let other = Service::new(settings.clone(), vault.clone(), "x", "1.0.0").unwrap();
+    other.set_server(Some("http://127.0.0.1:9")).await.unwrap();
+    assert!(other.view().plan_change.is_none());
+    let stranger = Arc::new(MemorySettings::default());
+    stranger.set(
+        "account.plan_change".into(),
+        held.replace("\"u1\"", "\"someone-else\""),
+    );
+    stranger.set("account.server".into(), account.origin());
+    stranger.set("account.cache".into(), cache);
+    let stranger = Service::new(stranger, vault, "x", "1.0.0").unwrap();
+    assert!(stranger.view().plan_change.is_none());
+}
+
+#[tokio::test]
+async fn an_expired_quote_is_dropped_so_a_new_one_must_be_asked_for() {
+    let (account, state, _, settings, _) = billing_account().await;
+    account.preview_plan_change("max", "monthly").await.unwrap();
+    state.lock().unwrap().expire = true;
+    assert_eq!(
+        account.confirm_plan_change().await.err(),
+        Some(AccountError::PlanChangeExpired)
+    );
+    assert!(account.view().plan_change.is_none());
+    assert_eq!(settings.get("account.plan_change"), None);
+}
+
+#[tokio::test]
+async fn plan_ids_and_intervals_are_checked_before_anything_is_sent() {
+    let (account, _, seen, _, _) = billing_account().await;
+    for (plan, interval) in [
+        ("", "monthly"),
+        ("pro max", "monthly"),
+        ("max", "weekly"),
+        ("a/b", "yearly"),
+    ] {
+        assert_eq!(
+            account.preview_plan_change(plan, interval).await.err(),
+            Some(AccountError::Invalid),
+            "{plan} {interval}"
+        );
+    }
+    assert!(requests(&seen, "POST /v1/billing/subscription/preview").is_empty());
+}
+
+#[tokio::test]
+async fn a_checkout_link_is_kept_to_retry_the_same_checkout() {
+    let (account, state, _, _, _) = billing_account().await;
+    let pro = Purchase::Plan {
+        plan: "pro".into(),
+        interval: "monthly".into(),
+    };
+    let first = account.checkout(&pro).await.unwrap();
+    // The service now refuses a second subscription checkout; the same link comes back.
+    let retry = account.checkout(&pro).await.unwrap();
+    assert_eq!(first, retry);
+    assert_eq!(state.lock().unwrap().checkouts, 1);
+    // A different purchase is not answered with that link.
+    let max = Purchase::Plan {
+        plan: "max".into(),
+        interval: "monthly".into(),
+    };
+    assert_eq!(
+        account.checkout(&max).await.err(),
+        Some(AccountError::CheckoutInProgress)
+    );
+}
+
+#[tokio::test]
+async fn billing_review_is_read_from_usage_and_blocks_a_new_checkout() {
+    let (account, state, _, _, _) = billing_account().await;
+    assert!(!account.view().billing_review);
+    state.lock().unwrap().review = true;
+    account.refresh(true).await.unwrap();
+    let view = account.view();
+    assert!(view.billing_review);
+    // The last known usage stays for the page to show.
+    assert!(view.usage.is_some());
+    let pro = Purchase::Plan {
+        plan: "pro".into(),
+        interval: "monthly".into(),
+    };
+    assert_eq!(
+        account.checkout(&pro).await.err(),
+        Some(AccountError::BillingReview)
+    );
+    state.lock().unwrap().review = false;
+    account.refresh(true).await.unwrap();
+    assert!(!account.view().billing_review);
+}
+
+#[tokio::test]
+async fn the_daily_limit_is_set_in_units_or_removed() {
+    let (account, _, seen, _, _) = billing_account().await;
+    account.set_daily_limit(Some("500000")).await.unwrap();
+    account.set_daily_limit(None).await.unwrap();
+    let puts = requests(&seen, "PUT /v1/usage/limits");
+    assert_eq!(puts[0].body, r#"{"daily_limit_units":"500000"}"#);
+    assert_eq!(puts[1].body, r#"{"daily_limit_units":null}"#);
+    for refused in ["-1", "1.5", "", "1e6", "  "] {
+        assert_eq!(
+            account.set_daily_limit(Some(refused)).await.err(),
+            Some(AccountError::Invalid),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(requests(&seen, "PUT /v1/usage/limits").len(), 2);
+}
+
+#[tokio::test]
+async fn which_task_made_a_call_is_kept_here_and_goes_with_signing_out() {
+    use crate::CallSource;
+    let (account, _, _, settings, vault) = billing_account().await;
+    let task = CallSource::Task {
+        profile: "p1".into(),
+        work: "w1".into(),
+    };
+    account.record_call_source("req-1", task.clone());
+    account.record_call_source("req-2", CallSource::Voice);
+    assert_eq!(
+        account.call_sources(&["req-1".into(), "req-2".into(), "req-3".into()]),
+        vec![Some(task.clone()), Some(CallSource::Voice), None]
+    );
+    let again = Service::new(settings.clone(), vault, "x", "1.0.0").unwrap();
+    assert_eq!(again.call_sources(&["req-1".into()]), vec![Some(task)]);
+
+    account.sign_out().await.unwrap();
+    assert_eq!(account.call_sources(&["req-1".into()]), vec![None]);
+    assert_eq!(settings.get("account.call_tasks"), None);
+}

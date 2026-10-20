@@ -6,7 +6,8 @@ import type { WorkModelReasoning, WorkModelsReadyV1 } from "$shared/ipc/bindings
 import { preferences } from "$domain/preferences";
 import ModelPicker from "../components/bar/ModelPicker.svelte";
 import ModelBarStage from "./ModelBarStage.svelte";
-import { PROFILE, models } from "$shared/testing/work-models";
+import { PROFILE, entry, models } from "$shared/testing/work-models";
+import { accountFixture } from "$shared/testing/account";
 
 const native = vi.hoisted(() => ({
   read: vi.fn(),
@@ -564,4 +565,45 @@ test("a press on the words while the menu is open closes it and puts the cursor 
   await words.click();
   await expect.element(page.getByRole("listbox")).not.toBeInTheDocument();
   await expect.element(words).toHaveFocus();
+});
+
+test("a hosted model the plan leaves out names the plan that opens it and leads to Account", async () => {
+  await page.viewport(1200, 800);
+  native.ready.mockImplementation(ready(true));
+  native.command.mockClear();
+  native.choose.mockClear();
+  const hosted = models({
+    cloud: true,
+    lead: "zephium/claude-sonnet-5-5",
+    chosen: "zephium/claude-sonnet-5-5",
+  });
+  const max = entry("cloud", "claude-opus-5-5", "Claude Opus 5.5", true, ["lead"]);
+  const other = entry("cloud", "claude-fable-5-1", "Claude Fable 5.1", true, ["lead"]);
+  native.read.mockResolvedValue({
+    ...hosted,
+    entries: [...hosted.entries, max, other],
+    cloud: {
+      ...hosted.cloud,
+      locked: [max.id, other.id],
+      required: [{ id: max.id, plan: "max" }],
+    },
+  });
+  native.account.mockResolvedValue({
+    account: accountFixture({ signed_in: true, plan: "pro" }),
+    fault: null,
+    retry_after: null,
+  });
+  const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
+  await screen.getByRole("button", { name: /Model: Claude Sonnet 5\.5/u }).click();
+
+  // The plan the server names is the badge; one it does not name says Upgrade.
+  const row = page.getByRole("option", { name: /Claude Opus 5\.5 needs the Max plan/u });
+  await expect.element(row).toHaveTextContent(/Claude Opus 5\.5\s*Max/u);
+  const plain = page.getByRole("option", { name: /Claude Fable 5\.1 needs a higher plan/u });
+  await expect.element(plain).toHaveTextContent(/Claude Fable 5\.1\s*Upgrade/u);
+  expect(page.getByText("Not in your plan").query()).toBeNull();
+
+  await row.click();
+  expect(native.choose).not.toHaveBeenCalled();
+  expect(native.command).toHaveBeenCalledWith("settings.account");
 });

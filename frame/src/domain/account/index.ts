@@ -1,6 +1,9 @@
 export * as accountSession from "./account.svelte";
 export {
-  credits,
+  creditsCall,
+  creditsLeft,
+  creditsToUnits,
+  creditsTotal,
   initials,
   offerKey,
   planName,
@@ -8,5 +11,7 @@ export {
   priceLabel,
   requestStanding,
   shortDate,
+  sumUnits,
+  unitsToCredits,
   usageTone,
 } from "./account-model";

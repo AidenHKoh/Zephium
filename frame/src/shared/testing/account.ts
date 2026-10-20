@@ -21,13 +21,20 @@ export function accountFixture(overrides: Partial<AccountV1> = {}): AccountV1 {
     subscription: null,
     offers: [],
     checkout_open: false,
+    portal_open: false,
+    signup_mode: null,
+    billing_review: false,
+    plan_change: null,
     notice: null,
     unsettled: [],
     ...overrides,
   };
 }
 
-/** Usage in integer units, one million to a credit, as the server counts it. */
+/**
+ * Usage in integer units, a million to the server's own unit and `credit_units`
+ * (10,000, as staging sends it) to a credit: 100 credits to a dollar.
+ */
 export function usageFixture(overrides: Partial<AccountUsageV1> = {}): AccountUsageV1 {
   return {
     used_percent: 42,
@@ -43,6 +50,11 @@ export function usageFixture(overrides: Partial<AccountUsageV1> = {}): AccountUs
     purchased_remaining: "0",
     spent_today: "840000",
     daily_limit: null,
+    credit_units: "10000",
+    allowance_left: "1160000",
+    one_time: false,
+    free_paused: false,
+    purchased_usable: null,
     ...overrides,
   };
 }

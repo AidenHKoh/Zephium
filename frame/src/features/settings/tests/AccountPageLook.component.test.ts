@@ -32,6 +32,8 @@ function request(id: string, model: string, state: string, charged: string): Acc
     started_at: "2026-10-09T10:0" + id + ":00Z",
     finished_at: state === "running" ? null : "2026-10-09T10:0" + id + ":20Z",
     error_class: null,
+    funding: state === "settled" ? "allowance" : null,
+    source: id === "3" ? null : { kind: "task", profile: "p1", work: "w1" },
   };
 }
 
@@ -126,10 +128,80 @@ test("Settings → Account signed out, waiting for a code, and signed in", async
   await shoot("history", signedIn, async (screen) => {
     await screen.getByRole("button", { name: "Show" }).first().click();
     await settle();
+    await screen
+      .getByRole("button", { name: /\d calls?/u })
+      .first()
+      .click();
+    await settle();
     await screen.getByRole("button", { name: "Details for this request" }).nth(1).click();
   });
+  const pro: AccountV1 = {
+    ...signedIn,
+    plan: "pro",
+    usage: usageFixture({
+      used_percent: 10,
+      allowance_total: "10000000",
+      allowance_used: "1000000",
+      allowance_left: "9000000",
+      resets_at: "2026-11-19T00:00:00Z",
+      purchased_remaining: "3400000",
+      daily_limit: null,
+    }),
+    subscription: {
+      status: "active",
+      interval: "monthly",
+      paid_until: "2026-11-19T00:00:00Z",
+      cancel_at_period_end: false,
+    },
+    offers: [
+      ...signedIn.offers,
+      {
+        kind: "plan",
+        plan: "max",
+        interval: "monthly",
+        name: "Zephium Max",
+        price: { amount_minor: 10000, currency: "usd" },
+        features: [],
+      },
+    ],
+  };
+  await shoot("trial", {
+    ...signedIn,
+    usage: usageFixture({
+      used_percent: 6,
+      allowance_total: "2000000",
+      allowance_used: "120000",
+      allowance_left: "1880000",
+      resets_at: null,
+      one_time: true,
+      free_paused: true,
+      purchased_usable: true,
+      purchased_remaining: "3400000",
+      bonus_remaining: null,
+      held: null,
+    }),
+  });
+  await shoot("paid", pro);
+  await shoot("quote", {
+    ...pro,
+    plan_change: {
+      id: "7d3c1f0e-5a42-4c8e-9b61-0f2d8a4e6b13",
+      status: "quoted",
+      current_plan: "pro",
+      target_plan: "max",
+      interval: "monthly",
+      direction: "upgrade",
+      effective_at: null,
+      charge: { amount_minor: 6500, currency: "usd" },
+      recurring: { amount_minor: 10000, currency: "usd" },
+      expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+      error: null,
+    },
+  });
+  await shoot("review", { ...pro, billing_review: true });
+  await shoot("invite-only", { ...base, signup_mode: "allowlist" });
   await shoot("email-change", signedIn, async (screen) => {
-    await screen.getByRole("button", { name: "Change…" }).first().click();
+    await screen.getByRole("button", { name: "Change…" }).last().click();
     await settle();
     await screen.getByLabelText("New email address").fill("ada@new.example");
   });
@@ -142,4 +214,4 @@ test("Settings → Account signed out, waiting for a code, and signed in", async
     update_required: true,
     unsettled: [history.requests[3]!],
   });
-});
+}, 90_000);

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  credits,
+  creditsCall,
+  creditsLeft,
+  creditsToUnits,
+  creditsTotal,
   initials,
   offerKey,
   planName,
@@ -8,6 +11,8 @@ import {
   priceLabel,
   requestStanding,
   shortDate,
+  sumUnits,
+  unitsToCredits,
   usageTone,
 } from "../account-model";
 
@@ -73,18 +78,53 @@ describe("account model", () => {
     ).toBe("topup:s");
   });
 
-  it("shows unit amounts as credits without touching the strings it was given", () => {
-    expect(credits("2500000", 1_000_000, "en-US")).toBe("2.5");
-    expect(credits("812000", 1_000_000, "en-US")).toBe("0.81");
-    expect(credits("0", 1_000_000, "en-US")).toBe("0");
-    expect(credits("3", 1_000_000, "en-US")).toBe("<0.01");
-    expect(credits("123456789012345678901234", 1_000_000, "en-US")).toMatch(
-      /^123,456,789,012,345,680/u,
-    );
-    expect(credits("-1", 1_000_000)).toBeNull();
-    expect(credits("1.5", 1_000_000)).toBeNull();
-    expect(credits("1", 0)).toBeNull();
-    expect(credits(null, 1_000_000)).toBeNull();
+  it("states balances in whole credits from the server's factor, rounded down", () => {
+    // Staging: 10,000 units to a credit, 100 credits to a dollar.
+    expect(creditsLeft("1880000", "10000", "en-US")).toBe("188");
+    expect(creditsLeft("1889999", "10000", "en-US")).toBe("188");
+    expect(creditsLeft("123456789", "10000", "en-US")).toBe("12,345");
+    expect(creditsLeft("0", "10000", "en-US")).toBe("0");
+    expect(creditsLeft("9999", "10000", "en-US")).toBe("0");
+    // No factor, no credit: percentages are all there is to show.
+    expect(creditsLeft("1880000", null)).toBeNull();
+    expect(creditsLeft("1880000", undefined)).toBeNull();
+    for (const bad of ["0", "-5", "1.5", "", "abc", "10000000000000"]) {
+      expect(creditsLeft("1880000", bad), bad).toBeNull();
+    }
+    expect(creditsLeft("-1", "10000")).toBeNull();
+    expect(creditsLeft("1.5", "10000")).toBeNull();
+    expect(creditsLeft(null, "10000")).toBeNull();
+    // The factor is read, never assumed: another server counts differently.
+    expect(creditsLeft("1880000", "1000", "en-US")).toBe("1,880");
+  });
+
+  it("states task totals in whole credits, never zero for something spent", () => {
+    expect(creditsTotal("1280000", "10000", "en-US")).toBe("128");
+    expect(creditsTotal("812000", "10000", "en-US")).toBe("81");
+    expect(creditsTotal("815000", "10000", "en-US")).toBe("82");
+    expect(creditsTotal("3000", "10000", "en-US")).toBe("<1");
+    expect(creditsTotal("0", "10000", "en-US")).toBe("0");
+    expect(creditsTotal("12", null)).toBeNull();
+  });
+
+  it("states one call to a tenth of a credit", () => {
+    expect(creditsCall("3000", "10000", "en-US")).toBe("0.3");
+    expect(creditsCall("812000", "10000", "en-US")).toBe("81.2");
+    expect(creditsCall("20000", "10000", "en-US")).toBe("2");
+    expect(creditsCall("400", "10000", "en-US")).toBe("<0.1");
+    expect(creditsCall("0", "10000", "en-US")).toBe("0");
+    expect(creditsCall("3000", null)).toBeNull();
+  });
+
+  it("adds units exactly and converts a typed limit both ways", () => {
+    expect(sumUnits(["812000", null, "400000", "abc", "-4"])).toBe("1212000");
+    expect(sumUnits(["123456789012345678901234", "1"])).toBe("123456789012345678901235");
+    expect(creditsToUnits(" 40 ", "10000")).toBe("400000");
+    expect(creditsToUnits("4.5", "10000")).toBeNull();
+    expect(creditsToUnits("", "10000")).toBeNull();
+    expect(creditsToUnits("40", null)).toBeNull();
+    expect(unitsToCredits("400000", "10000")).toBe("40");
+    expect(unitsToCredits("400000", null)).toBeNull();
     expect(positive("0")).toBe(false);
     expect(positive("1")).toBe(true);
     expect(positive(null)).toBe(false);
