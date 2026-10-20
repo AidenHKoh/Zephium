@@ -54,6 +54,7 @@ const ROLES: [WorkModelRole; 3] = [
 const CLOUD_CATALOG_KEY: &str = "work.models.cloud.catalog";
 const COMPATIBLE_BASE_KEY: &str = "work.models.compatible.base";
 const CLOUD_REFRESH: Duration = Duration::from_secs(60 * 60);
+const CLOUD_RETRY: Duration = Duration::from_secs(30);
 const MAX_STORED_CATALOG_BYTES: usize = 512 * 1024;
 
 /// App settings, installed by the composition root.
@@ -110,6 +111,7 @@ pub fn cloud_session_changed() {
     {
         let mut state = state();
         state.cloud_fetched = None;
+        state.cloud_tried = None;
         if !signed_in {
             state.cloud.clear();
             state.cloud_defaults = None;
@@ -269,6 +271,9 @@ struct State {
     transcriber: Option<models::CloudTranscriber>,
     cloud_loaded: bool,
     cloud_fetched: Option<Instant>,
+    /// When a fetch last started, so concurrent readers share one attempt and a
+    /// failing server is not asked again on every read.
+    cloud_tried: Option<Instant>,
     /// Choices kept in memory when no settings store is installed.
     choices: HashMap<String, WorkModelEntry>,
     efforts: HashMap<String, String>,
@@ -385,9 +390,16 @@ pub async fn refresh_cloud_catalog() {
     let stale = {
         let mut state = state();
         load_cloud_cache(&mut state);
-        state
+        let stale = state
             .cloud_fetched
             .is_none_or(|fetched| fetched.elapsed() > CLOUD_REFRESH)
+            && state
+                .cloud_tried
+                .is_none_or(|tried| tried.elapsed() > CLOUD_RETRY);
+        if stale {
+            state.cloud_tried = Some(Instant::now());
+        }
+        stale
     };
     if !stale {
         return;
@@ -448,11 +460,18 @@ pub async fn refresh_cloud_catalog() {
         }
         None => serde_json::json!({ "models": raw }),
     };
-    if let Ok(text) = serde_json::to_string(&stored) {
-        if text.len() <= MAX_STORED_CATALOG_BYTES {
-            store_setting(CLOUD_CATALOG_KEY.to_owned(), text);
+    // Readers re-read on every change event, and a read asks for this refresh:
+    // announcing an unchanged catalog would loop them.
+    let changed = match serde_json::to_string(&stored) {
+        Ok(text) if text.len() <= MAX_STORED_CATALOG_BYTES => {
+            let changed = setting(CLOUD_CATALOG_KEY).as_deref() != Some(text.as_str());
+            if changed {
+                store_setting(CLOUD_CATALOG_KEY.to_owned(), text);
+            }
+            changed
         }
-    }
+        _ => true,
+    };
     {
         let mut state = state();
         state.cloud = fetched.models;
@@ -460,7 +479,9 @@ pub async fn refresh_cloud_catalog() {
         state.cloud_defaults = fetched.defaults;
         state.cloud_fetched = Some(Instant::now());
     }
-    notify();
+    if changed {
+        notify();
+    }
 }
 
 /// Curated BYOK entries, custom endpoint models, and the signed-in account's
@@ -1493,6 +1514,43 @@ mod tests {
         }
         let hosted = profile_id(43);
         with_keys(&[]);
+
+        // Readers that ask together share one catalog fetch, and a fetch that
+        // failed is not repeated on the next read.
+        static ASKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        struct Refused;
+        impl LeadCredential for Refused {
+            fn secret(&self) -> LeadSecretFuture<'_> {
+                ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async { Err(WorkModelError::MissingKey) })
+            }
+            fn rejected(&self) {}
+        }
+        struct Failing;
+        impl WorkCloudSession for Failing {
+            fn signed_in(&self) -> bool {
+                true
+            }
+            fn plan(&self) -> Option<String> {
+                None
+            }
+            fn base(&self) -> String {
+                "https://api.zephium.app".into()
+            }
+            fn credential(&self) -> Arc<dyn LeadCredential> {
+                Arc::new(Refused)
+            }
+        }
+        install_cloud_session(Arc::new(Failing));
+        cloud_session_changed();
+        tokio::join!(
+            refresh_cloud_catalog(),
+            refresh_cloud_catalog(),
+            refresh_cloud_catalog()
+        );
+        refresh_cloud_catalog().await;
+        assert_eq!(ASKED.load(std::sync::atomic::Ordering::SeqCst), 1);
+
         install_cloud_session(Arc::new(Session));
         state().cloud = models::parse_cloud(&serde_json::json!({"models": [
             {"id": "fast", "provider": "openai", "upstream_model": "gpt-6-luna",

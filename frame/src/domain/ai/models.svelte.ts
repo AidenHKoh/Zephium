@@ -34,6 +34,7 @@ export class ModelsSession {
   private listed: string | null = null;
   private readSequence = 0;
   private readPending = false;
+  private reading = false;
   private active = false;
   private generation = 0;
   private stop: (() => void) | null = null;
@@ -56,10 +57,11 @@ export class ModelsSession {
   }
 
   private async read() {
-    if (this.busy) {
+    if (this.busy || this.reading) {
       this.readPending = true;
       return;
     }
+    this.reading = true;
     const sequence = ++this.readSequence;
     const generation = this.generation;
     const response = await observe(
@@ -67,12 +69,17 @@ export class ModelsSession {
       TIMEOUT,
       this.lifetime.signal,
     );
-    if (generation !== this.generation || sequence !== this.readSequence) return;
-    if (response.state !== "received") {
-      this.unavailable = true;
-      return;
+    if (generation !== this.generation) return;
+    this.reading = false;
+    if (sequence === this.readSequence) {
+      if (response.state !== "received") this.unavailable = true;
+      else this.adopt(response.value);
     }
-    this.adopt(response.value);
+    // Changes that arrived during the read are answered by one more, not one each.
+    if (this.readPending && !this.busy) {
+      this.readPending = false;
+      void this.read();
+    }
   }
 
   private adopt(response: WorkModelsV1) {
@@ -88,6 +95,8 @@ export class ModelsSession {
     const previousBase = this.models?.providers.find((row) => row.provider === "compatible")?.base;
     const nextBase = response.providers.find((row) => row.provider === "compatible")?.base;
     if (previousBase !== nextBase) this.endpoint = [];
+    // An identical answer is not a change: dependants would ask again for nothing.
+    if (this.models && JSON.stringify(this.models) === JSON.stringify(response)) return;
     this.models = response;
   }
 
@@ -214,6 +223,7 @@ export class ModelsSession {
     this.listingMore = false;
     this.listed = null;
     this.readPending = false;
+    this.reading = false;
     this.readSequence++;
   }
 }
