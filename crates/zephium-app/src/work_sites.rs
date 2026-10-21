@@ -537,10 +537,13 @@ impl RunSites {
             // session rather than asking to use it.
             (true, true) => Entry::Private(PrivateBecause::Public),
             (true, false) => Entry::Ask,
-            // Signed out of an account the run works on as the person: it
-            // still opens in their profile, so the sign-in they make there
-            // is theirs in normal browsing too.
-            (false, _) if self.account.iter().any(|known| known == site) => Entry::Ask,
+            // Signed out of an account the run works on as the person: there
+            // is nothing of theirs to ask about, so it opens in their profile
+            // without a question; signing in there is their own act, and the
+            // sign-in is theirs in normal browsing too.
+            (false, _) if self.account.iter().any(|known| known == site) => {
+                Entry::Session(self.yours(site))
+            }
             // Nothing of the person's to use: the page opens in Work's own
             // website data, which keeps what the site remembers for Work.
             (false, _) => Entry::Private(PrivateBecause::Public),
@@ -755,10 +758,13 @@ mod tests {
         ));
         run.personal("lego.com");
         assert_eq!(run.entry("lego.com", true), Entry::Ask);
-        // Signed out of an account the run works on as the person: asked,
-        // so the page and the sign-in are in the person's own profile.
+        // Signed out of an account the run works on as the person: nothing
+        // to ask about; the page and the sign-in are in their own profile.
         run.personal("linear.app");
-        assert_eq!(run.entry("linear.app", false), Entry::Ask);
+        assert!(matches!(
+            run.entry("linear.app", false),
+            Entry::Session(SiteSession::Yours { .. })
+        ));
         assert_eq!(
             run.entry("airbnb.com", false),
             Entry::Private(PrivateBecause::Public)
@@ -773,6 +779,7 @@ mod tests {
             run.view(),
             [
                 ("figma.com".to_owned(), "private"),
+                ("linear.app".to_owned(), "yours"),
                 ("notion.so".to_owned(), "yours"),
                 ("slack.com".to_owned(), "yours"),
             ]
