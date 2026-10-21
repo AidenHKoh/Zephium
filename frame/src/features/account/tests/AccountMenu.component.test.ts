@@ -23,12 +23,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 
 vi.mock("$domain/keymap", () => ({
-  keymap: {
-    all: () => [
-      { id: "browser.settings", accelerator: "CmdOrCtrl+," },
-      { id: "window.newPrivate", accelerator: "CmdOrCtrl+Shift+N" },
-    ],
-  },
+  keymap: { all: () => [{ id: "browser.settings", accelerator: "CmdOrCtrl+," }] },
 }));
 
 const ID = (n: number) => `01J${String(n).padStart(23, "0")}`;
@@ -53,14 +48,9 @@ async function shoot(name: string) {
   document.documentElement.dataset.theme = "dark";
 }
 
-async function open(
-  account: AccountV1,
-  profiles: ProfileEntryView[],
-  name = "Account",
-  privately = false,
-) {
+async function open(account: AccountV1, profiles: ProfileEntryView[], name = "Account") {
   native.account = account;
-  native.profiles = { current: ID(1), private: privately, profiles };
+  native.profiles = { current: ID(1), private: false, profiles };
   const screen = await render(AccountMenuStage);
   await settle(200);
   await screen.getByRole("button", { name, exact: true }).click();
@@ -76,102 +66,70 @@ const signedIn = accountFixture({
   usage: usageFixture(),
 });
 
-const label = (item: Element) =>
-  item.getAttribute("aria-label") ?? item.querySelector(".foot-label")?.textContent?.trim();
-
-test("the menu leads with the account, then profiles, a private window, models and settings", async () => {
-  await page.viewport(520, 680);
+test("the menu leads with who you are, then account, models and settings", async () => {
+  await page.viewport(520, 420);
   native.command.mockClear();
   const screen = await open(signedIn, three);
 
-  const items = [...document.querySelectorAll(".work-menu [role^='menuitem']")];
-  expect(items.map(label)).toEqual([
+  const items = page.getByRole("menuitem").all();
+  expect(
+    items.map(
+      (item) => item.element().getAttribute("aria-label") ?? item.element().textContent?.trim(),
+    ),
+  ).toEqual([
+    "Ada Lovelace — Profile Settings",
+    "Switch to Work",
+    "Switch to Side Project",
     "Account — ada@example.com",
-    "Ada Lovelace",
-    "Work",
-    "Side Project",
-    "New Profile…",
-    "Manage Profiles…",
-    "New Incognito Window",
     "Models",
-    "Settings",
+    expect.stringContaining("Settings"),
   ]);
   await expect
     .element(page.getByRole("menuitem", { name: /^Account/u }))
-    .toHaveTextContent(/ada@example\.com.*Pro.*42% used/u);
-  await expect
-    .element(page.getByRole("menuitemradio", { name: "Ada Lovelace" }))
-    .toHaveAttribute("aria-checked", "true");
-  await expect
-    .element(page.getByRole("menuitemradio", { name: "Work" }))
-    .toHaveAttribute("aria-checked", "false");
+    .toHaveTextContent(/ada@example\.com.*Pro · 42% used/u);
   expect(page.getByText("History").query()).toBeNull();
   expect(page.getByText("Downloads").query()).toBeNull();
 
-  const trigger = screen.getByRole("button", { name: "Account", exact: true });
-  for (const [name, command] of [
-    [/^Account/u, "settings.account"],
-    ["Manage Profiles…", "settings.profiles"],
-    ["New Profile…", "settings.profiles"],
-    ["New Incognito Window", "window.newPrivate"],
-    ["Models", "settings.ai"],
-    [/^Settings/u, "browser.settings"],
-  ] as const) {
-    await page.getByRole("menuitem", { name }).click();
-    expect(native.command).toHaveBeenLastCalledWith(command);
-    await trigger.click();
-  }
-});
-
-test("another profile is one click away, and the current one stays put", async () => {
-  await page.viewport(520, 680);
-  native.switch.mockClear();
-  const screen = await open(signedIn, three);
-  await page.getByRole("menuitemradio", { name: "Side Project" }).click();
-  expect(native.switch).toHaveBeenCalledWith(ID(3));
+  await page.getByRole("menuitem", { name: /Profile Settings/u }).click();
+  expect(native.command).toHaveBeenLastCalledWith("settings.profiles");
   await screen.getByRole("button", { name: "Account", exact: true }).click();
-  await page.getByRole("menuitemradio", { name: "Ada Lovelace" }).click();
-  expect(native.switch).toHaveBeenCalledTimes(1);
+  await page.getByRole("menuitem", { name: "Models" }).click();
+  expect(native.command).toHaveBeenLastCalledWith("settings.ai");
+  await screen.getByRole("button", { name: "Account", exact: true }).click();
+  await page.getByRole("menuitem", { name: /^Account/u }).click();
+  expect(native.command).toHaveBeenLastCalledWith("settings.account");
+  await screen.getByRole("button", { name: "Account", exact: true }).click();
+  await page.getByRole("menuitem", { name: /^Settings/u }).click();
+  expect(native.command).toHaveBeenLastCalledWith("browser.settings");
 });
 
-test("signed out offers one way in, and a private window shows neither account nor profiles", async () => {
-  await page.viewport(520, 680);
-  const out = await open(accountFixture(), solo);
-  await expect
-    .element(page.getByRole("menuitem", { name: "Sign in to Zephium", exact: true }))
-    .toBeVisible();
-  expect(page.getByRole("menuitem", { name: /^Account/u }).query()).toBeNull();
-  await out.unmount();
+test("another profile is one click away", async () => {
+  await page.viewport(520, 420);
+  native.switch.mockClear();
+  await open(signedIn, three);
+  await page.getByRole("menuitem", { name: "Switch to Side Project" }).click();
+  expect(native.switch).toHaveBeenCalledWith(ID(3));
+});
 
-  await open(signedIn, three, "Account", true);
-  expect(page.getByRole("menuitem", { name: /^Account|^Sign in/u }).query()).toBeNull();
-  expect(page.getByRole("menuitemradio").query()).toBeNull();
-  expect(page.getByRole("menuitem", { name: "New Incognito Window" }).query()).toBeNull();
+test("a lone profile has no one to switch to, and signed out offers to sign in", async () => {
+  await page.viewport(520, 420);
+  await open(accountFixture(), solo);
+  expect(page.getByRole("menuitem", { name: /Switch to/u }).query()).toBeNull();
+  await expect.element(page.getByRole("menuitem", { name: "Sign in", exact: true })).toBeVisible();
+  expect(page.getByRole("menuitem", { name: /^Account/u }).query()).toBeNull();
 });
 
 test("the menu is part of the keyboard", async () => {
-  await page.viewport(520, 680);
-  const { userEvent } = await import("vitest/browser");
-  await open(signedIn, three);
-  const account = page.getByRole("menuitem", { name: /^Account/u });
-  await expect.element(account).toHaveFocus();
-  await userEvent.keyboard("{ArrowDown}");
-  await expect.element(page.getByRole("menuitemradio", { name: "Ada Lovelace" })).toHaveFocus();
-  await userEvent.keyboard("{ArrowDown}{ArrowDown}");
-  await expect.element(page.getByRole("menuitemradio", { name: "Side Project" })).toHaveFocus();
-  await userEvent.keyboard("{End}");
-  await expect.element(page.getByRole("menuitem", { name: /^Settings/u })).toHaveFocus();
-  await userEvent.keyboard("{ArrowDown}");
-  await expect.element(account).toHaveFocus();
-  await userEvent.keyboard("{ArrowUp}");
-  await expect.element(page.getByRole("menuitem", { name: /^Settings/u })).toHaveFocus();
-  native.switch.mockClear();
-  await userEvent.keyboard("{Home}{ArrowDown}{ArrowDown}{Enter}");
-  expect(native.switch).toHaveBeenCalledWith(ID(2));
+  await page.viewport(520, 420);
+  native.command.mockClear();
+  const screen = await open(signedIn, solo);
+  await expect.element(page.getByRole("menuitem", { name: /Profile Settings/u })).toHaveFocus();
   await expect
     .element(page.getByRole("button", { name: "Account", exact: true }))
-    .toHaveAttribute("aria-expanded", "false");
-  await page.getByRole("button", { name: "Account", exact: true }).click();
+    .toHaveAttribute("aria-expanded", "true");
+  await page.getByRole("menuitem", { name: /Profile Settings/u }).click();
+  await screen.getByRole("button", { name: "Account", exact: true }).click();
+  const { userEvent } = await import("vitest/browser");
   await userEvent.keyboard("{Escape}");
   await expect
     .element(page.getByRole("button", { name: "Account", exact: true }))
@@ -182,7 +140,7 @@ test(
   "what the menu looks like, signed in and out, with one profile and three",
   { timeout: 90_000 },
   async () => {
-    await page.viewport(520, 680);
+    await page.viewport(520, 420);
     for (const [name, account, profiles] of [
       ["in-three", signedIn, three],
       ["in-one", signedIn, solo],
@@ -195,16 +153,6 @@ test(
           email: "ada@example.com",
           plan: "pro",
           usage: usageFixture({ used_percent: 91 }),
-        }),
-        three,
-      ],
-      [
-        "usage-full",
-        accountFixture({
-          signed_in: true,
-          email: "ada@example.com",
-          plan: "pro",
-          usage: usageFixture({ used_percent: 100 }),
         }),
         three,
       ],

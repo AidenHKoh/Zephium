@@ -1,18 +1,13 @@
-import { expect, test, vi } from "vitest";
+import { test, vi } from "vitest";
 import { page } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
-import type { AccountV1, ProfileEntryView, ProfilesView } from "$shared/ipc/bindings";
-import { accountFixture, usageFixture } from "$shared/testing/account";
+import type { ProfileEntryView, ProfilesView } from "$shared/ipc/bindings";
 import ProfileFootLook from "./ProfileFootLook.svelte";
 
-const native = vi.hoisted(() => ({
-  profiles: null as ProfilesView | null,
-  account: null as AccountV1 | null,
-}));
+const native = vi.hoisted(() => ({ profiles: null as ProfilesView | null }));
 vi.mock("$shared/ipc/bindings", async () => {
   const known: Record<string, (...args: never[]) => Promise<unknown>> = {
     profilesGet: async () => ({ status: "ok", data: native.profiles }),
-    accountGet: async () => ({ account: native.account, fault: null, retry_after: null }),
     runCommand: async () => ({ accepted: true, operation_id: null }),
     toolsMenuPopup: async () => true,
     settingGet: async () => null,
@@ -25,18 +20,6 @@ vi.mock("$shared/ipc/bindings", async () => {
     }),
   };
 });
-
-vi.mock("$domain/keymap", () => ({
-  keymap: {
-    all: () => [
-      { id: "browser.settings", accelerator: "CmdOrCtrl+," },
-      { id: "window.newPrivate", accelerator: "CmdOrCtrl+Shift+N" },
-      { id: "tool.notes", accelerator: "CmdOrCtrl+Shift+E" },
-      { id: "tool.history", accelerator: "CmdOrCtrl+Y" },
-      { id: "tool.downloads", accelerator: "CmdOrCtrl+Shift+J" },
-    ],
-  },
-}));
 
 const photo = vi.hoisted(() => ({ url: "" }));
 vi.mock("$domain/profiles/avatar", async (original) => {
@@ -104,33 +87,19 @@ async function shoot(target: HTMLElement, name: string) {
   document.documentElement.dataset.theme = "dark";
 }
 
-const signedIn = accountFixture({
-  signed_in: true,
-  email: "ada.lovelace@analytical-engine.example",
-  plan: "pro",
-  usage: usageFixture(),
-});
-
-/** Opens the full-width menu (first) or the rail's (last), settled. */
-async function open(screen: Awaited<ReturnType<typeof render>>, which: "first" | "last") {
-  const triggers = screen.getByRole("button", { name: /^Tools/u });
-  await (which === "first" ? triggers.first() : triggers.last()).click();
-  const stack = [...screen.container.querySelectorAll<HTMLElement>(".shelf-stack")].at(
-    which === "first" ? 0 : -1,
-  )!;
-  await expect.poll(() => stack.inert).toBe(false);
-  await expect.poll(() => getComputedStyle(stack).opacity).toBe("1");
-  return stack;
-}
-
-test("the sidebar foot wears the profile's photo, symbol or nothing", async () => {
+test("the sidebar foot wears the profile's photo, and its stack lists the other profiles", async () => {
   photo.url = paintPhoto();
-  await page.viewport(560, 740);
-  native.account = accountFixture();
+  await page.viewport(520, 720);
   native.profiles = { current: ID(1), private: false, profiles };
   const screen = await render(ProfileFootLook);
   await settle();
   await shoot(screen.container, "foot-photo");
+  await screen
+    .getByRole("button", { name: /^Tools/u })
+    .first()
+    .click();
+  await settle();
+  await shoot(screen.container, "foot-photo-open");
   await screen.unmount();
 
   native.profiles = { current: ID(2), private: false, profiles };
@@ -149,60 +118,3 @@ test("the sidebar foot wears the profile's photo, symbol or nothing", async () =
   await shoot(unchosen.container, "foot-unchosen");
   await unchosen.unmount();
 });
-
-test(
-  "the foot menu signed out and in, private, at rail width and in a narrow column",
-  { timeout: 120_000 },
-  async () => {
-    photo.url = paintPhoto();
-    await page.viewport(560, 740);
-    native.profiles = { current: ID(1), private: false, profiles };
-
-    native.account = accountFixture();
-    let screen = await render(ProfileFootLook);
-    await settle();
-    await open(screen, "first");
-    await shoot(screen.container, "menu-signed-out");
-    await screen.unmount();
-
-    native.account = signedIn;
-    screen = await render(ProfileFootLook);
-    await settle();
-    const stack = await open(screen, "first");
-    await expect.element(page.getByRole("menuitem", { name: /^Account/u })).toBeVisible();
-    // Never past the column: the menu fits the sidebar it rises from.
-    expect(stack.getBoundingClientRect().width).toBeLessThanOrEqual(260 - 8);
-    await shoot(screen.container, "menu-signed-in");
-    await screen.unmount();
-
-    screen = await render(ProfileFootLook);
-    await settle();
-    const rail = await open(screen, "last");
-    expect(rail.getBoundingClientRect().width).toBe(48);
-    await shoot(screen.container, "menu-rail");
-    await screen.unmount();
-
-    native.account = accountFixture({
-      signed_in: true,
-      email: "ada@example.com",
-      plan: "pro",
-      usage: usageFixture({ used_percent: 91 }),
-    });
-    screen = await render(ProfileFootLook, { width: 200 });
-    await settle();
-    const narrow = await open(screen, "first");
-    expect(narrow.getBoundingClientRect().width).toBeLessThanOrEqual(200 - 8);
-    await shoot(screen.container, "menu-narrow");
-    await screen.unmount();
-
-    native.account = signedIn;
-    native.profiles = { current: ID(1), private: true, profiles };
-    screen = await render(ProfileFootLook);
-    await settle();
-    await open(screen, "first");
-    expect(page.getByRole("menuitem", { name: /^Account/u }).query()).toBeNull();
-    expect(page.getByRole("menuitemradio").query()).toBeNull();
-    await shoot(screen.container, "menu-private");
-    await screen.unmount();
-  },
-);

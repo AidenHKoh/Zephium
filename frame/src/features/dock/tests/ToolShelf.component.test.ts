@@ -16,8 +16,8 @@ const native = vi.hoisted(() => ({
 }));
 
 const names = (root: HTMLElement) =>
-  [...root.querySelectorAll(".foot-tool")].map((item) =>
-    item.querySelector(".foot-label")?.textContent?.trim(),
+  [...root.querySelectorAll(".shelf-item")].map((item) =>
+    item.querySelector(":scope > span:not(.ui-menu-icon, .shelf-keys)")?.textContent?.trim(),
   );
 
 const avatar = { style: "initials" as const, color: 1, symbol: 0, revision: 0 };
@@ -71,14 +71,16 @@ test("the tools stay out of reach until the case is pressed", async () => {
     .toHaveAttribute("aria-current", "true");
 });
 
-test("the profile opens on the account, the profiles, a private window, then the tools", async () => {
+test("the profile opens on a switcher of who you are, then the tools", async () => {
   native.profiles.mockResolvedValueOnce({ status: "ok" as const, data: ROSTER });
   await page.viewport(1200, 800);
   const screen = await render(ToolShelf);
-  screen.container.style.paddingBlockStart = "640px";
+  screen.container.style.paddingBlockStart = "480px";
   const tools = screen.getByRole("button", { name: /^Tools/ });
   await expect.element(tools).toHaveAttribute("aria-haspopup", "menu");
-  await expect.element(tools).toHaveAttribute("aria-label", "Tools — Personal");
+  await expect
+    .poll(() => screen.container.querySelector(".shelf-me-name")?.textContent)
+    .toBe("Personal");
   expect(names(screen.container)).toEqual([
     "Notes",
     "Tasks",
@@ -88,57 +90,38 @@ test("the profile opens on the account, the profiles, a private window, then the
     "Bookmarks",
     "Settings",
   ]);
-  await expect
-    .poll(() =>
-      [...screen.container.querySelectorAll("[role='menuitemradio']")].map((item) => [
-        item.getAttribute("aria-label"),
-        item.getAttribute("aria-checked"),
-      ]),
-    )
-    .toEqual([
-      ["Personal", "true"],
-      ["Work", "false"],
-    ]);
-  // One shared menu: no stagger of rows, every row the same height.
-  const rows = [...screen.container.querySelectorAll<HTMLElement>(".foot-row")];
-  await tools.click();
-  await expect.poll(() => getComputedStyle(rows[0]!).opacity).toBe("1");
-  expect(new Set(rows.map((row) => row.offsetHeight))).toEqual(new Set([32]));
+  // Nearest the case settles first, so each row's step counts from the foot.
+  const steps = [...screen.container.querySelectorAll<HTMLElement>(".shelf-item, .shelf-head")].map(
+    (item) => Number(item.style.getPropertyValue("--step")),
+  );
+  expect(steps).toEqual([7, 6, 5, 4, 3, 2, 1, 0]);
+  expect(screen.container.textContent).not.toContain("Manage Profiles");
 
-  await screen.getByRole("menuitemradio", { name: "Work" }).click();
+  await tools.click();
+  await screen.getByRole("menuitem", { name: "Switch to Work" }).click();
   expect(native.switchTo).toHaveBeenCalledWith("p2");
   await tools.click();
   await screen.getByRole("menuitem", { name: "New Incognito Window" }).click();
   expect(native.run).toHaveBeenLastCalledWith("window.newPrivate");
   await tools.click();
-  await screen.getByRole("menuitem", { name: "Manage Profiles…" }).click();
-  expect(native.run).toHaveBeenLastCalledWith("settings.profiles");
-  native.run.mockClear();
-  await tools.click();
-  await screen.getByRole("menuitem", { name: "New Profile…" }).click();
+  await screen.getByRole("menuitem", { name: /^Personal — / }).click();
   expect(native.run).toHaveBeenLastCalledWith("settings.profiles");
 
   await tools.click({ button: "right" });
   expect(native.toolsMenu).toHaveBeenCalledOnce();
 });
 
-test("with one profile the switcher still names it, with a way to add another", async () => {
+test("with one profile the head is you alone, and a private window beside you", async () => {
   native.profiles.mockResolvedValueOnce({
     status: "ok" as const,
     data: { ...ROSTER, profiles: ROSTER.profiles.slice(0, 1) },
   });
   const screen = await render(ToolShelf);
   await expect
-    .poll(() =>
-      [...screen.container.querySelectorAll("[role='menuitemradio']")].map((item) =>
-        item.getAttribute("aria-label"),
-      ),
-    )
-    .toEqual(["Personal"]);
-  const labels = [...screen.container.querySelectorAll(".foot-label")].map((label) =>
-    label.textContent?.trim(),
-  );
-  expect(labels.slice(1, 3)).toEqual(["New Profile…", "Manage Profiles…"]);
+    .poll(() => screen.container.querySelector(".shelf-me-name")?.textContent)
+    .toBe("Personal");
+  const chips = [...screen.container.querySelectorAll(".shelf-chip")];
+  expect(chips.map((chip) => chip.getAttribute("aria-label"))).toEqual(["New Incognito Window"]);
 });
 
 test("a feature switched off takes its tool out, and an empty group its rule", async () => {
@@ -149,8 +132,7 @@ test("a feature switched off takes its tool out, and an empty group its rule", a
   await expect
     .poll(() => names(screen.container))
     .toEqual(["History", "Downloads", "Bookmarks", "Settings"]);
-  // Profiles, private window, records, Settings: three hairlines between four.
-  expect(screen.container.querySelectorAll(".foot-rule")).toHaveLength(3);
+  expect(screen.container.querySelectorAll(".shelf-rule")).toHaveLength(2);
   for (const feature of ["notes", "tasks", "time"])
     emitNativeEvent("uiCommand", `preference.${feature}.enabled=true`);
   preferences.dispose();
@@ -188,17 +170,4 @@ test("a press on the page, which takes focus away, puts the stack away", async (
   await expect.poll(() => stack.inert).toBe(false);
   window.dispatchEvent(new FocusEvent("blur"));
   await expect.poll(() => stack.inert).toBe(true);
-});
-
-test("a private window shows neither the account nor the profiles", async () => {
-  native.profiles.mockResolvedValueOnce({
-    status: "ok" as const,
-    data: { ...ROSTER, private: true },
-  });
-  const screen = await render(ToolShelf);
-  await expect.poll(() => names(screen.container)).toContain("Settings");
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  expect(screen.container.querySelector("[role='menuitemradio']")).toBeNull();
-  expect(screen.container.querySelector(".account-card")).toBeNull();
-  expect(screen.container.textContent).not.toContain("New Incognito Window");
 });

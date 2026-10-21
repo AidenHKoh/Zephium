@@ -16,7 +16,7 @@
   .stage {
     display: flex;
     inline-size: 460px;
-    block-size: 620px;
+    block-size: 360px;
     background: var(--color-canvas);
   }
 

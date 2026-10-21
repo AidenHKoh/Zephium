@@ -35,8 +35,7 @@
   let panel = $state<HTMLElement>();
   let button = $state<HTMLButtonElement>();
 
-  const ITEM = '[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]';
-  const items = () => [...(panel?.querySelectorAll<HTMLElement>(ITEM) ?? [])];
+  const items = () => [...(panel?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
 
   function show() {
     material = menuMaterialFor(button);
@@ -149,7 +148,7 @@
       if (
         menu &&
         !(event.target as Element | null)?.closest("[data-keep-open]") &&
-        (event.target as Element | null)?.closest(ITEM)
+        (event.target as Element | null)?.closest('[role="menuitem"]')
       )
         dismiss(true);
     }}
