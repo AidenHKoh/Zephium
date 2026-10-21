@@ -16,7 +16,7 @@ pub mod wire;
 use reqwest::header::HeaderValue;
 use zeroize::Zeroizing;
 
-pub use client::{Client, ConfigReply, Origin};
+pub use client::{AvatarReply, Client, ConfigReply, Origin, MAX_AVATAR_UPLOAD_BYTES};
 pub use service::{AccountSettings, Service, View};
 pub use tasks::CallSource;
 pub use vault::{AccountVault, SystemVault, VaultFault};
@@ -74,6 +74,23 @@ pub enum AccountError {
     PlanChangeExpired,
     /// This subscription cannot be changed that way right now.
     PlanChangeUnavailable,
+    /// The picture is missing, empty or could not be decoded.
+    AvatarInvalid,
+    /// The upload took too long or was cut off.
+    AvatarTimedOut,
+    /// The picture is over the 2 MiB limit.
+    AvatarTooLarge,
+    /// Not a still PNG, JPEG or WebP picture.
+    AvatarUnsupported,
+    /// The picture has more pixels than the service takes.
+    AvatarDimensions,
+    /// The service could not convert the picture within its limits.
+    AvatarProcessing,
+    /// The service is converting other pictures; try again after this many
+    /// seconds. The current picture is unchanged.
+    AvatarBusy { retry_after: u32 },
+    /// The upload was cancelled here, by a removal or by the person.
+    AvatarCancelled,
 }
 
 /// The session bearer, zeroized on drop and never printed.

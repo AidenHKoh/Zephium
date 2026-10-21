@@ -9,9 +9,10 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use tokio::sync::Notify;
 use url::Url;
 
-use crate::client::{Client, ConfigReply, Origin};
+use crate::client::{AvatarReply, Client, ConfigReply, Origin};
 use crate::tasks::{CallSource, Ledger};
 use crate::vault::{AccountVault, VaultFault};
 use crate::wire::{
@@ -39,6 +40,11 @@ const MAX_DEVICE_CHARS: usize = 64;
 const BILLING_REFRESHES: usize = 6;
 const BILLING_WINDOW: Duration = Duration::from_secs(60);
 const MAX_UNSETTLED: usize = 8;
+/// A held account picture is revalidated when shown, at most this often.
+#[cfg(not(test))]
+const AVATAR_RECHECK: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const AVATAR_RECHECK: Duration = Duration::ZERO;
 
 /// App settings, installed by the composition root.
 pub trait AccountSettings: Send + Sync {
@@ -74,6 +80,23 @@ pub struct View {
     pub billing_review: bool,
     /// A Pro/Max change this account has started and not dismissed.
     pub plan_change: Option<PlanChange>,
+    /// The revision of the account picture held here, to ask
+    /// [`Service::avatar_image`] for; none shows initials.
+    pub avatar: Option<u32>,
+}
+
+/// The account picture's bytes, for one account at one address on one server.
+/// Kept in memory only, so it goes with the session.
+struct HeldAvatar {
+    origin: String,
+    account: String,
+    url: String,
+    etag: Option<String>,
+    bytes: Arc<Vec<u8>>,
+    /// Never reused while the app runs, so a picture shown by revision is
+    /// never another account's.
+    revision: u32,
+    checked: Instant,
 }
 
 /// A plan change kept across restarts, for one account on one server. It holds
@@ -128,6 +151,12 @@ struct Inner {
     /// Outlives a re-authentication: the quote is confirmed after it.
     change: Option<HeldChange>,
     tasks: Ledger,
+    avatar: Option<HeldAvatar>,
+    avatar_revisions: u32,
+    /// An address the service answered 404 for, until the account names another.
+    avatar_missing: Option<String>,
+    /// Cancels the upload under way.
+    avatar_upload: Option<Arc<Notify>>,
 }
 
 impl Inner {
@@ -147,6 +176,21 @@ impl Inner {
         self.unsettled.clear();
         self.billing_review = false;
         self.checkout_link = None;
+        self.avatar = None;
+        self.avatar_missing = None;
+        if let Some(cancel) = self.avatar_upload.take() {
+            cancel.notify_one();
+        }
+    }
+
+    /// The picture held, when it is the signed-in account's current one here.
+    fn held_avatar(&self) -> Option<&HeldAvatar> {
+        let profile = self.profile.as_ref().filter(|_| self.signed_in)?;
+        let url = profile.avatar_url.as_deref()?;
+        let origin = self.origin();
+        self.avatar
+            .as_ref()
+            .filter(|held| held.origin == origin && held.account == profile.id && held.url == url)
     }
 
     /// The held change, when it belongs to the account signed in on this server.
@@ -175,6 +219,9 @@ pub struct Service {
     version: String,
     inner: Mutex<Inner>,
     observer: OnceLock<Observer>,
+    /// Held across a picture upload, so a removal waits for a cancelled
+    /// upload to stop before it is sent.
+    avatar_writes: tokio::sync::Mutex<()>,
 }
 
 impl Service {
@@ -241,8 +288,13 @@ impl Service {
                 checkout_link: None,
                 change,
                 tasks,
+                avatar: None,
+                avatar_revisions: 0,
+                avatar_missing: None,
+                avatar_upload: None,
             }),
             observer: OnceLock::new(),
+            avatar_writes: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -290,6 +342,7 @@ impl Service {
             unsettled: inner.unsettled.clone(),
             billing_review: inner.billing_review,
             plan_change: inner.visible_change().cloned(),
+            avatar: inner.held_avatar().map(|held| held.revision),
         }
     }
 
@@ -537,6 +590,193 @@ impl Service {
             inner.billing = billing.ok().or(inner.billing.take());
             inner.usage = usage.ok().or(inner.usage.take());
             inner.refreshed = Some(Instant::now());
+            self.persist(&inner);
+        }
+        self.notify();
+        // A picture that cannot be read leaves initials; the account still refreshed.
+        let _ = self.load_avatar().await;
+        Ok(())
+    }
+
+    /// The account picture's bytes for `revision`, while it is still the
+    /// signed-in account's current picture on this server.
+    pub fn avatar_image(&self, revision: u32) -> Option<Arc<Vec<u8>>> {
+        self.lock()
+            .held_avatar()
+            .filter(|held| held.revision == revision)
+            .map(|held| held.bytes.clone())
+    }
+
+    /// Fetches the account picture the account names, or revalidates the
+    /// bytes held by their ETag. An address the service no longer has makes
+    /// the account be read again, and a new one is followed once; otherwise
+    /// the account shows initials.
+    pub async fn load_avatar(&self) -> Result<(), AccountError> {
+        for _ in 0..2 {
+            let (client, epoch, url, etag) = {
+                let mut inner = self.lock();
+                let Some(profile) = inner.profile.as_ref().filter(|_| inner.signed_in) else {
+                    return Ok(());
+                };
+                let Some(url) = profile.avatar_url.clone() else {
+                    let dropped = inner.avatar.take().is_some();
+                    drop(inner);
+                    if dropped {
+                        self.notify();
+                    }
+                    return Ok(());
+                };
+                if inner.avatar_missing.as_deref() == Some(url.as_str()) {
+                    return Ok(());
+                }
+                let held = inner.held_avatar();
+                if held.is_some_and(|held| held.checked.elapsed() < AVATAR_RECHECK) {
+                    return Ok(());
+                }
+                let etag = held.and_then(|held| held.etag.clone());
+                (inner.client.clone(), inner.epoch, url, etag)
+            };
+            let token = self.bearer()?;
+            match client.avatar(&token, &url, etag.as_deref()).await {
+                Ok(reply) => {
+                    self.keep_avatar(epoch, &url, reply);
+                    return Ok(());
+                }
+                Err(AccountError::NotFound) => {
+                    let profile = self.signed_out_on_401(epoch, client.profile(&token).await)?;
+                    {
+                        let mut inner = self.lock();
+                        if inner.epoch != epoch {
+                            return Ok(());
+                        }
+                        inner.avatar = None;
+                        if profile.avatar_url.as_deref() == Some(url.as_str()) {
+                            inner.avatar_missing = Some(url);
+                        }
+                        inner.profile = Some(profile);
+                        self.persist(&inner);
+                    }
+                    self.notify();
+                }
+                Err(error) => return self.signed_out_on_401(epoch, Err(error)),
+            }
+        }
+        Ok(())
+    }
+
+    fn keep_avatar(&self, epoch: u64, url: &str, reply: AvatarReply) {
+        {
+            let mut inner = self.lock();
+            let account = inner
+                .profile
+                .as_ref()
+                .filter(|profile| profile.avatar_url.as_deref() == Some(url))
+                .map(|profile| profile.id.clone());
+            let Some(account) = account.filter(|_| inner.epoch == epoch && inner.signed_in) else {
+                return;
+            };
+            match reply {
+                AvatarReply::Unchanged => {
+                    if inner.held_avatar().is_some() {
+                        if let Some(held) = inner.avatar.as_mut() {
+                            held.checked = Instant::now();
+                        }
+                    }
+                    return;
+                }
+                AvatarReply::Fresh { bytes, etag } => {
+                    inner.avatar_revisions = inner.avatar_revisions.wrapping_add(1).max(1);
+                    let origin = inner.origin();
+                    inner.avatar = Some(HeldAvatar {
+                        origin,
+                        account,
+                        url: url.to_owned(),
+                        etag,
+                        bytes: Arc::new(bytes),
+                        revision: inner.avatar_revisions,
+                        checked: Instant::now(),
+                    });
+                }
+            }
+        }
+        self.notify();
+    }
+
+    /// Replaces the account picture with `bytes`, a still PNG, JPEG or WebP of
+    /// at most 2 MiB, then fetches the service's own copy of it. A removal or
+    /// another upload started meanwhile cancels this one.
+    pub async fn upload_avatar(&self, bytes: &[u8]) -> Result<(), AccountError> {
+        crate::client::avatar_upload_type(bytes)?;
+        let token = self.bearer()?;
+        let (client, epoch) = self.client();
+        let cancel = Arc::new(Notify::new());
+        if let Some(previous) = self.lock().avatar_upload.replace(cancel.clone()) {
+            previous.notify_one();
+        }
+        let result = {
+            let _writing = self.avatar_writes.lock().await;
+            tokio::select! {
+                result = client.upload_avatar(&token, bytes) => result,
+                () = cancel.notified() => Err(AccountError::AvatarCancelled),
+            }
+        };
+        {
+            let mut inner = self.lock();
+            if inner
+                .avatar_upload
+                .as_ref()
+                .is_some_and(|held| Arc::ptr_eq(held, &cancel))
+            {
+                inner.avatar_upload = None;
+            }
+        }
+        let url = self.signed_out_on_401(epoch, result)?;
+        {
+            let mut inner = self.lock();
+            if inner.epoch != epoch {
+                return Ok(());
+            }
+            if let Some(profile) = inner.profile.as_mut() {
+                profile.avatar_url = Some(url);
+            }
+            // The replaced picture's bytes go now; the new ones are fetched.
+            inner.avatar = None;
+            inner.avatar_missing = None;
+            self.persist(&inner);
+        }
+        self.notify();
+        let _ = self.load_avatar().await;
+        Ok(())
+    }
+
+    /// Stops an upload under way; nothing changes on the service.
+    pub fn cancel_avatar_upload(&self) {
+        if let Some(cancel) = self.lock().avatar_upload.take() {
+            cancel.notify_one();
+        }
+    }
+
+    /// Removes the account picture. An upload under way is cancelled, and
+    /// has stopped, before the removal is sent, so it cannot land after it.
+    pub async fn remove_avatar(&self) -> Result<(), AccountError> {
+        self.cancel_avatar_upload();
+        let token = self.bearer()?;
+        let (client, epoch) = self.client();
+        let removed = {
+            let _writing = self.avatar_writes.lock().await;
+            client.remove_avatar(&token).await
+        };
+        self.signed_out_on_401(epoch, removed)?;
+        {
+            let mut inner = self.lock();
+            if inner.epoch != epoch {
+                return Ok(());
+            }
+            if let Some(profile) = inner.profile.as_mut() {
+                profile.avatar_url = None;
+            }
+            inner.avatar = None;
+            inner.avatar_missing = None;
             self.persist(&inner);
         }
         self.notify();

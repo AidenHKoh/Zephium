@@ -59,6 +59,10 @@ pub struct Profile {
     pub name: Option<String>,
     #[serde(default, rename = "createdAt", alias = "created_at")]
     pub created_at: Option<String>,
+    /// The account picture's private, versioned address on the account
+    /// service; fetched natively with the bearer, never handed to a webview.
+    #[serde(default)]
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -80,6 +84,12 @@ pub struct Session {
     pub device: Option<String>,
     #[serde(default)]
     pub current: bool,
+}
+
+/// `PUT` and `DELETE /v1/account/avatar`.
+#[derive(Deserialize)]
+pub(crate) struct AvatarLink {
+    pub(crate) avatar_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -375,7 +385,8 @@ pub struct PlanChange {
     /// Null for an immediate upgrade; the renewal for a downgrade.
     #[serde(default)]
     pub effective_at: Option<String>,
-    /// Before tax, and only an estimate: the provider decides the final charge.
+    /// Only an estimate from product prices, with no customer tax worked out:
+    /// the provider decides the final charge and any tax on it.
     #[serde(default)]
     pub amount_due_estimate: Option<Price>,
     #[serde(default)]

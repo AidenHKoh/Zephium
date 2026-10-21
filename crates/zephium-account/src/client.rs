@@ -13,8 +13,8 @@ use serde_json::{json, Value};
 use url::Url;
 
 use crate::wire::{
-    self, Billing, ClientConfig, PlanChange, Profile, Purchase, Receipt, Session, Usage,
-    UsageHistory,
+    self, AvatarLink, Billing, ClientConfig, PlanChange, Profile, Purchase, Receipt, Session,
+    Usage, UsageHistory,
 };
 use crate::{AccountError, AccountToken};
 
@@ -30,6 +30,11 @@ const MAX_CURSOR_BYTES: usize = 200;
 const MAX_EXPORT_BYTES: usize = 512 * 1024;
 /// Checkout and the billing portal must open on the billing provider itself.
 const BILLING_HOSTS: [&str; 2] = ["polar.sh", "sandbox.polar.sh"];
+/// The largest picture the service takes; anything bigger is refused here.
+pub const MAX_AVATAR_UPLOAD_BYTES: usize = 2 * 1024 * 1024;
+/// The service's stored pictures are at most 256 KiB; twice that is refused.
+const MAX_AVATAR_BYTES: usize = 512 * 1024;
+const AVATAR: &str = "/v1/account/avatar";
 
 /// The account service's origin: https, or plain http on loopback for a
 /// server running on this machine.
@@ -82,9 +87,26 @@ pub enum ConfigReply {
     Unchanged { max_age: Duration },
 }
 
+/// What a private picture fetch answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AvatarReply {
+    Fresh {
+        bytes: Vec<u8>,
+        etag: Option<String>,
+    },
+    /// 304: the bytes held are still the account's picture.
+    Unchanged,
+}
+
 pub struct Client {
     origin: Origin,
     http: reqwest::Client,
+}
+
+/// A request body other than JSON.
+struct Payload {
+    content_type: HeaderValue,
+    bytes: Vec<u8>,
 }
 
 impl Client {
@@ -407,6 +429,130 @@ impl Client {
         billing_link(&link.url)
     }
 
+    /// Replaces the account picture with `bytes`, a still PNG, JPEG or WebP of
+    /// at most 2 MiB; anything else is refused before it is sent. The service
+    /// re-encodes it and answers with the new picture's address.
+    pub async fn upload_avatar(
+        &self,
+        token: &AccountToken,
+        bytes: &[u8],
+    ) -> Result<String, AccountError> {
+        let (content_type, extension) = avatar_upload_type(bytes)?;
+        let boundary = boundary(bytes);
+        let mut body = Vec::with_capacity(bytes.len() + 256);
+        // A fixed file name: the person's own is never sent.
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"avatar.{extension}\"\r\nContent-Type: {content_type}\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let payload = Payload {
+            content_type: HeaderValue::from_str(&format!(
+                "multipart/form-data; boundary={boundary}"
+            ))
+            .map_err(|_| AccountError::Invalid)?,
+            bytes: body,
+        };
+        let reply = self
+            .exchange(
+                Method::PUT,
+                self.origin.join(AVATAR),
+                Some(token),
+                Some(payload),
+                HeaderMap::new(),
+            )
+            .await?;
+        if !reply.status.is_success() {
+            return Err(classify_avatar(reply.status, &reply.headers, &reply.body));
+        }
+        let link: AvatarLink =
+            serde_json::from_slice(&reply.body).map_err(|_| AccountError::Protocol)?;
+        let url = link.avatar_url.ok_or(AccountError::Protocol)?;
+        self.avatar_address(&url)?;
+        Ok(url)
+    }
+
+    /// Removes the account picture; removing none is not a failure.
+    pub async fn remove_avatar(&self, token: &AccountToken) -> Result<(), AccountError> {
+        let reply = self
+            .exchange(
+                Method::DELETE,
+                self.origin.join(AVATAR),
+                Some(token),
+                None,
+                HeaderMap::new(),
+            )
+            .await?;
+        if !reply.status.is_success() {
+            return Err(classify_avatar(reply.status, &reply.headers, &reply.body));
+        }
+        Ok(())
+    }
+
+    /// The picture at `url`, exactly as the service named it and only on this
+    /// origin: the bearer goes nowhere else. `etag` is the validator of the
+    /// bytes already held; a 304 keeps them.
+    pub async fn avatar(
+        &self,
+        token: &AccountToken,
+        url: &str,
+        etag: Option<&str>,
+    ) -> Result<AvatarReply, AccountError> {
+        let url = self.avatar_address(url)?;
+        let mut headers = HeaderMap::new();
+        if let Some(value) = etag.and_then(|etag| HeaderValue::from_str(etag).ok()) {
+            headers.insert(IF_NONE_MATCH, value);
+        }
+        let reply = self
+            .send(Method::GET, url, Some(token), None, headers)
+            .await?;
+        if reply.status == StatusCode::NOT_MODIFIED {
+            return Ok(AvatarReply::Unchanged);
+        }
+        if reply.body.len() > MAX_AVATAR_BYTES || !webp(&reply.body) {
+            return Err(AccountError::Protocol);
+        }
+        let etag = reply
+            .headers
+            .get(ETAG)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| value.len() <= MAX_ETAG_BYTES)
+            .map(str::to_owned);
+        Ok(AvatarReply::Fresh {
+            bytes: reply.body,
+            etag,
+        })
+    }
+
+    /// A picture address the service gave, held to this origin and the
+    /// avatar path. It is checked, never built.
+    fn avatar_address(&self, text: &str) -> Result<Url, AccountError> {
+        let url = Url::parse(text).map_err(|_| AccountError::Protocol)?;
+        let ours = &self.origin.0;
+        let version = url
+            .path()
+            .strip_prefix(AVATAR)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .unwrap_or_default();
+        let same_origin = url.scheme() == ours.scheme()
+            && url.host() == ours.host()
+            && url.port_or_known_default() == ours.port_or_known_default();
+        if !same_origin
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || version.is_empty()
+            || version.contains('/')
+        {
+            return Err(AccountError::Protocol);
+        }
+        Ok(url)
+    }
+
     pub async fn send_deletion_code(&self, token: &AccountToken) -> Result<(), AccountError> {
         self.call(Method::POST, "/v1/account/deletion/code", Some(token), None)
             .await
@@ -469,15 +615,39 @@ impl Client {
         url: Url,
         token: Option<&AccountToken>,
         body: Option<Value>,
+        headers: HeaderMap,
+    ) -> Result<Reply, AccountError> {
+        let payload = match body {
+            Some(body) => Some(Payload {
+                content_type: HeaderValue::from_static("application/json"),
+                bytes: serde_json::to_vec(&body).map_err(|_| AccountError::Invalid)?,
+            }),
+            None => None,
+        };
+        let reply = self.exchange(method, url, token, payload, headers).await?;
+        if reply.status.is_success() || reply.status == StatusCode::NOT_MODIFIED {
+            return Ok(reply);
+        }
+        Err(classify(reply.status, &reply.headers, &reply.body))
+    }
+
+    /// One request and its bounded answer, whatever its status.
+    async fn exchange(
+        &self,
+        method: Method,
+        url: Url,
+        token: Option<&AccountToken>,
+        payload: Option<Payload>,
         mut headers: HeaderMap,
     ) -> Result<Reply, AccountError> {
         if let Some(token) = token {
             headers.insert(AUTHORIZATION, token.header()?);
         }
         let mut request = self.http.request(method, url).headers(headers);
-        if let Some(body) = body {
-            let bytes = serde_json::to_vec(&body).map_err(|_| AccountError::Invalid)?;
-            request = request.header(CONTENT_TYPE, "application/json").body(bytes);
+        if let Some(payload) = payload {
+            request = request
+                .header(CONTENT_TYPE, payload.content_type)
+                .body(payload.bytes);
         }
         let mut response = request.send().await.map_err(|error| {
             if error.is_timeout() || error.is_connect() || error.is_request() {
@@ -495,14 +665,11 @@ impl Client {
             }
             body.extend_from_slice(&chunk);
         }
-        if status.is_success() || status == StatusCode::NOT_MODIFIED {
-            return Ok(Reply {
-                status,
-                headers,
-                body,
-            });
-        }
-        Err(classify(status, &headers, &body))
+        Ok(Reply {
+            status,
+            headers,
+            body,
+        })
     }
 }
 
@@ -536,6 +703,57 @@ fn billing_link(text: &str) -> Result<Url, AccountError> {
         return Err(AccountError::Protocol);
     }
     Ok(url)
+}
+
+/// The media type and extension of a picture the service takes, read from
+/// its bytes; empty, oversized and other pictures are refused unsent.
+pub(crate) fn avatar_upload_type(
+    bytes: &[u8],
+) -> Result<(&'static str, &'static str), AccountError> {
+    if bytes.is_empty() {
+        return Err(AccountError::AvatarInvalid);
+    }
+    if bytes.len() > MAX_AVATAR_UPLOAD_BYTES {
+        return Err(AccountError::AvatarTooLarge);
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Ok(("image/png", "png"))
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Ok(("image/jpeg", "jpg"))
+    } else if webp(bytes) {
+        Ok(("image/webp", "webp"))
+    } else {
+        Err(AccountError::AvatarUnsupported)
+    }
+}
+
+fn webp(bytes: &[u8]) -> bool {
+    bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
+}
+
+/// A multipart boundary that does not occur in the picture.
+fn boundary(content: &[u8]) -> String {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    (0u32..)
+        .map(|n| format!("zephium-avatar-{seed:x}-{n}"))
+        .find(|boundary| {
+            !content
+                .windows(boundary.len())
+                .any(|window| window == boundary.as_bytes())
+        })
+        .unwrap_or_default()
+}
+
+/// The avatar endpoints' own statuses; anything else reads as any call's.
+fn classify_avatar(status: StatusCode, headers: &HeaderMap, body: &[u8]) -> AccountError {
+    match status.as_u16() {
+        408 => AccountError::AvatarTimedOut,
+        413 => AccountError::AvatarTooLarge,
+        415 => AccountError::AvatarUnsupported,
+        _ => classify(status, headers, body),
+    }
 }
 
 /// How long the answer may be reused: the server's `max-age`, never past
@@ -591,6 +809,13 @@ fn classify(status: StatusCode, headers: &HeaderMap, body: &[u8]) -> AccountErro
             AccountError::PlanChangeUnavailable
         }
         (_, "billing_not_enabled" | "cloud_disabled") => AccountError::Unavailable,
+        (_, "invalid_avatar") => AccountError::AvatarInvalid,
+        (_, "unsupported_avatar_format") => AccountError::AvatarUnsupported,
+        (_, "avatar_dimensions_exceeded") => AccountError::AvatarDimensions,
+        (_, "avatar_processing_failed") => AccountError::AvatarProcessing,
+        (_, "avatar_processing_busy") => AccountError::AvatarBusy {
+            retry_after: retry_after(headers),
+        },
         (401, _) => AccountError::SignedOut,
         (429, _) => AccountError::RateLimited {
             retry_after: retry_after(headers),
@@ -759,6 +984,123 @@ mod tests {
         assert_eq!(max_age(&headers), CONFIG_MAX_AGE);
         headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
         assert_eq!(max_age(&headers), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_picture_is_refused_unsent_unless_it_is_a_small_png_jpeg_or_webp() {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        assert_eq!(avatar_upload_type(&png), Ok(("image/png", "png")));
+        assert_eq!(
+            avatar_upload_type(&[0xff, 0xd8, 0xff, 0xe0]),
+            Ok(("image/jpeg", "jpg"))
+        );
+        assert_eq!(
+            avatar_upload_type(b"RIFF\0\0\0\0WEBPVP8 "),
+            Ok(("image/webp", "webp"))
+        );
+        png.resize(MAX_AVATAR_UPLOAD_BYTES, 0);
+        assert!(avatar_upload_type(&png).is_ok());
+        png.push(0);
+        assert_eq!(avatar_upload_type(&png), Err(AccountError::AvatarTooLarge));
+        assert_eq!(avatar_upload_type(b""), Err(AccountError::AvatarInvalid));
+        for refused in [&b"GIF89a"[..], b"<svg>", b"RIFF\0\0\0\0WAVE", b"BM"] {
+            assert_eq!(
+                avatar_upload_type(refused),
+                Err(AccountError::AvatarUnsupported)
+            );
+        }
+    }
+
+    #[test]
+    fn every_avatar_refusal_has_its_own_closed_fault() {
+        let body = |code: &str| format!(r#"{{"error":{{"code":"{code}"}},"request_id":null}}"#);
+        let mut busy = HeaderMap::new();
+        busy.insert(RETRY_AFTER, HeaderValue::from_static("7"));
+        for (status, code, expected) in [
+            (400, "invalid_avatar", AccountError::AvatarInvalid),
+            (408, "request_timeout", AccountError::AvatarTimedOut),
+            (413, "body_too_large", AccountError::AvatarTooLarge),
+            (
+                415,
+                "unsupported_avatar_format",
+                AccountError::AvatarUnsupported,
+            ),
+            (
+                422,
+                "avatar_dimensions_exceeded",
+                AccountError::AvatarDimensions,
+            ),
+            (
+                422,
+                "avatar_processing_failed",
+                AccountError::AvatarProcessing,
+            ),
+            (404, "avatar_not_found", AccountError::NotFound),
+            (
+                429,
+                "rate_limited",
+                AccountError::RateLimited { retry_after: 7 },
+            ),
+            (
+                503,
+                "avatar_processing_busy",
+                AccountError::AvatarBusy { retry_after: 7 },
+            ),
+            (401, "unauthorized", AccountError::SignedOut),
+        ] {
+            let status = StatusCode::from_u16(status).unwrap();
+            assert_eq!(
+                classify_avatar(status, &busy, body(code).as_bytes()),
+                expected,
+                "{code}"
+            );
+        }
+        // Elsewhere a 413 or 408 is not about a picture.
+        assert_eq!(
+            classify(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &busy,
+                body("body_too_large").as_bytes()
+            ),
+            AccountError::Invalid
+        );
+    }
+
+    #[test]
+    fn picture_addresses_must_be_on_this_origin_and_the_avatar_path() {
+        let client =
+            Client::new(Origin::parse("https://staging-api.zephium.app").unwrap()).unwrap();
+        assert!(client
+            .avatar_address("https://staging-api.zephium.app/v1/account/avatar/3f9a.webp")
+            .is_ok());
+        assert!(client
+            .avatar_address("https://staging-api.zephium.app:443/v1/account/avatar/3f9a.webp")
+            .is_ok());
+        for refused in [
+            "https://evil.example/v1/account/avatar/3f9a.webp",
+            "https://staging-api.zephium.app.evil.example/v1/account/avatar/3f9a.webp",
+            "http://staging-api.zephium.app/v1/account/avatar/3f9a.webp",
+            "https://staging-api.zephium.app:8443/v1/account/avatar/3f9a.webp",
+            "https://user@staging-api.zephium.app/v1/account/avatar/3f9a.webp",
+            "https://staging-api.zephium.app/v1/account/avatar/3f9a.webp?token=x",
+            "https://staging-api.zephium.app/v1/account/avatar/",
+            "https://staging-api.zephium.app/v1/account/avatar/a/b.webp",
+            "https://staging-api.zephium.app/v1/account/export",
+            "/v1/account/avatar/3f9a.webp",
+        ] {
+            assert_eq!(
+                client.avatar_address(refused).err(),
+                Some(AccountError::Protocol),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_boundary_never_occurs_in_the_picture() {
+        let first = boundary(b"");
+        let picture = format!("xx{first}yy");
+        assert_ne!(boundary(picture.as_bytes()), first);
     }
 
     #[test]

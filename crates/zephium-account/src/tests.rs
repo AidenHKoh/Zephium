@@ -127,6 +127,11 @@ async fn server(route: Route) -> (String, Log) {
                 };
                 log.lock().unwrap().push(seen.clone());
                 let (status, extra, body) = route(&seen);
+                // Status 0 never answers, like a request still being processed.
+                if status == 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    return;
+                }
                 let reply = format!(
                     "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
@@ -791,4 +796,201 @@ async fn which_task_made_a_call_is_kept_here_and_goes_with_signing_out() {
     account.sign_out().await.unwrap();
     assert_eq!(account.call_sources(&["req-1".into()]), vec![None]);
     assert_eq!(settings.get("account.call_tasks"), None);
+}
+
+/// An account server whose account names a picture at `picture` (a path on
+/// `host`, or on this server when `host` is empty), served as fake WebP bytes
+/// tagged by the picture's name.
+fn avatar_server(host: Arc<Mutex<String>>, picture: Arc<Mutex<Option<String>>>) -> Route {
+    Box::new(move |seen: &Seen| {
+        let signed = seen.headers.contains("authorization: bearer token-1");
+        let line = seen.line.clone();
+        let parts: Vec<&str> = line.split(' ').take(2).collect();
+        match parts[..] {
+            [_, path] if path.starts_with("/v1/") && !signed => refusal(401, "unauthorized"),
+            ["GET", "/v1/account"] => {
+                let url = picture
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|path| format!("\"{}{path}\"", host.lock().unwrap()))
+                    .unwrap_or_else(|| "null".into());
+                ok(&format!(
+                    r#"{{"id":"u1","email":"a@b.co","name":null,"avatar_url":{url}}}"#
+                ))
+            }
+            ["GET", "/v1/account/avatar/gone.webp"] => refusal(404, "avatar_not_found"),
+            ["GET", path] if path.starts_with("/v1/account/avatar/") => {
+                let name = path.trim_start_matches("/v1/account/avatar/");
+                let etag = format!("\"{name}\"");
+                if seen.headers.contains(&format!("if-none-match: {etag}")) {
+                    (304, format!("etag: {etag}\r\n"), String::new())
+                } else {
+                    (
+                        200,
+                        format!("etag: {etag}\r\n"),
+                        format!("RIFF\0\0\0\0WEBPVP8 {name}"),
+                    )
+                }
+            }
+            ["PUT", "/v1/account/avatar"] if seen.body.contains("slow") => {
+                (0, String::new(), String::new())
+            }
+            ["PUT", "/v1/account/avatar"] => {
+                *picture.lock().unwrap() = Some("/v1/account/avatar/v2.webp".into());
+                ok(&format!(
+                    r#"{{"avatar_url":"{}/v1/account/avatar/v2.webp"}}"#,
+                    host.lock().unwrap()
+                ))
+            }
+            ["DELETE", "/v1/account/avatar"] => {
+                *picture.lock().unwrap() = None;
+                ok(r#"{"avatar_url":null}"#)
+            }
+            _ => account_routes(seen),
+        }
+    })
+}
+
+struct Pictured {
+    account: Arc<Service>,
+    seen: Log,
+    picture: Arc<Mutex<Option<String>>>,
+}
+
+async fn pictured(picture: Option<&str>, foreign: Option<&str>) -> Pictured {
+    let host = Arc::new(Mutex::new(String::new()));
+    let named = Arc::new(Mutex::new(picture.map(str::to_owned)));
+    let (origin, seen) = server(avatar_server(host.clone(), named.clone())).await;
+    *host.lock().unwrap() = foreign.map_or_else(|| origin.clone(), str::to_owned);
+    let vault = MemoryVault::with(&origin, "token-1");
+    let account = Arc::new(service(&origin, vault, Arc::new(MemorySettings::default())));
+    account.refresh(true).await.unwrap();
+    Pictured {
+        account,
+        seen,
+        picture: named,
+    }
+}
+
+fn png(extra: usize) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.resize(8 + extra, b'p');
+    bytes
+}
+
+#[tokio::test]
+async fn the_picture_is_fetched_with_the_bearer_revalidated_by_etag_and_gone_on_sign_out() {
+    let held = pictured(Some("/v1/account/avatar/v1.webp"), None).await;
+    let account = &held.account;
+    let revision = account.view().avatar.expect("picture held");
+    let bytes = account.avatar_image(revision).unwrap();
+    assert!(bytes.ends_with(b"v1.webp"));
+    let fetches = requests(&held.seen, "GET /v1/account/avatar/v1.webp");
+    assert_eq!(fetches.len(), 1);
+    assert!(fetches[0].headers.contains("authorization: bearer token-1"));
+    assert!(!fetches[0].headers.contains("if-none-match"));
+
+    // Shown again: a conditional request, and the same bytes stay.
+    account.load_avatar().await.unwrap();
+    let fetches = requests(&held.seen, "GET /v1/account/avatar/v1.webp");
+    assert_eq!(fetches.len(), 2);
+    assert!(fetches[1].headers.contains("if-none-match: \"v1.webp\""));
+    assert_eq!(account.view().avatar, Some(revision));
+
+    // Another revision is never served, and nothing is after signing out.
+    assert_eq!(account.avatar_image(revision + 1), None);
+    account.sign_out().await.unwrap();
+    assert_eq!(account.view().avatar, None);
+    assert_eq!(account.avatar_image(revision), None);
+}
+
+#[tokio::test]
+async fn a_picture_named_on_another_origin_never_gets_the_bearer() {
+    let (elsewhere, elsewhere_seen) = server(Box::new(account_routes)).await;
+    let held = pictured(Some("/v1/account/avatar/v1.webp"), Some(&elsewhere)).await;
+    assert_eq!(held.account.view().avatar, None);
+    assert_eq!(
+        held.account.load_avatar().await,
+        Err(AccountError::Protocol)
+    );
+    assert!(elsewhere_seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_missing_picture_reads_the_account_again_and_falls_back_to_initials() {
+    let held = pictured(Some("/v1/account/avatar/gone.webp"), None).await;
+    assert_eq!(held.account.view().avatar, None);
+    held.account.load_avatar().await.unwrap();
+    // Asked once, the account read again once, and not asked again.
+    assert_eq!(
+        requests(&held.seen, "GET /v1/account/avatar/gone.webp").len(),
+        1
+    );
+    assert_eq!(requests(&held.seen, "GET /v1/account").len(), 2);
+}
+
+#[tokio::test]
+async fn uploads_are_checked_before_sending_and_replace_the_picture() {
+    let held = pictured(Some("/v1/account/avatar/v1.webp"), None).await;
+    let account = &held.account;
+    let before = account.view().avatar.unwrap();
+
+    let oversized = png(crate::MAX_AVATAR_UPLOAD_BYTES);
+    for (bytes, refused) in [
+        (Vec::new(), AccountError::AvatarInvalid),
+        (oversized, AccountError::AvatarTooLarge),
+        (b"GIF89a....".to_vec(), AccountError::AvatarUnsupported),
+        (b"<svg xmlns=".to_vec(), AccountError::AvatarUnsupported),
+    ] {
+        assert_eq!(account.upload_avatar(&bytes).await, Err(refused));
+    }
+    assert!(requests(&held.seen, "PUT /v1/account/avatar").is_empty());
+
+    account.upload_avatar(&png(64)).await.unwrap();
+    let put = &requests(&held.seen, "PUT /v1/account/avatar")[0];
+    assert!(put
+        .headers
+        .contains("content-type: multipart/form-data; boundary=zephium-avatar-"));
+    assert!(put
+        .body
+        .contains("name=\"file\"; filename=\"avatar.png\"\r\nContent-Type: image/png"));
+    let after = account.view().avatar.expect("new picture held");
+    assert_ne!(after, before);
+    assert_eq!(account.avatar_image(before), None);
+    assert!(account.avatar_image(after).unwrap().ends_with(b"v2.webp"));
+
+    account.remove_avatar().await.unwrap();
+    assert_eq!(account.view().avatar, None);
+    assert_eq!(account.view().profile.unwrap().avatar_url, None);
+    assert_eq!(*held.picture.lock().unwrap(), None);
+}
+
+#[tokio::test]
+async fn removing_cancels_an_upload_under_way_before_it_is_sent() {
+    let held = pictured(None, None).await;
+    let mut slow = png(16);
+    slow.extend_from_slice(b"slow");
+    let uploading = {
+        let account = held.account.clone();
+        tokio::spawn(async move { account.upload_avatar(&slow).await })
+    };
+    for _ in 0..200 {
+        if !requests(&held.seen, "PUT /v1/account/avatar").is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    held.account.remove_avatar().await.unwrap();
+    assert_eq!(uploading.await.unwrap(), Err(AccountError::AvatarCancelled));
+    let order: Vec<String> = held
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|seen| seen.line.clone())
+        .filter(|line| line.contains("/v1/account/avatar"))
+        .collect();
+    assert!(order[0].starts_with("PUT ") && order[1].starts_with("DELETE "));
+    assert_eq!(held.account.view().avatar, None);
 }
