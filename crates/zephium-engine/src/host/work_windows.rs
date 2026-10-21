@@ -683,16 +683,38 @@ impl EngineHost {
     }
 }
 
-/// A return's whole native window, inside the transfer ceiling and above its
-/// cleanup reserve.
-const WORK_SESSION_RETURN_WINDOW: std::time::Duration = std::time::Duration::from_secs(25);
+/// A return's whole native window: a few seconds to copy above the transfer's
+/// cleanup reserve, while the continued page waits on it.
+const WORK_SESSION_RETURN_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
 
 impl EngineHost {
     /// After a sign-in handoff on a Work page in the person's account, adds
     /// that page's site cookies to the person's profile, so their tabs are
-    /// signed in too. A return that cannot start stays pending for the
-    /// site's next page.
+    /// signed in too, then lets the page continue. A return that cannot start
+    /// stays pending for the site's next page; the page continues either way.
     pub(super) fn return_work_site_session(&mut self, guard: &Arc<WorkResourceGuard>) {
+        if !self.start_work_site_return(guard) {
+            self.continue_after_work_site_return(guard);
+        }
+    }
+
+    /// The continued page goes idle and resumes only now, so its suspension
+    /// never overlaps the copy that reads its store.
+    fn continue_after_work_site_return(&mut self, guard: &Arc<WorkResourceGuard>) {
+        let context = guard.resource().identity().context();
+        let Some(resource) = self
+            .work_resources
+            .get_mut(&context)
+            .filter(|resource| Arc::ptr_eq(&resource.guard, guard))
+        else {
+            return;
+        };
+        if let Some((task, document)) = resource.human_return.take() {
+            resource.finish_human_continue(task, document);
+        }
+    }
+
+    fn start_work_site_return(&mut self, guard: &Arc<WorkResourceGuard>) -> bool {
         use crate::platform::windows::log_work_session;
         let context = guard.resource().identity().context();
         let profile = guard.resource().identity().profile();
@@ -706,7 +728,7 @@ impl EngineHost {
             || self.erasure_tombstones.contains(&profile)
             || self.agent_cookie_quarantined_profiles.contains(&profile)
         {
-            return;
+            return false;
         }
         let (Some(document), Some(deadline), Some(environment)) = (
             guard.document().cloned(),
@@ -714,7 +736,7 @@ impl EngineHost {
             self.environments.get(&profile).cloned(),
         ) else {
             log_work_session("return", "not_started", "none", None);
-            return;
+            return false;
         };
         self.prune_work_profile_cookie_sources();
         let (manager, kind, bootstrap) =
@@ -742,7 +764,7 @@ impl EngineHost {
                             drop(bootstrap);
                             self.collect_pending_windows_cleanup_debts();
                             log_work_session("return", "not_started", "none", None);
-                            return;
+                            return false;
                         }
                     }
                 }
@@ -768,20 +790,24 @@ impl EngineHost {
                     scope,
                     deadline,
                     move |result| {
+                        let continuing = done.clone();
                         done.dispatch_notification(move || {
                             super::best_effort_with(move |host| {
                                 host.release_work_profile_cookie_source(context);
                                 if result == crate::work_site_session::SyncResult::Unproven {
                                     host.agent_cookie_quarantined_profiles.insert(profile);
                                 }
+                                host.continue_after_work_site_return(&continuing);
                             });
                         });
                     },
                     move || {
+                        let continuing = panicked.clone();
                         panicked.dispatch_notification(move || {
                             super::best_effort_with(move |host| {
                                 host.release_work_profile_cookie_source(context);
                                 host.agent_cookie_quarantined_profiles.insert(profile);
+                                host.continue_after_work_site_return(&continuing);
                             });
                         });
                     },
@@ -796,6 +822,7 @@ impl EngineHost {
                 self.collect_pending_windows_cleanup_debts();
             }
         }
+        started
     }
 
     pub(super) fn release_work_profile_cookie_source(

@@ -192,6 +192,11 @@ pub(super) struct WorkNativeResource {
     human_progress: Option<zephium_agentic::WorkBrowserHumanProgress>,
     /// Handed over without a presentation, for a decision made elsewhere.
     human_unpresented: bool,
+    /// A continued sign-in waiting for its site's cookies to reach the
+    /// person's profile; the page goes idle only after that copy, so the
+    /// copy never runs under the page's own suspension.
+    #[cfg(target_os = "windows")]
+    pub(super) human_return: Option<(WorkLifecycleTask, zephium_agentic::ContextNavigationTarget)>,
     revocation: Option<WorkLifecycleTask>,
     destruction: Option<WorkLifecycleTask>,
     watchdog: Option<crate::platform::imp::ContentPolicyTimeout>,
@@ -291,6 +296,8 @@ impl WorkNativeResource {
             human_wake: None,
             human_progress: None,
             human_unpresented: false,
+            #[cfg(target_os = "windows")]
+            human_return: None,
             revocation: None,
             destruction: None,
             watchdog: None,
@@ -371,7 +378,7 @@ impl WorkNativeResource {
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    false
+                    self.human_return.is_some()
                 }
             }
     }
@@ -1403,6 +1410,8 @@ impl EngineHost {
             human_wake: None,
             human_progress: None,
             human_unpresented: false,
+            #[cfg(target_os = "windows")]
+            human_return: None,
             revocation: None,
             destruction: None,
             watchdog: None,
@@ -1657,6 +1666,10 @@ impl EngineHost {
                 task.complete(Outcome::Refused);
             }
             if let Some(task) = resource.revocation.take() {
+                task.complete(Outcome::Refused);
+            }
+            #[cfg(target_os = "windows")]
+            if let Some((task, _)) = resource.human_return.take() {
                 task.complete(Outcome::Refused);
             }
             return;

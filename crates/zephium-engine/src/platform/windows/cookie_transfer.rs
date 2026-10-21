@@ -11,9 +11,10 @@
 //! This owner never pumps the message loop, blocks a thread, exposes a cookie
 //! field, or writes before every requested origin has completed preflight.
 //! Destination mutation is sequential. Legacy transfers clear their disposable
-//! destination after a failed write. Retained Work syncs add or update only
-//! changed identities in scope, never clear a profile, and on failure delete
-//! the identities they created and restore the ones they overwrote. An
+//! destination after a failed write. Retained Work syncs add missing
+//! identities in scope and replace only provably newer ones, never clear a
+//! profile, and on failure delete the identities they created and restore the
+//! ones they overwrote. An
 //! unproven cleanup must quarantine the logical profile.
 
 use std::cell::{Cell, RefCell};
@@ -230,10 +231,10 @@ impl WindowsAgentCookieTransfer {
         )
     }
 
-    /// Adds or updates the scoped cookies that differ, in either direction
-    /// between a profile and one of its Work site stores. Host admission
-    /// serializes it per store; it never deletes a destination cookie the
-    /// source lacks.
+    /// Adds the scoped cookies the destination lacks and replaces those the
+    /// source holds a provably newer copy of, in either direction between a
+    /// profile and one of its Work site stores. Host admission serializes it
+    /// per store; it never deletes a destination cookie the source lacks.
     pub(crate) fn start_work_sync(
         source: ICoreWebView2CookieManager,
         destination: ICoreWebView2CookieManager,
@@ -729,8 +730,7 @@ fn on_origin_completed(
                         .find(|cookie| cookie.identity == identity)
                     {
                         match read_cookie_fields(&existing.native) {
-                            // Rewriting an unchanged cookie is a write with nothing to carry.
-                            Ok(current) if current.same_snapshot(&fields) => continue,
+                            Ok(current) if !fields.supersedes(&current) => continue,
                             Ok(_) => {}
                             Err(native_failure) => {
                                 failure = Some(native_failure);

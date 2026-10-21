@@ -150,30 +150,25 @@ impl WorkNativeResource {
         match result {
             Ok(None) => task.complete(Outcome::HumanPresented),
             Ok(Some(document)) => {
+                // The sign-in lives in this site's Work store until it is
+                // added to the person's profile, so their tabs have it too.
+                // The page stays active until then and resumes afterwards.
                 #[cfg(target_os = "windows")]
-                if let Some(view) = self.view.as_ref() {
-                    // The sign-in lives in this site's Work store until it is
-                    // added to the person's profile, so their tabs have it too.
-                    if view.work_session_return_pending() {
-                        let returning = self.guard.clone();
-                        self.guard.dispatch_notification(move || {
-                            crate::host::best_effort_with(move |host| {
-                                host.return_work_site_session(&returning);
-                            });
+                if self
+                    .view
+                    .as_ref()
+                    .is_some_and(|view| view.work_session_return_pending())
+                {
+                    self.human_return = Some((task, document));
+                    let returning = self.guard.clone();
+                    self.guard.dispatch_notification(move || {
+                        crate::host::best_effort_with(move |host| {
+                            host.return_work_site_session(&returning);
                         });
-                    }
-                    let guard = self.guard.clone();
-                    view.finish_work_human_activity(move |clean| {
-                        if clean {
-                            task.complete_human_document(document);
-                        } else {
-                            guard.fail();
-                            task.complete(Outcome::Refused);
-                        }
                     });
                     return;
                 }
-                task.complete_human_document(document);
+                self.finish_human_continue(task, document);
             }
             Err(()) => {
                 self.retire_human_presentation();
@@ -185,6 +180,27 @@ impl WorkNativeResource {
                 task.complete(Outcome::Refused);
             }
         }
+    }
+
+    pub(crate) fn finish_human_continue(
+        &mut self,
+        task: WorkLifecycleTask,
+        document: zephium_agentic::ContextNavigationTarget,
+    ) {
+        #[cfg(target_os = "windows")]
+        if let Some(view) = self.view.as_ref() {
+            let guard = self.guard.clone();
+            view.finish_work_human_activity(move |clean| {
+                if clean {
+                    task.complete_human_document(document);
+                } else {
+                    guard.fail();
+                    task.complete(Outcome::Refused);
+                }
+            });
+            return;
+        }
+        task.complete_human_document(document);
     }
 
     fn schedule_human_wake(&mut self) -> bool {

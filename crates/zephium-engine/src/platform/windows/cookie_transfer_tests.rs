@@ -23,6 +23,8 @@ fn output<T>(target: *mut T, value: T) -> windows_core::Result<()> {
 struct TestCookie {
     name: String,
     value: String,
+    /// Negative is a session cookie.
+    expires: f64,
 }
 
 impl ICoreWebView2Cookie_Impl for TestCookie_Impl {
@@ -39,7 +41,14 @@ impl ICoreWebView2Cookie_Impl for TestCookie_Impl {
         output(value, webview2_com::pwstr_from_str("/"))
     }
     fn Expires(&self, value: *mut f64) -> windows_core::Result<()> {
-        output(value, -1.0)
+        output(
+            value,
+            if self.expires < 0.0 {
+                -1.0
+            } else {
+                self.expires
+            },
+        )
     }
     fn IsHttpOnly(&self, value: *mut BOOL) -> windows_core::Result<()> {
         output(value, true.into())
@@ -48,7 +57,7 @@ impl ICoreWebView2Cookie_Impl for TestCookie_Impl {
         output(value, true.into())
     }
     fn IsSession(&self, value: *mut BOOL) -> windows_core::Result<()> {
-        output(value, true.into())
+        output(value, (self.expires < 0.0).into())
     }
     fn SameSite(&self, value: *mut COREWEBVIEW2_COOKIE_SAME_SITE_KIND) -> windows_core::Result<()> {
         output(value, COREWEBVIEW2_COOKIE_SAME_SITE_KIND_LAX)
@@ -70,10 +79,18 @@ impl ICoreWebView2Cookie_Impl for TestCookie_Impl {
     }
 }
 
+const LATER: f64 = 1_900_086_400.0;
+const EARLIER: f64 = 1_900_000_000.0;
+
 fn cookie(name: &str, value: &str) -> ICoreWebView2Cookie {
+    expiring(name, value, EARLIER)
+}
+
+fn expiring(name: &str, value: &str, expires: f64) -> ICoreWebView2Cookie {
     TestCookie {
         name: name.into(),
         value: value.into(),
+        expires,
     }
     .into()
 }
@@ -215,16 +232,28 @@ fn holds(store: &Store, expected: &[&ICoreWebView2Cookie]) {
 }
 
 #[test]
-fn work_sync_updates_changed_identities_and_keeps_destination_only_ones() {
+fn work_sync_adds_missing_and_replaces_only_newer_identities() {
     let kept = cookie("work-only", "signed-in-in-work");
+    let rotated = expiring("rotated", "newer-in-destination", LATER);
+    let session = expiring("session", "destination", -1.0);
     let destination = Rc::new(Store {
-        cookies: RefCell::new(vec![kept.clone(), cookie("session", "old")]),
+        cookies: RefCell::new(vec![
+            kept.clone(),
+            cookie("signed-in", "old"),
+            rotated.clone(),
+            session.clone(),
+        ]),
         ..Store::default()
     });
-    let session = cookie("session", "new");
+    let signed_in = expiring("signed-in", "new", LATER);
     let unrelated = cookie("unrelated", "tab");
     let terminal = sync(
-        vec![session.clone(), unrelated.clone()],
+        vec![
+            signed_in.clone(),
+            unrelated.clone(),
+            cookie("rotated", "older-in-source"),
+            expiring("session", "source", -1.0),
+        ],
         destination.clone(),
     );
     assert!(matches!(
@@ -234,23 +263,36 @@ fn work_sync_updates_changed_identities_and_keeps_destination_only_ones() {
     assert_eq!(terminal.cleanup(), WindowsAgentCookieCleanup::NotRequired);
     assert_eq!(destination.writes.get(), 2);
     assert_eq!(destination.deletes.get(), 0);
-    holds(&destination, &[&kept, &session, &unrelated]);
+    holds(
+        &destination,
+        &[&kept, &signed_in, &unrelated, &rotated, &session],
+    );
 }
 
 #[test]
-fn work_sync_leaves_an_unchanged_cookie_unwritten() {
-    let held = cookie("session", "same");
-    let destination = Rc::new(Store {
-        cookies: RefCell::new(vec![held.clone()]),
+fn work_sync_settles_after_one_pass_in_both_directions() {
+    let tabs = Rc::new(Store {
+        cookies: RefCell::new(vec![expiring("SIDCC", "tab", EARLIER)]),
         ..Store::default()
     });
-    let terminal = sync(vec![cookie("session", "same")], destination.clone());
-    assert!(matches!(
-        terminal.outcome(),
-        ContextCookieTransferOutcome::Applied(_)
-    ));
-    assert_eq!(destination.writes.get(), 0);
-    holds(&destination, &[&held]);
+    let work = Rc::new(Store {
+        cookies: RefCell::new(vec![expiring("SIDCC", "rotated", LATER)]),
+        ..Store::default()
+    });
+    // Refreshing the store from the tabs leaves its rotated token alone.
+    let source = tabs.cookies.borrow().clone();
+    sync(source, work.clone());
+    assert_eq!(work.writes.get(), 0);
+    // Returning carries it to the tabs once; afterwards neither side writes.
+    let source = work.cookies.borrow().clone();
+    sync(source, tabs.clone());
+    assert_eq!(tabs.writes.get(), 1);
+    let source = work.cookies.borrow().clone();
+    sync(source, tabs.clone());
+    let source = tabs.cookies.borrow().clone();
+    sync(source, work.clone());
+    assert_eq!(tabs.writes.get(), 1);
+    assert_eq!(work.writes.get(), 0);
 }
 
 #[test]
@@ -263,7 +305,7 @@ fn work_sync_partial_failure_deletes_new_and_restores_overwritten_identities() {
         ..Store::default()
     });
     let terminal = sync(
-        vec![cookie("first", "one"), cookie("session", "new")],
+        vec![cookie("first", "one"), expiring("session", "new", LATER)],
         destination.clone(),
     );
     assert!(matches!(
