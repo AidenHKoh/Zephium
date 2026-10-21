@@ -139,7 +139,7 @@ test("a one-time trial says it never renews, and shows credits only from the ser
   await page.viewport(1100, 1400);
   native.get.mockResolvedValue(reply(free));
   const screen = await render(AccountPage);
-  await expect.element(screen.getByText("188 credits left · 6% used")).toBeVisible();
+  await expect.element(screen.getByText("188 of 200 credits left")).toBeVisible();
   await expect
     .element(screen.getByText("One-time free credits. They don’t renew.", { exact: false }))
     .toBeVisible();

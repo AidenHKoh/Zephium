@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AccountRequestV1 } from "$shared/ipc/bindings";
-import { groupCalls } from "../lib/call-groups";
+import { addDays, callsByDay, groupCalls, startOfDay } from "../lib/call-groups";
 
 function call(
   id: string,
@@ -76,5 +76,34 @@ describe("usage history grouped by what made each call", () => {
 
   it("is empty for no calls", () => {
     expect(groupCalls([])).toEqual([]);
+  });
+});
+
+describe("usage history by day", () => {
+  const local = (day: number, hour: number) => new Date(2026, 9, day, hour).toISOString();
+  const today = startOfDay(new Date(2026, 9, 21, 12).getTime());
+
+  it("puts each call on the local day it began, a day once however its calls are listed", () => {
+    const days = callsByDay(
+      [
+        call("a", "settled", "1", null, local(21, 9)),
+        call("b", "settled", "1", null, local(20, 23)),
+        call("c", "settled", "1", null, local(21, 1)),
+        { ...call("d", "settled", "1", null), started_at: null },
+        call("e", "settled", "1", null, local(18, 0)),
+      ],
+      today,
+    );
+    expect(days.map(({ day, calls }) => [day, calls.map((one) => one.id)])).toEqual([
+      [today, ["a", "c", "d"]],
+      [addDays(today, -1), ["b"]],
+      [addDays(today, -3), ["e"]],
+    ]);
+  });
+
+  it("counts calendar days across a clock change", () => {
+    const march = startOfDay(new Date(2026, 2, 30, 12).getTime());
+    expect(new Date(addDays(march, -1)).getDate()).toBe(29);
+    expect(new Date(addDays(march, -29)).getDate()).toBe(1);
   });
 });

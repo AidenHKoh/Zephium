@@ -4,13 +4,23 @@
     accountSession as session,
     creditsCall,
     creditsTotal,
+    positive,
     requestStanding,
+    sumUnits,
   } from "$domain/account";
   import type { AccountFaultV1, AccountRequestV1 } from "$shared/ipc/bindings";
   import * as m from "$shared/i18n/messages";
   import Button from "$shared/ui/Button";
+  import SegmentedControl from "$shared/ui/SegmentedControl";
   import { explainAccountFault } from "../../lib/account";
-  import { groupCalls, type CallGroup } from "../../lib/call-groups";
+  import {
+    addDays,
+    callsByDay,
+    groupCalls,
+    moment,
+    startOfDay,
+    type CallGroup,
+  } from "../../lib/call-groups";
   import { taskTitle } from "../../lib/task-titles";
 
   /**
@@ -18,6 +28,15 @@
    * Which task made a call is this computer's own record; the service only
    * ever sees request ids. Pages load by the service's cursor, on request.
    */
+  type Range = "week" | "month" | "all";
+  type Day = {
+    key: string;
+    label: string;
+    groups: CallGroup[];
+    /** Units charged that day; null while older pages may still add to it. */
+    total: string | null;
+  };
+
   let requests = $state.raw<AccountRequestV1[]>([]);
   let cursor = $state<string | null>(null);
   let loading = $state(true);
@@ -26,16 +45,80 @@
   let open = $state<string | null>(null);
   let receipt = $state.raw<AccountRequestV1 | AccountFaultV1 | null>(null);
   let titles = $state.raw<Record<string, string | null>>({});
+  let range = $state<Range>("all");
   /** Tasks whose name was asked for; not state, so asking never re-runs the effect. */
   const asked: Record<string, boolean> = {};
   const per = $derived(session.account()?.usage?.credit_units ?? null);
-  const groups = $derived(groupCalls(requests));
+  const today = startOfDay(Date.now());
+  const ranges = [
+    { value: "week", label: m.account_history_range_week() },
+    { value: "month", label: m.account_history_range_month() },
+    { value: "all", label: m.account_history_range_all() },
+  ];
   const when = new Intl.DateTimeFormat(undefined, {
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
   });
+  const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+  const weekday = new Intl.DateTimeFormat(undefined, { weekday: "long" });
+  const dated = new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
+  const datedYear = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+
+  /** The range's first day, counting today as one of its days. */
+  const cutoff = $derived(
+    range === "week" ? addDays(today, -6) : range === "month" ? addDays(today, -29) : null,
+  );
+  const shown = $derived(
+    cutoff === null
+      ? requests
+      : requests.filter((request) => (moment(request.started_at) ?? Infinity) >= cutoff),
+  );
+  /** Newest first, so once a page reaches past the range, no later page can add to it. */
+  const exhausted = $derived.by(() => {
+    if (!cursor) return true;
+    if (cutoff === null) return false;
+    const oldest = moment(requests.at(-1)?.started_at ?? null);
+    return oldest !== null && oldest < cutoff;
+  });
+  const days = $derived.by((): Day[] => {
+    const listed = callsByDay(shown, today);
+    return listed.map(({ day, calls }, at) => ({
+      key: String(day),
+      label: dayLabel(day),
+      groups: groupCalls(calls),
+      total: exhausted || at < listed.length - 1 ? charged(calls) : null,
+    }));
+  });
+  const rangeTotal = $derived(exhausted ? charged(shown) : null);
+
+  function dayLabel(day: number) {
+    if (day === today) return m.account_history_today();
+    if (day === addDays(today, -1)) return m.account_history_yesterday();
+    if (day > addDays(today, -7)) return weekday.format(day);
+    return new Date(day).getFullYear() === new Date(today).getFullYear()
+      ? dated.format(day)
+      : datedYear.format(day);
+  }
+
+  function charged(calls: readonly AccountRequestV1[]) {
+    return sumUnits(calls.filter((call) => call.state === "settled").map((call) => call.charged));
+  }
+
+  function amount(units: string | null) {
+    if (!positive(units)) return null;
+    const credits = creditsTotal(units, per);
+    return credits ? m.account_request_charged({ amount: credits }) : null;
+  }
 
   async function load(after: string | null) {
     loading = true;
@@ -50,7 +133,7 @@
   onMount(() => void load(null));
 
   $effect(() => {
-    for (const group of groups) {
+    for (const group of days.flatMap((day) => day.groups)) {
       if (!group.task || asked[group.key]) continue;
       asked[group.key] = true;
       const { profile, work } = group.task;
@@ -84,9 +167,9 @@
     if (open === id) receipt = read;
   }
 
-  function time(iso: string | null) {
-    const date = iso ? new Date(iso) : null;
-    return date && !Number.isNaN(date.getTime()) ? when.format(date) : "";
+  function time(iso: string | null, format = when) {
+    const at = moment(iso);
+    return at === null ? "" : format.format(at);
   }
 
   function count(calls: number) {
@@ -94,9 +177,9 @@
   }
 
   function total(group: CallGroup) {
-    const amount = creditsTotal(group.total, per);
+    const amount = positive(group.total) ? creditsTotal(group.total, per) : null;
     const charged = amount ? m.account_request_charged({ amount }) : null;
-    if (!group.unsettled) return charged ?? "";
+    if (!group.unsettled) return charged ?? m.account_request_free();
     return [charged, m.account_request_running()].filter(Boolean).join(" · ");
   }
 
@@ -159,99 +242,136 @@
 </script>
 
 <div class="history" aria-busy={loading}>
-  <h3>{m.account_history_row()}</h3>
   {#if failure && !requests.length}<p class="quiet" role="alert">
       {explainAccountFault(failure, null)}
     </p>
   {:else if loading && !requests.length}<p class="quiet">{m.account_usage_loading()}</p>
   {:else if !requests.length}<p class="quiet">{m.account_history_empty()}</p>
   {:else}
-    <ul class="groups">
-      {#each groups as group (group.key)}
-        <li>
-          <button
-            type="button"
-            class="group"
-            aria-expanded={openGroup === group.key}
-            aria-controls="calls-{group.key}"
-            onclick={() => toggleGroup(group.key)}
-          >
-            <span class="what">
-              <span class="name" data-quiet={group.task && !titles[group.key] ? "" : undefined}
-                >{name(group)}</span
+    <div class="toolbar">
+      <SegmentedControl
+        label={m.account_history_range()}
+        size="compact"
+        options={ranges}
+        bind:value={range}
+      />
+      {#if amount(rangeTotal)}<span class="sum">{amount(rangeTotal)}</span>{/if}
+    </div>
+    {#each days as day, at (day.key)}
+      <section class="day" aria-labelledby="day-{at}">
+        <h4 id="day-{at}">
+          <span>{day.label}</span>
+          {#if amount(day.total)}<span class="sum">{amount(day.total)}</span>{/if}
+        </h4>
+        <ul class="groups">
+          {#each day.groups as group, index (group.key)}
+            {@const id = `${day.key}:${group.key}`}
+            <li>
+              <button
+                type="button"
+                class="group"
+                aria-expanded={openGroup === id}
+                aria-controls="calls-{at}-{index}"
+                onclick={() => toggleGroup(id)}
               >
-              <span class="meta"
-                >{[time(group.latest), count(group.calls.length)].filter(Boolean).join(" · ")}</span
-              >
-            </span>
-            <span class="cost" data-standing={group.unsettled ? "running" : "charged"}
-              >{total(group)}</span
-            >
-          </button>
-          {#if openGroup === group.key}
-            <ul class="calls" id="calls-{group.key}">
-              {#each group.calls as request (request.id)}
-                <li>
-                  <button
-                    type="button"
-                    class="request"
-                    aria-expanded={open === request.id}
-                    aria-label={m.account_request_details()}
-                    onclick={() => void toggle(request.id)}
+                <span class="what">
+                  <span class="name" data-quiet={group.task && !titles[group.key] ? "" : undefined}
+                    >{name(group)}</span
                   >
-                    <span class="model"
-                      >{request.model_id ?? "—"}{#if funding(request)}<span class="funding"
-                          >{funding(request)}</span
-                        >{/if}</span
-                    >
-                    <span class="when">{time(request.started_at)}</span>
-                    <span class="cost" data-standing={requestStanding(request.state)}
-                      >{cost(request)}</span
-                    >
-                  </button>
-                  {#if open === request.id}<p class="receipt" role="status">
-                      {#if receipt === null}{m.account_usage_loading()}
-                      {:else if typeof receipt === "string"}{explainAccountFault(receipt, null)}
-                      {:else}{details(receipt)}{/if}
-                    </p>{/if}
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        </li>
-      {/each}
-    </ul>
+                  <span class="meta"
+                    >{[time(group.latest, clock), count(group.calls.length)]
+                      .filter(Boolean)
+                      .join(" · ")}</span
+                  >
+                </span>
+                <span class="cost" data-standing={group.unsettled ? "running" : "charged"}
+                  >{total(group)}</span
+                >
+              </button>
+              {#if openGroup === id}
+                <ul class="calls" id="calls-{at}-{index}">
+                  {#each group.calls as request (request.id)}
+                    <li>
+                      <button
+                        type="button"
+                        class="request"
+                        aria-expanded={open === request.id}
+                        aria-label={m.account_request_details()}
+                        onclick={() => void toggle(request.id)}
+                      >
+                        <span class="model"
+                          >{request.model_id ?? "—"}{#if funding(request)}<span class="funding"
+                              >{funding(request)}</span
+                            >{/if}</span
+                        >
+                        <span class="when">{time(request.started_at, clock)}</span>
+                        <span class="cost" data-standing={requestStanding(request.state)}
+                          >{cost(request)}</span
+                        >
+                      </button>
+                      {#if open === request.id}<p class="receipt" role="status">
+                          {#if receipt === null}{m.account_usage_loading()}
+                          {:else if typeof receipt === "string"}{explainAccountFault(receipt, null)}
+                          {:else}{details(receipt)}{/if}
+                        </p>{/if}
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {:else}<p class="quiet">{m.account_history_range_empty()}</p>
+    {/each}
     {#if failure}<p class="quiet" role="alert">{m.account_history_failed()}</p>{/if}
-    {#if cursor}<div class="more">
+    {#if !exhausted}<div class="more">
         <Button size="compact" variant="ghost" pending={loading} onclick={() => void load(cursor)}
           >{m.account_history_more()}</Button
         >
       </div>{/if}
   {/if}
+  <p class="footnote">{m.account_history_row_desc()}</p>
 </div>
 
 <style>
   .history {
-    position: relative;
-    padding: 14px 18px 10px;
+    padding: 4px 18px 16px;
   }
 
-  .history::before {
-    content: "";
-    position: absolute;
-    inset-inline: 16px 0;
+  .toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding-block: 4px 6px;
+  }
+
+  /* Day headings hold to the top of the page while their day scrolls under them. */
+  h4 {
+    position: sticky;
     top: 0;
-    height: 1px;
-    background: var(--color-border);
+    z-index: 1;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    margin: 0 -18px;
+    padding: 14px 18px 6px;
+    background: var(--color-surface);
+    color: var(--color-muted);
+    font-size: var(--text-caption);
+    font-weight: 600;
+    line-height: 16px;
+    letter-spacing: 0.02em;
   }
 
-  h3 {
-    margin: 0 0 8px;
-    color: var(--color-text);
-    font-size: var(--text-page-title);
+  .sum {
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    font-variant-numeric: tabular-nums;
     font-weight: 500;
-    line-height: 19px;
-    letter-spacing: -0.008em;
+    letter-spacing: 0;
   }
 
   ul {
@@ -281,7 +401,7 @@
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: 16px;
-    padding-block: 9px;
+    min-block-size: 44px;
   }
 
   .request {
@@ -315,6 +435,7 @@
 
   .name {
     overflow: hidden;
+    font-size: var(--text-body);
     font-weight: 500;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -325,14 +446,14 @@
   }
 
   .meta {
-    color: var(--color-muted);
+    color: var(--color-faint);
     font-variant-numeric: tabular-nums;
   }
 
   /* Calls sit in under their task, indented to read as its parts. */
   .calls {
     margin-inline-start: 12px;
-    padding-block-end: 4px;
+    padding-block: 2px 6px;
   }
 
   .cost {
@@ -371,10 +492,21 @@
     font-variant-numeric: tabular-nums;
   }
 
+  .quiet {
+    padding-block: 10px 4px;
+  }
+
   .more {
     display: flex;
     justify-content: flex-start;
-    padding-block: 4px;
-    margin-inline-start: -8px;
+    margin-inline-start: -10px;
+    padding-block-start: 6px;
+  }
+
+  .footnote {
+    margin: 12px 0 0;
+    color: var(--color-faint);
+    font-size: var(--text-caption);
+    line-height: 1.5;
   }
 </style>

@@ -54,3 +54,44 @@ export function groupCalls(requests: readonly AccountRequestV1[]): CallGroup[] {
   }
   return [...groups.values()];
 }
+
+/** A time as milliseconds, or null when it is missing or unreadable. */
+export function moment(iso: string | null | undefined): number | null {
+  const at = iso ? Date.parse(iso) : Number.NaN;
+  return Number.isNaN(at) ? null : at;
+}
+
+/** Local midnight of the day a time falls on. */
+export function startOfDay(at: number): number {
+  const date = new Date(at);
+  date.setHours(0, 0, 0, 0);
+  return date.getTime();
+}
+
+/** Calendar days, so a day that gains or loses an hour still counts as one. */
+export function addDays(day: number, count: number): number {
+  const date = new Date(day);
+  date.setDate(date.getDate() + count);
+  return date.getTime();
+}
+
+/**
+ * Calls by the local day they began, days in the order their first call is
+ * listed. A call without a start time sits with the one listed before it.
+ */
+export function callsByDay(
+  requests: readonly AccountRequestV1[],
+  today: number,
+): Array<{ day: number; calls: AccountRequestV1[] }> {
+  const days: Array<{ day: number; calls: AccountRequestV1[] }> = [];
+  let last = today;
+  for (const call of requests) {
+    const at = moment(call.started_at);
+    const day = at === null ? last : startOfDay(at);
+    last = day;
+    const listed = days.find((entry) => entry.day === day);
+    if (listed) listed.calls.push(call);
+    else days.push({ day, calls: [call] });
+  }
+  return days;
+}

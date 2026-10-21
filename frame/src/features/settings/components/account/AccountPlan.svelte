@@ -4,14 +4,15 @@
     accountSession as session,
     creditsLeft,
     creditsTotal,
-    planName,
     positive,
     shortDate,
     usageTone,
   } from "$domain/account";
+  import { ArrowDown01Icon, ArrowUpRight01Icon } from "@hugeicons/core-free-icons";
   import { preferences } from "$domain/preferences";
   import * as m from "$shared/i18n/messages";
   import Button from "$shared/ui/Button";
+  import Icon from "$shared/ui/Icon";
   import SettingsRow from "$shared/ui/SettingsRow";
   import { commands } from "$shared/ipc/bindings";
   import { explainAccountFault, SUPPORT_MAIL } from "../../lib/account";
@@ -64,27 +65,25 @@
   let plansOpen = $state(false);
   let creditsOpen = $state(false);
 
-  const usageLine = $derived.by(() => {
-    const percent = usage?.used_percent;
+  const percent = $derived(usage?.used_percent ?? null);
+  /** One statement of the allowance: what is left of what, or the share used where credits aren't stated. */
+  const figure = $derived.by(() => {
     if (percent == null) return usage ? m.account_usage_none() : m.account_usage_loading();
     const left = creditsLeft(usage?.allowance_left, per);
+    const total = positive(usage?.allowance_total)
+      ? creditsLeft(usage?.allowance_total, per)
+      : null;
+    if (left && total) return m.account_usage_left_of({ left, total });
     return left
-      ? m.account_usage_left({ amount: left, percent })
+      ? m.account_usage_left_plain({ amount: left })
       : m.account_usage_used_nodate({ percent });
   });
   /** A trial says it is one; a plan's allowance says when it refills. */
   const renewalLine = $derived.by(() => {
-    if (usage?.used_percent == null) return null;
+    if (percent == null || !usage) return null;
     if (usage.one_time) return m.account_usage_trial();
     const date = shortDate(usage.resets_at);
     return date ? m.account_usage_refills({ date }) : null;
-  });
-  const allowanceLine = $derived.by(() => {
-    const used = creditsTotal(usage?.allowance_used ?? "0", per);
-    const total = creditsLeft(usage?.allowance_total, per);
-    return used && total && positive(usage?.allowance_total)
-      ? m.account_allowance_value({ used, total })
-      : null;
   });
   const purchased = $derived(creditsLeft(usage?.purchased_remaining, per));
   const hasPurchased = $derived(positive(usage?.purchased_remaining) && !!purchased);
@@ -105,13 +104,14 @@
   });
   const heldCredits = $derived(positive(usage?.held) ? creditsTotal(usage?.held, per) : null);
   const planLine = $derived.by(() => {
-    if (!subscription || subscription.status === "inactive") return undefined;
+    if (!subscription || subscription.status === "inactive") return null;
     if (subscription.status === "unknown") return m.account_plan_unknown();
     const date = shortDate(subscription.paid_until);
     if (!date) return m.account_plan_active();
-    return subscription.cancel_at_period_end
-      ? m.account_plan_ends({ date })
-      : m.account_plan_renews({ date });
+    if (subscription.cancel_at_period_end) return m.account_plan_ends({ date });
+    // Credits that refill the day the plan renews already say when it renews.
+    if (ai && renewalLine && !usage?.one_time && date === shortDate(usage?.resets_at)) return null;
+    return m.account_plan_renews({ date });
   });
   const unconfirmed = $derived(
     (account?.unsettled ?? []).some((request) => request.state !== "settled"),
@@ -134,16 +134,16 @@
     void showCredits();
   });
 
-  /** Usage history is loaded only when someone asks to see it. */
+  /** Usage history is loaded only when someone asks to see it, and kept while the page is open. */
   let History = $state.raw<Component | null>(null);
-  let loadingHistory = $state(false);
-  async function showHistory() {
-    loadingHistory = true;
-    try {
-      History = (await import("./AccountHistory.svelte")).default;
-    } finally {
-      loadingHistory = false;
+  let historyOpen = $state(false);
+  async function toggleHistory() {
+    if (historyOpen) {
+      historyOpen = false;
+      return;
     }
+    History ??= (await import("./AccountHistory.svelte")).default;
+    historyOpen = true;
   }
 
   /** A change in progress, or a quote waiting to be confirmed, is shown where it is read. */
@@ -162,50 +162,53 @@
 
 {#if !hosted}{#if ai}<p class="note">{m.account_hosted_off()}</p>{/if}
 {:else}
-  <section class="plan" aria-label={ai ? m.account_usage_group() : m.account_plan_group()}>
-    <div class="head">
+  <section class="plan" aria-labelledby="account-plan-title">
+    <header class="head">
       <div class="title">
-        <span class="eyebrow">{ai ? m.account_usage_group() : m.account_plan_group()}</span>
-        <h3>{planName(currentPlan) ?? m.account_plan_free()}</h3>
+        <h3 id="account-plan-title">{ai ? m.account_usage_group() : m.account_plan_group()}</h3>
         {#if planLine}<p>{planLine}</p>{/if}
       </div>
       {#if billing && (paid || subscription?.status === "unknown")}<Button
+          size="compact"
+          variant="ghost"
+          class="manage"
           pending={busy === "manage"}
           disabled={!!busy && busy !== "manage"}
-          onclick={() => void session.manage()}>{m.account_billing_manage()}</Button
+          onclick={() => void session.manage()}
+          >{m.account_billing_manage()}<Icon icon={ArrowUpRight01Icon} size={13} /></Button
         >{/if}
-    </div>
+    </header>
     {#if ai}<div class="usage">
-        <div class="usage-copy">
-          <h4>{m.account_usage_title()}</h4>
-          <p>{usageLine}</p>
-        </div>
-        {#if usage?.used_percent != null}<div
+        <h4>{m.account_usage_title()}</h4>
+        <p class="figure">{figure}</p>
+        {#if percent != null}<div
             class="meter"
             role="meter"
             aria-label={m.account_usage_meter()}
             aria-valuemin={0}
             aria-valuemax={100}
-            aria-valuenow={usage.used_percent}
-            aria-valuetext={usageLine}
-            data-tone={usageTone(usage.used_percent)}
+            aria-valuenow={percent}
+            aria-valuetext={m.account_usage_used_nodate({ percent })}
+            data-tone={usageTone(percent)}
           >
-            <span style:inline-size={`${usage.used_percent}%`}></span>
-          </div>
-          {#if renewalLine || allowanceLine}<p class="caption">
-              {[renewalLine, allowanceLine].filter(Boolean).join(" · ")}
-            </p>{/if}{/if}
-        {#if pausedLine}<p class="caption" role="status">{pausedLine}</p>{/if}
+            <span style:inline-size={`${percent}%`}></span>
+          </div>{/if}
+        {#if renewalLine}<p class="caption">{renewalLine}</p>{/if}
+        {#if pausedLine}<p class="caption" data-tone="warning" role="status">{pausedLine}</p>{/if}
       </div>{/if}
     {#if canPlans || canCredits}<div class="actions">
-        {#if canCredits}<Button disabled={!!busy} onclick={() => void showCredits()}
-            >{m.account_credits_open()}</Button
-          >{/if}
-        {#if canPlans}<Button
-            variant={paid ? "secondary" : "primary"}
+        {#if canPlans && !paid}<Button
+            variant="primary"
             disabled={!!busy}
-            onclick={() => void showPlans()}
-            >{paid ? m.account_plans_change() : m.account_upgrade()}</Button
+            onclick={() => void showPlans()}>{m.account_upgrade()}</Button
+          >{/if}
+        {#if canCredits}<Button
+            variant={paid ? "primary" : "secondary"}
+            disabled={!!busy}
+            onclick={() => void showCredits()}>{m.account_credits_open()}</Button
+          >{/if}
+        {#if canPlans && paid}<Button disabled={!!busy} onclick={() => void showPlans()}
+            >{m.account_plans_change()}</Button
           >{/if}
       </div>{/if}
     {#if review}<div class="review" role="status">
@@ -222,12 +225,12 @@
         </p>
       </div>{/if}
     {#if Change && change}<Change />{/if}
-    {#if ai}<div class="rows">
+    {#if ai}<div class="rows" class:flush={!!(Change && change)}>
         {#if bonusLine}<SettingsRow title={m.account_bonus_title()}
             ><span class="value">{bonusLine}</span></SettingsRow
           >{/if}
         {#if per}<SettingsRow title={m.account_extra_title()}
-            ><span class="value"
+            ><span class="value" data-none={!hasPurchased || undefined}
               >{hasPurchased
                 ? m.account_extra_value({ amount: purchased ?? "0" })
                 : m.account_extra_none()}</span
@@ -237,14 +240,17 @@
             ><span class="value">{m.account_held_value({ amount: heldCredits })}</span></SettingsRow
           >{/if}
         <AccountDailyLimit />
-        {#if History}<History />
-        {:else}<SettingsRow
-            title={m.account_history_row()}
-            description={m.account_history_row_desc()}
-            ><Button size="compact" pending={loadingHistory} onclick={() => void showHistory()}
-              >{m.account_history_show()}</Button
-            ></SettingsRow
-          >{/if}
+        <button
+          type="button"
+          class="disclosure"
+          aria-expanded={historyOpen}
+          aria-controls={History ? "account-history" : undefined}
+          onclick={() => void toggleHistory()}
+        >
+          <span>{m.account_history_row()}</span>
+          <Icon icon={ArrowDown01Icon} size={14} strokeWidth={2} />
+        </button>
+        {#if History}<div id="account-history" hidden={!historyOpen}><History /></div>{/if}
       </div>{/if}
   </section>
   {#if canPlans && Plans}<Plans
@@ -265,11 +271,12 @@
 {/if}
 
 <style>
-  /* The plan is the account's one card: what it is, how much of it is used,
-     and the way to more, before the details under it. */
+  /* The plan is the account's one card: what it is, how much of it is left,
+     the way to more, and the details under it. It clips rather than hides
+     overflow, so the history's day headings can stick to the page's scroll. */
   .plan {
-    overflow: hidden;
-    margin-block-end: 34px;
+    overflow: clip;
+    margin-block-end: 30px;
     border-radius: var(--radius-card);
     background: var(--color-surface);
     box-shadow: var(--shadow-card);
@@ -280,71 +287,98 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: 16px;
-    padding: 20px 18px 0;
+    padding: 16px 12px 0 18px;
   }
 
   .title {
-    display: grid;
-    gap: 2px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 10px;
     min-inline-size: 0;
-  }
-
-  .eyebrow {
-    color: var(--color-muted);
-    font-size: var(--text-caption);
-    font-weight: 600;
-    letter-spacing: 0.02em;
+    padding-block-start: 3px;
   }
 
   h3 {
     margin: 0;
     color: var(--color-text);
-    font-size: 20px;
+    font-size: 15px;
     font-weight: 600;
-    line-height: 1.3;
-    letter-spacing: -0.02em;
+    line-height: 20px;
+    letter-spacing: -0.012em;
   }
 
   .title p {
     margin: 0;
     color: var(--color-muted);
     font-size: var(--text-label);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .head :global(.manage) {
+    gap: 4px;
+    padding-inline: 8px 6px;
   }
 
   .usage {
     display: grid;
-    gap: 10px;
-    padding: 18px 18px 20px;
-  }
-
-  .usage-copy {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 4px 16px;
+    padding: 18px 18px 0;
   }
 
   h4 {
     margin: 0;
-    color: var(--color-text);
-    font-size: var(--text-page-title);
+    color: var(--color-muted);
+    font-size: var(--text-label);
     font-weight: 500;
-    line-height: 19px;
+    line-height: 16px;
   }
 
-  .usage-copy p,
-  .value,
-  .caption {
+  .figure {
+    margin: 4px 0 12px;
+    color: var(--color-text);
+    font-size: 20px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    line-height: 26px;
+    letter-spacing: -0.02em;
+  }
+
+  .caption,
+  .value {
     margin: 0;
     color: var(--color-muted);
     font-size: var(--text-label);
     font-variant-numeric: tabular-nums;
   }
 
+  .caption {
+    margin-block-start: 10px;
+    line-height: 1.5;
+  }
+
+  .meter + .caption {
+    margin-block-start: 10px;
+  }
+
+  .caption + .caption {
+    margin-block-start: 2px;
+  }
+
+  .caption[data-tone="warning"] {
+    color: var(--color-warning);
+  }
+
+  .value {
+    color: var(--color-label-secondary);
+  }
+
+  .value[data-none] {
+    color: var(--color-faint);
+  }
+
   .meter {
     overflow: hidden;
-    block-size: 8px;
+    block-size: 6px;
     border-radius: var(--radius-capsule);
     background: var(--color-track);
   }
@@ -366,26 +400,27 @@
   }
 
   .actions {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 10px;
-    padding: 0 18px 20px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 18px 18px 0;
   }
 
-  .head + .actions {
-    padding-block-start: 18px;
+  .actions :global(.ui-button) {
+    min-inline-size: 104px;
   }
 
   .review {
     display: grid;
     gap: 4px;
-    margin: 0 18px 18px;
+    margin: 18px 18px 0;
     padding: 14px 16px;
     border-radius: var(--radius-control);
     background: var(--color-fill);
   }
 
   .review h4 {
+    color: var(--color-text);
     font-size: var(--text-body);
   }
 
@@ -396,8 +431,22 @@
     line-height: 1.5;
   }
 
+  /* The card's details: one line each, the same height, divided by the rows' own hairlines. */
   .rows {
     position: relative;
+    margin-block-start: 20px;
+  }
+
+  .plan > :global(:last-child:not(.rows)) {
+    margin-block-end: 20px;
+  }
+
+  .plan > :global(.change) {
+    margin-block-start: 20px;
+  }
+
+  .rows.flush {
+    margin-block-start: 0;
   }
 
   .rows::before {
@@ -409,8 +458,66 @@
     inset-inline: 16px 0;
   }
 
+  .rows :global(.ui-settings-row) {
+    min-block-size: 46px;
+    padding-block: 10px;
+  }
+
+  .rows :global(.ui-settings-copy h3) {
+    font-size: var(--text-body);
+  }
+
+  .disclosure {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    box-sizing: border-box;
+    inline-size: 100%;
+    min-block-size: 46px;
+    padding: 10px 18px;
+    border: 0;
+    background: transparent;
+    color: var(--color-text);
+    font: inherit;
+    font-size: var(--text-body);
+    font-weight: 500;
+    letter-spacing: -0.008em;
+    text-align: start;
+    cursor: default;
+    transition: background-color var(--motion-fast) var(--ease-out);
+  }
+
+  .disclosure::before {
+    position: absolute;
+    top: 0;
+    block-size: 1px;
+    background: var(--color-border);
+    content: "";
+    inset-inline: 16px 0;
+  }
+
+  .disclosure:hover {
+    background: var(--row-hover);
+  }
+
+  .disclosure:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: -2px;
+  }
+
+  .disclosure :global(svg) {
+    color: var(--color-faint);
+    transition: rotate var(--motion-fast) var(--ease-out);
+  }
+
+  .disclosure[aria-expanded="true"] :global(svg) {
+    rotate: 180deg;
+  }
+
   .note {
-    margin: -22px 18px 30px;
+    margin: -18px 18px 30px;
     color: var(--color-muted);
     font-size: var(--text-label);
     line-height: 1.5;
@@ -421,7 +528,9 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .meter span {
+    .meter span,
+    .disclosure,
+    .disclosure :global(svg) {
       transition: none;
     }
   }

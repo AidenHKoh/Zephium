@@ -105,8 +105,8 @@ test("signing in takes an address, then the emailed code, with no password", asy
   await userEvent.keyboard("123456");
   expect(native.verify).toHaveBeenLastCalledWith("123456");
   await expect.element(screen.getByRole("heading", { name: "ada@example.com" })).toBeVisible();
-  await expect.element(screen.getByText("116 credits left · 42% used")).toBeVisible();
-  await expect.element(screen.getByText("84 of 200 credits", { exact: false })).toBeVisible();
+  await expect.element(screen.getByText("116 of 200 credits left")).toBeVisible();
+  await expect.element(screen.getByText(/^Credits refill Oct 1[34]$/u)).toBeVisible();
 });
 
 test("upgrading opens checkout and says the plan will update on its own", async () => {
@@ -226,7 +226,7 @@ test("usage history loads on request, groups calls by task, pages by its cursor 
   const screen = await render(AccountPage);
 
   expect(native.history).not.toHaveBeenCalled();
-  await screen.getByRole("button", { name: "Show" }).first().click();
+  await screen.getByRole("button", { name: "Usage history" }).click();
   // One row per task: its name comes from this computer's own store, and a
   // call still running is not added to its total.
   await expect.element(screen.getByText("Standing desks, compared")).toBeVisible();
@@ -266,7 +266,7 @@ test("changing email asks for a fresh sign-in first, then signs in at the new ad
   native.send.mockResolvedValue(reply(moved));
   const screen = await render(AccountPage);
 
-  await screen.getByRole("button", { name: "Change…" }).first().click();
+  await screen.getByRole("button", { name: "Change email…" }).click();
   await screen.getByLabelText("New email address").fill("ada@new.example");
   await screen.getByRole("button", { name: "Send code" }).click();
   expect(native.emailCode).toHaveBeenLastCalledWith("ada@new.example");
@@ -281,7 +281,7 @@ test("changing email asks for a fresh sign-in first, then signs in at the new ad
   expect(native.emailCode).toHaveBeenCalledTimes(2);
 
   await screen.getByLabelText("Code from the email").fill("654321");
-  await screen.getByRole("button", { name: "Change email" }).click();
+  await screen.getByRole("button", { name: "Change email", exact: true }).click();
   expect(native.changeEmail).toHaveBeenCalledWith("ada@new.example", "654321");
   expect(native.send).toHaveBeenLastCalledWith("ada@new.example");
   await expect

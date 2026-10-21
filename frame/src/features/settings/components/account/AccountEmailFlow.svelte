@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
   import { accountSession as session } from "$domain/account";
   import * as m from "$shared/i18n/messages";
   import Button from "$shared/ui/Button";
@@ -61,14 +61,11 @@
     }
   }
 
-  const escape = (event: KeyboardEvent) => {
-    if (event.key === "Escape") close();
-  };
-
-  function close() {
+  // The dialog can also be dismissed around the flow, so a sign-in code
+  // still waiting is given up however it closes.
+  onDestroy(() => {
     if (step === "reauth_code") void session.cancelCode();
-    onclose();
-  }
+  });
 
   const pendingFor: Record<Step, string> = {
     address: "email_code",
@@ -102,7 +99,6 @@
       autocapitalize="off"
       maxlength={254}
       bind:value={email}
-      onkeydown={escape}
     />
   {:else if step === "reauth_code" || step === "code"}<Field
       label={step === "code" ? m.account_email_code() : m.account_email_reauth_code()}
@@ -111,13 +107,11 @@
       placeholder="000000"
       maxlength={11}
       bind:value={code}
-      onkeydown={escape}
     />{/if}
   {#if faultText}<p class="error" role="alert">{faultText}</p>{/if}
-  <div class="actions">
-    <Button size="compact" variant="ghost" onclick={close}>{m.action_cancel()}</Button>
+  <footer>
+    <Button onclick={onclose}>{m.action_cancel()}</Button>
     <Button
-      size="compact"
       type="submit"
       variant="primary"
       pending={busy === pendingFor[step]}
@@ -129,14 +123,14 @@
       {:else if step === "reauth_code"}{m.account_email_reauth_confirm()}
       {:else}{m.account_email_confirm()}{/if}
     </Button>
-  </div>
+  </footer>
 </form>
 
 <style>
   .flow {
     display: grid;
-    gap: 10px;
-    padding: 0 18px 14px;
+    gap: 14px;
+    margin-block-start: 10px;
   }
 
   .lead,
@@ -144,16 +138,15 @@
     margin: 0;
     color: var(--color-muted);
     font-size: var(--text-label);
-    line-height: 1.5;
+    line-height: 1.6;
   }
 
   .error {
     color: var(--color-danger);
   }
 
-  .actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
+  /* Over the dialog's own footer spacing, which assumes no grid gap above it. */
+  form.flow > footer {
+    margin-block-start: 10px;
   }
 </style>

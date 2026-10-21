@@ -32,8 +32,9 @@
 
 <SettingsRow title={m.account_delete()} description={m.account_delete_desc()}>
   <Button
-    variant="danger"
+    variant="ghost"
     size="compact"
+    class="destructive"
     disabled={!!busy}
     onclick={() => {
       opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -95,6 +96,15 @@
 </Dialog.Root>
 
 <style>
+  /* Quiet until reached for: the way out reads as a choice, never a call to action. */
+  :global(
+    .ui-settings-control
+      > .ui-button.destructive[data-variant="ghost"]:is(:hover, :focus-visible):not(:disabled)
+  ) {
+    background: color-mix(in srgb, var(--color-danger) 14%, transparent);
+    color: var(--color-danger);
+  }
+
   .error {
     margin: 0;
     color: var(--color-danger);

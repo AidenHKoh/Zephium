@@ -58,11 +58,17 @@
 </script>
 
 {#if per}
-  <SettingsRow title={m.account_daily_title()} description={m.account_daily_desc()}>
-    <span class="value">{line}</span>
-    {#if !editing}<Button size="compact" disabled={!!busy} onclick={() => void edit()}
-        >{limit ? m.account_daily_change() : m.account_daily_set()}</Button
-      >{/if}
+  <SettingsRow title={m.account_daily_title()}>
+    <span class="limit">
+      <span class="value" data-none={!limit || undefined}>{line}</span>
+      {#if !editing}<Button
+          size="compact"
+          variant="ghost"
+          disabled={!!busy}
+          onclick={() => void edit()}
+          >{limit ? m.account_daily_change() : m.account_daily_set()}</Button
+        >{/if}
+    </span>
   </SettingsRow>
   {#if editing}
     <form
@@ -75,6 +81,7 @@
     >
       <Field
         label={m.account_daily_field()}
+        hint={m.account_daily_desc()}
         inputmode="numeric"
         autocomplete="off"
         maxlength={9}
@@ -104,16 +111,27 @@
 {/if}
 
 <style>
+  .limit {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-inline-end: -10px;
+  }
+
   .value {
-    color: var(--color-muted);
+    color: var(--color-label-secondary);
     font-size: var(--text-label);
     font-variant-numeric: tabular-nums;
+  }
+
+  .value[data-none] {
+    color: var(--color-faint);
   }
 
   .edit {
     display: grid;
     gap: 10px;
-    padding: 0 18px 14px;
+    padding: 2px 18px 16px;
   }
 
   .actions {

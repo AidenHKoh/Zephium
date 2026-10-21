@@ -9,6 +9,7 @@
   import Icon from "$shared/ui/Icon";
   import ProfileAvatar from "$shared/ui/ProfileAvatar";
   import { explainAccountFault } from "../../lib/account";
+  import AccountEmail from "./AccountEmail.svelte";
 
   const account = $derived(session.account());
   const busy = $derived(session.pending());
@@ -45,7 +46,7 @@
 </script>
 
 <header class="account-identity">
-  <ProfileAvatar view={avatar} size={64} />
+  <ProfileAvatar view={avatar} size={56} />
   <div class="who">
     {#if editing}<form
         class="editor"
@@ -86,25 +87,26 @@
         >
       </div>{/if}
     <p>
-      {#if account?.name}<span>{account.email}</span>{/if}
+      {#if account?.name}<span class="email">{account.email}</span>{/if}
       {#if plan}<span class="plan">{m.account_identity_plan({ plan })}</span>{/if}
     </p>
     {#if faultText}<p class="error" role="alert">{faultText}</p>{/if}
   </div>
+  {#if !editing}<AccountEmail />{/if}
 </header>
 
 <style>
   .account-identity {
     display: flex;
     align-items: center;
-    gap: 20px;
-    padding: 4px 0 34px;
+    gap: 18px;
+    padding: 0 2px 30px;
   }
 
   .who {
     display: grid;
     flex: 1;
-    gap: 6px;
+    gap: 4px;
     min-inline-size: 0;
   }
 
@@ -119,10 +121,10 @@
     overflow: hidden;
     margin: 0;
     color: var(--color-text);
-    font-size: 22px;
+    font-size: 21px;
     font-weight: 600;
     line-height: 1.25;
-    letter-spacing: -0.025em;
+    letter-spacing: -0.022em;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -166,6 +168,13 @@
     margin: 0;
     color: var(--color-muted);
     font-size: var(--text-body);
+  }
+
+  .email {
+    overflow: hidden;
+    min-inline-size: 0;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .plan {

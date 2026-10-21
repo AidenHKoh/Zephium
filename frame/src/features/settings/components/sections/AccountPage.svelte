@@ -7,7 +7,6 @@
   import SettingsRow from "$shared/ui/SettingsRow";
   import AccountDelete from "../account/AccountDelete.svelte";
   import AccountDevices from "../account/AccountDevices.svelte";
-  import AccountEmail from "../account/AccountEmail.svelte";
   import AccountIdentity from "../account/AccountIdentity.svelte";
   import AccountPlan from "../account/AccountPlan.svelte";
   import AccountServer from "../account/AccountServer.svelte";
@@ -63,12 +62,12 @@
     <AccountDevices />
     <section class="quiet" aria-labelledby="account-data">
       <h2 id="account-data">{m.account_data_group()}</h2>
-      <AccountEmail />
       <SettingsRow title={m.account_export_title()} description={m.account_export_desc()}>
         {#if exported === "saved"}<span class="saved" role="status">{m.account_export_saved()}</span
           >{/if}
         <Button
           size="compact"
+          variant="ghost"
           pending={busy === "export"}
           disabled={!!busy && busy !== "export"}
           onclick={() => void exportData()}>{m.account_export()}</Button
@@ -77,6 +76,7 @@
       <SettingsRow title={m.account_sign_out_title()} description={m.account_sign_out_desc()}>
         <Button
           size="compact"
+          variant="ghost"
           pending={busy === "sign_out"}
           disabled={!!busy && busy !== "sign_out"}
           onclick={() => void session.signOut()}>{m.account_sign_out()}</Button
@@ -107,25 +107,38 @@
   /* Data and the way out sit under everything else, without a card: they
      matter, but they are not what anyone opened Account to do. */
   .quiet {
-    margin-block: 6px 26px;
+    margin-block: 4px 22px;
   }
 
   .quiet h2 {
-    margin: 0 0 4px;
-    padding-inline: 16px;
-    color: var(--color-muted);
-    font-size: var(--text-label);
+    margin: 0 0 2px;
+    padding-inline: 18px;
+    color: var(--color-faint);
+    font-size: var(--text-caption);
     font-weight: 600;
     line-height: 20px;
+    letter-spacing: 0.02em;
   }
 
   .quiet :global(.ui-settings-row) {
     min-block-size: 0;
-    padding-block: 11px;
+    padding-block: 10px;
   }
 
   .quiet :global(.ui-settings-copy h3) {
+    color: var(--color-label-secondary);
     font-size: var(--text-body);
+  }
+
+  .quiet :global(.ui-settings-copy p) {
+    color: var(--color-faint);
+  }
+
+  .quiet :global(.ui-settings-control) {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-inline-end: -10px;
   }
 
   .note {
