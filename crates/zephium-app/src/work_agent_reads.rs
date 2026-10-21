@@ -284,7 +284,7 @@ impl Driver {
                             .as_ref()
                             .ok()
                             .and_then(|outcome: &WorkBrowserOutcome| outcome.usage)
-                            .expect("retry requires known usage");
+                            .unwrap_or_default();
                         if let Some(limits) = retry_limits(request.limits, first) {
                             self.report(WorkAgentDiagnostic::ReadRetried);
                             let request = retry_request(request, &outcome, limits);
@@ -320,7 +320,7 @@ impl Driver {
                         .as_ref()
                         .ok()
                         .and_then(|outcome| outcome.usage)
-                        .expect("retry requires known usage");
+                        .unwrap_or_default();
                     if let Some(limits) = retry_limits(request.limits, first) {
                         self.report(WorkAgentDiagnostic::ReadRetried);
                         if signed_in {
@@ -1471,12 +1471,23 @@ fn job_listing(kind: WorkStepKindV1) -> WorkStepKindV1 {
 /// to the site's app loses the page it began on) before it sent or saved
 /// anything.
 fn starts_over(outcome: &WorkBrowserOutcome) -> bool {
-    outcome.usage.is_some()
+    (outcome.usage.is_some() || untouched(outcome))
         && (outcome.rerun
             || (outcome.helped
                 && outcome.status == WorkStepStatus::Failed
                 && outcome.committed.is_empty()
                 && !outcome.held_back))
+}
+
+/// A page lost before it called a model or acted: its usage is unknown only
+/// because nothing was spent.
+fn untouched(outcome: &WorkBrowserOutcome) -> bool {
+    outcome.measurements.as_ref().is_some_and(|m| {
+        m.planner_calls == 0
+            && m.decision_calls == 0
+            && m.native_actions == 0
+            && m.model_tokens == 0
+    })
 }
 
 fn retryable_read(step: &WorkStepKindV1, outcome: &Result<WorkBrowserOutcome, WorkError>) -> bool {
@@ -1737,6 +1748,16 @@ mod tests {
             starts_over(&helped),
             "the person signed in, then the page moved on"
         );
+        let mut lost = outcome("The page asked to sign in", 0);
+        lost.helped = true;
+        lost.usage = None;
+        lost.measurements = Some(WorkStepMeasurementsV1::default());
+        assert!(starts_over(&lost), "lost before spending anything");
+        lost.measurements = Some(WorkStepMeasurementsV1 {
+            planner_calls: 1,
+            ..Default::default()
+        });
+        assert!(!starts_over(&lost), "unknown usage after a model call");
         helped.committed = vec!["Sent on the page: hi".into()];
         assert!(!starts_over(&helped), "never twice once it sent something");
         assert!(!retryable_read(
