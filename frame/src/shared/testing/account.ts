@@ -59,3 +59,30 @@ export function usageFixture(overrides: Partial<AccountUsageV1> = {}): AccountUs
     ...overrides,
   };
 }
+
+const svg = (width: number, height: number, body: string) =>
+  `data:image/svg+xml,${encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${body}</svg>`,
+  )}`;
+
+/** A head-and-shoulders picture standing in for an account photo in looks. */
+export const portraitFixture = svg(
+  256,
+  256,
+  `<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#e9b38a"/><stop offset="1" stop-color="#8a5a7a"/></linearGradient></defs>
+  <rect width="256" height="256" fill="url(#g)"/>
+  <circle cx="128" cy="104" r="46" fill="#3b2a35" opacity="0.9"/>
+  <path d="M40 256c8-58 46-88 88-88s80 30 88 88z" fill="#3b2a35" opacity="0.9"/>`,
+);
+
+/** A wide picked photo, the person off centre, for the framing step. */
+export const landscapeFixture = svg(
+  1600,
+  900,
+  `<defs><linearGradient id="s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9cc3e6"/><stop offset="1" stop-color="#f3d9b9"/></linearGradient></defs>
+  <rect width="1600" height="900" fill="url(#s)"/>
+  <path d="M0 640q300-120 620-40t560-20 420 60v260H0z" fill="#6f8f6a"/>
+  <path d="M0 760q420-90 820-10t780-20v170H0z" fill="#4e6b4c"/>
+  <circle cx="1040" cy="420" r="92" fill="#3b2a35"/>
+  <path d="M860 900c14-170 90-260 180-260s166 90 180 260z" fill="#3b2a35"/>`,
+);

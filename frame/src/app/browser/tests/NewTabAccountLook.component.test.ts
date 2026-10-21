@@ -3,7 +3,7 @@ import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import "$styles/global.css";
 import type { AccountV1 } from "$shared/ipc/bindings";
-import { accountFixture, usageFixture } from "$shared/testing/account";
+import { accountFixture, portraitFixture, usageFixture } from "$shared/testing/account";
 import NewTabLook from "./NewTabLook.svelte";
 
 const native = vi.hoisted(() => ({
@@ -32,6 +32,11 @@ vi.mock("$shared/ipc/bindings", async () => {
     },
   });
 });
+// Rust serves the account picture by revision; a picture stands in for it here.
+vi.mock("$domain/account/account-model", async (original) => ({
+  ...(await original<typeof import("$domain/account/account-model")>()),
+  avatarUrl: (revision: number | null | undefined) => (revision ? portraitFixture : null),
+}));
 vi.mock("$domain/tabs", () => ({
   tabs: {
     profile: () => ({ id: "00000000000000000000000501", name: "Ada", kind: native.kind }),
@@ -135,6 +140,19 @@ test("signed in, the initials open the account, and the panel keeps the keyboard
   await avatar.click();
   await page.getByRole("menuitem", { name: "Manage account" }).click();
   expect(onaccount).toHaveBeenLastCalledWith("account");
+});
+
+test("with a photo, the corner and the panel show the account's own picture", async () => {
+  const screen = await stage({ ...signedIn("ada@example.com", 42, true), avatar: 3 });
+  const avatar = screen.getByRole("button", { name: "Account", exact: true });
+  await expect.element(avatar).toBeVisible();
+  expect(avatar.element().querySelector("img")?.getAttribute("src")).toBe(portraitFixture);
+  await shoot(screen, "photo");
+  await avatar.click();
+  await expect.element(page.getByText("42% used")).toBeVisible();
+  const summary = document.querySelector(".ntp-account-panel .account-summary img");
+  expect(summary?.getAttribute("src")).toBe(portraitFixture);
+  await shoot(screen, "photo-open");
 });
 
 test("near and at the limit, a fine ring says so; no credits for sale, no offer", async () => {

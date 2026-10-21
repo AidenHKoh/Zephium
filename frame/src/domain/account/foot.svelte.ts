@@ -1,5 +1,5 @@
 import * as accountSession from "./account.svelte";
-import { initials, planName, usageTone } from "./account-model";
+import { avatarUrl, initials, planName, usageTone } from "./account-model";
 import { preferences } from "$domain/preferences";
 import { drawn, profiles } from "$domain/profiles";
 
@@ -42,6 +42,10 @@ export function accountFoot(options: { private?: () => boolean } = {}) {
     },
     get initials() {
       return signedIn ? initials(account?.email, account?.name) : "";
+    },
+    /** The account's own picture, shown where its initials would be. */
+    get avatar() {
+      return signedIn ? avatarUrl(account?.avatar) : null;
     },
     get plan() {
       return signedIn ? planName(account?.plan) : null;

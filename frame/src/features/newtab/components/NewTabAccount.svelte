@@ -21,6 +21,8 @@
   // allowance is nearly spent.
   const ringed = $derived(account.tone !== "calm" && account.used != null);
   const fill = $derived(Math.min(100, Math.max(0, account.used ?? 0)));
+  let broken = $state<string | null>(null);
+  const photo = $derived(account.avatar && account.avatar !== broken ? account.avatar : null);
   const tip = $derived(
     [m.account_menu(), account.email, account.used != null && m.ai_cloud_used({ percent: fill })]
       .filter(Boolean)
@@ -51,7 +53,13 @@
     triggerClass="ntp-account"
     panelClass="ntp-account-panel"
   >
-    {#snippet trigger()}<span class="disc" aria-hidden="true">{account.initials}</span
+    {#snippet trigger()}<span class="disc" aria-hidden="true"
+        >{#if photo}<img
+            src={photo}
+            alt=""
+            draggable="false"
+            onerror={() => (broken = photo)}
+          />{:else}{account.initials}{/if}</span
       >{#if ringed}<svg
           class="usage-ring"
           data-tone={account.tone}
@@ -72,6 +80,7 @@
         <AccountSummary
           email={account.email}
           initials={account.initials}
+          avatar={account.avatar}
           plan={account.plan}
           used={account.used}
           metered={account.metered}
@@ -149,9 +158,27 @@
     transition: background-color var(--motion-fast) var(--ease-out);
   }
 
+  .disc:has(img) {
+    overflow: hidden;
+    box-shadow: inset 0 0 0 0.5px var(--avatar-rim);
+  }
+
   :global(.ntp-account:hover) .disc,
   :global(.ntp-account[data-state="open"]) .disc {
     background: var(--color-fill-strong);
+  }
+
+  .disc img {
+    inline-size: 100%;
+    block-size: 100%;
+    object-fit: cover;
+    animation: interface-fade var(--motion-base) var(--ease-out);
+    transition: filter var(--motion-fast) var(--ease-out);
+  }
+
+  :global(.ntp-account:hover) .disc img,
+  :global(.ntp-account[data-state="open"]) .disc img {
+    filter: brightness(1.08);
   }
 
   .usage-ring {
@@ -268,7 +295,9 @@
 
   @media (prefers-reduced-motion: reduce) {
     :global(.ntp-account),
-    .sign-in {
+    .sign-in,
+    .disc img {
+      animation: none;
       transition: none;
     }
 

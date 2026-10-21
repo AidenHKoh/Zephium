@@ -25,6 +25,12 @@
   --avatar-8-bottom: oklch(58% 0.12 152deg);
   --avatar-9-top: oklch(74% 0.09 200deg);
   --avatar-9-bottom: oklch(58% 0.1 210deg);
+
+  /* Over a picture rather than a theme: the same on either. The lens says a
+     picture can be changed; the veil dims what a crop leaves out. */
+  --avatar-lens: oklch(0% 0 0deg / 42%);
+  --avatar-veil: oklch(0% 0 0deg / 62%);
+  --avatar-crop-edge: oklch(100% 0 0deg / 40%);
 }
 
 [data-theme="dark"] {

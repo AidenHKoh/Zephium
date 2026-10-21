@@ -10,6 +10,7 @@
   let {
     email,
     initials,
+    avatar = null,
     plan = null,
     used = null,
     metered = false,
@@ -17,6 +18,8 @@
   }: {
     email: string | null;
     initials: string;
+    /** The account's own picture, in place of its initials. */
+    avatar?: string | null;
     plan?: string | null;
     /** Whole percent of the included usage spent, when known. */
     used?: number | null;
@@ -25,6 +28,8 @@
     tone?: "calm" | "high" | "full";
   } = $props();
 
+  let broken = $state<string | null>(null);
+  const photo = $derived(avatar && avatar !== broken ? avatar : null);
   const fill = $derived(used == null ? 0 : Math.min(100, Math.max(0, used)));
   const reading = $derived(
     used != null
@@ -36,7 +41,14 @@
 </script>
 
 <span class="account-summary" data-tone={tone} style:--fill={fill / 100}>
-  <span class="disc" aria-hidden="true">{initials}</span>
+  <span class="disc" aria-hidden="true"
+    >{#if photo}<img
+        src={photo}
+        alt=""
+        draggable="false"
+        onerror={() => (broken = photo)}
+      />{:else}{initials}{/if}</span
+  >
   <span class="who">
     <span class="email">{email}</span>
     {#if plan}<span class="plan">{plan}</span>{/if}
@@ -81,6 +93,18 @@
     font-weight: 600;
     letter-spacing: 0.03em;
     place-items: center;
+  }
+
+  .disc:has(img) {
+    overflow: hidden;
+    box-shadow: inset 0 0 0 0.5px var(--avatar-rim);
+  }
+
+  .disc img {
+    inline-size: 100%;
+    block-size: 100%;
+    object-fit: cover;
+    animation: interface-fade var(--motion-base) var(--ease-out);
   }
 
   .who {
@@ -192,7 +216,8 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    :global([data-open="true"]) .fill {
+    :global([data-open="true"]) .fill,
+    .disc img {
       animation: none;
     }
   }

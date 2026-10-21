@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { accountSession as session, initials, planName } from "$domain/account";
+  import { accountSession as session, avatarUrl, initials, planName } from "$domain/account";
   import * as m from "$shared/i18n/messages";
   import { preferences } from "$domain/preferences";
   import { identityAvatar, profiles } from "$domain/profiles";
@@ -45,7 +45,11 @@
         onclick={() => settings.select("account")}
         >{#if signedIn}<ProfileAvatar
             size={30}
-            view={identityAvatar(profiles.current(), initials(account.email, account.name))}
+            view={identityAvatar(
+              profiles.current(),
+              initials(account.email, account.name),
+              avatarUrl(account.avatar),
+            )}
           />{:else}<img class="mark" src="/zephium-icon.png" alt="" />{/if}<span class="copy"
           ><strong>{title}</strong><small>{detail}</small></span
         ></button

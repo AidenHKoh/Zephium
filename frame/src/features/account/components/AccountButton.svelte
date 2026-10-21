@@ -118,6 +118,7 @@
         ><AccountSummary
           email={foot.email}
           initials={foot.initials}
+          avatar={foot.avatar}
           plan={foot.plan}
           used={foot.used}
           metered={foot.metered}

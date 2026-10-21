@@ -8,12 +8,23 @@ import type {
   AccountSessionV1,
   AccountV1,
 } from "$shared/ipc/bindings";
-import { accountFixture, usageFixture } from "$shared/testing/account";
+import {
+  accountFixture,
+  landscapeFixture,
+  portraitFixture,
+  usageFixture,
+} from "$shared/testing/account";
 import AccountPageStage from "./AccountPageStage.svelte";
 
 const state = vi.hoisted(() => ({
   account: null as AccountV1 | null,
   history: null as AccountHistoryV1 | null,
+}));
+// Rust serves the account picture and a pick being framed; pictures stand in here.
+vi.mock("$domain/account/account-model", async (original) => ({
+  ...(await original<typeof import("$domain/account/account-model")>()),
+  avatarUrl: (revision: number | null | undefined) => (revision ? portraitFixture : null),
+  stagedAvatarUrl: () => landscapeFixture,
 }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
@@ -26,6 +37,16 @@ vi.mock("$shared/ipc/bindings", async () => {
       fault: null,
     }),
     accountSessions: async () => ({ sessions: devices, fault: null }),
+    accountAvatarPick: async () => ({
+      status: "ok" as const,
+      data: {
+        kind: "picked" as const,
+        token: "01JABCDEFGHJKMNPQRSTVWXYZ0",
+        width: 1600,
+        height: 900,
+      },
+    }),
+    accountAvatarDiscard: async () => ({ account: state.account!, fault: null, retry_after: null }),
     workCall: vi.fn(async (profile: string, call: unknown) => {
       const work = /"work":"(\w+)"/u.exec(JSON.stringify(call))?.[1] ?? "";
       return {
@@ -325,6 +346,19 @@ test("Settings → Account signed out, waiting for a code, and signed in", async
     await screen.getByRole("button", { name: "Change email…" }).click();
     await settle();
     await screen.getByLabelText("New email address").fill("ada@new.example");
+  });
+  const pictured = { ...signedIn, avatar: 3 };
+  await shoot("avatar", pictured);
+  await shoot("avatar-menu", pictured, async (screen) => {
+    await screen.getByRole("button", { name: "Change photo" }).click();
+  });
+  await shoot("avatar-crop", signedIn, async (screen) => {
+    await screen.getByRole("button", { name: "Add a photo" }).click();
+    await settle();
+    screen.getByRole("application").element().focus();
+    const { userEvent } = await import("vitest/browser");
+    await userEvent.keyboard("++++{Shift>}{ArrowLeft}{ArrowLeft}{ArrowLeft}{/Shift}");
+    screen.getByRole("application").element().blur();
   });
   await shoot("billing-off", {
     ...signedIn,
