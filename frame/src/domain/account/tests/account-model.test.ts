@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  avatarUrl,
   creditsCall,
   creditsLeft,
   creditsToUnits,
@@ -11,12 +12,24 @@ import {
   priceLabel,
   requestStanding,
   shortDate,
+  stagedAvatarUrl,
   sumUnits,
   unitsToCredits,
   usageTone,
 } from "../account-model";
 
 describe("account model", () => {
+  it("names the account picture only by the revision Rust holds, never a server address", () => {
+    expect(avatarUrl(3)).toMatch(
+      /^(zephium-media:\/\/localhost|http:\/\/zephium-media\.localhost)\/account-avatar\/3$/u,
+    );
+    for (const none of [null, undefined, 0, -1, 1.5]) expect(avatarUrl(none)).toBeNull();
+    expect(stagedAvatarUrl("01JABCDEFGHJKMNPQRSTVWXYZ0")).toMatch(
+      /account-avatar\/staged\/01JABCDEFGHJKMNPQRSTVWXYZ0$/u,
+    );
+    expect(stagedAvatarUrl("../../v1/account")).toBeNull();
+  });
+
   it("draws initials from a name, else from the address", () => {
     expect(initials("ada@example.com", "Ada Lovelace")).toBe("AL");
     expect(initials("ada@example.com", "  ada ")).toBe("A");

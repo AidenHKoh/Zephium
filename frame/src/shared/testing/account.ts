@@ -16,6 +16,7 @@ export function accountFixture(overrides: Partial<AccountV1> = {}): AccountV1 {
     resend_in: null,
     email: null,
     name: null,
+    avatar: null,
     plan: null,
     usage: null,
     subscription: null,

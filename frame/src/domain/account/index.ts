@@ -1,6 +1,8 @@
 export * as accountSession from "./account.svelte";
+export type { AvatarPick } from "./account.svelte";
 export { accountFoot } from "./foot.svelte";
 export {
+  avatarUrl,
   creditsCall,
   creditsLeft,
   creditsToUnits,
@@ -11,6 +13,7 @@ export {
   priceLabel,
   requestStanding,
   shortDate,
+  stagedAvatarUrl,
   sumUnits,
   unitsToCredits,
   usageTone,

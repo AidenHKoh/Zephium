@@ -160,6 +160,14 @@ export const commands = {
 	accountUsageHistory: (cursor: string | null) => __TAURI_INVOKE<AccountHistoryV1>("account_usage_history", { cursor }),
 	/**  One hosted request's receipt. */
 	accountReceipt: (id: string) => __TAURI_INVOKE<AccountReceiptV1>("account_receipt", { id }),
+	/**  Opens the system's picker and stages the picture for framing. */
+	accountAvatarPick: () => typedError<AccountAvatarPickV1, null>(__TAURI_INVOKE("account_avatar_pick")),
+	/**  Uploads the framed square of the staged picture as the account's picture. */
+	accountAvatarSave: (token: string, crop: AccountAvatarCropV1) => __TAURI_INVOKE<AccountReplyV1>("account_avatar_save", { token, crop }),
+	/**  Puts a staged picture away, and stops its upload if one is under way. */
+	accountAvatarDiscard: (token: string) => __TAURI_INVOKE<AccountReplyV1>("account_avatar_discard", { token }),
+	/**  Removes the account's picture everywhere it is signed in. */
+	accountAvatarRemove: () => __TAURI_INVOKE<AccountReplyV1>("account_avatar_remove"),
 	workSites: (expectedProfile: string) => __TAURI_INVOKE<WorkSiteAccessResponseV1>("work_sites", { expectedProfile }),
 	workSetSite: (expectedProfile: string, change: WorkSiteChangeV1) => __TAURI_INVOKE<WorkSiteAccessResponseV1>("work_set_site", { expectedProfile, change }),
 	workScreenshotSites: (expectedProfile: string) => __TAURI_INVOKE<WorkScreenshotSitesResponseV1>("work_screenshot_sites", { expectedProfile }),
@@ -588,6 +596,22 @@ export type AboutInfo = {
 	arch: string,
 };
 
+/**  The square the person framed, in the preview's pixels. */
+export type AccountAvatarCropV1 = {
+	x: number,
+	y: number,
+	side: number,
+};
+
+export type AccountAvatarPickV1 =
+/**
+ *  Staged under `token`; `width` and `height` are the preview's pixels,
+ *  which the framing is stated in.
+ */
+{ kind: "picked"; token: string; width: number; height: number } | { kind: "cancelled" } |
+/**  Not a still PNG, JPEG or WebP picture that could be read. */
+{ kind: "unsupported" } | { kind: "unavailable" };
+
 export type AccountCallSourceV1 = { kind: "task"; profile: string; work: string } | { kind: "voice" };
 
 /**  The account changed; read it again. */
@@ -624,7 +648,23 @@ export type AccountFaultV1 = "offline" |
 /**  There is a subscription already: change it instead of buying another. */
 "subscription_change_required" |
 /**  Billing is read again before another try. */
-"billing_refresh_required" | "plan_change_in_progress" | "plan_change_expired" | "plan_change_unavailable";
+"billing_refresh_required" | "plan_change_in_progress" | "plan_change_expired" | "plan_change_unavailable" |
+/**  The picture is missing, empty or could not be read. */
+"avatar_invalid" |
+/**  The picture's upload took too long. */
+"avatar_timeout" |
+/**  The picture is over 2 MiB. */
+"avatar_too_large" |
+/**  Not a still PNG, JPEG or WebP picture. */
+"avatar_unsupported" |
+/**  The picture has more pixels than the service takes. */
+"avatar_dimensions" |
+/**  The service could not convert the picture. */
+"avatar_processing" |
+/**  The service is busy with pictures; try again after `retry_after`. */
+"avatar_busy" |
+/**  The upload was stopped here; nothing to tell the person. */
+"avatar_cancelled";
 
 export type AccountHistoryV1 = {
 	requests: AccountRequestV1[],
@@ -679,7 +719,7 @@ export type AccountReceiptV1 = {
 export type AccountReplyV1 = {
 	account: AccountV1,
 	fault: AccountFaultV1 | null,
-	/**  Seconds to wait before trying again, with `rate_limited`. */
+	/**  Seconds to wait before trying again, with `rate_limited` or `avatar_busy`. */
 	retry_after: number | null,
 };
 
@@ -787,6 +827,12 @@ export type AccountV1 = {
 	resend_in: number | null,
 	email: string | null,
 	name: string | null,
+	/**
+	 *  The account picture's revision, served by `zephium-media` at
+	 *  `account-avatar/<revision>`; null shows initials. Never the service's
+	 *  address for it.
+	 */
+	avatar: number | null,
 	plan: string | null,
 	usage: AccountUsageV1 | null,
 	subscription: AccountSubscriptionV1 | null,

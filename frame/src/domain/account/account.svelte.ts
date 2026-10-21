@@ -5,6 +5,7 @@
  */
 import {
   commands,
+  type AccountAvatarCropV1,
   type AccountFaultV1,
   type AccountHistoryV1,
   type AccountPurchaseV1,
@@ -21,6 +22,8 @@ const TIMEOUT = 15_000;
 const SIGN_OUT_TIMEOUT = 30_000;
 /** Export waits on the person choosing where to save. */
 const EXPORT_TIMEOUT = 10 * 60_000;
+/** The picture is uploaded, converted by the service, then fetched again. */
+const AVATAR_TIMEOUT = 60_000;
 
 type AccountAction =
   | "send"
@@ -41,7 +44,9 @@ type AccountAction =
   | "plan_preview"
   | "plan_confirm"
   | "plan_dismiss"
-  | "export";
+  | "export"
+  | "avatar"
+  | "avatar_remove";
 
 type AccountFault = {
   action: AccountAction;
@@ -235,6 +240,36 @@ export async function receipt(id: string): Promise<AccountRequestV1 | AccountFau
   );
   if (response.state !== "received") return "offline";
   return response.value.request ?? response.value.fault ?? "server";
+}
+
+export type AvatarPick =
+  { token: string; width: number; height: number } | "cancelled" | "unsupported" | "unavailable";
+
+/** Opens the system's picker; the picture is staged natively for framing. */
+export async function pickAvatar(): Promise<AvatarPick> {
+  const reply = await observe(
+    Promise.resolve().then(() => commands.accountAvatarPick()),
+    10 * 60_000,
+  );
+  if (reply.state !== "received" || reply.value?.status !== "ok") return "unavailable";
+  const pick = reply.value.data;
+  return pick.kind === "picked"
+    ? { token: pick.token, width: pick.width, height: pick.height }
+    : pick.kind;
+}
+
+/** Uploads the framed square of a staged picture as the account's picture. */
+export const saveAvatar = (token: string, crop: AccountAvatarCropV1) =>
+  act("avatar", () => commands.accountAvatarSave(token, crop), AVATAR_TIMEOUT);
+/** Removes the picture on every device; an upload under way is cancelled first. */
+export const removeAvatar = () => act("avatar_remove", () => commands.accountAvatarRemove());
+
+/** Puts a staged picture away, stopping its upload if one is under way. */
+export async function discardAvatar(token: string) {
+  await observe(
+    Promise.resolve().then(() => commands.accountAvatarDiscard(token)),
+    TIMEOUT,
+  );
 }
 
 /** Goes back to entering an address; nothing is sent. */

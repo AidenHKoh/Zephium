@@ -1,4 +1,17 @@
 import type { AccountOfferV1, AccountPriceV1 } from "$shared/ipc/bindings";
+import { IS_MAC } from "$shared/platform";
+
+const media = IS_MAC ? "zephium-media://localhost/" : "http://zephium-media.localhost/";
+const TOKEN = /^[0-9A-HJKMNP-TV-Z]{26}$/u;
+
+/** The account picture as Rust serves it, by the revision it holds; null shows initials. */
+export const avatarUrl = (revision: number | null | undefined) =>
+  revision != null && Number.isInteger(revision) && revision > 0
+    ? `${media}account-avatar/${revision}`
+    : null;
+/** A picked picture being framed, staged natively under its token. */
+export const stagedAvatarUrl = (token: string) =>
+  TOKEN.test(token) ? `${media}account-avatar/staged/${token}` : null;
 
 /** One or two letters for the avatar, from the name or else the address. */
 export function initials(email: string | null | undefined, name?: string | null): string {

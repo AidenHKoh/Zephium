@@ -54,6 +54,22 @@ export function explainAccountFault(
       return m.account_fault_plan_change_expired();
     case "plan_change_unavailable":
       return m.account_fault_plan_change_unavailable();
+    case "avatar_invalid":
+      return m.account_fault_avatar_invalid();
+    case "avatar_timeout":
+      return m.account_fault_avatar_timeout();
+    case "avatar_too_large":
+      return m.account_fault_avatar_too_large();
+    case "avatar_unsupported":
+      return m.account_fault_avatar_unsupported();
+    case "avatar_dimensions":
+      return m.account_fault_avatar_dimensions();
+    case "avatar_processing":
+      return m.account_fault_avatar_processing();
+    case "avatar_busy":
+      return m.account_fault_avatar_busy({ seconds: Math.max(1, retryAfter ?? 30) });
+    case "avatar_cancelled":
+      return m.account_fault_avatar_cancelled();
   }
 }
 

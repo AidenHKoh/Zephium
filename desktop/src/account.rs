@@ -4,6 +4,8 @@ use super::*;
 use zephium_account::wire::{self, Billing, PlanChange, Purchase, Receipt, SignupMode, Usage};
 use zephium_account::{AccountError, AccountSettings, CallSource, Service, SystemVault, View};
 
+pub(crate) mod avatar;
+
 /// Four a minute, under the service's six, so a refresh by hand still fits.
 const CHECKOUT_POLL: std::time::Duration = std::time::Duration::from_secs(15);
 /// How often a queued or running plan change is read, and a slower pace for
@@ -59,6 +61,22 @@ pub(crate) enum AccountFaultV1 {
     PlanChangeInProgress,
     PlanChangeExpired,
     PlanChangeUnavailable,
+    /// The picture is missing, empty or could not be read.
+    AvatarInvalid,
+    /// The picture's upload took too long.
+    AvatarTimeout,
+    /// The picture is over 2 MiB.
+    AvatarTooLarge,
+    /// Not a still PNG, JPEG or WebP picture.
+    AvatarUnsupported,
+    /// The picture has more pixels than the service takes.
+    AvatarDimensions,
+    /// The service could not convert the picture.
+    AvatarProcessing,
+    /// The service is busy with pictures; try again after `retry_after`.
+    AvatarBusy,
+    /// The upload was stopped here; nothing to tell the person.
+    AvatarCancelled,
 }
 
 impl From<AccountError> for AccountFaultV1 {
@@ -84,6 +102,14 @@ impl From<AccountError> for AccountFaultV1 {
             AccountError::PlanChangeInProgress => Self::PlanChangeInProgress,
             AccountError::PlanChangeExpired => Self::PlanChangeExpired,
             AccountError::PlanChangeUnavailable => Self::PlanChangeUnavailable,
+            AccountError::AvatarInvalid => Self::AvatarInvalid,
+            AccountError::AvatarTimedOut => Self::AvatarTimeout,
+            AccountError::AvatarTooLarge => Self::AvatarTooLarge,
+            AccountError::AvatarUnsupported => Self::AvatarUnsupported,
+            AccountError::AvatarDimensions => Self::AvatarDimensions,
+            AccountError::AvatarProcessing => Self::AvatarProcessing,
+            AccountError::AvatarBusy { .. } => Self::AvatarBusy,
+            AccountError::AvatarCancelled => Self::AvatarCancelled,
         }
     }
 }
@@ -277,6 +303,10 @@ pub(crate) struct AccountV1 {
     pub(crate) resend_in: Option<u32>,
     pub(crate) email: Option<String>,
     pub(crate) name: Option<String>,
+    /// The account picture's revision, served by `zephium-media` at
+    /// `account-avatar/<revision>`; null shows initials. Never the service's
+    /// address for it.
+    pub(crate) avatar: Option<u32>,
     pub(crate) plan: Option<String>,
     pub(crate) usage: Option<AccountUsageV1>,
     pub(crate) subscription: Option<AccountSubscriptionV1>,
@@ -298,7 +328,7 @@ pub(crate) struct AccountV1 {
 pub(crate) struct AccountReplyV1 {
     pub(crate) account: AccountV1,
     pub(crate) fault: Option<AccountFaultV1>,
-    /// Seconds to wait before trying again, with `rate_limited`.
+    /// Seconds to wait before trying again, with `rate_limited` or `avatar_busy`.
     pub(crate) retry_after: Option<u32>,
 }
 
@@ -558,6 +588,7 @@ fn project(view: View) -> AccountV1 {
         resend_in: view.resend_in,
         email: view.profile.as_ref().map(|p| p.email.clone()),
         name: view.profile.as_ref().and_then(|p| p.name.clone()),
+        avatar: view.avatar,
         plan: view.usage.as_ref().and_then(|u| u.plan.clone()),
         usage: view.usage.as_ref().map(usage),
         subscription: billing.map(|billing| AccountSubscriptionV1 {
@@ -709,6 +740,7 @@ fn unavailable_view() -> AccountV1 {
         resend_in: None,
         email: None,
         name: None,
+        avatar: None,
         plan: None,
         usage: None,
         subscription: None,
@@ -731,6 +763,9 @@ fn reply(result: Result<(), AccountError>) -> AccountReplyV1 {
         Ok(()) => (None, None),
         Err(AccountError::RateLimited { retry_after }) => {
             (Some(AccountFaultV1::RateLimited), Some(retry_after))
+        }
+        Err(AccountError::AvatarBusy { retry_after }) => {
+            (Some(AccountFaultV1::AvatarBusy), Some(retry_after))
         }
         Err(error) => (Some(error.into()), None),
     };
@@ -770,6 +805,8 @@ pub(crate) async fn account_get(caller: WebviewWindow) -> AccountReplyV1 {
                 let _ = background.load_config().await;
             }
             let _ = background.refresh(false).await;
+            // Shown means revalidated: a picture changed on another device appears here.
+            let _ = background.load_avatar().await;
             if background.plan_change_in_flight() {
                 watch_plan_change(background);
             }
@@ -1451,6 +1488,54 @@ mod tests {
         assert_eq!(change.charge.unwrap().amount_minor, 0);
         assert_eq!(change.recurring.unwrap().amount_minor, 2000);
         assert_eq!(change.error, None);
+    }
+
+    #[test]
+    fn the_frame_gets_a_picture_revision_never_its_address_or_the_bearer() {
+        let url = "https://staging-api.zephium.app/v1/account/avatar/3f9a2c.webp";
+        let view = View {
+            server: "https://staging-api.zephium.app".into(),
+            signed_in: true,
+            profile: Some(wire::Profile {
+                id: "u1".into(),
+                email: "ada@example.com".into(),
+                name: None,
+                created_at: None,
+                avatar_url: Some(url.into()),
+            }),
+            avatar: Some(7),
+            ..Default::default()
+        };
+        let account = project(view);
+        assert_eq!(account.avatar, Some(7));
+        let text = serde_json::to_string(&reply_of(account)).unwrap();
+        assert!(!text.contains("/v1/account/avatar"), "{text}");
+        assert!(!text.to_ascii_lowercase().contains("bearer"), "{text}");
+        for (error, fault) in [
+            (AccountError::AvatarTimedOut, "avatar_timeout"),
+            (AccountError::AvatarTooLarge, "avatar_too_large"),
+            (AccountError::AvatarUnsupported, "avatar_unsupported"),
+            (AccountError::AvatarDimensions, "avatar_dimensions"),
+            (AccountError::AvatarProcessing, "avatar_processing"),
+            (AccountError::AvatarInvalid, "avatar_invalid"),
+            (AccountError::AvatarCancelled, "avatar_cancelled"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(AccountFaultV1::from(error)).unwrap(),
+                fault
+            );
+        }
+        let busy = reply(Err(AccountError::AvatarBusy { retry_after: 9 }));
+        assert_eq!(busy.fault, Some(AccountFaultV1::AvatarBusy));
+        assert_eq!(busy.retry_after, Some(9));
+    }
+
+    fn reply_of(account: AccountV1) -> AccountReplyV1 {
+        AccountReplyV1 {
+            account,
+            fault: None,
+            retry_after: None,
+        }
     }
 
     #[test]
