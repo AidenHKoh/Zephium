@@ -3,14 +3,15 @@
   import { CubeIcon, Settings02Icon, UserIcon } from "@hugeicons/core-free-icons";
   import { accountFoot, accountSession } from "$domain/account";
   import { keymap } from "$domain/keymap";
-  import { drawn, profiles } from "$domain/profiles";
+  import { profiles } from "$domain/profiles";
   import { tabs } from "$domain/tabs";
+  import { requestNew } from "$session/profile-sheet.svelte";
   import { commands } from "$shared/ipc/bindings";
   import * as m from "$shared/i18n/messages";
   import { acceleratorKeys } from "$shared/lib/accelerator";
   import { IS_MAC } from "$shared/platform";
-  import AccountCard from "$shared/ui/AccountCard";
   import Disclosure from "$shared/ui/Disclosure";
+  import FootMenu, { type FootRow } from "$shared/ui/FootMenu";
   import Icon from "$shared/ui/Icon";
   import ProfileAvatar from "$shared/ui/ProfileAvatar";
   import "$shared/ui/Shine/shine.css";
@@ -30,8 +31,6 @@
   const privately = $derived(profiles.inPrivate() || tabs.profile()?.kind === "incognito");
   const foot = accountFoot({ private: () => privately });
   const who = $derived(tabs.profile()?.name || profiles.current()?.name || name);
-  const shown = $derived(who || m.browse_profile_settings());
-  const others = $derived(profiles.others());
   const tone = $derived(foot.tone);
 
   function keysFor(command: string) {
@@ -39,40 +38,33 @@
     return accelerator ? acceleratorKeys(accelerator, IS_MAC).join(IS_MAC ? "" : "+") : null;
   }
   const run = (id: string) => void commands.runCommand(id).catch(() => {});
+  const groups = $derived<FootRow[][]>([
+    [{ id: "models", icon: CubeIcon, label: m.settings_models(), run: () => run("settings.ai") }],
+    [
+      {
+        id: "settings",
+        icon: Settings02Icon,
+        label: m.command_browser_settings(),
+        keys: keysFor("browser.settings"),
+        run: () => run("browser.settings"),
+      },
+    ],
+  ]);
 </script>
-
-{#snippet face(size: number)}{#if foot.face}<ProfileAvatar view={foot.face} {size} />{:else}<span
-      class="plain"
-      style:--size="{size}px"
-      aria-hidden="true"
-      ><Icon icon={UserIcon} size={Math.round(size * 0.58)} strokeWidth={1.8} /></span
-    >{/if}{/snippet}
-
-{#snippet row(
-  icon: typeof UserIcon,
-  label: string,
-  caption: string | null,
-  step: number,
-  go: () => void,
-)}
-  <button type="button" role="menuitem" class="ui-menu-item row" style:--step={step} onclick={go}>
-    <span class="ui-menu-icon"><Icon {icon} size={16} /></span>
-    <span class="label">{label}</span>
-    {#if caption}<span class="caption">{caption}</span>{/if}
-  </button>
-{/snippet}
 
 <!--
   Work's foot is the same figure as Browse's: you, as a lit circle, opening onto
-  who you are and what belongs to the work: your account, its models, settings.
-  It is the rail's own light menu rather than the page-wide one, since it
-  loads with Work into a chrome that pays for every dependency at launch.
+  the same menu, where Work's own destination, its models, stands in for
+  Browse's tools. It is the rail's own light menu rather than the page-wide
+  one, since it loads with Work into a chrome that pays for every dependency
+  at launch.
 -->
 <Disclosure
   label={m.account_menu()}
+  triggerTitle={who || undefined}
   menu
   triggerClass="work-case"
-  panelClass="work-menu ui-shine-sheet sidebar-softens"
+  panelClass="work-menu foot-menu-panel ui-shine-sheet sidebar-softens"
 >
   {#snippet trigger()}{#if foot.face}<ProfileAvatar view={foot.face} size={36} />{:else}<Icon
         icon={UserIcon}
@@ -80,71 +72,33 @@
         strokeWidth={1.7}
       />{/if}{#if tone !== "calm"}<span class="pip" data-tone={tone} aria-hidden="true"
       ></span>{/if}{/snippet}
-  <div class="head" role="presentation" style:--step={3}>
-    <button
-      type="button"
-      role="menuitem"
-      class="ui-menu-item me"
-      aria-label={`${shown} — ${m.browse_profile_settings()}`}
-      title={m.browse_profile_settings()}
-      onclick={() => run("settings.profiles")}
-    >
-      {@render face(22)}
-      <span class="me-name">{shown}</span>
-    </button>
-    {#if others.length > 0}<div class="chips" role="presentation">
-        {#each others as profile (profile.id)}
-          <button
-            type="button"
-            role="menuitem"
-            class="chip"
-            title={profile.name}
-            aria-label={m.profiles_menu_label({ name: profile.name })}
-            onclick={() => void profiles.switchTo(profile.id)}
-            ><ProfileAvatar view={drawn(profile)} size={20} /></button
-          >
-        {/each}
-      </div>{/if}
-  </div>
-  <div class="rule" role="separator"></div>
-  {#if foot.available && !privately}<div class="rule" role="separator"></div>
-    <AccountCard
-      signedIn={foot.signedIn}
-      email={foot.email}
-      plan={foot.plan}
-      used={foot.used}
-      tone={foot.tone}
-      mark={foot.mark}
-      step={2}
-      onclick={() => run("settings.account")}
-    />
-    <div class="rule" role="separator"></div>
-  {/if}
-  {@render row(CubeIcon, m.settings_models(), null, 1, () => run("settings.ai"))}
-  <div class="rule" role="separator"></div>
-  {@render row(Settings02Icon, m.command_browser_settings(), keysFor("browser.settings"), 0, () =>
-    run("browser.settings"),
-  )}
+  <FootMenu
+    account={foot.available && !privately ? foot : null}
+    profiles={foot.profiles}
+    privateWindow={privately
+      ? null
+      : { keys: keysFor("window.newPrivate"), run: () => run("window.newPrivate") }}
+    {groups}
+    onaccount={() => run("settings.account")}
+    onswitch={(id) => void profiles.switchTo(id)}
+    onnewprofile={() => {
+      requestNew();
+      run("settings.profiles");
+    }}
+    onmanage={() => run("settings.profiles")}
+  />
 </Disclosure>
 
 <style>
   /* Up out of the trigger, clear of it and of the window's foot, the way the
-     tool stack rises from Browse's: fully on screen at any rail or column width. */
+     menu rises from Browse's: fully on screen at any rail or column width. */
   :global(.work-menu.ui-disclosure-panel) {
-    top: auto;
     bottom: calc(100% + 12px);
     inset-inline-start: 0;
-    min-width: min(232px, calc(100vw - 16px));
-    max-width: min(320px, calc(100vw - 16px));
+    inline-size: min(256px, calc(100vw - 16px));
+    min-inline-size: min(232px, calc(100vw - 16px));
+    max-inline-size: calc(100vw - 16px);
     max-height: calc(100vh - 140px);
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    transform-origin: bottom left;
-    translate: 0 6px;
-  }
-
-  :global(.work-menu.ui-disclosure-panel[data-open="true"]) {
-    translate: 0 0;
   }
 
   /* The profile as the tab list's own foot draws it: lit like the current tab,
@@ -212,158 +166,6 @@
 
   .pip[data-tone="full"] {
     background: var(--color-danger);
-  }
-
-  .plain {
-    display: grid;
-    flex: none;
-    inline-size: var(--size);
-    block-size: var(--size);
-    border-radius: var(--radius-capsule);
-    background: var(--row-active);
-    box-shadow: var(--shine-top);
-    color: var(--color-label-secondary);
-    place-items: center;
-  }
-
-  .head {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-
-  .me {
-    flex: 1;
-    min-inline-size: 0;
-    min-block-size: 34px;
-    border: 0;
-    background: transparent;
-    font: inherit;
-    text-align: start;
-  }
-
-  .me-name {
-    overflow: hidden;
-    color: var(--color-text);
-    font-size: var(--text-body);
-    font-weight: 600;
-    letter-spacing: -0.005em;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .chips {
-    display: flex;
-    flex: none;
-    align-items: center;
-    gap: 2px;
-    padding-inline-end: 2px;
-  }
-
-  .chip {
-    display: grid;
-    inline-size: 28px;
-    block-size: 28px;
-    padding: 0;
-    border: 0;
-    border-radius: 50%;
-    background: transparent;
-    cursor: default;
-    outline: none;
-    place-items: center;
-    transition:
-      background-color var(--motion-instant) var(--ease-smooth),
-      scale var(--motion-base) var(--ease-spring);
-  }
-
-  .chip:hover,
-  .chip:focus-visible {
-    background: var(--row-active);
-  }
-
-  .chip:focus-visible {
-    box-shadow: inset 0 0 0 1.5px var(--color-text);
-  }
-
-  .chip:active {
-    scale: 0.92;
-    background: var(--row-pressed);
-  }
-
-  .row {
-    inline-size: 100%;
-    min-block-size: 32px;
-    padding-block: 4px;
-    border: 0;
-    background: transparent;
-    font: inherit;
-    font-size: var(--text-body);
-    text-align: start;
-  }
-
-  .label {
-    white-space: nowrap;
-  }
-
-  /* A caption, not a keycap: it belongs to the row and says what stands behind it. */
-  .caption {
-    overflow: hidden;
-    margin-inline-start: auto;
-    padding-inline-start: 24px;
-    color: var(--color-faint);
-    font-size: var(--text-label);
-    font-variant-numeric: tabular-nums;
-    letter-spacing: 0.02em;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    transition: color var(--motion-instant) var(--ease-smooth);
-  }
-
-  .row:hover .caption,
-  .row:focus-visible .caption {
-    color: var(--color-muted);
-  }
-
-  :is(.row, .me):hover,
-  :is(.row, .me):focus-visible {
-    outline: none;
-    background: var(--row-active);
-  }
-
-  :is(.row, .me):active {
-    background: var(--row-pressed);
-  }
-
-  .rule {
-    block-size: 1px;
-    margin: 4px var(--menu-item-inset);
-    background: var(--color-border);
-  }
-
-  /* Each row settles in behind the one below it, so the menu unfolds from its foot. */
-  :global(.work-menu[data-open="true"]) :is(.row, .head) {
-    animation: account-row-in var(--motion-slow) var(--ease-out) both;
-    animation-delay: calc(var(--step) * 14ms);
-  }
-
-  /* stylelint-disable-next-line keyframes-name-pattern -- Svelte's global prefix. */
-  @keyframes -global-account-row-in {
-    from {
-      opacity: 0;
-      translate: 0 6px;
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    :global(.work-case),
-    .chip,
-    .caption {
-      transition: none;
-    }
-
-    :global(.work-menu[data-open="true"]) :is(.row, .head) {
-      animation: none;
-    }
   }
 
   @media (forced-colors: active) {

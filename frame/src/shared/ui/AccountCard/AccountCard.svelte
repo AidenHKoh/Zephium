@@ -5,9 +5,8 @@
   import ProfileAvatar, { type ProfileAvatarView } from "$shared/ui/ProfileAvatar";
 
   /**
-   * The account at the foot of Browse and Work: apart from the profile above
-   * it, since the account is the same in every profile. Both feet draw it, so
-   * what it says is decided once.
+   * The Zephium account at the head of the foot menu, apart from the profiles
+   * below it, since the account is the same in every profile.
    */
   let {
     signedIn,
@@ -16,89 +15,96 @@
     used = null,
     tone = "calm",
     mark = null,
-    step = 0,
     compact = false,
     onclick,
   }: {
     signedIn: boolean;
     email?: string | null;
     plan?: string | null;
-    /** Whole percent of the included usage spent, when known. */
+    /** Percent of the included usage spent, when known. */
     used?: number | null;
     tone?: "calm" | "high" | "full";
     /** The account's initials as a drawn avatar. */
     mark?: ProfileAvatarView | null;
-    step?: number;
     compact?: boolean;
     onclick: () => void;
   } = $props();
 
-  const standing = $derived(
-    [plan, used != null ? m.ai_cloud_used({ percent: used }) : null].filter(Boolean).join(" · "),
+  const percent = $derived(used == null ? null : Math.min(100, Math.max(0, Math.round(used))));
+  const usage = $derived(percent == null ? null : m.ai_cloud_used({ percent }));
+  const label = $derived(
+    signedIn ? `${m.account_menu()} — ${email ?? ""}`.trimEnd() : m.menu_sign_in(),
   );
-  const label = $derived(signedIn ? m.account_menu() : m.settings_identity_sign_in());
-  const hint = $derived(signedIn ? [email, standing].filter(Boolean).join(" · ") : null);
-  const fill = $derived(used == null ? null : Math.min(100, Math.max(0, used)));
+  const hint = $derived(
+    signedIn ? [m.account_menu(), email, plan, usage].filter(Boolean).join(" · ") : label,
+  );
 </script>
 
-<button
-  type="button"
-  role="menuitem"
-  class="account-card"
-  data-signed-in={signedIn || undefined}
-  data-compact={compact || undefined}
-  data-tone={tone}
-  style:--step={step}
-  title={compact ? [label, hint].filter(Boolean).join(" · ") : undefined}
-  aria-label={compact || !signedIn ? label : `${label} — ${email ?? ""}`}
-  {onclick}
->
-  {#if !signedIn}
-    {#if compact}<Icon icon={UserIcon} size={16} />{:else}<span class="out">{label}</span>{/if}
-  {:else}
-    {#if mark}<ProfileAvatar view={mark} size={compact ? 28 : 30} />{/if}
-    {#if !compact}<span class="text">
+{#if !signedIn}
+  <button
+    type="button"
+    role="menuitem"
+    class="account-card account-out"
+    data-compact={compact || undefined}
+    title={compact ? hint : undefined}
+    aria-label={label}
+    {onclick}
+  >
+    {#if compact}<Icon icon={UserIcon} size={16} />{:else}{label}{/if}
+  </button>
+{:else}
+  <button
+    type="button"
+    role="menuitem"
+    class="account-card"
+    data-compact={compact || undefined}
+    data-tone={tone}
+    title={compact ? hint : undefined}
+    aria-label={label}
+    {onclick}
+  >
+    {#if mark}<ProfileAvatar view={mark} size={compact ? 24 : 32} />{/if}
+    {#if compact}{#if tone !== "calm"}<span class="pip" aria-hidden="true"></span>{/if}
+    {:else}<span class="text">
         <span class="email">{email}</span>
-        {#if standing}<span class="standing">{standing}</span>{/if}
-        {#if fill != null}<span class="bar" aria-hidden="true"
-            ><span style:inline-size="{fill}%"></span></span
+        {#if plan || usage}<span class="standing">
+            {#if plan}<span class="plan">{plan}</span>{/if}
+            {#if usage}<span class="used">{usage}</span>{/if}
+          </span>{/if}
+        {#if percent != null}<span class="bar" aria-hidden="true"
+            ><span style:inline-size="{percent}%"></span></span
           >{/if}
       </span>{/if}
-  {/if}
-</button>
+  </button>
+{/if}
 
 <style>
   .account-card {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 10px;
     inline-size: 100%;
     box-sizing: border-box;
-    min-block-size: 36px;
-    margin-block: 2px;
-    padding: 6px 10px;
+    padding: 10px;
     border: 0;
     border-radius: calc(var(--radius-menu) - var(--menu-pad));
     background: var(--color-fill);
-    box-shadow: var(--shine-top);
     color: var(--color-text);
     font: inherit;
     font-size: var(--text-body);
+    line-height: 18px;
     text-align: start;
     cursor: default;
+    outline: none;
     transition:
       background-color var(--motion-instant) var(--ease-smooth),
-      scale var(--motion-base) var(--ease-spring);
+      scale var(--motion-fast) var(--ease-out);
   }
 
   .account-card:hover,
   .account-card:focus-visible {
-    outline: none;
     background: var(--row-active);
-  }
-
-  .account-card:focus-visible {
-    box-shadow: inset 0 0 0 1.5px var(--color-text);
   }
 
   .account-card:active {
@@ -106,25 +112,32 @@
     background: var(--row-pressed);
   }
 
-  .account-card:not([data-signed-in]) {
+  /* Signed out, the card is one call to action: the secondary plate, centred. */
+  .account-out {
     justify-content: center;
-    min-block-size: 34px;
-  }
-
-  .out {
+    min-block-size: var(--foot-row, 32px);
+    padding-block: 7px;
+    background: var(--row-active);
+    box-shadow: var(--shine-top);
     font-weight: 600;
     letter-spacing: -0.005em;
   }
 
-  .account-card[data-compact] {
-    justify-content: center;
-    padding-inline: 0;
+  .account-out:hover,
+  .account-out:focus-visible {
+    background: var(--row-pressed);
+  }
+
+  .account-card:focus-visible {
+    box-shadow:
+      var(--shine-top),
+      inset 0 0 0 1px var(--color-ring);
   }
 
   .text {
     display: grid;
     flex: 1;
-    gap: 1px;
+    gap: 2px;
     min-inline-size: 0;
   }
 
@@ -137,33 +150,39 @@
   }
 
   .standing {
-    overflow: hidden;
-    color: var(--color-faint);
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    color: var(--color-muted);
     font-size: var(--text-label);
-    font-variant-numeric: tabular-nums;
-    letter-spacing: 0.02em;
+    line-height: 16px;
+  }
+
+  .plan {
+    overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    transition: color var(--motion-instant) var(--ease-smooth);
   }
 
-  .account-card:hover .standing,
-  .account-card:focus-visible .standing {
-    color: var(--color-muted);
+  .used {
+    flex: none;
+    margin-inline-start: auto;
+    color: var(--color-faint);
+    font-variant-numeric: tabular-nums;
   }
 
-  .account-card[data-tone="high"] .standing {
-    color: var(--color-warning, var(--color-muted));
+  .account-card[data-tone="high"] .used {
+    color: var(--color-warning);
   }
 
-  .account-card[data-tone="full"] .standing {
+  .account-card[data-tone="full"] .used {
     color: var(--color-danger);
   }
 
   .bar {
     overflow: hidden;
     block-size: 3px;
-    margin-block-start: 5px;
+    margin-block-start: 4px;
     border-radius: var(--radius-capsule);
     background: var(--color-track);
   }
@@ -172,7 +191,7 @@
     display: block;
     block-size: 100%;
     border-radius: inherit;
-    background: var(--color-text);
+    background: var(--color-muted);
     transition: inline-size var(--motion-slow) var(--ease-out);
   }
 
@@ -184,29 +203,38 @@
     background: var(--color-danger);
   }
 
-  /* Settles in behind the rows below it, so the menu unfolds from its foot. */
-  :global([data-open="true"]) .account-card {
-    animation: account-card-in var(--motion-slow) var(--ease-out) both;
-    animation-delay: calc(var(--step) * 14ms);
+  /* At rail width the card is the initials alone, its standing in the tooltip. */
+  .account-card[data-compact] {
+    justify-content: center;
+    min-block-size: var(--foot-row, 32px);
+    padding: 0;
+    background: transparent;
+    box-shadow: none;
   }
 
-  /* stylelint-disable-next-line keyframes-name-pattern -- Svelte's global prefix. */
-  @keyframes -global-account-card-in {
-    from {
-      opacity: 0;
-      translate: 0 6px;
-    }
+  .account-card[data-compact]:hover,
+  .account-card[data-compact]:focus-visible {
+    background: var(--row-active);
   }
 
-  @media (prefers-reduced-motion: reduce) {
-    .account-card,
-    .standing,
-    .bar span {
-      transition: none;
-    }
+  .pip {
+    position: absolute;
+    inset-block-start: 4px;
+    inset-inline-end: 5px;
+    inline-size: 7px;
+    block-size: 7px;
+    border-radius: 50%;
+    background: var(--color-warning);
+    box-shadow: 0 0 0 2px var(--color-float);
+  }
 
-    :global([data-open="true"]) .account-card {
-      animation: none;
+  .account-card[data-tone="full"] .pip {
+    background: var(--color-danger);
+  }
+
+  @media (forced-colors: active) {
+    .account-card {
+      border: 1px solid ButtonText;
     }
   }
 </style>

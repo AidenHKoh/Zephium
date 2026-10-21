@@ -22,9 +22,6 @@ export const all = (): ProfileEntryView[] => view?.profiles ?? [];
 export const current = (): ProfileEntryView | null =>
   view?.profiles.find((profile) => profile.id === view?.current) ?? null;
 export const inPrivate = () => view?.private ?? false;
-/** The profiles a window could switch to from here. */
-export const others = (): ProfileEntryView[] =>
-  all().filter((profile) => profile.id !== view?.current);
 
 async function read(started: number) {
   const reply = await observe(

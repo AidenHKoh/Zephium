@@ -24,14 +24,10 @@ test("with no menu bar, Help stands beneath Settings and opens the Help menu", a
   const screen = await render(ToolShelf);
   screen.container.style.paddingBlockStart = "480px";
   await screen.getByRole("button", { name: /^Tools/ }).click();
-  const steps = [...screen.container.querySelectorAll<HTMLElement>(".shelf-item")].map((item) => [
-    item.textContent?.trim(),
-    Number(item.style.getPropertyValue("--step")),
-  ]);
-  expect(steps.slice(-2)).toEqual([
-    ["Settings", 1],
-    ["Help", 0],
-  ]);
+  const rows = [...screen.container.querySelectorAll<HTMLElement>(".foot-tool")].map((item) =>
+    item.querySelector(".foot-label")?.textContent?.trim(),
+  );
+  expect(rows.slice(-2)).toEqual(["Settings", "Help"]);
   await screen.getByRole("menuitem", { name: "Help", exact: true }).click();
   expect(native.run).toHaveBeenLastCalledWith("help.menu");
 });

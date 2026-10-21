@@ -1,0 +1,24 @@
+/* The panel the foot menu rises in, from the foot of Browse or of Work. It
+   opens with a short fade and a slight scale from the trigger's corner and
+   nothing more: no slide, no rows arriving one by one. A window too short for
+   it scrolls the rows instead. */
+.ui-disclosure-panel.foot-menu-panel {
+  top: auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  transform-origin: bottom left;
+  translate: 0 0;
+  scale: 0.98;
+  transition:
+    opacity var(--motion-fast) var(--ease-exit),
+    scale var(--motion-fast) var(--ease-exit),
+    visibility 0s linear var(--motion-fast);
+}
+
+.ui-disclosure-panel.foot-menu-panel[data-open="true"] {
+  scale: 1;
+  transition:
+    opacity var(--motion-fast) var(--ease-out),
+    scale var(--motion-fast) var(--ease-out),
+    visibility 0s;
+}

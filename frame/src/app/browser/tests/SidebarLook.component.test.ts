@@ -37,8 +37,6 @@ test("the sidebar column at rest", async () => {
   const stack = screen.container.querySelector<HTMLElement>(".shelf-stack")!;
   await expect.poll(() => stack.inert).toBe(false);
   // The stack unfolds; capture it settled, not mid-rise.
-  const farthest = stack.querySelector<HTMLElement>(".shelf-item")!;
-  await expect.poll(() => getComputedStyle(farthest).opacity).toBe("1");
   await expect.poll(() => getComputedStyle(stack).opacity).toBe("1");
   await page
     .elementLocator(screen.container)
@@ -58,15 +56,13 @@ test("the rail at rest", async () => {
   await screen.getByRole("button", { name: "Tools", exact: true }).click();
   const stack = screen.container.querySelector<HTMLElement>(".shelf-stack")!;
   await expect.poll(() => stack.inert).toBe(false);
-  const farthest = stack.querySelector<HTMLElement>(".shelf-item")!;
-  await expect.poll(() => getComputedStyle(farthest).opacity).toBe("1");
   await expect.poll(() => getComputedStyle(stack).opacity).toBe("1");
-  // You and a private window head the stack as glyphs; then the tools in the
-  // native menu's order, and Settings last, nearest the case.
+  // The profiles and a private window head the stack as glyphs; then the
+  // tools in the native menu's order, and Settings last, nearest the case.
   await expect
     .element(page.getByRole("menuitem", { name: "New Incognito Window" }))
     .toBeInTheDocument();
-  const items = [...stack.querySelectorAll<HTMLElement>(".shelf-item")];
+  const items = [...stack.querySelectorAll<HTMLElement>(".foot-tool")];
   expect(items.map((item) => item.getAttribute("aria-label"))).toEqual([
     "Notes",
     "Tasks",

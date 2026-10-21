@@ -1,12 +1,15 @@
 <script lang="ts">
   import "$styles/global.css";
   import { Dock } from "$features/dock";
+
+  /** The column's width, which the menu may not outgrow. */
+  let { width = 260 }: { width?: number } = $props();
 </script>
 
 <!-- The foot of the sidebar at full width and at rail width, with the room
-     above it the stack rises into. -->
+     above it the menu rises into. -->
 <div class="stage">
-  <div class="browser-sidebar column">
+  <div class="browser-sidebar column" style:width="{width}px" style:--sidebar-width="{width}px">
     <div class="sidebar-columns">
       <div class="sidebar-browser-column">
         <div class="rest"></div>
@@ -34,9 +37,9 @@
 
   .column {
     display: flex;
+    flex: none;
     flex-direction: column;
-    width: 260px;
-    height: 560px;
+    height: 680px;
     background: var(--color-chrome);
   }
 
