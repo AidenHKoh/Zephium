@@ -129,7 +129,7 @@ fn about_the_day(request: &str) -> bool {
 }
 
 /// "Plan my day", "what's new in my Slack", "my inbox", "prep my next meeting".
-fn about_own_apps(request: &str) -> bool {
+pub(crate) fn about_own_apps(request: &str) -> bool {
     const PHRASES: [&str; 14] = [
         "my day",
         "today",

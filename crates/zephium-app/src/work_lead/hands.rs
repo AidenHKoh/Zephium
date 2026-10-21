@@ -730,12 +730,14 @@ where
                     continue;
                 };
                 // The model's own word that a page is the person's account
-                // counts only where the person's words point there: a store
-                // they shop for in is read as anyone sees it, never asked
-                // about, even when it holds their cookies.
+                // counts only where the person's words point there (the site,
+                // or their own day, inbox or tasks): a store they shop in is
+                // read as anyone sees it, never asked about, even when it
+                // holds their cookies.
                 let mine = request.mine
                     && (self.run.trusts(&site)
                         || self.run.asked_to_save(&site)
+                        || super::skills::about_own_apps(&self.run.said())
                         || super::route::site(site.split('.').next().unwrap_or_default())
                             .is_some());
                 if !(mine || self.personal || crate::work_sites::personal_page(url)) {
