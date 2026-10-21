@@ -41,7 +41,10 @@ pub struct WryWebViewIvars {
   #[cfg(target_os = "ios")]
   pub(crate) input_accessory_view_builder: Option<Box<crate::InputAccessoryViewBuilder>>,
   /// `Some` while the view's tracking areas are parked: the ones WebKit
-  /// installed (and any it adds meanwhile), held out of the view.
+  /// installed (and any it adds meanwhile), held out of the view. AppKit's
+  /// own areas (tool tips, gesture recognizers) stay installed: AppKit drops
+  /// them without `removeTrackingArea:` and frees what they point to, so a
+  /// parked copy would come back dangling.
   #[cfg(target_os = "macos")]
   pub(crate) parked_tracking: std::cell::RefCell<Option<Vec<Retained<NSTrackingArea>>>>,
   /// The view is also skipped by hit-testing.
@@ -108,20 +111,36 @@ define_class!(
     #[unsafe(method(addTrackingArea:))]
     fn add_tracking_area(&self, area: &NSTrackingArea) {
       if let Some(parked) = self.ivars().parked_tracking.borrow_mut().as_mut() {
-        parked.push(area.retain());
-      } else {
-        unsafe { objc2::msg_send![super(self), addTrackingArea: area] }
+        if is_webkit_area(area) {
+          parked.push(area.retain());
+          return;
+        }
       }
+      unsafe { objc2::msg_send![super(self), addTrackingArea: area] }
     }
 
     #[cfg(target_os = "macos")]
     #[unsafe(method(removeTrackingArea:))]
     fn remove_tracking_area(&self, area: &NSTrackingArea) {
       if let Some(parked) = self.ivars().parked_tracking.borrow_mut().as_mut() {
-        parked.retain(|held| !std::ptr::eq(&**held, area));
-      } else {
-        unsafe { objc2::msg_send![super(self), removeTrackingArea: area] }
+        if let Some(index) = parked.iter().position(|held| std::ptr::eq(&**held, area)) {
+          parked.remove(index);
+          return;
+        }
       }
+      unsafe { objc2::msg_send![super(self), removeTrackingArea: area] }
+    }
+
+    /// WebKit reads the pointer location in screen coordinates right before
+    /// it sets a cursor; noting that read lets the cursor guard tell which
+    /// view is asking.
+    #[cfg(target_os = "macos")]
+    #[unsafe(method(convertPoint:fromView:))]
+    fn convert_point_from_view(&self, point: NSPoint, view: Option<&NSView>) -> NSPoint {
+      if view.is_none() {
+        crate::wkwebview::cursor_guard::note_conversion(self, point);
+      }
+      unsafe { objc2::msg_send![super(self), convertPoint: point, fromView: view] }
     }
 
     #[cfg(target_os = "macos")]
@@ -208,9 +227,9 @@ define_class!(
 #[cfg(target_os = "macos")]
 impl WryWebView {
   /// While inert the view takes no mouse input at all: it is skipped by
-  /// hit-testing and holds no tracking areas, which AppKit delivers to even
-  /// when another view covers this one (they set the cursor under the cover).
-  /// Turning it off gives WebKit's areas back.
+  /// hit-testing and holds none of WebKit's tracking areas, which AppKit
+  /// delivers to even when another view covers this one (they set the cursor
+  /// under the cover). Turning it off gives WebKit's areas back.
   pub fn set_pointer_inert(&self, inert: bool) {
     self.ivars().skips_hit_test.set(inert);
     self.set_tracking_parked(inert);
@@ -227,7 +246,11 @@ impl WryWebView {
       return;
     }
     if parked {
-      let areas: Vec<_> = self.trackingAreas().iter().collect();
+      let areas: Vec<_> = self
+        .trackingAreas()
+        .iter()
+        .filter(|area| is_webkit_area(area))
+        .collect();
       *self.ivars().parked_tracking.borrow_mut() = Some(areas.clone());
       for area in &areas {
         unsafe { objc2::msg_send![super(self), removeTrackingArea: &**area] }
@@ -243,6 +266,24 @@ impl WryWebView {
   pub fn is_tracking_parked(&self) -> bool {
     self.ivars().parked_tracking.borrow().is_some()
   }
+}
+
+/// An area WebKit installed for its own mouse tracking: its owner is a
+/// WebKit object, and WebKit adds and removes it through the public calls
+/// this class intercepts.
+#[cfg(target_os = "macos")]
+fn is_webkit_area(area: &NSTrackingArea) -> bool {
+  use objc2::{runtime::AnyObject, ClassType};
+  use objc2_foundation::NSBundle;
+  use std::sync::OnceLock;
+
+  // SAFETY: a bundle lookup for a class loaded in this process.
+  let bundle = |class| Retained::as_ptr(&unsafe { NSBundle::bundleForClass(class) }).addr();
+  static WEBKIT: OnceLock<usize> = OnceLock::new();
+  let webkit = *WEBKIT.get_or_init(|| bundle(WKWebView::class()));
+  // SAFETY: an installed area's owner outlives it, as AppKit requires.
+  let owner: Option<Retained<AnyObject>> = unsafe { objc2::msg_send![area, owner] };
+  owner.is_some_and(|owner| bundle(owner.class()) == webkit)
 }
 
 // Custom Protocol Task Checker
@@ -289,6 +330,27 @@ mod tests {
       assert!(body.contains("Bool::NO"));
       assert!(body.contains("super(self)"));
     }
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn parking_holds_only_webkit_areas() {
+    let source = include_str!("wry_web_view.rs");
+    let section = |from: &str, to: &str| {
+      source
+        .split(from)
+        .nth(1)
+        .and_then(|rest| rest.split(to).next())
+        .expect("bounded section")
+        .to_owned()
+    };
+    let add = section("fn add_tracking_area", "fn remove_tracking_area");
+    assert!(add.contains("if is_webkit_area(area)"));
+    let remove = section("fn remove_tracking_area", "fn convert_point_from_view");
+    assert!(remove.contains("position("));
+    assert!(remove.contains("super(self), removeTrackingArea: area"));
+    let park = section("pub fn set_tracking_parked", "pub fn is_tracking_parked");
+    assert!(park.contains(".filter(|area| is_webkit_area(area))"));
   }
 
   #[test]

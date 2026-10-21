@@ -18,6 +18,8 @@ mod util;
 mod ios;
 
 mod class;
+#[cfg(target_os = "macos")]
+mod cursor_guard;
 pub(crate) use class::wry_navigation_delegate::BlockedLoadCounter;
 pub use class::wry_web_view::WryWebView;
 #[cfg(target_os = "macos")]
@@ -422,6 +424,8 @@ impl InnerWebView {
   ) -> Result<Self> {
     let mtm = MainThreadMarker::new().ok_or(Error::NotMainThread)?;
 
+    #[cfg(target_os = "macos")]
+    cursor_guard::install();
     #[cfg(target_os = "macos")]
     let focuses_during_initial_construction = attributes.focuses_during_initial_construction();
     #[cfg(target_os = "macos")]
