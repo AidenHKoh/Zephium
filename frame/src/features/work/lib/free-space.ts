@@ -4,6 +4,13 @@ type Point = { x: number; y: number };
 const STEP = 24;
 const RINGS = 40;
 
+/**
+ * How near the person's own thing may stand to a run's card. A run keeps this
+ * far from the person's things, and a drop nearer than this is put clear, so
+ * the two rules never disagree about where something may stand.
+ */
+export const CLEARANCE = 16;
+
 const clear = (a: Rect, taken: readonly Rect[], gap: number) =>
   taken.every(
     (b) =>
@@ -12,6 +19,10 @@ const clear = (a: Rect, taken: readonly Rect[], gap: number) =>
       a.y + a.height + gap <= b.y ||
       b.y + b.height + gap <= a.y,
   );
+
+/** Whether `rect` comes nearer than `gap` to anything taken. */
+export const touches = (rect: Rect, taken: readonly Rect[], gap = CLEARANCE) =>
+  !clear(rect, taken, gap);
 
 /**
  * The nearest place to `want` (the thing's centre) where a thing of `size`
@@ -51,4 +62,16 @@ export function freeSpot(
   }
   const bottom = Math.max(want.y, ...taken.map((rect) => rect.y + rect.height));
   return centre(at(want.x, bottom + gap + size.height / 2));
+}
+
+/**
+ * Where a thing the person dropped must stand instead, as its top-left: the
+ * nearest free spot when it landed on or against something taken, else null,
+ * and it stays exactly where it was put.
+ */
+export function dropSpot(rect: Rect, taken: readonly Rect[]): Point | null {
+  if (!touches(rect, taken)) return null;
+  const size = { width: rect.width, height: rect.height };
+  const spot = freeSpot({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }, size, taken);
+  return { x: Math.round(spot.x - size.width / 2), y: Math.round(spot.y - size.height / 2) };
 }

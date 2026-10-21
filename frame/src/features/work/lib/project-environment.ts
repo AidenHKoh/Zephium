@@ -271,7 +271,15 @@ function elementItems(
         TITLE_TEXT,
       );
       // A video is its poster, played in place; the poster is the admitted thumbnail.
-      const video = linkVideo(element.id, link.url, link.title ? { title: link.title } : {});
+      // Its caption is the video's own name when one is known, never the bare host
+      // a pasted link is stored with.
+      const bare = link.title.replace(/^www\./u, "") === host(link.url).replace(/^www\./u, "");
+      const named = observedTitle(objectives, link.url) || (bare ? "" : link.title);
+      const video = linkVideo(
+        element.id,
+        link.url,
+        named ? { title: clipText(named, TITLE_TEXT) } : {},
+      );
       if (video)
         return {
           id: element.id,

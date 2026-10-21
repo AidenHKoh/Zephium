@@ -60,6 +60,7 @@
     applyRemoteView,
     absolutePosition,
     containingArea,
+    defaultSize,
     isAgentNode,
     isAreaNode,
     isItemNode,
@@ -105,6 +106,7 @@
     onselectionaction,
     onareaedit,
     onmoved,
+    placeDrop,
     board,
     work,
     onprobe,
@@ -143,6 +145,11 @@
     ) => void;
     /** The person dragged these cards to where they stand now. */
     onmoved?: (ids: string[]) => void;
+    /**
+     * Where a card the person dropped must stand instead, as its top-left, when
+     * it landed somewhere it cannot stay; null, and it stays exactly where it was put.
+     */
+    placeDrop?: (id: string, rect: CanvasPosition & CanvasSize) => CanvasPosition | null;
     /** What a board's blocks ask of the canvas's owner. */
     board?: BoardActions;
     /** The runs behind the canvas, by objective, for a helper's own view of its part. */
@@ -439,6 +446,43 @@
       ? (previous as WorkNode[])
       : kept;
   }
+  /** Cards the canvas moved itself glide there, then lose the class that let them. */
+  const GLIDE = "settling";
+  let glideTimer: ReturnType<typeof setTimeout> | undefined;
+  const classes = (node: WorkNode) =>
+    typeof node.class === "string" ? node.class.split(" ").filter(Boolean) : [];
+  function glideCards(previous: readonly WorkNode[], next: WorkNode[]): WorkNode[] {
+    const before = new Map(previous.map((node) => [node.id, node]));
+    let moved = false;
+    const glided = next.map((node) => {
+      const was = before.get(node.id);
+      if (
+        !was ||
+        !isItemNode(node) ||
+        node.dragging ||
+        classes(node).includes(GLIDE) ||
+        (was.position.x === node.position.x && was.position.y === node.position.y)
+      )
+        return node;
+      moved = true;
+      return { ...node, class: [...classes(node), GLIDE].join(" ") };
+    });
+    if (!moved) return next;
+    clearTimeout(glideTimer);
+    glideTimer = setTimeout(
+      () => {
+        nodes = nodes.map((node) => {
+          const names = classes(node);
+          if (!names.includes(GLIDE)) return node;
+          const kept = names.filter((name) => name !== GLIDE);
+          return { ...node, class: kept.length ? kept.join(" ") : undefined };
+        });
+      },
+      duration("slow") + 40,
+    );
+    return glided;
+  }
+  $effect(() => () => clearTimeout(glideTimer));
   $effect(() => {
     const next = scene.items;
     const grouping = areas;
@@ -457,7 +501,7 @@
         lastPositions,
       );
       lastPositions = placed;
-      return rest(nodes, reconciled);
+      return rest(nodes, glideCards(nodes, reconciled));
     });
   });
   let publishedPositions = "";
@@ -763,6 +807,40 @@
     publishedPositions = positionKey(next);
     publishView();
   }
+  /**
+   * A dropped card stays where it was put. One that landed where it cannot
+   * stay glides to the nearest spot it can, and the owner says why.
+   */
+  function settleDrop(ids: readonly string[]) {
+    if (!placeDrop) return;
+    const spots: Record<string, CanvasPosition> = {};
+    for (const id of ids) {
+      const node = nodes.find((candidate) => candidate.id === id);
+      if (!node || !isItemNode(node)) continue;
+      const at = absolutePosition(node, nodes);
+      const spot = placeDrop(id, {
+        ...at,
+        width: node.width ?? defaultSize(node.data).width,
+        height: node.height ?? defaultSize(node.data).height,
+      });
+      if (spot && (spot.x !== at.x || spot.y !== at.y)) spots[id] = spot;
+    }
+    if (!Object.keys(spots).length) return;
+    nodes = glideCards(
+      nodes,
+      nodes.map((node) => {
+        const spot = spots[node.id];
+        if (!spot) return node;
+        const parent = node.parentId
+          ? nodes.find((candidate) => candidate.id === node.parentId)
+          : undefined;
+        const position = parent
+          ? { x: spot.x - parent.position.x, y: spot.y - parent.position.y }
+          : spot;
+        return { ...node, dragging: false, position };
+      }),
+    );
+  }
   const arrangeSelection = (how: Arrangement) =>
     place(moveTo(nodes, arrange(selectedPlacements(selectedItems, nodes), how)));
   const alignSelection = (how: Alignment) =>
@@ -886,6 +964,7 @@
       }}
       onnodedragstop={({ targetNode, nodes: carried }) => {
         onmoved?.(carried.map((node) => node.id));
+        settleDrop(carried.map((node) => node.id));
         if (!targetNode || !isItemNode(targetNode as WorkNode)) return;
         const node = nodes.find((candidate) => candidate.id === targetNode.id);
         if (!node || !isItemNode(node) || !authoritative.has(node.id)) return;
@@ -985,6 +1064,12 @@
   /* A board's block glides where its board makes room; a dragged one follows the pointer. */
   /* stylelint-disable-next-line selector-class-pattern */
   .work-canvas :global(.svelte-flow__node.board-block:not(.dragging)) {
+    transition: transform var(--motion-slow) var(--ease-emphasized);
+  }
+
+  /* A card the canvas moved itself (a drop put clear, a run making room) glides there. */
+  /* stylelint-disable-next-line selector-class-pattern */
+  .work-canvas :global(.svelte-flow__node.settling:not(.dragging)) {
     transition: transform var(--motion-slow) var(--ease-emphasized);
   }
 

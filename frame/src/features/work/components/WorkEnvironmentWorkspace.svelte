@@ -72,12 +72,12 @@
   import LiftHeader from "./LiftHeader.svelte";
   import { commandRecord } from "../lib/project-environment-stage";
   import {
-    clearOfBands,
     elementPictures,
     environmentStages,
     fetchedPictures,
     laneElement,
     measurer,
+    ownPlaces,
   } from "../lib/project-environment-board";
   import type { BoardActions, DraftEdit } from "../lib/canvas-context";
   import { OwnedObjects } from "$domain/resources";
@@ -121,7 +121,7 @@
   import { openOver, type PaneRect } from "../lib/pane-geometry";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
   import { CanvasPlacing } from "../lib/workspace/placing.svelte";
-  import { freeSpot } from "../lib/free-space";
+  import { dropSpot, freeSpot } from "../lib/free-space";
   import { PictureQueue } from "../lib/workspace/pictures.svelte";
   import { environmentResults, type ResultReference } from "../lib/project-environment-results";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
@@ -903,7 +903,15 @@
   const placing = new CanvasPlacing({
     session: () => session,
     busy: () => busy,
-    centre: placingCentre,
+    spot: (at, size, id) => {
+      if (!at) return clearSpot(id, size);
+      const corner = dropPlace(null, {
+        x: at.x - size.width / 2,
+        y: at.y - size.height / 2,
+        ...size,
+      });
+      return corner ? { x: corner.x + size.width / 2, y: corner.y + size.height / 2 } : at;
+    },
     at: (x, y) => canvasRef?.flowPosition(x, y) ?? null,
     file: (path) => {
       const draft = session.composer.trimEnd();
@@ -996,10 +1004,50 @@
   );
   /** Requests the person opened to read whole. */
   const openRequests = new SvelteSet<string>();
+  /**
+   * The person's own arrangement as it stands now: the unsaved one while a
+   * save is pending, so a save that lands late never puts a card back.
+   */
+  const ownView = $derived(
+    snapshot
+      ? environmentView(
+          session.viewDraft?.id === snapshot.id
+            ? { ...snapshot, view: session.viewDraft.view }
+            : snapshot,
+        )
+      : undefined,
+  );
+  /** What the person placed and the canvas draws, as the runs must leave it: their cards and areas. */
+  let ownRectsKey = "";
+  let ownRectsLast: Record<string, CanvasPosition & { width: number; height: number }> = {};
+  const ownRects = $derived.by(() => {
+    const next = ownView
+      ? {
+          ...Object.fromEntries(
+            results.items.flatMap((item) => {
+              const at = ownView.positions[item.id];
+              if (!at || item.type === "objective" || item.type === "request") return [];
+              return [[item.id, { ...at, ...(ownView.sizes?.[item.id] ?? defaultSize(item)) }]];
+            }),
+          ),
+          ...Object.fromEntries(
+            Object.entries(ownView.areas ?? {}).map(([id, rect]) => [`area:${id}`, rect]),
+          ),
+        }
+      : {};
+    // A live run re-derives its items many times a second; the runs re-lay only when these move.
+    const key = JSON.stringify(next);
+    if (key !== ownRectsKey) {
+      ownRectsKey = key;
+      ownRectsLast = next;
+    }
+    return ownRectsLast;
+  });
   /** Every request of the canvas as a band: its words, its branches, its result. */
   const stages = $derived(
     snapshot
       ? environmentStages(snapshot, context.objectives, {
+          around: ownRects,
           recorded: recordedPages,
           pictures: elementPictures(snapshot, context.media),
           fetched: fetchedPictures(snapshot, context.media),
@@ -1774,25 +1822,26 @@
     ),
   );
   const canvasView = $derived.by(() => {
-    if (!snapshot) return undefined;
-    const own = environmentView(snapshot);
+    if (!snapshot || !ownView) return undefined;
+    const own = ownView;
     const placed = {
       ...plannedGeometry.positions,
       ...planGeometry.positions,
       ...savedResultPositions,
       ...own.positions,
     };
-    // Something of the person's with no place yet stands clear of the runs, not on them.
+    // Something of the person's with no place yet stands in free room in view, clear of the runs.
     const loose = results.items.flatMap((item) =>
       item.type === "objective" || item.type === "request" || placed[item.id] ? [] : [item.id],
     );
+    const near = loose.length ? untrack(placingCentre) : null;
     return {
       ...own,
       positions: {
         ...plannedGeometry.positions,
         ...planGeometry.positions,
         ...savedResultPositions,
-        ...clearOfBands(
+        ...ownPlaces(
           own.positions,
           {
             ...Object.fromEntries(results.items.map((item) => [item.id, defaultSize(item)])),
@@ -1800,6 +1849,7 @@
           },
           stages,
           loose,
+          near,
         ),
         ...requests.positions,
         ...agents.positions,
@@ -1994,6 +2044,30 @@
       rects.push({ ...at, ...(view.sizes[item.id] ?? defaultSize(item)) });
     }
     return rects;
+  }
+  /** A drop the canvas put clear of a run says so, briefly. */
+  let putClear = $state(false);
+  let putClearTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => () => clearTimeout(putClearTimer));
+  /**
+   * Where something of the person's dropped at `rect` must stand instead:
+   * only on or against a run's card is a drop refused, and then it goes to
+   * the nearest free spot. Null, and it stays exactly where it was put. A
+   * run's own cards are the run's to place.
+   */
+  function dropPlace(id: string | null, rect: CanvasPosition & { width: number; height: number }) {
+    const current = snapshot;
+    const element = id ? current?.elements.find((entry) => entry.id === id) : undefined;
+    if (!current || (id && (!element || laneElement(current, element)))) return null;
+    const spot = dropSpot(
+      rect,
+      stages.flatMap((stage) => Object.values(stage.lane.rects)),
+    );
+    if (!spot) return null;
+    putClear = true;
+    clearTimeout(putClearTimer);
+    putClearTimer = setTimeout(() => (putClear = false), 4000);
+    return spot;
   }
   /** The centre of the nearest free room to the view's middle, or to where a thing already stands. */
   function clearSpot(except: string | null, size: { width: number; height: number }) {
@@ -2505,6 +2579,7 @@
               onmoved={(ids: string[]) => {
                 for (const id of ids) moved.add(id);
               }}
+              placeDrop={dropPlace}
               onprobe={(origin: string) =>
                 void commands.faviconProbe(session.profile, [origin]).catch(() => false)}
               fitBottomInset={composerHeight}
@@ -2619,6 +2694,9 @@
       <div class="island" class:gone={!(runningObjective && objectiveSession)}>
         {#if runningObjective && objectiveSession}{@render agentLine()}{/if}
       </div>
+      {#if putClear && !troubled}<div class="status" role="status">
+          <span>{m.work_env_put_clear()}</span>
+        </div>{/if}
       {#if troubled}<div class="status" role="status">
           <span
             >{session.failure

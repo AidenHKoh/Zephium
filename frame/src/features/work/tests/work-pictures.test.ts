@@ -6,7 +6,7 @@ vi.mock("../lib/subjects", () => ({
   subjectsOf: () => [{ name: "one" }, { name: "two" }],
   subjectImageCandidates: () => ["https://cdn.example.com/a.jpg"],
 }));
-vi.mock("../lib/link-media", () => ({ pickCandidates: () => [] }));
+vi.mock("../lib/link-media", () => ({ pickCandidates: () => [], youtubeThumbnail: () => null }));
 
 const { PictureQueue } = await import("../lib/workspace/pictures.svelte");
 

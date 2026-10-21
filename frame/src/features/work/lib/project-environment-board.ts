@@ -33,6 +33,7 @@ import { siteName } from "./run/site";
 import { computerRows, computerView } from "./parts/computer";
 import { foundByPart } from "./run/found";
 import { provenance } from "./run/provenance";
+import { freeSpot, touches } from "./free-space";
 import * as m from "$shared/i18n/messages";
 
 /** A placement written in board terms: the person moved the block; `x, y` are from the result's corner. */
@@ -167,6 +168,8 @@ export type StageOptions = {
   inputs?: (runs: readonly WorkExecutionFact[]) => readonly RunInputView[];
   /** The questions a run put to the person and the answers, as the asks read them. */
   exchange?: (runs: readonly WorkExecutionFact[]) => RunTurn[];
+  /** Where the person's own things stand, by element: every run is laid out clear of them. */
+  around?: Readonly<Record<string, Box>>;
 };
 
 /** An input's mark: its name over what kind of thing it is, its tile where its line leaves. */
@@ -351,6 +354,11 @@ export function environmentStages(
   const pins = boardPins(snapshot);
   const measured = options.measured ?? new Map<string, number>();
   const stages: WorkStage[] = [];
+  // A folder a run read is drawn as that run's input, not where it was put.
+  const claimed = runInputFolders(snapshot, objectives);
+  const around = Object.entries(options.around ?? {}).flatMap(([id, box]) =>
+    claimed.has(id) ? [] : [box],
+  );
   let top = 0;
   for (const element of snapshot.elements) {
     if (element.reference.kind !== "objective") continue;
@@ -592,7 +600,7 @@ export function environmentStages(
             height: measured.get(measureKey(sourcesId, SOURCES, false)) ?? sourcesHeight(drawn),
           }
         : undefined;
-      const lane = placeRun(top, {
+      const run = {
         request: requestPart,
         ...(sources ? { sources } : {}),
         inputs: inputs.map((entry) => ({ id: entry.id, ...INPUT })),
@@ -600,7 +608,16 @@ export function environmentStages(
         ...(head ? { head } : {}),
         board: layout,
         pins: pinSizes,
-      });
+      };
+      let lane = placeRun(top, run);
+      // The person's own things never move for a run: the run starts lower instead.
+      // Each step clears at least one of them, so this ends.
+      for (let left = around.length; left > 0; left -= 1) {
+        const below = clearBelow(lane.rects, pinSizes, around);
+        if (below === null) break;
+        top = below;
+        lane = placeRun(top, run);
+      }
       const place = lane.rects[draft.card]!;
       stages.push({
         element: element.id,
@@ -653,34 +670,89 @@ function sourcesHeight(drawn: ReturnType<typeof runSources>): number {
 }
 
 type Box = { x: number; y: number; width: number; height: number };
-const overlaps = (a: Box, b: Box) =>
-  a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
+/** The folders on the canvas that some run read, and so draws among its inputs. */
+function runInputFolders(
+  snapshot: WorkEnvironmentSnapshot,
+  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+): Set<string> {
+  const claimed = new Set<string>();
+  if (!snapshot.elements.some((element) => element.reference.kind === "folder")) return claimed;
+  for (const element of snapshot.elements) {
+    if (element.reference.kind !== "objective") continue;
+    for (const run of objectives.get(element.reference.objective)?.executions ?? [])
+      for (const fact of run.inputs ?? [])
+        if (fact.kind === "files")
+          for (const folder of folderNames(snapshot, run, fact))
+            if (folder.element) claimed.add(folder.element);
+  }
+  return claimed;
+}
 
 /**
- * The person's own things never sit under a run: one that a run has grown
- * over stands just past its right edge, at the height it had, until the
- * person moves it. Nothing here is saved.
+ * Where a run that touches one of the person's things must start instead:
+ * just under the lowest thing its cards touch. Null when it touches none.
+ * Blocks the person moved go with their run and are not counted.
  */
-export function clearOfBands(
+function clearBelow(
+  rects: Readonly<Record<string, Box>>,
+  pins: ReadonlyMap<string, unknown>,
+  around: readonly Box[],
+): number | null {
+  let below: number | null = null;
+  for (const [id, rect] of Object.entries(rects)) {
+    if (pins.has(id)) continue;
+    for (const thing of around)
+      if (touches(rect, [thing]))
+        below = Math.max(below ?? -Infinity, thing.y + thing.height + RUN.gutter);
+  }
+  return below === null ? null : Math.ceil(below / 8) * 8;
+}
+
+/**
+ * Where the person's own things stand: exactly where they were put, always;
+ * a run makes room for them, never the other way round. One with no place
+ * yet stands in the nearest free room to `near` (the middle of the view),
+ * clear of every run and of everything placed; without a `near`, in a column
+ * left of every run, where no run ever grows.
+ */
+export function ownPlaces(
   positions: Readonly<Record<string, CanvasPosition>>,
   sizes: Readonly<Record<string, { width: number; height: number }>>,
   stages: readonly WorkStage[],
-  /** The person's things with no place yet: they stand in a column right of every run. */
+  /** The person's things with no place yet. */
   loose: readonly string[] = [],
+  near?: CanvasPosition | null,
 ): Record<string, CanvasPosition> {
-  const moved: Record<string, CanvasPosition> = {};
-  const right = Math.max(0, ...stages.map((stage) => stage.lane.box.x + stage.lane.box.width));
-  const x = stages.length ? right + RUN.gutter * 2 : 80;
-  let below = 120;
-  for (const id of loose) {
-    if (positions[id]) continue;
-    moved[id] = { x, y: below };
-    below += (sizes[id]?.height ?? 160) + RUN.rowGap;
+  const placed: Record<string, CanvasPosition> = { ...positions };
+  const unplaced = loose.filter((id) => !positions[id]);
+  if (!unplaced.length) return placed;
+  const sizeOf = (id: string) => sizes[id] ?? { width: 280, height: 160 };
+  const taken: Box[] = [
+    ...stages.map((stage) => stage.lane.box),
+    ...Object.entries(positions).map(([id, at]) => ({ ...at, ...sizeOf(id) })),
+  ];
+  const edge = stages.length
+    ? Math.min(0, ...stages.map((stage) => stage.lane.box.x)) - RUN.gutter * 2
+    : null;
+  let below = stages.length ? Math.min(...stages.map((stage) => stage.lane.box.y)) : 120;
+  for (const id of unplaced) {
+    const size = sizeOf(id);
+    let at: CanvasPosition;
+    if (near) {
+      const spot = freeSpot(near, size, taken);
+      at = { x: Math.round(spot.x - size.width / 2), y: Math.round(spot.y - size.height / 2) };
+    } else {
+      at = { x: edge === null ? 80 : edge - size.width, y: below };
+      for (let tries = taken.length; tries > 0; tries -= 1) {
+        const hit = taken.find((rect) => touches({ ...at, ...size }, [rect]));
+        if (!hit) break;
+        at = { ...at, y: hit.y + hit.height + RUN.rowGap };
+      }
+      below = at.y + size.height + RUN.rowGap;
+    }
+    placed[id] = at;
+    taken.push({ ...at, ...size });
   }
-  for (const [id, at] of Object.entries(positions)) {
-    const size = sizes[id] ?? { width: 280, height: 160 };
-    const hit = stages.find((stage) => overlaps(stage.lane.box, { ...at, ...size }));
-    moved[id] = hit ? { x: hit.lane.box.x + hit.lane.box.width + RUN.gutter * 2, y: at.y } : at;
-  }
-  return moved;
+  return placed;
 }

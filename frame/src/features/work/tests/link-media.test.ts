@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { linkVideo, youtubeId } from "../lib/link-media";
+import { linkVideo, youtubeId, youtubeThumbnail } from "../lib/link-media";
 import { environmentItems } from "../lib/project-environment";
 import type { WorkEnvironmentSnapshot } from "$shared/ipc/bindings";
 import type { MediaAssetV1 } from "$domain/resources";
@@ -65,4 +65,36 @@ test("a pasted YouTube link becomes the video it is, starting where it points", 
     startSecs: 90,
   });
   expect(linkVideo("e2", "https://example.com/watch?v=dQw4w9WgXcQ")).toBeNull();
+});
+
+test("a video link's picture is the poster its video host serves, and nothing else's is", () => {
+  const id = "dQw4w9WgXcQ";
+  expect(youtubeThumbnail(`https://youtu.be/${id}?t=3`)).toBe(
+    `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+  );
+  expect(youtubeThumbnail("https://www.youtube.com/@channel")).toBeNull();
+  expect(youtubeThumbnail("https://example.com/video.mp4")).toBeNull();
+});
+
+test("a pasted video's card says the video's name when one is known, never the bare host", () => {
+  const url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  const snapshot = (title: string): WorkEnvironmentSnapshot => ({
+    version: 1,
+    profile: "p",
+    id: "env",
+    space: "s",
+    title: "T",
+    revision: "1",
+    lifecycle: "active",
+    areas: [],
+    view: { revision: "1", x: 0, y: 0, zoom_milli: 1000, placements: [] },
+    elements: [{ id: "link", area: null, reference: { kind: "link", url, title } }],
+  });
+  const video = (title: string) => {
+    const [item] = environmentItems(snapshot(title), [], [], new Map());
+    return item?.object?.view.kind === "media" ? item.object.view : undefined;
+  };
+  expect(video("youtube.com")?.title).toBeUndefined();
+  expect(video("www.youtube.com")?.title).toBeUndefined();
+  expect(video("A talk on canvases")?.title).toBe("A talk on canvases");
 });

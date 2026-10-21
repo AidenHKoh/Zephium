@@ -2,7 +2,7 @@
   // BoardCanvas, with the runs behind the canvas for a helper's own view of its part.
   import { SvelteMap } from "svelte/reactivity";
   import WorkCanvas from "../components/WorkCanvas.svelte";
-  import { clearOfBands, environmentStages, measureKey } from "../lib/project-environment-board";
+  import { ownPlaces, environmentStages, measureKey } from "../lib/project-environment-board";
   import {
     environmentAgents,
     environmentBoards,
@@ -93,7 +93,7 @@
   authoritative={new Set()}
   initialView={{
     positions: {
-      ...clearOfBands(
+      ...ownPlaces(
         own.positions,
         own.sizes ?? {},
         stages,

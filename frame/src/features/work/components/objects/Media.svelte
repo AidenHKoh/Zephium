@@ -34,7 +34,10 @@
     <button
       type="button"
       class="screen nodrag nopan"
-      aria-label={m.work_media_play({ title: object.title ?? "" })}
+      class:bare={!poster || failed}
+      aria-label={m.work_media_play({
+        title: object.title || (youtube ? m.work_media_youtube_video() : ""),
+      })}
       onclick={() => actions.link?.(object.url)}
     >
       {#if poster && !failed}<img
@@ -50,10 +53,12 @@
       <span class="play"><PlayMark size={youtube ? 60 : 52} {youtube} /></span>
       {#if object.duration}<span class="length">{object.duration}</span>{/if}
     </button>
-    {#if object.title}
+    {#if object.title || youtube}
       <figcaption>
         {#if youtube}<Mark address="youtube.com" size={16} />{/if}
-        <span class="title">{object.title}</span>
+        <span class="title" class:unnamed={!object.title}
+          >{object.title || m.work_media_youtube_video()}</span
+        >
       </figcaption>
     {/if}
   {:else}
@@ -122,6 +127,15 @@
     cursor: default;
   }
 
+  /* Until its poster is here (or when it cannot be), a quiet lit screen, not a blank one. */
+  .screen.bare {
+    background: radial-gradient(
+      circle at 50% 45%,
+      color-mix(in srgb, var(--color-text) 9%, var(--color-surface)),
+      var(--color-surface) 72%
+    );
+  }
+
   .screen:focus-visible {
     outline: 2px solid var(--color-ring);
     outline-offset: 2px;
@@ -173,6 +187,11 @@
     font-weight: 600;
     line-height: 18px;
     text-wrap: pretty;
+  }
+
+  .title.unnamed {
+    color: var(--color-muted);
+    font-weight: 500;
   }
 
   .player {

@@ -24,6 +24,16 @@ export function youtubeId(url: string): string | null {
   return id && VIDEO_ID.test(id) ? id : null;
 }
 
+/**
+ * The poster YouTube itself serves for a video, from its image host: the one
+ * address a video link's picture is fetched from. Rust fetches it once,
+ * without cookies, and the canvas only ever draws the stored copy.
+ */
+export function youtubeThumbnail(url: string): string | null {
+  const id = youtubeId(url);
+  return id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : null;
+}
+
 /** Only addresses actually observed by a source are candidates. */
 export function pickCandidates(item: {
   image_candidates?: readonly string[] | null;
