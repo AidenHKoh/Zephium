@@ -819,8 +819,7 @@ export function environmentParts(
       // Every step of a handoff is the person's turn: the part stays waiting
       // while its page is offered, open and being continued.
       const waitingPage = entries.find(
-        (page) =>
-          !!page.human && page.human.phase !== "reading" && page.human.phase !== "released",
+        (page) => !!page.human && page.human.phase !== "reading" && page.human.phase !== "released",
       );
       const needs = !!part.ask || !!waitingPage;
       const state = needs ? "waiting" : part.state;
