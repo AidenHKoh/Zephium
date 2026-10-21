@@ -816,7 +816,12 @@ export function environmentParts(
           ? { ...offered, past: true as const }
           : offered;
       const rect = stage.lane.rects[part.id]!;
-      const waitingPage = entries.find((page) => page.human?.phase === "waiting_for_human");
+      // Every step of a handoff is the person's turn: the part stays waiting
+      // while its page is offered, open and being continued.
+      const waitingPage = entries.find(
+        (page) =>
+          !!page.human && page.human.phase !== "reading" && page.human.phase !== "released",
+      );
       const needs = !!part.ask || !!waitingPage;
       const state = needs ? "waiting" : part.state;
       // The helper's own label already says it is waiting; the summary says where.
