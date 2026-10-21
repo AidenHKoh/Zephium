@@ -48,6 +48,8 @@
   const choosable = $derived(!paid && intervals.length > 1);
   const saving = $derived(yearlySavesTwoMonths(plans));
   const cards = $derived(planCards({ plans, currentPlan, subscribed, paid, interval, review }));
+  /** Polar's prices are before tax; the note shows only where a paid price is. */
+  const priced = $derived(cards.some((card) => card.offer?.price));
   let working = $state<string | null>(null);
 
   // Each opening starts from the account's own state, never from a stale pick.
@@ -133,6 +135,7 @@
     {/each}
   </ul>
   <footer>
+    {#if priced}<p class="tax">{m.account_prices_before_tax()}</p>{/if}
     <Button onclick={() => (open = false)}>{m.account_plans_close()}</Button>
   </footer>
 </AccountDialog>
@@ -252,6 +255,14 @@
     font-size: var(--text-label);
     font-weight: 600;
     text-align: center;
+  }
+
+  .tax {
+    align-self: center;
+    margin: 0 auto 0 2px;
+    color: var(--color-faint);
+    font-size: var(--text-caption);
+    line-height: 1.5;
   }
 
   @media (width <= 760px) {

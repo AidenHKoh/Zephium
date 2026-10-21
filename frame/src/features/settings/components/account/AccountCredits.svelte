@@ -91,6 +91,7 @@
       {/each}
     </fieldset>
     {#if custom}{@render custom()}{/if}
+    <p class="tax">{m.account_prices_before_tax()}</p>
     <footer>
       <Button onclick={() => (open = false)} disabled={buying}>{m.action_cancel()}</Button>
       <Button type="submit" variant="primary" pending={buying} disabled={!pack || !!busy}
@@ -253,6 +254,17 @@
     color: var(--color-text);
     font-size: 17px;
     font-weight: 600;
+  }
+
+  .tax {
+    margin: 14px 2px 0;
+    color: var(--color-faint);
+    font-size: var(--text-caption);
+    line-height: 1.5;
+  }
+
+  .tax + footer {
+    margin-block-start: 22px;
   }
 
   @media (prefers-reduced-motion: reduce) {

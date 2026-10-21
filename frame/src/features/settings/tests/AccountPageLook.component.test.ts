@@ -386,6 +386,13 @@ test("Settings → Account signed out, waiting for a code, and signed in", async
       await screen.getByText("$10", { exact: true }).click();
     },
   );
+  await shoot(
+    "plans",
+    { ...pro, plan: "free", subscription: signedIn.subscription },
+    async (screen) => {
+      await screen.getByRole("button", { name: "Upgrade", exact: true }).click();
+    },
+  );
   await shoot("billing-off", {
     ...signedIn,
     billing: false,

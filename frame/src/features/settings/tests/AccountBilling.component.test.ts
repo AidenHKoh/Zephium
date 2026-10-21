@@ -195,7 +195,8 @@ test("a paid account sees the way to the other plan, and a quote shows its price
   await expect.element(screen.getByText("$100 a month")).toBeVisible();
   await expect.element(screen.getByText("$65")).toBeVisible();
   await expect.element(screen.getByText("Due today (estimate)")).toBeVisible();
-  await expect.element(screen.getByText("Before tax", { exact: false })).toBeVisible();
+  // An estimate with no tax worked out here: Polar decides the final total.
+  await expect.element(screen.getByText("An estimate.", { exact: false })).toBeVisible();
   await expect.element(screen.getByText("Right away")).toBeVisible();
 });
 
@@ -419,7 +420,7 @@ const stagingPacks: AccountV1["offers"] = [
   expires_days: 365,
 }));
 
-test("several packs are a list to pick from, smallest first: credits lead, the price follows", async () => {
+test("several packs are a list to pick from, smallest first: credits lead, the price follows, before tax", async () => {
   await page.viewport(1100, 1600);
   const account = accountFixture({ ...free, offers: [...offers.slice(0, 2), ...stagingPacks] });
   native.get.mockResolvedValue(reply(account));
@@ -441,9 +442,35 @@ test("several packs are a list to pick from, smallest first: credits lead, the p
   // Every pack lasts as long, so it is said once rather than on each row.
   await expect.element(screen.getByText("Lasts 365 days")).toBeVisible();
   expect(screen.getByText("Lasts 365 days").elements()).toHaveLength(1);
+  await expect
+    .element(screen.getByText("Prices exclude tax, which is added at checkout."))
+    .toBeVisible();
   await screen.getByText("$25", { exact: true }).click();
   await screen.getByRole("button", { name: "Buy 2,500 credits · $25" }).click();
   expect(native.buy).toHaveBeenCalledWith({ kind: "top_up", id: "credits-25" });
+});
+
+test("prices in the plans dialog are before tax, and an upgrade's charge is only an estimate", async () => {
+  await page.viewport(1100, 1600);
+  native.get.mockResolvedValue(reply(free));
+  const screen = await render(AccountPage);
+  await screen.getByRole("button", { name: "Upgrade", exact: true }).click();
+  await expect
+    .element(screen.getByText("Prices exclude tax, which is added at checkout."))
+    .toBeVisible();
+  screen.unmount();
+
+  native.get.mockResolvedValue(reply(accountFixture({ ...pro, plan_change: quote() })));
+  const quoted = await render(AccountPage);
+  await expect.element(quoted.getByText("Due today (estimate)")).toBeVisible();
+  await expect
+    .element(
+      quoted.getByText("An estimate. Polar works out the final total, with any tax", {
+        exact: false,
+      }),
+    )
+    .toBeVisible();
+  expect(quoted.getByText("Before tax", { exact: false }).elements()).toHaveLength(0);
 });
 
 test("the plans dialog marks the plan and interval the subscription is for, not the access plan", async () => {
