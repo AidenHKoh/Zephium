@@ -145,6 +145,7 @@
     font-size: var(--text-label);
     font-variant-numeric: tabular-nums;
     line-height: 16px;
+    white-space: nowrap;
     transition: color var(--motion-base) var(--ease-out);
   }
 

@@ -308,17 +308,27 @@
       frame={page.frame}
       host={part.host ?? ""}
       live={page.live}
+      still={waits(page)}
     />
   </button>
 {/snippet}
 
 <style>
+  /* The row's box is larger than what it draws: only what is drawn takes the pointer, so
+     the empty space around the windows pans the canvas like any other. */
   .part {
     position: relative;
     box-sizing: border-box;
     inline-size: 100%;
     block-size: 100%;
     color: var(--color-text);
+    pointer-events: none;
+  }
+
+  .label,
+  .page,
+  .slot > :global(*) {
+    pointer-events: auto;
   }
 
   .label {
@@ -499,7 +509,6 @@
     font-variant-numeric: tabular-nums;
     font-weight: 600;
     line-height: 16px;
-    pointer-events: none;
     transition: opacity var(--motion-fast) var(--ease-out);
   }
 

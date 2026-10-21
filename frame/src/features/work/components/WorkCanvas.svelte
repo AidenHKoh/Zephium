@@ -1026,6 +1026,12 @@
   }
   /* stylelint-enable selector-class-pattern */
 
+  /* A part's row is taken by its name, its windows and its work; the rest of its box lets the pane pan. */
+  /* stylelint-disable-next-line selector-class-pattern */
+  .work-canvas :global(.svelte-flow__node:has(.part[data-part])) {
+    pointer-events: none;
+  }
+
   /* A set of cards is taken by its cards and title; the gaps between them let the pane pan. */
   /* stylelint-disable selector-class-pattern */
   .work-canvas :global(.svelte-flow__node:has(.object.picks)) {

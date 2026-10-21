@@ -13,6 +13,7 @@
     frame,
     host = "",
     live = false,
+    still = false,
   }: {
     url: string;
     title: string;
@@ -20,6 +21,8 @@
     host?: string;
     /** The agent is on this page now: its window is ringed and its frame follows. */
     live?: boolean;
+    /** The run waits on the person here: the window holds perfectly still, frames drawn in place. */
+    still?: boolean;
   } = $props();
 
   /** A frame that failed to load is not shown. */
@@ -40,12 +43,12 @@
   });
 </script>
 
-<span class="window" class:live>
+<span class="window" class:live class:still>
   <span class="bar">
     <span class="mark"><HostGlyph {host} {url} size={14} initial={false} /></span>
     <span class="host">{site}</span>
     <span class="heading">{heading}</span>
-    {#if live}{#key frame}<span class="arrived" aria-hidden="true"></span>{/key}{/if}
+    {#if live && !still}{#key frame}<span class="arrived" aria-hidden="true"></span>{/key}{/if}
   </span>
   <span class="view">
     <!-- Every frame, the live one too, is drawn into a canvas at the size it is seen:
@@ -78,6 +81,10 @@
       0 0 0 1px var(--color-border),
       var(--shadow-raised);
     transition: box-shadow var(--motion-base) var(--ease-out);
+  }
+
+  .window.still {
+    transition: none;
   }
 
   .window.live {
