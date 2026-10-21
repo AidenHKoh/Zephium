@@ -19,7 +19,7 @@ vi.mock("$shared/ipc/bindings", async () => {
   });
 });
 
-test("with no menu bar, Help stands beneath Settings and opens the Help menu", async () => {
+test("with no menu bar, the stack still ends at Settings; Help lives in Settings → About", async () => {
   await page.viewport(1200, 800);
   const screen = await render(ToolShelf);
   screen.container.style.paddingBlockStart = "480px";
@@ -28,10 +28,6 @@ test("with no menu bar, Help stands beneath Settings and opens the Help menu", a
     item.textContent?.trim(),
     Number(item.style.getPropertyValue("--step")),
   ]);
-  expect(steps.slice(-2)).toEqual([
-    ["Settings", 1],
-    ["Help", 0],
-  ]);
-  await screen.getByRole("menuitem", { name: "Help", exact: true }).click();
-  expect(native.run).toHaveBeenLastCalledWith("help.menu");
+  expect(steps.at(-1)).toEqual(["Settings", 0]);
+  expect(screen.getByRole("menuitem", { name: "Help" }).query()).toBeNull();
 });

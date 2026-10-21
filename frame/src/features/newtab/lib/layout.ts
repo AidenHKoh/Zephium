@@ -7,8 +7,9 @@ export type Box = { x: number; y: number; w: number; h: number };
 export type Layout = {
   /** The field's notch, narrowed so both top corners stay free. */
   notch: Notch;
-  /** The page's controls, one round button each, in the top corner beside
-   *  the notch and level with the field. */
+  /** The page's controls, each in its own round pane (a capsule when it
+   *  holds words), in the top corner beside the notch and level with the
+   *  field, the last nearest the corner. */
   controls: Box[];
   mark: Box;
   /** Where the line with the time stands, or null without one. */
@@ -20,6 +21,8 @@ export type Layout = {
 const NOTCH: Notch = { width: 640, height: 50, radius: 18, flare: 14 };
 const CORNER = 110;
 const CONTROL = { size: 32, gap: 6, inset: 14 };
+/** What two round controls take from the corner, which CORNER was set for. */
+const TWO_ROUND = CONTROL.inset + 2 * CONTROL.size + CONTROL.gap;
 const TILE = { width: 200, height: 80, gap: 12, foot: 28 };
 const GUTTER = 40;
 const WHEN = { gap: 26, height: 18 };
@@ -30,17 +33,24 @@ const WHEN = { gap: 26, height: 18 };
 export function layout(
   width: number,
   height: number,
-  { controls, clock, tiles }: { controls: number; clock: boolean; tiles: number },
+  { controls, clock, tiles }: { controls: readonly number[]; clock: boolean; tiles: number },
 ): Layout {
-  const notch = { ...NOTCH, width: Math.min(NOTCH.width, width - 2 * CORNER) };
+  // Both top corners stay clear of the notch's flare for the controls in
+  // one of them, so the field stays in the middle however wide they are.
+  const reach = controls.reduce((sum, w) => sum + w + CONTROL.gap, CONTROL.inset - CONTROL.gap);
+  const corner = Math.max(CORNER, reach + CORNER - TWO_ROUND);
+  const notch = { ...NOTCH, width: Math.min(NOTCH.width, width - 2 * corner) };
 
   const buttonY = Math.round((NOTCH.height - CONTROL.size) / 2);
-  const buttons = Array.from({ length: controls }, (_, index) => ({
-    x: width - CONTROL.inset - CONTROL.size - (controls - 1 - index) * (CONTROL.size + CONTROL.gap),
-    y: buttonY,
-    w: CONTROL.size,
-    h: CONTROL.size,
-  }));
+  let right = width - CONTROL.inset;
+  const buttons = controls
+    .toReversed()
+    .map((w) => {
+      const box = { x: right - w, y: buttonY, w, h: CONTROL.size };
+      right = box.x - CONTROL.gap;
+      return box;
+    })
+    .toReversed();
 
   const tileW = tiles
     ? Math.floor(Math.min(TILE.width, (width - 2 * GUTTER - (tiles - 1) * TILE.gap) / tiles))

@@ -36,7 +36,7 @@
 
   import { onMount } from "svelte";
   import { events } from "$shared/ipc/native-events";
-  import { handleNativeSection } from "$features/settings";
+  import { askSettings, handleNativeSection } from "$features/settings";
   import * as m from "$shared/i18n/messages";
   import { surface as browserPage } from "$domain/surface";
   import { loadToolSlot } from "$features/tools";
@@ -75,6 +75,11 @@
   // Settings opened from a page lands on the section that page asked for.
   function openSettings() {
     handleNativeSection("settings.section.newtab");
+    void browserPage.open("settings");
+  }
+  function openAccount(intent: "account" | "credits") {
+    askSettings(intent === "credits" ? "credits" : null);
+    handleNativeSection("settings.section.account");
     void browserPage.open("settings");
   }
   function openAbout() {
@@ -489,6 +494,7 @@
             retryLabel={m.surface_retry()}
             >{#snippet children(NewTab)}<NewTab
                 oncustomize={openSettings}
+                onaccount={openAccount}
                 ontasks={() => void browserPage.open("tasks")}
                 ontime={() => void browserPage.open("time")}
                 >{#snippet search()}{#key tabs.activeId()}<LazyView

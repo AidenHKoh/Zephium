@@ -1,11 +1,12 @@
 import * as accountSession from "./account.svelte";
 import { initials, planName, usageTone } from "./account-model";
-import { drawn, identityAvatar, profiles } from "$domain/profiles";
+import { preferences } from "$domain/preferences";
+import { drawn, profiles } from "$domain/profiles";
 
 /**
- * What the foot of Browse and Work shows: the profile's picture for the
- * trigger, and the account (the same in every profile) for the card in the
- * menu. One reading of both, so the two feet cannot drift. Call it during
+ * What the account surfaces show: the profile's picture for a foot's trigger,
+ * and the account (the same in every profile) wherever it is summed up. One
+ * reading of both, so the places that show it cannot drift. Call it during
  * component initialisation.
  */
 export function accountFoot(options: { private?: () => boolean } = {}) {
@@ -18,13 +19,20 @@ export function accountFoot(options: { private?: () => boolean } = {}) {
     const current = profiles.current();
     return current && current.avatar.revision > 0 ? drawn(current) : null;
   });
-  const mark = $derived(
-    signedIn ? identityAvatar(null, initials(account?.email, account?.name)) : null,
+  // The same test Settings applies before it offers credits for sale.
+  const canTopUp = $derived(
+    signedIn &&
+      account?.billing === true &&
+      !account.plan_change &&
+      !account.billing_review &&
+      preferences.aiEnabled() &&
+      account.offers.some((offer) => offer.kind === "top_up"),
   );
 
   return {
+    /** The account service answers here, and this is not a private window. */
     get available() {
-      return account?.available === true;
+      return account?.available === true && !options.private?.();
     },
     get signedIn() {
       return signedIn;
@@ -32,17 +40,24 @@ export function accountFoot(options: { private?: () => boolean } = {}) {
     get email() {
       return account?.email ?? null;
     },
+    get initials() {
+      return signedIn ? initials(account?.email, account?.name) : "";
+    },
     get plan() {
       return signedIn ? planName(account?.plan) : null;
     },
     get used() {
       return used;
     },
+    /** Whether usage has been read at all, as opposed to read and not included. */
+    get metered() {
+      return signedIn && account?.usage != null;
+    },
     get tone() {
       return usageTone(used);
     },
-    get mark() {
-      return mark;
+    get canTopUp() {
+      return canTopUp;
     },
     get face() {
       return face;

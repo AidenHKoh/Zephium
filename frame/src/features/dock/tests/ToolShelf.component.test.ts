@@ -96,6 +96,8 @@ test("the profile opens on a switcher of who you are, then the tools", async () 
   );
   expect(steps).toEqual([7, 6, 5, 4, 3, 2, 1, 0]);
   expect(screen.container.textContent).not.toContain("Manage Profiles");
+  // The account is not this profile's: it lives on the New Tab page and in Work.
+  expect(screen.getByRole("menuitem", { name: /^Account|^Sign in/u }).query()).toBeNull();
 
   await tools.click();
   await screen.getByRole("menuitem", { name: "Switch to Work" }).click();

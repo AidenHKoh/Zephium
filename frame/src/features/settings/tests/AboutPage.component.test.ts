@@ -154,7 +154,7 @@ test("the links open Zephium's own pages in a tab", async () => {
   const links = screen.getByRole("navigation", { name: "Zephium on the web" });
   for (const [name, url] of [
     ["Website", "https://zephium.app"],
-    ["Docs", "https://zephium.app/docs"],
+    [IS_MAC ? "Docs" : "Help", "https://zephium.app/docs"],
     ["GitHub", "https://github.com/zephium-browser/Zephium"],
     ["Discord", "https://discord.gg/tyveTUyEp7"],
     ["YouTube", "https://www.youtube.com/@crynta"],

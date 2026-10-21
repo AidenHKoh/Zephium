@@ -4,7 +4,10 @@
   import { loadNewTabSearch } from "$features/search";
   import LazyView from "$shared/ui/LazyView";
 
-  let { ontasks }: { ontasks?: () => void } = $props();
+  let {
+    ontasks,
+    onaccount,
+  }: { ontasks?: () => void; onaccount?: (intent: "account" | "credits") => void } = $props();
   const rows = ["Terax", "Proton VPN", "Wikipedia", "Figma", "ChatGPT", "New Tab"];
 </script>
 
@@ -20,7 +23,7 @@
   <div style="flex: 1; min-inline-size: 0; padding-inline-start: 8px">
     <div class="content-pane" data-ground="own" style="block-size: 100%">
       <LazyView loader={loadNewTab} loadingLabel="" failureLabel="failed" retryLabel="retry"
-        >{#snippet children(NewTab)}<NewTab oncustomize={() => {}} {ontasks}
+        >{#snippet children(NewTab)}<NewTab oncustomize={() => {}} {ontasks} {onaccount}
             >{#snippet search()}<LazyView
                 loader={loadNewTabSearch}
                 loadingLabel=""

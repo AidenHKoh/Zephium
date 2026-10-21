@@ -10,6 +10,7 @@ import type {
 } from "$shared/ipc/bindings";
 import { accountFixture, usageFixture } from "$shared/testing/account";
 import AccountPage from "../components/sections/AccountPage.svelte";
+import { ask } from "../lib/settings-state.svelte";
 
 const native = vi.hoisted(() => ({
   get: vi.fn(),
@@ -365,6 +366,15 @@ test("credits are bought from a dialog of packs, the chosen one named on the but
   await screen.getByRole("button", { name: "Buy 100 credits · $1" }).click();
   expect(native.buy).toHaveBeenCalledWith({ kind: "top_up", id: "staging-topup" });
   await expect.element(screen.getByRole("dialog")).not.toBeInTheDocument();
+});
+
+test("Buy credits chosen elsewhere opens the packs as the account shows", async () => {
+  await page.viewport(1100, 1600);
+  native.get.mockResolvedValue(reply(free));
+  ask("credits");
+  const screen = await render(AccountPage);
+  await expect.element(screen.getByRole("dialog")).toBeVisible();
+  await expect.element(screen.getByText("Lasts 365 days")).toBeVisible();
 });
 
 test("several packs are a choice of radios, and the first is chosen", async () => {

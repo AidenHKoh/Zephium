@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, type Snippet } from "svelte";
+  import { accountFoot, accountSession } from "$domain/account";
   import {
     CheckListIcon,
     Clock01Icon,
@@ -21,10 +22,12 @@
   import { layout, type Box } from "../lib/layout";
   import { WORDMARK } from "$shared/lib/wordmark";
   import { reducedMotion } from "$shared/lib/motion";
+  import NewTabAccount from "./NewTabAccount.svelte";
 
   let {
     search,
     oncustomize,
+    onaccount,
     ontasks,
     ontime,
   }: {
@@ -32,6 +35,8 @@
     search: Snippet;
     /** Opens this page's settings. */
     oncustomize?: () => void;
+    /** Opens the account in Settings, or straight onto buying credits. */
+    onaccount?: (intent: "account" | "credits") => void;
     /** Opens Tasks. */
     ontasks?: () => void;
     /** Opens Time. */
@@ -50,6 +55,11 @@
   let focusedBefore = $state(0);
 
   let incognito = $derived(tabs.profile()?.kind === "incognito");
+  const account = accountFoot({ private: () => incognito });
+  // The account is in its own pane beside the page's settings, and the
+  // settings keep the corner, so nothing moves when the account is known.
+  let showAccount = $derived(!!onaccount && account.available);
+  let signInWidth = $state(0);
   let profile = $derived(tabs.profile()?.id ?? null);
   let showGreeting = $derived(preferences.value("ui.newtab-greeting") === "true");
   let showClock = $derived(preferences.value("ui.newtab-clock") === "true");
@@ -133,7 +143,10 @@
       live = false;
     };
   });
-  let controls = $derived(oncustomize ? 1 : 0);
+  let controls = $derived([
+    ...(showAccount ? [account.signedIn ? 32 : Math.max(32, signInWidth)] : []),
+    ...(oncustomize ? [32] : []),
+  ]);
   let page = $derived(layout(width, height, { controls, clock: showClock, tiles: figures.length }));
 
   // One outline for the ground: the page less the notch, the controls' panes,
@@ -185,6 +198,11 @@
       clearTimeout(timer);
       void listening.then((stop) => stop());
     };
+  });
+
+  onMount(() => {
+    void accountSession.retain();
+    return () => accountSession.release();
   });
 
   onMount(() => {
@@ -299,6 +317,11 @@
 
   <!-- Each control in its own round pane of the window, level with the
        field. -->
+  {#if showAccount && onaccount && page.controls[0]}
+    <div class="control" data-glass-text style={at(page.controls[0])}>
+      <NewTabAccount {account} {onaccount} bind:signInWidth />
+    </div>
+  {/if}
   {#if oncustomize && page.controls.at(-1)}
     <div class="control" data-glass-text style={at(page.controls.at(-1)!)}>
       <IconButton

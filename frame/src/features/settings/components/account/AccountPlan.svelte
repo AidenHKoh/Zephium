@@ -15,6 +15,7 @@
   import SettingsRow from "$shared/ui/SettingsRow";
   import { commands } from "$shared/ipc/bindings";
   import { explainAccountFault, SUPPORT_MAIL } from "../../lib/account";
+  import * as settings from "../../lib/settings-state.svelte";
   import { canChangePlan, intervalsOf, planCards, planOffers, topUpOffers } from "../../lib/plans";
   import type AccountCredits from "./AccountCredits.svelte";
   import AccountDailyLimit from "./AccountDailyLimit.svelte";
@@ -125,6 +126,13 @@
     Credits ??= (await import("./AccountCredits.svelte")).default;
     creditsOpen = true;
   }
+
+  // Buy credits, chosen on the New Tab page, opens here as Settings shows.
+  $effect(() => {
+    if (!canCredits || settings.asking() !== "credits") return;
+    settings.ask(null);
+    void showCredits();
+  });
 
   /** Usage history is loaded only when someone asks to see it. */
   let History = $state.raw<Component | null>(null);

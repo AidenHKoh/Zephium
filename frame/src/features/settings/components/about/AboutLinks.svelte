@@ -6,12 +6,14 @@
   import DiscordIcon from "@hugeicons/core-free-icons/DiscordIcon";
   import GithubIcon from "@hugeicons/core-free-icons/GithubIcon";
   import GlobeIcon from "@hugeicons/core-free-icons/GlobeIcon";
+  import HelpCircleIcon from "@hugeicons/core-free-icons/HelpCircleIcon";
   import YoutubeIcon from "@hugeicons/core-free-icons/YoutubeIcon";
+  import { IS_MAC } from "$shared/platform";
   import { links } from "../../lib/links";
 
   const icons = {
     website: GlobeIcon,
-    docs: BookOpen01Icon,
+    docs: IS_MAC ? BookOpen01Icon : HelpCircleIcon,
     github: GithubIcon,
     discord: DiscordIcon,
     youtube: YoutubeIcon,

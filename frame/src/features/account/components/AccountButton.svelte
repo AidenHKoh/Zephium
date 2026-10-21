@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { CubeIcon, Settings02Icon, UserIcon } from "@hugeicons/core-free-icons";
+  import { CubeIcon, Settings02Icon, UserCircleIcon, UserIcon } from "@hugeicons/core-free-icons";
   import { accountFoot, accountSession } from "$domain/account";
   import { keymap } from "$domain/keymap";
   import { drawn, profiles } from "$domain/profiles";
@@ -9,7 +9,7 @@
   import * as m from "$shared/i18n/messages";
   import { acceleratorKeys } from "$shared/lib/accelerator";
   import { IS_MAC } from "$shared/platform";
-  import AccountCard from "$shared/ui/AccountCard";
+  import AccountSummary from "$shared/ui/AccountSummary";
   import Disclosure from "$shared/ui/Disclosure";
   import Icon from "$shared/ui/Icon";
   import ProfileAvatar from "$shared/ui/ProfileAvatar";
@@ -107,17 +107,25 @@
       </div>{/if}
   </div>
   <div class="rule" role="separator"></div>
-  {#if foot.available && !privately}<div class="rule" role="separator"></div>
-    <AccountCard
-      signedIn={foot.signedIn}
-      email={foot.email}
-      plan={foot.plan}
-      used={foot.used}
-      tone={foot.tone}
-      mark={foot.mark}
-      step={2}
-      onclick={() => run("settings.account")}
-    />
+  {#if foot.available && !privately}
+    {#if foot.signedIn}<button
+        type="button"
+        role="menuitem"
+        class="ui-menu-item account"
+        style:--step={2}
+        aria-label={`${m.account_menu()} — ${foot.email ?? ""}`}
+        onclick={() => run("settings.account")}
+        ><AccountSummary
+          email={foot.email}
+          initials={foot.initials}
+          plan={foot.plan}
+          used={foot.used}
+          metered={foot.metered}
+          tone={foot.tone}
+        /></button
+      >{:else}{@render row(UserCircleIcon, m.settings_sign_in(), null, 2, () =>
+        run("settings.account"),
+      )}{/if}
     <div class="rule" role="separator"></div>
   {/if}
   {@render row(CubeIcon, m.settings_models(), null, 1, () => run("settings.ai"))}
@@ -324,14 +332,24 @@
     color: var(--color-muted);
   }
 
-  :is(.row, .me):hover,
-  :is(.row, .me):focus-visible {
+  :is(.row, .me, .account):hover,
+  :is(.row, .me, .account):focus-visible {
     outline: none;
     background: var(--row-active);
   }
 
-  :is(.row, .me):active {
+  :is(.row, .me, .account):active {
     background: var(--row-pressed);
+  }
+
+  /* The account summed up, as a row that opens the rest of it. */
+  .account {
+    display: block;
+    inline-size: 100%;
+    padding: 10px var(--menu-item-inset) 12px;
+    border: 0;
+    background: transparent;
+    font: inherit;
   }
 
   .rule {
@@ -341,7 +359,7 @@
   }
 
   /* Each row settles in behind the one below it, so the menu unfolds from its foot. */
-  :global(.work-menu[data-open="true"]) :is(.row, .head) {
+  :global(.work-menu[data-open="true"]) :is(.row, .head, .account) {
     animation: account-row-in var(--motion-slow) var(--ease-out) both;
     animation-delay: calc(var(--step) * 14ms);
   }
@@ -361,7 +379,7 @@
       transition: none;
     }
 
-    :global(.work-menu[data-open="true"]) :is(.row, .head) {
+    :global(.work-menu[data-open="true"]) :is(.row, .head, .account) {
       animation: none;
     }
   }

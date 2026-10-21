@@ -1,37 +1,27 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import { onMount } from "svelte";
-  import {
-    HelpCircleIcon,
-    IncognitoIcon,
-    Settings02Icon,
-    UserIcon,
-  } from "@hugeicons/core-free-icons";
+  import { IncognitoIcon, Settings02Icon, UserIcon } from "@hugeicons/core-free-icons";
   import { commands } from "$shared/ipc/bindings";
   import * as tools from "$session/tools.svelte";
   import type { ToolKind } from "$session/tools.svelte";
-  import { accountFoot, accountSession } from "$domain/account";
+  import { accountFoot } from "$domain/account";
   import { preferences } from "$domain/preferences";
   import { tabs } from "$domain/tabs";
   import { drawn, profiles } from "$domain/profiles";
   import Disclosure from "$shared/ui/Disclosure";
   import Icon from "$shared/ui/Icon";
-  import AccountCard from "$shared/ui/AccountCard";
   import ProfileAvatar from "$shared/ui/ProfileAvatar";
   import { RECORD_TOOLS, SHELF_TOOLS, toolPresentation } from "../lib/dock-tools";
   import NoticePip from "./NoticePip.svelte";
   import { keymap } from "$domain/keymap";
   import { acceleratorKeys } from "$shared/lib/accelerator";
-  import { IS_MAC, IS_WINDOWS } from "$shared/platform";
+  import { IS_MAC } from "$shared/platform";
 
   let { compact = false }: { compact?: boolean } = $props();
   onMount(() => {
     void profiles.retain();
-    void accountSession.retain();
-    return () => {
-      profiles.release();
-      accountSession.release();
-    };
+    return () => profiles.release();
   });
   const name = $derived(tabs.profile()?.name ?? profiles.current()?.name ?? "");
   const others = $derived(profiles.inPrivate() ? [] : profiles.others());
@@ -44,11 +34,7 @@
   // Rows settle in nearest the case first, so each counts from the bottom:
   // Settings, the tools, then who you are.
   const toolRows = $derived(groups.reduce((sum, group) => sum + group.length, 0));
-  // Windows has no menu bar to hold Help, so it stands beneath Settings.
-  const below = IS_WINDOWS ? 1 : 0;
-  const accountStep = $derived(toolRows + 1 + below);
-  const accountRow = $derived(foot.available && !privately);
-  const headStep = $derived(accountStep + (accountRow ? 1 : 0));
+  const headStep = $derived(toolRows + 1);
   function pick(kind: ToolKind) {
     if (tools.activeTool() === kind) tools.close();
     else tools.open(kind);
@@ -165,18 +151,6 @@
             >{/if}
         </div>{/if}
     </div>
-    {#if accountRow}<div class="shelf-rule" role="separator"></div>
-      <AccountCard
-        signedIn={foot.signedIn}
-        email={foot.email}
-        plan={foot.plan}
-        used={foot.used}
-        tone={foot.tone}
-        mark={foot.mark}
-        step={accountStep}
-        {compact}
-        onclick={() => run("settings.account")}
-      />{/if}
     {#each groups as group, at (at)}
       {@const before = groups.slice(0, at).reduce((sum, earlier) => sum + earlier.length, 0)}
       <div class="shelf-rule" role="separator"></div>
@@ -186,23 +160,16 @@
           view.icon,
           view.label(),
           keysFor(`tool.${kind}`),
-          toolRows - before - index + below,
+          toolRows - before - index,
           () => pick(kind),
           tools.activeTool() === kind,
         )}
       {/each}
     {/each}
     <div class="shelf-rule" role="separator"></div>
-    {@render row(
-      Settings02Icon,
-      m.command_browser_settings(),
-      keysFor("browser.settings"),
-      below,
-      () => run("browser.settings"),
+    {@render row(Settings02Icon, m.command_browser_settings(), keysFor("browser.settings"), 0, () =>
+      run("browser.settings"),
     )}
-    {#if IS_WINDOWS}{@render row(HelpCircleIcon, m.native_help(), null, 0, () =>
-        run("help.menu"),
-      )}{/if}
   </Disclosure>
 </div>
 
