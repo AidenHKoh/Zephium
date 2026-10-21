@@ -109,6 +109,7 @@ const signedIn = (): AccountV1 => ({
   usage: usageFixture({ used_percent: 38, allowance_used: "760000" }),
   subscription: {
     status: "active",
+    plan: null,
     interval: "monthly",
     paid_until: "2026-11-02T00:00:00Z",
     cancel_at_period_end: false,

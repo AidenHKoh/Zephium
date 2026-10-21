@@ -85,7 +85,10 @@ export type PlanCard = {
 
 export type PlanContext = {
   plans: readonly PlanOffer[];
+  /** The plan that decides model access (`usage.plan`). */
   currentPlan: string | null;
+  /** The plan an active subscription is for; it, not the access plan, marks the held card. */
+  subscribed?: string | null;
   paid: boolean;
   interval: string;
   /** Under billing review nothing new is bought; only a downgrade is let through. */
@@ -97,8 +100,15 @@ const offerAt = (plans: readonly PlanOffer[], id: string, interval: string) =>
   plans.find((plan) => plan.plan === id);
 
 /** Free as the baseline, then every plan the server sells. */
-export function planCards({ plans, currentPlan, paid, interval, review }: PlanContext): PlanCard[] {
-  const current = currentPlan ?? "free";
+export function planCards({
+  plans,
+  currentPlan,
+  subscribed,
+  paid,
+  interval,
+  review,
+}: PlanContext): PlanCard[] {
+  const current = (paid && subscribed) || (currentPlan ?? "free");
   const currency = plans.find((plan) => plan.price)?.price?.currency;
   const nothing: AccountPriceV1 | null = currency ? { amount_minor: 0, currency } : null;
   const nowPrice = current === "free" ? 0 : offerAt(plans, current, interval)?.price?.amount_minor;

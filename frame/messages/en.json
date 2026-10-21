@@ -3387,6 +3387,7 @@
   "account_plans_desc": "Pick the plan that fits how you use Zephium.",
   "account_plans_billing": "Billing",
   "account_plans_current": "Current plan",
+  "account_plans_current_interval": "Current plan · {interval}",
   "account_plans_close": "Close",
   "account_plans_per_month": "a month",
   "account_plans_per_year": "a year",

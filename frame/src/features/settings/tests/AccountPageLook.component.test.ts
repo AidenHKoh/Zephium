@@ -89,6 +89,7 @@ const signedIn: AccountV1 = {
   }),
   subscription: {
     status: "inactive",
+    plan: null,
     interval: null,
     paid_until: null,
     cancel_at_period_end: false,
@@ -149,6 +150,7 @@ test("Settings → Account signed out, waiting for a code, and signed in", async
     }),
     subscription: {
       status: "active",
+      plan: null,
       interval: "monthly",
       paid_until: "2026-11-19T00:00:00Z",
       cancel_at_period_end: false,

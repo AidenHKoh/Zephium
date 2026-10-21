@@ -57,6 +57,7 @@ const signedIn = account({
   usage: usageFixture(),
   subscription: {
     status: "inactive",
+    plan: null,
     interval: null,
     paid_until: null,
     cancel_at_period_end: false,

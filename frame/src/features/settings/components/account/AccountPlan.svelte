@@ -40,6 +40,7 @@
   const topups = $derived(topUpOffers(account?.offers ?? []));
   const currentPlan = $derived(account?.plan ?? null);
   /** A subscription changes plan, not billing interval; a first purchase picks one. */
+  const subscribed = $derived(paid ? (subscription?.plan ?? null) : null);
   const held = $derived(paid ? (subscription?.interval ?? null) : null);
   const settled = $derived(!change && billing);
   const canPlans = $derived(
@@ -48,6 +49,7 @@
         planCards({
           plans,
           currentPlan,
+          subscribed,
           paid,
           interval: held ?? intervalsOf(plans)[0] ?? "monthly",
           review,
@@ -241,6 +243,7 @@
       bind:open={plansOpen}
       {plans}
       {currentPlan}
+      {subscribed}
       {paid}
       {held}
       {review}

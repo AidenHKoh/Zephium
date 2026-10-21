@@ -215,6 +215,9 @@ pub(crate) struct AccountExportV1 {
 pub(crate) struct AccountSubscriptionV1 {
     /// `active`, `inactive` or `unknown`.
     pub(crate) status: String,
+    /// The paid plan held; null with no paid subscription. Model access follows `plan`, not this.
+    pub(crate) plan: Option<String>,
+    /// `monthly` or `yearly`; null with no paid subscription.
     pub(crate) interval: Option<String>,
     pub(crate) paid_until: Option<String>,
     pub(crate) cancel_at_period_end: bool,
@@ -559,6 +562,7 @@ fn project(view: View) -> AccountV1 {
         usage: view.usage.as_ref().map(usage),
         subscription: billing.map(|billing| AccountSubscriptionV1 {
             status: billing.subscription.status.clone(),
+            plan: billing.subscription.plan.clone(),
             interval: billing.subscription.interval.clone(),
             paid_until: billing.subscription.paid_until.clone(),
             cancel_at_period_end: billing.subscription.cancel_at_period_end,

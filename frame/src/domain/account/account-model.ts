@@ -110,7 +110,7 @@ export function creditsTotal(
   return rounded === 0n ? `<${whole(locale).format(1)}` : whole(locale).format(rounded);
 }
 
-/** One call's cost to a tenth of a credit; below that, "<0.1". */
+/** One call's cost to a hundredth of a credit; below that, "<0.01". Never rounded to whole credits. */
 export function creditsCall(
   units: string | null | undefined,
   creditUnits: string | null | undefined,
@@ -118,10 +118,10 @@ export function creditsCall(
 ): string | null {
   const at = amounts(units, creditUnits);
   if (!at) return null;
-  const format = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
+  const format = new Intl.NumberFormat(locale, { maximumFractionDigits: 2 });
   if (at.value === 0n) return format.format(0);
-  const tenths = (at.value * 20n + at.per) / (at.per * 2n);
-  return tenths === 0n ? `<${format.format(0.1)}` : format.format(Number(tenths) / 10);
+  const hundredths = (at.value * 200n + at.per) / (at.per * 2n);
+  return hundredths === 0n ? `<${format.format(0.01)}` : format.format(Number(hundredths) / 100);
 }
 
 /** Unit counts added exactly; anything that is not a count is ignored. */

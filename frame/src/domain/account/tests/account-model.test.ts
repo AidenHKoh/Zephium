@@ -109,9 +109,11 @@ describe("account model", () => {
 
   it("states one call to a tenth of a credit", () => {
     expect(creditsCall("3000", "10000", "en-US")).toBe("0.3");
+    expect(creditsCall("1200", "10000", "en-US")).toBe("0.12");
     expect(creditsCall("812000", "10000", "en-US")).toBe("81.2");
     expect(creditsCall("20000", "10000", "en-US")).toBe("2");
-    expect(creditsCall("400", "10000", "en-US")).toBe("<0.1");
+    expect(creditsCall("400", "10000", "en-US")).toBe("0.04");
+    expect(creditsCall("10", "10000", "en-US")).toBe("<0.01");
     expect(creditsCall("0", "10000", "en-US")).toBe("0");
     expect(creditsCall("3000", null)).toBeNull();
   });

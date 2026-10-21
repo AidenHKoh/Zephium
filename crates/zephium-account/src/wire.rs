@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn billing_reads_the_servers_camel_case_and_missing_offers() {
         let billing: Billing = serde_json::from_value(serde_json::json!({
-            "subscription": {"status": "active", "paidUntil": "2026-11-01T00:00:00Z", "cancelAtPeriodEnd": true},
+            "subscription": {"status": "active", "paidUntil": "2026-11-01T00:00:00Z", "cancelAtPeriodEnd": true, "plan": "pro", "interval": "yearly"},
             "paid": true,
             "capabilities": {"hostedAI": true, "synchronization": false},
             "offers": null
@@ -480,6 +480,8 @@ mod tests {
         assert!(billing.paid);
         assert!(billing.capabilities.hosted_ai);
         assert!(billing.subscription.cancel_at_period_end);
+        assert_eq!(billing.subscription.plan.as_deref(), Some("pro"));
+        assert_eq!(billing.subscription.interval.as_deref(), Some("yearly"));
         assert_eq!(billing.offers, None);
         assert!(!billing.sells());
     }
@@ -494,6 +496,8 @@ mod tests {
         }))
         .unwrap();
         assert!(!billing.sells());
+        assert_eq!(billing.subscription.plan, None);
+        assert_eq!(billing.subscription.interval, None);
     }
 
     #[test]

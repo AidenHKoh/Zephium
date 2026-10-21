@@ -722,6 +722,9 @@ export type AccountSignupModeV1 = "open" |
 export type AccountSubscriptionV1 = {
 	/**  `active`, `inactive` or `unknown`. */
 	status: string,
+	/**  The paid plan held; null with no paid subscription. Model access follows `plan`, not this. */
+	plan: string | null,
+	/**  `monthly` or `yearly`; null with no paid subscription. */
 	interval: string | null,
 	paid_until: string | null,
 	cancel_at_period_end: boolean,

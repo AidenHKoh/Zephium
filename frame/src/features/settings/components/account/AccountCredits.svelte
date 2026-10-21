@@ -66,7 +66,7 @@
     }}
   >
     <!-- Native radios: the arrow keys, the group's one tab stop and its announcement are the browser's. -->
-    <fieldset class="packs">
+    <fieldset class="packs" data-solo={packs.length === 1 || undefined}>
       <legend class="hidden">{m.account_credits_packs()}</legend>
       {#each packs as offer (offer.id)}
         {@const credits = amount(offer)}
@@ -173,6 +173,49 @@
   .lasts {
     color: var(--color-faint);
     font-size: var(--text-caption);
+  }
+
+  /* One pack is not a choice to make: it reads as a single line, not a lone tile. */
+  .packs[data-solo] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .packs[data-solo] .pack {
+    grid-template-areas:
+      "credits cost"
+      "unit cost"
+      "lasts lasts";
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 16px;
+    background: var(--color-surface);
+    box-shadow: inset 0 0 0 1px var(--color-border);
+  }
+
+  .packs[data-solo] .pack:has(input:checked) {
+    background: var(--color-surface);
+    box-shadow: inset 0 0 0 1px var(--color-border);
+  }
+
+  .packs[data-solo] .credits {
+    grid-area: credits;
+  }
+
+  .packs[data-solo] .unit {
+    grid-area: unit;
+  }
+
+  .packs[data-solo] .cost {
+    grid-area: cost;
+    margin: 0;
+    color: var(--color-text);
+    font-size: var(--text-headline);
+    font-weight: 600;
+  }
+
+  .packs[data-solo] .lasts {
+    grid-area: lasts;
+    margin-block-start: 6px;
   }
 
   @media (prefers-reduced-motion: reduce) {

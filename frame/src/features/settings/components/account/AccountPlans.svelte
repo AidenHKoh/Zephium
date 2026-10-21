@@ -19,6 +19,7 @@
     open = $bindable(false),
     plans,
     currentPlan,
+    subscribed = null,
     paid,
     held,
     review,
@@ -26,6 +27,8 @@
     open?: boolean;
     plans: readonly PlanOffer[];
     currentPlan: string | null;
+    /** The plan the active subscription is for. */
+    subscribed?: string | null;
     paid: boolean;
     /** The interval a subscription is billed at; a plan change keeps it. */
     held: string | null;
@@ -44,7 +47,7 @@
   );
   const choosable = $derived(!paid && intervals.length > 1);
   const saving = $derived(yearlySavesTwoMonths(plans));
-  const cards = $derived(planCards({ plans, currentPlan, paid, interval, review }));
+  const cards = $derived(planCards({ plans, currentPlan, subscribed, paid, interval, review }));
   let working = $state<string | null>(null);
 
   // Each opening starts from the account's own state, never from a stale pick.
@@ -111,7 +114,11 @@
           {/each}
         </ul>
         <div class="action">
-          {#if card.action === "current"}<span class="here">{m.account_plans_current()}</span>
+          {#if card.action === "current"}<span class="here"
+              >{paid && held && card.id !== "free"
+                ? m.account_plans_current_interval({ interval: intervalName(held) })
+                : m.account_plans_current()}</span
+            >
           {:else if card.action === "upgrade" || card.action === "switch"}<Button
               variant={card.downgrade ? "secondary" : "primary"}
               pending={working === card.id}

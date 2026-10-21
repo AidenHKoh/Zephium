@@ -47,9 +47,10 @@ const reply = (value: AccountV1, fault: AccountFaultV1 | null = null): AccountRe
   retry_after: null,
 });
 
-const subscription = (status: string) => ({
+const subscription = (status: string, plan: string | null = "pro") => ({
   status,
-  interval: "monthly",
+  plan: status === "active" ? plan : null,
+  interval: status === "active" ? "monthly" : null,
   paid_until: "2026-11-19T00:00:00Z",
   cancel_at_period_end: false,
 });
@@ -75,7 +76,7 @@ const offers: AccountV1["offers"] = [
     kind: "top_up",
     id: "staging-topup",
     name: "Credits",
-    units: "2000000",
+    units: "1000000",
     price: { amount_minor: 100, currency: "USD" },
     expires_days: 365,
   },
@@ -306,7 +307,12 @@ test("a downgrade says it waits for renewal", async () => {
 
 test("under billing review there are no purchase buttons, but the portal and a downgrade remain", async () => {
   await page.viewport(1100, 1600);
-  const max = { ...pro, plan: "max", billing_review: true };
+  const max = {
+    ...pro,
+    plan: "max",
+    subscription: subscription("active", "max"),
+    billing_review: true,
+  };
   native.get.mockResolvedValue(reply(max));
   const screen = await render(AccountPage);
   await expect
@@ -355,10 +361,48 @@ test("credits are bought from a dialog of packs, the chosen one named on the but
   const screen = await render(AccountPage);
   await screen.getByRole("button", { name: "Buy credits" }).click();
   await expect.element(screen.getByText("Lasts 365 days")).toBeVisible();
-  await expect.element(screen.getByRole("radio", { name: /200/u })).toBeChecked();
-  await screen.getByRole("button", { name: "Buy 200 credits · $1" }).click();
+  await expect.element(screen.getByRole("radio", { name: /100/u })).toBeChecked();
+  await screen.getByRole("button", { name: "Buy 100 credits · $1" }).click();
   expect(native.buy).toHaveBeenCalledWith({ kind: "top_up", id: "staging-topup" });
   await expect.element(screen.getByRole("dialog")).not.toBeInTheDocument();
+});
+
+test("several packs are a choice of radios, and the first is chosen", async () => {
+  await page.viewport(1100, 1600);
+  native.get.mockResolvedValue(
+    reply(
+      accountFixture({
+        ...free,
+        offers: [
+          ...offers,
+          {
+            kind: "top_up",
+            id: "big",
+            name: "Credits",
+            units: "5000000",
+            price: { amount_minor: 500, currency: "USD" },
+            expires_days: 365,
+          },
+        ],
+      }),
+    ),
+  );
+  const screen = await render(AccountPage);
+  await screen.getByRole("button", { name: "Buy credits" }).click();
+  await expect.element(screen.getByRole("radio", { name: /100/u })).toBeChecked();
+  await expect.element(screen.getByRole("radio", { name: /500/u })).toBeVisible();
+});
+
+test("the plans dialog marks the plan and interval the subscription is for, not the access plan", async () => {
+  await page.viewport(1100, 1600);
+  native.get.mockResolvedValue(
+    reply(accountFixture({ ...pro, subscription: subscription("active", "max") })),
+  );
+  const screen = await render(AccountPage);
+  await screen.getByRole("button", { name: "Change plan" }).click();
+  await expect.element(screen.getByText("Current plan · Monthly")).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Switch to Pro" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Switch to Max" }).elements()).toHaveLength(0);
 });
 
 test("the plans dialog marks the current plan, offers each other plan, and closes with Escape", async () => {
