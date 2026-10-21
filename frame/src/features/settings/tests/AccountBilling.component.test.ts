@@ -403,6 +403,49 @@ test("several packs are a choice of radios, and the first is chosen", async () =
   await expect.element(screen.getByRole("radio", { name: /500/u })).toBeVisible();
 });
 
+/** The packs staging sells, in no particular order, each named and priced by the server. */
+const stagingPacks: AccountV1["offers"] = [
+  ["credits-25", "25000000", 2500],
+  ["credits-5", "5000000", 500],
+  ["staging-topup", "1000000", 100],
+  ["credits-50", "50000000", 5000],
+  ["credits-10", "10000000", 1000],
+].map(([id, units, cents]) => ({
+  kind: "top_up" as const,
+  id: id as string,
+  name: `Zephium ${id}`,
+  units: units as string,
+  price: { amount_minor: cents as number, currency: "USD" },
+  expires_days: 365,
+}));
+
+test("several packs are a list to pick from, smallest first: credits lead, the price follows", async () => {
+  await page.viewport(1100, 1600);
+  const account = accountFixture({ ...free, offers: [...offers.slice(0, 2), ...stagingPacks] });
+  native.get.mockResolvedValue(reply(account));
+  native.buy.mockResolvedValue(reply(account));
+  const screen = await render(AccountPage);
+  await screen.getByRole("button", { name: "Buy credits" }).click();
+  const radios = screen.getByRole("radio").elements() as HTMLInputElement[];
+  expect(radios.map((radio) => radio.value)).toEqual([
+    "staging-topup",
+    "credits-5",
+    "credits-10",
+    "credits-25",
+    "credits-50",
+  ]);
+  const rows = radios.map((radio) =>
+    radio.closest("label")!.textContent!.replace(/\s+/gu, " ").trim(),
+  );
+  expect(rows[2]).toBe("1,000credits $10");
+  // Every pack lasts as long, so it is said once rather than on each row.
+  await expect.element(screen.getByText("Lasts 365 days")).toBeVisible();
+  expect(screen.getByText("Lasts 365 days").elements()).toHaveLength(1);
+  await screen.getByText("$25", { exact: true }).click();
+  await screen.getByRole("button", { name: "Buy 2,500 credits · $25" }).click();
+  expect(native.buy).toHaveBeenCalledWith({ kind: "top_up", id: "credits-25" });
+});
+
 test("the plans dialog marks the plan and interval the subscription is for, not the access plan", async () => {
   await page.viewport(1100, 1600);
   native.get.mockResolvedValue(

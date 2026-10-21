@@ -360,6 +360,32 @@ test("Settings → Account signed out, waiting for a code, and signed in", async
     await userEvent.keyboard("++++{Shift>}{ArrowLeft}{ArrowLeft}{ArrowLeft}{/Shift}");
     screen.getByRole("application").element().blur();
   });
+  const packs: AccountV1["offers"] = [
+    ["staging-topup", "1000000", 100],
+    ["credits-5", "5000000", 500],
+    ["credits-10", "10000000", 1000],
+    ["credits-25", "25000000", 2500],
+    ["credits-50", "50000000", 5000],
+  ].map(([id, units, cents]) => ({
+    kind: "top_up" as const,
+    id: id as string,
+    name: null,
+    units: units as string,
+    price: { amount_minor: cents as number, currency: "usd" },
+    expires_days: 365,
+  }));
+  await shoot(
+    "credits",
+    {
+      ...pictured,
+      offers: [...signedIn.offers.filter((offer) => offer.kind === "plan"), ...packs],
+    },
+    async (screen) => {
+      await screen.getByRole("button", { name: "Buy credits" }).click();
+      await settle();
+      await screen.getByText("$10", { exact: true }).click();
+    },
+  );
   await shoot("billing-off", {
     ...signedIn,
     billing: false,

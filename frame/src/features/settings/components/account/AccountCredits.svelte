@@ -3,7 +3,7 @@
   import { accountSession as session, creditsLeft, priceLabel } from "$domain/account";
   import * as m from "$shared/i18n/messages";
   import Button from "$shared/ui/Button";
-  import type { TopUpOffer } from "../../lib/plans";
+  import { packsInOrder, sharedLifetime, type TopUpOffer } from "../../lib/plans";
   import AccountDialog from "./AccountDialog.svelte";
 
   let {
@@ -21,15 +21,18 @@
   } = $props();
 
   const busy = $derived(session.pending());
+  const ordered = $derived(packsInOrder(packs));
+  /** Said once in the description when every pack lasts as long; otherwise on each. */
+  const lifetime = $derived(sharedLifetime(packs));
   let chosen = $state<string | null>(null);
   let buying = $state(false);
-  const pack = $derived(packs.find((offer) => offer.id === chosen) ?? packs[0] ?? null);
+  const pack = $derived(ordered.find((offer) => offer.id === chosen) ?? ordered[0] ?? null);
 
   $effect(() => {
     if (!open) return;
     untrack(() => {
       buying = false;
-      chosen = packs[0]?.id ?? null;
+      chosen = ordered[0]?.id ?? null;
     });
   });
 
@@ -56,8 +59,8 @@
 <AccountDialog
   bind:open
   title={m.account_credits_title()}
-  description={m.account_topup_desc()}
-  width={520}
+  description={lifetime ? m.account_topup_desc_days({ days: lifetime }) : m.account_topup_desc()}
+  width={460}
 >
   <form
     onsubmit={(event) => {
@@ -66,18 +69,24 @@
     }}
   >
     <!-- Native radios: the arrow keys, the group's one tab stop and its announcement are the browser's. -->
-    <fieldset class="packs" data-solo={packs.length === 1 || undefined}>
+    <fieldset class="packs" data-solo={ordered.length === 1 || undefined}>
       <legend class="hidden">{m.account_credits_packs()}</legend>
-      {#each packs as offer (offer.id)}
+      {#each ordered as offer (offer.id)}
         {@const credits = amount(offer)}
         <label class="pack">
           <input type="radio" name="pack" value={offer.id} bind:group={chosen} />
-          <span class="credits">{credits ?? offer.name ?? m.account_topup_title()}</span>
-          {#if credits}<span class="unit">{m.account_credits_unit()}</span>{/if}
+          <span class="mark" aria-hidden="true"></span>
+          <span class="what">
+            <span class="credits"
+              >{credits ?? offer.name ?? m.account_topup_title()}{#if credits}<span class="unit"
+                  >{m.account_credits_unit()}</span
+                >{/if}</span
+            >
+            {#if !lifetime && offer.expires_days}<span class="lasts"
+                >{m.account_credits_lasts({ days: offer.expires_days })}</span
+              >{/if}
+          </span>
           <span class="cost">{price(offer) ?? ""}</span>
-          {#if offer.expires_days}<span class="lasts"
-              >{m.account_credits_lasts({ days: offer.expires_days })}</span
-            >{/if}
         </label>
       {/each}
     </fieldset>
@@ -92,10 +101,10 @@
 </AccountDialog>
 
 <style>
+  /* A list to choose from, one row a pack: the credits lead, the price follows. */
   .packs {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
-    gap: 10px;
+    gap: 6px;
     min-inline-size: 0;
     margin: 0;
     padding: 0;
@@ -114,10 +123,13 @@
   .pack {
     position: relative;
     display: grid;
-    align-content: start;
-    gap: 2px;
-    padding: 16px 16px 14px;
-    border-radius: var(--radius-card);
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 14px;
+    min-block-size: 56px;
+    box-sizing: border-box;
+    padding: 10px 18px 10px 16px;
+    border-radius: var(--radius-control);
     background: var(--color-surface);
     box-shadow: inset 0 0 0 1px var(--color-border);
     cursor: default;
@@ -131,8 +143,8 @@
   }
 
   .pack:has(input:checked) {
-    box-shadow: inset 0 0 0 1.5px var(--color-accent);
     background: var(--color-accent-soft);
+    box-shadow: inset 0 0 0 1.5px var(--color-accent);
   }
 
   .pack:has(input:focus-visible) {
@@ -148,26 +160,63 @@
     pointer-events: none;
   }
 
+  /* The radio, drawn: a ring that fills with the accent when chosen. */
+  .mark {
+    display: grid;
+    inline-size: 18px;
+    block-size: 18px;
+    box-sizing: border-box;
+    border-radius: 50%;
+    box-shadow: inset 0 0 0 1.5px var(--color-border-strong);
+    place-items: center;
+    transition:
+      background-color var(--motion-fast) var(--ease-out),
+      box-shadow var(--motion-fast) var(--ease-out);
+  }
+
+  .mark::after {
+    inline-size: 6px;
+    block-size: 6px;
+    border-radius: 50%;
+    background: var(--color-on-accent);
+    content: "";
+    scale: 0;
+    transition: scale var(--motion-fast) var(--ease-out);
+  }
+
+  .pack:has(input:checked) .mark {
+    background: var(--color-accent);
+    box-shadow: none;
+  }
+
+  .pack:has(input:checked) .mark::after {
+    scale: 1;
+  }
+
+  .what {
+    display: grid;
+    gap: 1px;
+    min-inline-size: 0;
+  }
+
   .credits {
+    overflow: hidden;
     color: var(--color-text);
-    font-size: var(--text-headline);
+    font-size: 17px;
     font-variant-numeric: tabular-nums;
     font-weight: 600;
-    letter-spacing: -0.025em;
-    line-height: 1.2;
+    letter-spacing: -0.02em;
+    line-height: 22px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .unit,
-  .cost,
-  .lasts {
+  .unit {
+    margin-inline-start: 5px;
     color: var(--color-muted);
     font-size: var(--text-label);
-    font-variant-numeric: tabular-nums;
-  }
-
-  .cost {
-    margin-block-start: 8px;
-    color: var(--color-label-secondary);
+    font-weight: 500;
+    letter-spacing: 0;
   }
 
   .lasts {
@@ -175,21 +224,24 @@
     font-size: var(--text-caption);
   }
 
-  /* One pack is not a choice to make: it reads as a single line, not a lone tile. */
-  .packs[data-solo] {
-    grid-template-columns: minmax(0, 1fr);
+  .cost {
+    color: var(--color-label-secondary);
+    font-size: var(--text-body);
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
   }
 
+  .pack:has(input:checked) .cost {
+    color: var(--color-text);
+  }
+
+  /* One pack is not a choice to make: no radio, no selection, just the line. */
   .packs[data-solo] .pack {
-    grid-template-areas:
-      "credits cost"
-      "unit cost"
-      "lasts lasts";
     grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    column-gap: 16px;
-    background: var(--color-surface);
-    box-shadow: inset 0 0 0 1px var(--color-border);
+  }
+
+  .packs[data-solo] .pack .mark {
+    display: none;
   }
 
   .packs[data-solo] .pack:has(input:checked) {
@@ -197,29 +249,16 @@
     box-shadow: inset 0 0 0 1px var(--color-border);
   }
 
-  .packs[data-solo] .credits {
-    grid-area: credits;
-  }
-
-  .packs[data-solo] .unit {
-    grid-area: unit;
-  }
-
-  .packs[data-solo] .cost {
-    grid-area: cost;
-    margin: 0;
+  .packs[data-solo] .pack .cost {
     color: var(--color-text);
-    font-size: var(--text-headline);
+    font-size: 17px;
     font-weight: 600;
   }
 
-  .packs[data-solo] .lasts {
-    grid-area: lasts;
-    margin-block-start: 6px;
-  }
-
   @media (prefers-reduced-motion: reduce) {
-    .pack {
+    .pack,
+    .mark,
+    .mark::after {
       transition: none;
     }
   }
@@ -227,6 +266,10 @@
   @media (forced-colors: active) {
     .pack:has(input:checked) {
       outline: 2px solid Highlight;
+    }
+
+    .mark {
+      border: 1px solid CanvasText;
     }
   }
 </style>
