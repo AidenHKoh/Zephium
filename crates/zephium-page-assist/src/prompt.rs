@@ -51,7 +51,20 @@ Act requests (the request starts with ACT): add up to 8 step lines after the = l
 > open rN   (a link to another page of this same site)
 rN must be the control's passage number. Never type into password, card or one-time-code fields. If the request needs another site, more pages, or more than 8 steps, write only the = line and the line > work.
 
-Style requests (the request starts with STYLE): write an = line describing the change in under 80 characters, then the stylesheet between a line @css and a line @end. Plain CSS rules only: selectors and declarations, optionally inside @media (prefers-color-scheme) or @media (min-width/max-width). Allowed properties: color, background-color, background, border and outline properties, border-radius, box-shadow, text-shadow, font-family, font-size, font-weight, font-style, line-height, letter-spacing, word-spacing, text-align, text-decoration, text-transform, margin, padding, gap, width, min-width, max-width, display, visibility, opacity, filter, color-scheme, accent-color, caret-color. No url(), no images, no fonts to download, no @import, no content, no comments, no position. Use !important where the site's own styles would win."#;
+Style requests (the request starts with STYLE): restyle the page with CSS only. Write an = line saying what changes, under 80 characters, then the stylesheet between a line @css and a line @end. Nothing else.
+
+An <<<OUTLINE block, when given, lists the page's real regions, one per line as "kind selector xCount bg=#hex fg=#hex size", after its scheme, colours and fonts. Use those selectors for regions and plain tags for text (body, h1 to h4, p, a, li, blockquote, table, th, td, code, pre, button, input, textarea, select). Invent no class or id. Without an outline use plain tags only.
+
+Design recipe, in this order:
+1. Palette. Choose a background, a text colour, a surface one step from the background for cards, panels and inputs, a border, and one accent for links and buttons. Begin from the outline's colours and keep the site's identity: its accent stays its accent. Write colours as hex.
+2. Contrast. Text on its background reaches 4.5:1, links and buttons too; large headings 3:1. Dark text on light surfaces, light text on dark ones, never mid-grey on mid-grey.
+3. Schemes. Unless the person asked for dark or light, write the light palette plainly and the dark one inside @media (prefers-color-scheme: dark) { ... }. If they asked for one scheme, write only that one, plainly, and add color-scheme.
+4. Type. Body font-size 17px, line-height 1.6. Headings in a 1.25 scale (h1 2em, h2 1.5em, h3 1.25em), font-weight 650, line-height 1.2, letter-spacing -0.01em. font-family from the outline's fonts, else system-ui, sans-serif (Georgia, serif for long articles). Never go below 14px.
+5. Measure. Give the article or main text block max-width: 70ch with margin-left: auto and margin-right: auto. Give paragraphs margin-bottom: 1em. Do not set width on columns or page frames.
+6. Surfaces. Cards, inputs and buttons get border-radius 8px to 12px, a 1px border, and a soft box-shadow. Spacing in multiples of 4px. At most 5 colours in all.
+7. Add !important to colours and backgrounds, as the site's own styles would win otherwise.
+
+Never hide, shrink or recolour to invisible any main, article, navigation, heading, link, button or form field: no display: none, visibility: hidden, opacity near 0, or font-size 0 on them. Never change the display or width of headers, navigation or columns, which breaks their layout. Clearing clutter such as banners or ads is allowed only when the person asked for it. At most 60 rules, under 3500 characters. Allowed properties: color, background-color, background, border and outline properties, border-radius, box-shadow, text-shadow, font-family, font-size, font-weight, font-style, line-height, letter-spacing, word-spacing, text-align, text-decoration, text-transform, margin, padding, gap, width, min-width, max-width, display, visibility, opacity, filter, color-scheme, accent-color, caret-color. No url(), images, downloadable fonts, @import, content, comments, variables, gradients or position."#;
 
 /// One earlier turn, as the model sees it again.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -19,6 +19,8 @@ pub mod citations;
 pub mod complexity;
 pub mod cost;
 pub mod css;
+#[cfg(test)]
+mod fixtures;
 pub mod guard;
 pub mod outline;
 pub mod pacer;
