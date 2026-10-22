@@ -957,7 +957,10 @@ async fn styles_apply_only_after_approval_and_reject_injection() {
 
 #[tokio::test]
 async fn a_full_site_takes_no_more_styles_and_spends_no_request() {
-    let h = harness(WorkModelProvider::OpenAi, Some(script("= Dark\n@css\nbody{color:#eee}\n@end\n")));
+    let h = harness(
+        WorkModelProvider::OpenAi,
+        Some(script("= Dark\n@css\nbody{color:#eee}\n@end\n")),
+    );
     *h.styles.0.lock().unwrap() = (0..MAX_SITE_STYLES)
         .map(|i| StoredStyle {
             id: format!("s{i}"),
@@ -968,14 +971,24 @@ async fn a_full_site_takes_no_more_styles_and_spends_no_request() {
         })
         .collect();
     h.run(ask(PageAssistIntentV1::Style, "make it dark")).await;
-    assert!(h.events().iter().any(|e| matches!(e, PageAssistEventV1::Style { style } if style.state == PageStyleStateV1::Full)));
+    assert!(h.events().iter().any(
+        |e| matches!(e, PageAssistEventV1::Style { style } if style.state == PageStyleStateV1::Full)
+    ));
     assert!(h.requests.lock().unwrap().is_empty());
     assert!(h.page.lock().applied.is_empty());
 
     let h = harness(WorkModelProvider::OpenAi, None);
     let big = format!("{}{{color:red}}\n", "a".repeat(MAX_SITE_CSS_BYTES));
-    assert!(h.service.add_style(&ProfileId::from(7), "example.com", "big", big).is_none());
-    let one = h.service.add_style(&ProfileId::from(7), "example.com", "ok", "a{color:red}\n".into());
+    assert!(h
+        .service
+        .add_style(&ProfileId::from(7), "example.com", "big", big)
+        .is_none());
+    let one = h.service.add_style(
+        &ProfileId::from(7),
+        "example.com",
+        "ok",
+        "a{color:red}\n".into(),
+    );
     assert!(one.is_some());
 }
 
@@ -989,9 +1002,18 @@ async fn closing_a_tab_ends_its_thread_and_its_running_turn() {
             hang: true,
         }),
     );
-    let (_, task) = h.service.ask(ask(PageAssistIntentV1::Ask, "q")).await.unwrap();
+    let (_, task) = h
+        .service
+        .ask(ask(PageAssistIntentV1::Ask, "q"))
+        .await
+        .unwrap();
     let running = tokio::spawn(task);
-    wait_for(&h, |events| events.iter().any(|e| matches!(e, PageAssistEventV1::Part { .. }))).await;
+    wait_for(&h, |events| {
+        events
+            .iter()
+            .any(|e| matches!(e, PageAssistEventV1::Part { .. }))
+    })
+    .await;
     h.service.tab_closed(TAB);
     running.await.unwrap();
     assert!(h.dropped.load(Ordering::Acquire), "the call was cancelled");

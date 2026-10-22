@@ -604,7 +604,9 @@ impl PageAssist {
         let (count, size) = styles
             .iter()
             .filter(|style| style.site == site)
-            .fold((0, 0), |(count, size), style| (count + 1, size + style.css.len()));
+            .fold((0, 0), |(count, size), style| {
+                (count + 1, size + style.css.len())
+            });
         count < MAX_SITE_STYLES && size + bytes <= MAX_SITE_CSS_BYTES
     }
 

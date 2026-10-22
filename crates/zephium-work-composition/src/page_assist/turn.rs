@@ -738,12 +738,10 @@ async fn style(context: &Context, answer: &Answer, outline: Option<&Outline>) ->
     context.emit(proposal(PageStyleStateV1::Proposed, validated.rules, None));
     match context.decision().await {
         Ok(PageAssistDecisionV1::Approve) => {
-            let added = context.service.add_style(
-                &context.profile,
-                &context.site,
-                &summary,
-                validated.css,
-            );
+            let added =
+                context
+                    .service
+                    .add_style(&context.profile, &context.site, &summary, validated.css);
             let state = if added.is_some() {
                 PageStyleStateV1::Applied
             } else {
