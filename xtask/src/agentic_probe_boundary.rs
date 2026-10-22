@@ -230,7 +230,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         repository.join("crates/zephium-agentic/src/semantic_runtime.rs"),
     )?);
     for required in [
-        "MAX_SEMANTIC_RUNTIME_SOURCE_BYTES:usize=192*1024;",
+        "MAX_SEMANTIC_RUNTIME_SOURCE_BYTES:usize=208*1024;",
         "MAX_SEMANTIC_RUNTIME_REQUEST_BYTES:usize=2*1024;",
         "MAX_SEMANTIC_ACTION_RUNTIME_RESULT_BYTES:usize=512;",
         "SEMANTIC_RUNTIME_SOURCE_SHA256:[u8;32]",
@@ -776,17 +776,30 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
             "engine production agentic-browser feature must remain probe-independent".to_owned(),
         );
     }
-    let image = windows_dependencies
-        .get("image")
+    // 801fcc49 moved the codec to both platforms for bounded record photos
+    // (platform/record_media.rs caps bytes, 2048 px and 24 MiB allocation).
+    if windows_dependencies.contains_key("image") {
+        return Err("Work thumbnail codec must be declared once for every platform".to_owned());
+    }
+    let image = manifest
+        .get("dependencies")
+        .and_then(|dependencies| dependencies.get("image"))
         .and_then(toml::Value::as_table)
-        .ok_or_else(|| "Windows Work thumbnail codec is missing".to_owned())?;
+        .ok_or_else(|| "Work thumbnail codec is missing".to_owned())?;
     if image.get("version").and_then(toml::Value::as_str) != Some("=0.25.10")
         || image.get("optional").and_then(toml::Value::as_bool) != Some(true)
         || image.get("default-features").and_then(toml::Value::as_bool) != Some(false)
         || image.get("features").and_then(toml::Value::as_array)
-            != Some(&vec![toml::Value::String("png".to_owned())])
+            != Some(
+                &["png", "jpeg", "webp", "gif"]
+                    .map(|feature| toml::Value::String(feature.to_owned()))
+                    .to_vec(),
+            )
     {
-        return Err("Windows Work thumbnail codec must remain optional and PNG-only".to_owned());
+        return Err(
+            "Work thumbnail codec must remain optional and limited to PNG, JPEG, WebP and GIF"
+                .to_owned(),
+        );
     }
     let semantic_probe_feature = manifest
         .get("features")
@@ -2646,9 +2659,9 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         for required in [
             "#[cfg(feature=\"native-agentic-semantic-probe\")]#[path=\"agentic_semantic_program_probe.rs\"]modprogram_probe;",
             "#[cfg(any(not(feature=\"native-agentic-semantic-probe\"),test))]usezephium_agentic::SEMANTIC_RUNTIME_PROGRAM;",
-            "#[cfg(not(feature=\"native-agentic-semantic-probe\"))]letsource=NSString::from_str(SEMANTIC_RUNTIME_PROGRAM.source());",
+            "#[cfg(not(feature=\"native-agentic-semantic-probe\"))]letsource=NSString::from_str(SEMANTIC_RUNTIME_PROGRAM.installation_source());",
             "#[cfg(feature=\"native-agentic-semantic-probe\")]letsource=NSString::from_str(&program_probe::source());",
-            "#[cfg(not(feature=\"native-agentic-semantic-probe\"))]letsource_mismatch=source.to_string()!=SEMANTIC_RUNTIME_PROGRAM.source();",
+            "#[cfg(not(feature=\"native-agentic-semantic-probe\"))]letsource_mismatch=source.to_string()!=SEMANTIC_RUNTIME_PROGRAM.installation_source();",
             "#[cfg(feature=\"native-agentic-semantic-probe\")]letsource_mismatch=source.to_string()!=program_probe::source();",
             "#[cfg(feature=\"native-agentic-semantic-probe\")]letbytes=program_probe::normalize_diagnostic(bytes);",
             "#[cfg(feature=\"native-agentic-semantic-probe\")]prepared_fill:Option<program_probe::PreparedFill>,",
@@ -2672,8 +2685,9 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
     }
     let expected_probe_gates = if source.contains("program_probe") {
         // Includes stopping the existing preparation reply on authority loss
-        // and the regression proving late preparation cannot reopen it.
-        17
+        // and the regression proving late preparation cannot reopen it, plus
+        // the probe-only record media and form receipt diagnostics.
+        28
     } else {
         0
     };
@@ -2695,11 +2709,11 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         "body.lengthOfBytesUsingEncoding(NSUTF8StringEncoding)",
         "MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES",
         "MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS",
-        "SEMANTIC_RUNTIME_PROGRAM.source()",
+        "SEMANTIC_RUNTIME_PROGRAM.installation_source()",
         "scripts.count()!=1",
         "scripts.objectAtIndex(0)",
         "Retained::as_ptr(&script)!=Retained::as_ptr(&active.script)",
-        "source.to_string()!=SEMANTIC_RUNTIME_PROGRAM.source()",
+        "source.to_string()!=SEMANTIC_RUNTIME_PROGRAM.installation_source()",
         "removeScriptMessageHandlerForName_contentWorld",
         "controller.removeAllScriptMessageHandlers()",
         "controller.removeAllUserScripts()",
@@ -2715,7 +2729,7 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         "self.settling_action==Some(attempt)",
         "super::semantic_action::map_runtime_fault(*fault)==zephium_agentic::SemanticActionNativeFailure::AppliedUnverified",
         "DocumentPhase::AuthorityRevoked",
-        "self.awaiting_result&&matches!(self.pending,Some(PendingInvocation::Action{..}))",
+        "lethanded_off=self.awaiting_result&&matches!(self.pending,Some(PendingInvocation::Action{..}|PendingInvocation::Privacy{..}|PendingInvocation::Media{..}));",
         "fnretire",
         "fnadmission_failure(&mutself)->Option<AgentSemanticRuntimeDispatchError>",
         "DocumentPhase::Loading=>{returnSome(AgentSemanticRuntimeDispatchError::NotReady);}",
@@ -5533,7 +5547,7 @@ fn validate_provider_transport_manifest(source: &str) -> Result<(), String> {
         .iter()
         .filter_map(toml::Value::as_str)
         .collect::<BTreeSet<_>>();
-    let expected = ["sync", "time"].into_iter().collect::<BTreeSet<_>>();
+    let expected = ["net", "sync", "time"].into_iter().collect::<BTreeSet<_>>();
     if actual != expected || actual.len() != features.len() {
         return Err("agent provider transport Tokio feature graph drifted".to_owned());
     }
@@ -5875,7 +5889,9 @@ fn validate_provider_transport_commit_boundary(source: &str) -> Result<(), Strin
         "letshutdown_gate=ifcancellation.shares_authority(&self.shared.shutdown)",
         "matchself.shared.shutdown.lock_commit_gate()",
         "ifcancellation.is_cancelled()||self.shared.shutdown.is_cancelled()",
-        "letcommitted=matchinput.commit(policy)",
+        "letcommitted=ifletSome(fence)=&image_fence{",
+        "letcurrent=fence.while_current(&mut||{ifletSome(input)=owned.take(){committed=Some(input.commit(policy));}});",
+        "}else{input.commit(policy)};letcommitted=matchcommitted{",
         "slot.mark_committed();drop(shutdown_gate);drop(cancellation_gate);",
     ] {
         if !source.contains(required) {
@@ -5901,7 +5917,7 @@ fn validate_provider_transport_commit_boundary(source: &str) -> Result<(), Strin
         .find("ifcancellation.is_cancelled()||self.shared.shutdown.is_cancelled()")
         .ok_or_else(|| "agent provider transport final cancellation check is missing".to_owned())?;
     let commit = source
-        .find("letcommitted=matchinput.commit(policy)")
+        .find("letcommitted=ifletSome(fence)=&image_fence{")
         .ok_or_else(|| "agent provider transport disclosure commit is missing".to_owned())?;
     let marked = source
         .find("slot.mark_committed();drop(shutdown_gate);drop(cancellation_gate);")
@@ -5982,7 +5998,7 @@ fn validate_abortable_provider_operation_contract(source: &str) -> Result<(), St
         .ok_or_else(|| "count drive no longer publishes disclosure before send".to_owned())?;
     // 697c56d0: the free count call retries once on overload with a cloned request.
     let count_send = count
-        .find("response=send.send()=>response")
+        .find("response=lead::image_fence::fenced(image_fence.as_ref(),send.send())=>matchresponse{Ok(response)=>response,Err(())=>returnself.counted_failure(cancelled_failure())}")
         .ok_or_else(|| "count drive send boundary is missing".to_owned())?;
     if !count.contains("letSome(send)=request.try_clone()else{")
         || !count
@@ -6011,7 +6027,7 @@ fn validate_abortable_provider_operation_contract(source: &str) -> Result<(), St
         .find("self.mark_model_may_have_dispatched()")
         .ok_or_else(|| "generation drive no longer publishes dispatch before send".to_owned())?;
     let generation_send = generation
-        .find("response=request.send()=>response")
+        .find("response=lead::image_fence::fenced(image_fence.as_ref(),request.send())=>matchresponse{Ok(response)=>response,Err(())=>returnself.finish_terminal(cancelled_failure())}")
         .ok_or_else(|| "generation drive send boundary is missing".to_owned())?;
     if !(generation_begin < generation_disclosure && generation_disclosure < generation_send) {
         return Err(
@@ -6981,8 +6997,8 @@ fn validate_semantic_read_continuation_contract(
         "pub(crate)fnmatches_acknowledgement(",
         "acknowledgement.guard()==self.observation_fingerprint.digest()",
         "node.sensitivity()==SemanticSensitivity::Secret",
-        "pubconstMAX_SEMANTIC_READ_ITEMS:u16=256",
-        "pubconstMAX_SEMANTIC_READ_BYTES:u32=64*1024",
+        "pubconstMAX_SEMANTIC_READ_ITEMS:u16=768",
+        "pubconstMAX_SEMANTIC_READ_BYTES:u32=128*1024",
     ] {
         if !read.contains(required) {
             return Err(format!(
@@ -7010,9 +7026,10 @@ fn validate_semantic_read_continuation_contract(
     for required in [
         "pubfnbind_read_request(",
         "self.correlation.kind()!=AgentBrowserToolKind::Read",
-        "self.correlation.read_scope.as_ref(),Some(super::AgentBrowserScopeProposal::Initial)",
-        "Some(super::AgentBrowserScopeProposal::Initial)",
-        "returnErr(AgentProviderContinuationError::Scope)",
+        "match(self.correlation.read_scope.as_ref(),read.selected_target()){",
+        "(Some(super::AgentBrowserScopeProposal::Initial),None)=>{}",
+        "(Some(super::AgentBrowserScopeProposal::Subtree(wanted)),Some(actual))if*wanted==actual&&!read.has_retained_evidence()=>{}",
+        "_=>returnErr(AgentProviderContinuationError::Scope),",
         "if!read.matches_acknowledgement(&self.baseline)",
         "if!payload.matches_read(read)",
         "pubstructAgentProviderBoundReadContinuation",
@@ -7147,10 +7164,10 @@ fn validate_semantic_extraction_provider_contract(
 
     let provider_tool = compact(provider_tool);
     for required in [
-        "AgentBrowserToolProposal::Extract{schema,..}=>Some(*schema)",
+        "Some(AgentBrowserToolProposal::Extract{schema,..})=>Some(*schema)",
         "extraction_schema:Option<SemanticExtractionSchemaId>",
         "extraction_schema,extraction_scope,read_scope,snapshot_scope,navigation_target,provider_item_id:self.provider_item_id",
-        "AgentBrowserToolProposal::Read(scope)=>Some(scope.clone())",
+        "Some(AgentBrowserToolProposal::Read(scope))=>Some(scope.clone())",
     ] {
         if !provider_tool.contains(required) {
             return Err(format!(
@@ -7169,7 +7186,8 @@ fn validate_semantic_extraction_provider_contract(
         "output_schema:super::request::bound_extraction_output_schema(schema,Some(read))",
         "pubstructAgentProviderBoundExtractionContinuation",
         "AgentBrowserToolKind::Locate|AgentBrowserToolKind::Read|AgentBrowserToolKind::Extract|AgentBrowserToolKind::Screenshot",
-        "AgentProviderInputEvidence::Extraction(_)|AgentProviderInputEvidence::Screenshot(_)=>{returnNone;}",
+        "AgentProviderInputEvidence::Screenshot(receipt)=>{letbaseline=continuation_baseline?;if!receipt.matches_baseline(&baseline){returnNone;}baseline}",
+        "AgentProviderInputEvidence::Extraction(_)=>{returnNone;}",
     ] {
         if !continuation.contains(required) {
             return Err(format!(
@@ -8222,11 +8240,11 @@ fn validate_progress_manifest_revision_contract(
     let effect_policy = compact(effect_policy);
     for required in [
         "pubstructAgentNeedsHumanTransition{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
-        "pubstructAgentEffectPermit{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
-        "pubstructAgentActiveEffect{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
+        "pubstructAgentEffectPermit{approval_binding:Option<crate::SemanticApprovalBinding>,manifest:AgentRunManifestId,manifest_guard:[u8;32]",
+        "pubstructAgentActiveEffect{approval_binding:Option<crate::SemanticApprovalBinding>,manifest:AgentRunManifestId,manifest_guard:[u8;32]",
         "pubstructAgentEffectReceipt{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
-        "AgentEffectAuthorization::Permit(AgentEffectPermit{manifest:self.manifest.id(),manifest_guard:self.manifest.guard()",
-        "Ok(AgentActiveEffect{manifest:permit.manifest,manifest_guard:permit.manifest_guard",
+        "AgentEffectAuthorization::Permit(AgentEffectPermit{approval_binding:assessment.approval_binding,manifest:self.manifest.id(),manifest_guard:self.manifest.guard()",
+        "Ok(AgentActiveEffect{approval_binding:permit.approval_binding,manifest:permit.manifest,manifest_guard:permit.manifest_guard",
         "Ok(AgentEffectReceipt{manifest:self.manifest.id(),manifest_guard:active.manifest_guard",
         "AgentEffectAuthorization::NeedsHuman(AgentNeedsHumanTransition{manifest:self.manifest.id(),manifest_guard:self.manifest.guard()",
     ] {
@@ -14325,11 +14343,11 @@ mod tests {
             body.lengthOfBytesUsingEncoding(NSUTF8StringEncoding);
             MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES;
             MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS;
-            SEMANTIC_RUNTIME_PROGRAM.source();
+            SEMANTIC_RUNTIME_PROGRAM.installation_source();
             if scripts.count() != 1 {}
             let script = scripts.objectAtIndex(0);
             Retained::as_ptr(&script) != Retained::as_ptr(&active.script);
-            source.to_string() != SEMANTIC_RUNTIME_PROGRAM.source();
+            source.to_string() != SEMANTIC_RUNTIME_PROGRAM.installation_source();
             removeScriptMessageHandlerForName_contentWorld();
             controller.removeAllScriptMessageHandlers();
             controller.removeAllUserScripts();
@@ -14343,8 +14361,15 @@ mod tests {
                 super::semantic_action::map_runtime_fault(*fault) ==
                     zephium_agentic::SemanticActionNativeFailure::AppliedUnverified;
                 DocumentPhase::AuthorityRevoked;
-                self.awaiting_result &&
-                    matches!(self.pending, Some(PendingInvocation::Action { .. }));
+                let handed_off = self.awaiting_result
+                    && matches!(
+                        self.pending,
+                        Some(
+                            PendingInvocation::Action { .. }
+                                | PendingInvocation::Privacy { .. }
+                                | PendingInvocation::Media { .. }
+                        )
+                    );
             }
             fn revoked_settling_action() {}
             fn renderer_lost() {}
