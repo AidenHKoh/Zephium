@@ -240,7 +240,6 @@ impl WorkStoreSeed {
 struct WorkSeedJob {
     /// The person's own profile cookies for this site, read and written.
     profile: Option<ICoreWebView2CookieManager>,
-    profile_kind: &'static str,
     scope: zephium_agentic::ContextCookieScope,
     origin: String,
     deadline: Instant,
@@ -327,7 +326,7 @@ impl AgentOwnedView {
     )]
     pub(crate) fn seed_work_session(
         &mut self,
-        profile: Option<(ICoreWebView2CookieManager, &'static str)>,
+        profile: Option<ICoreWebView2CookieManager>,
         scope: zephium_agentic::ContextCookieScope,
         origin: String,
         store: Rc<WorkStoreSeed>,
@@ -341,13 +340,8 @@ impl AgentOwnedView {
             .push(Rc::downgrade(&self.work_activity_notify));
         self.work_store = Some(store);
         self.work_storage_ready.set(false);
-        let (profile, profile_kind) = match profile {
-            Some((manager, kind)) => (Some(manager), kind),
-            None => (None, "none"),
-        };
         *self.work_seed_job.borrow_mut() = Some(WorkSeedJob {
             profile,
-            profile_kind,
             scope,
             origin,
             deadline,
@@ -432,7 +426,6 @@ impl AgentOwnedView {
                         profile_available: job.profile.is_some(),
                         return_pending: admission.store.return_pending.get(),
                     });
-                    log_work_session("admission", step_name(step), job.profile_kind, None);
                     match step {
                         Admission::Wait => {
                             admission.store.busy.set(false);
@@ -492,7 +485,6 @@ impl AgentOwnedView {
     pub(crate) fn return_work_session(
         &self,
         profile: ICoreWebView2CookieManager,
-        profile_kind: &'static str,
         scope: zephium_agentic::ContextCookieScope,
         deadline: Instant,
         completion: impl FnOnce(crate::work_site_session::SyncResult) + 'static,
@@ -524,7 +516,6 @@ impl AgentOwnedView {
             deadline,
             move |terminal| {
                 let result = sync_result(terminal);
-                log_work_session("return", result_name(result), profile_kind, stats(terminal));
                 finished.settle_return(result);
                 finished.busy.set(false);
                 completion(result);
@@ -538,7 +529,6 @@ impl AgentOwnedView {
                 true
             }
             Err(_) => {
-                log_work_session("return", "not_started", profile_kind, None);
                 store.busy.set(false);
                 store.notify();
                 false
@@ -1205,7 +1195,6 @@ fn refresh_work_store(admission: &Rc<WorkStorageAdmission>, job: WorkSeedJob) {
     };
     let scope = job.scope.clone();
     let deadline = job.deadline;
-    let profile_kind = job.profile_kind;
     let panic = job.panic.clone();
     let pending = Rc::new(RefCell::new(Some(job)));
     let finished = pending.clone();
@@ -1218,12 +1207,6 @@ fn refresh_work_store(admission: &Rc<WorkStorageAdmission>, job: WorkSeedJob) {
         move |terminal| {
             use crate::work_site_session::{after_refresh, AfterRefresh};
             let result = sync_result(terminal);
-            log_work_session(
-                "refresh",
-                result_name(result),
-                profile_kind,
-                stats(terminal),
-            );
             let Some(job) = finished.borrow_mut().take() else {
                 return;
             };
@@ -1237,7 +1220,6 @@ fn refresh_work_store(admission: &Rc<WorkStorageAdmission>, job: WorkSeedJob) {
     match attempt {
         Ok(attempt) => retain_transfer(&admission.transfer, attempt),
         Err(_) => {
-            log_work_session("refresh", "not_started", profile_kind, None);
             if let Some(job) = pending.borrow_mut().take() {
                 open_work_store(admission, job, false);
             }
@@ -1252,7 +1234,6 @@ fn return_then_refresh(admission: &Rc<WorkStorageAdmission>, job: WorkSeedJob) {
     };
     let scope = job.scope.clone();
     let deadline = job.deadline;
-    let profile_kind = job.profile_kind;
     let panic = job.panic.clone();
     let pending = Rc::new(RefCell::new(Some(job)));
     let finished = pending.clone();
@@ -1265,7 +1246,6 @@ fn return_then_refresh(admission: &Rc<WorkStorageAdmission>, job: WorkSeedJob) {
         move |terminal| {
             use crate::work_site_session::SyncResult;
             let result = sync_result(terminal);
-            log_work_session("return", result_name(result), profile_kind, stats(terminal));
             let Some(job) = finished.borrow_mut().take() else {
                 return;
             };
@@ -1283,7 +1263,6 @@ fn return_then_refresh(admission: &Rc<WorkStorageAdmission>, job: WorkSeedJob) {
     match attempt {
         Ok(attempt) => retain_transfer(&admission.transfer, attempt),
         Err(_) => {
-            log_work_session("return", "not_started", profile_kind, None);
             if let Some(job) = pending.borrow_mut().take() {
                 open_work_store(admission, job, false);
             }
@@ -1314,51 +1293,6 @@ fn sync_result(
         ),
         terminal.cleanup() == super::cookie_transfer::WindowsAgentCookieCleanup::Unproven,
     )
-}
-
-fn stats(terminal: super::cookie_transfer::WindowsAgentCookieTerminal) -> Option<u16> {
-    match terminal.outcome() {
-        zephium_agentic::ContextCookieTransferOutcome::Applied(stats)
-        | zephium_agentic::ContextCookieTransferOutcome::Partial { stats, .. } => {
-            Some(stats.counts().cookies_applied)
-        }
-        _ => None,
-    }
-}
-
-const fn step_name(step: crate::work_site_session::Admission) -> &'static str {
-    use crate::work_site_session::Admission;
-    match step {
-        Admission::Open { stamp: true } => "open",
-        Admission::Open { stamp: false } => "open_unstamped",
-        Admission::Wait => "wait",
-        Admission::Refresh => "refresh",
-        Admission::ReturnThenRefresh => "return_then_refresh",
-    }
-}
-
-const fn result_name(result: crate::work_site_session::SyncResult) -> &'static str {
-    use crate::work_site_session::SyncResult;
-    match result {
-        SyncResult::Applied => "applied",
-        SyncResult::Refused => "refused",
-        SyncResult::Unproven => "unproven",
-    }
-}
-
-/// Content-free: fixed words and a count, never a site, URL or cookie.
-pub(crate) fn log_work_session(
-    stage: &'static str,
-    outcome: &'static str,
-    profile: &'static str,
-    written: Option<u16>,
-) {
-    use std::io::Write as _;
-    let written = written.map_or(String::new(), |count| format!(" written={count}"));
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "windows-work-session: stage={stage} outcome={outcome} profile={profile}{written}; content=redacted"
-    );
 }
 
 type WorkIdleCompletion = Rc<RefCell<Option<Box<dyn FnOnce(bool)>>>>;

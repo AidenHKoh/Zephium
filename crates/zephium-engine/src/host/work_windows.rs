@@ -628,9 +628,7 @@ impl EngineHost {
                 .filter(|_| tab.is_none())
                 .and_then(|bootstrap| bootstrap.profile_cookie_manager(&environment).ok());
             let borrows_bootstrap = borrowed.is_some();
-            let profile_source = tab
-                .map(|manager| (manager, "tab"))
-                .or(borrowed.map(|manager| (manager, "work_bootstrap")));
+            let profile_source = tab.or(borrowed);
             let origin = document.as_url().origin().ascii_serialization();
             let scope = crate::work_site_session::session_scope(document, None)
                 .map_err(|_| ContextPortFailure::NativeRefused)?;
@@ -715,7 +713,6 @@ impl EngineHost {
     }
 
     fn start_work_site_return(&mut self, guard: &Arc<WorkResourceGuard>) -> bool {
-        use crate::platform::windows::log_work_session;
         let context = guard.resource().identity().context();
         let profile = guard.resource().identity().profile();
         let pending = self
@@ -735,40 +732,36 @@ impl EngineHost {
             Instant::now().checked_add(WORK_SESSION_RETURN_WINDOW),
             self.environments.get(&profile).cloned(),
         ) else {
-            log_work_session("return", "not_started", "none", None);
             return false;
         };
         self.prune_work_profile_cookie_sources();
-        let (manager, kind, bootstrap) =
-            match self.selected_profile_cookie_source(profile, &environment) {
-                Ok(manager) => (manager, "tab", None),
-                Err(_) => {
-                    let bootstrap =
-                        crate::erasure::prepare_profile_directory(&self.profiles_root, profile)
+        let (manager, bootstrap) = match self.selected_profile_cookie_source(profile, &environment)
+        {
+            Ok(manager) => (manager, None),
+            Err(_) => {
+                let bootstrap =
+                    crate::erasure::prepare_profile_directory(&self.profiles_root, profile)
+                        .ok()
+                        .and_then(|path| {
+                            self.begin_windows_work_profile_environment(
+                                profile, deadline, path, true,
+                            )
                             .ok()
-                            .and_then(|path| {
-                                self.begin_windows_work_profile_environment(
-                                    profile, deadline, path, true,
-                                )
-                                .ok()
-                                .flatten()
-                            });
-                    let manager = bootstrap
-                        .as_ref()
-                        .and_then(|bootstrap| bootstrap.profile_cookie_manager(&environment).ok());
-                    match (manager, bootstrap) {
-                        (Some(manager), Some(bootstrap)) => {
-                            (manager, "work_bootstrap", Some(bootstrap))
-                        }
-                        (_, bootstrap) => {
-                            drop(bootstrap);
-                            self.collect_pending_windows_cleanup_debts();
-                            log_work_session("return", "not_started", "none", None);
-                            return false;
-                        }
+                            .flatten()
+                        });
+                let manager = bootstrap
+                    .as_ref()
+                    .and_then(|bootstrap| bootstrap.profile_cookie_manager(&environment).ok());
+                match (manager, bootstrap) {
+                    (Some(manager), Some(bootstrap)) => (manager, Some(bootstrap)),
+                    (_, bootstrap) => {
+                        drop(bootstrap);
+                        self.collect_pending_windows_cleanup_debts();
+                        return false;
                     }
                 }
-            };
+            }
+        };
         let started = self
             .work_resources
             .get(&context)
@@ -786,7 +779,6 @@ impl EngineHost {
                 let panicked = guard.clone();
                 view.return_work_session(
                     manager,
-                    kind,
                     scope,
                     deadline,
                     move |result| {

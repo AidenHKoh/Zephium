@@ -95,9 +95,9 @@ pub(crate) use timeout::{schedule_browser_timeout, ContentPolicyTimeout};
 pub(crate) use crate::platform::agent_cookie_preflight::map_cookie_transfer_deadline;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use agent_context::{
-    build_owned_agent_view, build_owned_work_view, log_work_session, AgentNavigationCommit,
-    AgentNavigationTerminal, AgentOwnedProfile, AgentOwnedView, AgentOwnedViewCallbacks,
-    AgentOwnedViewConstructionError, WorkStoreSeed,
+    build_owned_agent_view, build_owned_work_view, AgentNavigationCommit, AgentNavigationTerminal,
+    AgentOwnedProfile, AgentOwnedView, AgentOwnedViewCallbacks, AgentOwnedViewConstructionError,
+    WorkStoreSeed,
 };
 #[cfg(feature = "native-agentic-input-probe")]
 pub(crate) use agentic_input_probe::run as run_agentic_input_matrix;
