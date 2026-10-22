@@ -4,7 +4,7 @@
   import Icon from "$shared/ui/Icon";
   import { Delete02Icon, PaintBoardIcon } from "@hugeicons/core-free-icons";
   import IconButton from "$shared/ui/IconButton";
-  import type { PageStyleStateV1 } from "$shared/ipc/bindings";
+  import { commands, type PageStyleStateV1 } from "$shared/ipc/bindings";
   import "./assist.css";
 
   let {
@@ -59,6 +59,16 @@
       label={m.assist_style_remove()}
       onclick={onremove}
     />
+  </div>
+{:else if state === "full"}
+  <div class="full assist-rise">
+    <p>{m.assist_style_full()}</p>
+    <Button
+      variant="ghost"
+      size="compact"
+      onclick={() => void commands.runCommand("settings.sites").catch(() => {})}
+      >{m.assist_style_full_open()}</Button
+    >
   </div>
 {:else}
   <p class="gone assist-rise">
@@ -131,6 +141,25 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .full {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .full :global(.ui-button) {
+    margin-inline-start: -10px;
+  }
+
+  .full p {
+    margin: 0;
+    color: var(--color-muted);
+    font-size: 12.5px;
+    line-height: 1.45;
+    text-wrap: pretty;
   }
 
   .gone {

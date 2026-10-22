@@ -271,3 +271,20 @@ test("a long answer scrolls inside the panel and stays pinned to its end", async
   await expect.element(screen.getByText("Luna · 0.8 credits")).toBeVisible();
   await capture(screen.container, "long");
 });
+
+test("a site that cannot hold another style says so and points to Settings", async () => {
+  const screen = await open(
+    status(
+      asEntries(
+        turn(1, {
+          question: "Make this easier to read",
+          intent: "style",
+          style: { id: null, summary: "Text 18px", site: "nytimes.com", rules: 2, state: "full" },
+        }),
+      ),
+    ),
+    360,
+  );
+  await expect.element(screen.getByRole("button", { name: "Open page styles" })).toBeVisible();
+  await capture(screen.container, "style-full");
+});

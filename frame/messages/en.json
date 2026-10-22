@@ -1653,6 +1653,7 @@
   "account_signup_invite_note": "Accounts are by invitation right now. If your address hasn’t been invited, no code will arrive.",
   "account_signup_closed_note": "This server isn’t taking new accounts. Existing accounts can still sign in.",
   "account_history_voice": "Voice",
+  "account_history_ask": "Ask about pages",
   "account_history_other": "Other",
   "account_history_task": "Work task",
   "account_history_calls": "{count} calls",
@@ -3539,5 +3540,7 @@
   "assist_consequence_save": "This saves a change on {site}.",
   "assist_consequence_edit": "This edits a document on {site}.",
   "assist_consequence_type": "This types into {site}.",
-  "assist_consequence_other": "This changes {site}."
+  "assist_consequence_other": "This changes {site}.",
+  "assist_style_full": "This site already has as many styles as it can hold. Remove one in Settings to add another.",
+  "assist_style_full_open": "Open page styles"
 }

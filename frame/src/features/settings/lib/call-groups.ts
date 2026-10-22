@@ -3,9 +3,9 @@ import { requestStanding, sumUnits } from "$domain/account";
 
 /** The calls made for one thing: a Work task, voice, or none this computer knows. */
 export type CallGroup = {
-  /** Stable while pages load: a task's profile and id, `voice`, or `other`. */
+  /** Stable while pages load: a task's profile and id, `voice`, `page`, or `other`. */
   key: string;
-  kind: "task" | "voice" | "other";
+  kind: "task" | "voice" | "page" | "other";
   /** The task's owner and id, to look its title up; only with `task`. */
   task: { profile: string; work: string } | null;
   /** Newest first, as the service lists them. */

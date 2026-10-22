@@ -101,3 +101,10 @@ test("started opens a turn with its question, and a divider ends every source be
     thread,
   );
 });
+
+test("a full site is kept as the style's state, on an event and on a snapshot", () => {
+  const style = { id: null, summary: "Text 18px", site: "a.com", rules: 2, state: "full" as const };
+  const live = admit(EMPTY, event(1, 1, { type: "style", style }));
+  expect(only(live).style?.state).toBe("full");
+  expect(only(reconcile(EMPTY, asEntries(turn(1, { style })))).style?.state).toBe("full");
+});

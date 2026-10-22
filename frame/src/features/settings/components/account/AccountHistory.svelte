@@ -147,6 +147,7 @@
 
   function name(group: CallGroup) {
     if (group.kind === "voice") return m.account_history_voice();
+    if (group.kind === "page") return m.account_history_ask();
     if (group.kind === "other") return m.account_history_other();
     return titles[group.key] ?? m.account_history_task();
   }
