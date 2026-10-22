@@ -1592,6 +1592,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             media::media_import,
             media::media_open,
             media::media_admit_remote,
+            media::link_describe,
             media::work_admit_folder,
             media::work_pick_folder,
             media::work_reveal_path,

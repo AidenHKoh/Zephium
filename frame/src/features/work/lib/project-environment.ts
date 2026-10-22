@@ -24,7 +24,7 @@ import { pageName } from "./run/sources";
 import { PART } from "./run/part-size";
 import { settleNeeds } from "./run/needs";
 import { fileName } from "./work-files";
-import { linkVideo } from "./link-media";
+import { isBareTitle, linkVideo, splitLinkTitle } from "./link-media";
 import { ownedView } from "./board/objects";
 import { heldPage, humanPage, phaseLabel } from "./work-human";
 import { mediaUrl, pageFrameUrl } from "$domain/resources";
@@ -266,20 +266,22 @@ function elementItems(
       } catch {
         /* Rust admits the address; an unreadable one simply has no origin line. */
       }
+      const stored = splitLinkTitle(link.title);
       const title = clipText(
-        observedTitle(objectives, link.url) || link.title || host(link.url) || link.url,
+        observedTitle(objectives, link.url) || stored.title || host(link.url) || link.url,
         TITLE_TEXT,
       );
       // A video is its poster, played in place; the poster is the admitted thumbnail.
       // Its caption is the video's own name when one is known, never the bare host
       // a pasted link is stored with.
-      const bare = link.title.replace(/^www\./u, "") === host(link.url).replace(/^www\./u, "");
-      const named = observedTitle(objectives, link.url) || (bare ? "" : link.title);
-      const video = linkVideo(
-        element.id,
-        link.url,
-        named ? { title: clipText(named, TITLE_TEXT) } : {},
-      );
+      const bare = isBareTitle(stored.title, link.url);
+      const observed = observedTitle(objectives, link.url);
+      const named = observed || (bare ? "" : stored.title);
+      const video = linkVideo(element.id, link.url, {
+        ...(named ? { title: clipText(named, TITLE_TEXT) } : {}),
+        // The channel belongs to the title it was stored with, not to a read's title.
+        ...(!observed && stored.channel ? { channel: stored.channel } : {}),
+      });
       if (video)
         return {
           id: element.id,

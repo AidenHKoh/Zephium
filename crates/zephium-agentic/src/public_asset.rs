@@ -322,6 +322,17 @@ pub async fn fetch_public_record_image(raw: &str) -> Result<Vec<u8>, PublicAsset
     .await
 }
 
+/// A client for one small anonymous JSON lookup: no redirects, a short
+/// deadline, the same public-address resolver as image fetches.
+pub(crate) fn lookup_client(timeout: Duration) -> Result<Client, PublicAssetError> {
+    public_client_builder(Arc::new(PublicResolver))
+        .redirect(Policy::none())
+        .timeout(timeout)
+        .connect_timeout(timeout)
+        .build()
+        .map_err(|_| PublicAssetError::Unavailable)
+}
+
 fn public_client(resolver: Arc<dyn reqwest::dns::Resolve>) -> Result<Client, PublicAssetError> {
     public_client_builder(resolver)
         .build()

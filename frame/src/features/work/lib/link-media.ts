@@ -34,6 +34,26 @@ export function youtubeThumbnail(url: string): string | null {
   return id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : null;
 }
 
+/**
+ * A link stored with what its video page said carries the title, then the
+ * channel on the next line; as pasted it carries the bare host.
+ */
+export function splitLinkTitle(stored: string): { title: string; channel?: string } {
+  const [title = "", ...rest] = stored.split("\n");
+  const channel = rest.join(" ").trim();
+  return { title: title.trim(), ...(channel ? { channel } : {}) };
+}
+
+/** Whether a link still carries the bare host it was pasted with. */
+export function isBareTitle(stored: string, url: string): boolean {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./u, "");
+    return stored.replace(/^www\./u, "") === host;
+  } catch {
+    return false;
+  }
+}
+
 /** Only addresses actually observed by a source are candidates. */
 export function pickCandidates(item: {
   image_candidates?: readonly string[] | null;
@@ -67,7 +87,11 @@ function startOf(url: string): number | undefined {
 export function linkVideo(
   id: string,
   url: string,
-  { title, poster }: { title?: string; poster?: MediaView["poster"] } = {},
+  {
+    title,
+    channel,
+    poster,
+  }: { title?: string; channel?: string; poster?: MediaView["poster"] } = {},
 ): MediaView | null {
   if (!youtubeId(url)) return null;
   const start = startOf(url);
@@ -78,6 +102,7 @@ export function linkVideo(
     url,
     provider: "youtube",
     ...(title ? { title } : {}),
+    ...(title && channel ? { channel } : {}),
     ...(poster ? { poster } : {}),
     ...(start ? { startSecs: start } : {}),
   };

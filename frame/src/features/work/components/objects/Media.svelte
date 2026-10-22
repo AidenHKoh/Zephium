@@ -56,9 +56,12 @@
     {#if object.title || youtube}
       <figcaption>
         {#if youtube}<Mark address="youtube.com" size={16} />{/if}
-        <span class="title" class:unnamed={!object.title}
-          >{object.title || m.work_media_youtube_video()}</span
-        >
+        <span class="words">
+          <span class="title" class:unnamed={!object.title} class:clamped={!!object.title}
+            >{object.title || m.work_media_youtube_video()}</span
+          >
+          {#if object.title && object.channel}<span class="channel">{object.channel}</span>{/if}
+        </span>
       </figcaption>
     {/if}
   {:else}
@@ -187,6 +190,25 @@
     font-weight: 600;
     line-height: 18px;
     text-wrap: pretty;
+  }
+
+  .title.clamped {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow-wrap: anywhere;
+  }
+
+  .channel {
+    display: block;
+    overflow: hidden;
+    color: var(--color-muted);
+    font-size: var(--text-caption);
+    line-height: 16px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .title.unnamed {

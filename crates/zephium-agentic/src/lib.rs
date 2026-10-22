@@ -126,6 +126,8 @@ mod semantic;
 mod semantic_media;
 #[cfg(feature = "probe-harness")]
 mod semantic_media_probe;
+#[cfg(feature = "provider-transport")]
+pub mod youtube_oembed;
 pub use semantic_media::{
     SemanticMediaEvidence, SemanticMediaKind, SemanticRecordMediaDiagnostics,
     SemanticRecordMediaOutcome, SemanticRecordMediaPlan, MAX_SEMANTIC_MEDIA,

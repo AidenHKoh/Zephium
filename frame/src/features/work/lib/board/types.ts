@@ -400,6 +400,8 @@ export type MediaView = ObjectBase & {
   poster?: PictureView;
   duration?: string;
   startSecs?: number;
+  /** The channel a video was published on, when its page said. */
+  channel?: string;
 };
 
 export type PageObjectView = ObjectBase & {

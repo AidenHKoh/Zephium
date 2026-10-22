@@ -77,7 +77,12 @@ const asset: MediaAssetV1 = {
 };
 
 test.each([
-  ["named", "Designing calm canvases — a talk", true],
+  ["named", "Designing calm canvases — a talk\nCalm Studio", true],
+  [
+    "long",
+    "Designing calm canvases for people who live in their browser all day, a long talk about quiet interfaces and the work of leaving things out\nCalm Studio with a rather long channel name",
+    true,
+  ],
   ["pasted", "youtube.com", true],
   ["waiting", "youtube.com", false],
 ] as const)(
@@ -107,9 +112,11 @@ test.each([
       await expect
         .poll(() => node()!.querySelector<HTMLImageElement>(".media.video img")?.complete)
         .toBe(true);
-    expect(node()!.querySelector("figcaption")?.textContent).toContain(
-      title === "youtube.com" ? "YouTube video" : title,
-    );
+    const [named, channel] = title.split("\n");
+    const caption = node()!.querySelector("figcaption")?.textContent ?? "";
+    expect(caption).toContain(title === "youtube.com" ? "YouTube video" : named);
+    if (channel) expect(caption).toContain(channel);
+    else expect(node()!.querySelector(".channel")).toBeNull();
     for (const theme of ["dark", "light"]) {
       document.documentElement.dataset.theme = theme;
       await new Promise((settled) => setTimeout(settled, 120));

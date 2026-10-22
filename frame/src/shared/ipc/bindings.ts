@@ -30,6 +30,12 @@ export const commands = {
 	mediaOpen: (expectedProfile: string, id: string) => typedError<boolean, null>(__TAURI_INVOKE("media_open", { expectedProfile, id })),
 	mediaAdmitRemote: (expectedProfile: string, environment: string, element: string, url: string) => typedError<MediaAdmitV1, null>(__TAURI_INVOKE("media_admit_remote", { expectedProfile, environment, element, url })),
 	/**
+	 *  Names a pasted YouTube link by its video's real title and channel. One
+	 *  anonymous lookup from here, kept with the item; false when nothing was
+	 *  learned, so the card keeps its plain caption.
+	 */
+	linkDescribe: (expectedProfile: string, environment: string, element: string) => typedError<boolean, null>(__TAURI_INVOKE("link_describe", { expectedProfile, environment, element })),
+	/**
 	 *  Admits one public image for a subject already on the canvas: fetch
 	 *  without cookies, bound and decode in the store, mint the Media resource,
 	 *  add it next to the subject, and relate subject → media.
@@ -4102,7 +4108,12 @@ export type WorkEnvironmentChangedV1 = {
 
 export type WorkEnvironmentEdit = { kind: "rename"; title: string } | { kind: "set_lifecycle"; lifecycle: WorkLifecycle } | { kind: "add"; reference: WorkEnvironmentReference; area: WorkAreaId | null } | { kind: "remove"; element: WorkElementId } | { kind: "create_area"; title: string } | { kind: "rename_area"; area: WorkAreaId; title: string } | { kind: "remove_area"; area: WorkAreaId } | { kind: "assign_area"; element: WorkElementId; area: WorkAreaId | null } | { kind: "relate"; from: WorkElementId; to: WorkElementId; relation: WorkRelationKind } | { kind: "unrelate"; relation: WorkRelationId } |
 /**  Records or replaces the user's choice about one element. */
-{ kind: "decide"; element: WorkElementId; choice: string } | { kind: "undecide"; element: WorkElementId };
+{ kind: "decide"; element: WorkElementId; choice: string } | { kind: "undecide"; element: WorkElementId } |
+/**
+ *  Names a placed link by what its page says it is; a video's title is
+ *  followed by its channel on the next line.
+ */
+{ kind: "name_link"; element: WorkElementId; title: string };
 
 export type WorkEnvironmentElement = {
 	id: WorkElementId,

@@ -194,7 +194,14 @@ export function objectHeight(view: ObjectView, width: number): number {
         (view.labels.length ? 44 : 0)
       );
     case "media":
-      return view.media === "audio" ? 72 : Math.round(width * 0.5625) + 40;
+      if (view.media === "audio") return 72;
+      // The caption's title takes up to two lines, a channel one quiet line more.
+      return (
+        Math.round(width * 0.5625) +
+        22 +
+        Math.min(2, view.title ? lines(view.title, width - 28, 7.5) : 1) * 18 +
+        (view.title && view.channel ? 16 : 0)
+      );
     case "page":
       return Math.round((width * 238) / 336);
     case "note":

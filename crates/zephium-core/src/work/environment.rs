@@ -426,6 +426,20 @@ impl WorkEnvironmentSnapshot {
                     next.decisions.push(WorkDecision { element, choice });
                 }
             }
+            WorkEnvironmentEdit::NameLink {
+                element,
+                title: named,
+            } => {
+                let Some(WorkEnvironmentReference::Link { title, .. }) = next
+                    .elements
+                    .iter_mut()
+                    .find(|e| e.id == element)
+                    .map(|e| &mut e.reference)
+                else {
+                    return Err(WorkError::NotFound);
+                };
+                *title = named;
+            }
             WorkEnvironmentEdit::Undecide { element } => {
                 let count = next.decisions.len();
                 next.decisions.retain(|d| d.element != element);
@@ -549,6 +563,12 @@ pub enum WorkEnvironmentEdit {
     Undecide {
         element: WorkElementId,
     },
+    /// Names a placed link by what its page says it is; a video's title is
+    /// followed by its channel on the next line.
+    NameLink {
+        element: WorkElementId,
+        title: String,
+    },
 }
 impl WorkEnvironmentEdit {
     pub fn validate(&self) -> Result<(), WorkError> {
@@ -557,6 +577,7 @@ impl WorkEnvironmentEdit {
             | Self::CreateArea { title }
             | Self::RenameArea { title, .. } => validate_text(title, MAX_ENVIRONMENT_TITLE_BYTES),
             Self::Decide { choice, .. } => validate_text(choice, MAX_DECISION_BYTES),
+            Self::NameLink { title, .. } => validate_text(title, 512),
             Self::Relate { from, to, .. } if from == to => Err(WorkError::Invalid),
             Self::Add {
                 reference: WorkEnvironmentReference::Folder { path, name },

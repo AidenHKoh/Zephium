@@ -6,7 +6,7 @@ import {
 } from "$shared/ipc/bindings";
 import type { MediaAssetV1 } from "$domain/resources";
 import type { WorkEnvironmentSession } from "$domain/work-environment";
-import { pickCandidates, youtubeThumbnail } from "../link-media";
+import { isBareTitle, pickCandidates, youtubeId, youtubeThumbnail } from "../link-media";
 import { subjectImageCandidates, subjectsOf } from "../subjects";
 
 function canonical(url: string): string {
@@ -59,6 +59,8 @@ export class PictureQueue {
   /** The media element the backend placed for a candidate address, so the next subject sharing it relates instead of asking again. */
   readonly #admittedMedia = new SvelteMap<string, string>();
   readonly #gallery = new SvelteSet<string>();
+  /** One lookup of a video's name per link per session, whatever it finds. */
+  readonly #described = new SvelteSet<string>();
   #running = false;
   #again = false;
   #timer: ReturnType<typeof setTimeout> | undefined;
@@ -162,6 +164,25 @@ export class PictureQueue {
     }
   }
 
+  /** A pasted video link still carrying its bare host asks Rust, once, what the video is called. */
+  #describe(snapshot: WorkEnvironmentSnapshot) {
+    for (const element of snapshot.elements) {
+      const reference = element.reference;
+      if (
+        reference.kind !== "link" ||
+        !youtubeId(reference.url) ||
+        !isBareTitle(reference.title, reference.url)
+      )
+        continue;
+      const key = `${snapshot.id} ${element.id}`;
+      if (this.#described.has(key)) continue;
+      this.#described.add(key);
+      commands
+        .linkDescribe(this.#deps.session().profile, snapshot.id, element.id)
+        .catch(() => undefined);
+    }
+  }
+
   async run() {
     if (this.#running) {
       this.#again = true;
@@ -174,6 +195,7 @@ export class PictureQueue {
         const session = this.#deps.session();
         const current = session.snapshot;
         if (!current) break;
+        this.#describe(current);
         let retry = Infinity;
         for (const { element, key: owed, candidates, done } of this.#unpictured(current)) {
           for (const candidate of candidates) {

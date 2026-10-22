@@ -965,6 +965,96 @@ pub(crate) async fn media_admit_remote(
     result
 }
 
+/// Names a pasted YouTube link by its video's real title and channel. One
+/// anonymous lookup from here, kept with the item; false when nothing was
+/// learned, so the card keeps its plain caption.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn link_describe(
+    caller: WebviewWindow,
+    app: AppHandle,
+    shell: State<'_, zephium_app::Handle>,
+    expected_profile: String,
+    environment: String,
+    element: String,
+) -> Result<bool, ()> {
+    if !super::authorize(&caller, super::CallerPolicy::Main, "link_describe")
+        || super::shutdown_started(&app)
+    {
+        return Ok(false);
+    }
+    let Some(profile) = profile_of(&expected_profile) else {
+        return Ok(false);
+    };
+    #[cfg(not(feature = "work-product"))]
+    {
+        let _ = (shell, profile, environment, element);
+        Ok(false)
+    }
+    #[cfg(feature = "work-product")]
+    {
+        use zephium_core::work::environment::{WorkEnvironmentEdit, WorkEnvironmentReference};
+        use zephium_core::work::{WorkElementId, WorkEnvironmentId};
+        let (Some(environment), Some(element)) = (
+            WorkEnvironmentId::parse(&environment),
+            WorkElementId::parse(&element),
+        ) else {
+            return Ok(false);
+        };
+        let Ok(snapshot) = environment_snapshot(&shell, profile, environment).await else {
+            return Ok(false);
+        };
+        let Some(WorkEnvironmentReference::Link { url, title }) = snapshot
+            .elements
+            .iter()
+            .find(|candidate| candidate.id == element)
+            .map(|candidate| &candidate.reference)
+        else {
+            return Ok(false);
+        };
+        let host = tauri::Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_owned))
+            .unwrap_or_default();
+        // Only a title still as pasted (the bare host) is replaced.
+        if title.trim_start_matches("www.") != host.trim_start_matches("www.") {
+            return Ok(false);
+        }
+        let Some(details) = zephium_agentic::youtube_oembed::fetch(url).await else {
+            return Ok(false);
+        };
+        let title = format!("{}\n{}", details.title, details.channel);
+        // The first read may be stale by now; one fresh read settles it.
+        for attempt in 0..2 {
+            let revision = if attempt == 0 {
+                snapshot.revision
+            } else {
+                match environment_snapshot(&shell, profile, environment).await {
+                    Ok(fresh) => fresh.revision,
+                    Err(_) => return Ok(false),
+                }
+            };
+            match environment_edit(
+                &shell,
+                profile,
+                environment,
+                revision,
+                WorkEnvironmentEdit::NameLink {
+                    element,
+                    title: title.clone(),
+                },
+            )
+            .await
+            {
+                Ok(_) => return Ok(true),
+                Err(ResourceError::Conflict) => continue,
+                Err(_) => return Ok(false),
+            }
+        }
+        Ok(false)
+    }
+}
+
 /// Closed facts about one admission, never the URL.
 #[derive(Default)]
 struct MediaAdmitTrace {

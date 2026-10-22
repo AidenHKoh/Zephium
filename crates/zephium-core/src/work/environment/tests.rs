@@ -590,3 +590,42 @@ fn decisions_bind_to_existing_elements_replace_in_place_and_leave_with_them() {
     dangling.decisions[0].element = 99.into();
     assert_eq!(dangling.validate(), Err(WorkError::Invalid));
 }
+
+#[test]
+fn a_link_is_named_in_place_and_an_unknown_element_is_not_found() {
+    let added = edit(
+        &empty(),
+        WorkEnvironmentEdit::Add {
+            reference: WorkEnvironmentReference::Link {
+                url: "https://youtu.be/dQw4w9WgXcQ".into(),
+                title: "youtu.be".into(),
+            },
+            area: None,
+        },
+    )
+    .unwrap();
+    let element = added.elements[0].id;
+    let named = edit(
+        &added,
+        WorkEnvironmentEdit::NameLink {
+            element,
+            title: "A talk\nA channel".into(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        &named.elements[0].reference,
+        WorkEnvironmentReference::Link { title, .. } if title == "A talk\nA channel"
+    ));
+    assert_eq!(
+        edit(
+            &added,
+            WorkEnvironmentEdit::NameLink {
+                element: 99.into(),
+                title: "x".into(),
+            },
+        )
+        .err(),
+        Some(WorkError::NotFound)
+    );
+}
