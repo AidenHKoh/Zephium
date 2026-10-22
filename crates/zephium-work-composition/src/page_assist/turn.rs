@@ -15,6 +15,7 @@ use zephium_ipc::page_assist::*;
 use zephium_page_assist::actions::{self, Proposal, Verb};
 use zephium_page_assist::complexity;
 use zephium_page_assist::css;
+use zephium_page_assist::guard;
 use zephium_page_assist::outline::Outline;
 use zephium_page_assist::pacer::Pacer;
 use zephium_page_assist::page::PageRead;
@@ -245,7 +246,7 @@ async fn body(context: &Context) -> End {
     }
     match context.intent {
         PageAssistIntentV1::Act => act(context, &readout, &answer).await,
-        PageAssistIntentV1::Style => style(context, &answer).await,
+        PageAssistIntentV1::Style => style(context, &answer, outline.as_ref()).await,
         _ if answer.parts.is_empty() => End::Failed(PageAssistFaultV1::NoAnswer),
         _ => End::Done(Some(answer.cost)),
     }
@@ -700,7 +701,7 @@ async fn take_over(
     Ok(fresh)
 }
 
-async fn style(context: &Context, answer: &Answer) -> End {
+async fn style(context: &Context, answer: &Answer, outline: Option<&Outline>) -> End {
     let summary = answer
         .parts
         .iter()
@@ -716,8 +717,12 @@ async fn style(context: &Context, answer: &Answer) -> End {
             state,
         },
     };
-    let validated = answer.css.as_deref().map(css::validate);
-    let Some(Ok(validated)) = validated else {
+    let validated = answer
+        .css
+        .as_deref()
+        .and_then(|sheet| css::validate(sheet).ok())
+        .and_then(|validated| guard::guard(&validated, outline));
+    let Some(validated) = validated else {
         context.emit(proposal(PageStyleStateV1::Rejected, 0, None));
         return End::Done(Some(answer.cost.clone()));
     };

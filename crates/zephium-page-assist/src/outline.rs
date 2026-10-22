@@ -221,11 +221,7 @@ impl Outline {
     pub fn render(&self) -> String {
         let mut out = String::from(OUTLINE_OPEN);
         out.push('\n');
-        let _ = writeln!(
-            out,
-            "scheme: {}",
-            if self.dark { "dark" } else { "light" }
-        );
+        let _ = writeln!(out, "scheme: {}", if self.dark { "dark" } else { "light" });
         for (label, color) in [
             ("background", self.background),
             ("text", self.text),

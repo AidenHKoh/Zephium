@@ -1216,10 +1216,38 @@ async fn style_turns_send_the_admitted_outline_and_survive_without_one() {
 
     let h = harness(WorkModelProvider::OpenAi, Some(script(sheet)));
     propose_style(&h, "calmer").await;
-    assert!(!h.requests.lock().unwrap().join("\n").contains("scheme: "));
+    assert!(!h.requests.lock().unwrap().join("\n").contains("\nscheme: "));
 
     let h = harness(WorkModelProvider::OpenAi, Some(script("= Plain\nAnswer.")));
     h.page.lock().outline = Some(blog_outline());
     h.run(ask(PageAssistIntentV1::Ask, "what?")).await;
-    assert!(!h.requests.lock().unwrap().join("\n").contains("scheme: "));
+    assert!(!h.requests.lock().unwrap().join("\n").contains("\nscheme: "));
+}
+
+#[tokio::test]
+async fn a_style_that_hides_the_main_content_is_applied_without_that_rule() {
+    let h = harness(
+        WorkModelProvider::OpenAi,
+        Some(script(
+            "= Tidy\n@css\nmain#content{display:none}\nbody{background-color:#fff;color:#bbb}\n@end\n",
+        )),
+    );
+    h.page.lock().outline = Some(blog_outline());
+    let (turn, task) = h
+        .service
+        .ask(ask(PageAssistIntentV1::Style, "tidy"))
+        .await
+        .unwrap();
+    let running = tokio::spawn(task);
+    wait_for(&h, |events| events.iter().any(|e| matches!(e, PageAssistEventV1::Style { style } if style.state == PageStyleStateV1::Proposed))).await;
+    assert!(h.service.decide(TAB, turn, PageAssistDecisionV1::Approve));
+    running.await.unwrap();
+    let applied = h.page.lock().applied.clone();
+    assert_eq!(
+        applied,
+        vec![(
+            "example.com".to_owned(),
+            "body{background-color:#fff;color:#111111}\n".to_owned()
+        )]
+    );
 }
