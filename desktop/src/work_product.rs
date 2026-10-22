@@ -24,6 +24,28 @@ impl WorkProductState {
         self.providers.clear_website_data(profile)
     }
 }
+/// Admits a Work run that Rust itself starts (the Ask panel's "Run in
+/// Work"), through the same operation owner as the panel's own runs.
+#[cfg(feature = "work-product")]
+pub(crate) fn admit_run(
+    app: &tauri::AppHandle,
+    profile: ProfileId,
+    operation: WorkCommandId,
+    input: WorkOperationV1,
+) -> Result<WorkOperationStateV1, WorkError> {
+    let owner = app
+        .try_state::<WorkProductState>()
+        .ok_or(WorkError::Unavailable)?;
+    let provider = owner.providers.clone();
+    let shell = app.state::<zephium_app::Handle>().inner().clone();
+    let task_input = input.clone();
+    owner
+        .operations
+        .admit((profile, operation), input, async move {
+            provider.run(shell, profile, task_input).await
+        })
+}
+
 /// Durable last frames of pages the agent read, managed beside the media blobs.
 pub(crate) struct WorkFrames(pub(crate) std::sync::Arc<zephium_store::WorkFrameStore>);
 

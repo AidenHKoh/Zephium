@@ -173,6 +173,23 @@ async fn body(context: &Context) -> End {
         context.emit(PageAssistEventV1::Offer { offer });
         return End::Done(None);
     }
+    // A full site is told before any request is spent on it.
+    if context.intent == PageAssistIntentV1::Style
+        && !context
+            .service
+            .site_has_room(&context.profile, &context.site, 0)
+    {
+        context.emit(PageAssistEventV1::Style {
+            style: PageStyleProposalV1 {
+                id: None,
+                summary: String::new(),
+                site: context.site.clone(),
+                rules: 0,
+                state: PageStyleStateV1::Full,
+            },
+        });
+        return End::Done(None);
+    }
     context.emit(PageAssistEventV1::Status {
         phase: PageAssistPhaseV1::Reading,
     });
@@ -679,18 +696,30 @@ async fn style(context: &Context, answer: &Answer) -> End {
         context.emit(proposal(PageStyleStateV1::Rejected, 0, None));
         return End::Done(Some(answer.cost.clone()));
     };
+    let room = |bytes| {
+        context
+            .service
+            .site_has_room(&context.profile, &context.site, bytes)
+    };
+    if !room(validated.css.len()) {
+        context.emit(proposal(PageStyleStateV1::Full, validated.rules, None));
+        return End::Done(Some(answer.cost.clone()));
+    }
     context.emit(proposal(PageStyleStateV1::Proposed, validated.rules, None));
     match context.decision().await {
         Ok(PageAssistDecisionV1::Approve) => {
-            let id =
-                context
-                    .service
-                    .add_style(&context.profile, &context.site, &summary, validated.css);
-            context.emit(proposal(
-                PageStyleStateV1::Applied,
-                validated.rules,
-                Some(id),
-            ));
+            let added = context.service.add_style(
+                &context.profile,
+                &context.site,
+                &summary,
+                validated.css,
+            );
+            let state = if added.is_some() {
+                PageStyleStateV1::Applied
+            } else {
+                PageStyleStateV1::Full
+            };
+            context.emit(proposal(state, validated.rules, added));
         }
         Ok(PageAssistDecisionV1::Decline) => {
             context.emit(proposal(PageStyleStateV1::Declined, validated.rules, None));

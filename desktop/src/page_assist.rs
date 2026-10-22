@@ -84,6 +84,9 @@ mod product {
     #[derive(Clone)]
     struct TabEntry {
         profile: ProfileId,
+        /// The Space the tab was last listed in: where "Run in Work" puts
+        /// its Work, and which list can tell that the tab closed.
+        space: Option<String>,
         private: bool,
         url: Option<String>,
         loading: bool,
@@ -103,14 +106,15 @@ mod product {
     fn follow(
         tabs: &mut HashMap<String, TabEntry>,
         tab: &zephium_ipc::TabView,
-        profile: Option<(ProfileId, bool)>,
+        profile: Option<(ProfileId, bool, Option<&str>)>,
     ) -> Option<(String, Option<String>)> {
         let viewer = tab.content != zephium_ipc::TabContentView::Web;
         match tabs.get_mut(&tab.id) {
             Some(entry) => {
-                if let Some((profile, private)) = profile {
+                if let Some((profile, private, space)) = profile {
                     entry.profile = profile;
                     entry.private = private;
+                    entry.space = space.map(str::to_owned);
                 }
                 entry.loading = tab.loading;
                 entry.viewer = viewer;
@@ -122,7 +126,7 @@ mod product {
                 None
             }
             None => {
-                let (profile, private) = profile?;
+                let (profile, private, space) = profile?;
                 if tabs.len() >= MAX_TABS {
                     tabs.clear();
                 }
@@ -130,6 +134,7 @@ mod product {
                     tab.id.clone(),
                     TabEntry {
                         profile,
+                        space: space.map(str::to_owned),
                         private,
                         url: tab.url.clone(),
                         loading: tab.loading,
@@ -152,20 +157,57 @@ mod product {
     }
 
     pub(crate) fn observe_items(state: &zephium_ipc::ItemsState) {
-        let Some(profile) = state.profile.as_ref().and_then(|profile| {
+        let Some((profile, private)) = state.profile.as_ref().and_then(|profile| {
             ProfileId::parse(&profile.id)
                 .map(|id| (id, profile.kind == zephium_ipc::ProfileKindView::Incognito))
         }) else {
             return;
         };
-        let changes = with_tabs(|tabs| {
-            state
+        let space = state.active_space_id.as_deref();
+        let (changes, closed) = with_tabs(|tabs| {
+            let changes: Vec<_> = state
                 .tabs
                 .iter()
-                .filter_map(|tab| follow(tabs, tab, Some(profile)))
-                .collect()
+                .filter_map(|tab| follow(tabs, tab, Some((profile, private, space))))
+                .collect();
+            let closed = closed_tabs(tabs, state, profile, space);
+            for tab in &closed {
+                tabs.remove(tab);
+            }
+            (changes, closed)
         });
         navigated(changes);
+        if let Some(service) = service() {
+            for tab in closed {
+                service.tab_closed(&tab);
+            }
+        }
+    }
+
+    /// Tabs this profile and Space listed before and no longer list: closed.
+    /// A tab in another Space is never judged from this Space's list.
+    fn closed_tabs(
+        tabs: &HashMap<String, TabEntry>,
+        state: &zephium_ipc::ItemsState,
+        profile: ProfileId,
+        space: Option<&str>,
+    ) -> Vec<String> {
+        let Some(space) = space else {
+            return Vec::new();
+        };
+        tabs.iter()
+            .filter(|(id, entry)| {
+                entry.profile == profile
+                    && entry.space.as_deref() == Some(space)
+                    && !state.tabs.iter().any(|tab| &tab.id == *id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Space and address of a tab, for "Run in Work".
+    fn tab_place(tab: &str) -> Option<String> {
+        with_tabs(|tabs| tabs.get(tab).and_then(|entry| entry.space.clone()))
     }
 
     pub(crate) fn observe_tab(tab: &zephium_ipc::TabView) {
@@ -289,23 +331,32 @@ mod product {
         }
     }
 
-    /// Work starts from the panel's own Work bar for now; this path reports
-    /// it unavailable rather than half-starting a run.
-    struct NoHandoff;
-    impl WorkHandoff for NoHandoff {
+    /// "Run in Work": a new Work in the tab's Space with the question as its
+    /// objective and the tab on its canvas, run through the ordinary Work
+    /// operation owner.
+    struct DesktopHandoff(tauri::AppHandle);
+    impl WorkHandoff for DesktopHandoff {
         fn begin<'a>(
             &'a self,
-            _profile: &'a ProfileId,
-            _question: String,
-            _url: String,
+            profile: &'a ProfileId,
+            tab: &'a str,
+            question: String,
+            url: String,
         ) -> BoxFuture<'a, Option<String>> {
-            Box::pin(async { None })
+            Box::pin(async move {
+                let space = tab_place(tab)?;
+                super::handoff::start(&self.0, *profile, tab, &space, question, url)
+                    .await
+                    .ok()
+            })
         }
     }
 
     /// Page styles in app settings, one key per profile and site, so no
     /// value outgrows the settings row.
     struct SettingStyles(Arc<zephium_store::SqliteStore>);
+    /// The settings store takes values up to 64 KiB; stay clear of it.
+    const MAX_SETTING_BYTES: usize = 60 * 1024;
 
     #[derive(serde::Serialize, serde::Deserialize)]
     struct Row {
@@ -356,7 +407,7 @@ mod product {
             }
             styles
         }
-        fn save(&self, profile: &ProfileId, styles: &[StoredStyle]) {
+        fn save(&self, profile: &ProfileId, styles: &[StoredStyle]) -> bool {
             let old: Vec<String> = self
                 .0
                 .app_setting(&Self::index_key(profile))
@@ -365,12 +416,9 @@ mod product {
             let mut sites: Vec<String> = styles.iter().map(|style| style.site.clone()).collect();
             sites.sort();
             sites.dedup();
-            for site in old.iter().filter(|site| !sites.contains(site)) {
-                self.0
-                    .set_app_setting(Self::site_key(profile, site), "[]".to_owned());
-            }
+            let mut rows = Vec::with_capacity(sites.len());
             for site in &sites {
-                let rows: Vec<Row> = styles
+                let site_rows: Vec<Row> = styles
                     .iter()
                     .filter(|style| &style.site == site)
                     .map(|style| Row {
@@ -380,13 +428,31 @@ mod product {
                         enabled: style.enabled,
                     })
                     .collect();
-                if let Ok(text) = serde_json::to_string(&rows) {
-                    self.0.set_app_setting(Self::site_key(profile, site), text);
+                let Ok(text) = serde_json::to_string(&site_rows) else {
+                    return false;
+                };
+                // Refuse before writing anything: no row outgrows a value.
+                if text.len() > MAX_SETTING_BYTES {
+                    return false;
                 }
+                rows.push((site, text));
             }
-            if let Ok(text) = serde_json::to_string(&sites) {
-                self.0.set_app_setting(Self::index_key(profile), text);
+            let Ok(index) = serde_json::to_string(&sites) else {
+                return false;
+            };
+            if index.len() > MAX_SETTING_BYTES {
+                return false;
             }
+            let mut stored = true;
+            for site in old.iter().filter(|site| !sites.contains(site)) {
+                stored &= self
+                    .0
+                    .set_app_setting(Self::site_key(profile, site), "[]".to_owned());
+            }
+            for (site, text) in rows {
+                stored &= self.0.set_app_setting(Self::site_key(profile, site), text);
+            }
+            stored & self.0.set_app_setting(Self::index_key(profile), index)
         }
     }
 
@@ -401,7 +467,7 @@ mod product {
             events: Arc::new(Events(app.clone())),
             clock: Arc::new(Monotonic(Instant::now())),
             settings: Arc::new(Switches(app.clone())),
-            work: Arc::new(NoHandoff),
+            work: Arc::new(DesktopHandoff(app.clone())),
             styles: Arc::new(SettingStyles(store)),
         });
         let _ = SERVICE.set(service);
@@ -689,5 +755,211 @@ mod tests {
         }
         assert!(valid_id("s123-4"));
         assert!(!valid_id("s1\"};"));
+    }
+}
+
+/// "Run in Work" from the Ask panel: the same Work documents and operation
+/// owner the panel's own Work flow uses, in order.
+#[cfg(feature = "work-product")]
+mod handoff {
+    use super::*;
+    use std::time::Duration;
+    use zephium_core::ids::{ItemId, ProfileId, SpaceId};
+    use zephium_core::work::authoring::WorkAuthoringIntent;
+    use zephium_core::work::context::{WorkContextSelectionItem, WorkContextSelectionV1};
+    use zephium_core::work::environment::{
+        WorkEnvironmentCall, WorkEnvironmentEdit, WorkEnvironmentIntent, WorkEnvironmentReference,
+        WorkEnvironmentReply, WorkEnvironmentSnapshot,
+    };
+    use zephium_core::work::runtime::WorkRuntimeIntent;
+    use zephium_core::work::{WorkCommandId, WorkError};
+    use zephium_ipc::work::{
+        WorkAuthoringCommandV1, WorkCallV1, WorkCommandV1, WorkOperationStateV1, WorkOperationV1,
+        WorkReplyV1,
+    };
+
+    const TIMEOUT: Duration = Duration::from_secs(8);
+    const MAX_TITLE_CHARS: usize = 80;
+
+    async fn call(
+        app: &tauri::AppHandle,
+        profile: ProfileId,
+        call: WorkCallV1,
+    ) -> Result<WorkReplyV1, WorkError> {
+        let request = app
+            .state::<zephium_app::Handle>()
+            .work_call(profile, call)?;
+        let response = tokio::time::timeout(TIMEOUT, request.response(profile))
+            .await
+            .map_err(|_| WorkError::OutcomeUnknown)?;
+        match response.reply {
+            WorkReplyV1::Error { .. } => Err(WorkError::Unavailable),
+            reply => Ok(reply),
+        }
+    }
+
+    fn environment(intent: WorkEnvironmentIntent) -> WorkCallV1 {
+        WorkCallV1::Environment {
+            version: 1,
+            request: WorkEnvironmentCall::Command {
+                command: WorkCommandId::generate(),
+                intent,
+            },
+        }
+    }
+
+    fn added(
+        snapshot: &WorkEnvironmentSnapshot,
+        reference: WorkEnvironmentReference,
+    ) -> WorkEnvironmentIntent {
+        WorkEnvironmentIntent::Edit {
+            id: snapshot.id,
+            expected: snapshot.revision,
+            edit: WorkEnvironmentEdit::Add {
+                reference,
+                area: None,
+            },
+        }
+    }
+
+    fn applied(reply: WorkReplyV1) -> Result<Box<WorkEnvironmentSnapshot>, WorkError> {
+        match reply {
+            WorkReplyV1::Environment {
+                reply: WorkEnvironmentReply::Applied { snapshot, .. },
+            } => Ok(snapshot),
+            _ => Err(WorkError::Unavailable),
+        }
+    }
+
+    /// The panel's own routine grant and limits (`AGENT_GRANT`, `AGENT_LIMITS`
+    /// in `frame/src/domain/work/work-model.ts`).
+    pub(super) fn begin_agent() -> Result<WorkRuntimeIntent, WorkError> {
+        serde_json::from_value(serde_json::json!({
+            "kind": "begin_agent",
+            "grant": {
+                "provider": "open_ai",
+                "model": "gpt-6-luna",
+                "max_turns": 10,
+                "max_steps": 32,
+                "browse_hops": 4
+            },
+            "limits": {
+                "model_tokens": 1_000_000,
+                "cost_micro_usd": 3_000_000,
+                "operations": 256,
+                "timeout_seconds": 1800,
+                "max_workers": 4
+            }
+        }))
+        .map_err(|_| WorkError::Invalid)
+    }
+
+    /// Creates a Work in the tab's Space with the tab and the objective on
+    /// its canvas, then begins a run with the tab as context.
+    pub(super) async fn start(
+        app: &tauri::AppHandle,
+        profile: ProfileId,
+        tab: &str,
+        space: &str,
+        question: String,
+        url: String,
+    ) -> Result<String, WorkError> {
+        let tab = ItemId::parse(tab).ok_or(WorkError::Invalid)?;
+        let space = SpaceId::parse(space).ok_or(WorkError::Invalid)?;
+        let intent = begin_agent()?;
+        let title = zephium_work_composition::page_assist::core::text::bounded(
+            &zephium_work_composition::page_assist::core::text::clean(&question),
+            MAX_TITLE_CHARS,
+        );
+        let created = applied(
+            call(
+                app,
+                profile,
+                environment(WorkEnvironmentIntent::Create { space, title }),
+            )
+            .await?,
+        )?;
+        let browser = WorkEnvironmentReference::Browser { tab };
+        let snapshot =
+            applied(call(app, profile, environment(added(&created, browser.clone()))).await?)?;
+        let element = snapshot
+            .elements
+            .iter()
+            .find(|element| element.reference == browser)
+            .map(|element| element.id)
+            .ok_or(WorkError::Unavailable)?;
+        let WorkReplyV1::AuthoringApplied { receipt } = call(
+            app,
+            profile,
+            WorkCallV1::Author {
+                command: WorkAuthoringCommandV1 {
+                    version: 1,
+                    command: WorkCommandId::generate(),
+                    intent: WorkAuthoringIntent::Create {
+                        objective: question,
+                    },
+                },
+            },
+        )
+        .await?
+        else {
+            return Err(WorkError::Unavailable);
+        };
+        // The objective joins the canvas beside its tab; the run does not
+        // depend on it, so a refusal here does not stop the run.
+        let objective = WorkEnvironmentReference::Objective {
+            objective: receipt.work,
+        };
+        let _ = call(app, profile, environment(added(&snapshot, objective))).await;
+        let operation = WorkCommandId::generate();
+        let input = WorkOperationV1::Run {
+            command: WorkCommandV1 {
+                version: 1,
+                work: receipt.work,
+                expected_revision: receipt.applied_revision,
+                command: WorkCommandId::generate(),
+                intent,
+            },
+            context: Some(WorkContextSelectionV1 {
+                environment: snapshot.id,
+                items: vec![WorkContextSelectionItem {
+                    element,
+                    revision: url,
+                }],
+                tabs: false,
+                blocks: false,
+            }),
+            signed_in: Default::default(),
+        };
+        match super::super::work_product::admit_run(app, profile, operation, input)? {
+            WorkOperationStateV1::Refused { .. } => Err(WorkError::Unavailable),
+            _ => Ok(receipt.work.to_string()),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn the_grant_matches_the_panels_own() {
+            assert!(super::begin_agent().is_ok());
+            let frame = include_str!("../../frame/src/domain/work/work-model.ts");
+            for pinned in [
+                "provider: \"open_ai\"",
+                "model: \"gpt-6-luna\"",
+                "max_turns: 10",
+                "max_steps: 32",
+                "browse_hops: 4",
+                "model_tokens: 1_000_000",
+                "cost_micro_usd: 3_000_000",
+                "operations: 256",
+                "timeout_seconds: 1800",
+                "max_workers: 4",
+            ] {
+                assert!(
+                    frame.contains(pinned),
+                    "{pinned} drifted from the panel's grant"
+                );
+            }
+        }
     }
 }

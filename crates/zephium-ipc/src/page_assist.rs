@@ -203,6 +203,9 @@ pub enum PageStyleStateV1 {
     Declined,
     /// Nothing the model wrote passed the style rules; nothing applies.
     Rejected,
+    /// The site already holds as many styles as it can (8, or their combined
+    /// size); the person removes one in Settings or the panel to add another.
+    Full,
 }
 
 /// A page style the model proposed in a Style turn.

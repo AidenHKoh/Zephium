@@ -29,6 +29,11 @@ use zephium_page_assist::{suggest, text};
 use port::*;
 
 const VERSION: u16 = 1;
+/// Most styles one site keeps.
+pub const MAX_SITE_STYLES: usize = 8;
+/// Most validated CSS one site keeps across its styles, in bytes, so its
+/// stored row stays inside a settings value.
+pub const MAX_SITE_CSS_BYTES: usize = 48 * 1024;
 
 /// The ports the service works through.
 #[derive(Clone)]
@@ -446,7 +451,12 @@ impl PageAssist {
             }
         };
         let url = facts.url.unwrap_or_default();
-        match self.ports().work.begin(&facts.profile, question, url).await {
+        match self
+            .ports()
+            .work
+            .begin(&facts.profile, tab, question, url)
+            .await
+        {
             Some(work) => PageAssistHandoffV1 {
                 work: Some(work),
                 fault: None,
@@ -577,22 +587,36 @@ impl PageAssist {
         change: impl FnOnce(&mut Vec<StoredStyle>) -> bool,
     ) -> bool {
         let mut styles = self.styles_of(profile);
-        if !change(&mut styles) {
+        if !change(&mut styles) || !self.ports().styles.save(profile, &styles) {
             return false;
         }
-        self.ports().styles.save(profile, &styles);
         self.apply_site(profile, site, &styles);
         self.state().styles.insert(*profile, styles);
         true
     }
 
+    /// Whether `site` can take one more style of `bytes` CSS.
+    pub(crate) fn site_has_room(&self, profile: &ProfileId, site: &str, bytes: usize) -> bool {
+        let styles = self.styles_of(profile);
+        let (count, size) = styles
+            .iter()
+            .filter(|style| style.site == site)
+            .fold((0, 0), |(count, size), style| (count + 1, size + style.css.len()));
+        count < MAX_SITE_STYLES && size + bytes <= MAX_SITE_CSS_BYTES
+    }
+
+    /// Stores and applies a validated style; none when the site is full or
+    /// it could not be stored.
     pub(crate) fn add_style(
         &self,
         profile: &ProfileId,
         site: &str,
         summary: &str,
         css: String,
-    ) -> String {
+    ) -> Option<String> {
+        if !self.site_has_room(profile, site, css.len()) {
+            return None;
+        }
         let id = {
             let mut state = self.state();
             state.next_style += 1;
@@ -608,8 +632,8 @@ impl PageAssist {
         self.change_styles(profile, site, |styles| {
             styles.push(style);
             true
-        });
-        id
+        })
+        .then_some(id)
     }
 
     fn site_styles(&self, profile: &ProfileId, site: &str) -> Vec<PageStyleV1> {

@@ -242,12 +242,13 @@ impl WorkHandoff for Work {
     fn begin<'a>(
         &'a self,
         _profile: &'a ProfileId,
+        tab: &'a str,
         question: String,
         url: String,
     ) -> BoxFuture<'a, Option<String>> {
-        Box::pin(
-            async move { (!question.is_empty() && !url.is_empty()).then(|| "work-1".to_owned()) },
-        )
+        Box::pin(async move {
+            (tab == TAB && !question.is_empty() && !url.is_empty()).then(|| "work-1".to_owned())
+        })
     }
 }
 
@@ -257,8 +258,9 @@ impl StyleStore for Styles {
     fn load(&self, _profile: &ProfileId) -> Vec<StoredStyle> {
         self.0.lock().unwrap().clone()
     }
-    fn save(&self, _profile: &ProfileId, styles: &[StoredStyle]) {
+    fn save(&self, _profile: &ProfileId, styles: &[StoredStyle]) -> bool {
         *self.0.lock().unwrap() = styles.to_vec();
+        true
     }
 }
 
@@ -942,6 +944,50 @@ async fn styles_apply_only_after_approval_and_reject_injection() {
     h.run(ask(PageAssistIntentV1::Style, "make it dark")).await;
     assert!(h.events().iter().any(|e| matches!(e, PageAssistEventV1::Style { style } if style.state == PageStyleStateV1::Rejected)));
     assert!(h.page.lock().applied.is_empty());
+}
+
+#[tokio::test]
+async fn a_full_site_takes_no_more_styles_and_spends_no_request() {
+    let h = harness(WorkModelProvider::OpenAi, Some(script("= Dark\n@css\nbody{color:#eee}\n@end\n")));
+    *h.styles.0.lock().unwrap() = (0..MAX_SITE_STYLES)
+        .map(|i| StoredStyle {
+            id: format!("s{i}"),
+            site: "example.com".into(),
+            summary: "old".into(),
+            css: "a{color:red}\n".into(),
+            enabled: true,
+        })
+        .collect();
+    h.run(ask(PageAssistIntentV1::Style, "make it dark")).await;
+    assert!(h.events().iter().any(|e| matches!(e, PageAssistEventV1::Style { style } if style.state == PageStyleStateV1::Full)));
+    assert!(h.requests.lock().unwrap().is_empty());
+    assert!(h.page.lock().applied.is_empty());
+
+    let h = harness(WorkModelProvider::OpenAi, None);
+    let big = format!("{}{{color:red}}\n", "a".repeat(MAX_SITE_CSS_BYTES));
+    assert!(h.service.add_style(&ProfileId::from(7), "example.com", "big", big).is_none());
+    let one = h.service.add_style(&ProfileId::from(7), "example.com", "ok", "a{color:red}\n".into());
+    assert!(one.is_some());
+}
+
+#[tokio::test]
+async fn closing_a_tab_ends_its_thread_and_its_running_turn() {
+    let h = harness(
+        WorkModelProvider::OpenAi,
+        Some(Script {
+            deltas: vec!["= first\n".into()],
+            result: Ok(()),
+            hang: true,
+        }),
+    );
+    let (_, task) = h.service.ask(ask(PageAssistIntentV1::Ask, "q")).await.unwrap();
+    let running = tokio::spawn(task);
+    wait_for(&h, |events| events.iter().any(|e| matches!(e, PageAssistEventV1::Part { .. }))).await;
+    h.service.tab_closed(TAB);
+    running.await.unwrap();
+    assert!(h.dropped.load(Ordering::Acquire), "the call was cancelled");
+    assert!(h.service.status(TAB).await.entries.is_empty());
+    assert!(!h.service.stop(TAB));
 }
 
 #[tokio::test]

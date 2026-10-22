@@ -247,11 +247,12 @@ pub trait Settings: Send + Sync {
 
 /// Starts a Work run.
 pub trait WorkHandoff: Send + Sync {
-    /// Begins Work in `profile` with the question and the tab's address;
-    /// returns the new Work's id.
+    /// Begins Work in `profile` with the question as its objective and the
+    /// tab, at `url`, as context; returns the new Work's id.
     fn begin<'a>(
         &'a self,
         profile: &'a ProfileId,
+        tab: &'a str,
         question: String,
         url: String,
     ) -> BoxFuture<'a, Option<String>>;
@@ -276,6 +277,7 @@ pub struct StoredStyle {
 pub trait StyleStore: Send + Sync {
     /// Every stored style of `profile`.
     fn load(&self, profile: &ProfileId) -> Vec<StoredStyle>;
-    /// Replaces every stored style of `profile`.
-    fn save(&self, profile: &ProfileId, styles: &[StoredStyle]);
+    /// Replaces every stored style of `profile`; false when it could not be
+    /// stored, and then nothing changed.
+    fn save(&self, profile: &ProfileId, styles: &[StoredStyle]) -> bool;
 }

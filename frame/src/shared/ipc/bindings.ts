@@ -2173,7 +2173,12 @@ export type PageStyleStateV1 =
 /**  Waits for the person's Apply (`page_assist_decide` Approve). */
 "proposed" | "applied" | "declined" |
 /**  Nothing the model wrote passed the style rules; nothing applies. */
-"rejected";
+"rejected" |
+/**
+ *  The site already holds as many styles as it can (8, or their combined
+ *  size); the person removes one in Settings or the panel to add another.
+ */
+"full";
 
 /**  One stored style for a site. */
 export type PageStyleV1 = {
