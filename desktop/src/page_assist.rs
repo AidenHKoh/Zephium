@@ -340,7 +340,7 @@ mod product {
 
     impl PagePort for DesktopPage {
         fn supported(&self) -> bool {
-            cfg!(target_os = "macos")
+            cfg!(any(target_os = "macos", target_os = "windows"))
         }
         fn facts(&self, tab: &str) -> Option<TabFacts> {
             let item = zephium_core::ids::ItemId::parse(tab);
