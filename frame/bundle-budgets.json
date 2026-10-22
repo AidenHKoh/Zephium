@@ -20,6 +20,14 @@
       "js": 149,
       "css": 0
     },
+    "lazy:features/assist/components/AssistPanel.svelte": {
+      "js": 58304,
+      "css": 23686
+    },
+    "lazy:features/assist/components/PageStyles.svelte": {
+      "js": 9798,
+      "css": 3698
+    },
     "lazy:features/blocker/components/ProtectionMenu.svelte": {
       "js": 10762,
       "css": 4741

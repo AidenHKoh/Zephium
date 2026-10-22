@@ -169,46 +169,6 @@
   margin: auto;
 }
 
-.shared-tool-composer {
-  position: relative;
-  margin: 8px 20px 0;
-  padding: 14px 14px 38px;
-  background: var(--color-fill);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-control);
-}
-
-.shared-tool-composer textarea {
-  resize: vertical;
-  min-height: 60px;
-  max-height: 180px;
-  width: 100%;
-  border: 0;
-  outline: none;
-  color: var(--color-text);
-  font: inherit;
-  font-size: 13px;
-  background: transparent;
-}
-
-.shared-tool-composer button {
-  position: absolute;
-  inset-inline-end: 9px;
-  bottom: 9px;
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border: 0;
-  border-radius: 50%;
-  color: var(--color-on-accent);
-  background: var(--color-accent);
-}
-
-.shared-tool-composer button:disabled {
-  opacity: 0.4;
-}
-
 .tool-load-state {
   display: grid;
   place-content: center;
