@@ -216,54 +216,208 @@ mod product {
     }
 
     pub(crate) fn preference_changed(key: &str, value: &str) {
-        if key == "ai.enabled" && value == "false" {
-            if let Some(service) = service() {
-                service.end_all();
+        if key == "ai.enabled" {
+            reader_switch(value != "false");
+            if value == "false" {
+                if let Some(service) = service() {
+                    service.end_all();
+                }
             }
         }
     }
 
-    /// The live tab. Reading and steps wait on the Browse reader, so they
-    /// report this platform as unsupported; page styles already apply.
+    static ENGINE: OnceLock<Arc<zephium_engine::WebviewEngine>> = OnceLock::new();
+
+    /// Turns the Browse reader on or off in every view. It never runs on a
+    /// bank, payment, health or government site.
+    fn reader_switch(on: bool) {
+        let Some(engine) = ENGINE.get() else {
+            return;
+        };
+        engine.set_page_reader(on.then(|| zephium_engine::page_reader::PageReaderPolicy {
+            sensitive: Arc::new(|url: &str| {
+                zephium_app::work_sites::site_of(url)
+                    .is_none_or(|site| zephium_app::work_sites::is_sensitive(&site))
+            }),
+        }));
+    }
+
+    /// Longest wait for one answer from the page; the reader's own
+    /// deadlines are shorter, so this only covers a lost engine.
+    const READER_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+    async fn reader_answer<T>(receiver: tokio::sync::oneshot::Receiver<T>) -> Option<T> {
+        tokio::time::timeout(READER_WAIT, receiver).await.ok()?.ok()
+    }
+
+    fn read_failure(failure: zephium_engine::page_reader::PageReadFailure) -> ReadFailure {
+        use zephium_engine::page_reader::PageReadFailure as Engine;
+        match failure {
+            Engine::NotReady => ReadFailure::NotReady,
+            Engine::PageChanged => ReadFailure::PageChanged,
+            Engine::Unavailable => ReadFailure::Unavailable,
+        }
+    }
+
+    fn readout(read: zephium_engine::page_reader::PageReadout) -> Readout {
+        use zephium_engine::page_reader::{PageFieldKind as Field, PageRole as Engine};
+        Readout {
+            epoch: read.epoch,
+            title: read.title,
+            passages: read
+                .passages
+                .into_iter()
+                .map(|passage| Passage {
+                    id: passage.id,
+                    role: match passage.role {
+                        Engine::Heading(level) => Role::Heading(level),
+                        Engine::Text => Role::Text,
+                        Engine::ListItem => Role::ListItem { ordered: false },
+                        Engine::Cell => Role::Cell,
+                        Engine::Link { same_site } => Role::Link { same_site },
+                        Engine::Button => Role::Button,
+                        Engine::Field(Field::Text) => Role::Field(FieldKind::Text),
+                        Engine::Field(Field::Search) => Role::Field(FieldKind::Search),
+                        Engine::Field(Field::Number) => Role::Field(FieldKind::Number),
+                        Engine::Field(Field::Password) => Role::Field(FieldKind::Password),
+                        Engine::Checkbox { checked } => Role::Checkbox { checked },
+                        Engine::Select => Role::Select,
+                        Engine::Other => Role::Other,
+                    },
+                    text: passage.text,
+                    verbatim: passage.verbatim,
+                    value: passage
+                        .value
+                        .filter(|_| !matches!(passage.role, Engine::Field(Field::Password))),
+                    region: passage.region,
+                })
+                .collect(),
+        }
+    }
+
+    fn outline(outline: zephium_engine::page_reader::PageOutline) -> Outline {
+        use zephium_engine::page_reader::PageOutlineKind as Engine;
+        let rgb = |color: Option<zephium_engine::page_reader::Rgb>| {
+            color.map(|zephium_engine::page_reader::Rgb(r, g, b)| Rgb(r, g, b))
+        };
+        Outline::admit(Outline {
+            nodes: outline
+                .nodes
+                .into_iter()
+                .map(|node| OutlineNode {
+                    selector: node.selector,
+                    kind: match node.kind {
+                        Engine::Header => OutlineKind::Header,
+                        Engine::Navigation => OutlineKind::Navigation,
+                        Engine::Main => OutlineKind::Main,
+                        Engine::Article => OutlineKind::Article,
+                        Engine::Aside => OutlineKind::Aside,
+                        Engine::Footer => OutlineKind::Footer,
+                        Engine::Heading => OutlineKind::Heading,
+                        Engine::Content => OutlineKind::Content,
+                        Engine::Control => OutlineKind::Control,
+                        Engine::Other => OutlineKind::Other,
+                    },
+                    count: node.count,
+                    background: rgb(node.background),
+                    color: rgb(node.color),
+                    font_size_px: node.font_size_px,
+                })
+                .collect(),
+            background: rgb(outline.background),
+            text: rgb(outline.text),
+            link: rgb(outline.link),
+            accent: rgb(outline.accent),
+            fonts: outline.fonts,
+            dark: outline.dark,
+        })
+    }
+
+    /// The live tab, read through the engine's Browse reader.
     struct DesktopPage {
         engine: Arc<zephium_engine::WebviewEngine>,
     }
 
     impl PagePort for DesktopPage {
         fn supported(&self) -> bool {
-            false
+            cfg!(target_os = "macos")
         }
         fn facts(&self, tab: &str) -> Option<TabFacts> {
+            let item = zephium_core::ids::ItemId::parse(tab);
+            let committed = item.and_then(zephium_engine::page_reader::committed_epoch);
+            // A document that predates the reader (it was switched on after
+            // the page loaded) reads as loading until its next navigation.
+            let unread = committed.is_some()
+                && item.is_some_and(|item| !zephium_engine::page_reader::readable(item));
             with_tabs(|tabs| {
                 tabs.get(tab).map(|entry| TabFacts {
                     profile: entry.profile,
                     url: entry.url.clone(),
                     private: entry.private,
                     viewer: entry.viewer,
-                    loading: entry.loading,
-                    epoch: entry.epoch,
+                    loading: entry.loading || unread,
+                    epoch: committed.unwrap_or(entry.epoch),
                 })
             })
         }
         fn read<'a>(
             &'a self,
-            _tab: &'a str,
-            _epoch: u64,
+            tab: &'a str,
+            epoch: u64,
         ) -> BoxFuture<'a, Result<Readout, ReadFailure>> {
-            Box::pin(async { Err(ReadFailure::Unavailable) })
+            Box::pin(async move {
+                let item = zephium_core::ids::ItemId::parse(tab).ok_or(ReadFailure::Unavailable)?;
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                self.engine.page_read(item, epoch, move |result| {
+                    let _ = sender.send(result);
+                });
+                match reader_answer(receiver).await {
+                    Some(Ok(read)) => Ok(readout(read)),
+                    Some(Err(failure)) => Err(read_failure(failure)),
+                    None => Err(ReadFailure::Unavailable),
+                }
+            })
         }
         fn outline<'a>(
             &'a self,
-            _tab: &'a str,
-            _epoch: u64,
+            tab: &'a str,
+            epoch: u64,
         ) -> BoxFuture<'a, Result<Outline, ReadFailure>> {
-            Box::pin(async { Err(ReadFailure::Unavailable) })
+            Box::pin(async move {
+                let item = zephium_core::ids::ItemId::parse(tab).ok_or(ReadFailure::Unavailable)?;
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                self.engine.page_outline(item, epoch, move |result| {
+                    let _ = sender.send(result);
+                });
+                match reader_answer(receiver).await {
+                    Some(Ok(page)) => Ok(outline(page)),
+                    Some(Err(failure)) => Err(read_failure(failure)),
+                    None => Err(ReadFailure::Unavailable),
+                }
+            })
         }
-        fn selection<'a>(&'a self, _tab: &'a str, _epoch: u64) -> BoxFuture<'a, Option<String>> {
-            Box::pin(async { None })
+        fn selection<'a>(&'a self, tab: &'a str, epoch: u64) -> BoxFuture<'a, Option<String>> {
+            Box::pin(async move {
+                let item = zephium_core::ids::ItemId::parse(tab)?;
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                self.engine.page_selection(item, epoch, move |selection| {
+                    let _ = sender.send(selection);
+                });
+                reader_answer(receiver).await.flatten()
+            })
         }
-        fn highlight(&self, _tab: &str, _epoch: u64, _text: &str) -> bool {
-            false
+        fn highlight(&self, tab: &str, epoch: u64, text: &str) -> bool {
+            let Some(item) = zephium_core::ids::ItemId::parse(tab) else {
+                return false;
+            };
+            if zephium_engine::page_reader::committed_epoch(item) != Some(epoch)
+                || !zephium_engine::page_reader::readable(item)
+            {
+                return false;
+            }
+            self.engine
+                .page_highlight(item, epoch, text.to_owned(), |_| {});
+            true
         }
         fn resolve(
             &self,
@@ -468,6 +622,11 @@ mod product {
         engine: Arc<zephium_engine::WebviewEngine>,
         store: Arc<zephium_store::SqliteStore>,
     ) {
+        let _ = ENGINE.set(engine.clone());
+        reader_switch(
+            app.try_state::<keymap::Keymap>()
+                .is_some_and(|keymap| keymap.ai_enabled()),
+        );
         let service = PageAssist::new(Ports {
             page: Arc::new(DesktopPage { engine }),
             models: Arc::new(Models),
