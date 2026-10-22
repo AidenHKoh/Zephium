@@ -36,6 +36,8 @@ mod page_open;
 mod page_ops;
 #[cfg(target_os = "macos")]
 mod page_permissions;
+#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+pub(crate) mod page_reader;
 mod permits;
 mod profiles;
 mod resources;
@@ -234,6 +236,10 @@ struct ObservedView {
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
     // Before `view`, so a running search is stopped while its view lives.
     find: Option<crate::platform::imp::FindSession>,
+    // Before `view`: the Ask panel's reader removes its scripts and
+    // handlers from the view's controller while the view lives.
+    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    page_reader: page_reader::ReaderSlot,
     view: WebView,
     // Keep this after `view`: fields drop in declaration order, so the native
     // WebView wrapper completes its teardown path before capacity can be

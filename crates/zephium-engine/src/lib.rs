@@ -20,6 +20,8 @@ mod layout_queue;
 #[cfg(any(target_os = "windows", test))]
 mod motion_curve;
 mod navigation_epoch;
+#[cfg(feature = "agentic-browser")]
+pub mod page_reader;
 mod pane_geometry;
 mod platform;
 #[cfg(target_os = "windows")]
@@ -1727,6 +1729,102 @@ impl WebviewEngine {
         (self.sink)(EngineEventIngress::global(
             EngineEvent::RuntimeRestartRequired,
         ));
+    }
+
+    /// Switches the Ask panel's Browse reader on with `policy`, or off with
+    /// none. Off removes every script, handler and channel from every view.
+    #[cfg(feature = "agentic-browser")]
+    pub fn set_page_reader(&self, policy: Option<page_reader::PageReaderPolicy>) {
+        #[cfg(target_os = "macos")]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.set_page_reader(policy));
+        });
+        #[cfg(not(target_os = "macos"))]
+        let _ = policy;
+    }
+
+    /// Reads `tab`'s document at `epoch`. `done` runs once on the main
+    /// thread, or is dropped unrun when the engine is gone.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_read(
+        &self,
+        tab: ItemId,
+        epoch: u64,
+        done: impl FnOnce(Result<page_reader::PageReadout, page_reader::PageReadFailure>)
+            + Send
+            + 'static,
+    ) {
+        #[cfg(target_os = "macos")]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_read(tab, epoch, Box::new(done)));
+        });
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (tab, epoch);
+            done(Err(page_reader::PageReadFailure::Unavailable));
+        }
+    }
+
+    /// The text selected in `tab`'s document at `epoch`, when any.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_selection(
+        &self,
+        tab: ItemId,
+        epoch: u64,
+        done: impl FnOnce(Option<String>) + Send + 'static,
+    ) {
+        #[cfg(target_os = "macos")]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_selection(tab, epoch, Box::new(done)));
+        });
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (tab, epoch);
+            done(None);
+        }
+    }
+
+    /// The structure and palette of `tab`'s document at `epoch`, for a
+    /// style turn. Untrusted: the caller admits it before use.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_outline(
+        &self,
+        tab: ItemId,
+        epoch: u64,
+        done: impl FnOnce(Result<page_reader::PageOutline, page_reader::PageReadFailure>)
+            + Send
+            + 'static,
+    ) {
+        #[cfg(target_os = "macos")]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_outline(tab, epoch, Box::new(done)));
+        });
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (tab, epoch);
+            done(Err(page_reader::PageReadFailure::Unavailable));
+        }
+    }
+
+    /// Scrolls `tab`'s document at `epoch` to `quote` and marks it, without
+    /// the find bar. `done` says whether the quote was found.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_highlight(
+        &self,
+        tab: ItemId,
+        epoch: u64,
+        quote: String,
+        done: impl FnOnce(bool) + Send + 'static,
+    ) {
+        #[cfg(target_os = "macos")]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_highlight(tab, epoch, &quote, Box::new(done)));
+        });
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (tab, epoch, quote);
+            done(false);
+        }
     }
 
     /// For each host, whether the profile's own website data holds cookies

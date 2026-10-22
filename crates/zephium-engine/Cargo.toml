@@ -45,6 +45,9 @@ native-agentic-work-lifetime-diagnostic = ["agentic-browser"]
 # intentionally separate from the release-excluded probe vocabulary.
 agentic-browser = ["dep:zephium-agentic", "dep:zeroize", "dep:image"]
 agentic-browser-qa = ["agentic-browser", "objc2-web-kit/WKHTTPCookieStore"]
+# Builds the headless loopback qualification of the Ask panel's Browse
+# reader and its measurements. Never part of a shipped binary.
+page-reader-probe = ["agentic-browser"]
 
 [[bin]]
 name = "macos-agentic-liveness-probe"

@@ -38,6 +38,12 @@ pub(crate) mod cosmetic_pull;
     feature = "agentic-browser",
     any(target_os = "macos", target_os = "windows", test)
 ))]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) mod page_recipe;
+#[cfg(all(
+    feature = "agentic-browser",
+    any(target_os = "macos", target_os = "windows", test)
+))]
 pub(crate) mod work_document_navigation;
 
 #[cfg(target_os = "macos")]

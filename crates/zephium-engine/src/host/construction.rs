@@ -669,6 +669,10 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         let navigation_site_scope = site_scope.clone();
         let navigation = NavigationEpochTracker::new();
+        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        let page_reader: super::page_reader::ReaderSlot = Rc::default();
+        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        let load_reader = Rc::downgrade(&page_reader);
         #[cfg(target_os = "macos")]
         super::webext::bind_auth_cleanup_fence(
             partition.profile(),
@@ -1275,8 +1279,12 @@ impl EngineHost {
         #[cfg(target_os = "macos")]
         {
             let scope = site_scope.clone();
+            #[cfg(feature = "agentic-browser")]
+            let attempt_reader = Rc::downgrade(&page_reader);
             builder = builder.with_main_frame_navigation_attempt_handler(move |target| {
-                scope.navigating(&target)
+                scope.navigating(&target);
+                #[cfg(feature = "agentic-browser")]
+                super::page_reader::attempt(&attempt_reader, &target);
             });
         }
         for script in wry_document_start_scripts(&scripts) {
@@ -1577,6 +1585,11 @@ impl EngineHost {
                     // SourceChanged ordering, authorizes rendered-content
                     // attribution to the final redirect destination.
                     if load_navigation.is_current(epoch) {
+                        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+                        super::page_reader::commit(
+                            &load_reader,
+                            epoch.presentation_id().into_raw(),
+                        );
                         queue_navigation_commit(id, &load_permit, &load_navigation, epoch);
                     }
                 }
@@ -1726,6 +1739,21 @@ impl EngineHost {
         #[cfg(target_os = "macos")]
         if zephium_webext_macos::tracing() {
             unsafe { crate::platform::imp::native_webview(&view).setInspectable(true) };
+        }
+        // Private windows never get the Ask panel's reader.
+        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        if !matches!(partition, Partition::Ephemeral(_)) {
+            let committed = navigation.clone();
+            *page_reader.borrow_mut() = crate::platform::macos::browse_reader::BrowseReader::new(
+                &crate::platform::imp::native_webview(&view),
+                id.clone(),
+                super::page_reader::enabled(),
+                Rc::new(move || {
+                    committed
+                        .current_committed()
+                        .map(|epoch| epoch.presentation_id().into_raw())
+                }),
+            );
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
@@ -2191,6 +2219,8 @@ impl EngineHost {
             #[cfg(target_os = "windows")]
             native_terminal_failure: self.native_terminal_failure.clone(),
             find: None,
+            #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+            page_reader,
             view,
             native_resource: None,
         })

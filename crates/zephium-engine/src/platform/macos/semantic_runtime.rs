@@ -66,6 +66,8 @@ type SemanticParkCompletion = Box<dyn FnOnce(bool)>;
 /// Receives the survey's closed decimal code, or an empty string when the
 /// document could not answer.
 type SurveyCompletion = Box<dyn FnOnce(String)>;
+/// Receives an Ask panel recipe's validated answer, or none.
+type RecipeCompletion = Box<dyn FnOnce(Option<String>)>;
 
 /// Synchronous refusal before one exact invocation enters the native channel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -164,6 +166,10 @@ enum PendingInvocation {
     Survey {
         completion: SurveyCompletion,
     },
+    Recipe {
+        recipe: crate::platform::page_recipe::PageRecipe,
+        completion: RecipeCompletion,
+    },
     Observation {
         invocation: SemanticRuntimeInvocation,
         completion: SemanticCompletion,
@@ -187,6 +193,7 @@ impl PendingInvocation {
             }
             Self::Media { invocation, .. } => invocation.as_str(),
             Self::Survey { .. } => zephium_agentic::SEMANTIC_RUNTIME_HUMAN_SURVEY,
+            Self::Recipe { recipe, .. } => recipe.as_str(),
             Self::Observation { invocation, .. } => invocation.as_str(),
             Self::Action { invocation, .. } => invocation.as_str(),
         }
@@ -240,6 +247,10 @@ enum CompletionAction {
         completion: SurveyCompletion,
         wire: String,
     },
+    Recipe {
+        completion: RecipeCompletion,
+        outcome: Option<String>,
+    },
     Observation {
         completion: SemanticCompletion,
         outcome: Result<Box<SemanticSnapshot>, AgentSemanticRuntimeFailure>,
@@ -258,6 +269,7 @@ impl CompletionAction {
             Self::Action { .. }
             | Self::Privacy { .. }
             | Self::Survey { .. }
+            | Self::Recipe { .. }
             | Self::Media { .. } => {
                 panic!("expected observation completion")
             }
@@ -406,6 +418,18 @@ impl SemanticRuntimeChannelState {
             return Err(completion);
         }
         self.pending = Some(PendingInvocation::Survey { completion });
+        Ok(self.prepare_pump())
+    }
+
+    fn dispatch_recipe(
+        &mut self,
+        recipe: crate::platform::page_recipe::PageRecipe,
+        completion: RecipeCompletion,
+    ) -> Result<ChannelActions, RecipeCompletion> {
+        if self.admission_failure().is_some() {
+            return Err(completion);
+        }
+        self.pending = Some(PendingInvocation::Recipe { recipe, completion });
         Ok(self.prepare_pump())
     }
 
@@ -718,6 +742,10 @@ impl SemanticRuntimeChannelState {
                     completion,
                     wire: String::new(),
                 },
+                PendingInvocation::Recipe { completion, .. } => CompletionAction::Recipe {
+                    completion,
+                    outcome: None,
+                },
                 PendingInvocation::Observation { completion, .. } => {
                     CompletionAction::Observation {
                         completion,
@@ -836,6 +864,10 @@ impl SemanticRuntimeChannelState {
                     completion,
                     wire: String::new(),
                 },
+                PendingInvocation::Recipe { completion, .. } => CompletionAction::Recipe {
+                    completion,
+                    outcome: None,
+                },
                 PendingInvocation::Observation { completion, .. } => {
                     CompletionAction::Observation {
                         completion,
@@ -897,6 +929,15 @@ impl SemanticRuntimeChannelState {
                         .filter(|wire| wire.len() <= 2)
                         .and_then(crate::platform::work_human_survey::decode)
                         .unwrap_or_default(),
+                },
+                true,
+            ),
+            PendingInvocation::Recipe { recipe, completion } => (
+                CompletionAction::Recipe {
+                    completion,
+                    outcome: (self.phase == DocumentPhase::Ready)
+                        .then(|| recipe.decode(bytes))
+                        .flatten(),
                 },
                 true,
             ),
@@ -1317,6 +1358,29 @@ impl AgentSemanticRuntimeController {
         };
         dispatched.map(|actions| self.execute(actions))
     }
+    /// Runs one closed Ask panel recipe through the document's pull; the
+    /// completion receives none when the document could not answer.
+    pub(crate) fn dispatch_recipe(
+        &self,
+        recipe: crate::platform::page_recipe::PageRecipe,
+        completion: impl FnOnce(Option<String>) + 'static,
+    ) {
+        let completion: RecipeCompletion = Box::new(completion);
+        let dispatched = match self.state.try_borrow_mut() {
+            Ok(mut state) => state.dispatch_recipe(recipe, completion),
+            Err(_) => Err(completion),
+        };
+        match dispatched {
+            Ok(actions) => self.execute(actions),
+            Err(completion) => invoke_completion(
+                CompletionAction::Recipe {
+                    completion,
+                    outcome: None,
+                },
+                self.on_callback_panic.as_ref(),
+            ),
+        }
+    }
     fn pending_semantic_for_audit(&self) -> Option<bool> {
         let state = self.state.try_borrow().ok()?;
         let pending = state.pending.is_some();
@@ -1522,6 +1586,10 @@ fn invoke_completion(completion: CompletionAction, on_panic: &dyn Fn()) {
             outcome,
         } => completion(outcome),
         CompletionAction::Survey { completion, wire } => completion(wire),
+        CompletionAction::Recipe {
+            completion,
+            outcome,
+        } => completion(outcome),
         CompletionAction::Observation {
             completion,
             outcome,
@@ -1839,6 +1907,45 @@ fn install_semantic_runtime_epoch(
         script,
         handler,
     })
+}
+
+/// Binds a fresh channel to one Browse document's private world under
+/// `handler_name`, with the same closed state machine and message checks.
+/// The Browse reader owns the world, its scripts and the handler's removal.
+pub(crate) fn browse_channel(
+    controller: &WKUserContentController,
+    world: &WKContentWorld,
+    view: &WKWebView,
+    handler_name: &NSString,
+    on_invariant_failure: Rc<dyn Fn()>,
+    on_callback_panic: Rc<dyn Fn()>,
+) -> Result<AgentSemanticRuntimeController, ()> {
+    let mtm = MainThreadMarker::new().ok_or(())?;
+    let channel = AgentSemanticRuntimeController::new(on_invariant_failure, on_callback_panic);
+    channel.bind_view(view)?;
+    channel.bind_world(world)?;
+    channel.document_committed();
+    let handler = SemanticMessageHandler::alloc(mtm).set_ivars(SemanticMessageHandlerIvars {
+        controller: controller.retain(),
+        world: world.retain(),
+        handler_name: handler_name.retain(),
+        channel: channel.clone(),
+    });
+    // SAFETY: `handler` is a freshly allocated instance of the declared class
+    // with fully initialized ivars; `init` is NSObject's designated initializer.
+    let handler: Retained<SemanticMessageHandler> = unsafe { msg_send![super(handler), init] };
+    let protocol_handler = objc2::runtime::ProtocolObject::from_ref(&*handler);
+    // SAFETY: `mtm` proves main-thread registration and every Objective-C
+    // argument is retained for this call; exceptions become a refusal.
+    objc2::exception::catch(AssertUnwindSafe(|| unsafe {
+        controller.addScriptMessageHandlerWithReply_contentWorld_name(
+            protocol_handler,
+            world,
+            handler_name,
+        );
+    }))
+    .map_err(|_| channel.cancel())?;
+    Ok(channel)
 }
 
 /// Retains one production semantic world, handler, and document-start script.

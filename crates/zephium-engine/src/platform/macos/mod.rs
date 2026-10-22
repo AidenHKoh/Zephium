@@ -29,6 +29,8 @@ mod agentic_semantic_probe;
 pub(crate) use agentic_foreground_probe::ForegroundRenderingLease;
 mod apps;
 mod automatic_pip;
+#[cfg(feature = "agentic-browser")]
+pub(crate) mod browse_reader;
 pub(crate) mod capture;
 pub(crate) mod fullscreen;
 pub(crate) use automatic_pip::automatic_pip;
