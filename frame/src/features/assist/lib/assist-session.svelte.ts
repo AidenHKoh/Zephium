@@ -158,8 +158,6 @@ export class AssistSession {
     try {
       const reply = await commands.pageAssistAsk({ tab, text: question, intent, suggestion });
       if (reply.turn === null) return false;
-      // The echo of the question comes with the next read; the answer's events need no wait.
-      this.refresh();
       return true;
     } catch {
       return false;

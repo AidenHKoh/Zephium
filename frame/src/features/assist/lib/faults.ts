@@ -4,6 +4,8 @@ import type { PageAssistAvailabilityV1, PageAssistFaultV1 } from "$shared/ipc/bi
 type FaultFix = { label: string; command: string };
 
 export type FaultView = {
+  /** Seconds the core asked to wait, when it said. */
+  wait?: number | null;
   message: string;
   /** Where the person fixes it, when they can. */
   fix: FaultFix | null;
@@ -23,7 +25,10 @@ const models = (label: string): FaultFix => ({ label, command: "settings.ai" });
 /** Every way an answer can end early, said as the person can act on it. */
 export function faultView(reason: PageAssistFaultV1): FaultView {
   if (reason.reason !== "model") return pageFault(reason.reason);
-  return modelFault(reason.fault);
+  const view = modelFault(reason.fault);
+  return reason.retry_after_ms === null
+    ? view
+    : { ...view, wait: Math.ceil(reason.retry_after_ms / 1000) };
 }
 
 function modelFault(fault: Extract<PageAssistFaultV1, { reason: "model" }>["fault"]): FaultView {

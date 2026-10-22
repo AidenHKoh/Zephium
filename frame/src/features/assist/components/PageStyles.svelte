@@ -8,10 +8,10 @@
   import Switch from "$shared/ui/Switch";
   import Globe02Icon from "@hugeicons/core-free-icons/Globe02Icon";
   import Cancel01Icon from "@hugeicons/core-free-icons/Cancel01Icon";
-  import { stylesPort, type StyledSites } from "../lib/styles-port";
+  import { commands, type PageSiteStylesV1 } from "$shared/ipc/bindings";
 
   const profile = $derived(tabs.profile());
-  let sites = $state.raw<StyledSites | null>(null);
+  let sites = $state.raw<PageSiteStylesV1[] | null>(null);
   let failed = $state(false);
   let busy = $state(false);
 
@@ -19,9 +19,9 @@
     const id = profile && profile.kind !== "incognito" ? profile.id : null;
     if (!id) return;
     let live = true;
-    stylesPort.list(id).then(
-      (list) => {
-        if (live) sites = list;
+    commands.pageStylesAll(id).then(
+      (view) => {
+        if (live) sites = view.sites;
       },
       () => {
         if (live) failed = true;
@@ -36,12 +36,12 @@
     (sites ?? []).flatMap((entry) => entry.styles.map((style) => ({ site: entry.site, ...style }))),
   );
 
-  async function change(action: () => Promise<StyledSites>) {
+  async function change(action: () => Promise<{ sites: PageSiteStylesV1[] }>) {
     if (busy) return;
     busy = true;
     failed = false;
     try {
-      sites = await action();
+      sites = (await action()).sites;
     } catch {
       failed = true;
     } finally {
@@ -74,7 +74,7 @@
           checked={row.enabled}
           disabled={busy}
           onchange={(enabled) =>
-            void change(() => stylesPort.toggle(profile.id, row.site, row.id, enabled))}
+            void change(() => commands.pageStyleToggleFor(profile.id, row.site, row.id, enabled))}
         />
         <IconButton
           icon={Cancel01Icon}
@@ -82,7 +82,8 @@
           buttonSize={26}
           label={m.assist_styles_remove({ site: row.site })}
           disabled={busy}
-          onclick={() => void change(() => stylesPort.remove(profile.id, row.site, row.id))}
+          onclick={() =>
+            void change(() => commands.pageStyleRemoveFor(profile.id, row.site, row.id))}
         />
       </div>
     {/each}

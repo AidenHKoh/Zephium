@@ -2,7 +2,8 @@ import { expect, test } from "vitest";
 import type { WorkModelFaultV1 } from "$shared/ipc/bindings";
 import { faultView, refusalView } from "../lib/faults";
 
-const model = (fault: WorkModelFaultV1) => faultView({ reason: "model", fault });
+const model = (fault: WorkModelFaultV1, retry_after_ms: number | null = null) =>
+  faultView({ reason: "model", fault, retry_after_ms });
 
 test("out of credits sends the person to buy more, not to retry", () => {
   const view = model("hosted_usage");
@@ -11,7 +12,7 @@ test("out of credits sends the person to buy more, not to retry", () => {
 });
 
 test("a rate limit waits, then offers the same question again", () => {
-  expect(model("rate_limited")).toMatchObject({ retry: "wait", fix: null });
+  expect(model("rate_limited", 12_000)).toMatchObject({ retry: "wait", fix: null, wait: 12 });
 });
 
 test("a missing or refused key leads to Settings → AI", () => {

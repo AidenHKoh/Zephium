@@ -75,6 +75,7 @@
     maxlength={ASK_LIMIT}
     disabled={off}
     value={draft}
+    onfocus={() => session.refresh()}
     oninput={(event) => ondraft(event.currentTarget.value)}
     {onkeydown}></textarea>
   <div class="bar">

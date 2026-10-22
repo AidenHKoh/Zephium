@@ -86,3 +86,18 @@ test("dividers come from the snapshot and stay between turns", () => {
   ]);
   expect(thread.items.map((item) => item.type)).toEqual(["turn", "divider", "turn"]);
 });
+
+test("started opens a turn with its question, and a divider ends every source before it", () => {
+  let thread = admit(
+    EMPTY,
+    event(1, 1, { type: "started", turn: turn(1, { question: "Why?", state: "working", seq: 1 }) }),
+  );
+  expect(only(thread).question).toBe("Why?");
+  thread = admit(thread, event(1, 2, { type: "done", cost: null }));
+  thread = admit(thread, event(1, 3, { type: "divider", site: "b.com", cross_site: true }));
+  expect(thread.items.map((item) => item.type)).toEqual(["turn", "divider"]);
+  expect(only(thread).inert).toBe(true);
+  expect(admit(thread, event(1, 3, { type: "divider", site: "b.com", cross_site: true }))).toBe(
+    thread,
+  );
+});

@@ -67,6 +67,30 @@ export function reconcile(thread: Thread, entries: readonly PageAssistEntryV1[])
 export function admit(thread: Thread, event: PageAssistChangedV1): Thread {
   const at = thread.items.findIndex((item) => item.type === "turn" && item.turn === event.turn);
   const current = at < 0 ? null : (thread.items[at] as TurnView);
+  if (event.kind.type === "started") {
+    const started: TurnView = { ...event.kind.turn, type: "turn", seq: event.seq };
+    if (current && event.seq <= current.seq) return thread;
+    const items = [...thread.items];
+    if (at < 0) items.push(started);
+    else items[at] = started;
+    return { items };
+  }
+  if (event.kind.type === "divider") {
+    if (current && event.seq <= current.seq) return thread;
+    // Every source before a navigation is inert from then on.
+    const items: ThreadItem[] = thread.items.map((item) =>
+      item.type === "turn"
+        ? { ...item, inert: true, seq: item.turn === event.turn ? event.seq : item.seq }
+        : item,
+    );
+    items.push({
+      type: "divider",
+      key: `${event.turn}:${event.seq}`,
+      site: event.kind.site,
+      fresh: event.kind.cross_site,
+    });
+    return { items };
+  }
   if (event.kind.type === "invalidated")
     return {
       items: thread.items.map((item) => (item.type === "turn" ? { ...item, inert: true } : item)),
@@ -116,6 +140,8 @@ function apply(turn: TurnView, kind: PageAssistChangedV1["kind"]): TurnView {
     case "cancelled":
       return { ...turn, state: "cancelled", phase: null };
     case "invalidated":
+    case "started":
+    case "divider":
       return turn;
   }
 }

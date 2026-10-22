@@ -146,12 +146,12 @@ test("faults say what to do next", async () => {
         turn(1, {
           question: "Compare the plans",
           state: "failed",
-          fault: { reason: "model", fault: "hosted_usage" },
+          fault: { reason: "model", fault: "hosted_usage", retry_after_ms: null },
         }),
         turn(2, {
           question: "Try again",
           state: "failed",
-          fault: { reason: "model", fault: "rate_limited" },
+          fault: { reason: "model", fault: "rate_limited", retry_after_ms: 12000 },
           seq: 12,
         }),
       ),
