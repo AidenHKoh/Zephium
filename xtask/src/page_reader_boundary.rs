@@ -344,17 +344,20 @@ fn check_host(host: &str, construction: &str) -> Result<(), String> {
         }
     }
     let construction = compact(construction);
-    if !construction.contains(
-        "if!matches!(partition,Partition::Ephemeral(_)){letcommitted=navigation.clone();*page_reader.borrow_mut()=",
-    ) {
+    // Both platforms build the reader only right inside the private-window
+    // gate.
+    const GATE: &str = "if!matches!(partition,Partition::Ephemeral(_)){";
+    let gated = construction
+        .match_indices("BrowseReader::new(")
+        .all(|(at, _)| {
+            construction[..at]
+                .rfind(GATE)
+                .is_some_and(|gate| at - gate < 400 && !construction[gate..at].contains('}'))
+        });
+    if !gated {
         return Err("a private window could receive the page reader".to_owned());
     }
-    if construction.matches("BrowseReader::new(").count() != 2
-        || construction
-            .matches("if!matches!(partition,Partition::Ephemeral(_)){letcommitted=navigation.clone();*page_reader.borrow_mut()=")
-            .count()
-            != 2
-    {
+    if construction.matches("BrowseReader::new(").count() != 2 {
         return Err("the page reader gained a construction path".to_owned());
     }
     Ok(())
