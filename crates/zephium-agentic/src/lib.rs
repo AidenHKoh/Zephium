@@ -645,6 +645,7 @@ pub use semantic_runtime::{
     SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX, SEMANTIC_RUNTIME_CHANNEL_STOP,
     SEMANTIC_RUNTIME_GLOBAL_NAME, SEMANTIC_RUNTIME_PROGRAM, SEMANTIC_RUNTIME_PROTOCOL_VERSION,
 };
+pub use semantic_runtime::SEMANTIC_RUNTIME_HUMAN_SURVEY;
 pub use semantic_screenshot::{
     prepare_semantic_screenshot, SemanticModelImageHost, SemanticModelImagePlan,
     SemanticScreenshot, SemanticScreenshotBudget, SemanticScreenshotBudgetError,

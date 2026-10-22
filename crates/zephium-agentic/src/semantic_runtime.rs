@@ -81,6 +81,9 @@ pub const SEMANTIC_RUNTIME_CHANNEL_PARK: &str = "K1";
 pub const SEMANTIC_RUNTIME_CHANNEL_PARKED: &str = "K1:A";
 /// Exact runtime notice after exhausting its per-document invocation budget.
 pub const SEMANTIC_RUNTIME_CHANNEL_EXHAUSTED: &str = "X1";
+/// Exact closed invocation that runs the fixed human-wall survey; the
+/// result is a decimal code 0..=24 or an `E1:` fault.
+pub const SEMANTIC_RUNTIME_HUMAN_SURVEY: &str = "H1:survey";
 /// Maximum closed invocations accepted by one document before a fresh document is required.
 pub const MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS: u16 = 4096;
 /// Largest UTF-8 script-message body accepted from the fixed runtime.
@@ -89,8 +92,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0x56, 0x06, 0x02, 0x06, 0x55, 0x12, 0xea, 0x9c, 0xfb, 0xeb, 0x6f, 0xd0, 0x5b, 0x34, 0x97, 0xd6,
-    0x74, 0x2f, 0x91, 0xfd, 0xb2, 0x14, 0xe9, 0xa4, 0xb1, 0xfe, 0x68, 0x42, 0x6d, 0xb0, 0xf4, 0xa4,
+    0x10, 0xbe, 0x3e, 0x97, 0x28, 0x5b, 0xe4, 0xb5, 0xaa, 0x73, 0x69, 0x8a, 0x7d, 0x42, 0xa3, 0x0a,
+    0x09, 0x88, 0x7f, 0x16, 0x33, 0x23, 0x71, 0xfe, 0x95, 0x2d, 0x20, 0xc4, 0xf4, 0x04, 0xaa, 0x22,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -108,8 +111,31 @@ impl SemanticRuntimeProgram {
         SEMANTIC_RUNTIME_SOURCE
     }
 
-    /// Immutable installation containing the independently bounded pixel privacy helper.
+    /// Immutable installation containing the independently bounded pixel
+    /// privacy helper and the human-wall survey. The survey is reachable only
+    /// through the runtime's closed [`SEMANTIC_RUNTIME_HUMAN_SURVEY`] pull, so
+    /// no automated call needs an activation-granting evaluation API.
     pub fn installation_source(self) -> &'static str {
+        concat!(
+            include_str!("../assets/semantic-record-media-v1.js"),
+            include_str!("../assets/semantic-pixel-privacy-v1.js"),
+            "// Fixed passive human-wall survey; closed numeric codes only.\n(() => {\nconst NAME = \"__zephiumHumanSurveyV1\";\nif (Object.hasOwn(globalThis, NAME)) return;\nconst survey = () => { const code =\n",
+            include_str!("../assets/work-human-wall-v1.js"),
+            ";\nreturn typeof code === \"number\" && Number.isInteger(code) && code >= 0 && code <= 24 ? String(code) : \"E1:survey\"; };\nObject.defineProperty(globalThis, NAME, {value: Object.freeze({survey}), writable: false, configurable: false, enumerable: false});\n})();\n",
+            include_str!("../assets/semantic-runtime-v1.js")
+        )
+    }
+
+    /// The fixed survey expression itself, for adapters that run it in a
+    /// private world they created (Windows CDP `Runtime.callFunctionOn`).
+    pub const fn human_survey_source(self) -> &'static str {
+        include_str!("../assets/work-human-wall-v1.js")
+    }
+
+    /// The source the Windows compact program is generated from; it has its
+    /// own survey path and does not carry the macOS survey helper.
+    #[cfg(test)]
+    fn cdp_basis(self) -> &'static str {
         concat!(
             include_str!("../assets/semantic-record-media-v1.js"),
             include_str!("../assets/semantic-pixel-privacy-v1.js"),
@@ -1836,12 +1862,33 @@ mod tests {
     }
 
     #[test]
+    fn human_survey_is_installed_once_and_reached_only_by_its_closed_pull() {
+        let survey = SEMANTIC_RUNTIME_PROGRAM.human_survey_source();
+        assert!(survey.len() <= 32 * 1024 && survey.is_ascii());
+        let installation = SEMANTIC_RUNTIME_PROGRAM.installation_source();
+        assert_eq!(installation.matches(survey).count(), 1);
+        assert_eq!(
+            installation.matches("\"__zephiumHumanSurveyV1\"").count(),
+            1
+        );
+        assert!(installation.ends_with(SEMANTIC_RUNTIME_PROGRAM.source()));
+        let routed = format!("if (encoded === \"{SEMANTIC_RUNTIME_HUMAN_SURVEY}\")");
+        assert_eq!(
+            SEMANTIC_RUNTIME_PROGRAM.source().matches(&routed).count(),
+            1
+        );
+        assert!(!SEMANTIC_RUNTIME_PROGRAM
+            .cdp_source()
+            .contains("__zephiumHumanSurveyV1 ="));
+    }
+
+    #[test]
     fn compact_program_is_bound_to_the_reviewed_source_and_exact_output() {
         let manifest: serde_json::Value =
             serde_json::from_str(include_str!("../assets/semantic-runtime-cdp-v1.json"))
                 .expect("manifest");
         for (key, source) in [
-            ("source", SEMANTIC_RUNTIME_PROGRAM.installation_source()),
+            ("source", SEMANTIC_RUNTIME_PROGRAM.cdp_basis()),
             ("compact", SEMANTIC_RUNTIME_PROGRAM.cdp_source()),
         ] {
             assert!(source.is_ascii());

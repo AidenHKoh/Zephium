@@ -13,7 +13,7 @@
 //! holds one Promise on a content-world-scoped reply handler. Native code may
 //! answer that pull only with [`SemanticRuntimeInvocation`]'s closed grammar.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::panic::AssertUnwindSafe;
 use std::ptr::null_mut;
 use std::rc::Rc;
@@ -34,9 +34,7 @@ pub(super) fn configure_media_diagnostic(public: bool, account: bool) {
 }
 use objc2::{define_class, msg_send, rc::Retained, runtime::AnyObject, runtime::NSObject};
 use objc2::{DefinedClass as _, MainThreadOnly, Message as _};
-use objc2_foundation::{
-    MainThreadMarker, NSError, NSObjectProtocol, NSString, NSUTF8StringEncoding,
-};
+use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSString, NSUTF8StringEncoding};
 use objc2_web_kit::{
     WKContentWorld, WKScriptMessage, WKScriptMessageHandlerWithReply, WKUserContentController,
     WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration,
@@ -65,6 +63,9 @@ type SemanticCompletion = Box<dyn FnOnce(Result<SemanticSnapshot, AgentSemanticR
 type SemanticActionCompletion =
     Box<dyn FnOnce(Result<SemanticActionRuntimeEvidence, AgentSemanticActionRuntimeFailure>)>;
 type SemanticParkCompletion = Box<dyn FnOnce(bool)>;
+/// Receives the survey's closed decimal code, or an empty string when the
+/// document could not answer.
+type SurveyCompletion = Box<dyn FnOnce(String)>;
 
 /// Synchronous refusal before one exact invocation enters the native channel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -160,6 +161,9 @@ enum PendingInvocation {
         completion: PrivacyCompletion,
         public: bool,
     },
+    Survey {
+        completion: SurveyCompletion,
+    },
     Observation {
         invocation: SemanticRuntimeInvocation,
         completion: SemanticCompletion,
@@ -182,6 +186,7 @@ impl PendingInvocation {
                 }
             }
             Self::Media { invocation, .. } => invocation.as_str(),
+            Self::Survey { .. } => zephium_agentic::SEMANTIC_RUNTIME_HUMAN_SURVEY,
             Self::Observation { invocation, .. } => invocation.as_str(),
             Self::Action { invocation, .. } => invocation.as_str(),
         }
@@ -231,6 +236,10 @@ enum CompletionAction {
         completion: PrivacyCompletion,
         outcome: Option<PixelPrivacyProof>,
     },
+    Survey {
+        completion: SurveyCompletion,
+        wire: String,
+    },
     Observation {
         completion: SemanticCompletion,
         outcome: Result<Box<SemanticSnapshot>, AgentSemanticRuntimeFailure>,
@@ -246,7 +255,10 @@ impl CompletionAction {
     fn observation_outcome(self) -> Result<SemanticSnapshot, AgentSemanticRuntimeFailure> {
         match self {
             Self::Observation { outcome, .. } => outcome.map(|snapshot| *snapshot),
-            Self::Action { .. } | Self::Privacy { .. } | Self::Media { .. } => {
+            Self::Action { .. }
+            | Self::Privacy { .. }
+            | Self::Survey { .. }
+            | Self::Media { .. } => {
                 panic!("expected observation completion")
             }
         }
@@ -384,6 +396,25 @@ impl SemanticRuntimeChannelState {
         }
         self.pending = Some(PendingInvocation::Privacy { completion, public });
         Ok(self.prepare_pump())
+    }
+
+    fn dispatch_survey(
+        &mut self,
+        completion: SurveyCompletion,
+    ) -> Result<ChannelActions, SurveyCompletion> {
+        if self.admission_failure().is_some() {
+            return Err(completion);
+        }
+        self.pending = Some(PendingInvocation::Survey { completion });
+        Ok(self.prepare_pump())
+    }
+
+    /// Whether the only work in flight is a human-wall survey, which a
+    /// person's own navigation may abandon.
+    fn survey_only(&self) -> bool {
+        self.phase == DocumentPhase::Ready
+            && self.park_completion.is_none()
+            && matches!(self.pending, Some(PendingInvocation::Survey { .. }))
     }
 
     fn dispatch_action(
@@ -683,6 +714,10 @@ impl SemanticRuntimeChannelState {
                     completion,
                     outcome: None,
                 },
+                PendingInvocation::Survey { completion } => CompletionAction::Survey {
+                    completion,
+                    wire: String::new(),
+                },
                 PendingInvocation::Observation { completion, .. } => {
                     CompletionAction::Observation {
                         completion,
@@ -797,6 +832,10 @@ impl SemanticRuntimeChannelState {
                     completion,
                     outcome: None,
                 },
+                PendingInvocation::Survey { completion } => CompletionAction::Survey {
+                    completion,
+                    wire: String::new(),
+                },
                 PendingInvocation::Observation { completion, .. } => {
                     CompletionAction::Observation {
                         completion,
@@ -846,6 +885,18 @@ impl SemanticRuntimeChannelState {
                             }
                         })
                         .flatten(),
+                },
+                true,
+            ),
+            PendingInvocation::Survey { completion } => (
+                CompletionAction::Survey {
+                    completion,
+                    wire: (self.phase == DocumentPhase::Ready)
+                        .then(|| std::str::from_utf8(bytes).ok())
+                        .flatten()
+                        .filter(|wire| wire.len() <= 2)
+                        .and_then(crate::platform::work_human_survey::decode)
+                        .unwrap_or_default(),
                 },
                 true,
             ),
@@ -1001,7 +1052,6 @@ impl SemanticRuntimeChannelState {
 
 #[derive(Clone)]
 pub(crate) struct AgentSemanticRuntimeController {
-    human_probe: Rc<Cell<bool>>,
     state: Rc<RefCell<SemanticRuntimeChannelState>>,
     on_invariant_failure: Rc<dyn Fn()>,
     on_callback_panic: Rc<dyn Fn()>,
@@ -1065,7 +1115,6 @@ impl AgentSemanticRuntimeController {
     }
     fn new(on_invariant_failure: Rc<dyn Fn()>, on_callback_panic: Rc<dyn Fn()>) -> Self {
         Self {
-            human_probe: Rc::new(Cell::new(false)),
             state: Rc::new(RefCell::new(SemanticRuntimeChannelState::default())),
             on_invariant_failure,
             on_callback_panic,
@@ -1251,12 +1300,22 @@ impl AgentSemanticRuntimeController {
         matched
     }
 
-    pub(crate) fn human_survey_pending(&self) -> bool {
-        self.human_probe.get()
-    }
     pub(crate) fn pending_for_audit(&self) -> Option<bool> {
         self.pending_semantic_for_audit()
-            .map(|pending| pending || self.human_probe.get())
+    }
+    fn survey_only(&self) -> bool {
+        self.state
+            .try_borrow()
+            .is_ok_and(|state| state.survey_only())
+    }
+    /// Runs the fixed human-wall survey through the document's closed pull.
+    /// Hands the completion back when the document cannot take it now.
+    fn dispatch_survey(&self, completion: SurveyCompletion) -> Result<(), SurveyCompletion> {
+        let dispatched = match self.state.try_borrow_mut() {
+            Ok(mut state) => state.dispatch_survey(completion),
+            Err(_) => Err(completion),
+        };
+        dispatched.map(|actions| self.execute(actions))
     }
     fn pending_semantic_for_audit(&self) -> Option<bool> {
         let state = self.state.try_borrow().ok()?;
@@ -1333,9 +1392,6 @@ impl AgentSemanticRuntimeController {
     }
 
     fn retire(&self) -> bool {
-        if self.human_probe.get() {
-            return false;
-        }
         let (actions, clean) = match self.state.try_borrow_mut() {
             Ok(mut state) => (state.retire(), true),
             Err(_) => {
@@ -1465,6 +1521,7 @@ fn invoke_completion(completion: CompletionAction, on_panic: &dyn Fn()) {
             completion,
             outcome,
         } => completion(outcome),
+        CompletionAction::Survey { completion, wire } => completion(wire),
         CompletionAction::Observation {
             completion,
             outcome,
@@ -1844,9 +1901,9 @@ impl AgentSemanticRuntimeRegistration {
         Ok(registration)
     }
 
-    /// The fixed read-only survey is evaluated only for an already-presented
-    /// human page, in this view's attested original private world. Automated
-    /// semantic invocations still use the no-evaluation pull channel.
+    /// Runs the fixed human-wall survey in the bound document's private world.
+    /// It travels as one closed pull answer, never through WebKit's
+    /// evaluation APIs, so the page gains no user activation from it.
     pub(crate) fn sample_human_wall(
         &self,
         view: &WKWebView,
@@ -1874,63 +1931,9 @@ impl AgentSemanticRuntimeRegistration {
                 return Err(());
             }
         }
-        if self.channel.human_probe.replace(true) {
-            return Err(());
-        }
-        let returned = Rc::new(RefCell::new(Some(completion)));
-        let result = returned.clone();
-        let channel = self.channel.clone();
-        let source_world = world.clone();
-        let callback: RcBlock<dyn Fn(*mut AnyObject, *mut NSError)> =
-            RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
-                let Some(completion) = result.borrow_mut().take() else {
-                    return;
-                };
-                let current = channel.state.try_borrow().is_ok_and(|state| {
-                    state.active_world == Some(Retained::as_ptr(&source_world).addr())
-                        && state.phase != DocumentPhase::Retired
-                });
-                let wire = if current && error.is_null() {
-                    // SAFETY: WebKit provides live callback objects on this original main-thread view.
-                    unsafe { value.as_ref() }
-                        .and_then(AnyObject::downcast_ref::<NSString>)
-                        .filter(|value| value.length() <= 2)
-                        .and_then(|value| {
-                            crate::platform::work_human_survey::decode(&value.to_string())
-                        })
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                // Keep physical callback debt visible through the recipient callback.
-                let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| completion(wire)));
-                channel.human_probe.set(false);
-                if outcome.is_err() {
-                    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                        (channel.on_callback_panic)()
-                    }));
-                }
-            });
-        let source = NSString::from_str(&crate::platform::work_human_survey::program());
-        // SAFETY: fixed source, attested private world, exact bound owned view,
-        // and one original native callback owner. No main-world fallback exists.
-        let dispatched = objc2::exception::catch(AssertUnwindSafe(|| unsafe {
-            view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
-                &source,
-                None,
-                &world,
-                Some(&callback),
-            );
-        }))
-        .is_ok();
-        if !dispatched {
-            // An exceptional dispatch cannot prove callback absence. Preserve
-            // native debt until an actual callback, and keep readiness false.
-            let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                (self.channel.on_invariant_failure)()
-            }));
-        }
-        Ok(())
+        self.channel
+            .dispatch_survey(Box::new(completion))
+            .map_err(|_| ())
     }
 
     pub(crate) fn bind_view(&self, view: &WKWebView) -> Result<(), ()> {
@@ -2088,8 +2091,10 @@ impl AgentSemanticRuntimeRegistration {
     pub(crate) fn human_navigation_preparer(&self) -> Rc<dyn Fn() -> bool> {
         let installation = self.installation.clone();
         Rc::new(move || {
-            if !installation.channel.ready_for_history()
-                || installation.channel.pending_semantic_for_audit() != Some(false)
+            // A survey still running on the old page never holds the person back.
+            if !installation.channel.survey_only()
+                && (!installation.channel.ready_for_history()
+                    || installation.channel.pending_semantic_for_audit() != Some(false))
             {
                 return false;
             }
@@ -2300,25 +2305,93 @@ mod tests {
         SemanticOrigin, SemanticRuntimeBudget, SemanticRuntimeFault, SemanticSnapshotGeneration,
     };
 
-    #[test]
-    fn human_survey_callback_debt_blocks_retirement_without_blocking_user_navigation() {
-        let controller = AgentSemanticRuntimeController::new(Rc::new(|| {}), Rc::new(|| {}));
-        *controller.state.borrow_mut() = SemanticRuntimeChannelState {
+    fn ready_state() -> SemanticRuntimeChannelState {
+        SemanticRuntimeChannelState {
             expected_view: Some(17),
             active_world: Some(18),
             phase: DocumentPhase::Ready,
             ..Default::default()
-        };
-        assert_eq!(controller.pending_for_audit(), Some(false));
-        controller.human_probe.set(true);
-        assert_eq!(controller.pending_for_audit(), Some(true));
-        assert_eq!(controller.pending_semantic_for_audit(), Some(false));
-        assert!(!controller.retire());
-        assert_eq!(controller.state.borrow().phase, DocumentPhase::Ready);
-        controller.human_probe.set(false);
-        assert_eq!(controller.pending_for_audit(), Some(false));
-        assert_eq!(controller.state.borrow().completed_invocations, 0);
+        }
     }
+
+    fn survey_wire(actions: ChannelActions) -> Option<String> {
+        match actions.completion {
+            Some(CompletionAction::Survey { wire, .. }) => Some(wire),
+            _ => None,
+        }
+    }
+
+    fn sent(actions: &ChannelActions) -> Option<&str> {
+        match &actions.first_reply.as_ref()?.value {
+            ReplyValue::Success(value) => Some(value),
+            ReplyValue::Error => None,
+        }
+    }
+
+    #[test]
+    fn human_survey_travels_only_as_a_closed_pull_answer() {
+        for (result, expected) in [
+            (&b"0"[..], "0"),
+            (b"24", "24"),
+            (b"25", ""),
+            (b"E1:survey", ""),
+            (b"07", ""),
+            (b"private text", ""),
+        ] {
+            let mut state = ready_state();
+            let Ok(actions) = state.dispatch_survey(Box::new(|_| {})) else {
+                panic!("survey admission");
+            };
+            assert!(actions.first_reply.is_none() && state.survey_only());
+            let pulled = state.on_pull(reply());
+            assert_eq!(
+                sent(&pulled),
+                Some(zephium_agentic::SEMANTIC_RUNTIME_HUMAN_SURVEY)
+            );
+            assert!(state.awaiting_result);
+            let answered = state.on_result(result, reply());
+            assert_eq!(sent(&answered), Some(SEMANTIC_RUNTIME_CHANNEL_ACK));
+            assert!(!answered.invariant_failed);
+            assert_eq!(survey_wire(answered).as_deref(), Some(expected));
+            assert_eq!(state.phase, DocumentPhase::Ready);
+            assert!(state.pending.is_none() && !state.survey_only());
+        }
+    }
+
+    #[test]
+    fn human_survey_is_refused_while_busy_and_ends_empty_on_navigation_or_retirement() {
+        let mut state = ready_state();
+        state.phase = DocumentPhase::Loading;
+        assert!(state.dispatch_survey(Box::new(|_| {})).is_err());
+
+        let mut state = ready_state();
+        assert!(state.dispatch_survey(Box::new(|_| {})).is_ok());
+        assert!(state.dispatch_survey(Box::new(|_| {})).is_err());
+        let _ = state.on_pull(reply());
+        assert_eq!(
+            survey_wire(state.begin_document_load()).as_deref(),
+            Some("")
+        );
+        assert_eq!(state.phase, DocumentPhase::Loading);
+
+        let mut state = ready_state();
+        assert!(state.dispatch_survey(Box::new(|_| {})).is_ok());
+        assert_eq!(survey_wire(state.retire()).as_deref(), Some(""));
+
+        let controller = AgentSemanticRuntimeController::new(Rc::new(|| {}), Rc::new(|| {}));
+        *controller.state.borrow_mut() = ready_state();
+        assert_eq!(controller.pending_for_audit(), Some(false));
+        let answered = Rc::new(RefCell::new(None));
+        let sink = answered.clone();
+        assert!(controller
+            .dispatch_survey(Box::new(move |wire| *sink.borrow_mut() = Some(wire)))
+            .is_ok());
+        assert_eq!(controller.pending_for_audit(), Some(true));
+        assert!(controller.survey_only());
+        assert!(controller.retire());
+        assert_eq!(answered.borrow().as_deref(), Some(""));
+    }
+
     #[test]
     fn handed_off_privacy_probe_drains_after_stop_without_authorizing_capture() {
         let mut state = SemanticRuntimeChannelState {
@@ -3005,7 +3078,6 @@ mod tests {
             ..SemanticRuntimeChannelState::default()
         };
         let controller = AgentSemanticRuntimeController {
-            human_probe: Rc::new(Cell::new(false)),
             state: Rc::new(RefCell::new(invalid)),
             on_invariant_failure: Rc::new(|| {}),
             on_callback_panic: Rc::new(|| {}),

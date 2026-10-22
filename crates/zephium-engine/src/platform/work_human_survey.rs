@@ -1,5 +1,9 @@
 //! Fixed passive human-page survey. No caller-supplied program or page text.
-const SOURCE: &str = include_str!("../host/work_human_wall.js");
+//! macOS reaches it through the semantic runtime's closed pull; Windows runs
+//! [`program`] in its own private CDP world.
+#[cfg(any(target_os = "windows", test))]
+const SOURCE: &str = zephium_agentic::SEMANTIC_RUNTIME_PROGRAM.human_survey_source();
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn program() -> String {
     format!("(() => {{ const code =\n{SOURCE}\n; return typeof code === 'number' && Number.isInteger(code) && code >= 0 && code <= 24 ? JSON.stringify(code) : null; }})()")
 }

@@ -4478,6 +4478,7 @@
     if (typeof encoded === "string" && ["M1:","V1:","U1:"].includes(encoded.slice(0,3))) return globalThis.__zephiumRecordMediaV1.invoke(encoded, pixelPrivacy);
     if (encoded === "P1:privacy") return pixelPrivacy();
     if (encoded === "P1:public") return pixelPrivacy(true);
+    if (encoded === "H1:survey") { try { return globalThis.__zephiumHumanSurveyV1.survey(); } catch (_) { return "E1:survey"; } }
     const request = parseRequest(encoded);
     if (request === null) return fault("invalid_request");
     busy = true;

@@ -716,6 +716,10 @@ for (const prefix of ["M1:","V1:","U1:"]) {
 }
 assert(runtime.invoke('X1:{"i":1}')==="E1:invalid_request" && mediaDispatches===3,"unknown media protocol reached its owner");
 delete globalThis.__zephiumRecordMediaV1;
+assert(runtime.invoke("H1:survey")==="E1:survey","human survey without its helper did not fail closed");
+Object.defineProperty(globalThis, "__zephiumHumanSurveyV1", {configurable:true, value:{survey(){return "7";}}});
+assert(runtime.invoke("H1:survey")==="7" && runtime.invoke("H1:survey ")==="E1:invalid_request","human survey was not routed by its exact closed pull");
+delete globalThis.__zephiumHumanSurveyV1;
 
 const invoke = (invocation, generation, scope, budget = {}) => runtime.invoke(JSON.stringify({
   v: 1,

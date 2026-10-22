@@ -256,8 +256,8 @@ impl AgentOwnedView {
         &self,
         completion: impl FnOnce(String) + 'static,
     ) -> Result<(), ()> {
-        // Only the original, live human-owned navigation phase may evaluate
-        // this fixed survey. It is never an automated or hidden-decision tool.
+        // Only the original, live human-owned navigation phase may run this
+        // fixed survey. It is never an automated or hidden-decision tool.
         self.work_navigation()
             .and_then(|gate| gate.human_wall_probe())
             .ok_or(())?;
@@ -279,12 +279,6 @@ impl AgentOwnedView {
     }
 
     pub(crate) fn retire_semantic_runtime(&mut self) -> bool {
-        if self
-            .semantic()
-            .is_some_and(|semantic| semantic.human_survey_pending())
-        {
-            return false;
-        }
         self.history.clear();
         self.semantic
             .take()
