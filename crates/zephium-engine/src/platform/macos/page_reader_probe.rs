@@ -361,6 +361,7 @@ impl Probe {
                 .setInactiveSchedulingPolicy(objc2_web_kit::WKInactiveSchedulingPolicy::None);
         }
         let committed = navigation.clone();
+        let settled = navigation.clone();
         let tab_cell = Rc::new(Cell::new(tab));
         *reader.borrow_mut() = BrowseReader::new(
             &super::native_webview(&view),
@@ -371,6 +372,7 @@ impl Probe {
                     .current_committed()
                     .map(|epoch| epoch.presentation_id().into_raw())
             }),
+            Rc::new(move || settled.current() == settled.current_committed()),
         );
         if reader.borrow().is_none() {
             return Err("this WebKit cannot host the reader".to_owned());

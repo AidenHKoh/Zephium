@@ -125,10 +125,9 @@ impl Op {
 /// A document's dormant pull, waiting for the person to ask.
 struct Pull {
     reply: ReplyBlock,
-    /// The committed navigation it belongs to, once known.
+    /// The committed navigation it belongs to; unknown when it arrived
+    /// while a navigation was under way.
     epoch: Option<u64>,
-    /// The navigation attempts seen when it arrived.
-    attempts: u64,
     /// The document already holds the program.
     instantiated: bool,
 }
@@ -158,7 +157,6 @@ struct ReaderState {
     /// The boot handler is registered.
     listening: bool,
     script: Option<Retained<WKUserScript>>,
-    attempts: u64,
     committed: Option<u64>,
     failed: Option<u64>,
     pull: Option<Pull>,
@@ -169,6 +167,8 @@ struct ReaderState {
     current: Option<Current>,
     idle_timer: Option<super::ContentPolicyTimeout>,
     committed_now: Rc<dyn Fn() -> Option<u64>>,
+    /// No navigation is under way.
+    settled: Rc<dyn Fn() -> bool>,
     weak: Weak<RefCell<ReaderState>>,
 }
 
@@ -347,7 +347,6 @@ impl ReaderState {
     }
 
     fn attempt(&mut self, admitted: bool) {
-        self.attempts = self.attempts.wrapping_add(1);
         self.set_script(self.enabled && admitted);
     }
 
@@ -361,13 +360,10 @@ impl ReaderState {
         {
             self.stop_channel();
         }
-        let attempts = self.attempts;
         match self.pull.as_mut() {
-            // A pull that arrived after this navigation's attempt and before
-            // its commit was reported is this document's.
-            Some(pull) if pull.epoch != Some(epoch) && pull.attempts == attempts => {
-                pull.epoch = Some(epoch);
-            }
+            // A pull that arrived while this navigation was under way, before
+            // its commit was reported, is this document's.
+            Some(pull) if pull.epoch.is_none() => pull.epoch = Some(epoch),
             Some(pull) if pull.epoch != Some(epoch) => self.stop_pull(),
             _ => {}
         }
@@ -388,8 +384,7 @@ impl ReaderState {
         self.stop_pull();
         self.pull = Some(Pull {
             reply,
-            epoch: self.committed,
-            attempts: self.attempts,
+            epoch: self.committed.filter(|_| (self.settled)()),
             instantiated: body == BOOT_INSTANTIATED,
         });
         self.publish();
@@ -414,6 +409,11 @@ impl ReaderState {
             return Err(PageReadFailure::Unavailable);
         }
         let view = self.view.load().ok_or(PageReadFailure::PageChanged)?;
+        if (self.settled)() {
+            if let Some(pull) = self.pull.as_mut().filter(|pull| pull.epoch.is_none()) {
+                pull.epoch = Some(epoch);
+            }
+        }
         let Some(pull) = self.pull.take_if(|pull| pull.epoch == Some(epoch)) else {
             return Err(PageReadFailure::NotReady);
         };
@@ -632,6 +632,7 @@ impl BrowseReader {
         tab: Rc<Cell<ItemId>>,
         enabled: bool,
         committed_now: Rc<dyn Fn() -> Option<u64>>,
+        settled: Rc<dyn Fn() -> bool>,
     ) -> Option<Self> {
         let mtm = MainThreadMarker::new()?;
         // SAFETY: main thread proven above; objc2 retains the configuration
@@ -659,7 +660,6 @@ impl BrowseReader {
                 enabled: false,
                 listening: false,
                 script: None,
-                attempts: 0,
                 committed: None,
                 failed: None,
                 pull: None,
@@ -670,6 +670,7 @@ impl BrowseReader {
                 current: None,
                 idle_timer: None,
                 committed_now,
+                settled,
                 weak: weak.clone(),
             })
         });

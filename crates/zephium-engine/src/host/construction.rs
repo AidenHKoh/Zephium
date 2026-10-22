@@ -1753,6 +1753,7 @@ impl EngineHost {
         #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
         if !matches!(partition, Partition::Ephemeral(_)) {
             let committed = navigation.clone();
+            let settled = navigation.clone();
             *page_reader.borrow_mut() = crate::platform::macos::browse_reader::BrowseReader::new(
                 &crate::platform::imp::native_webview(&view),
                 id.clone(),
@@ -1762,6 +1763,7 @@ impl EngineHost {
                         .current_committed()
                         .map(|epoch| epoch.presentation_id().into_raw())
                 }),
+                Rc::new(move || settled.current() == settled.current_committed()),
             );
         }
         #[cfg(all(unix, not(target_os = "macos")))]
