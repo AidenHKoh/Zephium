@@ -262,6 +262,8 @@ fn check_macos_reader(source: &str) -> Result<(), String> {
         // only while the same document is committed, run as the runtime's
         // fixed recipe and never as native input.
         "crate::page_reader::read::person_action(",
+        // A step is prepared only against the read it was planned on.
+        "letstored=crate::page_reader::planned_read(tab,read)",
         "super::semantic_action::dispatch_closed(",
         "Some(Box::new(move||still()==Some(epoch))),",
         "crate::host::page_reader::report_human_input(tab);",
@@ -336,6 +338,7 @@ fn check_windows_reader(source: &str, protocol: &str) -> Result<(), String> {
         "self.fail_current(PageReadFailure::PageChanged);self.forget_document();",
         "}=>invoke_action_recipe_command(context,&prepared.invocation).ok(),",
         "crate::page_reader::read::person_action(",
+        "letstored=crate::page_reader::planned_read(self.tab(),read)",
         "crate::host::page_reader::report_human_input(tab);",
     ] {
         if !production.contains(required) {
@@ -430,6 +433,13 @@ fn check_public(source: &str) -> Result<(), String> {
     }
     if compact.contains("SemanticReadSensitivityLimit::Sensitive") {
         return Err("the read projection widened past public content".to_owned());
+    }
+    // Reads are found only by the id a plan carries, so a later read can
+    // never stand in for the one a step was planned on.
+    if !compact.contains("pubfnplanned_read(tab:ItemId,id:u64)->Option<Arc<PageRead>>")
+        || compact.contains("latest_read")
+    {
+        return Err("the reader lost the binding of steps to their own read".to_owned());
     }
     Ok(())
 }
