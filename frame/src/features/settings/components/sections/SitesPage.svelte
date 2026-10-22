@@ -8,6 +8,8 @@
   import FavIcon from "$shared/ui/FavIcon";
   import IconButton from "$shared/ui/IconButton";
   import SegmentedControl from "$shared/ui/SegmentedControl";
+  import LazyView from "$shared/ui/LazyView";
+  import { loadPageStyles } from "$features/assist";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import Icon from "$shared/ui/Icon";
   import Add01Icon from "@hugeicons/core-free-icons/Add01Icon";
@@ -119,6 +121,12 @@
     </p>{:else if known}<p class="sites-note">
       {m.settings_sites_known({ site: added ?? "" })}
     </p>{/if}
+  <LazyView
+    loader={loadPageStyles}
+    loadingLabel={m.panel_loading()}
+    failureLabel={m.panel_load_failed()}
+    retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
+  >
 {/if}
 
 <style>
