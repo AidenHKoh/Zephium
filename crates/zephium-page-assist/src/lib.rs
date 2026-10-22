@@ -19,6 +19,7 @@ pub mod citations;
 pub mod complexity;
 pub mod cost;
 pub mod css;
+pub mod outline;
 pub mod pacer;
 pub mod page;
 pub mod policy;

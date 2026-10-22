@@ -10,6 +10,7 @@ use zephium_core::ids::ProfileId;
 use zephium_core::work::model::{WorkModelClient, WorkModelEntry, WorkModelError};
 use zephium_ipc::page_assist::{PageAssistChangedV1, WorkConfirmCategoryV1};
 use zephium_page_assist::actions::{Direction, Verb};
+pub use zephium_page_assist::outline::{Outline, OutlineKind, OutlineNode, Rgb};
 
 /// A boxed, sendable future.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -184,6 +185,12 @@ pub trait PagePort: Send + Sync {
     fn facts(&self, tab: &str) -> Option<TabFacts>;
     /// A fresh read of `tab`, bound to `epoch`.
     fn read<'a>(&'a self, tab: &'a str, epoch: u64) -> BoxFuture<'a, Result<Readout, ReadFailure>>;
+    /// The page's structure and palette for a style turn, bound to `epoch`.
+    fn outline<'a>(
+        &'a self,
+        tab: &'a str,
+        epoch: u64,
+    ) -> BoxFuture<'a, Result<Outline, ReadFailure>>;
     /// The selected text, when anything is selected.
     fn selection<'a>(&'a self, tab: &'a str, epoch: u64) -> BoxFuture<'a, Option<String>>;
     /// Scrolls to and marks `text` without the find bar.

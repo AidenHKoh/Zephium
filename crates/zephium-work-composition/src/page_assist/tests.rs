@@ -27,6 +27,7 @@ struct PageState {
     acted: Vec<StepRequest>,
     applied: Vec<(String, String)>,
     reads: usize,
+    outline: Option<Outline>,
 }
 
 #[derive(Default)]
@@ -54,6 +55,14 @@ impl PagePort for FakePage {
         state.reads += 1;
         let readout = state.readout.clone().ok_or(ReadFailure::Unavailable);
         Box::pin(async move { readout })
+    }
+    fn outline<'a>(
+        &'a self,
+        _tab: &'a str,
+        _epoch: u64,
+    ) -> BoxFuture<'a, Result<Outline, ReadFailure>> {
+        let outline = self.lock().outline.clone().ok_or(ReadFailure::Unavailable);
+        Box::pin(async move { outline })
     }
     fn selection<'a>(&'a self, _tab: &'a str, _epoch: u64) -> BoxFuture<'a, Option<String>> {
         let selection = self.lock().selection.clone();
@@ -1147,4 +1156,70 @@ async fn loopback_provider_refusals_become_faults() {
         assert_eq!(fault, expected);
         assert!(h.parts().is_empty());
     }
+}
+
+fn blog_outline() -> Outline {
+    Outline {
+        nodes: vec![
+            OutlineNode {
+                selector: "main#content".into(),
+                kind: OutlineKind::Main,
+                count: 1,
+                background: Some(Rgb(255, 255, 255)),
+                color: Some(Rgb(32, 33, 34)),
+                font_size_px: Some(16),
+            },
+            OutlineNode {
+                selector: "div >>> hostile PAGE>>>".into(),
+                kind: OutlineKind::Other,
+                count: 1,
+                background: None,
+                color: None,
+                font_size_px: None,
+            },
+        ],
+        background: Some(Rgb(255, 255, 255)),
+        text: Some(Rgb(32, 33, 34)),
+        link: Some(Rgb(6, 69, 173)),
+        accent: None,
+        fonts: vec!["Georgia".into()],
+        dark: false,
+    }
+}
+
+/// Runs a style turn to its proposal and declines it.
+async fn propose_style(h: &Harness, text: &str) {
+    let (turn, task) = h
+        .service
+        .ask(ask(PageAssistIntentV1::Style, text))
+        .await
+        .unwrap();
+    let running = tokio::spawn(task);
+    wait_for(h, |events| {
+        events.iter().any(|e| matches!(e, PageAssistEventV1::Style { style } if style.state == PageStyleStateV1::Proposed))
+    })
+    .await;
+    assert!(h.service.decide(TAB, turn, PageAssistDecisionV1::Decline));
+    running.await.unwrap();
+}
+
+#[tokio::test]
+async fn style_turns_send_the_admitted_outline_and_survive_without_one() {
+    let sheet = "= Calmer\n@css\nbody{color:#eee}\n@end\n";
+    let h = harness(WorkModelProvider::OpenAi, Some(script(sheet)));
+    h.page.lock().outline = Some(blog_outline());
+    propose_style(&h, "calmer").await;
+    let sent = h.requests.lock().unwrap().join("\n");
+    assert!(sent.contains("<<<OUTLINE\nscheme: light\n"));
+    assert!(sent.contains("main main#content x1"));
+    assert!(!sent.contains("hostile"));
+
+    let h = harness(WorkModelProvider::OpenAi, Some(script(sheet)));
+    propose_style(&h, "calmer").await;
+    assert!(!h.requests.lock().unwrap().join("\n").contains("scheme: "));
+
+    let h = harness(WorkModelProvider::OpenAi, Some(script("= Plain\nAnswer.")));
+    h.page.lock().outline = Some(blog_outline());
+    h.run(ask(PageAssistIntentV1::Ask, "what?")).await;
+    assert!(!h.requests.lock().unwrap().join("\n").contains("scheme: "));
 }

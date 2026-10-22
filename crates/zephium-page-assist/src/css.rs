@@ -225,6 +225,29 @@ fn tree<'i>(
     }
 }
 
+/// Parses one compound selector (no combinators) with the sheet validator's
+/// own grammar and returns its canonical text.
+pub(crate) fn compound_selector(input: &str) -> Option<String> {
+    if input.is_empty()
+        || input.len() > 256
+        || input.trim() != input
+        || input.contains('\\')
+        || input.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let mut source = ParserInput::new(input);
+    let mut parser = Parser::new(&mut source);
+    let mut budget = 64;
+    let mut failure = None;
+    let nodes = tree(&mut parser, 0, &mut budget, &mut failure).ok()?;
+    if failure.is_some() {
+        return None;
+    }
+    let refs: Vec<&Node> = nodes.iter().collect();
+    complex(&refs, false)
+}
+
 fn forbidden_function(name: &str) -> bool {
     let bare = name.trim_start_matches('-');
     let bare = ["webkit-", "moz-", "ms-", "o-"]

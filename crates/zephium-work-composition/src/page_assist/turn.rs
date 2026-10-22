@@ -15,6 +15,7 @@ use zephium_ipc::page_assist::*;
 use zephium_page_assist::actions::{self, Proposal, Verb};
 use zephium_page_assist::complexity;
 use zephium_page_assist::css;
+use zephium_page_assist::outline::Outline;
 use zephium_page_assist::pacer::Pacer;
 use zephium_page_assist::page::PageRead;
 use zephium_page_assist::prompt::{self, Message};
@@ -26,6 +27,8 @@ use super::{fault, readout, Cancel, CancelReason, PageAssist};
 
 /// Longest a page read may take.
 const READ_TIMEOUT: Duration = Duration::from_secs(8);
+/// Longest a style turn waits for the page outline before restyling without it.
+const OUTLINE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Longest one model call may take.
 const CALL_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -96,6 +99,17 @@ impl Context {
             .traits
             .insert(self.tab.clone(), (self.epoch, read.traits));
         Ok((readout, read))
+    }
+
+    /// The page's outline for a style turn; a page that cannot give one is
+    /// still restyled, generically.
+    async fn outline(&self) -> Option<Outline> {
+        let page = &self.service.ports().page;
+        let outline = tokio::time::timeout(OUTLINE_TIMEOUT, page.outline(&self.tab, self.epoch));
+        match outline.await {
+            Ok(Ok(outline)) => Some(Outline::admit(outline)),
+            Ok(Err(_)) | Err(_) => None,
+        }
     }
 
     fn cite(
@@ -208,7 +222,12 @@ async fn body(context: &Context) -> End {
     if summary && replay_summary(context, read.fingerprint) {
         return End::Done(None);
     }
-    let answer = match answer(context, &read).await {
+    let outline = if context.intent == PageAssistIntentV1::Style {
+        context.outline().await
+    } else {
+        None
+    };
+    let answer = match answer(context, &read, outline.as_ref()).await {
         Ok(answer) => answer,
         Err(end) => return end,
     };
@@ -267,6 +286,7 @@ struct Answer {
 fn request(
     context: &Context,
     read: &PageRead,
+    outline: Option<&Outline>,
     entry: &zephium_core::work::model::WorkModelEntry,
 ) -> WorkModelRequest {
     let history = {
@@ -284,6 +304,7 @@ fn request(
         selection: context.selection.as_deref(),
         page: read,
         history: &history,
+        outline,
     });
     let system = vec![WorkModelSystemBlock {
         text: prompt.system.to_owned(),
@@ -317,7 +338,11 @@ fn request(
     }
 }
 
-async fn answer(context: &Context, read: &PageRead) -> Result<Answer, End> {
+async fn answer(
+    context: &Context,
+    read: &PageRead,
+    outline: Option<&Outline>,
+) -> Result<Answer, End> {
     let ports = context.service.ports();
     let source = WorkCallSource::Page {
         tab: context.tab.clone(),
@@ -329,7 +354,7 @@ async fn answer(context: &Context, read: &PageRead) -> Result<Answer, End> {
         .await
         .map_err(|error| End::Failed(fault::model_fault(error, false)))?;
     let hosted = model.entry.model.provider == zephium_core::work::model::WorkModelProvider::Cloud;
-    let request = request(context, read, &model.entry);
+    let request = request(context, read, outline, &model.entry);
     context.emit(PageAssistEventV1::Status {
         phase: if context.intent == PageAssistIntentV1::Style {
             PageAssistPhaseV1::Styling

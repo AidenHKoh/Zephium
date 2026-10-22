@@ -252,6 +252,13 @@ mod product {
         ) -> BoxFuture<'a, Result<Readout, ReadFailure>> {
             Box::pin(async { Err(ReadFailure::Unavailable) })
         }
+        fn outline<'a>(
+            &'a self,
+            _tab: &'a str,
+            _epoch: u64,
+        ) -> BoxFuture<'a, Result<Outline, ReadFailure>> {
+            Box::pin(async { Err(ReadFailure::Unavailable) })
+        }
         fn selection<'a>(&'a self, _tab: &'a str, _epoch: u64) -> BoxFuture<'a, Option<String>> {
             Box::pin(async { None })
         }
