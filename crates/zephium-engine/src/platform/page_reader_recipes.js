@@ -232,6 +232,8 @@
       requestAnimationFrame(frame);
     };
     requestAnimationFrame(frame);
+    // Frames stop while the page is hidden; the mark still goes on time.
+    setTimeout(() => { if (mark === current) unmark(); }, rise + hold + fall + 120);
     return "1";
   }
 
