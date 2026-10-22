@@ -32,6 +32,8 @@ mod rig;
 pub mod search;
 /// Bounded semantic artifacts from admitted dependency context.
 pub mod synthesis;
+/// A pasted YouTube link's title and channel from YouTube's oEmbed endpoint.
+pub mod youtube_oembed;
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -127,7 +127,7 @@ mod semantic_media;
 #[cfg(feature = "probe-harness")]
 mod semantic_media_probe;
 #[cfg(feature = "provider-transport")]
-pub mod youtube_oembed;
+pub use provider_transport::youtube_oembed;
 pub use semantic_media::{
     SemanticMediaEvidence, SemanticMediaKind, SemanticRecordMediaDiagnostics,
     SemanticRecordMediaOutcome, SemanticRecordMediaPlan, MAX_SEMANTIC_MEDIA,
@@ -627,6 +627,7 @@ pub use semantic_read_model::{
     encode_semantic_read, SemanticEncodedRead, SemanticReadDeliveryReceipt,
     SemanticReadEncodingStats, SemanticReadModelPayload, SEMANTIC_READ_MODEL_SCHEMA_VERSION,
 };
+pub use semantic_runtime::SEMANTIC_RUNTIME_HUMAN_SURVEY;
 pub use semantic_runtime::{
     encode_semantic_action_runtime_invocation, encode_semantic_runtime_invocation,
     SemanticActionRuntimeEvidence, SemanticActionRuntimeFault, SemanticActionRuntimeInvocation,
@@ -645,7 +646,6 @@ pub use semantic_runtime::{
     SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX, SEMANTIC_RUNTIME_CHANNEL_STOP,
     SEMANTIC_RUNTIME_GLOBAL_NAME, SEMANTIC_RUNTIME_PROGRAM, SEMANTIC_RUNTIME_PROTOCOL_VERSION,
 };
-pub use semantic_runtime::SEMANTIC_RUNTIME_HUMAN_SURVEY;
 pub use semantic_screenshot::{
     prepare_semantic_screenshot, SemanticModelImageHost, SemanticModelImagePlan,
     SemanticScreenshot, SemanticScreenshotBudget, SemanticScreenshotBudgetError,
