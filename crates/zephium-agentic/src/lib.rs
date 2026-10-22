@@ -155,6 +155,7 @@ mod semantic_locate_model;
 mod semantic_model;
 mod semantic_money;
 mod semantic_observation;
+mod semantic_person;
 #[cfg(feature = "probe-harness")]
 mod semantic_probe_evidence;
 mod semantic_read;
@@ -599,6 +600,7 @@ pub use semantic_observation::{
     MAX_SEMANTIC_TEXT_SEARCH_BYTES, MAX_SEMANTIC_TEXT_SEARCH_QUERY_BYTES,
     MAX_SEMANTIC_TEXT_SEARCH_RESULTS,
 };
+pub use semantic_person::PersonDirectedAction;
 #[cfg(feature = "probe-harness")]
 pub use semantic_probe_evidence::{
     decode_windows_semantic_probe_response, encode_windows_semantic_probe_response,

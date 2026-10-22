@@ -563,6 +563,30 @@ impl AgentActiveEffect {
         }
     }
 
+    /// Authority for one step the person directed on their own tab from the
+    /// Ask panel. No run, plan or model stands behind it: the step is the
+    /// person's, and the shell holds every committing step for their
+    /// confirm before it gets here. Its manifest guard marks it as such and
+    /// joins no agent run.
+    pub(crate) fn for_person_directed(
+        action: &SemanticPreparedAction,
+        attempt: SemanticActionAttemptId,
+        id: AgentEffectId,
+    ) -> Self {
+        Self {
+            approval_binding: action.approval_binding(),
+            manifest: AgentRunManifestId::generate(),
+            manifest_guard: [0x50; 32],
+            id,
+            lease: AgentPlanLeaseId::generate(),
+            node: AgentPlanNodeId::generate(),
+            effect: action.effect(),
+            attempt,
+            action_guard: action.verification_guard(),
+            guard: [0x51; 32],
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn for_execution_test(
         action: &SemanticPreparedAction,
