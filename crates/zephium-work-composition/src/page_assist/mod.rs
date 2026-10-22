@@ -9,6 +9,7 @@ mod fault;
 pub mod port;
 pub use zephium_page_assist as core;
 mod readout;
+pub mod steps;
 mod turn;
 
 #[cfg(test)]
