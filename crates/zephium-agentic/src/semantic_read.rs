@@ -619,6 +619,12 @@ impl<'a> SemanticReadFragment<'a> {
     pub const fn provenance(self) -> SemanticReadProvenance<'a> {
         self.provenance
     }
+
+    /// Where on the page it sits: 0 the main content, 1 beside it, 2 the
+    /// page's chrome (header, navigation, footer, search).
+    pub const fn region(self) -> u8 {
+        self.region
+    }
 }
 
 impl fmt::Debug for SemanticReadFragment<'_> {
