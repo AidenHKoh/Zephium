@@ -1042,6 +1042,52 @@ fn measure(mtm: MainThreadMarker, fixture: &Fixture, article: Option<&str>) -> R
     }
     drop(without);
 
+    println!("measure: page memory in one process, reader on and off in alternating blocks");
+    let heavy = fixture.url("/heavy");
+    let mut blocks: HashMap<bool, Vec<u64>> = HashMap::new();
+    for _ in 0..3 {
+        for enabled in [true, false] {
+            ENABLED.with(|on| on.set(enabled));
+            if let Some(reader) = with.reader.borrow().as_ref() {
+                reader.set_enabled(enabled);
+            }
+            for _ in 0..12 {
+                with.load(&heavy)?;
+            }
+            blocks
+                .entry(enabled)
+                .or_default()
+                .push(with.settled_footprint());
+        }
+    }
+    ENABLED.with(|on| on.set(true));
+    if let Some(reader) = with.reader.borrow().as_ref() {
+        reader.set_enabled(true);
+    }
+    for enabled in [true, false] {
+        println!(
+            "  reader={enabled:<5} settled footprint after each 12-load block: {:?} KB",
+            blocks.get(&enabled).cloned().unwrap_or_default()
+        );
+    }
+
+    println!("measure: memory once the person leaves a page they asked about");
+    let plain = fixture.url("/plain");
+    with.load(&plain)?;
+    let before = with.settled_footprint();
+    let epoch = with.load(&heavy)?;
+    with.wait_readable()?;
+    for _ in 0..5 {
+        let _ = with.read(epoch, &heavy);
+    }
+    let asked = with.settled_footprint();
+    with.load(&plain)?;
+    let left = with.settled_footprint();
+    println!(
+        "  on /plain {before} KB; on /heavy after 5 reads {asked} KB; back on /plain {left} KB ({:+} KB)",
+        i64::try_from(left).unwrap_or(0) - i64::try_from(before).unwrap_or(0)
+    );
+
     println!("measure: first ask, reads and memory");
     ask_costs(&with, &fixture.url("/plain"), "/plain")?;
     ask_costs(&with, &fixture.url("/heavy"), "/heavy")?;
