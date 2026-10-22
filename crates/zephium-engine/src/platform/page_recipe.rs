@@ -19,6 +19,7 @@ const MAX_FONT_BYTES: usize = 48;
 
 const SELECTION: &str = "Q1:selection";
 const OUTLINE: &str = "Q1:outline";
+const TOUCHED: &str = "Q1:touched";
 const MARK_PREFIX: &str = "Q1:mark:";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,6 +27,7 @@ enum Kind {
     Selection,
     Outline,
     Mark,
+    Touched,
 }
 
 /// One closed recipe invocation.
@@ -51,6 +53,15 @@ impl PageRecipe {
         Self {
             kind: Kind::Selection,
             encoded: SELECTION.to_owned(),
+        }
+    }
+
+    /// Whether the person used the page since the last ask; the first ask
+    /// starts listening. Only trusted input counts.
+    pub(crate) fn touched() -> Self {
+        Self {
+            kind: Kind::Touched,
+            encoded: TOUCHED.to_owned(),
         }
     }
 
@@ -91,7 +102,7 @@ impl PageRecipe {
         let limit = match self.kind {
             Kind::Selection => MAX_SELECTION_WIRE_BYTES,
             Kind::Outline => MAX_OUTLINE_WIRE_BYTES,
-            Kind::Mark => 1,
+            Kind::Mark | Kind::Touched => 1,
         };
         if bytes.len() > limit {
             return None;
@@ -107,6 +118,7 @@ impl PageRecipe {
             }
             Kind::Outline => text.starts_with('{').then(|| text.to_owned()),
             Kind::Mark => matches!(text, "0" | "1" | "2").then(|| text.to_owned()),
+            Kind::Touched => matches!(text, "0" | "1").then(|| text.to_owned()),
         }
     }
 }

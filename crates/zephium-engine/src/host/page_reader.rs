@@ -9,7 +9,9 @@ use std::sync::RwLock;
 use zephium_core::ids::ItemId;
 
 use super::EngineHost;
-use crate::page_reader::{PageOutline, PageReadFailure, PageReaderPolicy, PageReadout};
+use crate::page_reader::{
+    PageActFailure, PageOutline, PageReadFailure, PageReaderPolicy, PageReadout,
+};
 use crate::platform::page_recipe::{mark_outcome, parse_outline, MarkOutcome, PageRecipe};
 
 #[cfg(target_os = "macos")]
@@ -22,6 +24,14 @@ pub(super) type Reader = crate::platform::windows::browse_reader::BrowseReader;
 pub(super) type ReaderSlot = Rc<RefCell<Option<Reader>>>;
 
 static POLICY: RwLock<Option<PageReaderPolicy>> = RwLock::new(None);
+
+/// The reader's probe sets the policy the shell would.
+#[cfg(feature = "page-reader-probe")]
+pub(crate) fn set_policy_for_probe(next: Option<PageReaderPolicy>) {
+    *POLICY
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
+}
 
 fn policy() -> Option<PageReaderPolicy> {
     POLICY
@@ -74,6 +84,13 @@ pub(super) fn commit(slot: &Weak<RefCell<Option<Reader>>>, epoch: u64, url: &str
             reader.commit(epoch, url);
         }
     };
+}
+
+/// The person used `tab` while steps held it.
+pub(crate) fn report_human_input(tab: ItemId) {
+    if let Some(policy) = policy() {
+        (policy.human_input)(tab);
+    }
 }
 
 type ReadDone = Box<dyn FnOnce(Result<PageReadout, PageReadFailure>) + Send>;
@@ -216,6 +233,34 @@ impl EngineHost {
                 ));
             }),
         );
+    }
+
+    /// Runs one person-directed step on `id`'s document at `epoch`.
+    pub(crate) fn page_act(
+        &mut self,
+        id: ItemId,
+        epoch: u64,
+        proposal: zephium_agentic::SemanticActionProposal,
+        done: Box<dyn FnOnce(Result<(), PageActFailure>) + Send>,
+    ) {
+        let url = match self.reader_target(id, epoch) {
+            Ok(url) => url,
+            Err(PageReadFailure::PageChanged) => return done(Err(PageActFailure::PageChanged)),
+            Err(_) => return done(Err(PageActFailure::Refused)),
+        };
+        let mut done = Some(done);
+        let found = self.with_reader(id, |reader| {
+            if let Some(done) = done.take() {
+                reader.act(epoch, url, proposal, done);
+            }
+        });
+        if let (false, Some(done)) = (found, done) {
+            done(Err(PageActFailure::Failed));
+        }
+    }
+
+    pub(crate) fn page_reader_poll(&mut self, id: ItemId) {
+        self.with_reader(id, Reader::poll);
     }
 
     pub(crate) fn page_reader_pump(&mut self, id: ItemId) {

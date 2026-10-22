@@ -23,7 +23,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use webview2_com::DevToolsProtocolEventReceivedEventHandler;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
@@ -34,14 +34,15 @@ use zephium_agentic::{ContextJoin, SemanticRuntimeFault, SemanticRuntimeResultEr
 use zephium_core::ids::ItemId;
 
 use super::semantic_runtime::{call_cdp_async, NativeCdpFailure};
-use crate::page_reader::{PageReadFailure, PageReadout};
+use crate::page_reader::{PageActFailure, PageReadFailure, PageReadout};
 use crate::platform::agent_semantic_cdp_protocol::{
-    decode_empty_success, decode_invocation_response, decode_page_recipe_response,
-    decode_root_frame, decode_runtime_install_response, get_frame_tree_command,
-    install_page_recipes_in_context_command, install_runtime_in_context_command,
-    invoke_page_recipe_command, invoke_runtime_command, runtime_disable_command,
-    runtime_enable_command, FixedSemanticCdpCommand, SemanticCdpInvocationError,
-    SemanticContextDiscovery, SemanticExecutionContext, SemanticWorldName, MAX_CONTEXT_EVENT_BYTES,
+    decode_action_recipe_response, decode_empty_success, decode_invocation_response,
+    decode_page_recipe_response, decode_root_frame, decode_runtime_install_response,
+    get_frame_tree_command, install_page_recipes_in_context_command,
+    install_runtime_in_context_command, invoke_action_recipe_command, invoke_page_recipe_command,
+    invoke_runtime_command, runtime_disable_command, runtime_enable_command,
+    FixedSemanticCdpCommand, SemanticCdpInvocationError, SemanticContextDiscovery,
+    SemanticExecutionContext, SemanticWorldName, MAX_CONTEXT_EVENT_BYTES,
 };
 use crate::platform::page_recipe::PageRecipe;
 
@@ -52,6 +53,18 @@ static NEXT_WORLD: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) type ReadDone = Box<dyn FnOnce(Result<PageReadout, PageReadFailure>) + Send>;
 pub(crate) type RecipeDone = Box<dyn FnOnce(Option<String>) + Send>;
+pub(crate) type ActDone = Box<dyn FnOnce(Result<(), PageActFailure>) + Send>;
+
+const ACT_TIMEOUT: Duration = Duration::from_secs(15);
+const LEASE: Duration = Duration::from_secs(15);
+const LEASE_POLL: Duration = Duration::from_millis(200);
+
+fn monotonic_ms() -> u64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    u64::try_from(START.get_or_init(Instant::now).elapsed().as_millis())
+        .unwrap_or(u64::MAX)
+        .saturating_add(1)
+}
 
 fn next_world_name() -> Option<SemanticWorldName> {
     let epoch = NEXT_WORLD
@@ -74,6 +87,19 @@ enum Op {
         recipe: PageRecipe,
         done: RecipeDone,
     },
+    Act {
+        epoch: u64,
+        url: String,
+        proposal: Box<zephium_agentic::SemanticActionProposal>,
+        done: ActDone,
+    },
+}
+
+fn act_failure(failure: PageReadFailure) -> PageActFailure {
+    match failure {
+        PageReadFailure::PageChanged => PageActFailure::PageChanged,
+        PageReadFailure::NotReady | PageReadFailure::Unavailable => PageActFailure::Failed,
+    }
 }
 
 impl Op {
@@ -81,14 +107,25 @@ impl Op {
         match self {
             Self::Read { done, .. } => done(Err(failure)),
             Self::Recipe { done, .. } => done(None),
+            Self::Act { done, .. } => done(Err(act_failure(failure))),
         }
     }
 
     const fn epoch(&self) -> u64 {
         match self {
-            Self::Read { epoch, .. } | Self::Recipe { epoch, .. } => *epoch,
+            Self::Read { epoch, .. } | Self::Recipe { epoch, .. } | Self::Act { epoch, .. } => {
+                *epoch
+            }
         }
     }
+}
+
+/// A step's runtime half once prepared against the page as it is.
+struct Prepared {
+    pending: zephium_agentic::PersonDirectedAction,
+    native: zephium_agentic::SemanticActionNativeRequest,
+    invocation: zephium_agentic::SemanticActionRuntimeInvocation,
+    admitted_at: Instant,
 }
 
 /// The operation being served, once its invocation is encoded.
@@ -102,6 +139,13 @@ enum Serving {
         recipe: PageRecipe,
         done: RecipeDone,
     },
+    /// First the page as it is now, then the step itself.
+    Act {
+        observe: Box<zephium_agentic::SemanticRuntimeInvocation>,
+        proposal: Option<Box<zephium_agentic::SemanticActionProposal>>,
+        prepared: Option<Box<Prepared>>,
+        done: ActDone,
+    },
 }
 
 impl Serving {
@@ -109,6 +153,7 @@ impl Serving {
         match self {
             Self::Read { done, .. } => done(Err(failure)),
             Self::Recipe { done, .. } => done(None),
+            Self::Act { done, .. } => done(Err(act_failure(failure))),
         }
     }
 
@@ -116,6 +161,11 @@ impl Serving {
         match self {
             Self::Read { invocation, .. } => invoke_runtime_command(context, invocation).ok(),
             Self::Recipe { recipe, .. } => invoke_page_recipe_command(context, recipe).ok(),
+            Self::Act {
+                prepared: Some(prepared),
+                ..
+            } => invoke_action_recipe_command(context, &prepared.invocation).ok(),
+            Self::Act { observe, .. } => invoke_runtime_command(context, observe).ok(),
         }
     }
 }
@@ -172,6 +222,8 @@ struct State {
     queue: VecDeque<Op>,
     current: Option<Current>,
     sequence: u64,
+    lease_until: Option<Instant>,
+    lease_timer: Option<super::ContentPolicyTimeout>,
     committed_now: Rc<dyn Fn() -> Option<u64>>,
     weak: Weak<RefCell<State>>,
 }
@@ -450,11 +502,16 @@ impl State {
             } => {
                 let outcome = decode_invocation_response(&invocation, response)
                     .map_err(map_read_failure)
-                    .and_then(|snapshot| crate::page_reader::read::passages(*pending, snapshot, 1))
-                    .map(|passages| PageReadout {
-                        epoch,
-                        title: title(&self.core),
-                        passages,
+                    .and_then(|snapshot| {
+                        crate::page_reader::read::passages(*pending, snapshot, 1, epoch)
+                    })
+                    .map(|(passages, kept)| {
+                        crate::page_reader::publish_read(self.tab(), kept);
+                        PageReadout {
+                            epoch,
+                            title: title(&self.core),
+                            passages,
+                        }
                     });
                 if outcome == Err(PageReadFailure::Unavailable) {
                     self.forget_document();
@@ -467,6 +524,98 @@ impl State {
                     self.forget_document();
                 }
                 done(answer);
+            }
+            Serving::Act {
+                observe,
+                proposal,
+                prepared: None,
+                done,
+            } => {
+                let prepared = decode_invocation_response(&observe, response)
+                    .map_err(|_| PageActFailure::Failed)
+                    .and_then(|snapshot| {
+                        let stored = crate::page_reader::latest_read(self.tab())
+                            .filter(|stored| stored.epoch() == epoch)
+                            .ok_or(PageActFailure::PageChanged)?;
+                        let proposal = proposal.ok_or(PageActFailure::Failed)?;
+                        crate::page_reader::read::person_action(
+                            &stored,
+                            &snapshot,
+                            *proposal,
+                            current.id,
+                            monotonic_ms(),
+                        )
+                    })
+                    .and_then(|(pending, native)| {
+                        let invocation =
+                            zephium_agentic::encode_semantic_action_runtime_invocation(&native)
+                                .map_err(|_| PageActFailure::Failed)?;
+                        Ok(Prepared {
+                            pending,
+                            native,
+                            invocation,
+                            admitted_at: Instant::now(),
+                        })
+                    });
+                match prepared {
+                    Ok(prepared) => {
+                        self.current = Some(Current {
+                            id: current.id,
+                            epoch,
+                            serving: Serving::Act {
+                                observe,
+                                proposal: None,
+                                prepared: Some(Box::new(prepared)),
+                                done,
+                            },
+                            _timer: current._timer,
+                        });
+                        self.invoke();
+                    }
+                    Err(failure) => done(Err(failure)),
+                }
+            }
+            Serving::Act {
+                prepared: Some(prepared),
+                done,
+                ..
+            } => {
+                let Prepared {
+                    pending,
+                    native,
+                    invocation,
+                    admitted_at,
+                } = *prepared;
+                let settlement = match decode_action_recipe_response(&invocation, response) {
+                    Ok(evidence) => {
+                        let elapsed =
+                            u64::try_from(admitted_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        let completed =
+                            zephium_agentic::SemanticActionExecutionInstant::from_millis(
+                                native.requested_at().millis().saturating_add(elapsed),
+                            );
+                        native.complete(
+                            evidence.backend(),
+                            evidence.readiness(),
+                            evidence.viewport(),
+                            evidence.geometry(),
+                            completed,
+                            completed,
+                        )
+                    }
+                    Err(_) => {
+                        let deadline = native.deadline();
+                        native.fail(
+                            zephium_agentic::SemanticActionNativeFailure::Transport,
+                            deadline,
+                        )
+                    }
+                };
+                done(
+                    pending
+                        .settle(settlement)
+                        .map_err(crate::page_reader::read::act_failure),
+                );
             }
         }
     }
@@ -507,6 +656,28 @@ impl State {
                 Op::Recipe { recipe, done, .. } => {
                     (Serving::Recipe { recipe, done }, RECIPE_TIMEOUT)
                 }
+                Op::Act {
+                    url,
+                    proposal,
+                    done,
+                    ..
+                } => {
+                    let Some((observe, _)) =
+                        crate::page_reader::read::invocation(self.join, &url, id)
+                    else {
+                        done(Err(PageActFailure::Failed));
+                        continue;
+                    };
+                    (
+                        Serving::Act {
+                            observe: Box::new(observe),
+                            proposal: Some(proposal),
+                            prepared: None,
+                            done,
+                        },
+                        ACT_TIMEOUT,
+                    )
+                }
             };
             let tab = self.tab();
             self.current = Some(Current {
@@ -535,8 +706,38 @@ impl State {
         }
     }
 
+    /// Asks the page whether the person used it, while steps hold it.
+    fn poll_lease(&mut self) {
+        self.lease_timer = None;
+        let (Some(until), Some(epoch)) = (self.lease_until, self.committed) else {
+            return;
+        };
+        if Instant::now() >= until {
+            self.lease_until = None;
+            return;
+        }
+        let tab = self.tab();
+        if self.queue.len() < MAX_QUEUED {
+            self.queue.push_back(Op::Recipe {
+                epoch,
+                recipe: PageRecipe::touched(),
+                done: Box::new(move |answer| {
+                    if answer.as_deref() == Some("1") {
+                        crate::host::page_reader::report_human_input(tab);
+                    }
+                }),
+            });
+        }
+        self.lease_timer = super::schedule_browser_timeout(LEASE_POLL, move || {
+            let _ = crate::host::try_with(move |host| host.page_reader_poll(tab));
+        });
+        self.pump();
+    }
+
     fn commit(&mut self, epoch: u64) {
         self.committed = Some(epoch);
+        self.lease_until = None;
+        self.lease_timer = None;
         crate::page_reader::publish_commit(self.tab(), epoch);
         crate::page_reader::publish_ready(self.tab(), epoch, self.enabled);
         if self
@@ -566,6 +767,8 @@ impl State {
 
     fn disable(&mut self) {
         self.enabled = false;
+        self.lease_until = None;
+        self.lease_timer = None;
         self.fail_current(PageReadFailure::Unavailable);
         while let Some(op) = self.queue.pop_front() {
             op.fail(PageReadFailure::Unavailable);
@@ -618,6 +821,8 @@ impl BrowseReader {
                     queue: VecDeque::new(),
                     current: None,
                     sequence: 0,
+                    lease_until: None,
+                    lease_timer: None,
                     committed_now,
                     weak: weak.clone(),
                 })
@@ -676,6 +881,47 @@ impl BrowseReader {
             recipe,
             done,
         });
+    }
+
+    /// Runs one person-directed step and holds the page for a while: the
+    /// person's own use of it is reported.
+    pub(crate) fn act(
+        &self,
+        epoch: u64,
+        url: String,
+        proposal: zephium_agentic::SemanticActionProposal,
+        done: ActDone,
+    ) {
+        let start = match self.state.try_borrow_mut() {
+            Ok(mut state) => {
+                let start = state.lease_until.is_none();
+                state.lease_until = Some(Instant::now() + LEASE);
+                if start {
+                    state.queue.push_back(Op::Recipe {
+                        epoch,
+                        recipe: PageRecipe::touched(),
+                        done: Box::new(|_| {}),
+                    });
+                }
+                start
+            }
+            Err(_) => false,
+        };
+        self.enqueue(Op::Act {
+            epoch,
+            url,
+            proposal: Box::new(proposal),
+            done,
+        });
+        if start {
+            self.poll();
+        }
+    }
+
+    pub(crate) fn poll(&self) {
+        if let Ok(mut state) = self.state.try_borrow_mut() {
+            state.poll_lease();
+        }
     }
 
     pub(crate) fn pump(&self) {

@@ -47,7 +47,7 @@ use super::semantic_runtime::{
     browse_channel, AgentSemanticRuntimeController, AgentSemanticRuntimeDispatchError,
     AgentSemanticRuntimeFailure,
 };
-use crate::page_reader::{PageReadFailure, PageReadout};
+use crate::page_reader::{PageActFailure, PageReadFailure, PageReadout};
 use crate::platform::page_recipe::PageRecipe;
 
 const BOOT_HANDLER: &str = "zephiumPageAssistBootV1";
@@ -130,6 +130,20 @@ pub(crate) fn program() -> &'static str {
 type ReplyBlock = RcBlock<dyn Fn(*mut AnyObject, *mut NSString)>;
 pub(crate) type ReadDone = Box<dyn FnOnce(Result<PageReadout, PageReadFailure>) + Send>;
 pub(crate) type RecipeDone = Box<dyn FnOnce(Option<String>) + Send>;
+pub(crate) type ActDone = Box<dyn FnOnce(Result<(), PageActFailure>) + Send>;
+
+/// How long after a step the person's use of the page still pauses the
+/// steps, and how often the page is asked about it meanwhile.
+const LEASE: Duration = Duration::from_secs(15);
+const LEASE_POLL: Duration = Duration::from_millis(200);
+const ACT_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn monotonic_ms() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    u64::try_from(START.get_or_init(Instant::now).elapsed().as_millis())
+        .unwrap_or(u64::MAX)
+        .saturating_add(1)
+}
 
 enum Op {
     Read {
@@ -142,6 +156,12 @@ enum Op {
         recipe: PageRecipe,
         done: RecipeDone,
     },
+    Act {
+        epoch: u64,
+        url: String,
+        proposal: zephium_agentic::SemanticActionProposal,
+        done: ActDone,
+    },
 }
 
 impl Op {
@@ -149,12 +169,18 @@ impl Op {
         match self {
             Self::Read { done, .. } => done(Err(failure)),
             Self::Recipe { done, .. } => done(None),
+            Self::Act { done, .. } => done(Err(match failure {
+                PageReadFailure::PageChanged => PageActFailure::PageChanged,
+                PageReadFailure::NotReady | PageReadFailure::Unavailable => PageActFailure::Failed,
+            })),
         }
     }
 
     const fn epoch(&self) -> u64 {
         match self {
-            Self::Read { epoch, .. } | Self::Recipe { epoch, .. } => *epoch,
+            Self::Read { epoch, .. } | Self::Recipe { epoch, .. } | Self::Act { epoch, .. } => {
+                *epoch
+            }
         }
     }
 }
@@ -218,6 +244,9 @@ struct ReaderState {
     busy: Rc<Cell<bool>>,
     current: Option<Current>,
     idle_timer: Option<super::ContentPolicyTimeout>,
+    /// Steps hold the page until then; the person's use of it pauses them.
+    lease_until: Option<Instant>,
+    lease_timer: Option<super::ContentPolicyTimeout>,
     committed_now: Rc<dyn Fn() -> Option<u64>>,
     /// No navigation is under way.
     settled: Rc<dyn Fn() -> bool>,
@@ -453,6 +482,8 @@ impl ReaderState {
 
     fn commit(&mut self, epoch: u64, url: &str) {
         self.committed = Some(epoch);
+        self.lease_until = None;
+        self.lease_timer = None;
         self.committed_url = Some(url.to_owned());
         self.back_forward = std::mem::take(&mut self.back_forward_pending);
         crate::page_reader::publish_commit(self.tab(), epoch);
@@ -645,13 +676,15 @@ impl ReaderState {
                             let captured = u64::try_from(started.elapsed().as_millis())
                                 .unwrap_or(u64::MAX)
                                 .max(1);
-                            crate::page_reader::read::passages(pending, snapshot, captured).map(
-                                |passages| PageReadout {
-                                    epoch,
-                                    title: view.load().and_then(|view| title(&view)),
-                                    passages,
-                                },
-                            )
+                            crate::page_reader::read::passages(pending, snapshot, captured, epoch)
+                                .map(|(passages, kept)| {
+                                    crate::page_reader::publish_read(tab, kept);
+                                    PageReadout {
+                                        epoch,
+                                        title: view.load().and_then(|view| title(&view)),
+                                        passages,
+                                    }
+                                })
                         }
                         Err(_) if committed_now() != Some(epoch) => {
                             Err(PageReadFailure::PageChanged)
@@ -683,6 +716,77 @@ impl ReaderState {
                 controller.dispatch_recipe(recipe, move |answer| {
                     done(answer.filter(|_| committed_now() == Some(epoch)));
                     finish();
+                });
+            }
+            Op::Act {
+                epoch,
+                url,
+                proposal,
+                done,
+            } => {
+                // The step is prepared against the page as it is now, then
+                // runs as the runtime's fixed recipe; it is re-admitted at
+                // the handoff only while the same document is committed.
+                let Some((invocation, _)) =
+                    crate::page_reader::read::invocation(self.context, &url, id)
+                else {
+                    done(Err(PageActFailure::Failed));
+                    finish();
+                    return;
+                };
+                self.current = Some(Current {
+                    id,
+                    read: None,
+                    _timer: timeout(ACT_TIMEOUT),
+                });
+                let committed_now = self.committed_now.clone();
+                let channel = controller.clone();
+                let _ = controller.dispatch(invocation, move |result| {
+                    let changed = || committed_now() != Some(epoch);
+                    let current = match result {
+                        Ok(_) if changed() => Err(PageActFailure::PageChanged),
+                        Ok(snapshot) => Ok(snapshot),
+                        Err(_) if changed() => Err(PageActFailure::PageChanged),
+                        Err(_) => Err(PageActFailure::Failed),
+                    };
+                    let prepared = current.and_then(|snapshot| {
+                        let stored = crate::page_reader::latest_read(tab)
+                            .filter(|stored| stored.epoch() == epoch)
+                            .ok_or(PageActFailure::PageChanged)?;
+                        crate::page_reader::read::person_action(
+                            &stored,
+                            &snapshot,
+                            proposal,
+                            id,
+                            monotonic_ms(),
+                        )
+                    });
+                    let (pending, native) = match prepared {
+                        Ok(prepared) => prepared,
+                        Err(failure) => {
+                            done(Err(failure));
+                            finish();
+                            return;
+                        }
+                    };
+                    let still = committed_now.clone();
+                    super::semantic_action::dispatch_closed(
+                        &channel,
+                        native,
+                        Instant::now(),
+                        Some(Box::new(move || still() == Some(epoch))),
+                        move |settlement| {
+                            let outcome = match pending.settle(settlement) {
+                                Ok(()) => Ok(()),
+                                Err(_) if committed_now() != Some(epoch) => {
+                                    Err(PageActFailure::PageChanged)
+                                }
+                                Err(failure) => Err(crate::page_reader::read::act_failure(failure)),
+                            };
+                            done(outcome);
+                            finish();
+                        },
+                    );
                 });
             }
         }
@@ -727,6 +831,35 @@ impl ReaderState {
         }
     }
 
+    /// Asks the page whether the person used it, and keeps asking while
+    /// steps hold it.
+    fn poll_lease(&mut self) {
+        self.lease_timer = None;
+        let (Some(until), Some(epoch)) = (self.lease_until, self.committed) else {
+            return;
+        };
+        if Instant::now() >= until {
+            self.lease_until = None;
+            return;
+        }
+        let tab = self.tab();
+        if self.queue.len() < MAX_QUEUED {
+            self.queue.push_back(Op::Recipe {
+                epoch,
+                recipe: PageRecipe::touched(),
+                done: Box::new(move |answer| {
+                    if answer.as_deref() == Some("1") {
+                        crate::host::page_reader::report_human_input(tab);
+                    }
+                }),
+            });
+        }
+        self.lease_timer = super::schedule_content_policy_timeout(LEASE_POLL, move || {
+            let _ = crate::host::try_with(move |host| host.page_reader_poll(tab));
+        });
+        self.pump();
+    }
+
     /// The script itself is added by the next admitted navigation attempt,
     /// so a document without a site (a blank spare) never gets it.
     fn enable(&mut self) {
@@ -736,6 +869,8 @@ impl ReaderState {
 
     fn disable(&mut self) {
         self.enabled = false;
+        self.lease_until = None;
+        self.lease_timer = None;
         self.stop_pull();
         self.stop_channel();
         self.set_script(false);
@@ -815,6 +950,8 @@ impl BrowseReader {
                 busy: Rc::new(Cell::new(false)),
                 current: None,
                 idle_timer: None,
+                lease_until: None,
+                lease_timer: None,
                 committed_now,
                 settled,
                 weak: weak.clone(),
@@ -883,6 +1020,48 @@ impl BrowseReader {
             recipe,
             done,
         });
+    }
+
+    /// Runs one person-directed step on the document at `epoch`, and holds
+    /// the page for a while: the person's own use of it is reported.
+    pub(crate) fn act(
+        &self,
+        epoch: u64,
+        url: String,
+        proposal: zephium_agentic::SemanticActionProposal,
+        done: ActDone,
+    ) {
+        let start = match self.state.try_borrow_mut() {
+            Ok(mut state) => {
+                let start = state.lease_until.is_none();
+                state.lease_until = Some(Instant::now() + LEASE);
+                if start {
+                    // Arms the page's listening before the step runs.
+                    state.queue.push_back(Op::Recipe {
+                        epoch,
+                        recipe: PageRecipe::touched(),
+                        done: Box::new(|_| {}),
+                    });
+                }
+                start
+            }
+            Err(_) => false,
+        };
+        self.enqueue(Op::Act {
+            epoch,
+            url,
+            proposal,
+            done,
+        });
+        if start {
+            self.poll();
+        }
+    }
+
+    pub(crate) fn poll(&self) {
+        if let Ok(mut state) = self.state.try_borrow_mut() {
+            state.poll_lease();
+        }
     }
 
     pub(crate) fn pump(&self) {

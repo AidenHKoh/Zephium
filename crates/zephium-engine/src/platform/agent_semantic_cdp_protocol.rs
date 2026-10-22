@@ -571,6 +571,51 @@ pub(crate) fn decode_page_recipe_response(
         .ok_or(SemanticCdpProtocolError::InvalidResponse)
 }
 
+const MAX_ACTION_RECIPE_PARAMETERS_BYTES: usize = 64 * 1_024;
+const MAX_ACTION_RECIPE_RESPONSE_BYTES: usize = 8 * 1_024;
+
+/// One person-directed step through the runtime's own fixed isolated-world
+/// recipe, never through native input: the page gains no user activation.
+pub(crate) fn invoke_action_recipe_command(
+    context: &SemanticExecutionContext,
+    invocation: &SemanticActionRuntimeInvocation,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    command(
+        FixedSemanticCdpMethod::CallFunctionOn,
+        json!({
+            "functionDeclaration": INVOKE_FUNCTION,
+            "arguments": [{ "value": invocation.as_str() }],
+            "silent": true,
+            "returnByValue": true,
+            "generatePreview": false,
+            "userGesture": false,
+            "awaitPromise": true,
+            "uniqueContextId": context.unique_id(),
+        }),
+        MAX_ACTION_RECIPE_PARAMETERS_BYTES,
+        MAX_ACTION_RECIPE_RESPONSE_BYTES,
+    )
+}
+
+pub(crate) fn decode_action_recipe_response(
+    invocation: &SemanticActionRuntimeInvocation,
+    response: &str,
+) -> Result<SemanticActionRuntimeEvidence, SemanticActionRuntimeResultError> {
+    let object = parse_success_object(response, MAX_ACTION_RECIPE_RESPONSE_BYTES)
+        .map_err(|_| SemanticActionRuntimeResultError::InvalidEncoding)?;
+    let value = object
+        .get("result")
+        .and_then(Value::as_object)
+        .filter(|result| {
+            result.get("type").and_then(Value::as_str) == Some("string")
+                && !result.contains_key("subtype")
+        })
+        .and_then(|result| result.get("value"))
+        .and_then(Value::as_str)
+        .ok_or(SemanticActionRuntimeResultError::InvalidEncoding)?;
+    invocation.decode_result(value.as_bytes())
+}
+
 pub(crate) fn invoke_media_command(
     context: &SemanticExecutionContext,
     invocation: &crate::platform::record_media::MediaInvocation,

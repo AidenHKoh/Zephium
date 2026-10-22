@@ -163,6 +163,8 @@ pub enum PageReadFailure {
 pub struct PageReaderPolicy {
     /// Whether an address is on a site the reader never runs on.
     pub sensitive: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    /// The person used a tab while steps held it: mouse, keys or scroll.
+    pub human_input: Arc<dyn Fn(ItemId) + Send + Sync>,
 }
 
 impl std::fmt::Debug for PageReaderPolicy {
@@ -224,6 +226,78 @@ pub(crate) fn publish_ready(tab: ItemId, epoch: u64, ready: bool) {
 pub(crate) fn forget(tab: ItemId) {
     with_tabs(|tabs| {
         tabs.remove(&tab);
+    });
+    with_reads(|reads| {
+        reads.remove(&tab);
+    });
+}
+
+/// Why a step did not run or did not take.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PageActFailure {
+    /// The tab navigated or closed, or the step was planned on another page.
+    PageChanged,
+    /// The control is not one this step can use, or it changed.
+    Unsuitable,
+    /// A protected field, another site or a sensitive page.
+    Refused,
+    /// It ran without the expected effect, or could not run.
+    Failed,
+}
+
+/// The read a step is planned on: its passages' nodes, as observed.
+pub struct PageRead {
+    epoch: u64,
+    observation: zephium_agentic::SemanticObservation,
+    frame: zephium_agentic::SemanticFrameJoin,
+    references: Vec<(u16, zephium_agentic::SemanticReferenceId)>,
+}
+
+impl PageRead {
+    /// The committed navigation it belongs to.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// The observation the passages came from.
+    pub fn observation(&self) -> &zephium_agentic::SemanticObservation {
+        &self.observation
+    }
+
+    /// Its main frame's authority.
+    pub fn frame(&self) -> &zephium_agentic::SemanticFrameJoin {
+        &self.frame
+    }
+
+    /// The observed node behind passage `rN`.
+    pub fn reference(&self, passage: u16) -> Option<zephium_agentic::SemanticReferenceId> {
+        self.references
+            .iter()
+            .find(|(id, _)| *id == passage)
+            .map(|(_, reference)| *reference)
+    }
+}
+
+static READS: Mutex<Option<HashMap<ItemId, Arc<PageRead>>>> = Mutex::new(None);
+
+fn with_reads<T>(apply: impl FnOnce(&mut HashMap<ItemId, Arc<PageRead>>) -> T) -> T {
+    let mut reads = READS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    apply(reads.get_or_insert_with(HashMap::new))
+}
+
+/// The latest read of `tab`'s document, which steps are planned on.
+pub fn latest_read(tab: ItemId) -> Option<Arc<PageRead>> {
+    with_reads(|reads| reads.get(&tab).cloned())
+}
+
+pub(crate) fn publish_read(tab: ItemId, read: PageRead) {
+    with_reads(|reads| {
+        if reads.len() >= 512 && !reads.contains_key(&tab) {
+            reads.clear();
+        }
+        reads.insert(tab, Arc::new(read));
     });
 }
 
@@ -326,11 +400,13 @@ pub(crate) mod read {
     }
 
     /// Projects one runtime snapshot into passages in reading order.
+    /// Passages, and the read kept for the steps that may follow it.
     pub(crate) fn passages(
         pending: PendingRead,
         snapshot: SemanticSnapshot,
         captured_at_ms: u64,
-    ) -> Result<Vec<PagePassage>, PageReadFailure> {
+        epoch: u64,
+    ) -> Result<(Vec<PagePassage>, super::PageRead), PageReadFailure> {
         let observation = SemanticObservationAssembler::new(pending.request, snapshot)
             .and_then(|assembler| assembler.finish())
             .map_err(|_| PageReadFailure::Unavailable)?;
@@ -432,11 +508,77 @@ pub(crate) mod read {
                 _ => {}
             }
         }
-        Ok(passages
+        let passages: Vec<(PagePassage, zephium_agentic::SemanticReferenceId)> = passages
             .into_iter()
-            .map(|(passage, _)| passage)
-            .filter(|passage| !passage.text.is_empty() || passage.value.is_some())
-            .collect())
+            .filter(|(passage, _)| !passage.text.is_empty() || passage.value.is_some())
+            .collect();
+        let references = passages
+            .iter()
+            .map(|(passage, reference)| (passage.id, *reference))
+            .collect();
+        drop(read);
+        Ok((
+            passages.into_iter().map(|(passage, _)| passage).collect(),
+            super::PageRead {
+                epoch,
+                observation,
+                frame: pending.frame,
+                references,
+            },
+        ))
+    }
+
+    /// One person-directed step bound to the read it was planned on and
+    /// prepared against `current`, the page as it is right now.
+    pub(crate) fn person_action(
+        stored: &super::PageRead,
+        current: &SemanticSnapshot,
+        proposal: zephium_agentic::SemanticActionProposal,
+        attempt: u64,
+        requested_at_ms: u64,
+    ) -> Result<
+        (
+            zephium_agentic::PersonDirectedAction,
+            zephium_agentic::SemanticActionNativeRequest,
+        ),
+        super::PageActFailure,
+    > {
+        use super::PageActFailure;
+        let batch = zephium_agentic::SemanticActionBatch::bind(
+            zephium_agentic::SemanticActionBatchId::new(attempt).ok_or(PageActFailure::Failed)?,
+            &stored.observation,
+            std::slice::from_ref(&stored.frame),
+            vec![proposal],
+        )
+        .map_err(|_| PageActFailure::Unsuitable)?;
+        let prepared = batch
+            .actions()
+            .first()
+            .ok_or(PageActFailure::Failed)?
+            .prepare(current)
+            .map_err(|_| PageActFailure::Unsuitable)?;
+        zephium_agentic::PersonDirectedAction::prepare(
+            &prepared,
+            zephium_agentic::SemanticActionAttemptId::new(attempt).ok_or(PageActFailure::Failed)?,
+            zephium_agentic::SemanticActionExecutionInstant::from_millis(requested_at_ms),
+        )
+        .map_err(|_| PageActFailure::Failed)
+    }
+
+    /// Why a prepared step did not take.
+    pub(crate) fn act_failure(
+        failure: zephium_agentic::SemanticActionFailure,
+    ) -> super::PageActFailure {
+        use zephium_agentic::SemanticActionFailure as Failure;
+        match failure {
+            Failure::CredentialBoundary | Failure::BlockedOrigin => super::PageActFailure::Refused,
+            Failure::TargetChanged
+            | Failure::TargetDisabled
+            | Failure::TargetOccluded
+            | Failure::UnsupportedInteraction => super::PageActFailure::Unsuitable,
+            Failure::StaleReference => super::PageActFailure::PageChanged,
+            _ => super::PageActFailure::Failed,
+        }
     }
 
     #[cfg(test)]
@@ -470,7 +612,10 @@ pub(crate) mod read {
                 {"k":4,"p":0,"r":"password","n":"Password","q":"secret","v":{"k":"redacted"}},
                 {"k":5,"p":0,"r":"textbox","n":"Email","q":"sensitive"}
             ]}"#;
-            let passages = passages(pending, snapshot_for(&invocation, wire), 1).expect("read");
+            let (passages, kept) =
+                passages(pending, snapshot_for(&invocation, wire), 1, 7).expect("read");
+            assert_eq!(kept.epoch(), 7);
+            assert!(passages.iter().all(|p| kept.reference(p.id).is_some()));
             let texts: Vec<&str> = passages.iter().map(|p| p.text.as_str()).collect();
             assert!(texts.contains(&"Rivers rise"), "{texts:?}");
             assert!(texts.contains(&"The river rose two metres overnight."));

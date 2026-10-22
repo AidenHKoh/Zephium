@@ -1814,6 +1814,27 @@ impl WebviewEngine {
         }
     }
 
+    /// Runs one step the person directed on `tab`'s document at `epoch`,
+    /// through the same fixed recipes as Work; `done` says whether it took.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_act(
+        &self,
+        tab: ItemId,
+        epoch: u64,
+        proposal: zephium_agentic::SemanticActionProposal,
+        done: impl FnOnce(Result<(), page_reader::PageActFailure>) + Send + 'static,
+    ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_act(tab, epoch, proposal, Box::new(done)));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (tab, epoch, proposal);
+            done(Err(page_reader::PageActFailure::Failed));
+        }
+    }
+
     /// Scrolls `tab`'s document at `epoch` to `quote` and marks it, without
     /// the find bar. `done` says whether the quote was found.
     #[cfg(feature = "agentic-browser")]

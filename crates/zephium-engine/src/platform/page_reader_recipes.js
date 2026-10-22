@@ -162,6 +162,7 @@
     const current = mark;
     mark = null;
     current.done = true;
+    try { current.highlight.clear(); } catch (_) {}
     try { CSS.highlights.delete(current.name); } catch (_) {}
     try { doc.adoptedStyleSheets = doc.adoptedStyleSheets.filter((sheet) => sheet !== current.sheet); } catch (_) {}
   }
@@ -212,7 +213,7 @@
       try { CSS.highlights.delete(name); } catch (_) {}
       return "2";
     }
-    const current = { name, sheet, done: false };
+    const current = { name, sheet, highlight: CSS.highlights.get(name), done: false };
     mark = current;
     const started = now(), rise = still ? 0 : 220, hold = 2600, fall = 1400;
     const frame = () => {
@@ -382,7 +383,24 @@
     return wire;
   }
 
+  // While steps hold the page: did the person press, type or scroll? Our own
+  // steps' events are not trusted, so only the person's count.
+  let touched = false, listening = false;
+  const touch = (event) => { if (event.isTrusted) touched = true; };
+  function wasTouched() {
+    if (!listening) {
+      listening = true;
+      for (const type of ["pointerdown", "keydown", "wheel", "touchstart"]) {
+        addEventListener(type, touch, { capture: true, passive: true });
+      }
+    }
+    const answer = touched ? "1" : "0";
+    touched = false;
+    return answer;
+  }
+
   function recipe(encoded) {
+    if (encoded === "Q1:touched") return wasTouched();
     if (encoded === "Q1:selection") return selection();
     if (encoded === "Q1:outline") return outline();
     if (typeof encoded === "string" && encoded.startsWith("Q1:mark:")) return markQuote(encoded.slice(8));
