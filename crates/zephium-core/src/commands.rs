@@ -272,6 +272,7 @@ pub const REGISTRY: &[CommandSpec] = &[
         split("CmdOrCtrl+Shift+E", "Ctrl+Shift+E"),
         Group::Window,
     ),
+    command("tool.ai", "Ask", Keys::same("CmdOrCtrl+E"), Group::Window),
     command(
         "tool.tasks",
         "Tasks",
@@ -700,6 +701,14 @@ mod tests {
     }
 
     #[test]
+    fn ask_panel_takes_the_bare_e_and_stays_rebindable() {
+        let ask = get("tool.ai").expect("ask command");
+        assert_eq!(ask.keys.on(Platform::Mac), Some("CmdOrCtrl+E"));
+        assert_eq!(ask.keys.on(Platform::Other), Some("CmdOrCtrl+E"));
+        assert!(ask.customizable());
+    }
+
+    #[test]
     fn compact_sidebar_is_a_registered_view_command() {
         let command = get("sidebar.toggleCompact").expect("compact sidebar command");
         assert_eq!(command.title, "Compact Mode");
@@ -717,6 +726,7 @@ mod tests {
     #[test]
     fn every_feature_command_names_its_switch() {
         assert_eq!(feature_of("work.dictate"), Some("ai"));
+        assert_eq!(feature_of("tool.ai"), Some("ai"));
         assert_eq!(feature_of("work.pane.close"), Some("work"));
         assert_eq!(feature_of("browser.work"), Some("work"));
         for id in ["tool.notes", "browser.notes", "note.new"] {

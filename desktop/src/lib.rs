@@ -97,6 +97,7 @@ mod memory_pressure;
 mod menu_text;
 mod notes;
 mod overlay;
+mod page_assist;
 #[cfg(target_os = "macos")]
 mod panel;
 mod platform;
@@ -1626,6 +1627,17 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             voice::voice_stop,
             voice::voice_cancel,
             voice::voice_open_privacy,
+            page_assist::page_assist_status,
+            page_assist::page_assist_ask,
+            page_assist::page_assist_stop,
+            page_assist::page_assist_cite,
+            page_assist::page_assist_decide,
+            page_assist::page_assist_resume,
+            page_assist::page_assist_clear,
+            page_assist::page_assist_handoff,
+            page_assist::page_styles,
+            page_assist::page_style_toggle,
+            page_assist::page_style_remove,
             account::account_get,
             account::account_send_code,
             account::account_verify,
@@ -1817,6 +1829,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_models::WorkModelsChanged,
             voice::VoiceChanged,
             voice::VoiceLevels,
+            page_assist::PageAssistChanged,
             swipe::SwipeScroll,
             account::AccountChanged,
             ItemsChanged,

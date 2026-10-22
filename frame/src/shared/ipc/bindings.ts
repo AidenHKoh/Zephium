@@ -113,6 +113,28 @@ export const commands = {
 	 *  recognition, after the person declined one.
 	 */
 	voiceOpenPrivacy: (kind: VoicePrivacyV1) => __TAURI_INVOKE<boolean>("voice_open_privacy", { kind }),
+	/**  The tab's availability, suggestions and whole thread. */
+	pageAssistStatus: (tab: string) => __TAURI_INVOKE<PageAssistStatusV1>("page_assist_status", { tab }),
+	/**  Starts a turn. Admission only; the answer arrives as events. */
+	pageAssistAsk: (request: PageAssistAskV1) => __TAURI_INVOKE<PageAssistAskResponseV1>("page_assist_ask", { request }),
+	/**  Stops the tab's running turn; nothing more is sent or applied. */
+	pageAssistStop: (tab: string) => __TAURI_INVOKE<boolean>("page_assist_stop", { tab }),
+	/**  Scrolls to and highlights citation `n` of `turn` in the page. */
+	pageAssistCite: (tab: string, turn: number, n: number) => __TAURI_INVOKE<boolean>("page_assist_cite", { tab, turn, n }),
+	/**  Answers the turn's waiting confirm or style Apply. */
+	pageAssistDecide: (tab: string, turn: number, decision: PageAssistDecisionV1) => __TAURI_INVOKE<boolean>("page_assist_decide", { tab, turn, decision }),
+	/**  Continues a paused turn after the person used the page; it reads again. */
+	pageAssistResume: (tab: string, turn: number) => __TAURI_INVOKE<boolean>("page_assist_resume", { tab, turn }),
+	/**  Ends the tab's thread. */
+	pageAssistClear: (tab: string) => __TAURI_INVOKE<boolean>("page_assist_clear", { tab }),
+	/**  Starts a Work run with the turn's question and this tab. */
+	pageAssistHandoff: (tab: string, turn: number) => __TAURI_INVOKE<PageAssistHandoffV1>("page_assist_handoff", { tab, turn }),
+	/**  The page styles of the site in `tab`. */
+	pageStyles: (tab: string) => __TAURI_INVOKE<PageStylesV1>("page_styles", { tab }),
+	/**  Turns one of the site's styles on or off. */
+	pageStyleToggle: (tab: string, style: string, enabled: boolean) => __TAURI_INVOKE<PageStylesV1>("page_style_toggle", { tab, style, enabled }),
+	/**  Deletes one of the site's styles. */
+	pageStyleRemove: (tab: string, style: string) => __TAURI_INVOKE<PageStylesV1>("page_style_remove", { tab, style }),
 	/**
 	 *  The account now, refreshing what is stale in the background. Asks no
 	 *  server unless the person is signed in or chose one.
@@ -586,6 +608,7 @@ export const events = {
 	zephiumAccountChanged: makeEvent<AccountChanged>("zephium:account-changed"),
 	zephiumImportProgress: makeEvent<ImportJobView>("zephium:import-progress"),
 	zephiumKeymapChanged: makeEvent<KeymapChanged>("zephium:keymap-changed"),
+	zephiumPageAssistChanged: makeEvent<PageAssistChanged>("zephium:page-assist-changed"),
 	zephiumSwipe: makeEvent<SwipeScroll>("zephium:swipe"),
 	zephiumVoiceChanged: makeEvent<VoiceChanged>("zephium:voice-changed"),
 	zephiumVoiceLevels: makeEvent<VoiceLevels>("zephium:voice-levels"),
@@ -1794,6 +1817,276 @@ export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_
  */
 export type OperationStatus = { state: "unknown" } | { state: "pending" } | { state: "processed"; disposition: OperationDisposition };
 
+/**  Admission only: the answer arrives as events for `turn`. */
+export type PageAssistAskResponseV1 = {
+	turn: number | null,
+	fault: PageAssistFaultV1 | null,
+};
+
+export type PageAssistAskV1 = {
+	tab: string,
+	/**  The person's words; may be empty when `suggestion` is set. */
+	text: string,
+	intent: PageAssistIntentV1,
+	suggestion: PageAssistSuggestionV1 | null,
+};
+
+/**
+ *  Whether the tab can be asked about now. Anything but `ready` means no
+ *  request is sent.
+ */
+export type PageAssistAvailabilityV1 = "ready" |
+/**  AI is switched off in Settings. */
+"ai_off" |
+/**  Private windows never send pages to a model. */
+"private" |
+/**  Not a web page: internal pages, new tab, files, extension pages, PDFs. */
+"not_web" |
+/**  Banks, payments, health and government sites are never read. */
+"sensitive" |
+/**  No model is set up: no Zephium account and no key. */
+"no_model" |
+/**  The page is still loading; ask again when it settles. */
+"loading" |
+/**  This platform cannot read pages yet. */
+"unsupported" |
+/**  The tab is gone or the service is not running. */
+"unavailable";
+
+/**  One change to a tab's Ask thread. */
+export type PageAssistChanged = PageAssistChangedV1;
+
+/**  Payload of `zephium:page-assist-changed`. */
+export type PageAssistChangedV1 = {
+	tab: string,
+	turn: number,
+	seq: number,
+	kind: PageAssistEventV1,
+};
+
+/**
+ *  One numbered source on the page. `excerpt` is the page's own words
+ *  (≤ 80 characters), never the model's.
+ */
+export type PageAssistCiteV1 = {
+	/**
+	 *  Number shown on the chip, 1-based within the turn; pass it to
+	 *  `page_assist_cite`.
+	 */
+	n: number,
+	excerpt: string,
+};
+
+/**  What a turn cost, for the line under the answer. */
+export type PageAssistCostV1 =
+/**
+ *  Zephium AI. `credits` is a decimal string such as "0.3"; null while
+ *  the charge is being confirmed.
+ */
+{ kind: "hosted"; model: string; credits: string | null } |
+/**
+ *  The person's own key. `usd` is an estimate as a decimal string such
+ *  as "0.004"; null when no price is known.
+ */
+{ kind: "byok"; model: string; provider: string; usd: string | null } |
+/**  A model on this device or network; no charge. */
+{ kind: "local"; model: string };
+
+export type PageAssistDecisionV1 = "approve" | "decline";
+
+/**  The thread in order: turns, and a divider wherever the tab navigated. */
+export type PageAssistEntryV1 = { kind: "turn"; turn: PageAssistTurnV1 } |
+/**  The tab moved to another page. Across sites, the model starts fresh. */
+{ kind: "divider"; site: string; cross_site: boolean };
+
+/**
+ *  One change to a tab's thread, in `seq` order per tab. Apply it to the
+ *  matching turn; on `invalidated`, read `page_assist_status` again.
+ */
+export type PageAssistEventV1 = { type: "status"; phase: PageAssistPhaseV1 } | { type: "part"; part: PageAssistPartV1 } |
+/**  A step was added or changed state; replaces the step with its index. */
+{ type: "step"; step: PageAssistStepV1 } | { type: "style"; style: PageStyleProposalV1 } |
+/**  Better done in Work; the panel offers "Run in Work". */
+{ type: "offer"; offer: PageAssistOfferV1 } | { type: "paused"; reason: PageAssistPauseV1 } |
+/**
+ *  The turn finished. `cost` may still be confirming; a later `cost`
+ *  event replaces it.
+ */
+{ type: "done"; cost: PageAssistCostV1 | null } | { type: "cost"; cost: PageAssistCostV1 } | { type: "failed"; fault: PageAssistFaultV1 } | { type: "cancelled" } |
+/**  The thread changed shape (navigation, clear, tab closed, AI off). */
+{ type: "invalidated" };
+
+/**  Why a turn could not start or finish. Closed; never provider or page text. */
+export type PageAssistFaultV1 = { reason: "ai_off" } | { reason: "private" } | { reason: "not_web" } | { reason: "sensitive" } | { reason: "no_model" } | { reason: "loading" } | { reason: "unsupported" } |
+/**  Another turn on this tab is still running. */
+{ reason: "busy" } |
+/**  The question is longer than [`PAGE_ASSIST_MAX_QUESTION_BYTES`] or empty. */
+{ reason: "invalid" } |
+/**  Nothing is selected on the page. */
+{ reason: "no_selection" } |
+/**  The page could not be read. */
+{ reason: "unreadable" } |
+/**  The page navigated or closed while the turn ran. */
+{ reason: "page_changed" } |
+/**  The model answered with nothing usable. */
+{ reason: "no_answer" } |
+/**  A page step did not take effect as expected. */
+{ reason: "step_failed" } |
+/**  The model call failed. */
+{ reason: "model"; fault: WorkModelFaultV1 } | { reason: "unavailable" };
+
+/**  "Run in Work" result: the new Work's id, or why it did not start. */
+export type PageAssistHandoffV1 = {
+	work: string | null,
+	fault: PageAssistFaultV1 | null,
+};
+
+/**  What a turn is for. Rust picks the prompt; the panel never sends one. */
+export type PageAssistIntentV1 =
+/**  A question about the page. */
+"ask" | "summarize" |
+/**  A question about what the person selected on the page. */
+"selection" |
+/**  A few everyday steps on this page. */
+"act" |
+/**  Restyle this site (CSS only, applied on the person's click). */
+"style";
+
+/**  The model a turn uses, as the panel names it. */
+export type PageAssistModelV1 = {
+	/**  Display name, such as Luna or GPT-5 mini. */
+	name: string,
+	/**  Zephium AI (credits) rather than the person's own key. */
+	hosted: boolean,
+};
+
+/**  Why Rust offers "Run in Work" instead of trying in the panel. */
+export type PageAssistOfferV1 =
+/**  It needs other pages or sites. */
+"multi_page" |
+/**  It needs more than a few steps. */
+"complex";
+
+export type PageAssistPartKindV1 =
+/**  The short answer, first and once per turn. */
+"answer" |
+/**  A supporting point. */
+"point" |
+/**  A labelled value, such as "Price :: $12/month". */
+"figure" |
+/**  Something not on the page, or a limit of the answer. Never cited. */
+"caveat";
+
+/**  One whole block of an answer, delivered complete (no token streaming). */
+export type PageAssistPartV1 = {
+	kind: PageAssistPartKindV1,
+	text: string,
+	/**  A figure's label; null for every other kind. */
+	label: string | null,
+	cites: PageAssistCiteV1[],
+};
+
+export type PageAssistPauseV1 =
+/**  The person used the page; Continue re-reads it (`page_assist_resume`). */
+"took_over";
+
+/**  What the panel shows while a turn works. */
+export type PageAssistPhaseV1 =
+/**  "Reading the page…" */
+{ phase: "reading" } |
+/**  "Read 214 passages" */
+{ phase: "read"; passages: number } |
+/**  "Answering…" */
+{ phase: "answering" } |
+/**  "Working on the page…" */
+{ phase: "acting" } |
+/**  "Designing a style…" */
+{ phase: "styling" };
+
+/**
+ *  Everything the panel needs for one tab. Read on open, on tab switch and
+ *  after `invalidated`.
+ */
+export type PageAssistStatusV1 = {
+	version: number,
+	tab: string,
+	availability: PageAssistAvailabilityV1,
+	/**  Registrable site of the page, such as nytimes.com. */
+	site: string | null,
+	model: PageAssistModelV1 | null,
+	suggestions: PageAssistSuggestionV1[],
+	/**  The start of what is selected on the page, when anything is. */
+	selection: string | null,
+	/**  Light page actions are available here. */
+	can_act: boolean,
+	/**  At least one of this site's page styles is on. */
+	styled: boolean,
+	entries: PageAssistEntryV1[],
+};
+
+export type PageAssistStepStateV1 = "running" |
+/**  Waits on the person: Approve or Decline through `page_assist_decide`. */
+"confirm" | "done" | "declined" | "failed" |
+/**  Not run because an earlier step stopped the turn. */
+"skipped";
+
+/**  One step of a light page action. */
+export type PageAssistStepV1 = {
+	/**  0-based; at most 8 steps per turn. */
+	index: number,
+	/**
+	 *  What the step does, naming the exact control, such as
+	 *  `Click "Place order"`.
+	 */
+	label: string,
+	/**  Set when the step commits something and so needs the person's confirm. */
+	category: WorkConfirmCategoryV1 | null,
+	state: PageAssistStepStateV1,
+};
+
+/**  One-click starts Rust offers for the page in front. The panel names them. */
+export type PageAssistSuggestionV1 = "summarize" | "key_points" | "key_numbers" |
+/**  "What's the catch?": fine print, conditions, costs. */
+"catch" |
+/**  Plain-language explanation of a dense page. */
+"explain" |
+/**  The steps a how-to or recipe asks for. */
+"steps" |
+/**  Compare the options a product or pricing page lists. */
+"compare" |
+/**  A darker version of this site. */
+"darker" |
+/**  Larger, easier-to-read text on this site. */
+"readable";
+
+export type PageAssistTurnStateV1 = "working" |
+/**  A confirm or a style Apply waits on the person. */
+"waiting" | "paused" | "done" | "failed" | "cancelled";
+
+/**  One question and everything Rust produced for it. */
+export type PageAssistTurnV1 = {
+	turn: number,
+	intent: PageAssistIntentV1,
+	suggestion: PageAssistSuggestionV1 | null,
+	/**  What the person typed; empty for a suggestion. */
+	question: string,
+	/**  The start of the selection asked about. */
+	selection: string | null,
+	state: PageAssistTurnStateV1,
+	/**  Latest progress line while working. */
+	phase: PageAssistPhaseV1 | null,
+	parts: PageAssistPartV1[],
+	steps: PageAssistStepV1[],
+	style: PageStyleProposalV1 | null,
+	offer: PageAssistOfferV1 | null,
+	cost: PageAssistCostV1 | null,
+	fault: PageAssistFaultV1 | null,
+	/**  The page changed since; its citations no longer jump. */
+	inert: boolean,
+	/**  The last event sequence folded into this snapshot. */
+	seq: number,
+};
+
 /**
  *  Closed page capability names rendered by browser-owned chrome. Native
  *  permission strings and page-controlled labels never cross this boundary.
@@ -1836,6 +2129,40 @@ export type PageRequestView =
 { kind: "external_app"; site: string | null; scheme: string; app: string | null } |
 /**  A new tab the page tried to open; `host` is set when it can be opened. */
 { kind: "popup"; host: string | null };
+
+/**  A page style the model proposed in a Style turn. */
+export type PageStyleProposalV1 = {
+	/**  The stored style's id once applied; null before. */
+	id: string | null,
+	/**  Short description, such as "Dark background, softer text". */
+	summary: string,
+	/**  Registrable site it applies to, such as wikipedia.org. */
+	site: string,
+	/**  Rules that passed validation. */
+	rules: number,
+	state: PageStyleStateV1,
+};
+
+export type PageStyleStateV1 =
+/**  Waits for the person's Apply (`page_assist_decide` Approve). */
+"proposed" | "applied" | "declined" |
+/**  Nothing the model wrote passed the style rules; nothing applies. */
+"rejected";
+
+/**  One stored style for a site. */
+export type PageStyleV1 = {
+	id: string,
+	summary: string,
+	enabled: boolean,
+};
+
+/**  The styles of the site in a tab. */
+export type PageStylesV1 = {
+	version: number,
+	tab: string,
+	site: string | null,
+	styles: PageStyleV1[],
+};
 
 export type PanelIntent =
 /**  The hidden renderer has settled its asynchronous work. */
