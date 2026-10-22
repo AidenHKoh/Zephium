@@ -17,6 +17,10 @@ const CONSTRUCTION: &str = "crates/zephium-engine/src/host/construction.rs";
 const PUBLIC: &str = "crates/zephium-engine/src/page_reader.rs";
 const RUNTIME: &str = "crates/zephium-engine/src/platform/macos/semantic_runtime.rs";
 const ENGINE_MANIFEST: &str = "crates/zephium-engine/Cargo.toml";
+const PERSON: &str = "crates/zephium-agentic/src/semantic_person.rs";
+const EFFECT: &str = "crates/zephium-agentic/src/agent_policy/effect.rs";
+/// The only places a person-directed step may be prepared.
+const PERSON_USERS: [&str; 1] = ["crates/zephium-engine/src/page_reader.rs"];
 const SHIPPING_MANIFESTS: [&str; 2] = ["desktop/Cargo.toml", "crates/zephium-app/Cargo.toml"];
 const MAX_BOOTSTRAP_BYTES: usize = 1_024;
 
@@ -81,6 +85,11 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     check_public(&read(repository, PUBLIC)?)?;
     check_runtime_recipe(&read(repository, RUNTIME)?)?;
     check_probe_gate(&read(repository, ENGINE_MANIFEST)?)?;
+    check_person_seam(
+        &read(repository, PERSON)?,
+        &read(repository, EFFECT)?,
+        repository,
+    )?;
     for manifest in SHIPPING_MANIFESTS {
         if read(repository, manifest)?.contains("page-reader-probe") {
             return Err(format!("{manifest} reaches the page reader probe"));
@@ -141,7 +150,10 @@ fn check_recipes(source: &str) -> Result<(), String> {
             return Err(format!("the recipes lost {required}"));
         }
     }
-    if compact.matches("\"Q1:").count() != 3 {
+    if !compact.contains("consttouch=(event)=>{if(event.isTrusted)touched=true;};") {
+        return Err("the recipes count something other than the person's own input".to_owned());
+    }
+    if compact.matches("\"Q1:").count() != 4 {
         return Err("the recipes gained an invocation".to_owned());
     }
     for forbidden in PAGE_FORBIDDEN
@@ -190,14 +202,17 @@ fn check_recipe_grammar(source: &str) -> Result<(), String> {
         "encoded:format!(\"{MARK_PREFIX}{json}\"),",
         "Kind::Selection=>MAX_SELECTION_WIRE_BYTES,",
         "Kind::Outline=>MAX_OUTLINE_WIRE_BYTES,",
-        "Kind::Mark=>1,",
+        "Kind::Mark|Kind::Touched=>1,",
         "ifbytes.len()>limit{returnNone;}",
     ] {
         if !compact.contains(required) {
             return Err(format!("the recipe grammar lost {required}"));
         }
     }
-    if compact.matches("Self{kind:Kind::").count() != 3 {
+    if !compact.contains("constTOUCHED:&str=\"Q1:touched\";") {
+        return Err("the recipe grammar lost the person's-input recipe".to_owned());
+    }
+    if compact.matches("Self{kind:Kind::").count() != 4 {
         return Err("the recipe grammar gained an invocation".to_owned());
     }
     Ok(())
@@ -243,9 +258,29 @@ fn check_macos_reader(source: &str) -> Result<(), String> {
         "if(self.committed_now)()!=Some(epoch)||self.committed!=Some(epoch){op.fail(PageReadFailure::PageChanged);",
         "Ok(_)ifcommitted_now()!=Some(epoch)=>{Err(PageReadFailure::PageChanged)}",
         "done(answer.filter(|_|committed_now()==Some(epoch)));",
+        // Steps: prepared against the live page, re-admitted at the handoff
+        // only while the same document is committed, run as the runtime's
+        // fixed recipe and never as native input.
+        "crate::page_reader::read::person_action(",
+        "super::semantic_action::dispatch_closed(",
+        "Some(Box::new(move||still()==Some(epoch))),",
+        "crate::host::page_reader::report_human_input(tab);",
     ] {
         if !production.contains(required) {
             return Err(format!("the macOS reader lost {required}"));
+        }
+    }
+    for forbidden in [
+        "NSEvent",
+        "keyDown",
+        "mouseDown",
+        "CGEvent",
+        "dispatch_guarded(",
+    ] {
+        if production.contains(forbidden) {
+            return Err(format!(
+                "the macOS reader acquired native input {forbidden}"
+            ));
         }
     }
     // Native answers a pull only with a fixed token or the fixed program.
@@ -299,9 +334,19 @@ fn check_windows_reader(source: &str, protocol: &str) -> Result<(), String> {
         "if(self.committed_now)()!=Some(epoch)||self.committed!=Some(epoch){op.fail(PageReadFailure::PageChanged);",
         "if(self.committed_now)()!=Some(current.epoch){returncurrent.serving.fail(PageReadFailure::PageChanged);}",
         "self.fail_current(PageReadFailure::PageChanged);self.forget_document();",
+        "}=>invoke_action_recipe_command(context,&prepared.invocation).ok(),",
+        "crate::page_reader::read::person_action(",
+        "crate::host::page_reader::report_human_input(tab);",
     ] {
         if !production.contains(required) {
             return Err(format!("the Windows reader lost {required}"));
+        }
+    }
+    for forbidden in ["prepare_action_command", "next_action_command", "Input."] {
+        if production.contains(forbidden) {
+            return Err(format!(
+                "the Windows reader acquired native input {forbidden}"
+            ));
         }
     }
     // Every CDP byte comes from the closed protocol module.
@@ -328,6 +373,7 @@ fn check_windows_reader(source: &str, protocol: &str) -> Result<(), String> {
         "constPAGE_RECIPE_FUNCTION:&str=\"function(encoded){returnglobalThis.__zephiumPageAssistV1.recipe(encoded);}\";",
         "\"arguments\":[{\"value\":recipe.as_str()}],",
         ".and_then(|value|recipe.decode(value.as_bytes()))",
+        "pub(crate)fninvoke_action_recipe_command(",
     ] {
         if !protocol.contains(required) {
             return Err(format!("the Windows recipe protocol lost {required}"));
@@ -414,6 +460,74 @@ fn check_probe_gate(manifest: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The person-directed seam stays closed: four everyday kinds, its own
+/// marked authority built in one place, and used only by the Browse reader.
+fn check_person_seam(person: &str, effect: &str, repository: &Path) -> Result<(), String> {
+    let person = compact(person);
+    for required in [
+        "constPERSON_ACTION_KINDS:[SemanticActionKind;4]=[SemanticActionKind::Click,SemanticActionKind::Fill,SemanticActionKind::Select,SemanticActionKind::Scroll,];",
+        "if!PERSON_ACTION_KINDS.contains(&action.kind()){",
+        "AgentActiveEffect::for_person_directed(action,attempt,id)",
+    ] {
+        if !person.contains(required) {
+            return Err(format!("the person-directed seam lost {required}"));
+        }
+    }
+    let effect = compact(effect);
+    if effect.matches("fnfor_person_directed(").count() != 1
+        || !effect.contains("manifest_guard:[0x50;32],")
+    {
+        return Err("person-directed authority drifted".to_owned());
+    }
+    for root in ["crates", "desktop/src"] {
+        for path in sources(&repository.join(root))? {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+            let relative = path
+                .strip_prefix(repository)
+                .map_err(|_| "source outside the repository".to_owned())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if text.contains("for_person_directed(")
+                && !relative.ends_with("semantic_person.rs")
+                && !relative.ends_with("agent_policy/effect.rs")
+            {
+                return Err(format!("{relative} mints person-directed authority"));
+            }
+            if text.contains("PersonDirectedAction::prepare(")
+                && !PERSON_USERS.contains(&relative.as_str())
+                && !relative.ends_with("semantic_person.rs")
+            {
+                return Err(format!("{relative} prepares a person-directed step"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sources(directory: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut found = Vec::new();
+    let entries = std::fs::read_dir(directory)
+        .map_err(|error| format!("cannot list {}: {error}", directory.display()))?;
+    for entry in entries {
+        let path = entry
+            .map_err(|error| format!("cannot list {}: {error}", directory.display()))?
+            .path();
+        if path.is_dir() {
+            if path
+                .file_name()
+                .is_some_and(|name| name == "target" || name == "node_modules")
+            {
+                continue;
+            }
+            found.extend(sources(&path)?);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            found.push(path);
+        }
+    }
+    Ok(found)
 }
 
 fn production(source: &str) -> &str {
