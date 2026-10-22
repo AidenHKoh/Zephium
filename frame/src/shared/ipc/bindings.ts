@@ -2074,6 +2074,8 @@ export type PageAssistSuggestionV1 = "summarize" | "key_points" | "key_numbers" 
 "steps" |
 /**  Compare the options a product or pricing page lists. */
 "compare" |
+/**  A fresh, coherent look for this site. */
+"redesign" |
 /**  A darker version of this site. */
 "darker" |
 /**  Larger, easier-to-read text on this site. */

@@ -9,6 +9,7 @@ const LABELS: Record<PageAssistSuggestionV1, () => string> = {
   explain: m.assist_suggest_explain,
   steps: m.assist_suggest_steps,
   compare: m.assist_suggest_compare,
+  redesign: m.assist_suggest_redesign,
   darker: m.assist_suggest_darker,
   readable: m.assist_suggest_readable,
 };
@@ -17,8 +18,7 @@ export const suggestionLabel = (suggestion: PageAssistSuggestionV1) => LABELS[su
 
 /** What a one-click suggestion asks the core to do. */
 export const suggestionIntent = (suggestion: PageAssistSuggestionV1): PageAssistIntentV1 =>
-  suggestion === "summarize"
-    ? "summarize"
-    : suggestion === "darker" || suggestion === "readable"
-      ? "style"
-      : "ask";
+  suggestion === "summarize" ? "summarize" : isRestyle(suggestion) ? "style" : "ask";
+
+export const isRestyle = (suggestion: PageAssistSuggestionV1) =>
+  suggestion === "redesign" || suggestion === "darker" || suggestion === "readable";

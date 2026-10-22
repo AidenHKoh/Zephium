@@ -2,12 +2,15 @@
 use crate::ipc::{PageAssistIntentV1 as Intent, PageAssistSuggestionV1 as Suggestion};
 use crate::page::{PageKind, PageTraits};
 
-/// Most suggestions shown at once.
-pub const MAX_SUGGESTIONS: usize = 4;
+/// Most reading suggestions shown at once.
+pub const MAX_UNDERSTAND: usize = 3;
+/// Most restyle suggestions shown at once.
+pub const MAX_RESTYLE: usize = 3;
 
-/// Suggestions for a page, most useful first.
-pub fn suggestions(traits: &PageTraits) -> Vec<Suggestion> {
-    let mut chosen = Vec::with_capacity(MAX_SUGGESTIONS);
+/// Suggestions for a page, most useful first: what to understand, then, where
+/// a page style can be added, how to restyle it.
+pub fn suggestions(traits: &PageTraits, styles: bool) -> Vec<Suggestion> {
+    let mut chosen = Vec::with_capacity(MAX_UNDERSTAND + MAX_RESTYLE);
     let long = traits.words >= 150;
     if long {
         chosen.push(Suggestion::Summarize);
@@ -28,12 +31,15 @@ pub fn suggestions(traits: &PageTraits) -> Vec<Suggestion> {
     if long && !chosen.contains(&Suggestion::KeyPoints) && chosen.len() < 3 {
         chosen.push(Suggestion::KeyPoints);
     }
-    if traits.words >= 1500 {
-        chosen.push(Suggestion::Readable);
-    }
-    chosen.push(Suggestion::Darker);
     chosen.dedup();
-    chosen.truncate(MAX_SUGGESTIONS);
+    chosen.truncate(MAX_UNDERSTAND);
+    if styles {
+        chosen.push(Suggestion::Redesign);
+        if traits.words >= 1500 {
+            chosen.push(Suggestion::Readable);
+        }
+        chosen.push(Suggestion::Darker);
+    }
     chosen
 }
 
@@ -41,7 +47,7 @@ pub fn suggestions(traits: &PageTraits) -> Vec<Suggestion> {
 pub fn intent_of(suggestion: Suggestion) -> Intent {
     match suggestion {
         Suggestion::Summarize => Intent::Summarize,
-        Suggestion::Darker | Suggestion::Readable => Intent::Style,
+        Suggestion::Redesign | Suggestion::Darker | Suggestion::Readable => Intent::Style,
         Suggestion::KeyPoints
         | Suggestion::KeyNumbers
         | Suggestion::Catch
@@ -66,6 +72,9 @@ pub fn request_text(suggestion: Suggestion) -> &'static str {
         Suggestion::Explain => "Explain this page in plain language.",
         Suggestion::Steps => "List the steps this page describes, in order.",
         Suggestion::Compare => "Compare the options this page offers and say who each suits.",
+        Suggestion::Redesign => {
+            "Redesign this site: a refined, modern look that keeps its identity, with a clear type scale and a comfortable reading width."
+        }
         Suggestion::Darker => "Make this site dark: dark backgrounds, light readable text.",
         Suggestion::Readable => {
             "Make this site easier to read: larger text, comfortable line length and spacing."
@@ -80,7 +89,10 @@ mod tests {
     #[test]
     fn suggestions_follow_the_page() {
         let cases = [
-            (PageTraits::default(), vec![Suggestion::Darker]),
+            (
+                PageTraits::default(),
+                vec![Suggestion::Redesign, Suggestion::Darker],
+            ),
             (
                 PageTraits {
                     kind: PageKind::Article,
@@ -90,6 +102,7 @@ mod tests {
                 vec![
                     Suggestion::Summarize,
                     Suggestion::KeyPoints,
+                    Suggestion::Redesign,
                     Suggestion::Readable,
                     Suggestion::Darker,
                 ],
@@ -106,7 +119,8 @@ mod tests {
                     Suggestion::Summarize,
                     Suggestion::Compare,
                     Suggestion::Catch,
-                    Suggestion::KeyNumbers,
+                    Suggestion::Redesign,
+                    Suggestion::Darker,
                 ],
             ),
             (
@@ -120,13 +134,28 @@ mod tests {
                     Suggestion::Summarize,
                     Suggestion::Steps,
                     Suggestion::KeyPoints,
+                    Suggestion::Redesign,
                     Suggestion::Darker,
                 ],
             ),
         ];
         for (traits, expected) in cases {
-            assert_eq!(suggestions(&traits), expected, "{traits:?}");
+            assert_eq!(suggestions(&traits, true), expected, "{traits:?}");
         }
+    }
+
+    #[test]
+    fn no_restyle_suggestions_where_a_style_cannot_be_added() {
+        let traits = PageTraits {
+            kind: PageKind::Article,
+            words: 2000,
+            ..Default::default()
+        };
+        assert_eq!(
+            suggestions(&traits, false),
+            vec![Suggestion::Summarize, Suggestion::KeyPoints]
+        );
+        assert!(suggestions(&PageTraits::default(), false).is_empty());
     }
 
     #[test]
@@ -139,11 +168,15 @@ mod tests {
             Suggestion::Explain,
             Suggestion::Steps,
             Suggestion::Compare,
+            Suggestion::Redesign,
             Suggestion::Darker,
             Suggestion::Readable,
         ] {
             assert!(!request_text(suggestion).is_empty());
-            let style = matches!(suggestion, Suggestion::Darker | Suggestion::Readable);
+            let style = matches!(
+                suggestion,
+                Suggestion::Redesign | Suggestion::Darker | Suggestion::Readable
+            );
             assert_eq!(intent_of(suggestion) == Intent::Style, style);
         }
     }

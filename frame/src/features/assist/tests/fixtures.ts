@@ -33,7 +33,7 @@ export const status = (
   availability: "ready",
   site: "nytimes.com",
   model: { name: "Luna", hosted: true },
-  suggestions: ["summarize", "key_numbers", "catch", "explain", "darker", "readable"],
+  suggestions: ["summarize", "key_numbers", "catch", "explain", "redesign", "darker", "readable"],
   selection: null,
   can_act: true,
   styled: false,

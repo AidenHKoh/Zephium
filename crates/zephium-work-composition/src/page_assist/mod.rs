@@ -254,7 +254,10 @@ impl PageAssist {
                 _ => None,
             },
         };
-        status.suggestions = suggest::suggestions(&traits.unwrap_or_default());
+        let styles = site
+            .as_deref()
+            .is_some_and(|site| self.site_has_room(&facts.profile, site, 0));
+        status.suggestions = suggest::suggestions(&traits.unwrap_or_default(), styles);
         status.selection = self
             .ports()
             .page

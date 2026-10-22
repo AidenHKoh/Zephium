@@ -42,6 +42,8 @@ pub enum PageAssistSuggestionV1 {
     Steps,
     /// Compare the options a product or pricing page lists.
     Compare,
+    /// A fresh, coherent look for this site.
+    Redesign,
     /// A darker version of this site.
     Darker,
     /// Larger, easier-to-read text on this site.

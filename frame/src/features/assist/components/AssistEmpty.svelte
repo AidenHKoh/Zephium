@@ -4,7 +4,7 @@
   import FavIcon from "$shared/ui/FavIcon";
   import Globe02Icon from "@hugeicons/core-free-icons/Globe02Icon";
   import type { PageAssistSuggestionV1 } from "$shared/ipc/bindings";
-  import { suggestionLabel } from "../lib/suggestions";
+  import { isRestyle, suggestionLabel } from "../lib/suggestions";
   import "./assist.css";
 
   let {
@@ -22,12 +22,10 @@
   } = $props();
 
   const mark = $derived(url ? favicons.forPage(url) : null);
-  const restyle = (suggestion: PageAssistSuggestionV1) =>
-    suggestion === "darker" || suggestion === "readable";
   const groups = $derived(
     [
-      { label: m.assist_group_understand(), items: suggestions.filter((s) => !restyle(s)) },
-      { label: m.assist_group_restyle(), items: suggestions.filter(restyle) },
+      { label: m.assist_group_understand(), items: suggestions.filter((s) => !isRestyle(s)) },
+      { label: m.assist_group_restyle(), items: suggestions.filter(isRestyle) },
     ].filter((group) => group.items.length > 0),
   );
 </script>

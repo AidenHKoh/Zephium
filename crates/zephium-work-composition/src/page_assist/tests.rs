@@ -1251,3 +1251,23 @@ async fn a_style_that_hides_the_main_content_is_applied_without_that_rule() {
         )]
     );
 }
+
+#[tokio::test]
+async fn redesign_is_offered_only_where_a_style_can_still_be_added() {
+    let h = harness(WorkModelProvider::OpenAi, None);
+    let offered = h.service.status(TAB).await.suggestions;
+    assert!(offered.contains(&PageAssistSuggestionV1::Redesign));
+    let h = harness(WorkModelProvider::OpenAi, None);
+    *h.styles.0.lock().unwrap() = (0..MAX_SITE_STYLES)
+        .map(|i| StoredStyle {
+            id: format!("s{i}"),
+            site: "example.com".into(),
+            summary: "old".into(),
+            css: "a{color:red}\n".into(),
+            enabled: true,
+        })
+        .collect();
+    let full = h.service.status(TAB).await.suggestions;
+    assert!(!full.contains(&PageAssistSuggestionV1::Redesign));
+    assert!(!full.contains(&PageAssistSuggestionV1::Darker));
+}
