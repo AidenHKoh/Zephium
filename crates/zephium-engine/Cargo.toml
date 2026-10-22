@@ -65,6 +65,11 @@ path = "src/bin/macos_page_permission_probe.rs"
 required-features = ["native-page-permission-probes"]
 
 [[bin]]
+name = "macos-page-reader-probe"
+path = "src/bin/macos_page_reader_probe.rs"
+required-features = ["page-reader-probe"]
+
+[[bin]]
 name = "macos-agentic-input-probe"
 path = "src/bin/macos_agentic_input_probe.rs"
 required-features = ["native-agentic-input-probe"]

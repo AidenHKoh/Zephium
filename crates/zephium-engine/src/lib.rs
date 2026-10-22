@@ -521,6 +521,14 @@ pub fn run_macos_principal_isolation_probe() -> Result<(), String> {
     platform::macos::run_principal_isolation_probe()
 }
 
+/// Runs the headless loopback qualification of the Ask panel's Browse
+/// reader, or with `--measure` its cost. Absent from ordinary builds.
+#[cfg(all(target_os = "macos", feature = "page-reader-probe"))]
+#[doc(hidden)]
+pub fn run_macos_page_reader_probe(arguments: &[String]) -> Result<(), String> {
+    platform::macos::run_page_reader_probe(arguments)
+}
+
 /// Runs the local-origin WKWebView page-permission denial/deferral gate.
 ///
 /// The fixture is served only from an ephemeral loopback listener. The probe

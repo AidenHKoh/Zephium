@@ -31,6 +31,10 @@ mod apps;
 mod automatic_pip;
 #[cfg(feature = "agentic-browser")]
 pub(crate) mod browse_reader;
+#[cfg(feature = "page-reader-probe")]
+mod page_reader_probe;
+#[cfg(feature = "page-reader-probe")]
+pub(crate) use page_reader_probe::run as run_page_reader_probe;
 pub(crate) mod capture;
 pub(crate) mod fullscreen;
 pub(crate) use automatic_pip::automatic_pip;
