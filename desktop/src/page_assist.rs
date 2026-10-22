@@ -239,6 +239,11 @@ mod product {
                 zephium_app::work_sites::site_of(url)
                     .is_none_or(|site| zephium_app::work_sites::is_sensitive(&site))
             }),
+            human_input: Arc::new(|tab| {
+                if let Some(service) = service() {
+                    service.human_input(&tab.to_string());
+                }
+            }),
         }));
     }
 
@@ -333,6 +338,32 @@ mod product {
         })
     }
 
+    /// Judges a step against the read its question was answered from, which
+    /// must belong to the tab's committed page.
+    fn plan_step(
+        tab: &str,
+        epoch: u64,
+        step: &StepRequest,
+    ) -> Result<zephium_work_composition::page_assist::steps::PlannedStep, StepFailure> {
+        let item = zephium_core::ids::ItemId::parse(tab).ok_or(StepFailure::Refused)?;
+        if zephium_engine::page_reader::committed_epoch(item) != Some(epoch) {
+            return Err(StepFailure::PageChanged);
+        }
+        let read = zephium_engine::page_reader::latest_read(item)
+            .filter(|read| read.epoch() == epoch)
+            .ok_or(StepFailure::PageChanged)?;
+        let target = match step.target {
+            Some(passage) => Some(read.reference(passage).ok_or(StepFailure::Unsuitable)?),
+            None => None,
+        };
+        zephium_work_composition::page_assist::steps::plan(
+            read.observation(),
+            read.frame(),
+            target,
+            step,
+        )
+    }
+
     /// The live tab, read through the engine's Browse reader.
     struct DesktopPage {
         engine: Arc<zephium_engine::WebviewEngine>,
@@ -421,19 +452,35 @@ mod product {
         }
         fn resolve(
             &self,
-            _tab: &str,
-            _epoch: u64,
-            _step: &StepRequest,
+            tab: &str,
+            epoch: u64,
+            step: &StepRequest,
         ) -> Result<ResolvedStep, StepFailure> {
-            Err(StepFailure::Refused)
+            plan_step(tab, epoch, step).map(|planned| planned.resolved)
         }
         fn act<'a>(
             &'a self,
-            _tab: &'a str,
-            _epoch: u64,
-            _step: &'a StepRequest,
+            tab: &'a str,
+            epoch: u64,
+            step: &'a StepRequest,
         ) -> BoxFuture<'a, Result<(), StepFailure>> {
-            Box::pin(async { Err(StepFailure::Refused) })
+            Box::pin(async move {
+                let item = zephium_core::ids::ItemId::parse(tab).ok_or(StepFailure::Refused)?;
+                let planned = plan_step(tab, epoch, step)?;
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                self.engine
+                    .page_act(item, epoch, planned.proposal, move |result| {
+                        let _ = sender.send(result);
+                    });
+                use zephium_engine::page_reader::PageActFailure as Engine;
+                match reader_answer(receiver).await {
+                    Some(Ok(())) => Ok(()),
+                    Some(Err(Engine::PageChanged)) => Err(StepFailure::PageChanged),
+                    Some(Err(Engine::Unsuitable)) => Err(StepFailure::Unsuitable),
+                    Some(Err(Engine::Refused)) => Err(StepFailure::Refused),
+                    Some(Err(Engine::Failed)) | None => Err(StepFailure::Failed),
+                }
+            })
         }
         fn apply_styles(&self, profile: &ProfileId, site: &str, css: &str) {
             self.engine
