@@ -191,12 +191,20 @@
     font-weight: 600;
     font-variant-numeric: tabular-nums;
     line-height: 1;
+    position: relative;
     vertical-align: 0.12em;
     cursor: default;
     transition:
       background-color var(--motion-instant) var(--ease-smooth),
       color var(--motion-instant) var(--ease-smooth),
       scale var(--motion-fast) var(--ease-smooth);
+  }
+
+  /* The marker stays small in the line; its target does not. */
+  .cite::after {
+    position: absolute;
+    inset: -5px -3px;
+    content: "";
   }
 
   .cite:focus-visible {

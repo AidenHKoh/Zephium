@@ -51,7 +51,7 @@
       onpick={(suggestion) => void session.suggest(suggestion)}
     />
   {:else}
-    <div class="items">
+    <div class="items" role="log" aria-label={m.assist_thread_label()}>
       {#each items as item (item.type === "turn" ? `t${item.turn}` : `d${item.key}`)}
         {#if item.type === "turn"}
           <AssistTurn turn={item} {session} />

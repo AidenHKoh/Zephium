@@ -109,6 +109,28 @@ test("working shows Stop, and Stop asks the core to stop", async () => {
   expect(native.stop).toHaveBeenCalledWith("a");
 });
 
+test("Escape in the field stops a working answer and is kept from closing the panel", async () => {
+  const screen = await open();
+  send(1, 1, { type: "status", phase: { phase: "answering" } });
+  await screen.getByRole("textbox").click();
+  const closed = vi.fn();
+  screen.container.addEventListener("keydown", (event) => closed(event.defaultPrevented));
+  await userEvent.keyboard("{Escape}");
+  expect(native.stop).toHaveBeenCalledWith("a");
+  expect(closed).toHaveBeenCalledWith(true);
+});
+
+test("a source that cannot be found on the page says so", async () => {
+  native.statuses.a = status(asEntries(turn(1, { question: "Live", parts: ANSWER.slice(0, 2) })));
+  native.cite.mockResolvedValueOnce(false);
+  const screen = await open();
+  await screen
+    .getByRole("button", { name: /^Source 1/ })
+    .first()
+    .click();
+  await expect.element(screen.getByText("Couldn’t find that on the page.")).toBeVisible();
+});
+
 test("switching tabs drops the thread and shows the other tab's", async () => {
   native.statuses.a = status(
     asEntries(turn(1, { question: "On tab a", parts: ANSWER.slice(0, 1) })),
@@ -172,4 +194,11 @@ test("a refused page shows why and offers no field to type in", async () => {
   const screen = await open();
   await expect.element(screen.getByText("Not in private windows")).toBeVisible();
   await expect.element(screen.getByRole("textbox")).toBeDisabled();
+});
+
+test("a system that cannot read pages says exactly that, not that it is coming", async () => {
+  native.statuses.a = status([], { availability: "unsupported" });
+  const screen = await open();
+  await expect.element(screen.getByText("Not available on this system")).toBeVisible();
+  expect(screen.container.textContent).not.toContain("almost here");
 });

@@ -52,6 +52,12 @@
   }
 
   function onkeydown(event: KeyboardEvent) {
+    // While an answer is coming, Escape stops it before it would close the panel.
+    if (event.key === "Escape" && busy) {
+      event.preventDefault();
+      session.stop();
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       void send();
@@ -125,8 +131,9 @@
     padding: 10px 8px 8px 12px;
     border-radius: var(--radius-card);
 
-    /* The field lifts toward the raised rung, so it stays a field on light glass too. */
-    background: color-mix(in srgb, var(--color-field) 45%, var(--color-raised));
+    /* An opaque plate: the column behind it is glass, and a sentence being typed
+       must never sit over whatever the glass shows. */
+    background: var(--color-raised);
     box-shadow:
       var(--shadow-field),
       inset 0 0 0 1px var(--color-border-strong);
@@ -136,7 +143,7 @@
   }
 
   .composer:focus-within {
-    background: var(--color-field-hover);
+    background: linear-gradient(var(--color-field), var(--color-field)), var(--color-raised);
     box-shadow: var(--shadow-field-focus);
   }
 
@@ -168,6 +175,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
+    min-inline-size: 0;
     margin-inline-start: -4px;
   }
 

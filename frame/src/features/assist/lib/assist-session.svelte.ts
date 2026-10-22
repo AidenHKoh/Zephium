@@ -178,10 +178,15 @@ export class AssistSession {
     if (this.tab) void commands.pageAssistStop(this.tab).catch(() => {});
   }
 
-  cite(turn: number, n: number) {
+  /** False when the passage could not be scrolled to, so the panel can say so. */
+  async cite(turn: number, n: number): Promise<boolean> {
     const found = this.thread.items.find((item) => item.type === "turn" && item.turn === turn);
-    if (!this.tab || !found || (found.type === "turn" && found.inert)) return;
-    void commands.pageAssistCite(this.tab, turn, n).catch(() => {});
+    if (!this.tab || !found || (found.type === "turn" && found.inert)) return false;
+    try {
+      return await commands.pageAssistCite(this.tab, turn, n);
+    } catch {
+      return false;
+    }
   }
 
   decide(turn: number, approve: boolean) {

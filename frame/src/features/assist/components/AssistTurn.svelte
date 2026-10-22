@@ -13,6 +13,20 @@
 
   let { turn, session }: { turn: TurnView; session: AssistSession } = $props();
 
+  // A source that could not be found says so for a few seconds, then lets go.
+  let missed = $state(false);
+  let missTimer: ReturnType<typeof setTimeout> | undefined;
+  async function cite(n: number) {
+    if (await session.cite(turn.turn, n)) {
+      missed = false;
+      return;
+    }
+    missed = true;
+    clearTimeout(missTimer);
+    missTimer = setTimeout(() => (missed = false), 4000);
+  }
+  $effect(() => () => clearTimeout(missTimer));
+
   const style = $derived(turn.style);
   // An applied style is on until the core's list says it was switched off.
   const enabled = $derived(session.styles.find((row) => row.id === style?.id)?.enabled ?? true);
@@ -21,11 +35,8 @@
 <section class="turn" aria-label={turn.question}>
   {#if turn.question}<p class="ask assist-rise">{turn.question}</p>{/if}
   {#if turn.state === "working" && turn.phase}<StatusLine phase={turn.phase} />{/if}
-  {#if turn.parts.length}<AnswerCard
-      parts={turn.parts}
-      inert={turn.inert}
-      oncite={(n) => session.cite(turn.turn, n)}
-    />{/if}
+  {#if turn.parts.length}<AnswerCard parts={turn.parts} inert={turn.inert} oncite={cite} />{/if}
+  {#if missed}<p class="stopped assist-rise" role="status">{m.assist_cite_missed()}</p>{/if}
   {#if turn.steps.length}<StepList
       steps={turn.steps}
       site={session.site}
