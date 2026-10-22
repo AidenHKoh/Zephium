@@ -10,6 +10,7 @@ mod blocker_seed;
 mod foreground_rendering_boundary;
 mod macos_process_family;
 mod page_assist_boundary;
+mod page_reader_boundary;
 mod password_manager_qa;
 mod webext_suite;
 mod work_composition_boundary;
@@ -54,6 +55,7 @@ fn main() {
         Some("check-agentic-probe-boundary") => check_agentic_probe_boundary(),
         Some("check-agent-model-catalog-boundary") => check_agent_model_catalog_boundary(),
         Some("check-page-assist-boundary") => check_page_assist_boundary(),
+        Some("check-page-reader-boundary") => check_page_reader_boundary(),
         Some("check-agent-controller-boundary") => check_agent_controller_boundary(),
         Some("check-agent-runtime-boundary") => check_agent_runtime_boundary(),
         Some("check-advisory-exceptions") => {
@@ -621,6 +623,7 @@ fn ci() {
     check_agentic_probe_boundary();
     check_agent_model_catalog_boundary();
     check_page_assist_boundary();
+    check_page_reader_boundary();
     check_agent_controller_boundary();
     check_agent_runtime_boundary();
     check_engine_floors(false);
@@ -843,6 +846,14 @@ fn check_page_assist_boundary() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     if let Err(error) = page_assist_boundary::check(&repository) {
         eprintln!("page assist architecture boundary failed: {error}");
+        exit(1);
+    }
+}
+
+fn check_page_reader_boundary() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    if let Err(error) = page_reader_boundary::check(&repository) {
+        eprintln!("page reader boundary failed: {error}");
         exit(1);
     }
 }
