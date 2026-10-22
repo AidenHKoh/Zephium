@@ -36,7 +36,9 @@ export function handleNativeSection(id: string) {
   }
   if (
     id.startsWith("settings.section.") &&
-    ["profiles", "newtab", "ai", "focus", "account", "about", "shortcuts"].includes(section)
+    ["profiles", "newtab", "ai", "focus", "account", "about", "shortcuts", "sites"].includes(
+      section,
+    )
   )
     select(section as SettingsSection);
 }
