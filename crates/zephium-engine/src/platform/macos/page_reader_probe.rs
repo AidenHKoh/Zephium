@@ -88,11 +88,14 @@ const WATCH: &str = r##"(() => {
   };
   channel.port2.postMessage(0);
   addEventListener("hashchange", () => {
-    if (location.hash !== "#report") return;
+    if (!location.hash.startsWith("#report")) return;
     running = false;
-    document.title = `report layout=${shape() === initial ? "same" : "changed"} active=${active} been=${been} opened=${opened} attempts=${attempts} samples=${samples} marked=${marked} highlights=${globalThis.CSS && CSS.highlights ? [...CSS.highlights.keys()].join(",") : "none"} leaks=${[...leaks].join("|") || "none"}`;
+    document.title = `report ${location.hash.slice(7)} sheets=${document.adoptedStyleSheets.length} layout=${shape() === initial ? "same" : "changed"} active=${active} been=${been} opened=${opened} attempts=${attempts} samples=${samples} marked=${marked} highlights=${globalThis.CSS && CSS.highlights ? [...CSS.highlights.keys()].join(",") : "none"} leaks=${[...leaks].join("|") || "none"}`;
   });
 })();"##;
+
+const CACHE_A: &str = r#"<!doctype html><meta charset="utf-8"><title>A</title><h1>Page A</h1><p>Alpha text only page A has.</p><script>addEventListener("pageshow", e => { if (e.persisted) document.title = "A restored"; });</script>"#;
+const CACHE_B: &str = r#"<!doctype html><meta charset="utf-8"><title>B</title><h1>Page B</h1><p>Beta text only page B has.</p><script>addEventListener("pageshow", e => { if (e.persisted) document.title = "B restored"; });</script>"#;
 
 const NEXT: &str = r#"<!doctype html><meta charset="utf-8"><title>Next</title><h1>The next story</h1><p>A second document for navigation checks.</p>"#;
 
@@ -218,11 +221,19 @@ fn serve(mut stream: TcpStream, heavy: &str) {
             Some("default-src 'self'; style-src 'self' 'unsafe-inline'"),
         ),
         "/heavy" => (heavy, "text/html; charset=utf-8", None),
+        "/cache-a" => (CACHE_A, "text/html; charset=utf-8", None),
+        "/cache-b" => (CACHE_B, "text/html; charset=utf-8", None),
         "/next" => (NEXT, "text/html; charset=utf-8", None),
         _ => ("not found", "text/plain", None),
     };
+    // The back-forward pages are cacheable, as most of the web is.
+    let cache = if path.starts_with("/cache-") {
+        "Cache-Control: max-age=60"
+    } else {
+        "Cache-Control: no-store"
+    };
     let mut response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n{cache}\r\nConnection: close\r\n",
         body.len()
     );
     if let Some(csp) = csp {
@@ -264,6 +275,7 @@ struct Probe {
     state: Rc<RefCell<PageState>>,
     sensitive: Rc<Cell<bool>>,
     tab: ItemId,
+    tab_cell: Rc<Cell<ItemId>>,
 }
 
 fn pump(until: impl Fn() -> bool, what: &str) -> Result<(), String> {
@@ -315,6 +327,7 @@ impl Probe {
         let attempt_reader = Rc::downgrade(&reader);
         let attempt_sensitive = sensitive.clone();
         let commit_reader = Rc::downgrade(&reader);
+        let kind_reader = Rc::downgrade(&reader);
         let commit_navigation = navigation.clone();
         let finish_state = state.clone();
         let view = wry::WebViewBuilder::new()
@@ -325,6 +338,18 @@ impl Probe {
             .with_new_window_req_handler(move |_url, _features| {
                 popup_state.borrow_mut().popups += 1;
                 wry::NewWindowResponse::Deny
+            })
+            .with_apple_navigation_action_handler(move |_target, action| {
+                if action.target_is_main_frame == Some(true) {
+                    if let Some(reader) = kind_reader.upgrade() {
+                        if let Some(reader) = reader.borrow().as_ref() {
+                            reader.back_forward(
+                                action.navigation_type == wry::AppleNavigationType::BackForward,
+                            );
+                        }
+                    }
+                }
+                true
             })
             .with_main_frame_navigation_attempt_handler(move |target| {
                 let admitted = enabled_and_admitted(&attempt_sensitive, &target);
@@ -339,7 +364,7 @@ impl Probe {
                     Some(NavigationTransition::Committed(epoch)) => {
                         if let Some(reader) = commit_reader.upgrade() {
                             if let Some(reader) = reader.borrow().as_ref() {
-                                reader.commit(epoch.presentation_id().into_raw());
+                                reader.commit(epoch.presentation_id().into_raw(), &event.url);
                             }
                         }
                     }
@@ -365,7 +390,7 @@ impl Probe {
         let tab_cell = Rc::new(Cell::new(tab));
         *reader.borrow_mut() = BrowseReader::new(
             &super::native_webview(&view),
-            tab_cell,
+            tab_cell.clone(),
             enabled,
             Rc::new(move || {
                 committed
@@ -386,7 +411,37 @@ impl Probe {
             state,
             sensitive,
             tab,
+            tab_cell,
         })
+    }
+
+    /// Goes back, or forward, as the person's history buttons do.
+    fn history(&self, forward: bool) {
+        let page = super::native_webview(&self.view);
+        // SAFETY: main-thread WebKit navigation on the probe's own view.
+        unsafe {
+            if forward {
+                let _ = page.goForward();
+            } else {
+                let _ = page.goBack();
+            }
+        }
+    }
+
+    fn interaction_state(&self) -> Option<Retained<objc2_foundation::NSData>> {
+        let page = super::native_webview(&self.view);
+        // SAFETY: main-thread property read; objc2 retains the result.
+        unsafe { page.interactionState() }?
+            .downcast::<objc2_foundation::NSData>()
+            .ok()
+    }
+
+    /// Restores a saved session, as a discarded tab is brought back.
+    fn restore(&self, state: &objc2_foundation::NSData) {
+        let page = super::native_webview(&self.view);
+        // SAFETY: the exact data came from interactionState on a view of
+        // the same kind; the setter starts the navigation itself.
+        unsafe { page.setInteractionState(Some(state)) };
     }
 
     fn epoch(&self) -> Option<u64> {
@@ -410,9 +465,19 @@ impl Probe {
 
     fn wait_readable(&self) -> Result<(), String> {
         pump(
-            || crate::page_reader::readable(self.tab),
+            || crate::page_reader::readable(self.tab_cell.get()),
             "for the boot pull",
         )
+        .map_err(|error| {
+            format!(
+                "{error} (published {:?}, committed {:?}, current {:?})",
+                crate::page_reader::committed_epoch(self.tab_cell.get()),
+                self.epoch(),
+                self.navigation
+                    .current()
+                    .map(|epoch| epoch.presentation_id().into_raw())
+            )
+        })
     }
 
     fn read(&self, epoch: u64, url: &str) -> (Result<PageReadout, PageReadFailure>, Duration) {
@@ -534,8 +599,11 @@ thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(true) };
 }
 
+// As in the app, an address with no site (about:blank) never gets the script.
 fn enabled_and_admitted(sensitive: &Cell<bool>, target: &str) -> bool {
-    ENABLED.with(Cell::get) && !(sensitive.get() && target.contains("/sensitive"))
+    ENABLED.with(Cell::get)
+        && target.starts_with("http")
+        && !(sensitive.get() && target.contains("/sensitive"))
 }
 
 // libc marks the timebase deprecated in favour of another crate; this
@@ -625,7 +693,7 @@ fn check(condition: bool, what: &str) -> Result<(), String> {
 
 fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
     let probe = Probe::new(mtm, true)?;
-    let baseline_scripts = probe.user_scripts() - 1;
+    let baseline_scripts = probe.user_scripts();
 
     println!("fixture: read under page CSP and Trusted Types");
     for path in ["/csp", "/tt", "/strict"] {
@@ -805,6 +873,77 @@ fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         "the page polled continuously",
     )?;
 
+    println!("fixture: mark cleanup");
+    let (_, _) = probe.recipe(epoch, PageRecipe::mark(quote).ok_or("mark")?);
+    let (_, _) = probe.recipe(
+        epoch,
+        PageRecipe::mark("Engineers opened the eastern floodgates at dawn").ok_or("mark")?,
+    );
+    let report = |label: &str| -> Result<String, String> {
+        probe
+            .view
+            .load_url(&format!("{url}#report{label}"))
+            .map_err(|e| format!("report: {e}"))?;
+        let prefix = format!("report {label} ");
+        pump(
+            || probe.state.borrow().title.starts_with(&prefix),
+            "for a page report",
+        )?;
+        Ok(probe.state.borrow().title.clone())
+    };
+    let replaced = report("replaced")?;
+    check(
+        replaced.contains("sheets=1")
+            && replaced.split("highlights=").nth(1).is_some_and(|h| {
+                !h.starts_with("none") && !h.split_whitespace().next().unwrap_or("").contains(',')
+            }),
+        "a new mark replaces the old one: one highlight, one sheet",
+    )?;
+    settle(Duration::from_millis(4_600));
+    let faded = report("faded")?;
+    check(
+        faded.contains("sheets=0") && faded.contains("highlights= "),
+        &format!("after the fade nothing is left for the page to see ({faded})"),
+    )?;
+
+    println!("fixture: a program that will not start");
+    let epoch = probe.load(&url)?;
+    probe.wait_readable()?;
+    super::browse_reader::probe::break_starts(1);
+    let started = Instant::now();
+    let (first, _) = probe.read(epoch, &url);
+    check(
+        first == Err(PageReadFailure::Unavailable) && started.elapsed() < Duration::from_secs(3),
+        "the failed start ends that ask as unavailable at once",
+    )?;
+    probe.wait_readable()?;
+    check(
+        probe.read(epoch, &url).0.is_ok(),
+        "the next ask retries once and reads",
+    )?;
+    let epoch = probe.load(&url)?;
+    probe.wait_readable()?;
+    super::browse_reader::probe::break_starts(2);
+    let (first, _) = probe.read(epoch, &url);
+    settle(Duration::from_millis(200));
+    let started = Instant::now();
+    let (second, _) = probe.read(epoch, &url);
+    let (third, _) = probe.read(epoch, &url);
+    check(
+        first == Err(PageReadFailure::Unavailable)
+            && second == Err(PageReadFailure::Unavailable)
+            && third == Err(PageReadFailure::Unavailable)
+            && started.elapsed() < Duration::from_secs(3),
+        "after the one retry fails the page reads as unavailable, with no loop",
+    )?;
+    check(
+        crate::page_reader::readable(probe.tab),
+        "and it never reads as loading",
+    )?;
+    super::browse_reader::probe::break_starts(0);
+    let epoch = probe.load(&url)?;
+    probe.wait_readable()?;
+
     println!("fixture: idle stop and restart");
     if let Some(reader) = probe.reader.borrow().as_ref() {
         reader.stop_now();
@@ -849,6 +988,136 @@ fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         probe.user_scripts() == baseline_scripts + 1,
         "one reader script per view, however many navigations",
     )?;
+
+    println!("fixture: back-forward cache");
+    let a = fixture.url("/cache-a");
+    let b = fixture.url("/cache-b");
+    let epoch_a = probe.load(&a)?;
+    probe.wait_readable()?;
+    check(
+        probe
+            .read(epoch_a, &a)
+            .0
+            .is_ok_and(|r| r.passages.iter().any(|p| p.text.contains("Alpha"))),
+        "page A reads",
+    )?;
+    let epoch_b = probe.load(&b)?;
+    probe.wait_readable()?;
+    let before = probe.state.borrow().finished;
+    probe.history(false);
+    pump(
+        || probe.state.borrow().title == "A restored",
+        "for page A to come back from the cache",
+    )?;
+    pump(
+        || probe.state.borrow().finished > before,
+        "for the restore to finish",
+    )?;
+    let restored = probe.epoch().ok_or("restored epoch")?;
+    check(
+        restored != epoch_a && restored != epoch_b,
+        "a restored page has its own epoch",
+    )?;
+    let (stale, _) = probe.read(epoch_b, &b);
+    check(
+        stale == Err(PageReadFailure::PageChanged),
+        "a read for the page left is discarded",
+    )?;
+    pump(
+        || crate::page_reader::readable(probe.tab),
+        "for the restored page to pull again",
+    )?;
+    let (back, _) = probe.read(restored, &a);
+    check(
+        back.as_ref().is_ok_and(|r| {
+            r.epoch == restored
+                && r.passages.iter().any(|p| p.text.contains("Alpha"))
+                && !r.passages.iter().any(|p| p.text.contains("Beta"))
+        }),
+        &format!("the restored page reads itself under its new epoch ({back:?})"),
+    )?;
+    let before = probe.state.borrow().finished;
+    probe.history(true);
+    pump(
+        || probe.state.borrow().title == "B restored",
+        "for page B to come back",
+    )?;
+    pump(
+        || probe.state.borrow().finished > before,
+        "for the forward restore to finish",
+    )?;
+    let forward = probe.epoch().ok_or("forward epoch")?;
+    pump(
+        || crate::page_reader::readable(probe.tab),
+        "for page B to pull again",
+    )?;
+    check(
+        probe.read(forward, &b).0.is_ok_and(|r| {
+            r.passages.iter().any(|p| p.text.contains("Beta"))
+                && !r.passages.iter().any(|p| p.text.contains("Alpha"))
+        }),
+        "a page restored before it was ever read reads itself",
+    )?;
+
+    println!("fixture: discarded tab restored");
+    let epoch = probe.load(&url)?;
+    probe.wait_readable()?;
+    let _ = probe.read(epoch, &url);
+    let saved = probe.interaction_state().ok_or("interaction state")?;
+    let restored = Probe::new(mtm, true)?;
+    let before = restored.state.borrow().finished;
+    let _ = restored.navigation.begin(&url);
+    restored.restore(&saved);
+    pump(
+        || restored.state.borrow().finished > before,
+        "for the restored tab to load",
+    )?;
+    restored.wait_readable()?;
+    let epoch = restored.epoch().ok_or("restored tab epoch")?;
+    check(
+        restored
+            .read(epoch, &url)
+            .0
+            .is_ok_and(|r| r.passages.iter().any(|p| p.text == quote)),
+        "a restored tab reads under its new epoch",
+    )?;
+    drop(restored);
+
+    println!("fixture: warm spare adopted");
+    let spare = Probe::new(mtm, true)?;
+    let before = spare.state.borrow().finished;
+    let _ = spare.navigation.begin("about:blank");
+    spare
+        .view
+        .load_url("about:blank")
+        .map_err(|e| e.to_string())?;
+    pump(
+        || spare.state.borrow().finished > before,
+        "for the spare's blank page",
+    )?;
+    check(
+        !crate::page_reader::readable(spare.tab),
+        "a blank spare has no script",
+    )?;
+    let adopted = ItemId::generate();
+    spare.tab_cell.set(adopted);
+    let epoch = spare.load(&url)?;
+    pump(
+        || crate::page_reader::readable(adopted),
+        "for the adopted tab to pull",
+    )?;
+    check(
+        crate::page_reader::committed_epoch(adopted) == Some(epoch),
+        "the adopted tab publishes its own epoch",
+    )?;
+    check(
+        spare
+            .read(epoch, &url)
+            .0
+            .is_ok_and(|r| r.passages.iter().any(|p| p.text == quote)),
+        "and reads",
+    )?;
+    drop(spare);
 
     println!("fixture: sensitive site and AI off");
     probe.sensitive.set(true);
