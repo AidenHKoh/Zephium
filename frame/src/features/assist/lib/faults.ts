@@ -135,7 +135,9 @@ function pageFault(reason: Exclude<PageAssistFaultV1["reason"], "model">): Fault
     case "unsupported":
       return { message: refusalView(reason).help, fix: null, retry: "no" };
     case "loading":
+      return { message: m.assist_fault_loading(), fix: null, retry: "now" };
     case "invalid":
+      return { message: m.assist_fault_invalid(), fix: null, retry: "no" };
     case "unavailable":
       return { message: m.assist_unavailable(), fix: null, retry: "now" };
   }

@@ -37,3 +37,10 @@ test("every refusal has words of its own", () => {
   ).map((kind) => refusalView(kind).title);
   expect(new Set(titles).size).toBe(titles.length);
 });
+
+test("a page still loading is asked again, not called unavailable", () => {
+  const view = faultView({ reason: "loading" });
+  expect(view.retry).toBe("now");
+  expect(view.message).toContain("still loading");
+  expect(faultView({ reason: "invalid" }).retry).toBe("no");
+});
