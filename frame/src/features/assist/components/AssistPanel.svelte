@@ -31,7 +31,8 @@
   // The panel is about the tab the person is on; the focused pane of a split is the active tab.
   $effect(() => session?.follow(tabs.activeId() ?? null));
   // A navigation changes what the page is, not whose thread this is.
-  const address = $derived(tabs.activeTab()?.url ?? null);
+  const tab = $derived(tabs.activeTab());
+  const address = $derived(tab?.url ?? null);
   $effect(() => {
     void address;
     session?.refresh();
@@ -74,7 +75,10 @@
           onclick={() => void session?.clear()}
         />{/if}
     {/snippet}
-    {#if session}<AssistThread {session} />{/if}
+    {#if session}<AssistThread
+        {session}
+        page={{ title: tab?.title ?? "", url: tab?.url ?? null }}
+      />{/if}
     {#snippet footer()}
       {#if session}<AssistComposer
           {session}

@@ -49,8 +49,8 @@
     <span class="dot" aria-hidden="true"></span>
     <span class="label">{enabled ? m.assist_style_on({ site }) : m.assist_style_off({ site })}</span
     >
-    <button type="button" class="toggle" onclick={() => ontoggle(!enabled)}
-      >{enabled ? m.assist_style_turn_off() : m.assist_style_turn_on()}</button
+    <Button variant="ghost" size="compact" onclick={() => ontoggle(!enabled)}
+      >{enabled ? m.assist_style_turn_off() : m.assist_style_turn_on()}</Button
     >
     <IconButton
       icon={Delete02Icon}
@@ -131,28 +131,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .toggle {
-    flex: none;
-    padding: 4px 8px;
-    border: 0;
-    border-radius: var(--radius-inset);
-    background: transparent;
-    color: var(--color-text);
-    font: inherit;
-    font-size: 12.5px;
-    font-weight: 550;
-    cursor: default;
-    transition: background-color var(--motion-instant) var(--ease-smooth);
-  }
-
-  .toggle:hover {
-    background: var(--color-fill-hover);
-  }
-
-  .toggle:focus-visible {
-    outline: 2px solid var(--color-ring);
   }
 
   .gone {

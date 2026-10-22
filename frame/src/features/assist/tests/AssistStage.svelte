@@ -4,13 +4,14 @@
   import AssistComposer from "../components/AssistComposer.svelte";
   import AssistThread from "../components/AssistThread.svelte";
 
-  let { session }: { session: AssistSession } = $props();
+  let { session, page }: { session: AssistSession; page?: { title: string; url: string | null } } =
+    $props();
   let draft = $state("");
 </script>
 
 <aside class="browser-sidebar stage">
   <header><h2>Ask</h2></header>
-  <AssistThread {session} />
+  <AssistThread {session} {page} />
   <AssistComposer {session} {draft} ondraft={(text) => (draft = text)} />
 </aside>
 

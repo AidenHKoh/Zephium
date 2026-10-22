@@ -251,8 +251,6 @@
     color: var(--color-faint);
     font-size: var(--text-caption);
     font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
   }
 
   .rule {

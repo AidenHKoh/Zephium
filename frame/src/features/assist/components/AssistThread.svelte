@@ -7,7 +7,8 @@
   import Refusal from "./Refusal.svelte";
   import "./assist.css";
 
-  let { session }: { session: AssistSession } = $props();
+  let { session, page }: { session: AssistSession; page?: { title: string; url: string | null } } =
+    $props();
 
   let scroller = $state<HTMLElement>();
   /** Follow the answer while the reader is at its end; leave them alone once they scroll up. */
@@ -44,6 +45,8 @@
   {:else if items.length === 0 && session.status}
     <AssistEmpty
       site={session.site}
+      title={page?.title ?? ""}
+      url={page?.url ?? null}
       suggestions={session.status.suggestions}
       onpick={(suggestion) => void session.suggest(suggestion)}
     />

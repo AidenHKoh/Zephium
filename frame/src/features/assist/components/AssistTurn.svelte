@@ -28,6 +28,7 @@
     />{/if}
   {#if turn.steps.length}<StepList
       steps={turn.steps}
+      site={session.site}
       ondecide={(approve) => session.decide(turn.turn, approve)}
     />{/if}
   {#if turn.state === "paused"}<TurnCards

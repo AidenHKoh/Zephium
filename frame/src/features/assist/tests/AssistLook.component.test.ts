@@ -56,7 +56,10 @@ async function open(next: PageAssistStatusV1, height = 760) {
   session = new AssistSession(PROFILE);
   await session.start();
   session.follow("tab-1");
-  const screen = await render(AssistStage, { session });
+  const screen = await render(AssistStage, {
+    session,
+    page: { title: "Fed holds rates steady and signals one cut this year", url: null },
+  });
   screen.container.style.cssText = `inline-size:336px;block-size:${height}px`;
   await expect.poll(() => session!.loading).toBe(false);
   return screen;
@@ -64,7 +67,7 @@ async function open(next: PageAssistStatusV1, height = 760) {
 
 test("empty: a greeting for the page and the suggestions the core chose", async () => {
   const screen = await open(status());
-  await expect.element(screen.getByText("Ask about nytimes.com")).toBeVisible();
+  await expect.element(screen.getByText("Understand")).toBeVisible();
   await expect.element(screen.getByRole("button", { name: "Key numbers" })).toBeVisible();
   await capture(screen.container, "empty");
 });
@@ -177,7 +180,7 @@ test("a step that commits waits for approval, naming the control", async () => {
     ),
     480,
   );
-  await expect.element(screen.getByRole("button", { name: "Approve" })).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Place order" })).toBeVisible();
   await capture(screen.container, "confirm");
 });
 
@@ -234,4 +237,37 @@ test("a style proposal, then the badge of an applied one", async () => {
   );
   await expect.element(screen.getByRole("button", { name: "Apply" })).toBeVisible();
   await capture(screen.container, "style");
+});
+
+test("the model menu opens over the thread, grouped by provider", async () => {
+  const screen = await open(
+    status(asEntries(turn(1, { question: "Summarize", parts: ANSWER.slice(0, 2) }))),
+    520,
+  );
+  await screen.getByRole("button", { name: /Sonnet/ }).click();
+  await expect.element(screen.getByRole("listbox")).toBeVisible();
+  await capture(screen.container, "model-menu");
+});
+
+test("a long answer scrolls inside the panel and stays pinned to its end", async () => {
+  const points = Array.from({ length: 12 }, (_, at) => ({
+    ...ANSWER[1]!,
+    text: `Point ${at + 1}: ${ANSWER[1]!.text}`,
+  }));
+  const screen = await open(
+    status(
+      asEntries(
+        turn(1, {
+          question: "Give me everything on this page",
+          parts: [ANSWER[0]!, ...points, ANSWER[7]!],
+          cost: { kind: "hosted", model: "Luna", credits: "0.8" },
+        }),
+      ),
+    ),
+    520,
+  );
+  const scroller = screen.container.querySelector<HTMLElement>(".thread")!;
+  await expect.poll(() => scroller.scrollTop).toBeGreaterThan(200);
+  await expect.element(screen.getByText("Luna · 0.8 credits")).toBeVisible();
+  await capture(screen.container, "long");
 });

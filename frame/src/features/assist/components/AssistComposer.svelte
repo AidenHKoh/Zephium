@@ -123,10 +123,12 @@
     margin: 4px 12px 12px;
     padding: 10px 8px 8px 12px;
     border-radius: var(--radius-card);
-    background: var(--color-field);
+
+    /* The field lifts toward the raised rung, so it stays a field on light glass too. */
+    background: color-mix(in srgb, var(--color-field) 45%, var(--color-raised));
     box-shadow:
       var(--shadow-field),
-      inset 0 0 0 1px var(--color-border);
+      inset 0 0 0 1px var(--color-border-strong);
     transition:
       background-color var(--motion-instant) var(--ease-smooth),
       box-shadow var(--motion-instant) var(--ease-smooth);

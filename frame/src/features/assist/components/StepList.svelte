@@ -10,16 +10,33 @@
 
   let {
     steps,
+    site = null,
     ondecide,
-  }: { steps: readonly PageAssistStepV1[]; ondecide: (approve: boolean) => void } = $props();
+  }: {
+    steps: readonly PageAssistStepV1[];
+    site?: string | null;
+    ondecide: (approve: boolean) => void;
+  } = $props();
 
-  const names: Record<WorkConfirmCategoryV1, () => string> = {
-    communication: m.assist_category_communication,
-    purchase: m.assist_category_purchase,
-    destructive: m.assist_category_destructive,
-    save: m.assist_category_save,
-    edit: m.assist_category_edit,
-    type: m.assist_category_type,
+  /** One quiet line on what pressing it does, from the core's category. */
+  const consequence = (category: WorkConfirmCategoryV1 | null) => {
+    const args = { site: site ?? m.assist_this_page() };
+    switch (category) {
+      case "communication":
+        return m.assist_consequence_communication(args);
+      case "purchase":
+        return m.assist_consequence_purchase(args);
+      case "destructive":
+        return m.assist_consequence_destructive(args);
+      case "save":
+        return m.assist_consequence_save(args);
+      case "edit":
+        return m.assist_consequence_edit(args);
+      case "type":
+        return m.assist_consequence_type(args);
+      default:
+        return m.assist_consequence_other(args);
+    }
   };
   const waiting = $derived(steps.find((step) => step.state === "confirm") ?? null);
   const settled = $derived(steps.filter((step) => step !== waiting));
@@ -50,14 +67,11 @@
 
 {#if waiting}
   <section class="assist-card confirm assist-rise" aria-label={m.assist_confirm_label()}>
-    <p class="kind">
-      {waiting.category ? names[waiting.category]() : m.assist_category_other()}
-    </p>
-    <h4>{m.assist_confirm_title()}</h4>
-    <p class="control">{waiting.label}</p>
+    <h4>{m.assist_confirm_title({ control: waiting.label })}</h4>
+    <p>{consequence(waiting.category)}</p>
     <div class="assist-actions">
-      <Button variant="primary" size="compact" onclick={() => ondecide(true)}
-        >{m.assist_approve()}</Button
+      <Button variant="primary" size="compact" class="control" onclick={() => ondecide(true)}
+        >{waiting.label}</Button
       >
       <Button size="compact" onclick={() => ondecide(false)}>{m.assist_decline()}</Button>
     </div>
@@ -112,23 +126,10 @@
     color: var(--color-faint);
   }
 
-  .kind {
-    color: var(--color-faint);
-    font-size: var(--text-caption);
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-  }
-
-  /* The exact control, quoted as the page names it, so approving is never approving a paraphrase. */
-  .control {
-    padding: 8px 10px;
-    border-radius: var(--radius-inset);
-    background: var(--color-field);
-    color: var(--color-text);
-    font-size: var(--text-body);
-    font-weight: 550;
-    line-height: 1.35;
-    overflow-wrap: anywhere;
+  .confirm :global(.control) {
+    max-inline-size: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

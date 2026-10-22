@@ -117,7 +117,7 @@ test("switching tabs drops the thread and shows the other tab's", async () => {
   await expect.element(screen.getByText("On tab a")).toBeVisible();
   session.follow("b");
   expect(session.thread.items).toHaveLength(0);
-  await expect.element(screen.getByText("Ask about example.org")).toBeVisible();
+  await expect.element(screen.getByText("example.org")).toBeVisible();
   expect(screen.container.textContent).not.toContain("On tab a");
 });
 
@@ -146,10 +146,10 @@ test("an action that commits is approved or declined by the person", async () =>
     ),
   );
   const screen = await open();
-  await expect.element(screen.getByText("Place order")).toBeVisible();
-  await screen.getByRole("button", { name: "Approve" }).click();
+  await expect.element(screen.getByText("This spends money on nytimes.com.")).toBeVisible();
+  await screen.getByRole("button", { name: "Place order" }).click();
   expect(native.decide).toHaveBeenCalledWith("a", 1, "approve");
-  await screen.getByRole("button", { name: "Decline" }).click();
+  await screen.getByRole("button", { name: "Not now" }).click();
   expect(native.decide).toHaveBeenCalledWith("a", 1, "decline");
 });
 
