@@ -95,7 +95,7 @@ export default defineConfig({
                 "utf8",
               ),
             humanWallSurvey: readFileSync(
-              new URL("../crates/zephium-engine/src/host/work_human_wall.js", import.meta.url),
+              new URL("../crates/zephium-agentic/assets/work-human-wall-v1.js", import.meta.url),
               "utf8",
             ),
             contentStyleSource: readFileSync(
