@@ -25,7 +25,9 @@
     void session.thread;
     const element = scroller;
     if (!element || !pinned) return;
-    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const reduce =
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches ||
+      document.documentElement.dataset.reduceMotion === "true";
     queueMicrotask(() =>
       element.scrollTo({ top: element.scrollHeight, behavior: reduce ? "auto" : "smooth" }),
     );

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { onMount, tick } from "svelte";
   import * as m from "$shared/i18n/messages";
   import Icon from "$shared/ui/Icon";
   import { ArrowUp02Icon, StopIcon, TextSelectionIcon } from "@hugeicons/core-free-icons";
@@ -26,6 +26,9 @@
   $effect(() => {
     if (selection === null) useSelection = false;
   });
+
+  // Opening Ask, from ⌘E or the dock, lands the caret in the field.
+  onMount(() => field?.focus());
 
   /** Moves the caret into the field; the host calls it when Ask is asked for again. */
   export function focus() {

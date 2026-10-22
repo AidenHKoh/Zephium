@@ -40,7 +40,7 @@
 
   let composer = $state<ReturnType<typeof AssistComposer>>();
   onMount(() => {
-    composer?.focus();
+    // The field takes focus as it mounts; this is for asking again while open.
     let stop: (() => void) | null = null;
     let live = true;
     // Asking for Ask again, while it is open, goes to its field.

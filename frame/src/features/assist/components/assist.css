@@ -11,10 +11,16 @@
   }
 }
 
+/* The global switch already collapses durations; staggered delays would
+   still hold blocks back, so reduced motion shows everything at once. */
 @media (prefers-reduced-motion: reduce) {
   .assist-rise {
     animation: none;
   }
+}
+
+:root[data-reduce-motion="true"] .assist-rise {
+  animation: none;
 }
 
 /* A card in the thread: a quiet plate, one step above the panel, for anything

@@ -79,6 +79,24 @@ test("typing and pressing Enter asks; Shift+Enter only adds a line", async () =>
   });
 });
 
+test("opening Ask puts the caret in the field", async () => {
+  const screen = await open();
+  await expect.element(screen.getByRole("textbox")).toHaveFocus();
+});
+
+test("reduced motion shows every block at once", async () => {
+  document.documentElement.dataset.reduceMotion = "true";
+  try {
+    native.statuses.a = status(asEntries(turn(1, { question: "Live", parts: ANSWER.slice(0, 2) })));
+    const screen = await open();
+    const block = screen.container.querySelector(".assist-rise");
+    expect(block).not.toBeNull();
+    expect(getComputedStyle(block!).animationName).toBe("none");
+  } finally {
+    delete document.documentElement.dataset.reduceMotion;
+  }
+});
+
 test("a suggestion asks with its own id", async () => {
   const screen = await open();
   await screen.getByRole("button", { name: "Key numbers" }).click();
@@ -201,4 +219,16 @@ test("a system that cannot read pages says exactly that, not that it is coming",
   const screen = await open();
   await expect.element(screen.getByText("Not available on this system")).toBeVisible();
   expect(screen.container.textContent).not.toContain("almost here");
+});
+
+test("Redesign this page starts a style turn with its own id", async () => {
+  const screen = await open();
+  await screen.getByRole("button", { name: "Redesign this page" }).click();
+  await expect.poll(() => native.ask.mock.calls.length).toBe(1);
+  expect(native.ask).toHaveBeenCalledWith({
+    tab: "a",
+    text: "Redesign this page",
+    intent: "style",
+    suggestion: "redesign",
+  });
 });
