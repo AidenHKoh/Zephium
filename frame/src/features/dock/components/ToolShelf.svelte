@@ -12,7 +12,7 @@
   import Disclosure from "$shared/ui/Disclosure";
   import Icon from "$shared/ui/Icon";
   import ProfileAvatar from "$shared/ui/ProfileAvatar";
-  import { RECORD_TOOLS, SHELF_TOOLS, toolPresentation } from "../lib/dock-tools";
+  import { ASK_TOOL, RECORD_TOOLS, SHELF_TOOLS, toolPresentation } from "../lib/dock-tools";
   import NoticePip from "./NoticePip.svelte";
   import { keymap } from "$domain/keymap";
   import { acceleratorKeys } from "$shared/lib/accelerator";
@@ -29,7 +29,10 @@
   /** The avatar the profile chose; a private window shows none. */
   const foot = accountFoot({ private: () => privately });
   // A tool whose feature is off is not offered here either.
-  const shelf = $derived(SHELF_TOOLS.filter((kind) => preferences.enabled(kind)));
+  const shelf = $derived<ToolKind[]>([
+    ...(preferences.aiEnabled() && !privately ? [ASK_TOOL] : []),
+    ...SHELF_TOOLS.filter((kind) => preferences.enabled(kind)),
+  ]);
   const groups = $derived([shelf, RECORD_TOOLS].filter((group) => group.length > 0));
   // Rows settle in nearest the case first, so each counts from the bottom:
   // Settings, the tools, then who you are.

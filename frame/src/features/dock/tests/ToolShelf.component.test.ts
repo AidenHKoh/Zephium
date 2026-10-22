@@ -82,6 +82,7 @@ test("the profile opens on a switcher of who you are, then the tools", async () 
     .poll(() => screen.container.querySelector(".shelf-me-name")?.textContent)
     .toBe("Personal");
   expect(names(screen.container)).toEqual([
+    "Ask",
     "Notes",
     "Tasks",
     "Time",
@@ -94,7 +95,7 @@ test("the profile opens on a switcher of who you are, then the tools", async () 
   const steps = [...screen.container.querySelectorAll<HTMLElement>(".shelf-item, .shelf-head")].map(
     (item) => Number(item.style.getPropertyValue("--step")),
   );
-  expect(steps).toEqual([7, 6, 5, 4, 3, 2, 1, 0]);
+  expect(steps).toEqual([8, 7, 6, 5, 4, 3, 2, 1, 0]);
   expect(screen.container.textContent).not.toContain("Manage Profiles");
   // The account is not this profile's: it lives on the New Tab page and in Work.
   expect(screen.getByRole("menuitem", { name: /^Account|^Sign in/u }).query()).toBeNull();
@@ -133,8 +134,8 @@ test("a feature switched off takes its tool out, and an empty group its rule", a
     emitNativeEvent("uiCommand", `preference.${feature}.enabled=false`);
   await expect
     .poll(() => names(screen.container))
-    .toEqual(["History", "Downloads", "Bookmarks", "Settings"]);
-  expect(screen.container.querySelectorAll(".shelf-rule")).toHaveLength(2);
+    .toEqual(["Ask", "History", "Downloads", "Bookmarks", "Settings"]);
+  expect(screen.container.querySelectorAll(".shelf-rule")).toHaveLength(3);
   for (const feature of ["notes", "tasks", "time"])
     emitNativeEvent("uiCommand", `preference.${feature}.enabled=true`);
   preferences.dispose();
