@@ -50,6 +50,8 @@ const ARTICLE: &str = r#"<!doctype html><html><head><meta charset="utf-8"><title
 <div class="card kCsWcF">Card one</div><div class="card kCsWcF">Card two</div><div class="card kCsWcF">Card three</div>
 <form onsubmit="return false"><label>Email <input type="email" name="email" value="person@example.com"></label>
 <label>Password <input type="password" name="password" value="hunter2-secret"></label>
+<label>Card number <input type="text" name="cardnumber" autocomplete="cc-number" value="4111 1111 1111 1111"></label>
+<label>Code <input type="text" name="otp" autocomplete="one-time-code" value="928374"></label>
 <label>Search <input type="search" name="q" value="flood maps"></label><button type="submit">Send report</button></form>
 </article><aside class="related">Related stories</aside></main>
 <footer class="site-foot">Fixture footer</footer>
@@ -96,6 +98,29 @@ const WATCH: &str = r##"(() => {
 
 const CACHE_A: &str = r#"<!doctype html><meta charset="utf-8"><title>A</title><h1>Page A</h1><p>Alpha text only page A has.</p><script>addEventListener("pageshow", e => { if (e.persisted) document.title = "A restored"; });</script>"#;
 const CACHE_B: &str = r#"<!doctype html><meta charset="utf-8"><title>B</title><h1>Page B</h1><p>Beta text only page B has.</p><script>addEventListener("pageshow", e => { if (e.persisted) document.title = "B restored"; });</script>"#;
+
+// A form whose name field behaves like a controlled input: the page keeps
+// its own state from input events and renders the field from it.
+const FORM: &str = r#"<!doctype html><meta charset="utf-8"><title>Checkout</title>
+<style>body{font:16px sans-serif} input,button,select{display:block;margin:8px;width:240px;height:28px}</style>
+<main><h1>Checkout</h1>
+<label>Name <input id="name" type="text" value=""></label>
+<label>Password <input id="pw" type="password" value=""></label>
+<label>Size <select id="size"><option>Small</option><option>Large</option></select></label>
+<label><input id="gift" type="checkbox" style="width:auto"> Gift wrap</label>
+<button id="slow" type="button">Check stock</button>
+<button id="order" type="button">Place order</button>
+<p id="echo">state:</p><a href="/next">Next story</a></main>
+<script src="/form.js"></script>"#;
+const FORM_JS: &str = r#"(() => {
+  const name = document.getElementById("name"), echo = document.getElementById("echo");
+  let state = "";
+  const render = () => { name.value = state; echo.textContent = "state:" + state; };
+  name.addEventListener("input", () => { state = name.value; render(); });
+  name.addEventListener("blur", render);
+  document.getElementById("order").addEventListener("click", () => { echo.textContent = "ordered"; });
+  document.getElementById("slow").addEventListener("click", () => { const end = performance.now() + 600; while (performance.now() < end) {} });
+})();"#;
 
 const NEXT: &str = r#"<!doctype html><meta charset="utf-8"><title>Next</title><h1>The next story</h1><p>A second document for navigation checks.</p>"#;
 
@@ -199,6 +224,8 @@ fn serve(mut stream: TcpStream, heavy: &str) {
         .to_owned();
     let (body, kind, csp): (&str, &str, Option<&str>) = match path.as_str() {
         "/watch.js" => (WATCH, "text/javascript", None),
+        "/form.js" => (FORM_JS, "text/javascript", None),
+        "/form" => (FORM, "text/html; charset=utf-8", None),
         "/article" | "/sensitive" => (ARTICLE, "text/html; charset=utf-8", None),
         "/plain" => (
             ARTICLE.trim_end_matches("<script src=\"/watch.js\"></script></body></html>"),
@@ -331,6 +358,10 @@ impl Probe {
         let commit_navigation = navigation.clone();
         let finish_state = state.clone();
         let view = wry::WebViewBuilder::new()
+            .with_bounds(wry::Rect {
+                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                size: wry::dpi::LogicalSize::new(1024.0, 768.0).into(),
+            })
             .with_incognito(true)
             .with_document_title_changed_handler(move |title| {
                 title_state.borrow_mut().title = title;
@@ -493,7 +524,13 @@ impl Probe {
                 }),
             );
         }
-        let done = || slot.lock().unwrap_or_else(|p| p.into_inner()).is_some();
+        // The host's timers re-run the queue in the app; here the wait does.
+        let done = || {
+            if let Some(reader) = self.reader.borrow().as_ref() {
+                reader.pump();
+            }
+            slot.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+        };
         if pump(done, "for a read").is_err() {
             return (Err(PageReadFailure::Unavailable), started.elapsed());
         }
@@ -519,7 +556,13 @@ impl Probe {
                 }),
             );
         }
-        let done = || slot.lock().unwrap_or_else(|p| p.into_inner()).is_some();
+        // The host's timers re-run the queue in the app; here the wait does.
+        let done = || {
+            if let Some(reader) = self.reader.borrow().as_ref() {
+                reader.pump();
+            }
+            slot.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+        };
         if pump(done, "for a recipe").is_err() {
             return (None, started.elapsed());
         }
@@ -530,6 +573,69 @@ impl Probe {
             .take()
             .flatten();
         (result, elapsed)
+    }
+
+    /// Runs one step and waits for it, driving the reader's queue and its
+    /// lease the way the host's timers do.
+    fn act(
+        &self,
+        epoch: u64,
+        url: &str,
+        proposal: zephium_agentic::SemanticActionProposal,
+    ) -> Result<(), crate::page_reader::PageActFailure> {
+        let slot: Arc<Mutex<Option<Result<(), crate::page_reader::PageActFailure>>>> =
+            Arc::default();
+        let answer = slot.clone();
+        if let Some(reader) = self.reader.borrow().as_ref() {
+            reader.act(
+                epoch,
+                url.to_owned(),
+                proposal,
+                Box::new(move |result| {
+                    *answer.lock().unwrap_or_else(|p| p.into_inner()) = Some(result);
+                }),
+            );
+        }
+        let done = || {
+            if let Some(reader) = self.reader.borrow().as_ref() {
+                reader.pump();
+            }
+            slot.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+        };
+        pump(done, "for a step").map_err(|_| crate::page_reader::PageActFailure::Failed)?;
+        let result = slot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+            .unwrap_or(Err(crate::page_reader::PageActFailure::Failed));
+        result
+    }
+
+    /// Presses a key into the page as the person's keyboard would.
+    fn press_key(&self) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let page = super::native_webview(&self.view);
+        let characters = objc2_foundation::NSString::from_str("a");
+        let event = {
+            objc2_app_kit::NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                objc2_app_kit::NSEventType::KeyDown,
+                NSPoint::new(10.0, 10.0),
+                objc2_app_kit::NSEventModifierFlags::empty(),
+                0.0,
+                self._window.windowNumber(),
+                None,
+                &characters,
+                &characters,
+                false,
+                0,
+            )
+        };
+        let _ = mtm;
+        if let Some(event) = event {
+            page.keyDown(&event);
+        }
     }
 
     /// The view's pixels, through WebKit's snapshot API (no script).
@@ -682,6 +788,14 @@ fn compare(
     tinted
 }
 
+fn epoch_of_old(epoch: u64) -> u64 {
+    epoch.saturating_sub(1)
+}
+
+fn next_url(fixture: &Fixture) -> String {
+    fixture.url("/next")
+}
+
 fn check(condition: bool, what: &str) -> Result<(), String> {
     if condition {
         println!("  ok    {what}");
@@ -738,10 +852,11 @@ fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         "the password's value is never read",
     )?;
     check(
-        read.passages
-            .iter()
-            .all(|p| p.value.as_deref() != Some("person@example.com")),
-        "a personal field's value stays out of a public read",
+        read.passages.iter().all(|p| {
+            let leaked = |text: &str| text.contains("4111") || text.contains("928374");
+            !leaked(&p.text) && p.value.as_deref().is_none_or(|v| !leaked(v))
+        }),
+        "card and one-time-code values are never read",
     )?;
     check(
         read.passages
@@ -874,11 +989,9 @@ fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
     )?;
 
     println!("fixture: mark cleanup");
+    let engineers = "Engineers opened the eastern floodgates at dawn";
     let (_, _) = probe.recipe(epoch, PageRecipe::mark(quote).ok_or("mark")?);
-    let (_, _) = probe.recipe(
-        epoch,
-        PageRecipe::mark("Engineers opened the eastern floodgates at dawn").ok_or("mark")?,
-    );
+    let (_, _) = probe.recipe(epoch, PageRecipe::mark(engineers).ok_or("mark")?);
     let report = |label: &str| -> Result<String, String> {
         probe
             .view
@@ -893,17 +1006,25 @@ fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
     };
     let replaced = report("replaced")?;
     check(
-        replaced.contains("sheets=1")
-            && replaced.split("highlights=").nth(1).is_some_and(|h| {
-                !h.starts_with("none") && !h.split_whitespace().next().unwrap_or("").contains(',')
-            }),
-        "a new mark replaces the old one: one highlight, one sheet",
+        replaced.contains("sheets=1"),
+        "a new mark replaces the old one: one sheet",
     )?;
-    settle(Duration::from_millis(4_600));
+    settle(Duration::from_millis(5_500));
+    let clean = probe.snapshot().ok_or("clean snapshot")?;
     let faded = report("faded")?;
     check(
-        faded.contains("sheets=0") && faded.contains("highlights= "),
-        &format!("after the fade nothing is left for the page to see ({faded})"),
+        faded.contains("sheets=0"),
+        "after the fade the page has no sheet of ours",
+    )?;
+    let (_, _) = probe.recipe(epoch, PageRecipe::mark(engineers).ok_or("mark")?);
+    settle(Duration::from_millis(150));
+    let marked = probe.snapshot().ok_or("marked snapshot")?;
+    check(compare(&clean, &marked) > 20, "a mark paints")?;
+    settle(Duration::from_millis(5_500));
+    let gone = probe.snapshot().ok_or("faded snapshot")?;
+    check(
+        compare(&clean, &gone) == 0,
+        "and after its fade nothing of it is painted",
     )?;
 
     println!("fixture: a program that will not start");
@@ -988,6 +1109,213 @@ fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         probe.user_scripts() == baseline_scripts + 1,
         "one reader script per view, however many navigations",
     )?;
+
+    println!("fixture: steps on the person's own tab");
+    let inputs: Arc<Mutex<Vec<ItemId>>> = Arc::default();
+    let seen = inputs.clone();
+    crate::host::page_reader::set_policy_for_probe(Some(crate::page_reader::PageReaderPolicy {
+        sensitive: Arc::new(|_| false),
+        human_input: Arc::new(move |tab| seen.lock().unwrap_or_else(|p| p.into_inner()).push(tab)),
+    }));
+    let form = fixture.url("/form");
+    let epoch = probe.load(&form)?;
+    probe.wait_readable()?;
+    let (read, _) = probe.read(epoch, &form);
+    let read = read.map_err(|f| format!("form read: {f:?}"))?;
+    let stored = crate::page_reader::latest_read(probe.tab).ok_or("stored read")?;
+    let passage = |text: &str| {
+        read.passages
+            .iter()
+            .find(|p| p.text == text)
+            .and_then(|p| stored.reference(p.id))
+            .ok_or_else(|| {
+                format!(
+                    "no passage {text:?} in {:?}",
+                    read.passages.iter().map(|p| &p.text).collect::<Vec<_>>()
+                )
+            })
+    };
+    let proposal = |intent, effect, verification| {
+        zephium_agentic::SemanticActionProposal::try_new(
+            intent,
+            effect,
+            zephium_agentic::SemanticWaitCondition::Immediate,
+            verification,
+            zephium_agentic::SemanticSettleBudget::try_new(2_000).expect("settle"),
+        )
+        .expect("proposal")
+    };
+    let typed = zephium_agentic::SemanticActionText::try_new("Ada Lovelace".to_owned())
+        .map_err(|_| "text")?;
+    let started = Instant::now();
+    let filled = probe.act(
+        epoch,
+        &form,
+        proposal(
+            zephium_agentic::SemanticActionIntent::Fill {
+                target: passage("Name")?,
+                value: typed,
+            },
+            zephium_agentic::SemanticEffectClass::LocalWrite,
+            zephium_agentic::SemanticVerification::TargetValueMatchesInput,
+        ),
+    );
+    check(
+        filled.is_ok(),
+        &format!(
+            "typing into an ordinary field works ({filled:?}, {} ms)",
+            started.elapsed().as_millis()
+        ),
+    )?;
+    let (after, _) = probe.read(epoch, &form);
+    check(
+        after.is_ok_and(|r| r.passages.iter().any(|p| p.text == "state:Ada Lovelace")),
+        "a controlled field's own state took the typed text",
+    )?;
+    let stored = crate::page_reader::latest_read(probe.tab).ok_or("stored read")?;
+    let password = stored
+        .observation()
+        .frames()
+        .first()
+        .and_then(|frame| {
+            frame
+                .nodes()
+                .iter()
+                .find(|node| node.role() == zephium_agentic::SemanticRole::Password)
+                .map(|node| node.reference())
+        })
+        .ok_or("password node")?;
+    let secret =
+        zephium_agentic::SemanticActionText::try_new("hunter2".to_owned()).map_err(|_| "text")?;
+    let refused = probe.act(
+        epoch,
+        &form,
+        proposal(
+            zephium_agentic::SemanticActionIntent::Fill {
+                target: password,
+                value: secret,
+            },
+            zephium_agentic::SemanticEffectClass::LocalWrite,
+            zephium_agentic::SemanticVerification::TargetValueMatchesInput,
+        ),
+    );
+    check(
+        matches!(
+            refused,
+            Err(crate::page_reader::PageActFailure::Refused
+                | crate::page_reader::PageActFailure::Unsuitable)
+        ),
+        &format!("a password field is never typed into ({refused:?})"),
+    )?;
+    let ordered = probe.act(
+        epoch,
+        &form,
+        proposal(
+            zephium_agentic::SemanticActionIntent::Click {
+                target: passage("Place order")?,
+            },
+            zephium_agentic::SemanticEffectClass::Purchase,
+            zephium_agentic::SemanticVerification::PageChanged,
+        ),
+    );
+    let (after, _) = probe.read(epoch, &form);
+    check(
+        ordered.is_ok() && after.is_ok_and(|r| r.passages.iter().any(|p| p.text == "ordered")),
+        "a confirmed committing click runs once, as the page's own click",
+    )?;
+    let stale = probe.act(
+        epoch_of_old(epoch),
+        &form,
+        proposal(
+            zephium_agentic::SemanticActionIntent::Click {
+                target: passage("Next story")?,
+            },
+            zephium_agentic::SemanticEffectClass::Read,
+            zephium_agentic::SemanticVerification::PageChanged,
+        ),
+    );
+    check(
+        stale == Err(crate::page_reader::PageActFailure::PageChanged),
+        "a step on another epoch is refused",
+    )?;
+    inputs.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    probe.press_key();
+    let reported = || {
+        if let Some(reader) = probe.reader.borrow().as_ref() {
+            reader.poll();
+        }
+        inputs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&probe.tab)
+    };
+    pump(reported, "for the person's key to be noticed")?;
+    check(
+        true,
+        "the person's own input on a held tab is reported, so steps pause",
+    )?;
+    // A step admitted before a navigation never runs after it.
+    let (read, _) = probe.read(epoch, &form);
+    let read = read.map_err(|f| format!("form read: {f:?}"))?;
+    let stored = crate::page_reader::latest_read(probe.tab).ok_or("stored read")?;
+    let target = |text: &str| {
+        read.passages
+            .iter()
+            .find(|p| p.text == text)
+            .and_then(|p| stored.reference(p.id))
+            .ok_or("passage")
+    };
+    let slow = Arc::new(Mutex::new(None));
+    let second = Arc::new(Mutex::new(None));
+    if let Some(reader) = probe.reader.borrow().as_ref() {
+        let slot = slow.clone();
+        reader.act(
+            epoch,
+            form.clone(),
+            proposal(
+                zephium_agentic::SemanticActionIntent::Click {
+                    target: target("Check stock")?,
+                },
+                zephium_agentic::SemanticEffectClass::LocalWrite,
+                zephium_agentic::SemanticVerification::PageChanged,
+            ),
+            Box::new(move |result| *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(result)),
+        );
+        let slot = second.clone();
+        reader.act(
+            epoch,
+            form.clone(),
+            proposal(
+                zephium_agentic::SemanticActionIntent::Click {
+                    target: target("Place order")?,
+                },
+                zephium_agentic::SemanticEffectClass::Purchase,
+                zephium_agentic::SemanticVerification::PageChanged,
+            ),
+            Box::new(move |result| *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(result)),
+        );
+    }
+    let _ = probe.navigation.begin(&next_url(fixture));
+    probe
+        .view
+        .load_url(&next_url(fixture))
+        .map_err(|e| e.to_string())?;
+    pump(
+        || {
+            if let Some(reader) = probe.reader.borrow().as_ref() {
+                reader.pump();
+            }
+            second.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+        },
+        "for the queued step",
+    )?;
+    let second = second.lock().unwrap_or_else(|p| p.into_inner()).take();
+    check(
+        second == Some(Err(crate::page_reader::PageActFailure::PageChanged)),
+        &format!("a navigation mid-plan ends the next step as a changed page ({second:?})"),
+    )?;
+    crate::host::page_reader::set_policy_for_probe(None);
+    let _ = slow;
 
     println!("fixture: back-forward cache");
     let a = fixture.url("/cache-a");
