@@ -521,6 +521,8 @@ pub(crate) struct EngineHost {
     /// views already open without touching them.
     focus_gate: focus::SharedFocusGate,
     blocker_sites: HashMap<ProfileId, content_styles::SitePreferencesSlot>,
+    /// Ask panel page styles: validated CSS per registrable site.
+    page_styles: HashMap<ProfileId, HashMap<String, Arc<str>>>,
     picker: Option<Arc<element_picker::PickerSession>>,
     next_picker: u64,
     // Declarative native objects are content-addressed by the SHA-256 of the

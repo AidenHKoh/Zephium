@@ -1935,6 +1935,11 @@ impl Engine for WebviewEngine {
             });
         });
     }
+    fn set_page_style(&self, profile: ProfileId, site: String, css: Arc<str>) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.set_page_style(profile, site, css));
+        });
+    }
     fn download_call(
         &self,
         partition: Partition,

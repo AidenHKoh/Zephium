@@ -20,7 +20,7 @@
   const token = Array.from(random, n => n.toString(16).padStart(8, "0")).join("");
   const slots = new Map();
   const inlineOverrides = new Map();
-  const allowed = new Set(["subscription", "personal", "preview"]);
+  const allowed = new Set(["subscription", "personal", "preview", "page-style"]);
   let picker = null;
   // Elements hidden the moment they are picked, until the saved personal
   // sheet (or its absence after a failed save) takes over.

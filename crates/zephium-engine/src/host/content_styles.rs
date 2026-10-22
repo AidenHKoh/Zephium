@@ -77,6 +77,7 @@ pub(super) struct StyleKey {
     pub(super) url: String,
     pub(super) subscription: Option<ContentRuleDigest>,
     personal: Option<ContentRuleDigest>,
+    page_style: Option<String>,
     paused: bool,
 }
 
@@ -172,6 +173,7 @@ struct Delivery {
     permit: EventPermit,
     provider: Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>,
     personal: Arc<str>,
+    page_style: Arc<str>,
 }
 
 impl Drop for Delivery {
@@ -195,6 +197,34 @@ struct DocumentIdentity {
 }
 
 impl EngineHost {
+    /// Replaces the Ask panel style of one registrable site; empty removes it.
+    /// The CSS was validated and re-serialized by the page-assist core.
+    pub(crate) fn set_page_style(&mut self, profile: ProfileId, site: String, css: Arc<str>) {
+        if self.erasure_tombstones.contains(&profile) || site.is_empty() || css.len() > 16 * 1024 {
+            return;
+        }
+        let styles = self.page_styles.entry(profile).or_default();
+        if css.is_empty() {
+            styles.remove(&site);
+        } else if styles.len() < 4096 || styles.contains_key(&site) {
+            styles.insert(site, css);
+        }
+        self.refresh_profile_document_styles(profile);
+    }
+
+    /// The page style for `url`: the stored site its host is, or ends in.
+    fn page_style_for(&self, profile: ProfileId, url: &str) -> Arc<str> {
+        let styles = self.page_styles.get(&profile);
+        let host = url::Url::parse(url).ok().and_then(|url| {
+            url.host_str()
+                .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+        });
+        styles
+            .zip(host)
+            .and_then(|(styles, host)| style_for_host(styles, &host).cloned())
+            .unwrap_or_else(|| Arc::from(""))
+    }
+
     pub(crate) fn set_blocker_site_preferences(
         &mut self,
         profile: ProfileId,
@@ -299,11 +329,13 @@ impl EngineHost {
             .get(&profile)
             .and_then(|p| p.applied.as_ref())
             .and_then(|p| p.cosmetics.clone());
+        let page_style = self.page_style_for(profile, &url);
         let key = StyleKey {
             epoch,
             url: url.clone(),
             subscription: provider.as_ref().map(|p| p.fingerprint()),
             personal: site_policy.map(|p| p.fingerprint),
+            page_style: (!page_style.is_empty()).then(|| css_digest(&page_style)),
             paused,
         };
         let state = view.content_styles.clone();
@@ -332,7 +364,10 @@ impl EngineHost {
             .unwrap_or_else(|| Arc::from(""));
         let sequence = {
             let status = state.lock();
-            if (paused || provider.is_none()) && personal.is_empty() && status.applied_key.is_none()
+            if (paused || provider.is_none())
+                && personal.is_empty()
+                && page_style.is_empty()
+                && status.applied_key.is_none()
             {
                 return;
             }
@@ -372,6 +407,7 @@ impl EngineHost {
             key,
             provider: if paused { None } else { provider },
             personal,
+            page_style,
             navigation: view.navigation.clone(),
             permit: view.event_permit.clone(),
         };
@@ -458,6 +494,7 @@ impl EngineHost {
                 &fingerprint,
                 &plan,
                 &delivery.personal,
+                &delivery.page_style,
                 delivery.reuse,
             );
             if script.len() > 4 * 1024 * 1024 {
@@ -548,6 +585,7 @@ fn document_style_script(
     fingerprint: &str,
     plan: &zephium_core::blocker::DocumentStylePlan,
     personal: &str,
+    page_style: &str,
     reuse: bool,
 ) -> String {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -572,6 +610,8 @@ fn document_style_script(
         exceptions,
         css_digest(personal),
         personal,
+        css_digest(page_style),
+        page_style,
     ]);
     let subscription = if reuse {
         "a.reuseSubscription(p[0],p[1],p[2],p[3])"
@@ -579,8 +619,26 @@ fn document_style_script(
         "a.subscription(p[0],p[1],p[2],p[3],p[4],p[5],p[6])"
     };
     format!(
-        "((p)=>{{const a=globalThis.__zephium_content_style_v1__;if(!a)return false;const s={subscription};const u=a.apply('personal',p[0],p[1],p[2],p[7],p[8]);return s===true&&u===true;}})({arguments})"
+        "((p)=>{{const a=globalThis.__zephium_content_style_v1__;if(!a)return false;const s={subscription};const u=a.apply('personal',p[0],p[1],p[2],p[7],p[8]);const v=a.apply('page-style',p[0],p[1],p[2],p[9],p[10]);return s===true&&u===true&&v===true;}})({arguments})"
     )
+}
+
+/// The style stored for `host` itself or the nearest site it belongs to;
+/// never a bare top-level domain.
+fn style_for_host<'a>(
+    styles: &'a std::collections::HashMap<String, Arc<str>>,
+    host: &str,
+) -> Option<&'a Arc<str>> {
+    let mut candidate = host;
+    loop {
+        if let Some(css) = styles.get(candidate) {
+            return Some(css);
+        }
+        match candidate.split_once('.') {
+            Some((_, rest)) if rest.contains('.') => candidate = rest,
+            _ => return None,
+        }
+    }
 }
 
 fn css_digest(css: &str) -> String {
@@ -632,15 +690,18 @@ mod tests {
             subscription: None,
         };
         let fingerprint = "b".repeat(64);
-        let full = document_style_script(&identity, 1, &fingerprint, &plan, "", false);
+        let full = document_style_script(&identity, 1, &fingerprint, &plan, "", "", false);
         let reuse = document_style_script(
             &identity,
             2,
             &fingerprint,
             &plan,
             ".personal{display:none!important}",
+            "body{color:#eee}\n",
             true,
         );
+        assert!(reuse.contains("a.apply('page-style',p[0],p[1],p[2],p[9],p[10])"));
+        assert!(reuse.contains("body{color:#eee}"));
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         assert!(full.len() < 1024);
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -649,6 +710,29 @@ mod tests {
         assert!(!reuse.contains(".site-ad"));
         assert!(reuse.contains(".personal"));
         assert!(reuse.contains("reuseSubscription"));
+    }
+    #[test]
+    fn page_styles_follow_the_site_and_never_a_bare_suffix() {
+        let styles: std::collections::HashMap<String, Arc<str>> = [
+            ("wikipedia.org".to_owned(), Arc::from("a{}")),
+            ("example.co.uk".to_owned(), Arc::from("b{}")),
+        ]
+        .into();
+        for (host, expected) in [
+            ("wikipedia.org", Some("a{}")),
+            ("en.wikipedia.org", Some("a{}")),
+            ("evilwikipedia.org", None),
+            ("wikipedia.org.evil.example", None),
+            ("news.example.co.uk", Some("b{}")),
+            ("other.co.uk", None),
+            ("org", None),
+        ] {
+            assert_eq!(
+                style_for_host(&styles, host).map(|css| &**css),
+                expected,
+                "{host}"
+            );
+        }
     }
     #[test]
     fn a_settled_delivery_releases_the_lock_before_redelivering() {
@@ -683,6 +767,7 @@ mod tests {
             url: "https://example.com/".into(),
             subscription: None,
             personal: None,
+            page_style: None,
             paused: false,
         };
         let state = DocumentStyleState::default();

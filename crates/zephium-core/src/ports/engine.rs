@@ -696,6 +696,10 @@ pub trait Engine {
     ) {
         completion.finish(false);
     }
+    /// Replaces the Ask panel page style of one registrable site in
+    /// `profile`; an empty sheet removes it. The CSS must come from the
+    /// page-assist validator, never from a page or a model directly.
+    fn set_page_style(&self, _profile: ProfileId, _site: String, _css: Arc<str>) {}
     /// Browser-owned file actions. Only trusted Shell admission supplies the
     /// profile partition; the caller supplies IDs, never filesystem paths.
     fn download_call(

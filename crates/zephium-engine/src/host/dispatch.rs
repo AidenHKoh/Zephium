@@ -428,6 +428,7 @@ pub(crate) fn install(
             blocker_statistics: HashMap::new(),
             focus_gate: Default::default(),
             blocker_sites: HashMap::new(),
+            page_styles: HashMap::new(),
             picker: None,
             next_picker: 0,
             declarative_content_policy_cache: HashMap::new(),
