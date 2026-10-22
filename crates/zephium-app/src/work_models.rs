@@ -75,6 +75,11 @@ pub enum WorkCallSource {
         work: String,
     },
     Voice,
+    /// One Ask panel turn, so its charge can be shown under the answer.
+    Page {
+        tab: String,
+        turn: u32,
+    },
 }
 
 /// A signed-in Zephium Cloud session, installed by the sign-in flow.

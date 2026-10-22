@@ -20,6 +20,8 @@ pub enum CallSource {
         work: String,
     },
     Voice,
+    /// The Ask panel; which page is never kept.
+    Page,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -45,7 +47,7 @@ fn valid(id: &str, source: &CallSource) -> bool {
     plain(id)
         && match source {
             CallSource::Task { profile, work } => plain(profile) && plain(work),
-            CallSource::Voice => true,
+            CallSource::Voice | CallSource::Page => true,
         }
 }
 

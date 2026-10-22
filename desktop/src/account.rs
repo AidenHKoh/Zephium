@@ -173,6 +173,7 @@ pub(crate) struct AccountRequestV1 {
 pub(crate) enum AccountCallSourceV1 {
     Task { profile: String, work: String },
     Voice,
+    Page,
 }
 
 impl From<CallSource> for AccountCallSourceV1 {
@@ -180,6 +181,7 @@ impl From<CallSource> for AccountCallSourceV1 {
         match source {
             CallSource::Task { profile, work } => Self::Task { profile, work },
             CallSource::Voice => Self::Voice,
+            CallSource::Page => Self::Page,
         }
     }
 }
@@ -478,6 +480,7 @@ mod hosted {
                         work: work.clone(),
                     },
                     WorkCallSource::Voice => CallSource::Voice,
+                    WorkCallSource::Page { .. } => CallSource::Page,
                 },
             );
         }

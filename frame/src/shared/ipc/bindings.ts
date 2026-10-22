@@ -647,7 +647,7 @@ export type AccountAvatarPickV1 =
 /**  Not a still PNG, JPEG or WebP picture that could be read. */
 { kind: "unsupported" } | { kind: "unavailable" };
 
-export type AccountCallSourceV1 = { kind: "task"; profile: string; work: string } | { kind: "voice" };
+export type AccountCallSourceV1 = { kind: "task"; profile: string; work: string } | { kind: "voice" } | { kind: "page" };
 
 /**  The account changed; read it again. */
 export type AccountChanged = {

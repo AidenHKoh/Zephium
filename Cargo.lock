@@ -7818,6 +7818,7 @@ dependencies = [
  "zephium-core",
  "zephium-engine",
  "zephium-ipc",
+ "zephium-page-assist",
  "zephium-store",
 ]
 
