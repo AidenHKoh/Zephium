@@ -161,3 +161,51 @@ pub(crate) async fn page_style_remove(
     let _ = (allowed(&caller, "page_style_remove"), style);
     no_styles(tab)
 }
+
+fn no_profile_styles(profile: String) -> PageStylesAllV1 {
+    PageStylesAllV1 {
+        version: VERSION,
+        profile,
+        sites: Vec::new(),
+    }
+}
+
+/// Every site's page styles in `profile`, for Settings.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn page_styles_all(caller: WebviewWindow, profile: String) -> PageStylesAllV1 {
+    let _ = allowed(&caller, "page_styles_all");
+    no_profile_styles(profile)
+}
+
+/// Turns one of a site's styles on or off from Settings.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn page_style_toggle_for(
+    caller: WebviewWindow,
+    profile: String,
+    site: String,
+    style: String,
+    enabled: bool,
+) -> PageStylesAllV1 {
+    let _ = (
+        allowed(&caller, "page_style_toggle_for"),
+        site,
+        style,
+        enabled,
+    );
+    no_profile_styles(profile)
+}
+
+/// Deletes one of a site's styles from Settings.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn page_style_remove_for(
+    caller: WebviewWindow,
+    profile: String,
+    site: String,
+    style: String,
+) -> PageStylesAllV1 {
+    let _ = (allowed(&caller, "page_style_remove_for"), site, style);
+    no_profile_styles(profile)
+}

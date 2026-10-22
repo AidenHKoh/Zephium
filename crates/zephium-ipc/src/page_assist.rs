@@ -107,9 +107,11 @@ pub enum PageAssistFaultV1 {
     NoAnswer,
     /// A page step did not take effect as expected.
     StepFailed,
-    /// The model call failed.
+    /// The model call failed. `retry_after_ms` is set for `rate_limited`
+    /// (and hosted limits) when the provider or server said when to retry.
     Model {
         fault: WorkModelFaultV1,
+        retry_after_ms: Option<u32>,
     },
     Unavailable,
 }
@@ -381,11 +383,40 @@ pub struct PageStylesV1 {
     pub styles: Vec<PageStyleV1>,
 }
 
+/// One site's styles, for the Settings manager.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct PageSiteStylesV1 {
+    pub site: String,
+    pub styles: Vec<PageStyleV1>,
+}
+
+/// Every site's styles in a profile, sites in name order.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct PageStylesAllV1 {
+    pub version: u16,
+    pub profile: String,
+    pub sites: Vec<PageSiteStylesV1>,
+}
+
 /// One change to a tab's thread, in `seq` order per tab. Apply it to the
 /// matching turn; on `invalidated`, read `page_assist_status` again.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PageAssistEventV1 {
+    /// The first event of every turn: its whole starting snapshot, with the
+    /// question and selection excerpt.
+    Started {
+        turn: Box<PageAssistTurnV1>,
+    },
+    /// The tab committed a navigation; append this divider. Sent for every
+    /// committed navigation of a tab that has a thread; `turn` is the latest
+    /// turn, whose citations (and all earlier ones) are now inert.
+    Divider {
+        site: String,
+        cross_site: bool,
+    },
     Status {
         phase: PageAssistPhaseV1,
     },
@@ -459,6 +490,7 @@ mod tests {
         assert_eq!(json["kind"]["part"]["kind"], "point");
         let fault = serde_json::to_value(PageAssistFaultV1::Model {
             fault: WorkModelFaultV1::DailyLimit,
+            retry_after_ms: None,
         })
         .unwrap();
         assert_eq!(fault["reason"], "model");

@@ -135,6 +135,12 @@ export const commands = {
 	pageStyleToggle: (tab: string, style: string, enabled: boolean) => __TAURI_INVOKE<PageStylesV1>("page_style_toggle", { tab, style, enabled }),
 	/**  Deletes one of the site's styles. */
 	pageStyleRemove: (tab: string, style: string) => __TAURI_INVOKE<PageStylesV1>("page_style_remove", { tab, style }),
+	/**  Every site's page styles in `profile`, for Settings. */
+	pageStylesAll: (profile: string) => __TAURI_INVOKE<PageStylesAllV1>("page_styles_all", { profile }),
+	/**  Turns one of a site's styles on or off from Settings. */
+	pageStyleToggleFor: (profile: string, site: string, style: string, enabled: boolean) => __TAURI_INVOKE<PageStylesAllV1>("page_style_toggle_for", { profile, site, style, enabled }),
+	/**  Deletes one of a site's styles from Settings. */
+	pageStyleRemoveFor: (profile: string, site: string, style: string) => __TAURI_INVOKE<PageStylesAllV1>("page_style_remove_for", { profile, site, style }),
 	/**
 	 *  The account now, refreshing what is stale in the background. Asks no
 	 *  server unless the person is signed in or chose one.
@@ -1903,7 +1909,18 @@ export type PageAssistEntryV1 = { kind: "turn"; turn: PageAssistTurnV1 } |
  *  One change to a tab's thread, in `seq` order per tab. Apply it to the
  *  matching turn; on `invalidated`, read `page_assist_status` again.
  */
-export type PageAssistEventV1 = { type: "status"; phase: PageAssistPhaseV1 } | { type: "part"; part: PageAssistPartV1 } |
+export type PageAssistEventV1 =
+/**
+ *  The first event of every turn: its whole starting snapshot, with the
+ *  question and selection excerpt.
+ */
+{ type: "started"; turn: PageAssistTurnV1 } |
+/**
+ *  The tab committed a navigation; append this divider. Sent for every
+ *  committed navigation of a tab that has a thread; `turn` is the latest
+ *  turn, whose citations (and all earlier ones) are now inert.
+ */
+{ type: "divider"; site: string; cross_site: boolean } | { type: "status"; phase: PageAssistPhaseV1 } | { type: "part"; part: PageAssistPartV1 } |
 /**  A step was added or changed state; replaces the step with its index. */
 { type: "step"; step: PageAssistStepV1 } | { type: "style"; style: PageStyleProposalV1 } |
 /**  Better done in Work; the panel offers "Run in Work". */
@@ -1932,8 +1949,11 @@ export type PageAssistFaultV1 = { reason: "ai_off" } | { reason: "private" } | {
 { reason: "no_answer" } |
 /**  A page step did not take effect as expected. */
 { reason: "step_failed" } |
-/**  The model call failed. */
-{ reason: "model"; fault: WorkModelFaultV1 } | { reason: "unavailable" };
+/**
+ *  The model call failed. `retry_after_ms` is set for `rate_limited`
+ *  (and hosted limits) when the provider or server said when to retry.
+ */
+{ reason: "model"; fault: WorkModelFaultV1; retry_after_ms: number | null } | { reason: "unavailable" };
 
 /**  "Run in Work" result: the new Work's id, or why it did not start. */
 export type PageAssistHandoffV1 = {
@@ -2130,6 +2150,12 @@ export type PageRequestView =
 /**  A new tab the page tried to open; `host` is set when it can be opened. */
 { kind: "popup"; host: string | null };
 
+/**  One site's styles, for the Settings manager. */
+export type PageSiteStylesV1 = {
+	site: string,
+	styles: PageStyleV1[],
+};
+
 /**  A page style the model proposed in a Style turn. */
 export type PageStyleProposalV1 = {
 	/**  The stored style's id once applied; null before. */
@@ -2154,6 +2180,13 @@ export type PageStyleV1 = {
 	id: string,
 	summary: string,
 	enabled: boolean,
+};
+
+/**  Every site's styles in a profile, sites in name order. */
+export type PageStylesAllV1 = {
+	version: number,
+	profile: string,
+	sites: PageSiteStylesV1[],
 };
 
 /**  The styles of the site in a tab. */
