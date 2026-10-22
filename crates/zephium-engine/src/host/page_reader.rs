@@ -41,6 +41,18 @@ pub(super) fn admits(target: &str) -> bool {
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) fn back_forward(slot: &Weak<RefCell<Option<Reader>>>, back_forward: bool) {
+    let Some(slot) = slot.upgrade() else {
+        return;
+    };
+    if let Ok(reader) = slot.try_borrow() {
+        if let Some(reader) = reader.as_ref() {
+            reader.back_forward(back_forward);
+        }
+    };
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn attempt(slot: &Weak<RefCell<Option<Reader>>>, target: &str) {
     let Some(slot) = slot.upgrade() else {
         return;
@@ -53,13 +65,13 @@ pub(super) fn attempt(slot: &Weak<RefCell<Option<Reader>>>, target: &str) {
     };
 }
 
-pub(super) fn commit(slot: &Weak<RefCell<Option<Reader>>>, epoch: u64) {
+pub(super) fn commit(slot: &Weak<RefCell<Option<Reader>>>, epoch: u64, url: &str) {
     let Some(slot) = slot.upgrade() else {
         return;
     };
     if let Ok(reader) = slot.try_borrow() {
         if let Some(reader) = reader.as_ref() {
-            reader.commit(epoch);
+            reader.commit(epoch, url);
         }
     };
 }

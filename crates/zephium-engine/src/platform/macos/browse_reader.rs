@@ -55,11 +55,19 @@ const CHANNEL_HANDLER: &str = "zephiumPageAssistV1";
 const WORLD_PREFIX: &str = "zephium-page-assist-v1-";
 /// A document's script has not received the program yet.
 const BOOT_FRESH: &str = "B1";
-/// A document's script holds the program and waits to serve again.
-const BOOT_INSTANTIATED: &str = "B2";
+/// A document's script holds the program and waits to serve again; the
+/// token native gave it with the program follows.
+const BOOT_INSTANTIATED: &str = "B2:";
+const TOKEN_HEX: usize = 16;
 /// The program could not be instantiated in this document.
 const BOOT_FAILED: &str = "E1";
 const RESTART: &str = "G1";
+/// The program failed to start; pull once more for a retry.
+const RETRY: &str = "Y1";
+/// Instantiation attempts per document before it reads as unavailable.
+const MAX_STARTS: u8 = 2;
+/// Documents whose program token is remembered, for back-forward restores.
+const MAX_DOCUMENTS: usize = 8;
 const STOP: &str = "S1";
 const FIXED_ERROR: &str = "zephium page reader refused";
 const MAX_QUEUED: usize = 8;
@@ -75,6 +83,35 @@ const SERVE: &str = include_str!("page_reader_serve.js");
 
 /// The fixed program a document receives when the person first asks:
 /// the pinned runtime installation, the recipes, and the pull loop.
+/// The program to send, or in the reader's probe one that fails to start.
+fn first_program() -> &'static str {
+    #[cfg(feature = "page-reader-probe")]
+    if probe::take_broken_start() {
+        return "throw 0;";
+    }
+    program()
+}
+
+#[cfg(feature = "page-reader-probe")]
+pub(crate) mod probe {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    static BROKEN_STARTS: AtomicU8 = AtomicU8::new(0);
+
+    /// The next `count` program starts fail, as a page would make them.
+    pub(crate) fn break_starts(count: u8) {
+        BROKEN_STARTS.store(count, Ordering::Release);
+    }
+
+    pub(super) fn take_broken_start() -> bool {
+        BROKEN_STARTS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+    }
+}
+
 pub(crate) fn program() -> &'static str {
     static PROGRAM: OnceLock<String> = OnceLock::new();
     PROGRAM.get_or_init(|| {
@@ -128,8 +165,16 @@ struct Pull {
     /// The committed navigation it belongs to; unknown when it arrived
     /// while a navigation was under way.
     epoch: Option<u64>,
-    /// The document already holds the program.
-    instantiated: bool,
+    /// The token of a document that already holds the program.
+    token: Option<String>,
+}
+
+/// A document that received the program: its token, its address, and the
+/// committed navigation it shows now.
+struct Document {
+    token: String,
+    url: Option<String>,
+    epoch: u64,
 }
 
 struct Channel {
@@ -158,7 +203,14 @@ struct ReaderState {
     listening: bool,
     script: Option<Retained<WKUserScript>>,
     committed: Option<u64>,
-    failed: Option<u64>,
+    committed_url: Option<String>,
+    /// The navigation now under way was a back or forward move.
+    back_forward_pending: bool,
+    /// The last commit was a back or forward move.
+    back_forward: bool,
+    /// Failed program starts in the committed document.
+    starts_failed: Option<(u64, u8)>,
+    documents: VecDeque<Document>,
     pull: Option<Pull>,
     channel: Option<Channel>,
     sequence: u64,
@@ -191,6 +243,13 @@ fn refuse(reply: ReplyBlock) {
         let error = NSString::from_str(FIXED_ERROR);
         reply.call((null_mut(), Retained::as_ptr(&error).cast_mut()));
     }));
+}
+
+fn random_hex() -> String {
+    let state = std::collections::hash_map::RandomState::new();
+    let mut hasher = state.build_hasher();
+    hasher.write_u64(0x544f_4b31);
+    format!("{:016x}", hasher.finish())
 }
 
 fn world_name() -> String {
@@ -227,13 +286,14 @@ fn map_failure(failure: &AgentSemanticRuntimeFailure) -> PageReadFailure {
         AgentSemanticRuntimeFailure::Dispatch(
             AgentSemanticRuntimeDispatchError::NotReady | AgentSemanticRuntimeDispatchError::Busy,
         ) => PageReadFailure::NotReady,
-        AgentSemanticRuntimeFailure::Cancelled
-        | AgentSemanticRuntimeFailure::DocumentReplaced
-        | AgentSemanticRuntimeFailure::Retired => PageReadFailure::PageChanged,
+        AgentSemanticRuntimeFailure::DocumentReplaced | AgentSemanticRuntimeFailure::Retired => {
+            PageReadFailure::PageChanged
+        }
         AgentSemanticRuntimeFailure::Result(SemanticRuntimeResultError::Runtime(
             SemanticRuntimeFault::DocumentLoading,
         )) => PageReadFailure::NotReady,
         AgentSemanticRuntimeFailure::Dispatch(_)
+        | AgentSemanticRuntimeFailure::Cancelled
         | AgentSemanticRuntimeFailure::RendererLost
         | AgentSemanticRuntimeFailure::TimedOut
         | AgentSemanticRuntimeFailure::Transport
@@ -250,12 +310,14 @@ impl ReaderState {
         let Some(epoch) = self.committed else {
             return;
         };
+        // A document whose program would not start reads as unavailable
+        // when asked, never as loading.
         let ready = self.enabled
-            && self.failed != Some(epoch)
-            && (self
-                .pull
-                .as_ref()
-                .is_some_and(|pull| pull.epoch == Some(epoch))
+            && (self.unstartable(epoch)
+                || self
+                    .pull
+                    .as_ref()
+                    .is_some_and(|pull| pull.epoch == Some(epoch))
                 || self
                     .channel
                     .as_ref()
@@ -346,12 +408,53 @@ impl ReaderState {
         }
     }
 
+    fn unstartable(&self, epoch: u64) -> bool {
+        self.starts_failed == Some((epoch, MAX_STARTS))
+    }
+
+    /// Binds a pull that arrived while a navigation was under way, once it
+    /// settled. A document that already holds the program is only the
+    /// committed one when it was committed there, or when a back or forward
+    /// move just restored it at its own address; anything else is stale.
+    fn bind_pull(&mut self) {
+        let (Some(committed), true) = (self.committed, (self.settled)()) else {
+            return;
+        };
+        let Some(pull) = self.pull.as_ref().filter(|pull| pull.epoch.is_none()) else {
+            return;
+        };
+        let bound = match pull.token.as_deref() {
+            None => true,
+            Some(token) => match self.documents.iter_mut().find(|d| d.token == token) {
+                Some(document) if document.epoch == committed => true,
+                Some(document)
+                    if self.back_forward
+                        && document.url.is_some()
+                        && document.url == self.committed_url =>
+                {
+                    document.epoch = committed;
+                    true
+                }
+                _ => false,
+            },
+        };
+        if bound {
+            if let Some(pull) = self.pull.as_mut() {
+                pull.epoch = Some(committed);
+            }
+        } else {
+            self.stop_pull();
+        }
+    }
+
     fn attempt(&mut self, admitted: bool) {
         self.set_script(self.enabled && admitted);
     }
 
-    fn commit(&mut self, epoch: u64) {
+    fn commit(&mut self, epoch: u64, url: &str) {
         self.committed = Some(epoch);
+        self.committed_url = Some(url.to_owned());
+        self.back_forward = std::mem::take(&mut self.back_forward_pending);
         crate::page_reader::publish_commit(self.tab(), epoch);
         if self
             .channel
@@ -360,13 +463,14 @@ impl ReaderState {
         {
             self.stop_channel();
         }
-        match self.pull.as_mut() {
-            // A pull that arrived while this navigation was under way, before
-            // its commit was reported, is this document's.
-            Some(pull) if pull.epoch.is_none() => pull.epoch = Some(epoch),
-            Some(pull) if pull.epoch != Some(epoch) => self.stop_pull(),
-            _ => {}
+        if self
+            .pull
+            .as_ref()
+            .is_some_and(|pull| pull.epoch.is_some_and(|bound| bound != epoch))
+        {
+            self.stop_pull();
         }
+        self.bind_pull();
         self.publish();
     }
 
@@ -376,17 +480,43 @@ impl ReaderState {
             return;
         }
         if body == BOOT_FAILED {
-            self.failed = self.committed;
-            let _ = answer(reply, STOP);
+            // The ask that started it ends unavailable now; the next ask on
+            // this document tries once more, and then no more.
+            let Some(epoch) = self.committed else {
+                let _ = answer(reply, STOP);
+                return;
+            };
+            let failed = match self.starts_failed {
+                Some((bound, count)) if bound == epoch => count.saturating_add(1).min(MAX_STARTS),
+                _ => 1,
+            };
+            self.starts_failed = Some((epoch, failed));
+            if self
+                .channel
+                .as_ref()
+                .is_some_and(|channel| channel.epoch == epoch)
+            {
+                self.stop_channel();
+            }
+            let _ = answer(reply, if failed < MAX_STARTS { RETRY } else { STOP });
             self.publish();
+            return;
+        }
+        let token = body.strip_prefix(BOOT_INSTANTIATED).map(str::to_owned);
+        // A fresh document is always the newest one. A document that already
+        // holds the program never displaces another pull: it may be one being
+        // left, whose loop just ended.
+        if token.is_some() && self.pull.is_some() {
+            let _ = answer(reply, STOP);
             return;
         }
         self.stop_pull();
         self.pull = Some(Pull {
             reply,
-            epoch: self.committed.filter(|_| (self.settled)()),
-            instantiated: body == BOOT_INSTANTIATED,
+            epoch: None,
+            token,
         });
+        self.bind_pull();
         self.publish();
     }
 
@@ -405,15 +535,11 @@ impl ReaderState {
             return Ok(channel.controller.clone());
         }
         self.stop_channel();
-        if self.failed == Some(epoch) {
+        if self.unstartable(epoch) {
             return Err(PageReadFailure::Unavailable);
         }
         let view = self.view.load().ok_or(PageReadFailure::PageChanged)?;
-        if (self.settled)() {
-            if let Some(pull) = self.pull.as_mut().filter(|pull| pull.epoch.is_none()) {
-                pull.epoch = Some(epoch);
-            }
-        }
+        self.bind_pull();
         let Some(pull) = self.pull.take_if(|pull| pull.epoch == Some(epoch)) else {
             return Err(PageReadFailure::NotReady);
         };
@@ -430,15 +556,27 @@ impl ReaderState {
             self.pull = Some(pull);
             return Err(PageReadFailure::Unavailable);
         };
-        let message = if pull.instantiated {
-            RESTART
-        } else {
-            program()
+        // The first answer is a fresh token and the program; the token
+        // names this document when it pulls again.
+        let token = random_hex();
+        let message = match pull.token {
+            Some(_) => RESTART.to_owned(),
+            None => format!("{token}\n{}", first_program()),
         };
-        if !answer(pull.reply, message) {
+        if !answer(pull.reply, &message) {
             controller.cancel();
             remove_handler(&self.controller, &self.world, CHANNEL_HANDLER);
             return Err(PageReadFailure::Unavailable);
+        }
+        if pull.token.is_none() {
+            if self.documents.len() >= MAX_DOCUMENTS {
+                self.documents.pop_front();
+            }
+            self.documents.push_back(Document {
+                token,
+                url: self.committed_url.clone(),
+                epoch,
+            });
         }
         self.channel = Some(Channel {
             controller: controller.clone(),
@@ -515,6 +653,9 @@ impl ReaderState {
                                 },
                             )
                         }
+                        Err(_) if committed_now() != Some(epoch) => {
+                            Err(PageReadFailure::PageChanged)
+                        }
                         Err(failure) => Err(map_failure(&failure)),
                     };
                     done(outcome);
@@ -586,10 +727,11 @@ impl ReaderState {
         }
     }
 
+    /// The script itself is added by the next admitted navigation attempt,
+    /// so a document without a site (a blank spare) never gets it.
     fn enable(&mut self) {
         self.enabled = true;
         self.listen();
-        self.set_script(true);
     }
 
     fn disable(&mut self) {
@@ -661,7 +803,11 @@ impl BrowseReader {
                 listening: false,
                 script: None,
                 committed: None,
-                failed: None,
+                committed_url: None,
+                back_forward_pending: false,
+                back_forward: false,
+                starts_failed: None,
+                documents: VecDeque::new(),
                 pull: None,
                 channel: None,
                 sequence: 0,
@@ -688,10 +834,17 @@ impl BrowseReader {
         }
     }
 
-    pub(crate) fn commit(&self, epoch: u64) {
+    pub(crate) fn commit(&self, epoch: u64, url: &str) {
         if let Ok(mut state) = self.state.try_borrow_mut() {
-            state.commit(epoch);
+            state.commit(epoch, url);
             state.pump();
+        }
+    }
+
+    /// The main-frame navigation about to start is a back or forward move.
+    pub(crate) fn back_forward(&self, back_forward: bool) {
+        if let Ok(mut state) = self.state.try_borrow_mut() {
+            state.back_forward_pending = back_forward;
         }
     }
 
@@ -834,12 +987,18 @@ define_class!(
                 refuse(reply);
                 return;
             };
-            if body.length() > 2 || body.lengthOfBytesUsingEncoding(NSUTF8StringEncoding) > 2 {
+            let limit = BOOT_INSTANTIATED.len() + TOKEN_HEX;
+            if body.length() > limit
+                || body.lengthOfBytesUsingEncoding(NSUTF8StringEncoding) > limit
+            {
                 refuse(reply);
                 return;
             }
             let body = body.to_string();
-            if ![BOOT_FRESH, BOOT_INSTANTIATED, BOOT_FAILED].contains(&body.as_str()) {
+            let token_shaped = body.strip_prefix(BOOT_INSTANTIATED).is_some_and(|token| {
+                token.len() == TOKEN_HEX && token.bytes().all(|b| b.is_ascii_hexdigit())
+            });
+            if body != BOOT_FRESH && body != BOOT_FAILED && !token_shaped {
                 refuse(reply);
                 return;
             }
@@ -871,7 +1030,14 @@ mod tests {
         for forbidden in ["eval(", "document.", "fetch(", "XMLHttpRequest", "import("] {
             assert!(!BOOTSTRAP.contains(forbidden), "{forbidden}");
         }
-        for token in [BOOT_FRESH, BOOT_INSTANTIATED, BOOT_FAILED, RESTART, STOP] {
+        for token in [
+            BOOT_FRESH,
+            BOOT_INSTANTIATED,
+            BOOT_FAILED,
+            RESTART,
+            STOP,
+            RETRY,
+        ] {
             assert!(BOOTSTRAP.contains(&format!("\"{token}\"")), "{token}");
         }
     }

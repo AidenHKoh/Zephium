@@ -1140,6 +1140,8 @@ impl EngineHost {
         #[cfg(target_os = "macos")]
         {
             let replay = replay_safety.clone();
+            #[cfg(feature = "agentic-browser")]
+            let action_reader = Rc::downgrade(&page_reader);
             let auth_tab = id.clone();
             let action_app_link = app_link.clone();
             builder = builder.with_apple_navigation_action_handler(move |target, action| {
@@ -1178,6 +1180,13 @@ impl EngineHost {
                 }
                 if admitted && action.target_is_main_frame == Some(true) && focus_shuts(&target) {
                     return false;
+                }
+                #[cfg(feature = "agentic-browser")]
+                if admitted && action.target_is_main_frame == Some(true) {
+                    super::page_reader::back_forward(
+                        &action_reader,
+                        action.navigation_type == wry::AppleNavigationType::BackForward,
+                    );
                 }
                 if admitted {
                     replay.observe(&target, action);
@@ -1598,6 +1607,7 @@ impl EngineHost {
                         super::page_reader::commit(
                             &load_reader,
                             epoch.presentation_id().into_raw(),
+                            &event.url,
                         );
                         queue_navigation_commit(id, &load_permit, &load_navigation, epoch);
                     }

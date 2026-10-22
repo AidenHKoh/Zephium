@@ -628,7 +628,10 @@ impl BrowseReader {
     /// WebView2 has no document-start piece; the attempt changes nothing.
     pub(crate) fn attempt(&self, _admitted: bool) {}
 
-    pub(crate) fn commit(&self, epoch: u64) {
+    /// Each ask joins a fresh world on WebView2, so restores need nothing.
+    pub(crate) fn back_forward(&self, _back_forward: bool) {}
+
+    pub(crate) fn commit(&self, epoch: u64, _url: &str) {
         if let Ok(mut state) = self.state.try_borrow_mut() {
             state.commit(epoch);
             state.pump();
