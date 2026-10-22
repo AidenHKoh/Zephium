@@ -6333,9 +6333,11 @@ pub fn run() {
                 Projection::PanelOwner(owner) => overlay::update_context(&emit_handle, &owner),
                 Projection::Items(state) => {
                     spaces::follow(&emit_handle, &state);
+                    page_assist::observe_items(&state);
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_ITEMS, &state)
                 }
                 Projection::Tab(tab) => {
+                    page_assist::observe_tab(&tab);
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_TAB, &tab)
                 }
                 Projection::Favicons(favicons) => emit_to_privileged(
@@ -6398,6 +6400,7 @@ pub fn run() {
                         apply_native_material(&emit_handle, value);
                     }
                     if let Some((key, value)) = id.strip_prefix("preference.").and_then(|rest| rest.split_once('=')) {
+                        page_assist::preference_changed(key, value);
                         if material::theme_changed(key, value) {
                             reinstall_native_materials(&emit_handle);
                         }
@@ -6565,6 +6568,8 @@ pub fn run() {
                 );
                 return Err(error.into());
             }
+            #[cfg(feature = "work-product")]
+            page_assist::install(app.handle(), engine.clone(), store.clone());
             notes::install(app.handle(), &data_dir, store.clone(), &shell);
             external_links::adopt(app.handle());
             #[cfg(feature = "work-product")]

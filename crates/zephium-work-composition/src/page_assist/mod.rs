@@ -7,6 +7,7 @@
 
 mod fault;
 pub mod port;
+pub use zephium_page_assist as core;
 mod readout;
 mod turn;
 

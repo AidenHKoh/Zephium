@@ -480,13 +480,27 @@ mod hosted {
                         work: work.clone(),
                     },
                     WorkCallSource::Voice => CallSource::Voice,
-                    WorkCallSource::Page { .. } => CallSource::Page,
+                    WorkCallSource::Page { tab, turn } => {
+                        super::super::page_assist::hosted_sourced(request_id, tab, *turn);
+                        CallSource::Page
+                    }
                 },
             );
         }
         fn recorded(&self, record: LeadCloudRecord) {
             self.0.usage_changed();
+            let per_credit =
+                |service: &Service| service.view().usage.and_then(|usage| usage.credit_units());
             let unsettled = record.unsettled();
+            if let (Some(id), zephium_agentic::lead::LeadCloudAccounting::Settled { charged }) =
+                (&record.request_id, &record.accounting)
+            {
+                super::super::page_assist::hosted_charged(
+                    id,
+                    charged.as_deref().and_then(|units| units.parse().ok()),
+                    per_credit(&self.0),
+                );
+            }
             let Some(id) = record.request_id.filter(|_| unsettled) else {
                 return;
             };
@@ -496,7 +510,17 @@ mod hosted {
                 for wait in RECEIPT_CHECKS {
                     tokio::time::sleep(wait).await;
                     match service.confirm_request(&id).await {
-                        Ok(receipt) if receipt.settled() => return,
+                        Ok(receipt) if receipt.settled() => {
+                            super::super::page_assist::hosted_charged(
+                                &id,
+                                receipt
+                                    .charged
+                                    .as_deref()
+                                    .and_then(|units| units.parse().ok()),
+                                per_credit(&service),
+                            );
+                            return;
+                        }
                         Err(AccountError::SignedOut | AccountError::NotFound) => return,
                         _ => {}
                     }
