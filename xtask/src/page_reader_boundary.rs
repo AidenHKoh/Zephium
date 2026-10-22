@@ -11,6 +11,7 @@ const SERVE: &str = "crates/zephium-engine/src/platform/macos/page_reader_serve.
 const RECIPE: &str = "crates/zephium-engine/src/platform/page_recipe.rs";
 const MACOS_READER: &str = "crates/zephium-engine/src/platform/macos/browse_reader.rs";
 const WINDOWS_READER: &str = "crates/zephium-engine/src/platform/windows/browse_reader.rs";
+const PROTOCOL: &str = "crates/zephium-engine/src/platform/agent_semantic_cdp_protocol.rs";
 const HOST: &str = "crates/zephium-engine/src/host/page_reader.rs";
 const CONSTRUCTION: &str = "crates/zephium-engine/src/host/construction.rs";
 const PUBLIC: &str = "crates/zephium-engine/src/page_reader.rs";
@@ -72,9 +73,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     check_serve(&read(repository, SERVE)?)?;
     check_recipe_grammar(&read(repository, RECIPE)?)?;
     check_macos_reader(&read(repository, MACOS_READER)?)?;
-    if repository.join(WINDOWS_READER).exists() {
-        check_windows_reader(&read(repository, WINDOWS_READER)?)?;
-    }
+    check_windows_reader(
+        &read(repository, WINDOWS_READER)?,
+        &read(repository, PROTOCOL)?,
+    )?;
     check_host(&read(repository, HOST)?, &read(repository, CONSTRUCTION)?)?;
     check_public(&read(repository, PUBLIC)?)?;
     check_runtime_recipe(&read(repository, RUNTIME)?)?;
@@ -269,22 +271,40 @@ fn check_macos_reader(source: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn check_windows_reader(source: &str) -> Result<(), String> {
+fn check_windows_reader(source: &str, protocol: &str) -> Result<(), String> {
+    let whole = compact(source);
+    for header in NATIVE_HEADER {
+        if !whole.contains(header) {
+            return Err(format!("the Windows reader lost {header}"));
+        }
+    }
     let production = compact(production(source));
     for required in [
-        "\"grantUniveralAccess\":false",
-        "\"userGesture\":false",
-        "SEMANTIC_RUNTIME_PROGRAM.cdp_source()",
+        "letunpredictable=windows_core::GUID::new().ok()?.to_u128();",
+        "SemanticWorldName::from_nonce(epoch,unpredictable).ok()",
+        "self.world=next_world_name();",
+        "discovery.create_world_command()",
+        "install_runtime_in_context_command(&context)",
+        "install_page_recipes_in_context_command(context)",
+        "Self::Read{invocation,..}=>invoke_runtime_command(context,invocation).ok(),",
+        "Self::Recipe{recipe,..}=>invoke_page_recipe_command(context,recipe).ok(),",
+        "ifself.in_flight.is_some(){",
+        "if(self.committed_now)()!=Some(epoch)||self.committed!=Some(epoch){op.fail(PageReadFailure::PageChanged);",
+        "if(self.committed_now)()!=Some(current.epoch){returncurrent.serving.fail(PageReadFailure::PageChanged);}",
+        "self.fail_current(PageReadFailure::PageChanged);self.forget_document();",
     ] {
         if !production.contains(required) {
             return Err(format!("the Windows reader lost {required}"));
         }
     }
+    // Every CDP byte comes from the closed protocol module.
     for forbidden in EVALUATION.iter().chain(
         [
-            "ExecuteScript",
+            "json!",
+            "\"userGesture\"",
             "AddScriptToExecuteOnDocumentCreated",
-            "\"worldName\":",
+            "PostWebMessage",
+            "Runtime.evaluate",
             "std::env",
             "println!",
             "eprintln!",
@@ -294,6 +314,20 @@ fn check_windows_reader(source: &str) -> Result<(), String> {
         if production.contains(forbidden) {
             return Err(format!("the Windows reader acquired {forbidden}"));
         }
+    }
+    let protocol = compact(protocol);
+    for required in [
+        "constPAGE_RECIPES_SOURCE:&str=include_str!(\"page_reader_recipes.js\");",
+        "constPAGE_RECIPE_FUNCTION:&str=\"function(encoded){returnglobalThis.__zephiumPageAssistV1.recipe(encoded);}\";",
+        "\"arguments\":[{\"value\":recipe.as_str()}],",
+        ".and_then(|value|recipe.decode(value.as_bytes()))",
+    ] {
+        if !protocol.contains(required) {
+            return Err(format!("the Windows recipe protocol lost {required}"));
+        }
+    }
+    if protocol.contains("\"userGesture\":true") {
+        return Err("the Windows recipe protocol grants user activation".to_owned());
     }
     Ok(())
 }
@@ -315,7 +349,12 @@ fn check_host(host: &str, construction: &str) -> Result<(), String> {
     ) {
         return Err("a private window could receive the page reader".to_owned());
     }
-    if construction.matches("BrowseReader::new(").count() != 1 {
+    if construction.matches("BrowseReader::new(").count() != 2
+        || construction
+            .matches("if!matches!(partition,Partition::Ephemeral(_)){letcommitted=navigation.clone();*page_reader.borrow_mut()=")
+            .count()
+            != 2
+    {
         return Err("the page reader gained a construction path".to_owned());
     }
     Ok(())
