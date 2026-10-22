@@ -36,7 +36,10 @@ mod page_open;
 mod page_ops;
 #[cfg(target_os = "macos")]
 mod page_permissions;
-#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+#[cfg(all(
+    feature = "agentic-browser",
+    any(target_os = "macos", target_os = "windows")
+))]
 pub(crate) mod page_reader;
 mod permits;
 mod profiles;
@@ -238,7 +241,10 @@ struct ObservedView {
     find: Option<crate::platform::imp::FindSession>,
     // Before `view`: the Ask panel's reader removes its scripts and
     // handlers from the view's controller while the view lives.
-    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    #[cfg(all(
+        feature = "agentic-browser",
+        any(target_os = "macos", target_os = "windows")
+    ))]
     page_reader: page_reader::ReaderSlot,
     view: WebView,
     // Keep this after `view`: fields drop in declaration order, so the native

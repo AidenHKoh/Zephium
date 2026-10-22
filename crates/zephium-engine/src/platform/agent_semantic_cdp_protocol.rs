@@ -493,6 +493,84 @@ pub(crate) fn invoke_runtime_command(
     )
 }
 
+/// The Ask panel's fixed recipes, installed beside the runtime in the same
+/// isolated context and reached only through [`invoke_page_recipe_command`].
+const PAGE_RECIPES_SOURCE: &str = include_str!("page_reader_recipes.js");
+const PAGE_RECIPES_INSTALL_SUFFIX: &str = concat!(
+    ";const descriptor=Object.getOwnPropertyDescriptor(globalThis,\"",
+    "__zephiumPageAssistV1",
+    "\");const api=descriptor&&descriptor.value;return descriptor&&",
+    "descriptor.writable===false&&descriptor.configurable===false&&",
+    "Object.isFrozen(api)&&typeof api.recipe===\"function\"?\"I1\":\"F1\";}"
+);
+const PAGE_RECIPE_FUNCTION: &str =
+    "function(encoded){return globalThis.__zephiumPageAssistV1.recipe(encoded);}";
+const MAX_PAGE_RECIPE_PARAMETERS_BYTES: usize = 32 * 1_024;
+const MAX_PAGE_RECIPE_RESPONSE_BYTES: usize = 64 * 1_024;
+
+pub(crate) fn install_page_recipes_in_context_command(
+    context: &SemanticExecutionContext,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    if !PAGE_RECIPES_SOURCE.is_ascii() {
+        return Err(SemanticCdpProtocolError::Limit);
+    }
+    let declaration =
+        format!("{INSTALL_FUNCTION_PREFIX}{PAGE_RECIPES_SOURCE}{PAGE_RECIPES_INSTALL_SUFFIX}");
+    command(
+        FixedSemanticCdpMethod::CallFunctionOn,
+        json!({
+            "functionDeclaration": declaration,
+            "silent": true,
+            "returnByValue": true,
+            "generatePreview": false,
+            "userGesture": false,
+            "awaitPromise": false,
+            "uniqueContextId": context.unique_id(),
+        }),
+        MAX_CONTROL_PARAMETERS_BYTES,
+        MAX_CONTROL_RESPONSE_BYTES,
+    )
+}
+
+pub(crate) fn invoke_page_recipe_command(
+    context: &SemanticExecutionContext,
+    recipe: &crate::platform::page_recipe::PageRecipe,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    command(
+        FixedSemanticCdpMethod::CallFunctionOn,
+        json!({
+            "functionDeclaration": PAGE_RECIPE_FUNCTION,
+            "arguments": [{ "value": recipe.as_str() }],
+            "silent": true,
+            "returnByValue": true,
+            "generatePreview": false,
+            "userGesture": false,
+            "awaitPromise": false,
+            "uniqueContextId": context.unique_id(),
+        }),
+        MAX_PAGE_RECIPE_PARAMETERS_BYTES,
+        MAX_PAGE_RECIPE_RESPONSE_BYTES,
+    )
+}
+
+pub(crate) fn decode_page_recipe_response(
+    recipe: &crate::platform::page_recipe::PageRecipe,
+    response: &str,
+) -> Result<String, SemanticCdpProtocolError> {
+    let object = parse_success_object(response, MAX_PAGE_RECIPE_RESPONSE_BYTES)?;
+    object
+        .get("result")
+        .and_then(Value::as_object)
+        .filter(|result| {
+            result.get("type").and_then(Value::as_str) == Some("string")
+                && !result.contains_key("subtype")
+        })
+        .and_then(|result| result.get("value"))
+        .and_then(Value::as_str)
+        .and_then(|value| recipe.decode(value.as_bytes()))
+        .ok_or(SemanticCdpProtocolError::InvalidResponse)
+}
+
 pub(crate) fn invoke_media_command(
     context: &SemanticExecutionContext,
     invocation: &crate::platform::record_media::MediaInvocation,

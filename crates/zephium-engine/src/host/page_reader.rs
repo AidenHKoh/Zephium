@@ -40,6 +40,7 @@ pub(super) fn admits(target: &str) -> bool {
     policy().is_some_and(|policy| !(policy.sensitive)(target))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn attempt(slot: &Weak<RefCell<Option<Reader>>>, target: &str) {
     let Some(slot) = slot.upgrade() else {
         return;
@@ -213,6 +214,8 @@ impl EngineHost {
         self.with_reader(id, |reader| reader.timeout(operation));
     }
 
+    /// WebView2 keeps nothing running between asks, so only macOS idles.
+    #[cfg(target_os = "macos")]
     pub(crate) fn page_reader_idle(&mut self, id: ItemId) {
         self.with_reader(id, Reader::idle);
     }

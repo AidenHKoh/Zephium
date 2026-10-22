@@ -1743,11 +1743,11 @@ impl WebviewEngine {
     /// none. Off removes every script, handler and channel from every view.
     #[cfg(feature = "agentic-browser")]
     pub fn set_page_reader(&self, policy: Option<page_reader::PageReaderPolicy>) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let _ = self.run(move || {
             host::try_with(move |host| host.set_page_reader(policy));
         });
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let _ = policy;
     }
 
@@ -1762,11 +1762,11 @@ impl WebviewEngine {
             + Send
             + 'static,
     ) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let _ = self.run(move || {
             host::try_with(move |host| host.page_read(tab, epoch, Box::new(done)));
         });
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (tab, epoch);
             done(Err(page_reader::PageReadFailure::Unavailable));
@@ -1781,11 +1781,11 @@ impl WebviewEngine {
         epoch: u64,
         done: impl FnOnce(Option<String>) + Send + 'static,
     ) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let _ = self.run(move || {
             host::try_with(move |host| host.page_selection(tab, epoch, Box::new(done)));
         });
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (tab, epoch);
             done(None);
@@ -1803,11 +1803,11 @@ impl WebviewEngine {
             + Send
             + 'static,
     ) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let _ = self.run(move || {
             host::try_with(move |host| host.page_outline(tab, epoch, Box::new(done)));
         });
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (tab, epoch);
             done(Err(page_reader::PageReadFailure::Unavailable));
@@ -1824,11 +1824,11 @@ impl WebviewEngine {
         quote: String,
         done: impl FnOnce(bool) + Send + 'static,
     ) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let _ = self.run(move || {
             host::try_with(move |host| host.page_highlight(tab, epoch, &quote, Box::new(done)));
         });
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (tab, epoch, quote);
             done(false);

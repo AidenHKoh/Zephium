@@ -169,7 +169,7 @@ struct PendingAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NativeCdpFailure {
+pub(super) enum NativeCdpFailure {
     Native,
     ResponseLimit,
 }
@@ -1739,7 +1739,7 @@ fn same_interface(left: &ICoreWebView2, right: &ICoreWebView2) -> bool {
         .is_some_and(|(left, right)| left.as_raw() == right.as_raw())
 }
 
-fn call_cdp_async(
+pub(super) fn call_cdp_async(
     core: &ICoreWebView2,
     command: FixedSemanticCdpCommand,
     completion: impl FnOnce(Result<String, NativeCdpFailure>) + 'static,

@@ -322,6 +322,69 @@ mod tests {
     }
 
     #[test]
+    fn windows_recipe_calls_are_closed_and_grant_no_gesture() {
+        use crate::platform::agent_semantic_cdp_protocol::{
+            decode_page_recipe_response, decode_root_frame,
+            install_page_recipes_in_context_command, invoke_page_recipe_command,
+            SemanticContextDiscovery, SemanticWorldName,
+        };
+        let world = SemanticWorldName::from_nonce(1, 7).expect("world");
+        let root = decode_root_frame(r#"{"frameTree":{"frame":{"id":"F1"}}}"#).expect("root");
+        let mut discovery = SemanticContextDiscovery::new(world.clone(), root);
+        discovery
+            .record_created_context(r#"{"executionContextId":5}"#)
+            .expect("created");
+        discovery
+            .observe_context_created(&format!(
+                r#"{{"context":{{"id":5,"uniqueId":"u-5","name":"{}","auxData":{{"frameId":"F1","isDefault":false,"type":"isolated"}}}}}}"#,
+                world.as_str()
+            ))
+            .expect("observed");
+        let context = discovery.resolved().expect("resolved").expect("context");
+        let mark = PageRecipe::mark("q").expect("mark");
+        for command in [
+            invoke_page_recipe_command(&context, &mark).expect("invoke"),
+            install_page_recipes_in_context_command(&context).expect("install"),
+        ] {
+            assert_eq!(command.method().as_str(), "Runtime.callFunctionOn");
+            let parameters: serde_json::Value =
+                serde_json::from_str(command.parameters()).expect("json");
+            assert_eq!(parameters["userGesture"], false);
+            assert_eq!(parameters["uniqueContextId"], "u-5");
+        }
+        let parameters: serde_json::Value = serde_json::from_str(
+            invoke_page_recipe_command(&context, &mark)
+                .expect("invoke")
+                .parameters(),
+        )
+        .expect("json");
+        assert_eq!(
+            parameters["functionDeclaration"],
+            "function(encoded){return globalThis.__zephiumPageAssistV1.recipe(encoded);}"
+        );
+        assert_eq!(parameters["arguments"][0]["value"], "Q1:mark:\"q\"");
+        let selection = PageRecipe::selection();
+        assert_eq!(
+            decode_page_recipe_response(
+                &selection,
+                r#"{"result":{"type":"string","value":"T:hello"}}"#
+            )
+            .as_deref(),
+            Ok("hello")
+        );
+        for refused in [
+            r#"{"result":{"type":"string","value":"hello"}}"#,
+            r#"{"result":{"type":"object","value":"T:hello"}}"#,
+            r#"{"exceptionDetails":{},"result":{"type":"string","value":"T:x"}}"#,
+        ] {
+            assert!(
+                decode_page_recipe_response(&selection, refused).is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
     fn outline_keeps_only_well_shaped_entries() {
         let wire = r##"{"n":[
             {"s":"header.site-head","k":"header","c":1,"b":[255,255,255],"f":[17,17,17],"z":16},

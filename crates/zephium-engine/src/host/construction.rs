@@ -669,9 +669,15 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         let navigation_site_scope = site_scope.clone();
         let navigation = NavigationEpochTracker::new();
-        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        #[cfg(all(
+            feature = "agentic-browser",
+            any(target_os = "macos", target_os = "windows")
+        ))]
         let page_reader: super::page_reader::ReaderSlot = Rc::default();
-        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        #[cfg(all(
+            feature = "agentic-browser",
+            any(target_os = "macos", target_os = "windows")
+        ))]
         let load_reader = Rc::downgrade(&page_reader);
         #[cfg(target_os = "macos")]
         super::webext::bind_auth_cleanup_fence(
@@ -1585,7 +1591,10 @@ impl EngineHost {
                     // SourceChanged ordering, authorizes rendered-content
                     // attribution to the final redirect destination.
                     if load_navigation.is_current(epoch) {
-                        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+                        #[cfg(all(
+                            feature = "agentic-browser",
+                            any(target_os = "macos", target_os = "windows")
+                        ))]
                         super::page_reader::commit(
                             &load_reader,
                             epoch.presentation_id().into_raw(),
@@ -1905,6 +1914,21 @@ impl EngineHost {
             !report_failure && !native_popup,
         )
         .ok();
+        // Private windows never get the Ask panel's reader.
+        #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
+        if !matches!(partition, Partition::Ephemeral(_)) {
+            let committed = navigation.clone();
+            *page_reader.borrow_mut() = crate::platform::windows::browse_reader::BrowseReader::new(
+                wry::WebViewExtWindows::webview(&view),
+                id.clone(),
+                super::page_reader::enabled(),
+                Rc::new(move || {
+                    committed
+                        .current_committed()
+                        .map(|epoch| epoch.presentation_id().into_raw())
+                }),
+            );
+        }
         #[cfg(all(unix, not(target_os = "macos")))]
         if let Err(error) = crate::platform::imp::configure(
             &view,
@@ -2219,7 +2243,10 @@ impl EngineHost {
             #[cfg(target_os = "windows")]
             native_terminal_failure: self.native_terminal_failure.clone(),
             find: None,
-            #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+            #[cfg(all(
+                feature = "agentic-browser",
+                any(target_os = "macos", target_os = "windows")
+            ))]
             page_reader,
             view,
             native_resource: None,
