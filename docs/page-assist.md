@@ -13,16 +13,15 @@ Status as of 2026-10-22, branch `feat/work-production`.
 | Desktop wiring | `desktop/src/page_assist.rs`, hooks in `desktop/src/lib.rs` and `desktop/src/account.rs` | Commands call the service; tabs followed from `Projection::Items`/`Projection::Tab`; AI off ends every thread; styles persist per profile and site in app settings (validated again on load); hosted charges reach the answer when the receipt settles. |
 | Page-style slot | `crates/zephium-engine/src/host/content_styles.rs`, `content_style.js` | `Engine::set_page_style(profile, site, css)`; delivered as the `page-style` adopted sheet after `personal`, matched by registrable site including subdomains. |
 | Human-wall survey | `platform/macos/semantic_runtime.rs` | Runs as the closed `H1:survey` pull of the installed runtime; no `evaluateJavaScript` remains in that file. |
+| Browse reader | `crates/zephium-engine/src/page_reader.rs` (types, read projection), `platform/page_recipe.rs` and `page_reader_recipes.js` (closed recipes), `platform/macos/browse_reader.rs`, `platform/windows/browse_reader.rs`, `host/page_reader.rs` | Reads, selection, mark and outline on macOS (qualified headlessly) and Windows (compiled; physical verification pending). `DesktopPage::supported()` is true on both. Boundary: `cargo xtask check-page-reader-boundary`. Probe: `cargo run -p zephium-engine --features page-reader-probe --bin macos-page-reader-probe [-- --measure [--article URL]]`. |
 
 ## What is not done
 
-1. **The live Browse-tab reader (macOS and Windows).** `DesktopPage::supported()` returns false, so every tab reports `unsupported` and no request is ever sent. Everything above it is ready for it.
-2. **`PagePort::outline`** — `DesktopPage` returns `Unavailable`, so style turns restyle generically (plain tags, no outline block). The reader builds an `Outline` (`port::{Outline, OutlineNode, OutlineKind, Rgb}`) from the live page; the service runs `Outline::admit` on whatever it returns, so the adapter need not sanitize.
-3. **Highlight without the find bar** (`PagePort::highlight`) — part of the reader.
-4. **Light actions** (`PagePort::resolve` / `act`) — part of the reader; `resolve` must judge effects with `open_objective::site_work::classify` on the read's `SemanticSnapshot`.
+1. **Windows reader on a real machine.** It compiles and its CDP calls are unit-tested; the physical checks (reads with an extension and DevTools attached, lost context) are not yet run.
+2. **Light actions** (`PagePort::resolve` / `act`) — part of the reader; `resolve` must judge effects with `open_objective::site_work::classify` on the read's `SemanticSnapshot`.
 5. **"Run in Work"** is wired: `desktop/src/page_assist.rs` (`handoff`) creates a Work environment in the tab's Space, adds the tab (`WorkEnvironmentReference::Browser`) and the new objective, and begins a run through `work_product::admit_run` with the panel's own grant and limits (pinned against `frame/src/domain/work/work-model.ts` by a test). A tab not yet listed in a Space cannot be handed off.
 6. **Tab close** is read from the shell's Items projection: a tab its profile and Space listed before and no longer list ends its thread and cancels its turn. A tab moved to another Space is treated the same way.
-7. **Security fixture** for the survey change (a page calling `window.open()` right after our pull answer must stay blocked) is not written; it needs a live WebKit view in a probe.
+7. **Security fixture** for the survey change itself is not written; the reader's probe covers the same pull mechanism (activation and popups stay blocked while the page watches).
 
 ## Reader: chosen design
 
@@ -42,9 +41,20 @@ Founder bar: lighter than protection-off on CPU and RAM; no user activation from
 - Epoch binding: begin/commit document loads from the Browse navigation observer (`host/navigation.rs`, `NavigationEpochTracker`), so a read or step answered for an older document is discarded; the desktop `TabFacts.epoch` must come from the same committed epoch rather than the URL-change counter it uses today.
 - Teardown: navigation (begin load invalidates), tab close (retire), idle (stop the runtime's pull after a few minutes without asks; the bootstrap pull remains), AI off (remove).
 
+#### As built (macOS)
+
+- The fixtures held: under `script-src 'self'`, Trusted Types and `default-src 'self'`, `Function` instantiates the program in the private world; activation and `hasBeenActive` stay false and no popup reaches native while the page polls; the page sees no private global or handler. No fallback was needed.
+- **One private world per view**, not one per document: rotating the world on every navigation attempt cost 2.3–4 ms page-process CPU per load and kept memory. Instead every instantiation gets a fresh channel and handler registration bound to the committed epoch, and a commit removes the old document's handler. The script is added or removed (WebKit's `_removeAllUserScriptsAssociatedWithContentWorld:`, probed) only when the next document's admission changes: sensitive site, AI switch.
+- The program is `installation_source()` + `page_reader_recipes.js` + `page_reader_serve.js`. Recipes are `Q1:selection`, `Q1:outline`, `Q1:mark:<json string>`, carried by one closed pending kind in the pinned runtime (`PendingInvocation::Recipe`) plus `browse_channel`, its constructor export.
+- A pull that arrives while a navigation is under way stays unbound until its commit, so a read can never open the incoming document under the outgoing epoch.
+- The mark is a CSS Custom Highlight under the quote (no element, no reflow; amber tuned for light or dark grounds; eases in, holds 2.6 s, fades). A page can see that a highlight with a random name and one adopted sheet exist while it shows; nothing it can see names the panel.
+- Measured (release build, headless): per page load +0.3–0.5 ms page-process CPU, no measurable load time or memory difference (alternating blocks in one process). First ask 15–23 ms on a short article, 62–70 ms on a 3,000-paragraph page, 86 ms on a live Wikipedia article; later reads 2.5 ms, 28 ms, 36 ms; selection 2 ms; outline 5–30 ms; mark 2–25 ms. Asking adds ~1.5 MB on a short page and 6–20 MB on very long ones while that page stays open; leaving it returns the process to its earlier footprint.
+
 ### Windows — on demand, no document-start piece
 
 Through the closed CDP protocol (`platform/agent_semantic_cdp_protocol.rs`): on first ask, create a fresh, unpredictable isolated world for the current document (`grantUniveralAccess: false`), join its execution-context event, install `cdp_source()` with `Runtime.callFunctionOn` (`userGesture: false`), and invoke reads through the same fixed functions. Coexist with extensions and the person's DevTools: one CDP request at a time, detach cleanly, and treat a lost context as `PageChanged`.
+
+As built: the recipes are installed beside the runtime by one more fixed `callFunctionOn` and called through a fixed one-line function; the pinned Windows runtime only exposes its CDP call helper. Runtime reporting is on only between `Runtime.enable` and the world's context event.
 
 ### Reader output
 
@@ -52,7 +62,6 @@ Through the closed CDP protocol (`platform/agent_semantic_cdp_protocol.rs`): on 
 
 ## Tests still needed
 
-- Reader probe on loopback fixtures (`zephium-terra-macos-probe --loopback-site` pattern): read, CSP fixture, activation fixture, epoch discard after navigation, teardown on close and AI off.
-- Highlight fixture: the quote is scrolled to and marked, the find bar never opens.
+- Back-forward cache restores, discarded-tab restores and warm-spare adoption with the reader (the probe's pages are `no-store`).
 - Step fixtures: a Commit control waits for confirm; a password field is refused; human input pauses.
 - Windows: the same reads through CDP with an extension's content script and DevTools attached.
