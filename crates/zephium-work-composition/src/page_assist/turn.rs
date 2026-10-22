@@ -506,10 +506,11 @@ async fn act(context: &Context, readout: &Readout, answer: &Answer) -> End {
             End::Done(Some(answer.cost.clone()))
         };
     }
-    let requests: Vec<StepRequest> = steps
+    let mut requests: Vec<StepRequest> = steps
         .into_iter()
         .map(|step| StepRequest {
             verb: step.verb,
+            read: readout.read,
             target: step.target,
             direction: step.direction,
             value: step.value,
@@ -527,13 +528,14 @@ async fn act(context: &Context, readout: &Readout, answer: &Answer) -> End {
     context.emit(PageAssistEventV1::Status {
         phase: PageAssistPhaseV1::Acting,
     });
-    for (index, step) in requests.iter().take(last).enumerate() {
+    for index in 0..last {
         if context.took_over.swap(false, Ordering::AcqRel) {
-            match take_over(context, &requests[index..last], &labels[index..]).await {
+            match take_over(context, &mut requests[index..last], &labels[index..]).await {
                 Ok(fresh) => readout = fresh,
                 Err(end) => return skip_rest(context, &requests, &labels, index, last, end),
             }
         }
+        let step = &requests[index];
         let resolved = if admissible(&readout, step) {
             page.resolve(&context.tab, context.epoch, step)
         } else {
@@ -663,7 +665,7 @@ fn skip_rest(
 /// on only if every remaining step still names the same control.
 async fn take_over(
     context: &Context,
-    remaining: &[StepRequest],
+    remaining: &mut [StepRequest],
     labels: &[Option<String>],
 ) -> Result<Readout, End> {
     context.emit(PageAssistEventV1::Paused {
@@ -686,6 +688,10 @@ async fn take_over(
     context.emit(PageAssistEventV1::Status {
         phase: PageAssistPhaseV1::Acting,
     });
+    // The rest of the plan now belongs to the fresh read, and only to it.
+    for step in remaining.iter_mut() {
+        step.read = fresh.read;
+    }
     for (step, label) in remaining.iter().zip(labels) {
         let Some(label) = label else { continue };
         match context

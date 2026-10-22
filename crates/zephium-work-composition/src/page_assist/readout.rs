@@ -190,6 +190,7 @@ mod tests {
     fn protected_and_secret_values_never_reach_the_payload() {
         let readout = Readout {
             epoch: 1,
+            read: 1,
             title: Some("Sign in".into()),
             passages: vec![
                 passage(
@@ -250,6 +251,7 @@ mod tests {
             "example.com",
             &Readout {
                 epoch: 1,
+                read: 1,
                 title: None,
                 passages,
             },
@@ -261,6 +263,7 @@ mod tests {
             "example.com",
             &Readout {
                 epoch: 2,
+                read: 2,
                 title: None,
                 passages: vec![],
             },

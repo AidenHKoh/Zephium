@@ -114,6 +114,9 @@ pub struct Passage {
 pub struct Readout {
     /// The navigation the read belongs to.
     pub epoch: u64,
+    /// This read's identity; steps planned on it carry it, so no other read
+    /// can stand in for it.
+    pub read: u64,
     /// The page's title (untrusted).
     pub title: Option<String>,
     /// Passages in reading order.
@@ -136,7 +139,10 @@ pub enum ReadFailure {
 pub struct StepRequest {
     /// What it does.
     pub verb: Verb,
-    /// The passage of the latest read it acts on.
+    /// The read it was planned on; a step whose read is gone is refused as
+    /// a changed page.
+    pub read: u64,
+    /// The passage of that read it acts on.
     pub target: Option<u16>,
     /// A page scroll with no passage.
     pub direction: Option<Direction>,

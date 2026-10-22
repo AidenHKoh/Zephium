@@ -141,6 +141,8 @@ pub struct PagePassage {
 pub struct PageReadout {
     /// The committed navigation the read belongs to.
     pub epoch: u64,
+    /// This read's identity: steps planned on it name it, and only it.
+    pub read: u64,
     /// The page's title (untrusted).
     pub title: Option<String>,
     /// Passages in reading order.
@@ -247,6 +249,7 @@ pub enum PageActFailure {
 
 /// The read a step is planned on: its passages' nodes, as observed.
 pub struct PageRead {
+    id: u64,
     epoch: u64,
     observation: zephium_agentic::SemanticObservation,
     frame: zephium_agentic::SemanticFrameJoin,
@@ -254,6 +257,11 @@ pub struct PageRead {
 }
 
 impl PageRead {
+    /// Its identity, as its readout carries it.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     /// The committed navigation it belongs to.
     pub fn epoch(&self) -> u64 {
         self.epoch
@@ -278,27 +286,43 @@ impl PageRead {
     }
 }
 
-static READS: Mutex<Option<HashMap<ItemId, Arc<PageRead>>>> = Mutex::new(None);
+/// Reads kept per tab: a plan stays bound to the exact read it was made
+/// on, however many reads of the page happen meanwhile.
+const MAX_KEPT_READS: usize = 8;
 
-fn with_reads<T>(apply: impl FnOnce(&mut HashMap<ItemId, Arc<PageRead>>) -> T) -> T {
+type KeptReads = HashMap<ItemId, std::collections::VecDeque<Arc<PageRead>>>;
+
+static READS: Mutex<Option<KeptReads>> = Mutex::new(None);
+static NEXT_READ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn with_reads<T>(apply: impl FnOnce(&mut KeptReads) -> T) -> T {
     let mut reads = READS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     apply(reads.get_or_insert_with(HashMap::new))
 }
 
-/// The latest read of `tab`'s document, which steps are planned on.
-pub fn latest_read(tab: ItemId) -> Option<Arc<PageRead>> {
-    with_reads(|reads| reads.get(&tab).cloned())
+/// The read of `tab` named `id`, while it is kept. Another read never
+/// stands in for it.
+pub fn planned_read(tab: ItemId, id: u64) -> Option<Arc<PageRead>> {
+    with_reads(|reads| reads.get(&tab)?.iter().find(|read| read.id == id).cloned())
 }
 
-pub(crate) fn publish_read(tab: ItemId, read: PageRead) {
+/// Keeps `read` for the steps that may be planned on it; returns its id.
+pub(crate) fn publish_read(tab: ItemId, mut read: PageRead) -> u64 {
+    let id = NEXT_READ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    read.id = id;
     with_reads(|reads| {
         if reads.len() >= 512 && !reads.contains_key(&tab) {
             reads.clear();
         }
-        reads.insert(tab, Arc::new(read));
+        let kept = reads.entry(tab).or_default();
+        if kept.len() >= MAX_KEPT_READS {
+            kept.pop_front();
+        }
+        kept.push_back(Arc::new(read));
     });
+    id
 }
 
 #[cfg(feature = "agentic-browser")]
@@ -520,6 +544,7 @@ pub(crate) mod read {
         Ok((
             passages.into_iter().map(|(passage, _)| passage).collect(),
             super::PageRead {
+                id: 0,
                 epoch,
                 observation,
                 frame: pending.frame,
@@ -630,6 +655,36 @@ pub(crate) mod read {
                 .expect("heading");
             assert_eq!(heading.role, PageRole::Heading(1));
             assert!(heading.verbatim);
+        }
+
+        #[test]
+        fn a_plan_stays_bound_to_its_own_read() {
+            let context = reader_context().expect("context");
+            let tab = zephium_core::ids::ItemId::generate();
+            let publish = |sequence: u64, text: &str| {
+                let (invocation, pending) =
+                    super::invocation(context, "https://news.example.com/", sequence)
+                        .expect("invocation");
+                let wire = format!(
+                    r#"{{"v":1,"i":{sequence},"g":{sequence},"c":"complete","n":[{{"k":1,"r":"document","o":16}},{{"k":2,"p":0,"r":"paragraph","t":"{text}"}}]}}"#
+                );
+                let (_, kept) =
+                    passages(pending, snapshot_for(&invocation, &wire), 1, 7).expect("read");
+                super::super::publish_read(tab, kept)
+            };
+            let planned = publish(1, "First look");
+            let later = publish(2, "A status refresh");
+            assert_ne!(planned, later);
+            let bound = super::super::planned_read(tab, planned).expect("bound read");
+            assert_eq!(bound.id(), planned);
+            for sequence in 3..=9 {
+                publish(sequence, "More reads");
+            }
+            assert!(
+                super::super::planned_read(tab, planned).is_none(),
+                "a read no longer kept ends its plan as a changed page"
+            );
+            assert!(super::super::planned_read(tab, later).is_some());
         }
 
         fn snapshot_for(invocation: &SemanticRuntimeInvocation, wire: &str) -> SemanticSnapshot {

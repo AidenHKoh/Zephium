@@ -240,6 +240,7 @@ impl EngineHost {
         &mut self,
         id: ItemId,
         epoch: u64,
+        read: u64,
         proposal: zephium_agentic::SemanticActionProposal,
         done: Box<dyn FnOnce(Result<(), PageActFailure>) + Send>,
     ) {
@@ -251,7 +252,7 @@ impl EngineHost {
         let mut done = Some(done);
         let found = self.with_reader(id, |reader| {
             if let Some(done) = done.take() {
-                reader.act(epoch, url, proposal, done);
+                reader.act(epoch, read, url, proposal, done);
             }
         });
         if let (false, Some(done)) = (found, done) {

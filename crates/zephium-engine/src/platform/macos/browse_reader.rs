@@ -158,6 +158,7 @@ enum Op {
     },
     Act {
         epoch: u64,
+        read: u64,
         url: String,
         proposal: zephium_agentic::SemanticActionProposal,
         done: ActDone,
@@ -678,9 +679,10 @@ impl ReaderState {
                                 .max(1);
                             crate::page_reader::read::passages(pending, snapshot, captured, epoch)
                                 .map(|(passages, kept)| {
-                                    crate::page_reader::publish_read(tab, kept);
+                                    let read = crate::page_reader::publish_read(tab, kept);
                                     PageReadout {
                                         epoch,
+                                        read,
                                         title: view.load().and_then(|view| title(&view)),
                                         passages,
                                     }
@@ -720,6 +722,7 @@ impl ReaderState {
             }
             Op::Act {
                 epoch,
+                read,
                 url,
                 proposal,
                 done,
@@ -750,7 +753,7 @@ impl ReaderState {
                         Err(_) => Err(PageActFailure::Failed),
                     };
                     let prepared = current.and_then(|snapshot| {
-                        let stored = crate::page_reader::latest_read(tab)
+                        let stored = crate::page_reader::planned_read(tab, read)
                             .filter(|stored| stored.epoch() == epoch)
                             .ok_or(PageActFailure::PageChanged)?;
                         crate::page_reader::read::person_action(
@@ -1027,6 +1030,7 @@ impl BrowseReader {
     pub(crate) fn act(
         &self,
         epoch: u64,
+        read: u64,
         url: String,
         proposal: zephium_agentic::SemanticActionProposal,
         done: ActDone,
@@ -1049,6 +1053,7 @@ impl BrowseReader {
         };
         self.enqueue(Op::Act {
             epoch,
+            read,
             url,
             proposal,
             done,

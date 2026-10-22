@@ -268,6 +268,7 @@ mod product {
         use zephium_engine::page_reader::{PageFieldKind as Field, PageRole as Engine};
         Readout {
             epoch: read.epoch,
+            read: read.read,
             title: read.title,
             passages: read
                 .passages
@@ -338,8 +339,8 @@ mod product {
         })
     }
 
-    /// Judges a step against the read its question was answered from, which
-    /// must belong to the tab's committed page.
+    /// Judges a step against the exact read it was planned on, which must
+    /// still be kept and belong to the tab's committed page.
     fn plan_step(
         tab: &str,
         epoch: u64,
@@ -349,7 +350,7 @@ mod product {
         if zephium_engine::page_reader::committed_epoch(item) != Some(epoch) {
             return Err(StepFailure::PageChanged);
         }
-        let read = zephium_engine::page_reader::latest_read(item)
+        let read = zephium_engine::page_reader::planned_read(item, step.read)
             .filter(|read| read.epoch() == epoch)
             .ok_or(StepFailure::PageChanged)?;
         let target = match step.target {
@@ -469,7 +470,7 @@ mod product {
                 let planned = plan_step(tab, epoch, step)?;
                 let (sender, receiver) = tokio::sync::oneshot::channel();
                 self.engine
-                    .page_act(item, epoch, planned.proposal, move |result| {
+                    .page_act(item, epoch, step.read, planned.proposal, move |result| {
                         let _ = sender.send(result);
                     });
                 use zephium_engine::page_reader::PageActFailure as Engine;

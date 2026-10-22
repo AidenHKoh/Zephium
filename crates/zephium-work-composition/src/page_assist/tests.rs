@@ -53,7 +53,15 @@ impl PagePort for FakePage {
     ) -> BoxFuture<'a, Result<Readout, ReadFailure>> {
         let mut state = self.lock();
         state.reads += 1;
-        let readout = state.readout.clone().ok_or(ReadFailure::Unavailable);
+        let read = state.reads as u64;
+        let readout = state
+            .readout
+            .clone()
+            .map(|mut readout| {
+                readout.read = read;
+                readout
+            })
+            .ok_or(ReadFailure::Unavailable);
         Box::pin(async move { readout })
     }
     fn outline<'a>(
@@ -298,6 +306,7 @@ fn passage(id: u16, role: Role, text: &str) -> Passage {
 fn readout() -> Readout {
     Readout {
         epoch: 1,
+        read: 0,
         title: Some("Pricing".into()),
         passages: vec![
             passage(1, Role::Heading(1), "Pricing"),
@@ -813,9 +822,15 @@ async fn commit_steps_wait_for_the_person_and_protected_fields_are_refused() {
     let running = tokio::spawn(task);
     wait_for(&h, |events| events.iter().any(|e| matches!(e, PageAssistEventV1::Step { step } if step.state == PageAssistStepStateV1::Confirm))).await;
     assert_eq!(h.page.lock().acted.len(), 1, "the commit step has not run");
+    let planned = h.page.lock().acted[0].read;
+    // Another read of the same page meanwhile (a status refresh) never
+    // stands in for the read the plan was made on.
+    let other = h.page.read(TAB, 1).await.unwrap();
+    assert_ne!(other.read, planned);
     assert!(h.service.decide(TAB, turn, PageAssistDecisionV1::Approve));
     running.await.unwrap();
     assert_eq!(h.page.lock().acted.len(), 2);
+    assert!(h.page.lock().acted.iter().all(|step| step.read == planned));
     assert!(matches!(h.last(), PageAssistEventV1::Done { .. }));
 
     let h = harness(
@@ -895,6 +910,11 @@ async fn human_input_pauses_steps_until_continue() {
         "Continue reads the page again"
     );
     assert_eq!(h.page.lock().acted.len(), 2);
+    assert_eq!(
+        h.page.lock().acted[1].read,
+        (reads + 1) as u64,
+        "the rest of the plan moves to the fresh read"
+    );
     assert!(matches!(h.last(), PageAssistEventV1::Done { .. }));
 }
 

@@ -363,6 +363,7 @@ mod tests {
     fn step(verb: Verb, value: Option<&str>) -> StepRequest {
         StepRequest {
             verb,
+            read: 1,
             target: Some(1),
             direction: None,
             value: value.map(str::to_owned),
@@ -446,6 +447,7 @@ mod tests {
             None,
             &StepRequest {
                 verb: Verb::Scroll,
+                read: 1,
                 target: None,
                 direction: Some(Direction::Down),
                 value: None,

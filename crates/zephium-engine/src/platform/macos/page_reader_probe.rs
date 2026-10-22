@@ -580,6 +580,7 @@ impl Probe {
     fn act(
         &self,
         epoch: u64,
+        read: u64,
         url: &str,
         proposal: zephium_agentic::SemanticActionProposal,
     ) -> Result<(), crate::page_reader::PageActFailure> {
@@ -589,6 +590,7 @@ impl Probe {
         if let Some(reader) = self.reader.borrow().as_ref() {
             reader.act(
                 epoch,
+                read,
                 url.to_owned(),
                 proposal,
                 Box::new(move |result| {
@@ -1122,7 +1124,7 @@ fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
     probe.wait_readable()?;
     let (read, _) = probe.read(epoch, &form);
     let read = read.map_err(|f| format!("form read: {f:?}"))?;
-    let stored = crate::page_reader::latest_read(probe.tab).ok_or("stored read")?;
+    let stored = crate::page_reader::planned_read(probe.tab, read.read).ok_or("stored read")?;
     let passage = |text: &str| {
         read.passages
             .iter()
@@ -1150,6 +1152,7 @@ fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
     let started = Instant::now();
     let filled = probe.act(
         epoch,
+        read.read,
         &form,
         proposal(
             zephium_agentic::SemanticActionIntent::Fill {
@@ -1168,11 +1171,15 @@ fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         ),
     )?;
     let (after, _) = probe.read(epoch, &form);
+    let after = after.map_err(|f| format!("form read: {f:?}"))?;
     check(
-        after.is_ok_and(|r| r.passages.iter().any(|p| p.text == "state:Ada Lovelace")),
+        after
+            .passages
+            .iter()
+            .any(|p| p.text == "state:Ada Lovelace"),
         "a controlled field's own state took the typed text",
     )?;
-    let stored = crate::page_reader::latest_read(probe.tab).ok_or("stored read")?;
+    let stored = crate::page_reader::planned_read(probe.tab, after.read).ok_or("stored read")?;
     let password = stored
         .observation()
         .frames()
@@ -1189,6 +1196,7 @@ fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         zephium_agentic::SemanticActionText::try_new("hunter2".to_owned()).map_err(|_| "text")?;
     let refused = probe.act(
         epoch,
+        after.read,
         &form,
         proposal(
             zephium_agentic::SemanticActionIntent::Fill {
@@ -1207,8 +1215,10 @@ fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         ),
         &format!("a password field is never typed into ({refused:?})"),
     )?;
+    // Planned on the first read although a later one was taken since.
     let ordered = probe.act(
         epoch,
+        read.read,
         &form,
         proposal(
             zephium_agentic::SemanticActionIntent::Click {
@@ -1225,6 +1235,7 @@ fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
     )?;
     let stale = probe.act(
         epoch_of_old(epoch),
+        read.read,
         &form,
         proposal(
             zephium_agentic::SemanticActionIntent::Click {
@@ -1257,7 +1268,7 @@ fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
     // A step admitted before a navigation never runs after it.
     let (read, _) = probe.read(epoch, &form);
     let read = read.map_err(|f| format!("form read: {f:?}"))?;
-    let stored = crate::page_reader::latest_read(probe.tab).ok_or("stored read")?;
+    let stored = crate::page_reader::planned_read(probe.tab, read.read).ok_or("stored read")?;
     let target = |text: &str| {
         read.passages
             .iter()
@@ -1271,6 +1282,7 @@ fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         let slot = slow.clone();
         reader.act(
             epoch,
+            read.read,
             form.clone(),
             proposal(
                 zephium_agentic::SemanticActionIntent::Click {
@@ -1284,6 +1296,7 @@ fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         let slot = second.clone();
         reader.act(
             epoch,
+            read.read,
             form.clone(),
             proposal(
                 zephium_agentic::SemanticActionIntent::Click {

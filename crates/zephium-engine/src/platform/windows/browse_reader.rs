@@ -89,6 +89,7 @@ enum Op {
     },
     Act {
         epoch: u64,
+        read: u64,
         url: String,
         proposal: Box<zephium_agentic::SemanticActionProposal>,
         done: ActDone,
@@ -142,6 +143,7 @@ enum Serving {
     /// First the page as it is now, then the step itself.
     Act {
         observe: Box<zephium_agentic::SemanticRuntimeInvocation>,
+        read: u64,
         proposal: Option<Box<zephium_agentic::SemanticActionProposal>>,
         prepared: Option<Box<Prepared>>,
         done: ActDone,
@@ -506,9 +508,10 @@ impl State {
                         crate::page_reader::read::passages(*pending, snapshot, 1, epoch)
                     })
                     .map(|(passages, kept)| {
-                        crate::page_reader::publish_read(self.tab(), kept);
+                        let read = crate::page_reader::publish_read(self.tab(), kept);
                         PageReadout {
                             epoch,
+                            read,
                             title: title(&self.core),
                             passages,
                         }
@@ -527,6 +530,7 @@ impl State {
             }
             Serving::Act {
                 observe,
+                read,
                 proposal,
                 prepared: None,
                 done,
@@ -534,7 +538,7 @@ impl State {
                 let prepared = decode_invocation_response(&observe, response)
                     .map_err(|_| PageActFailure::Failed)
                     .and_then(|snapshot| {
-                        let stored = crate::page_reader::latest_read(self.tab())
+                        let stored = crate::page_reader::planned_read(self.tab(), read)
                             .filter(|stored| stored.epoch() == epoch)
                             .ok_or(PageActFailure::PageChanged)?;
                         let proposal = proposal.ok_or(PageActFailure::Failed)?;
@@ -564,6 +568,7 @@ impl State {
                             epoch,
                             serving: Serving::Act {
                                 observe,
+                                read,
                                 proposal: None,
                                 prepared: Some(Box::new(prepared)),
                                 done,
@@ -657,6 +662,7 @@ impl State {
                     (Serving::Recipe { recipe, done }, RECIPE_TIMEOUT)
                 }
                 Op::Act {
+                    read,
                     url,
                     proposal,
                     done,
@@ -671,6 +677,7 @@ impl State {
                     (
                         Serving::Act {
                             observe: Box::new(observe),
+                            read,
                             proposal: Some(proposal),
                             prepared: None,
                             done,
@@ -888,6 +895,7 @@ impl BrowseReader {
     pub(crate) fn act(
         &self,
         epoch: u64,
+        read: u64,
         url: String,
         proposal: zephium_agentic::SemanticActionProposal,
         done: ActDone,
@@ -909,6 +917,7 @@ impl BrowseReader {
         };
         self.enqueue(Op::Act {
             epoch,
+            read,
             url,
             proposal: Box::new(proposal),
             done,

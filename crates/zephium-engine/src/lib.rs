@@ -1821,16 +1821,17 @@ impl WebviewEngine {
         &self,
         tab: ItemId,
         epoch: u64,
+        read: u64,
         proposal: zephium_agentic::SemanticActionProposal,
         done: impl FnOnce(Result<(), page_reader::PageActFailure>) + Send + 'static,
     ) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let _ = self.run(move || {
-            host::try_with(move |host| host.page_act(tab, epoch, proposal, Box::new(done)));
+            host::try_with(move |host| host.page_act(tab, epoch, read, proposal, Box::new(done)));
         });
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
-            let _ = (tab, epoch, proposal);
+            let _ = (tab, epoch, read, proposal);
             done(Err(page_reader::PageActFailure::Failed));
         }
     }
