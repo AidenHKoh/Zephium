@@ -99,8 +99,9 @@ fn check_bootstrap(source: &str) -> Result<(), String> {
     for required in [
         "messageHandlers.zephiumPageAssistBootV1",
         "run=Function",
-        "serve=run(a)()",
-        "[serve===null?\"B1\":\"B2\"]",
+        "serve=run(a.slice(i+1))()",
+        "[serve===null?\"B1\":\"B2:\"+token]",
+        "if(r===\"Y1\")pull();",
         "a===\"S1\"",
         "a!==\"G1\"",
     ] {
@@ -217,7 +218,11 @@ fn check_macos_reader(source: &str) -> Result<(), String> {
         "_removeAllUserScriptsAssociatedWithContentWorld",
         "respondsToSelector:sel!(_removeAllUserScriptsAssociatedWithContentWorld:)",
         "browse_channel(",
-        "letmessage=ifpull.instantiated{RESTART}else{program()};",
+        "letmessage=matchpull.token{Some(_)=>RESTART.to_owned(),None=>format!(\"{token}\\n{}\",first_program()),};",
+        "#[cfg(feature=\"page-reader-probe\")]ifprobe::take_broken_start(){return\"throw0;\";}",
+        "constMAX_STARTS:u8=2;",
+        "answer(reply,iffailed<MAX_STARTS{RETRY}else{STOP});",
+        "iftoken.is_some()&&self.pull.is_some(){let_=answer(reply,STOP);return;}",
         "program.push_str(installation);",
         "program.push_str(RECIPES);",
         "program.push_str(SERVE);",
@@ -230,8 +235,10 @@ fn check_macos_reader(source: &str) -> Result<(), String> {
         "Retained::as_ptr(&world)!=Retained::as_ptr(&ivars.world)",
         "!same_view(webview.as_deref())",
         "!same_view(frame_webview.as_deref())",
-        "body.lengthOfBytesUsingEncoding(NSUTF8StringEncoding)>2",
-        "![BOOT_FRESH,BOOT_INSTANTIATED,BOOT_FAILED].contains(&body.as_str())",
+        "letlimit=BOOT_INSTANTIATED.len()+TOKEN_HEX;",
+        "body.lengthOfBytesUsingEncoding(NSUTF8StringEncoding)>limit",
+        "token.len()==TOKEN_HEX&&token.bytes().all(|b|b.is_ascii_hexdigit())",
+        "ifbody!=BOOT_FRESH&&body!=BOOT_FAILED&&!token_shaped{refuse(reply);return;}",
         "ifself.channel.as_ref().is_some_and(|channel|channel.epoch!=epoch){self.stop_channel();}",
         "if(self.committed_now)()!=Some(epoch)||self.committed!=Some(epoch){op.fail(PageReadFailure::PageChanged);",
         "Ok(_)ifcommitted_now()!=Some(epoch)=>{Err(PageReadFailure::PageChanged)}",
@@ -243,7 +250,7 @@ fn check_macos_reader(source: &str) -> Result<(), String> {
     }
     // Native answers a pull only with a fixed token or the fixed program.
     let answers = production.matches("answer(").count();
-    if answers != 7 {
+    if answers != 9 {
         return Err(format!(
             "the macOS reader answers pulls from {answers} places; review each before re-pinning"
         ));
@@ -251,7 +258,7 @@ fn check_macos_reader(source: &str) -> Result<(), String> {
     for answer in [
         "answer(reply,STOP)",
         "answer(pull.reply,STOP)",
-        "answer(pull.reply,message)",
+        "answer(pull.reply,&message)",
     ] {
         if !production.contains(answer) {
             return Err(format!("the macOS reader lost {answer}"));
