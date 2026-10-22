@@ -184,7 +184,11 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "lease.deadline().millis().saturating_sub(now.millis())",
             // 99bf594a: dispatch waits for the runtime to park, then arms the successor;
             // each stage rechecks its own lease authority.
-            "resource.navigation=Some(WorkNavigation{task,timer,deadline,stage:WorkNavigationStage::Parking,})",
+            "resource.navigation=Some(WorkNavigation{task,timer,deadline,stage:WorkNavigationStage::Parking,departure,})",
+            // d4b32b9c: a failed load returns to its departure only under the same
+            // health, deadline and dispatch-lease checks as the original navigation.
+            "iferased||!self.guard.is_healthy()||now>=lease.deadline()||!self.guard.navigation_dispatch_current(&lease,operation,now){returnfalse;}",
+            "gate.arm_departure(source,operation,departure.clone()).is_ok()",
             "WorkNavigationStage::Parking=>self.guard.navigation_dispatch_current(&lease,operation,now)",
             "WorkNavigationStage::Navigating=>self.guard.navigation_completion_current(&lease,operation,now)",
             "view.semantic_runtime_parked()",
@@ -448,7 +452,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "ifretained.is_some()&&(extraction_schema.is_none()||(actions_before_extraction&&!retained.as_ref().is_some_and(|browser|browser.supports_actions()))||subtree_extraction||navigation_target.is_some()||navigation_route.is_some()||(navigation_discovery.is_some()&&!retained.as_ref().is_some_and(|browser|browser.supports_navigation()))||(viewport_screenshot&&!retained.as_ref().is_some_and(|browser|browser.supports_screenshots())))",
             "resources:retained.is_none().then(||WorkContextResources{",
             "ifstate.native.retained.is_some(){journal.emit(AgentWorkEventKind::ContextActive)?;self.start_session()?;self.browser_loop(worker,browser).await?;returnself.close_retained(worker,None).await;}",
-            "state.transport.take().ok_or(AgentWorkFailure::Contract)?",
+            "state.transport.take().ok_or_else(||crate::contract!())?",
             "worker.try_claim_scoped_terminal(class)",
             "claim.commit(delivery,settlement,provider)",
             "state.native.retained.take()",
@@ -803,7 +807,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "construction_pending:true",
             "state.phase==Phase::Constructing&&state.construction_pending&&!state.uncertain",
             // a866eb38: human handoff delivery is a fourth owned callback debt.
-            "!state.construction_pending&&state.retirement_delivery.is_none()&&state.human_delivery.is_none()&&state.reads==0&&state.navigation.is_none()&&state.action.is_none()&&state.callbacks==0&&!state.notification_pending",
+            // ad2ef7cb: an in-flight media delivery also keeps the resource busy.
+            "!state.construction_pending&&state.retirement_delivery.is_none()&&state.human_delivery.is_none()&&!state.media_delivery&&state.reads==0&&state.navigation.is_none()&&state.action.is_none()&&state.callbacks==0&&!state.notification_pending",
             "letremove=guard.construction_returned()",
             "self.admission.work_construction_returned(&guard)",
             "state.phase=Phase::Revoking",
@@ -829,9 +834,9 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "drop(state);letnotified=notification.is_none_or(|notification|notification.notify())",
             "if!notified{state.uncertain=true;",
             "ifexact&&permit_released&&state.retirement_delivery.as_ref()==Some(lease){",
-            "self.permit.release();ifletSome(operation)=human{self.guard.finish_human_delivery(", "ifletSome(lease)=&revocation{self.guard.finish_revocation_delivery(",
+            "self.permit.release();ifmedia{self.guard.finish_media_delivery(callback_returned,self.permit.released&&self.permit.admission.counts().is_some(),);}ifletSome(operation)=human{self.guard.finish_human_delivery(","ifletSome(lease)=&revocation{self.guard.finish_revocation_delivery(",
             "self.permit.released&&self.permit.admission.counts().is_some()",
-            "(construction||revocation.is_some()||human.is_some())&&self.guard.destruction_started()",
+            "(construction||revocation.is_some()||human.is_some()||media)&&self.guard.destruction_started()",
             "Arc::ptr_eq(current,guard)",
             "ingress.rows.len()>=MAX_LIVE_CONTEXTS",
             ">=zephium_agentic::MAX_EXECUTING_CONTEXTS",
@@ -1000,12 +1005,39 @@ const GROUP_HANDLE: [&str; 5] = [
     "pub(crate) fn is_sealed(&self) -> bool {",
 ];
 
+// Admits the retained adapter's private image broker (ad2ef7cb): it holds the
+// port but answers only the two lease-bound screenshot-source calls.
+const IMAGE_BROKER: [&str; 4] = [
+    "struct RetainedImageSource {\n    port: Arc<dyn AgentBrowserPort>,\n    lease: WorkBrowserExecutionLease,\n}",
+    "self.port\n            .work_screenshot_public_candidate(&self.lease, context)",
+    "self.port.claim_work_screenshot_source(&self.lease, image)",
+    "port: self.browser.shared.port.clone(),",
+];
+
 fn adapter_source(path: &str, source: String) -> Result<String, String> {
     if path.ends_with("work_resources_application.rs") {
         admit_group_handle(&source)
+    } else if path.ends_with("work_resources_controller.rs") {
+        admit_image_broker(&source)
     } else {
         Ok(source)
     }
+}
+
+fn admit_image_broker(source: &str) -> Result<String, String> {
+    let mut source = source.to_owned();
+    for item in IMAGE_BROKER {
+        if source.matches(item).count() != 1 {
+            return Err(format!("Work retained image broker drifted: {item}"));
+        }
+        source = source.replacen(item, "", 1);
+    }
+    if source.contains("self.port") {
+        return Err(
+            "Work retained image broker reaches its port beyond the two reviewed calls".into(),
+        );
+    }
+    Ok(source)
 }
 
 fn admit_group_handle(source: &str) -> Result<String, String> {

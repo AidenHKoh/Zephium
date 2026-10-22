@@ -1586,17 +1586,19 @@ fn validate_engine_windows_cookie_transfer(module: &str, source: &str) -> Result
         "Self::start_scoped(source,destination,destination_profile,request.scope().clone(),terminal_deadline,completion,callback_panicked,)",
         "AgentCookiePreflight::try_new(scope.len())",
         "pub(crate)fnstart_scoped(",
-        "pub(crate)fnstart_work_scoped(",
+        "pub(crate)fnstart_work_sync(",
         "fnstart_mode(",
         "work_seed:retained.then(||WorkSeed{existing:Vec::new(),attempted:Vec::new(),})",
         "ifretained{check_work_destination(&shared);}else{start_origin(&shared,0);}",
         "countasusize>MAX_COOKIES_PER_TRANSFER",
         "bytes>MAX_COOKIE_TRANSFER_BYTES",
-        "Ok(identity)if!seed.existing.contains(&identity)=>{}",
+        "Ok(current)if!fields.supersedes(&current)=>continue,",
         "seed.attempted.push(cookie.clone());",
         "rollback_work_seed(shared,failure,stats);",
-        "destination.DeleteCookie(cookie)",
-        "attempted.iter().all(|cookie|{cookie_identity(cookie).is_ok_and(|identity|!current.contains(&identity))})",
+        ".find(|existing|existing.identity==identity).map(|existing|existing.native.clone());journal.push((cookie.clone(),identity,prior));",
+        "let_=unsafe{destination.AddOrUpdateCookie(prior)};",
+        "let_=unsafe{destination.DeleteCookie(attempted)};",
+        "expected.iter().all(|(identity,restored)|{current.iter().any(|cookie|cookie.identity==*identity)==*restored})",
         "GetCookies(PCWSTR::from_raw(origin.as_ptr()),&handler)",
         "count>maximum",
         "state.destination.CopyCookie(&source_cookie)",
@@ -1630,11 +1632,11 @@ fn validate_engine_windows_cookie_transfer(module: &str, source: &str) -> Result
     // select its separate destination preflight and journal-only rollback.
     let legacy_scoped = source
         .split_once("fnstart_scoped(")
-        .and_then(|(_, body)| body.split_once("fnstart_work_scoped("))
+        .and_then(|(_, body)| body.split_once("fnstart_work_sync("))
         .map(|(body, _)| body)
         .ok_or_else(|| "production Windows legacy scoped cookie entry is missing".to_owned())?;
     let work_scoped = source
-        .split_once("fnstart_work_scoped(")
+        .split_once("fnstart_work_sync(")
         .and_then(|(_, body)| body.split_once("fnstart_mode("))
         .map(|(body, _)| body)
         .ok_or_else(|| "production Windows retained scoped cookie entry is missing".to_owned())?;
@@ -1803,7 +1805,8 @@ fn validate_engine_windows_semantic_screenshot(
         .split_once("pub(crate)fndispatch_screenshot(")
         .map(|(_, method)| method.split("pub(crate)fn").next().unwrap_or(method))
         .ok_or("production Windows semantic screenshot lost its dispatch method")?;
-    let guarded_capture = "ifself.semantic().is_none_or(|semantic|semantic.document_content_available_for_audit()!=Some(true))||(self.work_navigation.is_none()&&attest_hidden_owner(&self.view,self.expected_parent,self.viewport).is_err()){returnErr(SemanticScreenshotNativeFailure::NotReady);}super::semantic_screenshot::capture_viewport(";
+    // ad2ef7cb: the capture additionally runs only behind the pixel privacy proof.
+    let guarded_capture = "ifself.semantic().is_none_or(|semantic|semantic.document_content_available_for_audit()!=Some(true))||(self.work_navigation.is_none()&&attest_hidden_owner(&self.view,self.expected_parent,self.viewport).is_err()){returnErr(SemanticScreenshotNativeFailure::NotReady);}letSome(semantic)=self.semantic().cloned()else{returnErr(SemanticScreenshotNativeFailure::NotReady);};letnative=self.view.webview();letcapture_cancelled=cancelled.clone();letpublic=request.requires_public_page();crate::platform::semantic_pixel_privacy::guarded_model_capture(public,Rc::new(move|completion|{ifpublic{semantic.dispatch_public_privacy(completion)}else{semantic.dispatch_privacy(completion)}}),move|completion|{super::semantic_screenshot::capture_viewport(";
     if !screenshot.contains(guarded_capture) {
         return Err("production Windows semantic screenshot lost its exact early ownership refusal before capture".into());
     }
@@ -2437,6 +2440,9 @@ fn validate_engine_windows_semantic_protocol(module: &str, source: &str) -> Resu
             ));
         }
     }
+    if source.contains("\"userGesture\":true") {
+        return Err("production Windows semantic CDP protocol grants user activation".to_owned());
+    }
     if production.contains("expect(")
         || production.contains("unwrap(")
         || production.contains("panic!")
@@ -2517,7 +2523,12 @@ fn validate_engine_windows_semantic_runtime(module: &str, source: &str) -> Resul
         "CommandStage::CleanupRuntimeDisable",
         "install_runtime_in_context_command(&context)",
         "decode_runtime_install_response(&response)",
-        "invoke_runtime_command(context,&state.pending.as_ref()?.invocation)",
+        "state.pending.as_ref()?.invocation.command(context)",
+        "enumReadInvocation{HumanWall,Observation(Box<SemanticRuntimeInvocation>),Privacy(bool),Media(MediaInvocation),}",
+        "Self::HumanWall=>{crate::platform::agent_semantic_cdp_protocol::invoke_human_wall_command(context).ok()}",
+        "Self::Observation(value)=>invoke_runtime_command(context,value).ok(),",
+        "Self::Privacy(public)=>{crate::platform::agent_semantic_cdp_protocol::invoke_privacy_command_mode(context,*public,).ok()}",
+        "Self::Media(value)=>{crate::platform::agent_semantic_cdp_protocol::invoke_media_command(context,value).ok()}",
         "state.installed_context=None",
         "state.document_generation=state.document_generation.checked_add(1)",
         "fnwork_drained_for_audit(&self)->Option<bool>",
@@ -9300,6 +9311,14 @@ fn validate_agentic_zero_idle_sources(repository: &Path) -> Result<(), String> {
         return Err("zephium-agentic public asset fetch escaped provider-transport".to_owned());
     }
     let transport = source_directory.join("provider_transport");
+    // Policy tests live beside agent_policy.rs and compile only under cfg(test).
+    let policy_tests = source_directory.join("agent_policy").join("tests");
+    let policy = compact(&read(source_directory.join("agent_policy.rs"))?);
+    if !policy.contains(
+        "#[cfg(test)]modtests{#[cfg(feature=\"provider-transport\")]modimage_tests;modnavigation_tests;",
+    ) {
+        return Err("zephium-agentic policy test modules escaped cfg(test)".to_owned());
+    }
     let mut files = Vec::new();
     collect_files(&source_directory, &mut files)?;
     for path in files {
@@ -9317,7 +9336,12 @@ fn validate_agentic_zero_idle_sources(repository: &Path) -> Result<(), String> {
         let transport_owned = path.starts_with(&transport)
             || path.parent() == Some(source_directory.as_path())
                 && path.file_name().and_then(|name| name.to_str()) == Some("public_asset.rs");
-        if !transport_owned {
+        let test_only = path.parent() == Some(policy_tests.as_path())
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| matches!(name, "image_tests.rs" | "navigation_tests.rs"));
+        if !transport_owned && !test_only {
             validate_agentic_zero_idle_source(
                 &path
                     .strip_prefix(repository)
@@ -9340,6 +9364,10 @@ fn validate_agentic_zero_idle_sources(repository: &Path) -> Result<(), String> {
 }
 
 fn validate_agentic_zero_idle_source(label: &str, source: &str) -> Result<(), String> {
+    // Reading the current thread's identity grants no authority; 0eeb8c21's
+    // test uses it to keep parallel tests from sharing a global probe hook.
+    let source = source.replace("std::thread::current().id()", "");
+    let source = source.as_str();
     for forbidden in [
         "std::net::",
         "std::thread::",
@@ -12091,10 +12119,12 @@ mod tests {
                 manifest_guard: [u8; 32],
             }
             pub struct AgentEffectPermit {
+                approval_binding: Option<crate::SemanticApprovalBinding>,
                 manifest: AgentRunManifestId,
                 manifest_guard: [u8; 32],
             }
             pub struct AgentActiveEffect {
+                approval_binding: Option<crate::SemanticApprovalBinding>,
                 manifest: AgentRunManifestId,
                 manifest_guard: [u8; 32],
             }
@@ -12115,10 +12145,12 @@ mod tests {
                 self.manifest == manifest && self.manifest_guard == manifest_guard
             }
             AgentEffectAuthorization::Permit(AgentEffectPermit {
+                approval_binding: assessment.approval_binding,
                 manifest: self.manifest.id(),
                 manifest_guard: self.manifest.guard(),
             });
             Ok(AgentActiveEffect {
+                approval_binding: permit.approval_binding,
                 manifest: permit.manifest,
                 manifest_guard: permit.manifest_guard,
             });
@@ -12982,7 +13014,7 @@ mod tests {
             [dependencies]
             futures-util = { version = "=0.3.32", optional = true }
             reqwest = { version = "=0.13.4", default-features = false, features = ["http2", "rustls", "stream", "system-proxy"], optional = true }
-            tokio = { workspace = true, features = ["sync", "time"], optional = true }
+            tokio = { workspace = true, features = ["sync", "time", "net"], optional = true }
             zeroize = { version = "=1.9.0", optional = true }
             [target.'cfg(target_os = "macos")'.dependencies]
             security-framework = { version = "=3.7.0", optional = true }
@@ -13685,8 +13717,8 @@ mod tests {
             [dependencies]
             zephium-agentic = { optional = true }
             zeroize = { version = "=1.9.0", optional = true }
+            image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"], optional = true }
             [target.'cfg(target_os = "windows")'.dependencies]
-            image = { version = "=0.25.10", default-features = false, features = ["png"], optional = true }
             windows = { version = "0.61", features = ["Win32_System_Threading"] }
             windows-probe-sys = { package = "windows-sys", version = "=0.61.2", optional = true, features = [
               "Win32_Foundation",
@@ -13715,7 +13747,7 @@ mod tests {
         )
         .is_err());
         assert!(validate_engine_manifest(
-            &valid.replace("features = [\"png\"]", "features = [\"png\", \"jpeg\"]")
+            &valid.replace("\"webp\", \"gif\"]", "\"webp\", \"gif\", \"bmp\"]")
         )
         .is_err());
         assert!(validate_engine_manifest(&valid.replace(
@@ -14280,13 +14312,20 @@ mod tests {
             compact(transfer).replace("callback_panicked,true,)", "callback_panicked,false,)"),
             transfer.replace("count as usize > MAX_COOKIES_PER_TRANSFER", "false"),
             transfer.replace("bytes > MAX_COOKIE_TRANSFER_BYTES", "false"),
-            transfer.replace("!seed.existing.contains(&identity)", "true"),
+            transfer.replace(
+                "if !fields.supersedes(&current) => continue",
+                "if false => continue",
+            ),
             transfer.replace("seed.attempted.push(cookie.clone());", ""),
             transfer.replace(
-                "destination.DeleteCookie(cookie)",
+                "destination.DeleteCookie(attempted)",
                 "destination.DeleteAllCookies()",
             ),
-            transfer.replace("!current.contains(&identity)", "true"),
+            transfer.replace("destination.AddOrUpdateCookie(prior)", "Ok(())"),
+            transfer.replace(
+                "cookie.identity == *identity) == *restored",
+                "cookie.identity == *identity) || true",
+            ),
             transfer.replace(
                 "state.destination.CopyCookie(&source_cookie)",
                 "source_cookie.clone()",
@@ -14506,7 +14545,25 @@ mod tests {
                         && attest_hidden_owner(&self.view, self.expected_parent, self.viewport).is_err()) {
                     return Err(SemanticScreenshotNativeFailure::NotReady);
                 }
-                super::semantic_screenshot::capture_viewport(&self.view);
+                let Some(semantic) = self.semantic().cloned() else {
+                    return Err(SemanticScreenshotNativeFailure::NotReady);
+                };
+                let native = self.view.webview();
+                let capture_cancelled = cancelled.clone();
+                let public = request.requires_public_page();
+                crate::platform::semantic_pixel_privacy::guarded_model_capture(
+                    public,
+                    Rc::new(move |completion| {
+                        if public {
+                            semantic.dispatch_public_privacy(completion)
+                        } else {
+                            semantic.dispatch_privacy(completion)
+                        }
+                    }),
+                    move |completion| {
+                        super::semantic_screenshot::capture_viewport(&native);
+                    },
+                );
             }
         "#;
         let buffer = r#"
@@ -14542,6 +14599,11 @@ mod tests {
             ),
             (".is_err()", ".is_ok()"),
             ("return Err(SemanticScreenshotNativeFailure::NotReady);", ""),
+            ("guarded_model_capture(", "unguarded_capture("),
+            (
+                "semantic.dispatch_privacy(completion)",
+                "completion(Ok(()))",
+            ),
             (
                 "pub(crate) fn dispatch_screenshot()",
                 "pub(crate) fn semantic_runtime_ready_for_history()",

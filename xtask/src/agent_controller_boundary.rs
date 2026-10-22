@@ -466,7 +466,7 @@ fn validate_navigation(actor: &str, policy: &str, continuation: &str) -> Result<
                 "terminal.operation() == operation",
                 ".settle_navigation_terminal(&terminal)",
                 "AgentBrowserNavigationDispatchRefusal",
-                "self.navigation_refusal.ok_or(AgentWorkFailure::Contract)?",
+                "self.navigation_refusal.ok_or_else(|| crate::contract!())?",
                 "!= Some(refusal.operation)",
                 ".refuse_navigation_dispatch(active, refusal.failure, now)",
                 "Self::observe(state, worker, browser).await?",
@@ -477,7 +477,7 @@ fn validate_navigation(actor: &str, policy: &str, continuation: &str) -> Result<
                 "self.validate_account_update(account, receipt.operation().context())?",
                 "SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE",
                 ".validate_successor_with_action_authority(",
-                "self.drive(prepared.into_transport_input()).await",
+                "self.drive(prepared.into_transport_input(), Some(observation))",
             ][..],
         ),
         (
@@ -771,7 +771,7 @@ fn validate_terra(source: &str) -> Result<(), String> {
         ".bind_read_request(request, &self.config, &read, payload)",
         "AgentProviderReadContinuationRequestDraft::try_new(bound)",
         "try_prepare_for_provider_exact_count",
-        "self.drive(prepared.into_transport_input()).await",
+        "self.drive(prepared.into_transport_input(), Some(observation))",
     ] {
         if !read.contains(required) {
             return Err(format!(
@@ -1071,7 +1071,7 @@ fn validate_progressive_observation(inspection: &str, checkpoint: &str) -> Resul
         "state.refresh_account(worker, browser)?",
         "Self::provider(",
         ".prepare_successor_with_action_authority(",
-        "self.drive(prepared.into_transport_input())",
+        "self.drive(prepared.into_transport_input(), Some(observation))",
     ] {
         if !inspection.contains(required) {
             return Err(format!(
@@ -1186,7 +1186,7 @@ fn validate_work(work: &str, decision: &str) -> Result<(), String> {
         // Since 8755115b the terminal intent is frozen once and the closure must
         // match it, replacing the unsuccessful flag threaded into publication.
         "if state.terminal_intent.replace(terminal_intent).is_some() {",
-        "let terminal_intent = state.terminal_intent.ok_or(AgentWorkFailure::Contract)?;",
+        "let terminal_intent = state.terminal_intent.ok_or_else(|| crate::contract!())?;",
         "let closure_matches_intent = match terminal_intent {",
         "closure.outcome() != AgentRunProgressOutcome::Succeeded",
         "if !closure_matches_intent {",
@@ -1545,7 +1545,7 @@ mod tests {
             ".begin_navigation(id, op)",
             "state.task_progress(&fresh)?",
             "account.observed_at() < receipt.settled_at()",
-            "self.navigation_refusal.ok_or(AgentWorkFailure::Contract)?",
+            "self.navigation_refusal.ok_or_else(|| crate::contract!())?",
             "!= Some(refusal.operation)",
         ] {
             assert!(validate_navigation(
@@ -1869,7 +1869,7 @@ mod tests {
             "let _ = session.settle_navigation_refusal();",
             "state.drained.is_some()",
             "if state.terminal_intent.replace(terminal_intent).is_some() {",
-            "let terminal_intent = state.terminal_intent.ok_or(AgentWorkFailure::Contract)?;",
+            "let terminal_intent = state.terminal_intent.ok_or_else(|| crate::contract!())?;",
             "let closure_matches_intent = match terminal_intent {",
             "closure.outcome() != AgentRunProgressOutcome::Succeeded",
             "if !closure_matches_intent {",
