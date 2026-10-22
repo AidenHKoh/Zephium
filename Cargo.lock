@@ -7669,6 +7669,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-page-assist"
+version = "0.1.0"
+dependencies = [
+ "cssparser 0.37.0",
+ "proptest",
+ "zephium-ipc",
+]
+
+[[package]]
 name = "zephium-private-fs"
 version = "0.1.0"
 dependencies = [
