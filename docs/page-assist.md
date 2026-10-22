@@ -17,8 +17,7 @@ Status as of 2026-10-22, branch `feat/work-production`.
 
 ## What is not done
 
-1. **Windows reader on a real machine.** It compiles and its CDP calls are unit-tested; the physical checks (reads with an extension and DevTools attached, lost context) are not yet run.
-2. **Light actions** (`PagePort::resolve` / `act`) — part of the reader; `resolve` must judge effects with `open_objective::site_work::classify` on the read's `SemanticSnapshot`.
+1. **Windows reader and steps on a real machine.** They compile and their CDP calls are unit-tested; the physical checks are not yet run.
 5. **"Run in Work"** is wired: `desktop/src/page_assist.rs` (`handoff`) creates a Work environment in the tab's Space, adds the tab (`WorkEnvironmentReference::Browser`) and the new objective, and begins a run through `work_product::admit_run` with the panel's own grant and limits (pinned against `frame/src/domain/work/work-model.ts` by a test). A tab not yet listed in a Space cannot be handed off.
 6. **Tab close** is read from the shell's Items projection: a tab its profile and Space listed before and no longer list ends its thread and cancels its turn. A tab moved to another Space is treated the same way.
 7. **Security fixture** for the survey change itself is not written; the reader's probe covers the same pull mechanism (activation and popups stay blocked while the page watches).
@@ -60,8 +59,20 @@ As built: the recipes are installed beside the runtime by one more fixed `callFu
 
 `Readout { epoch, title, passages }` (`page_assist/port.rs`). Build it from the runtime's `SemanticSnapshot` via `read_semantic_observation` with `SemanticReadSensitivityLimit::PublicOnly` and `SemanticReadBudget::STANDARD`: one `Passage` per read fragment, `id` = the fragment's `rN`, `verbatim` only when `verbatim_text()` is `Some`, `value` never for protected fields (the service also withholds protected kinds and secret-shaped values). Selection and highlight need two more fixed recipes in the runtime (select-text read; scroll-to-and-mark a verbatim quote without the find bar), each a closed invocation like `H1:survey`.
 
+## Light steps (`PagePort::resolve` / `act`)
+
+- **Judging.** `page_assist::steps::plan` resolves a step against the read the question was answered from (`page_reader::latest_read`, same epoch) and judges it with `site_work::classify` on that read's snapshot: Read, Draft or Commit with its confirm category. Password, card and one-time-code fields (`Password` role or secret sensitivity) and links to another registrable site are refused; a control the verb cannot use is unsuitable. The service holds every Commit for the person's confirm.
+- **Running.** The engine re-reads the page, binds the planned proposal to the stored read and prepares it against the fresh snapshot (the core's target revalidation, baseline and checkpoint guards), then hands the closed request to the runtime through `PersonDirectedAction` (`zephium-agentic`). That authority is built in one place, marked as the person's, and joins no agent run; it is not Work's policy permit. At the handoff the step is re-admitted only while the same document is committed; queued steps fail as `PageChanged` after a navigation.
+- **Input path, both platforms: the runtime's fixed isolated-world recipe**, never native input. macOS uses the existing closed action path (`semantic_action::dispatch_closed`); Windows one fixed `Runtime.callFunctionOn` (`invoke_action_recipe_command`, `userGesture: false`), not the Work path's `Input.*` events. Effects: the page gains **no user activation**; a page handler that calls `window.open` from the click is **blocked** like any script popup; **focus** moves only inside the page (a field is focused by the recipe for typing; the window and the panel keep OS focus). Pages that insist on trusted events (`isTrusted`) or on a user gesture will not respond; the step then reports failed. `userGesture: true` and public `evaluateJavaScript` stay forbidden.
+- **Lease.** A step holds the tab for 15 s after it last ran. Meanwhile the page is asked every 200 ms whether the person pressed, typed, scrolled or touched it (capture listeners in the private world, trusted events only); the shell then pauses the steps (`PageAssist::human_input`) and the service re-reads on Continue. A page's own capture listener registered earlier could hide input from these listeners; it can only make steps continue that the person asked for, and Stop always works. A commit ends the lease.
+
+## Lifecycle as built
+
+- A program that will not start ends that ask as unavailable at once; the next ask on the document tries once more, then the page reads as unavailable (never as loading) with no further attempts.
+- The first answer to a document carries a fresh token it names when it pulls again. A back-forward cache restore binds the restored document to its new epoch only at its own address, and a document being left cannot displace the incoming one's pull. The script is added by the next admitted navigation, so a blank warm spare never gets it; adopted spares, restored discarded tabs and cache restores read under their own epoch (probe).
+- Marks: the highlight and its sheet are removed when the fade ends (a timer backs the frames) and when a new mark replaces the old one. WebKit mirrors `CSS.highlights` into each world's wrapper when that wrapper is created and does not propagate later deletions, so a page that looked at `CSS.highlights` while a mark showed may keep seeing a stale name; the native registry and painting are clear (probe checks pixels), and the stale entry holds no ranges.
+
 ## Tests still needed
 
-- Back-forward cache restores, discarded-tab restores and warm-spare adoption with the reader (the probe's pages are `no-store`).
-- Step fixtures: a Commit control waits for confirm; a password field is refused; human input pauses.
+- The same step and lifecycle checks on a physical Windows machine.
 - Windows: the same reads through CDP with an extension's content script and DevTools attached.
