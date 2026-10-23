@@ -1175,6 +1175,13 @@ impl Shell {
             Command::WindowTabs { profile, reply } => {
                 let _ = reply.send(self.window_tabs(profile));
             }
+            Command::OpenBackgroundTab {
+                profile,
+                space,
+                after,
+                url,
+                done,
+            } => done.finish(self.open_background_tab(profile, space, after, &url)),
             Command::FaviconPoll { id, attempt } => self.poll_favicon(id, attempt),
             Command::PresentationFallback {
                 id,

@@ -22,7 +22,7 @@ use crate::{
     Command, ContentPolicyStatusQueryOutcome, EmitFn, SharedBlocker, SharedChrome, SharedEngine,
     SharedStore, ShellTerminalFailureCallback, ShutdownOutcome,
 };
-use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::ids::{ItemId, ProfileId, SpaceId};
 use zephium_ipc::BlockerStatusView;
 
 const FAILED_SPAWN_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -1034,6 +1034,30 @@ impl Handle {
             finish_unprocessed_command(command, ShutdownOutcome::Unclean);
         }
         receiver
+    }
+
+    /// Opens `url` in a new tab of `profile`'s `space` without focusing it:
+    /// right after `after` when that tab is in the space's Today, else at its
+    /// end. `None` when the profile is private or not the one in front, the
+    /// space is not the profile's, the address is not an ordinary web page,
+    /// or the tab limit refuses.
+    pub async fn open_background_tab(
+        &self,
+        profile: ProfileId,
+        space: SpaceId,
+        after: Option<ItemId>,
+        url: String,
+    ) -> Option<ItemId> {
+        let (replier, reply) = crate::reply::channel();
+        // A refused command drops its completion, which resolves the reply.
+        let _ = self.queue.try_push(Command::OpenBackgroundTab {
+            profile,
+            space,
+            after,
+            url,
+            done: crate::TabCompletion::new(move |tab| replier.send(tab)),
+        });
+        reply.await.flatten()
     }
 
     /// Admits desktop-read bytes as a Media resource of the focused profile.

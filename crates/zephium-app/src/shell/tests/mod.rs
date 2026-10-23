@@ -1,4 +1,5 @@
 use super::*;
+use crate::reply::block_on;
 use std::sync::Mutex;
 use zephium_core::blocker::{
     BlockerConfig, BlockerConfigRevision, ContentPolicyFailure, ContentPolicyGeneration,
@@ -1724,6 +1725,37 @@ pub(super) fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Scre
 
 fn setup() -> (Shell, Arc<FakeEngine>, Screen) {
     setup_with(Arc::new(FakeStore::default()))
+}
+
+/// A running actor with its first window shown: the handle and the profile,
+/// space and tab it opened with.
+pub(super) fn started(store: Arc<FakeStore>) -> (Handle, ProfileId, SpaceId, ItemId) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = spawn(
+        Arc::new(FakeEngine::default()),
+        store,
+        Arc::new(ImmediateAllowAllCompiler),
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            let _ = tx.send(projection);
+        }),
+    )
+    .expect("spawn test shell");
+    assert!(handle.dispatch(Command::SetWindowSize(Size::new(1200.0, 800.0))));
+    assert!(handle.dispatch(Command::Bootstrap));
+    let state = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::Items(state) if state.profile.is_some() => Some(state),
+            _ => None,
+        })
+        .expect("bootstrap snapshot");
+    (
+        handle,
+        ProfileId::parse(&state.profile.unwrap().id).unwrap(),
+        SpaceId::parse(state.active_space_id.as_deref().unwrap()).unwrap(),
+        ItemId::parse(state.active.as_deref().unwrap()).unwrap(),
+    )
 }
 
 type IconLog = Arc<Mutex<Vec<zephium_ipc::FaviconsView>>>;

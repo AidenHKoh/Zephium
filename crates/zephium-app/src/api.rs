@@ -645,6 +645,16 @@ pub enum Command {
         profile: ProfileId,
         reply: SyncSender<Vec<TabMetadata>>,
     },
+    /// A page opened behind the person's work in `space`: right after
+    /// `after` when that tab is in Today, never focused. Answers the new tab,
+    /// or `None` when the profile, space, address or tab limit refuses.
+    OpenBackgroundTab {
+        profile: ProfileId,
+        space: zephium_core::ids::SpaceId,
+        after: Option<ItemId>,
+        url: String,
+        done: TabCompletion,
+    },
     /// Hands the shell the anonymous origin prober, once, after startup.
     AttachFaviconProber(FaviconProberAttachment),
     /// Icons for origins shown outside a tab: cached or stored rasters are
@@ -806,6 +816,29 @@ impl NoteCompletion {
 impl fmt::Debug for NoteCompletion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("NoteCompletion")
+    }
+}
+
+#[derive(Clone)]
+pub struct TabCompletion(Completion<Option<ItemId>>);
+impl TabCompletion {
+    pub fn new(done: impl FnOnce(Option<ItemId>) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, tab: Option<ItemId>) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(tab);
+        }
+    }
+}
+impl fmt::Debug for TabCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TabCompletion")
     }
 }
 

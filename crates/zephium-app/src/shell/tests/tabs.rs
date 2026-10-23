@@ -586,3 +586,250 @@ fn closing_an_essential_ends_its_page_and_keeps_it_in_place() {
         .iter()
         .all(|id| *id != reopened.to_string()));
 }
+
+fn today_of(shell: &Shell, space: SpaceId) -> Vec<ItemId> {
+    shell
+        .items
+        .roots(Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        })
+        .to_vec()
+}
+
+#[test]
+fn a_background_tab_opens_right_after_its_source_and_takes_no_focus() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    shell.handle(Command::Open);
+    let third = active_id(&screen);
+    shell.handle(Command::Activate(first));
+    shell.windows.focused_mut().unwrap().splits = Some(Pane::Branch {
+        axis: Axis::Row,
+        ratio: 0.5,
+        a: Box::new(Pane::leaf(first)),
+        b: Box::new(Pane::leaf(second)),
+    });
+    let (profile, space) = shell
+        .windows
+        .focused()
+        .map(|win| (win.profile, win.space))
+        .unwrap();
+    let layout = engine.last_layout();
+    let panes = shell
+        .windows
+        .focused()
+        .unwrap()
+        .splits
+        .clone()
+        .unwrap()
+        .tabs();
+
+    let opened = shell
+        .open_background_tab(profile, space, Some(first), "https://example.test/a")
+        .expect("a background tab");
+    let again = shell
+        .open_background_tab(profile, space, Some(third), "https://example.test/b")
+        .expect("a background tab at the end");
+
+    assert_eq!(
+        today_of(&shell, space),
+        [first, opened, second, third, again]
+    );
+    let window = shell.windows.focused().unwrap();
+    assert_eq!(window.active, Some(first));
+    assert_eq!(window.splits.clone().unwrap().tabs(), panes);
+    assert_eq!(active_id(&screen), first);
+    assert_eq!(engine.last_layout(), layout);
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call == &format!("create {opened} https://example.test/a [default]")));
+}
+
+#[test]
+fn a_background_tab_without_a_source_in_today_goes_to_the_end() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    let (profile, space) = shell
+        .windows
+        .focused()
+        .map(|win| (win.profile, win.space))
+        .unwrap();
+    assert!(shell.items.move_tab_to_root(
+        first,
+        Placement::Space {
+            space,
+            section: SpaceSection::Pinned,
+        },
+        None,
+    ));
+
+    for after in [Some(first), Some(ItemId::from(9_999)), None] {
+        let opened = shell
+            .open_background_tab(profile, space, after, "https://example.test/")
+            .expect("a background tab");
+        assert_eq!(today_of(&shell, space).last(), Some(&opened));
+    }
+    assert_eq!(shell.windows.focused().unwrap().active, Some(second));
+}
+
+#[test]
+fn a_background_tab_is_refused_outside_the_persons_scope_or_for_other_addresses() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    let (profile, space) = shell
+        .windows
+        .focused()
+        .map(|win| (win.profile, win.space))
+        .unwrap();
+    let foreign_profile = ProfileId::from(9_002);
+    let foreign_space = SpaceId::from(9_003);
+    assert!(shell.profiles.insert(Profile {
+        id: foreign_profile,
+        name: "Foreign".into(),
+        kind: ProfileKind::Named,
+    }));
+    assert!(shell.spaces.insert(Space {
+        id: foreign_space,
+        profile: foreign_profile,
+        name: "Foreign".into(),
+        look: Default::default(),
+    }));
+    let tabs = shell.items.view_ids().len();
+    let calls = engine.calls();
+    let open = |shell: &mut Shell, profile, space, url: &str| {
+        shell.open_background_tab(profile, space, Some(first), url)
+    };
+
+    for url in [
+        "javascript:alert(1)",
+        "about:blank",
+        "file:///etc/passwd",
+        "ftp://example.test/",
+        "https://user:secret@example.test/",
+        "example.test",
+        "two words",
+        "",
+    ] {
+        assert_eq!(open(&mut shell, profile, space, url), None, "{url}");
+    }
+    assert_eq!(
+        open(&mut shell, profile, foreign_space, "https://example.test/"),
+        None
+    );
+    assert_eq!(
+        open(
+            &mut shell,
+            profile,
+            SpaceId::from(9_999),
+            "https://example.test/"
+        ),
+        None
+    );
+    assert_eq!(
+        open(
+            &mut shell,
+            foreign_profile,
+            foreign_space,
+            "https://example.test/"
+        ),
+        None,
+        "only the profile in front opens tabs"
+    );
+    assert_eq!(shell.items.view_ids().len(), tabs);
+    assert_eq!(engine.calls(), calls);
+
+    let mut private = shell.profiles.remove(profile).unwrap();
+    private.kind = ProfileKind::Incognito;
+    assert!(shell.profiles.insert(private));
+    assert_eq!(
+        open(&mut shell, profile, space, "https://example.test/"),
+        None
+    );
+    assert_eq!(engine.calls(), calls);
+}
+
+#[test]
+fn a_background_tab_is_refused_at_the_item_limit() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    let (profile, space) = shell
+        .windows
+        .focused()
+        .map(|win| (win.profile, win.space))
+        .unwrap();
+    let today = Placement::Space {
+        space,
+        section: SpaceSection::Today,
+    };
+    while shell.items.insert_tab(ItemId::generate(), today) {}
+    let roots = today_of(&shell, space);
+
+    assert_eq!(
+        shell.open_background_tab(profile, space, Some(first), "https://example.test/"),
+        None
+    );
+    assert_eq!(today_of(&shell, space), roots);
+}
+
+#[test]
+fn a_background_tab_command_answers_through_its_completion() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    let (profile, space) = shell
+        .windows
+        .focused()
+        .map(|win| (win.profile, win.space))
+        .unwrap();
+    let answers = Arc::new(Mutex::new(Vec::new()));
+    for url in ["https://example.test/", "javascript:alert(1)"] {
+        let sink = answers.clone();
+        shell.handle(Command::OpenBackgroundTab {
+            profile,
+            space,
+            after: Some(first),
+            url: url.into(),
+            done: crate::TabCompletion::new(move |tab| sink.lock().unwrap().push(tab)),
+        });
+    }
+
+    let answers = answers.lock().unwrap().clone();
+    assert_eq!(answers.len(), 2);
+    assert_eq!(answers[0], today_of(&shell, space).get(1).copied());
+    assert!(answers[0].is_some());
+    assert_eq!(answers[1], None);
+}
+
+#[test]
+fn a_background_tab_opens_through_the_handle() {
+    let (handle, profile, space, active) = started(Arc::new(FakeStore::default()));
+
+    let request =
+        handle.open_background_tab(profile, space, Some(active), "https://example.test/".into());
+    fn runs_on_any_thread<T: Send>(_: &T) {}
+    runs_on_any_thread(&request);
+    let opened = block_on(request).expect("a background tab");
+
+    let tabs = handle.window_tabs(profile).recv().unwrap();
+    assert_eq!(
+        tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+        [active, opened]
+    );
+    for url in ["javascript:alert(1)", "file:///etc/passwd"] {
+        assert_eq!(
+            block_on(handle.open_background_tab(profile, space, None, url.into())),
+            None
+        );
+    }
+    assert_eq!(handle.window_tabs(profile).recv().unwrap().len(), 2);
+}

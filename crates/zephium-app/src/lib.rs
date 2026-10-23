@@ -21,6 +21,7 @@ pub(crate) use diagnostic;
 mod actor;
 mod api;
 mod onboarding;
+mod reply;
 mod shell;
 mod store_reads;
 #[cfg(feature = "work-execution")]
@@ -129,5 +130,5 @@ pub mod work_trace;
 pub use api::{
     BookmarkCompletion, FaviconProber, FaviconProberAttachment, HistoryCompletion,
     ImportCompletion, NoteCompletion, NotesAttachment, ResourceCompletion, SpaceCommand, TabAction,
-    TimeCompletion,
+    TabCompletion, TimeCompletion,
 };

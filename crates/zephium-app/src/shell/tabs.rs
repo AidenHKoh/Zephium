@@ -744,6 +744,62 @@ impl Shell {
         fx.extend(self.items.navigate(id, url));
         self.commit(fx);
     }
+
+    /// A new Today tab of `space` for an ordinary web page, right after
+    /// `after` when that tab is a root of the same Today, never focused:
+    /// the active tab, window focus and split stay as they are.
+    pub(super) fn open_background_tab(
+        &mut self,
+        profile: ProfileId,
+        space: SpaceId,
+        after: Option<ItemId>,
+        url: &str,
+    ) -> Option<ItemId> {
+        let url = url::Url::parse(url.trim()).ok().filter(|url| {
+            matches!(url.scheme(), "http" | "https") && navigation::is_allowed(url)
+        })?;
+        if self.incognito_profile(profile)
+            || self.profile_deletion_quarantines(profile)
+            || self
+                .windows
+                .focused()
+                .is_none_or(|win| win.profile != profile)
+            || self
+                .spaces
+                .get(space)
+                .is_none_or(|owner| owner.profile != profile)
+        {
+            return None;
+        }
+        let today = Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        };
+        let id = ItemId::generate();
+        if !self.items.insert_tab(id, today) {
+            return None;
+        }
+        let next = after.and_then(|after| {
+            let roots = self.items.roots(today);
+            let at = roots.iter().position(|root| *root == after)?;
+            roots.get(at + 1).copied().filter(|next| *next != id)
+        });
+        if let Some(next) = next {
+            self.items.move_tab_to_root(id, today, Some(next));
+        }
+        let effects = self.items.navigate(id, url.as_str());
+        let native = self.commit(effects);
+        // A view the engine refused and no capacity wait explains is a dead
+        // tab; nothing was opened.
+        if native.rejected
+            && self.items.tab(id).is_some_and(|tab| !tab.has_view())
+            && self.capacity_presentation(id).is_none()
+        {
+            self.close_in_any_space(id);
+            return None;
+        }
+        Some(id)
+    }
 }
 
 /// Wall-clock now in Unix milliseconds, within the range persisted times use.
