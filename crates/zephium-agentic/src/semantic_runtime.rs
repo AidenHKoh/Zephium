@@ -55,13 +55,14 @@ pub const MAX_SEMANTIC_RUNTIME_VISITED_NODES: u32 = 32 * 1024;
 pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// Maximum immutable production runtime source bytes installed per document.
 ///
-/// The fixed 206 KiB ceiling covers the digest-pinned semantic runtime including
+/// The fixed 212 KiB ceiling covers the digest-pinned semantic runtime including
 /// production Fill, native-select, public links and bounded source-coalesced
 /// windows, keyword discovery, independent page-dialog samples, bounded fill
 /// diagnostics, covered-target centring and the page's structured-data facts,
 /// re-rendered target rebinding, settle quiet and custom listbox choice,
-/// guarded native number-key defaults and ARIA-owned listboxes, with an explicit installation bound per platform.
-pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 208 * 1024;
+/// guarded native number-key defaults, ARIA-owned listboxes and fallback names
+/// for unnamed form fields, with an explicit installation bound per platform.
+pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 212 * 1024;
 /// Sole fixed isolated-world global installed by the production runtime.
 pub const SEMANTIC_RUNTIME_GLOBAL_NAME: &str = "__zephiumSemanticRuntimeV1";
 /// Sole fixed native message handler visible in the production isolated world.
@@ -92,8 +93,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0x10, 0xbe, 0x3e, 0x97, 0x28, 0x5b, 0xe4, 0xb5, 0xaa, 0x73, 0x69, 0x8a, 0x7d, 0x42, 0xa3, 0x0a,
-    0x09, 0x88, 0x7f, 0x16, 0x33, 0x23, 0x71, 0xfe, 0x95, 0x2d, 0x20, 0xc4, 0xf4, 0x04, 0xaa, 0x22,
+    0x97, 0x07, 0xe7, 0xba, 0x6e, 0xa5, 0x8c, 0xd2, 0xa7, 0xe5, 0x88, 0x3f, 0xe9, 0x1b, 0x05, 0xde,
+    0x3d, 0xeb, 0x25, 0x45, 0xb5, 0x37, 0x00, 0x1e, 0x13, 0xad, 0xd2, 0x2d, 0x35, 0x14, 0xba, 0x9b,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.

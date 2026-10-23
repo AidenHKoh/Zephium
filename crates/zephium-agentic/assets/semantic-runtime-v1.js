@@ -1337,6 +1337,64 @@
     return null;
   }
 
+  // A form control the page left unnamed reads by the words beside it, then
+  // its description, then its form name; never by any value.
+  const FALLBACK_NAMED_ROLES = ["textbox", "searchbox", "spinbutton", "combobox", "listbox", "checkbox", "radio"];
+  const FALLBACK_NAME_BYTES = 64;
+  const INLINE_LABEL_TAGS = ["span", "b", "strong", "em", "i", "small", "font"];
+
+  function adjacentLabel(element, following, state) {
+    const parent = read(nodeParentGetter, element);
+    if (parent === null || nodeType(parent) !== 1) return null;
+    const children = read(nodeChildNodesGetter, parent);
+    const length = mathMin(listLength(children), 256);
+    let at = -1;
+    for (let index = 0; index < length; index += 1) {
+      if (listItem(children, index) === element) { at = index; break; }
+    }
+    if (at < 0) return null;
+    const step = following ? 1 : -1;
+    for (let index = at + step, seen = 0; index >= 0 && index < length && seen < 4; index += step, seen += 1) {
+      const node = listItem(children, index);
+      const type = nodeType(node);
+      let raw;
+      if (type === 3) raw = read(characterDataGetter, node);
+      else if (type === 1 && INLINE_LABEL_TAGS.includes(tagName(node))) raw = flatText(node, state, FALLBACK_NAME_BYTES + 1);
+      else if (type === 1) return null;
+      else continue;
+      const text = normalizeText(raw, FALLBACK_NAME_BYTES);
+      if (text.truncated) return null;
+      if (text.value === "") continue;
+      // Words just after a check box are its own label, not the next field's.
+      if (!following && index > 0) {
+        const before = listItem(children, index - 1);
+        if (nodeType(before) === 1 && tagName(before) === "input" &&
+            ["checkbox", "radio"].includes(lower(attribute(before, "type", 16) || ""))) return null;
+      }
+      let end = text.value.length;
+      while (end > 0 && (text.value[end - 1] === ":" || text.value[end - 1] === " ")) end -= 1;
+      return end === 0 ? null : apply(stringSlice, text.value, [0, end]);
+    }
+    return null;
+  }
+
+  function nameWords(raw) {
+    const words = apply(stringSplit, raw, [/[\s_\-.[\]]+|(?=[A-Z][a-z])/u]);
+    const text = normalizeText(lower(words.join(" ")), FALLBACK_NAME_BYTES);
+    return text.truncated || text.value === "" ? null : text.value;
+  }
+
+  function fallbackFieldName(element, descriptor, state) {
+    if (!["input", "textarea", "select"].includes(descriptor.tag)) return null;
+    const check = descriptor.role === "checkbox" || descriptor.role === "radio";
+    const beside = adjacentLabel(element, check, state) || (check ? adjacentLabel(element, false, state) : null);
+    if (beside !== null) return beside;
+    const description = attribute(element, "aria-description", MAX_NAME_BYTES * 4, state);
+    if (description !== null && apply(stringTrim, description, []) !== "") return description;
+    const formName = attribute(element, "name", 128, state);
+    return formName === null ? null : nameWords(formName);
+  }
+
   function styleIsVisible(element) {
     let style;
     try {
@@ -2241,6 +2299,9 @@
         descriptor.pageTitle === true ? "Page title" :
         typeof descriptor.pageFacts === "string" ? "Page facts" : labelledText(element, descriptor, state);
       if ((name === null || name === "") && descriptor.role === "image") name = ancestorLabel(element, state);
+      else if ((name === null || name === "") && FALLBACK_NAMED_ROLES.includes(descriptor.role)) {
+        name = fallbackFieldName(element, descriptor, state);
+      }
       if (name !== null && name !== "") addName(record, name, state);
       record.sink = recordSink(descriptor, wire.n !== undefined);
       if (record.sink === "value") record.sinkBytes = 0;
