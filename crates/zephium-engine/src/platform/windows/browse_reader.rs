@@ -127,6 +127,8 @@ struct Prepared {
     native: zephium_agentic::SemanticActionNativeRequest,
     invocation: zephium_agentic::SemanticActionRuntimeInvocation,
     admitted_at: Instant,
+    /// Return in a field: the document it leaves is the step taking.
+    submits: bool,
 }
 
 /// The operation being served, once its invocation is encoded.
@@ -155,6 +157,11 @@ impl Serving {
         match self {
             Self::Read { done, .. } => done(Err(failure)),
             Self::Recipe { done, .. } => done(None),
+            Self::Act {
+                prepared: Some(prepared),
+                done,
+                ..
+            } if prepared.submits && failure == PageReadFailure::PageChanged => done(Ok(())),
             Self::Act { done, .. } => done(Err(act_failure(failure))),
         }
     }
@@ -546,6 +553,7 @@ impl State {
                             .filter(|stored| stored.epoch() == epoch)
                             .ok_or(PageActFailure::PageChanged)?;
                         let proposal = proposal.ok_or(PageActFailure::Failed)?;
+                        let submits = crate::page_reader::read::submits(&proposal);
                         crate::page_reader::read::person_action(
                             &stored,
                             &snapshot,
@@ -553,8 +561,9 @@ impl State {
                             current.id,
                             monotonic_ms(),
                         )
+                        .map(|(pending, native)| (pending, native, submits))
                     })
-                    .and_then(|(pending, native)| {
+                    .and_then(|(pending, native, submits)| {
                         let invocation =
                             zephium_agentic::encode_semantic_action_runtime_invocation(&native)
                                 .map_err(|_| PageActFailure::Failed)?;
@@ -563,6 +572,7 @@ impl State {
                             native,
                             invocation,
                             admitted_at: Instant::now(),
+                            submits,
                         })
                     });
                 match prepared {
@@ -594,6 +604,7 @@ impl State {
                     native,
                     invocation,
                     admitted_at,
+                    ..
                 } = *prepared;
                 let settlement = match decode_action_recipe_response(&invocation, response) {
                     Ok(evidence) => {

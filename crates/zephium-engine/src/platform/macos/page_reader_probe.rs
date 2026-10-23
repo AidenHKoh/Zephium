@@ -252,6 +252,35 @@ fn feed() -> String {
     page
 }
 
+// Hacker News's footer: a search form whose only field has no label, no
+// placeholder and no title, submitted by Return alone; beside it, fields
+// named only by their description, their form name or nothing.
+const HN: &str = r##"<!doctype html><html><head><meta charset="utf-8"><title>Hacker News</title>
+<style>body{font:10pt Verdana,sans-serif;background:#f6f6ef;margin:0}#hnmain{width:85%;margin:8px auto}</style></head>
+<body><center><table id="hnmain" border="0" cellpadding="0" cellspacing="0"><tbody>
+<tr><td bgcolor="#ff6600"><b>Hacker News</b> <a href="/newest">new</a> | <a href="/ask">ask</a></td></tr>
+<tr><td><table><tr class="athing"><td class="title"><a href="https://example.org/a">Rivers rise in the north</a></td></tr></table></td></tr>
+<tr><td><center><span class="yclinks"><a href="/guidelines">Guidelines</a> | <a href="/faq">FAQ</a></span><br><br>
+<form method="get" action="/search">Search: <input type="text" name="q" size="17" autocorrect="off" spellcheck="false" autocapitalize="off" autocomplete="off"></form>
+<p><input type="text" name="shipping_notes"> <input type="text" aria-description="Promo code"> <select name="sortOrder"><option>New</option><option>Top</option></select>
+<input type="checkbox"> Keep me posted <input type="text" disabled> <input type="text"></p>
+</center></td></tr></tbody></table></center></body></html>"##;
+
+fn search_results(path: &str) -> String {
+    let query = url::Url::parse(&format!("http://fixture{path}"))
+        .ok()
+        .and_then(|url| {
+            url.query_pairs()
+                .find(|(k, _)| k == "q")
+                .map(|(_, v)| v.into_owned())
+        })
+        .unwrap_or_default()
+        .replace(['<', '>', '&', '"'], "");
+    format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>Search</title><h1>Results for {query}</h1>"
+    )
+}
+
 struct Fixture {
     address: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -335,6 +364,7 @@ fn serve(mut stream: TcpStream, heavy: &str) {
         .to_owned();
     let generated = match path.as_str() {
         "/listing" | "/listing-csp" => listing(),
+        search if search.starts_with("/search?") => search_results(search),
         "/feed" => feed(),
         "/slow" => {
             std::thread::sleep(Duration::from_millis(1_500));
@@ -345,6 +375,8 @@ fn serve(mut stream: TcpStream, heavy: &str) {
     let (body, kind, csp): (&str, &str, Option<&str>) = match path.as_str() {
         "/assist.js" => (ASSIST_WATCH, "text/javascript", None),
         "/listing" | "/feed" | "/slow" => (&generated, "text/html; charset=utf-8", None),
+        search if search.starts_with("/search?") => (&generated, "text/html; charset=utf-8", None),
+        "/hn" => (HN, "text/html; charset=utf-8", None),
         "/listing-csp" => (
             &generated,
             "text/html; charset=utf-8",
@@ -1736,7 +1768,13 @@ impl Probe {
     }
 
     /// The Assistant fixtures' report: `verb` first, then the page's view.
-    fn assist_report(&self, url: &str, verb: &str, label: &str, arg: &str) -> Result<String, String> {
+    fn assist_report(
+        &self,
+        url: &str,
+        verb: &str,
+        label: &str,
+        arg: &str,
+    ) -> Result<String, String> {
         self.view
             .load_url(&format!("{url}#{verb}~{label}~{arg}"))
             .map_err(|e| format!("report: {e}"))?;
@@ -2352,6 +2390,142 @@ fn assist(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
     Ok(())
 }
 
+/// Unnamed fields read under the best name the page gives, and Return in a
+/// search field submits its form.
+fn fields(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
+    use crate::page_reader::{PageFieldKind, PageReaderPolicy};
+    let probe = Probe::new(mtm, true)?;
+    crate::host::page_reader::set_policy_for_probe(Some(PageReaderPolicy {
+        sensitive: Arc::new(|_| false),
+        human_input: Arc::new(|_| {}),
+    }));
+    println!("fields: unnamed fields read");
+    let url = fixture.url("/hn");
+    let epoch = probe.load(&url)?;
+    probe.wait_readable()?;
+    let (read, took) = probe.read(epoch, &url);
+    let read = read.map_err(|f| format!("hn read failed: {f:?}"))?;
+    let controls: Vec<(PageRole, &str)> = read
+        .passages
+        .iter()
+        .filter(|p| {
+            matches!(
+                p.role,
+                PageRole::Field(_) | PageRole::Select | PageRole::Checkbox { .. }
+            )
+        })
+        .map(|p| (p.role, p.text.as_str()))
+        .collect();
+    check(
+        controls
+            == [
+                (PageRole::Field(PageFieldKind::Text), "Search"),
+                (PageRole::Field(PageFieldKind::Text), "shipping notes"),
+                (PageRole::Field(PageFieldKind::Text), "Promo code"),
+                (PageRole::Select, "sort order"),
+                (PageRole::Checkbox { checked: false }, "Keep me posted"),
+                (PageRole::Field(PageFieldKind::Text), ""),
+            ],
+        &format!(
+            "every enabled field reads: the words beside it, its description, its form name, or nothing ({controls:?}, {} ms)",
+            took.as_millis()
+        ),
+    )?;
+    let stored = crate::page_reader::planned_read(probe.tab, read.read).ok_or("stored read")?;
+    check(
+        read.passages
+            .iter()
+            .all(|p| stored.reference(p.id).is_some()),
+        "each passage resolves to its node",
+    )?;
+    let search = read
+        .passages
+        .iter()
+        .find(|p| p.text == "Search")
+        .and_then(|p| stored.reference(p.id))
+        .ok_or("no search passage")?;
+    let proposal = |intent, effect, verification| {
+        zephium_agentic::SemanticActionProposal::try_new(
+            intent,
+            effect,
+            zephium_agentic::SemanticWaitCondition::Immediate,
+            verification,
+            zephium_agentic::SemanticSettleBudget::try_new(2_000).expect("settle"),
+        )
+        .expect("proposal")
+    };
+    let typed =
+        zephium_agentic::SemanticActionText::try_new("Terax".to_owned()).map_err(|_| "text")?;
+    let filled = probe.act(
+        epoch,
+        read.read,
+        &url,
+        proposal(
+            zephium_agentic::SemanticActionIntent::Fill {
+                target: search,
+                value: typed,
+            },
+            zephium_agentic::SemanticEffectClass::LocalWrite,
+            zephium_agentic::SemanticVerification::TargetValueMatchesInput,
+        ),
+    );
+    check(
+        filled.is_ok(),
+        &format!("a Fill step resolves on the unnamed search field ({filled:?})"),
+    )?;
+    let (after, _) = probe.read(epoch, &url);
+    let after = after.map_err(|f| format!("hn read failed: {f:?}"))?;
+    check(
+        after
+            .passages
+            .iter()
+            .any(|p| p.text == "Search" && p.value.as_deref() == Some("Terax")),
+        "the field holds the typed words",
+    )?;
+    println!("fields: Return submits a Return-only form");
+    let stored = crate::page_reader::planned_read(probe.tab, after.read).ok_or("stored read")?;
+    let search = after
+        .passages
+        .iter()
+        .find(|p| p.text == "Search")
+        .and_then(|p| stored.reference(p.id))
+        .ok_or("no search passage")?;
+    let finished = probe.state.borrow().finished;
+    let pressed = probe.act(
+        epoch,
+        after.read,
+        &url,
+        proposal(
+            zephium_agentic::SemanticActionIntent::Press {
+                target: search,
+                key: zephium_agentic::SemanticPressKey::Enter,
+            },
+            zephium_agentic::SemanticEffectClass::Read,
+            zephium_agentic::SemanticVerification::PageChanged,
+        ),
+    );
+    check(
+        pressed.is_ok(),
+        &format!("Return runs as the runtime's fixed press recipe and takes ({pressed:?})"),
+    )?;
+    pump(
+        || probe.state.borrow().finished > finished,
+        "for the search results",
+    )?;
+    let results = fixture.url("/search?q=Terax");
+    probe.wait_readable()?;
+    let next = probe.epoch().ok_or("no committed epoch")?;
+    let (landed, _) = probe.read(next, &results);
+    check(
+        next != epoch
+            && landed.is_ok_and(|r| r.passages.iter().any(|p| p.text == "Results for Terax")),
+        "the form navigated to its action with the query",
+    )?;
+    check(probe.state.borrow().popups == 0, "no popup reached native")?;
+    crate::host::page_reader::set_policy_for_probe(None);
+    Ok(())
+}
+
 fn median(values: &mut [f64]) -> f64 {
     values.sort_by(|a, b| a.total_cmp(b));
     values.get(values.len() / 2).copied().unwrap_or(0.0)
@@ -2547,6 +2721,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
     let fixture = Fixture::start()?;
     let measuring = arguments.iter().any(|a| a == "--measure");
     let assist_only = arguments.iter().any(|a| a == "--assist");
+    let fields_only = arguments.iter().any(|a| a == "--fields");
     let wikipedia = arguments
         .iter()
         .position(|a| a == "--article")
@@ -2557,8 +2732,12 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
             measure(mtm, &fixture, wikipedia)
         } else if assist_only {
             assist(mtm, &fixture)
+        } else if fields_only {
+            fields(mtm, &fixture)
         } else {
-            fixtures(mtm, &fixture).and_then(|()| assist(mtm, &fixture))
+            fixtures(mtm, &fixture)
+                .and_then(|()| assist(mtm, &fixture))
+                .and_then(|()| fields(mtm, &fixture))
         }
     });
     drop(fixture);

@@ -382,6 +382,8 @@ pub(crate) mod read {
         SemanticRuntimeInvocation, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
     };
 
+    use std::collections::HashMap;
+
     use super::{PageFieldKind, PagePassage, PageReadFailure, PageRole};
 
     /// One request in flight: its observation request and frame authority,
@@ -488,33 +490,7 @@ pub(crate) mod read {
             let Ok(node) = observation.resolve_node(reference, &pending.frame) else {
                 continue;
             };
-            let role = match node.role() {
-                SemanticRole::Heading => {
-                    PageRole::Heading(node.heading_level().map_or(2, |level| level.get()))
-                }
-                SemanticRole::Paragraph | SemanticRole::Document | SemanticRole::Status => {
-                    PageRole::Text
-                }
-                SemanticRole::ListItem => PageRole::ListItem,
-                SemanticRole::Cell | SemanticRole::CellHeader => PageRole::Cell,
-                SemanticRole::Link => PageRole::Link {
-                    same_site: node
-                        .link_destination()
-                        .is_some_and(|target| same_site(pending.site.as_deref(), target)),
-                },
-                SemanticRole::Button | SemanticRole::MenuItem | SemanticRole::Tab => {
-                    PageRole::Button
-                }
-                SemanticRole::Textbox => PageRole::Field(PageFieldKind::Text),
-                SemanticRole::Searchbox => PageRole::Field(PageFieldKind::Search),
-                SemanticRole::Spinbutton => PageRole::Field(PageFieldKind::Number),
-                SemanticRole::Password => PageRole::Field(PageFieldKind::Password),
-                SemanticRole::Checkbox | SemanticRole::Radio => PageRole::Checkbox {
-                    checked: node.states().contains(SemanticState::Checked),
-                },
-                SemanticRole::Combobox | SemanticRole::Listbox => PageRole::Select,
-                _ => PageRole::Other,
-            };
+            let role = page_role(node, pending.site.as_deref());
             let field = matches!(role, PageRole::Field(_));
             let protected = matches!(role, PageRole::Field(PageFieldKind::Password));
             let previous = passages
@@ -565,19 +541,42 @@ pub(crate) mod read {
                     }
                 }
                 (SemanticReadField::BooleanValue, SemanticReadContent::Boolean(checked)) => {
-                    if let Some(previous) = previous {
-                        if matches!(previous.role, PageRole::Checkbox { .. }) {
+                    match previous {
+                        Some(previous) if matches!(previous.role, PageRole::Checkbox { .. }) => {
                             previous.role = PageRole::Checkbox { checked };
                         }
+                        Some(_) => {}
+                        None if matches!(role, PageRole::Checkbox { .. }) => {
+                            passages.push((
+                                unnamed(
+                                    fragment.id().get(),
+                                    PageRole::Checkbox { checked },
+                                    fragment.region(),
+                                ),
+                                reference,
+                            ));
+                        }
+                        None => {}
                     }
+                }
+                (SemanticReadField::OrdinalValue, _)
+                    if previous.is_none() && role == PageRole::Select =>
+                {
+                    passages.push((
+                        unnamed(fragment.id().get(), role, fragment.region()),
+                        reference,
+                    ));
                 }
                 _ => {}
             }
         }
-        let passages: Vec<(PagePassage, zephium_agentic::SemanticReferenceId)> = passages
+        let mut passages: Vec<(PagePassage, zephium_agentic::SemanticReferenceId)> = passages
             .into_iter()
-            .filter(|(passage, _)| !passage.text.is_empty() || passage.value.is_some())
+            .filter(|(passage, _)| {
+                !passage.text.is_empty() || passage.value.is_some() || control(passage.role)
+            })
             .collect();
+        add_unread_fields(&observation, pending.site.as_deref(), &mut passages);
         let references = passages
             .iter()
             .map(|(passage, reference)| (passage.id, *reference))
@@ -593,6 +592,117 @@ pub(crate) mod read {
                 references,
             },
         ))
+    }
+
+    fn page_role(node: &zephium_agentic::SemanticNode, site: Option<&str>) -> PageRole {
+        match node.role() {
+            SemanticRole::Heading => {
+                PageRole::Heading(node.heading_level().map_or(2, |level| level.get()))
+            }
+            SemanticRole::Paragraph | SemanticRole::Document | SemanticRole::Status => {
+                PageRole::Text
+            }
+            SemanticRole::ListItem => PageRole::ListItem,
+            SemanticRole::Cell | SemanticRole::CellHeader => PageRole::Cell,
+            SemanticRole::Link => PageRole::Link {
+                same_site: node
+                    .link_destination()
+                    .is_some_and(|target| same_site(site, target)),
+            },
+            SemanticRole::Button | SemanticRole::MenuItem | SemanticRole::Tab => PageRole::Button,
+            SemanticRole::Textbox => PageRole::Field(PageFieldKind::Text),
+            SemanticRole::Searchbox => PageRole::Field(PageFieldKind::Search),
+            SemanticRole::Spinbutton => PageRole::Field(PageFieldKind::Number),
+            SemanticRole::Password => PageRole::Field(PageFieldKind::Password),
+            SemanticRole::Checkbox | SemanticRole::Radio => PageRole::Checkbox {
+                checked: node.states().contains(SemanticState::Checked),
+            },
+            SemanticRole::Combobox | SemanticRole::Listbox => PageRole::Select,
+            _ => PageRole::Other,
+        }
+    }
+
+    /// A control the person could use, which reads even without a name.
+    fn control(role: PageRole) -> bool {
+        matches!(
+            role,
+            PageRole::Field(PageFieldKind::Text | PageFieldKind::Search | PageFieldKind::Number)
+                | PageRole::Checkbox { .. }
+                | PageRole::Select
+        )
+    }
+
+    fn unnamed(id: u16, role: PageRole, region: u8) -> PagePassage {
+        PagePassage {
+            id,
+            role,
+            text: String::new(),
+            verbatim: false,
+            value: None,
+            region,
+            href: None,
+        }
+    }
+
+    /// Fields a read may gain beyond its own fragments.
+    const MAX_UNREAD_FIELDS: usize = 16;
+
+    /// Adds the enabled, public fields of the main frame the read had
+    /// nothing to say about (an empty field the page left unnamed), in
+    /// document order, under ids past the read's own.
+    fn add_unread_fields(
+        observation: &zephium_agentic::SemanticObservation,
+        site: Option<&str>,
+        passages: &mut Vec<(PagePassage, zephium_agentic::SemanticReferenceId)>,
+    ) {
+        let Some(frame) = observation.frames().first() else {
+            return;
+        };
+        let nodes = frame.nodes();
+        let indices: HashMap<_, _> = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.reference(), index))
+            .collect();
+        let mut order: Vec<usize> = passages
+            .iter()
+            .map(|(_, reference)| indices.get(reference).copied().unwrap_or(0))
+            .collect();
+        let read: std::collections::HashSet<_> =
+            passages.iter().map(|(_, reference)| *reference).collect();
+        let mut next = passages
+            .iter()
+            .map(|(passage, _)| passage.id)
+            .max()
+            .unwrap_or(0);
+        let mut added = 0;
+        for (index, node) in nodes.iter().enumerate() {
+            if added == MAX_UNREAD_FIELDS {
+                break;
+            }
+            let role = page_role(node, site);
+            if !control(role)
+                || node.sensitivity() != zephium_agentic::SemanticSensitivity::Public
+                || node.states().contains(SemanticState::Disabled)
+                || read.contains(&node.reference())
+            {
+                continue;
+            }
+            let Some(id) = next.checked_add(1) else {
+                return;
+            };
+            next = id;
+            added += 1;
+            let at = order
+                .iter()
+                .rposition(|&i| i < index)
+                .map_or(0, |at| at + 1);
+            let region = at
+                .checked_sub(1)
+                .map_or(0, |before| passages[before].0.region);
+            order.insert(at, index);
+            passages.insert(at, (unnamed(id, role, region), node.reference()));
+        }
     }
 
     /// A link's destination as a tab may be opened to it: the observed
@@ -714,6 +824,19 @@ pub(crate) mod read {
             zephium_agentic::SemanticActionExecutionInstant::from_millis(requested_at_ms),
         )
         .map_err(|_| PageActFailure::Failed)
+    }
+
+    /// Return in a field: a step whose taking may be the document leaving,
+    /// as a form submits. Once it was handed to the page, that navigation
+    /// is its effect, not a changed page.
+    pub(crate) fn submits(proposal: &zephium_agentic::SemanticActionProposal) -> bool {
+        matches!(
+            proposal.intent(),
+            zephium_agentic::SemanticActionIntent::Press {
+                key: zephium_agentic::SemanticPressKey::Enter,
+                ..
+            }
+        )
     }
 
     /// Why a prepared step did not take.
@@ -854,6 +977,42 @@ pub(crate) mod read {
 
         fn snapshot_for(invocation: &SemanticRuntimeInvocation, wire: &str) -> SemanticSnapshot {
             invocation.decode_result(wire.as_bytes()).expect("decode")
+        }
+
+        #[test]
+        fn unnamed_empty_controls_still_read_and_resolve() {
+            let context = reader_context().expect("context");
+            let (invocation, pending) =
+                super::invocation(context, "https://news.example.com/", 5).expect("invocation");
+            let wire = r#"{"v":1,"i":5,"g":5,"c":"complete","n":[
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"paragraph","t":"Search:"},
+                {"k":3,"p":0,"r":"textbox","v":{"k":"text","value":""},"o":2},
+                {"k":4,"p":0,"r":"checkbox","v":{"k":"boolean","value":true},"o":1},
+                {"k":5,"p":0,"r":"combobox","v":{"k":"ordinal","value":0}},
+                {"k":6,"p":0,"r":"textbox","s":8,"v":{"k":"text","value":""}},
+                {"k":7,"p":0,"r":"textbox","n":"Email","q":"sensitive","v":{"k":"text","value":""}},
+                {"k":8,"p":0,"r":"paragraph","t":"Footer"}
+            ]}"#;
+            let (passages, kept) =
+                passages(pending, snapshot_for(&invocation, wire), 1, 7).expect("read");
+            let roles: Vec<PageRole> = passages.iter().map(|p| p.role).collect();
+            assert_eq!(
+                roles,
+                [
+                    PageRole::Text,
+                    PageRole::Field(PageFieldKind::Text),
+                    PageRole::Checkbox { checked: true },
+                    PageRole::Select,
+                    PageRole::Text,
+                ],
+                "disabled and sensitive fields stay out; the rest keep document order"
+            );
+            let mut ids: Vec<u16> = passages.iter().map(|p| p.id).collect();
+            assert!(passages.iter().all(|p| kept.reference(p.id).is_some()));
+            ids.sort_unstable();
+            ids.dedup();
+            assert_eq!(ids.len(), passages.len(), "ids stay unique");
         }
 
         #[test]

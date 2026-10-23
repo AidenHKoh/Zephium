@@ -1,7 +1,7 @@
 //! One step the person directed on their own Browse tab from the Ask panel,
 //! run through the same fixed isolated-world recipes as Work: the exact
-//! observed target is revalidated in the page, then clicked, filled, chosen
-//! or scrolled by the immutable runtime. No agent run, plan, budget or model
+//! observed target is revalidated in the page, then clicked, filled, chosen,
+//! pressed or scrolled by the immutable runtime. No agent run, plan, budget or model
 //! authority is created; the shell asks the person to confirm any step that
 //! commits before it reaches this seam.
 
@@ -16,10 +16,11 @@ use crate::{
 };
 
 /// The kinds a person may direct from the panel.
-const PERSON_ACTION_KINDS: [SemanticActionKind; 4] = [
+const PERSON_ACTION_KINDS: [SemanticActionKind; 5] = [
     SemanticActionKind::Click,
     SemanticActionKind::Fill,
     SemanticActionKind::Select,
+    SemanticActionKind::Press,
     SemanticActionKind::Scroll,
 ];
 

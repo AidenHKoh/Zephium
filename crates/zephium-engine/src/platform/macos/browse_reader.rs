@@ -804,6 +804,7 @@ impl ReaderState {
                 });
                 let committed_now = self.committed_now.clone();
                 let channel = controller.clone();
+                let submits = crate::page_reader::read::submits(&proposal);
                 let _ = controller.dispatch(invocation, move |result| {
                     let changed = || committed_now() != Some(epoch);
                     let current = match result {
@@ -841,6 +842,7 @@ impl ReaderState {
                         move |settlement| {
                             let outcome = match pending.settle(settlement) {
                                 Ok(()) => Ok(()),
+                                Err(_) if committed_now() != Some(epoch) && submits => Ok(()),
                                 Err(_) if committed_now() != Some(epoch) => {
                                     Err(PageActFailure::PageChanged)
                                 }

@@ -528,12 +528,12 @@ fn check_probe_gate(manifest: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The person-directed seam stays closed: four everyday kinds, its own
+/// The person-directed seam stays closed: five everyday kinds, its own
 /// marked authority built in one place, and used only by the Browse reader.
 fn check_person_seam(person: &str, effect: &str, repository: &Path) -> Result<(), String> {
     let person = compact(person);
     for required in [
-        "constPERSON_ACTION_KINDS:[SemanticActionKind;4]=[SemanticActionKind::Click,SemanticActionKind::Fill,SemanticActionKind::Select,SemanticActionKind::Scroll,];",
+        "constPERSON_ACTION_KINDS:[SemanticActionKind;5]=[SemanticActionKind::Click,SemanticActionKind::Fill,SemanticActionKind::Select,SemanticActionKind::Press,SemanticActionKind::Scroll,];",
         "if!PERSON_ACTION_KINDS.contains(&action.kind()){",
         "AgentActiveEffect::for_person_directed(action,attempt,id)",
     ] {
