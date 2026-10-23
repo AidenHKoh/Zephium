@@ -1558,12 +1558,22 @@ fn validate_engine_windows_cookie_transfer(module: &str, source: &str) -> Result
     let module_at = module
         .find(module_marker)
         .ok_or_else(|| "production Windows cookie adapter module is missing".to_owned())?;
-    let module_prefix = &module[..module_at];
-    let gate_at = module_prefix
-        .rfind("#[cfg")
-        .ok_or_else(|| "production Windows cookie adapter lost its feature gate".to_owned())?;
-    let gate = compact(&module_prefix[gate_at..]);
-    if !gate.contains("#[cfg(feature=\"agentic-browser\")]") {
+    // Only the attributes attached to the item gate it: stop at the first line
+    // that is neither an attribute nor a comment, so a gated sibling declared
+    // just above cannot stand in for this module's gate.
+    let line_start = module[..module_at].rfind('\n').map_or(0, |at| at + 1);
+    let attached = module[..line_start]
+        .lines()
+        .rev()
+        .map(str::trim)
+        .take_while(|line| line.starts_with("#[") || line.starts_with("//"))
+        .filter(|line| line.starts_with("#["))
+        .map(compact)
+        .collect::<Vec<_>>();
+    if !attached
+        .iter()
+        .any(|gate| gate == "#[cfg(feature=\"agentic-browser\")]")
+    {
         return Err(
             "production Windows cookie adapter must remain agentic-browser gated".to_owned(),
         );
@@ -14480,7 +14490,7 @@ mod tests {
         assert!(!shipping.contains("applied_unverified_preparation_only"));
         let engine = include_str!("../../crates/zephium-engine/src/lib.rs");
         assert!(engine.contains("#[cfg(all(feature = \"native-agentic-semantic-probe\", not(debug_assertions)))]\ncompile_error!(\"the native agentic semantic probe is forbidden in optimized builds\");"));
-        assert!(candidate.contains("return commandPreparationOnly ? \"unsupported_interaction\" : runSyntheticFill(target, descriptor, request);"));
+        assert!(candidate.contains("return commandPreparationOnly ? \"unsupported_interaction\" : runSyntheticFill(target, descriptor, request, finish);"));
         let revalidation = candidate.find("if (!preparedCurrent()) return \"applied_unverified_beforeinput_revalidation\";\n      // The consumed").unwrap();
         let stop = candidate
             .find("if (commandPreparationOnly) return \"applied_unverified_preparation_only\";")
