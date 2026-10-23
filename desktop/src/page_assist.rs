@@ -607,7 +607,17 @@ mod product {
                 self.engine.page_pick_cancel(item);
             }
         }
-        fn glow(&self, _tab: &str, _glow: Glow) {}
+        fn glow(&self, tab: &str, glow: Glow) {
+            use zephium_engine::page_reader::PageGlow;
+            if let Some(item) = zephium_core::ids::ItemId::parse(tab) {
+                let glow = match glow {
+                    Glow::Off => PageGlow::Off,
+                    Glow::Working => PageGlow::Working,
+                    Glow::Paused => PageGlow::Paused,
+                };
+                self.engine.page_glow(item, glow, reduce_motion());
+            }
+        }
     }
 
     /// Closed facts about replies, into the app's diagnostic log.
