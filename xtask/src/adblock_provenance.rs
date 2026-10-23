@@ -2274,7 +2274,7 @@ fn verify_blocker_product_lock(repository: &Path) -> Result<(), String> {
     const REGISTRY: [(&str, &str); 5] = [
         ("aws-lc-rs", "1.18.1"),
         ("reqwest", "0.13.4"),
-        ("rustls", "0.23.45"),
+        ("rustls", "0.23.46"),
         ("rustls-platform-verifier", "0.7.0"),
         ("tough", "0.24.0"),
     ];
