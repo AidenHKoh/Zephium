@@ -474,7 +474,7 @@ fn check_public(source: &str) -> Result<(), String> {
     let compact = compact(production(source));
     for required in [
         "SemanticReadSensitivityLimit::PublicOnly",
-        "SemanticReadBudget::STANDARD",
+        "SemanticReadBudget::EXTRACTION",
         "verbatim:fragment.verbatim_text().is_some()",
         "iffield&&!protected=>",
     ] {
@@ -484,6 +484,11 @@ fn check_public(source: &str) -> Result<(), String> {
     }
     if compact.contains("SemanticReadSensitivityLimit::Sensitive") {
         return Err("the read projection widened past public content".to_owned());
+    }
+    if compact.contains("SemanticReadBudget::LISTING")
+        || compact.contains("SemanticReadBudget::try_new")
+    {
+        return Err("the read projection outgrew its fixed listing budget".to_owned());
     }
     // Reads are found only by the id a plan carries, so a later read can
     // never stand in for the one a step was planned on.

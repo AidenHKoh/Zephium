@@ -479,7 +479,7 @@ pub(crate) mod read {
             SemanticReadAuthority::Initial,
             SemanticCaptureInstant::from_millis(captured_at_ms),
             SemanticReadSensitivityLimit::PublicOnly,
-            SemanticReadBudget::STANDARD,
+            SemanticReadBudget::EXTRACTION,
         )
         .map_err(|_| PageReadFailure::Unavailable)?;
         let mut passages: Vec<(PagePassage, zephium_agentic::SemanticReferenceId)> = Vec::new();

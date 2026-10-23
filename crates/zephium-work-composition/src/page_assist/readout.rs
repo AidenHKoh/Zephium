@@ -11,7 +11,7 @@ use zephium_page_assist::text;
 use super::port::{FieldKind, Passage, Readout, Role};
 
 /// Largest page text sent, in bytes.
-pub(crate) const MAX_PAYLOAD_BYTES: usize = 32 * 1024;
+pub(crate) const MAX_PAYLOAD_BYTES: usize = 40 * 1024;
 const MAX_PASSAGE_CHARS: usize = 600;
 const MAX_VALUE_CHARS: usize = 200;
 const MAX_DESTINATION_CHARS: usize = 80;
