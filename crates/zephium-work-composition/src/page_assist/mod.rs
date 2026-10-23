@@ -714,6 +714,7 @@ impl PageAssist {
             cancel,
             leased,
             took_over,
+            glowing: Mutex::new(Vec::new()),
         };
         Ok((reply, Box::pin(agent::run(context))))
     }

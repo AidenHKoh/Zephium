@@ -36,6 +36,9 @@ pub(crate) enum Call {
     OpenTabs {
         targets: Vec<String>,
     },
+    GoTo {
+        target: String,
+    },
     Act {
         steps: Vec<Step>,
     },
@@ -113,6 +116,16 @@ pub(crate) fn definitions() -> Vec<WorkModelTool> {
                 "type": "object",
                 "properties": {"targets": {"type": "array", "maxItems": MAX_OPEN, "items": {"type": "string"}}},
                 "required": ["targets"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "go_to",
+            "Opens one page in a new tab in front of the person and reads it, so you can keep working there. The target is a link passage reference such as a12, an address the person wrote or a tab listed by list_tabs, or `search: words` to search the person's own search engine.",
+            json!({
+                "type": "object",
+                "properties": {"target": {"type": "string"}},
+                "required": ["target"],
                 "additionalProperties": false
             }),
         ),
@@ -221,6 +234,7 @@ pub(crate) fn known(name: &str) -> &'static str {
         "read_page",
         "show_items",
         "open_tabs",
+        "go_to",
         "act",
         "inspect_style",
         "restyle",
@@ -258,6 +272,9 @@ pub(crate) fn parse(name: &str, arguments: &Value) -> Option<Call> {
             }
             Call::ShowItems { items }
         }
+        "go_to" => Call::GoTo {
+            target: bounded(arguments, "target", 2048)?,
+        },
         "open_tabs" => {
             let targets = strings(arguments, "targets", MAX_OPEN, 2048);
             if targets.is_empty() {
@@ -325,6 +342,7 @@ mod tests {
                 json!({"items": [{"ref": "a3", "title": "Story"}]}),
             ),
             ("open_tabs", json!({"targets": ["a3"]})),
+            ("go_to", json!({"target": "search: rust language"})),
             ("act", json!({"steps": [{"verb": "click", "ref": "a3"}]})),
             ("inspect_style", json!({"page": "a"})),
             (

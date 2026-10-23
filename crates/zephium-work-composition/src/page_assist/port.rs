@@ -309,15 +309,18 @@ pub trait Tabs: Send + Sync {
     fn profile(&self, space: &str) -> Option<ProfileId>;
     /// The Space's tabs in order.
     fn list(&self, profile: &ProfileId, space: &str) -> Vec<TabSummary>;
-    /// Opens `url` in a new background tab of `space` after `after`; yields
-    /// the new tab's id.
+    /// Opens `url` in a new tab of `space` after `after`, in front when
+    /// `focus`; yields the new tab's id.
     fn open<'a>(
         &'a self,
         profile: &'a ProfileId,
         space: &'a str,
         url: &'a str,
         after: Option<&'a str>,
+        focus: bool,
     ) -> BoxFuture<'a, Option<String>>;
+    /// The person's own search engine's results address for `query`.
+    fn search_url(&self, profile: &ProfileId, query: &str) -> Option<String>;
 }
 
 /// The model a reply would use.

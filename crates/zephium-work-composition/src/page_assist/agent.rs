@@ -40,11 +40,11 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(12);
 const UNLISTED_TIMEOUT: Duration = Duration::from_millis(1_500);
 const TEXT_INTERVAL_MS: u64 = 50;
 /// Most model calls one reply makes.
-const MAX_CALLS: usize = 8;
+const MAX_CALLS: usize = 16;
 /// Most tool calls one reply runs.
-const MAX_TOOLS: usize = 16;
+const MAX_TOOLS: usize = 40;
 /// Most pages one reply reads.
-const MAX_READS: usize = 6;
+const MAX_READS: usize = 12;
 /// Longest transcript handed to Work, in characters.
 const MAX_TRANSCRIPT_CHARS: usize = 6_000;
 
@@ -60,6 +60,8 @@ pub(super) struct Reply {
     pub(super) cancel: Arc<Cancel>,
     pub(super) leased: Arc<AtomicBool>,
     pub(super) took_over: Arc<AtomicBool>,
+    /// Tabs lit while this reply works on them.
+    pub(super) glowing: std::sync::Mutex<Vec<String>>,
 }
 
 enum End {
@@ -103,6 +105,22 @@ impl Reply {
         ));
     }
 
+    fn glow(&self, tab: &str, glow: Glow) {
+        let mut glowing = self.glowing.lock().unwrap_or_else(|p| p.into_inner());
+        if glow != Glow::Off && !glowing.iter().any(|known| known == tab) {
+            glowing.push(tab.to_owned());
+        }
+        drop(glowing);
+        self.service.ports().page.glow(tab, glow);
+    }
+
+    fn unglow(&self) {
+        let tabs = std::mem::take(&mut *self.glowing.lock().unwrap_or_else(|p| p.into_inner()));
+        for tab in tabs {
+            self.service.ports().page.glow(&tab, Glow::Off);
+        }
+    }
+
     fn phase(&self, phase: Option<PageAssistPhaseV1>) {
         self.apply(PageAssistEventV1::Phase { phase });
     }
@@ -140,6 +158,20 @@ impl Reply {
 
     fn set_block(&self, block: u16, value: PageAssistBlockV1) {
         self.apply(PageAssistEventV1::Block { block, value });
+    }
+
+    fn admit_links(&self, links: impl IntoIterator<Item = String>) {
+        let mut state = self.service.state();
+        if let Some(live) = state.live.get_mut(&self.conversation) {
+            for link in links {
+                if live.links.len() >= MAX_LINKS {
+                    break;
+                }
+                if zephium_page_assist::policy::is_web_url(&link) {
+                    live.links.insert(link);
+                }
+            }
+        }
     }
 
     fn handle(&self, tab: &str) -> String {
@@ -471,6 +503,7 @@ pub(super) async fn run(reply: Reply) {
         end = body(&reply) => end,
     };
     reply.leased.store(false, Ordering::Release);
+    reply.unglow();
     reply.note(format_args!(
         "end {}",
         match &end {
@@ -542,7 +575,8 @@ async fn body(reply: &Reply) -> End {
     let mut text = Text::default();
     let mut usage = WorkModelUsage::default();
     let mut ran = 0usize;
-    for _ in 0..MAX_CALLS {
+    let mut calls_left = MAX_CALLS;
+    while calls_left > 0 {
         if text.block.is_none() {
             reply.phase(Some(PageAssistPhaseV1::Thinking));
         }
@@ -639,6 +673,12 @@ async fn body(reply: &Reply) -> End {
         if stop {
             break;
         }
+        calls_left -= 1;
+        if calls_left == 1 {
+            messages.push(WorkModelMessage::User(vec![WorkModelPart::Text(
+                "Stop using tools now. In two or three sentences tell the person what you did and what is left.".to_owned(),
+            )]));
+        }
     }
     reply.flush(&mut text);
     reply.phase(None);
@@ -654,6 +694,7 @@ async fn run_tool(reply: &Reply, text: &mut Text, call: Call) -> Result<ToolOutc
         Call::ReadPage { tab } => read_page(reply, &tab).await,
         Call::ShowItems { items } => show_items(reply, text, items).await,
         Call::OpenTabs { targets } => open_tabs(reply, text, targets).await,
+        Call::GoTo { target } => go_to(reply, text, &target).await,
         Call::Act { steps } => return act(reply, text, steps).await,
         Call::InspectStyle { page } => inspect_style(reply, &page).await,
         Call::Restyle { page, summary, css } => restyle(reply, text, &page, summary, &css).await,
@@ -671,6 +712,7 @@ fn list_tabs(reply: &Reply) -> String {
         .ports()
         .tabs
         .list(&reply.profile, &reply.space);
+    reply.admit_links(tabs.iter().filter_map(|tab| tab.url.clone()));
     let lines: Vec<String> = tabs
         .iter()
         .take(60)
@@ -704,7 +746,10 @@ async fn read_page(reply: &Reply, handle: &str) -> ToolOutcome {
         Err(PageAssistFaultV1::TooLong) => {
             Err("No more pages can be read in this reply.".to_owned())
         }
-        Err(_) => Err("That tab cannot be read now.".to_owned()),
+        Err(_) => Err(
+            "That tab is asleep or still loading. go_to its address from list_tabs to open it fresh."
+                .to_owned(),
+        ),
     }
 }
 
@@ -850,20 +895,14 @@ async fn open_tabs(reply: &Reply, text: &mut Text, targets: Vec<String>) -> Tool
                 &reply.space,
                 &rows[index].url,
                 after.as_deref(),
+                false,
             )
             .await;
         match opened {
             Some(tab) => {
                 rows[index].tab = Some(tab.clone());
                 reply.set_block(block, PageAssistBlockV1::Opened { tabs: rows.clone() });
-                let started = tokio::time::Instant::now();
-                while started.elapsed() < OPEN_TIMEOUT {
-                    match ports.page.facts(&tab) {
-                        Some(facts) if !facts.loading => break,
-                        None if started.elapsed() > UNLISTED_TIMEOUT => break,
-                        _ => tokio::time::sleep(Duration::from_millis(150)).await,
-                    }
-                }
+                settled(&ports, &tab).await;
                 rows[index].state = PageAssistOpenStateV1::Opened;
                 after = Some(tab);
             }
@@ -890,6 +929,105 @@ async fn open_tabs(reply: &Reply, text: &mut Text, targets: Vec<String>) -> Tool
         ));
     }
     Ok(summary)
+}
+
+/// Waits for a new tab's first load, bounded.
+async fn settled(ports: &super::Ports, tab: &str) {
+    let started = tokio::time::Instant::now();
+    while started.elapsed() < OPEN_TIMEOUT {
+        match ports.page.facts(tab) {
+            Some(facts) if !facts.loading => break,
+            None if started.elapsed() > UNLISTED_TIMEOUT => break,
+            _ => tokio::time::sleep(Duration::from_millis(150)).await,
+        }
+    }
+}
+
+/// One page in front, read for the model: a read link, an address the
+/// person wrote or a listed tab's, or a search on the person's own engine.
+async fn go_to(reply: &Reply, text: &mut Text, target: &str) -> ToolOutcome {
+    let ports = reply.service.ports().clone();
+    let target = target.trim();
+    let url = if let Some(query) = target
+        .strip_prefix("search:")
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+    {
+        ports
+            .tabs
+            .search_url(&reply.profile, query)
+            .ok_or_else(|| "That search cannot be made.".to_owned())?
+    } else if let Some(reference) = refs::parse(target) {
+        reply
+            .record_of(reference)
+            .and_then(|record| record.page.fragments.get(&reference.passage)?.href.clone())
+            .ok_or_else(|| format!("{target} is not a link of a page you read."))?
+    } else {
+        let known = {
+            let state = reply.service.state();
+            state
+                .live
+                .get(&reply.conversation)
+                .is_some_and(|live| live.links.contains(target))
+        };
+        if !known {
+            return Err("Not an address the person wrote, a link you read or a listed tab. Use `search: words` instead.".to_owned());
+        }
+        target.to_owned()
+    };
+    reply.phase(Some(PageAssistPhaseV1::Opening));
+    let after = reply
+        .with_data(|data| data.handles.first().cloned())
+        .flatten();
+    let host = host_of(&url);
+    let mut row = PageAssistOpenedV1 {
+        index: 0,
+        host: host.clone(),
+        url: url.clone(),
+        tab: None,
+        state: PageAssistOpenStateV1::Opening,
+    };
+    let block = reply.add_block(
+        text,
+        PageAssistBlockV1::Opened {
+            tabs: vec![row.clone()],
+        },
+    );
+    let Some(tab) = ports
+        .tabs
+        .open(&reply.profile, &reply.space, &url, after.as_deref(), true)
+        .await
+    else {
+        row.state = PageAssistOpenStateV1::Failed;
+        reply.set_block(block, PageAssistBlockV1::Opened { tabs: vec![row] });
+        return Err(format!("{host} could not be opened."));
+    };
+    row.tab = Some(tab.clone());
+    reply.set_block(
+        block,
+        PageAssistBlockV1::Opened {
+            tabs: vec![row.clone()],
+        },
+    );
+    settled(&ports, &tab).await;
+    row.state = PageAssistOpenStateV1::Opened;
+    reply.set_block(block, PageAssistBlockV1::Opened { tabs: vec![row] });
+    let handle = reply.handle(&tab);
+    let mut read = reply.read_tab(&tab).await;
+    if matches!(read, Err(PageAssistFaultV1::Loading)) {
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        read = reply.read_tab(&tab).await;
+    }
+    reply.phase(Some(PageAssistPhaseV1::Thinking));
+    match read {
+        Ok(index) => Ok(format!("Opened {host} in front as {handle}.\n{}", reply.page_block(index))),
+        Err(PageAssistFaultV1::Sensitive) => Ok(format!(
+            "Opened {host} in front as {handle}. It is a sensitive site and is never read; the person continues there."
+        )),
+        Err(_) => Ok(format!(
+            "Opened {host} in front as {handle}, but it cannot be read yet; try read_page {handle} once."
+        )),
+    }
 }
 
 async fn inspect_style(reply: &Reply, page: &str) -> ToolOutcome {
@@ -1061,10 +1199,16 @@ fn category(effect: StepEffect) -> Option<WorkConfirmCategoryV1> {
     }
 }
 
-/// Refuses, from the step's own read, steps the engine must never run.
-fn admissible(record: &ReadRecord, step: &StepRequest) -> bool {
+/// Refuses, from the step's own read, steps the engine must never run:
+/// protected fields and links away from the site are refused, anything a
+/// verb cannot use is unsuitable.
+fn admissible(record: &ReadRecord, step: &StepRequest) -> Result<(), StepFailure> {
     let Some(target) = step.target else {
-        return step.verb == Verb::Scroll;
+        return if step.verb == Verb::Scroll {
+            Ok(())
+        } else {
+            Err(StepFailure::Unsuitable)
+        };
     };
     let Some(passage) = record
         .readout
@@ -1072,10 +1216,18 @@ fn admissible(record: &ReadRecord, step: &StepRequest) -> bool {
         .iter()
         .find(|passage| passage.id == target)
     else {
-        return false;
+        return Err(StepFailure::Unsuitable);
     };
-    match (step.verb, passage.role) {
-        (_, Role::Field(kind)) if kind.protected() => false,
+    if matches!(passage.role, Role::Field(kind) if kind.protected()) {
+        return Err(StepFailure::Refused);
+    }
+    if matches!(
+        (step.verb, passage.role),
+        (Verb::Open | Verb::Click, Role::Link { same_site: false })
+    ) {
+        return Err(StepFailure::Refused);
+    }
+    let fits = match (step.verb, passage.role) {
         (Verb::Fill, Role::Field(_)) => true,
         (Verb::Fill, _) => false,
         (Verb::Submit, Role::Field(_)) => true,
@@ -1090,6 +1242,11 @@ fn admissible(record: &ReadRecord, step: &StepRequest) -> bool {
         (Verb::Click | Verb::Expand, Role::Button | Role::Checkbox { .. } | Role::Other) => true,
         (Verb::Click | Verb::Expand, _) => false,
         (Verb::Scroll, _) => true,
+    };
+    if fits {
+        Ok(())
+    } else {
+        Err(StepFailure::Unsuitable)
     }
 }
 
@@ -1329,10 +1486,8 @@ async fn act(reply: &Reply, text: &mut Text, steps: Vec<Step>) -> Result<ToolOut
         });
     reply.leased.store(true, Ordering::Release);
     reply.phase(Some(PageAssistPhaseV1::Acting));
-    let page = reply.service.ports().page.clone();
-    page.glow(&plan.tab, Glow::Working);
+    reply.glow(&plan.tab, Glow::Working);
     let result = run_steps(reply, text, &mut plan).await;
-    page.glow(&plan.tab, Glow::Off);
     reply.leased.store(false, Ordering::Release);
     reply
         .service
@@ -1355,11 +1510,8 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
             take_over(reply, text, plan, index).await?;
         }
         let step = plan.requests[index].clone();
-        let resolved = if admissible(&plan.record, &step) {
-            page.resolve(&plan.tab, plan.epoch, &step)
-        } else {
-            Err(StepFailure::Refused)
-        };
+        let resolved = admissible(&plan.record, &step)
+            .and_then(|()| page.resolve(&plan.tab, plan.epoch, &step));
         let resolved = match resolved {
             Ok(resolved) => resolved,
             Err(failure) => {
@@ -1432,7 +1584,7 @@ async fn take_over(
     reply.apply(PageAssistEventV1::State {
         state: PageAssistReplyStateV1::Paused,
     });
-    reply.service.ports().page.glow(&plan.tab, Glow::Paused);
+    reply.glow(&plan.tab, Glow::Paused);
     let (sender, receiver) = oneshot::channel();
     reply
         .service
@@ -1443,7 +1595,7 @@ async fn take_over(
         reason = reply.cancel.cancelled() => return Err(Some(End::Cancelled(reason))),
         resumed = receiver => resumed.map_err(|_| Some(End::Cancelled(CancelReason::Gone)))?,
     }
-    reply.service.ports().page.glow(&plan.tab, Glow::Working);
+    reply.glow(&plan.tab, Glow::Working);
     reply.apply(PageAssistEventV1::State {
         state: PageAssistReplyStateV1::Working,
     });
