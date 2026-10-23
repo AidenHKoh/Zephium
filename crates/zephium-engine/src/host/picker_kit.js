@@ -1,6 +1,6 @@
 // One element picker for the whole app: the hover box with its label chip and
 // size, the walk to a parent and back, the readable name of an element and the
-// selector a pick yields. The blocker's page-world picker and Kite's private-
+// selector a pick yields. The blocker's page-world picker and the assistant's private-
 // world one both include it; it keeps no state between sessions.
 const pickerKit = (() => {
   "use strict";

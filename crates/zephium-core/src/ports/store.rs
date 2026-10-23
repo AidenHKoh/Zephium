@@ -41,7 +41,7 @@ pub struct HistoryVisit {
     pub visited_at: i64,
 }
 
-/// A stored Kite conversation without its body, for a history list.
+/// A stored assistant conversation without its body, for a history list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatSummary {
     pub id: String,
@@ -664,7 +664,7 @@ pub trait Store {
             .collect()
     }
 
-    /// Kite conversations, newest first, at most `limit` (never more than
+    /// Assistant conversations, newest first, at most `limit` (never more than
     /// `MAX_CHATS`).
     fn chats(&self, _profile: ProfileId, _limit: u32) -> Vec<ChatSummary> {
         Vec::new()

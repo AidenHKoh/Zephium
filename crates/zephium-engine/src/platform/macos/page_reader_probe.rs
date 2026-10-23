@@ -141,12 +141,12 @@ fn heavy() -> String {
     page
 }
 
-// Runs in the Kite fixtures' own world: what the page can tell of our
+// Runs in the Assistant fixtures' own world: what the page can tell of our
 // drawings and picker (mutations, clicks, keys, activation), the rows'
 // geometry, and scrolling on request. It reports through its title. A
 // window never shown renders only when the probe takes a snapshot, so
 // nothing here waits for a frame.
-const KITE_WATCH: &str = r##"(() => {
+const ASSIST_WATCH: &str = r##"(() => {
   let active = false, been = false, opened = 0, attrs = 0, inside = 0, clicks = 0, downs = 0, keys = 0, sampled = 0;
   const added = [];
   new MutationObserver((records) => {
@@ -191,7 +191,7 @@ const KITE_WATCH: &str = r##"(() => {
     const [verb, label, arg] = hash.split("~");
     if (verb === "s") { scrollTo(0, Number(arg)); }
     if (verb === "i") { const inner = document.getElementById("inner"); if (inner) inner.scrollTop = Number(arg); }
-    const report = (rest) => { document.title = `kite ${label} ${rest}`; };
+    const report = (rest) => { document.title = `assist ${label} ${rest}`; };
     const finish = () => {
       const items = (arg || "").split(",").filter(Boolean).map((id) => [id, item(id)]);
       report(`attrs=${attrs} inside=${inside} html=${document.documentElement.children.length} added=${added.join("|") || "none"} active=${active} been=${been} opened=${opened} clicks=${clicks} downs=${downs} keys=${keys} moves=${moves} sampled=${sampled} scroll=${Math.round(scrollY)} inner=${document.getElementById("inner") ? document.getElementById("inner").scrollTop : -1} items=${JSON.stringify(Object.fromEntries(items))}`);
@@ -223,7 +223,7 @@ fn listing() -> String {
     page.push_str(
         "</tbody></table><form id=\"f\" onsubmit=\"return false\" style=\"margin-left:60px;width:400px\"><label id=\"email\">Email address \
          <input name=\"email\" value=\"person@example.com\"></label><br><label>Password <input type=\"password\" value=\"hunter2-secret\"></label><br>\
-         <textarea>draft text</textarea><select><option>Opt A</option></select></form><script src=\"/kite.js\"></script></body></html>",
+         <textarea>draft text</textarea><select><option>Opt A</option></select></form><script src=\"/assist.js\"></script></body></html>",
     );
     page
 }
@@ -248,7 +248,7 @@ fn feed() -> String {
             "<li class=\"row\" id=\"row{n}\">Scrolled row {n}</li>"
         ));
     }
-    page.push_str("</ul></main><script src=\"/kite.js\"></script></body></html>");
+    page.push_str("</ul></main><script src=\"/assist.js\"></script></body></html>");
     page
 }
 
@@ -343,7 +343,7 @@ fn serve(mut stream: TcpStream, heavy: &str) {
         _ => String::new(),
     };
     let (body, kind, csp): (&str, &str, Option<&str>) = match path.as_str() {
-        "/kite.js" => (KITE_WATCH, "text/javascript", None),
+        "/assist.js" => (ASSIST_WATCH, "text/javascript", None),
         "/listing" | "/feed" | "/slow" => (&generated, "text/html; charset=utf-8", None),
         "/listing-csp" => (
             &generated,
@@ -1735,15 +1735,15 @@ impl Probe {
         settle(Duration::from_millis(40));
     }
 
-    /// The Kite fixtures' report: `verb` first, then the page's view.
-    fn kite_report(&self, url: &str, verb: &str, label: &str, arg: &str) -> Result<String, String> {
+    /// The Assistant fixtures' report: `verb` first, then the page's view.
+    fn assist_report(&self, url: &str, verb: &str, label: &str, arg: &str) -> Result<String, String> {
         self.view
             .load_url(&format!("{url}#{verb}~{label}~{arg}"))
             .map_err(|e| format!("report: {e}"))?;
-        let prefix = format!("kite {label} ");
+        let prefix = format!("assist {label} ");
         pump(
             || self.state.borrow().title.starts_with(&prefix),
-            "for a Kite report",
+            "for a Assistant report",
         )?;
         Ok(self.state.borrow().title.clone())
     }
@@ -1840,12 +1840,12 @@ fn encloses(mark: Option<[i64; 4]>, item: Option<&[i64; 4]>) -> bool {
     }
 }
 
-fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
+fn assist(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
     use crate::page_reader::PageMark;
     use crate::platform::page_recipe::PickState;
     let probe = Probe::new(mtm, true)?;
 
-    println!("kite: link targets in reads");
+    println!("assist: link targets in reads");
     let url = fixture.url("/listing");
     let epoch = probe.load(&url)?;
     probe.wait_readable()?;
@@ -1893,8 +1893,8 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         .find(|n| passage(&format!("Story number {n} about rivers")).is_some())
         .ok_or("no story read")?;
 
-    println!("kite: numbered marks enclose listing items");
-    let before = probe.kite_report(&url, "r", "before", "")?;
+    println!("assist: numbered marks enclose listing items");
+    let before = probe.assist_report(&url, "r", "before", "")?;
     let marks = [
         PageMark {
             n: 1,
@@ -1919,7 +1919,7 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         &format!("four marks placed in {} ms ({placed:?})", took.as_millis()),
     )?;
     let state = probe.overlay(epoch)?;
-    let rows = probe.kite_report(&url, "r", "rows", &format!("1,2,3,{last}"))?;
+    let rows = probe.assist_report(&url, "r", "rows", &format!("1,2,3,{last}"))?;
     let geometry = items(&rows);
     for (n, row) in [
         (1, "1".to_owned()),
@@ -1955,17 +1955,17 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         ),
     )?;
     check(
-        !rows.to_ascii_lowercase().contains("zephium") && !rows.contains("kite-"),
+        !rows.to_ascii_lowercase().contains("zephium") && !rows.contains("assist-"),
         "nothing the page can see names the panel",
     )?;
 
-    println!("kite: document scroll runs none of our script");
+    println!("assist: document scroll runs none of our script");
     // The first frame delivers the observers' initial sizes.
     probe.render();
     let layouts = probe.overlay(epoch)?["l"].as_u64().unwrap_or(0);
     let cpu = probe.cpu_ns();
     for (step, y) in [600, 1_400, 300, 2_000, 0, 2_600].into_iter().enumerate() {
-        probe.kite_report(&url, "s", &format!("scroll{step}"), &y.to_string())?;
+        probe.assist_report(&url, "s", &format!("scroll{step}"), &y.to_string())?;
         probe.render();
     }
     let scrolled_cpu = probe.cpu_ns().zip(cpu).map_or(0.0, |(after, before)| {
@@ -1976,7 +1976,7 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         after_scroll["l"].as_u64() == Some(layouts),
         &format!("six document scrolls, no layout of ours ({layouts} layouts before and after; page CPU {scrolled_cpu:.1} ms)"),
     )?;
-    let at = probe.kite_report(&url, "r", "atbottom", "")?;
+    let at = probe.assist_report(&url, "r", "atbottom", "")?;
     let scroll_y = field(&at, "scroll").parse::<f64>().unwrap_or(0.0);
     let snapshot = probe.snapshot().ok_or("snapshot after scrolling")?;
     let scale = snapshot.pixelsWide() as f64 / 1024.0;
@@ -1991,7 +1991,7 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         &format!("the badge scrolled with its row on its own (pixel {pixel:?} at {bx:.0},{by:.0})"),
     )?;
 
-    println!("kite: focus and clearing");
+    println!("assist: focus and clearing");
     let (focused, _) = probe.recipe(epoch, PageRecipe::mark_focus(Some(2), true));
     let state = probe.overlay(epoch)?;
     check(
@@ -2008,13 +2008,13 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
             && state["s"] == 0,
         "clearing removes the layer and every observer and listener",
     )?;
-    let after_clear = probe.kite_report(&url, "r", "cleared", "")?;
+    let after_clear = probe.assist_report(&url, "r", "cleared", "")?;
     check(
         field(&after_clear, "html") == field(&before, "html"),
         "the page is back to its own nodes",
     )?;
 
-    println!("kite: costs");
+    println!("assist: costs");
     let mut times = Vec::new();
     for _ in 0..7 {
         let (placed, took) = probe.marks(epoch, read.read, &marks, true);
@@ -2079,7 +2079,7 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         "twelve marked elements and the document observed, no scroll listener",
     )?;
 
-    println!("kite: a card feed and a nested scroller");
+    println!("assist: a card feed and a nested scroller");
     let feed = fixture.url("/feed");
     let feed_epoch = probe.load(&feed)?;
     probe.wait_readable()?;
@@ -2113,7 +2113,7 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         false,
     );
     let state = probe.overlay(feed_epoch)?;
-    let cards = items(&probe.kite_report(&feed, "r", "cards", "card1,card5,row3")?);
+    let cards = items(&probe.assist_report(&feed, "r", "cards", "card1,card5,row3")?);
     check(placed == [1, 2, 3], "three marks placed on the feed")?;
     check(
         encloses(mark_box(&state, 1), cards.get("card1"))
@@ -2137,7 +2137,7 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
     probe.render();
     let layouts = probe.overlay(feed_epoch)?["l"].as_u64().unwrap_or(0);
     let row = mark_box(&state, 3).ok_or("row mark")?;
-    probe.kite_report(&feed, "i", "inner", "56")?;
+    probe.assist_report(&feed, "i", "inner", "56")?;
     probe.render();
     settle(Duration::from_millis(60));
     let state = probe.overlay(feed_epoch)?;
@@ -2150,7 +2150,7 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         ),
     )?;
 
-    println!("kite: navigation removes the marks");
+    println!("assist: navigation removes the marks");
     let state = probe.overlay(feed_epoch)?;
     let card = mark_box(&state, 1).ok_or("card mark")?;
     let badge = (card[0] as f64 - 29.5, card[1] as f64 + card[3] as f64 / 2.0);
@@ -2179,7 +2179,7 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
     )?;
     pump(|| probe.epoch() != Some(feed_epoch), "for the slow page")?;
 
-    println!("kite: the person's pick");
+    println!("assist: the person's pick");
     let epoch = probe.load(&url)?;
     probe.wait_readable()?;
     let (started, took) = probe.recipe(epoch, PageRecipe::pick(1, false).ok_or("pick")?);
@@ -2188,7 +2188,7 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         started.as_deref() == Some("1") && state["w"] == true,
         &format!("the picker starts in {} ms", took.as_millis()),
     )?;
-    let geometry = items(&probe.kite_report(&url, "r", "picking", "t2,t3,t4,t5,email,f")?);
+    let geometry = items(&probe.assist_report(&url, "r", "picking", "t2,t3,t4,t5,email,f")?);
     let centre = |id: &str| -> Result<(f64, f64), String> {
         let rect = geometry
             .get(id)
@@ -2230,7 +2230,7 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         let _ = probe.recipe(epoch, PageRecipe::pick(3, false).ok_or("pick")?);
         let (x, y) = centre("email")?;
         let scrolled =
-            probe.kite_report(&url, "s", "toform", &format!("{}", (y - 300.0).max(0.0)))?;
+            probe.assist_report(&url, "s", "toform", &format!("{}", (y - 300.0).max(0.0)))?;
         let offset = field(&scrolled, "scroll").parse::<f64>().unwrap_or(0.0);
         probe.press_walk_release(x, y - offset, 1);
         match probe.pick_outcome(epoch, 3, Duration::from_secs(3)) {
@@ -2245,7 +2245,7 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
             other => return Err(format!("FAILED form pick: {other:?}")),
         }
         let _ = probe.recipe(epoch, PageRecipe::pick(4, false).ok_or("pick")?);
-        probe.kite_report(&url, "s", "totop", "0")?;
+        probe.assist_report(&url, "s", "totop", "0")?;
         let (x, y) = centre("t4")?;
         probe.click_at(x, y);
         let _ = probe.pick_outcome(epoch, 4, Duration::from_secs(3));
@@ -2278,7 +2278,7 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
             state["p"].as_array().is_some_and(|p| p.len() == 2),
             "clearing a pick removes its outline",
         )?;
-        let watched = probe.kite_report(&url, "r", "picked", "")?;
+        let watched = probe.assist_report(&url, "r", "picked", "")?;
         println!("  page report: {watched}");
         check(
             field(&watched, "clicks") == "0"
@@ -2309,7 +2309,7 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         probe.pick_outcome(epoch, 6, Duration::from_secs(2)) == Some(PickState::Cancelled),
         "a cancel ends a pick as cancelled",
     )?;
-    let quiet = probe.kite_report(&url, "r", "quiet", "")?;
+    let quiet = probe.assist_report(&url, "r", "quiet", "")?;
     if !synthetic {
         check(
             field(&quiet, "active") == "false" && field(&quiet, "been") == "false",
@@ -2317,7 +2317,7 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         )?;
     }
 
-    println!("kite: under script-src 'self'");
+    println!("assist: under script-src 'self'");
     let csp = fixture.url("/listing-csp");
     let epoch = probe.load(&csp)?;
     probe.wait_readable()?;
@@ -2338,7 +2338,7 @@ fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
         false,
     );
     let (started, _) = probe.recipe(epoch, PageRecipe::pick(7, false).ok_or("pick")?);
-    let watched = probe.kite_report(&csp, "r", "csp", "")?;
+    let watched = probe.assist_report(&csp, "r", "csp", "")?;
     check(
         placed == [1] && started.as_deref() == Some("1"),
         "marks and the picker work under the page's CSP",
@@ -2546,7 +2546,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
     let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
     let fixture = Fixture::start()?;
     let measuring = arguments.iter().any(|a| a == "--measure");
-    let kite_only = arguments.iter().any(|a| a == "--kite");
+    let assist_only = arguments.iter().any(|a| a == "--assist");
     let wikipedia = arguments
         .iter()
         .position(|a| a == "--article")
@@ -2555,10 +2555,10 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
     let outcome = objc2::rc::autoreleasepool(|_| {
         if measuring {
             measure(mtm, &fixture, wikipedia)
-        } else if kite_only {
-            kite(mtm, &fixture)
+        } else if assist_only {
+            assist(mtm, &fixture)
         } else {
-            fixtures(mtm, &fixture).and_then(|()| kite(mtm, &fixture))
+            fixtures(mtm, &fixture).and_then(|()| assist(mtm, &fixture))
         }
     });
     drop(fixture);

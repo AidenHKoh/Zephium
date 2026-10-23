@@ -1,4 +1,4 @@
-//! Kite conversations: one opaque body each in the profile database, newest
+//! Assistant conversations: one opaque body each in the profile database, newest
 //! first, held to a count.
 
 use super::*;

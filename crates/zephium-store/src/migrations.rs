@@ -2673,7 +2673,7 @@ pub static PROFILE: &[Migration] = &[
     Migration {
         version: 36,
         up: |tx| {
-            // Kite conversations. The body is opaque to the store; the count
+            // Assistant conversations. The body is opaque to the store; the count
             // cap is held by the write. Bounds mirror zephium_core::ports::store.
             tx.execute_batch(
                 "CREATE TABLE chats (
