@@ -529,6 +529,27 @@ fn recovery_tools_require_approval_and_restore_without_overwrite() {
         let file = root.join("trash-fixture.txt");
         std::fs::write(&file, "approved text").unwrap();
         let host = Recorder::deciding(&[Decision::Declined, Decision::Stopped, Decision::Approved]);
+        if !crate::work_commands::runner::native_recovery_qualified() {
+            // Recovery opens only on a macOS build whose native fixtures were
+            // reviewed; anywhere else Trash is refused before any approval.
+            assert!(
+                !tools
+                    .call(&host, "read", &json!({"path":"trash-fixture.txt"}))
+                    .await
+                    .is_error
+            );
+            let refused = tools
+                .call(&host, "trash", &json!({"path":"trash-fixture.txt"}))
+                .await;
+            assert!(
+                refused.is_error && refused.content.contains("not available"),
+                "{}",
+                refused.content
+            );
+            assert_eq!(*host.asked.lock().unwrap(), 0);
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "approved text");
+            return;
+        }
         let unread = tools
             .call(&host, "trash", &json!({"path":"trash-fixture.txt"}))
             .await;
