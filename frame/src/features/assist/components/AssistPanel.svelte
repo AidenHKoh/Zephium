@@ -11,6 +11,7 @@
   import Menu from "$shared/ui/Menu";
   import { AssistSession } from "../lib/assist-session.svelte";
   import {
+    Cancel01Icon,
     Clock01Icon,
     Delete02Icon,
     MoreHorizontalIcon,
@@ -115,11 +116,20 @@
       danger: true,
       disabled: empty,
     },
+    { kind: "separator" as const },
+    {
+      kind: "item" as const,
+      id: "close",
+      label: m.assist_menu_close(),
+      icon: Cancel01Icon,
+      hint: "esc",
+    },
   ]);
 
   function choose(id: string) {
     if (id === "history" || id === "styles") view = id;
     else if (id === "models") void commands.runCommand("settings.ai").catch(() => {});
+    else if (id === "close") viewProps.onclose();
     else if (id === "delete") {
       view = "thread";
       void session?.deleteCurrent();
@@ -205,6 +215,12 @@
   .assist-host :global(.assist-more[data-state="open"]) {
     background: var(--color-fill-hover);
     color: var(--color-text);
+  }
+
+  /* While one of the panel's menus is open, the column beside it steps back,
+     as it does under the sidebar's own panels. */
+  :global(.browser-sidebar:has(.assist-host [aria-expanded="true"]) [data-under-panel]) {
+    opacity: 0.18;
   }
 
   .assist-host :global(.assist-more:focus-visible) {
