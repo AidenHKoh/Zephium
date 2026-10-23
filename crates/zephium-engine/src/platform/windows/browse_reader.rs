@@ -652,10 +652,10 @@ impl State {
         };
         if !self.enabled
             || self.committed != Some(epoch)
-            || !self
+            || self
                 .context
                 .as_ref()
-                .is_some_and(|(bound, _)| *bound == epoch)
+                .is_none_or(|(bound, _)| *bound != epoch)
         {
             return;
         }

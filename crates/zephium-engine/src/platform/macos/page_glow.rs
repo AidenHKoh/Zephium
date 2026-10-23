@@ -44,6 +44,10 @@ const FALLOFF: f64 = 34.0;
 const LOOP_SECONDS: f64 = 7.0;
 const FADE_IN_SECONDS: f64 = 0.3;
 const FADE_OUT_SECONDS: f64 = 0.45;
+/// The light stays this long after the last step before it fades.
+const HOLD_SECONDS: f64 = 0.6;
+/// However short the steps, it is seen at least this long.
+const SHOWN_AT_LEAST_SECONDS: f64 = 1.4;
 const PEAK_LIGHT: f32 = 0.55;
 const PEAK_DARK: f32 = 0.68;
 /// The person took over: the light holds still at this share of its peak.
@@ -103,6 +107,7 @@ struct Layout {
 }
 
 struct Glow {
+    tab: ItemId,
     view: Weak<WKWebView>,
     root: Retained<GlowLayer>,
     /// The pieces' clock: holding it holds the colours.
@@ -116,6 +121,8 @@ struct Glow {
     scale: Cell<f64>,
     dark: Cell<bool>,
     shown: Cell<PageGlow>,
+    /// When the light last came on from off, in media time.
+    since: Cell<f64>,
     generation: Rc<Cell<u64>>,
 }
 
@@ -157,7 +164,7 @@ pub(crate) fn show_on(tab: ItemId, view: &WKWebView, glow: PageGlow, reduce_moti
             if glows.len() >= 64 {
                 glows.retain(|_, glow| glow.view.load().is_some());
             }
-            glows.insert(tab, Glow::new(view));
+            glows.insert(tab, Glow::new(tab, view));
         }
     });
     // Attaching resizes the root, which lays out through `resized`: the map
@@ -212,7 +219,7 @@ fn resized(root: &GlowLayer) {
 }
 
 impl Glow {
-    fn new(view: &WKWebView) -> Self {
+    fn new(tab: ItemId, view: &WKWebView) -> Self {
         let root = GlowLayer::create();
         let colours = CALayer::new();
         let strips = [(); 4].map(|()| CALayer::new());
@@ -246,6 +253,7 @@ impl Glow {
         CATransaction::commit();
         let epoch = colours.convertTime_fromLayer(CACurrentMediaTime(), None);
         let glow = Self {
+            tab,
             view: Weak::new(view),
             root,
             colours,
@@ -258,6 +266,7 @@ impl Glow {
             scale: Cell::new(2.0),
             dark: Cell::new(false),
             shown: Cell::new(PageGlow::Off),
+            since: Cell::new(0.0),
             generation: Rc::new(Cell::new(0)),
         };
         glow.measure(view);
@@ -277,6 +286,10 @@ impl Glow {
 
     fn show(&self, view: &WKWebView, glow: PageGlow, reduce_motion: bool) {
         let Some(host) = view.layer() else {
+            crate::page_reader::note(format_args!(
+                "page_glow refused tab={} reason=no-layer",
+                self.tab
+            ));
             return;
         };
         self.generation.set(self.generation.get().wrapping_add(1));
@@ -293,6 +306,26 @@ impl Glow {
             host.addSublayer(&self.root);
         }
         self.root.setFrame(host.bounds());
+        if self.shown.get() == PageGlow::Off {
+            self.since.set(CACurrentMediaTime());
+        }
+        if !attached {
+            let size = host.bounds().size;
+            // SAFETY: main-thread reads of the live view's own hierarchy.
+            let parent = unsafe { view.superview() }.map(|parent| parent.class().name().to_owned());
+            crate::page_reader::note(format_args!(
+                "page_glow attached tab={} size={}x{} radius={} scale={} window={} hidden={} visible={} host={}",
+                self.tab,
+                size.width.round(),
+                size.height.round(),
+                self.radius.get(),
+                self.scale.get(),
+                view.window().is_some(),
+                view.isHiddenOrHasHiddenAncestor(),
+                view.window().is_some_and(|window| window.isVisible()),
+                parent.as_ref().and_then(|name| name.to_str().ok()).unwrap_or("none"),
+            ));
+        }
         self.layout();
         if glow == PageGlow::Working && !reduce_motion {
             self.resume();
@@ -310,10 +343,12 @@ impl Glow {
         } else {
             peak
         };
-        self.fade(target, FADE_IN_SECONDS, None);
+        self.fade_in(target);
         self.shown.set(glow);
     }
 
+    /// The light finishes coming on, holds, then fades and goes: a short
+    /// run of steps is still seen.
     fn off(&self) {
         if self.shown.replace(PageGlow::Off) == PageGlow::Off {
             return;
@@ -324,6 +359,8 @@ impl Glow {
         let root = self.root.clone();
         let pieces: Vec<Retained<CALayer>> =
             self.strips.iter().chain(&self.corners).cloned().collect();
+        let tab = self.tab;
+        let since = self.since.get();
         let done = block2::RcBlock::new(move || {
             if current.get() == generation {
                 for piece in &pieces {
@@ -331,13 +368,54 @@ impl Glow {
                 }
                 root.removeAllAnimations();
                 root.removeFromSuperlayer();
+                crate::page_reader::note(format_args!(
+                    "page_glow removed tab={tab} reason=off shown_ms={}",
+                    ((CACurrentMediaTime() - since) * 1_000.0).round()
+                ));
             }
         });
-        self.fade(0.0, FADE_OUT_SECONDS, Some(&*done));
+        // SAFETY: the presentation copy is read on the main thread.
+        let from = unsafe { self.root.presentationLayer() }
+            .map_or_else(|| self.root.opacity(), |shown| shown.opacity());
+        let peak = self.root.opacity().max(from);
+        let rise = if peak > 0.0 {
+            FADE_IN_SECONDS * f64::from((peak - from) / peak)
+        } else {
+            0.0
+        };
+        let elapsed = CACurrentMediaTime() - since;
+        let hold = HOLD_SECONDS.max(SHOWN_AT_LEAST_SECONDS - elapsed - FADE_OUT_SECONDS);
+        let total = rise + hold + FADE_OUT_SECONDS;
+        let ease = CAMediaTimingFunction::functionWithControlPoints(0.25, 0.1, 0.25, 1.0);
+        let still = CAMediaTimingFunction::functionWithControlPoints(0.0, 0.0, 1.0, 1.0);
+        let fade = CAKeyframeAnimation::animationWithKeyPath(Some(ns_string!("opacity")));
+        let values = [from, peak, peak, 0.0].map(NSNumber::new_f32);
+        let objects: Vec<&AnyObject> = values.iter().map(|value| value.as_ref()).collect();
+        let times = [0.0, rise / total, (rise + hold) / total, 1.0].map(NSNumber::new_f64);
+        // SAFETY: opacity takes NSNumber values; key times are NSNumbers in
+        // [0, 1], one per value, ascending.
+        unsafe {
+            fade.setValues(Some(&NSArray::from_slice(&objects)));
+            fade.setKeyTimes(Some(&NSArray::from_retained_slice(&times)));
+        }
+        fade.setTimingFunctions(Some(&NSArray::from_retained_slice(&[
+            ease.clone(),
+            still,
+            ease,
+        ])));
+        fade.setDuration(total);
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        // SAFETY: Core Animation copies the block and runs it once, on the
+        // main thread, when this transaction's animations end.
+        unsafe { CATransaction::setCompletionBlock(Some(&*done)) };
+        self.root.setOpacity(0.0);
+        self.root.addAnimation_forKey(&fade, Some(ns_string!(FADE)));
+        CATransaction::commit();
         self.laid.set(None);
     }
 
-    fn fade(&self, to: f32, seconds: f64, done: Option<&block2::DynBlock<dyn Fn()>>) {
+    fn fade_in(&self, to: f32) {
         // SAFETY: the presentation copy is read on the main thread.
         let from = unsafe { self.root.presentationLayer() }
             .map_or_else(|| self.root.opacity(), |shown| shown.opacity());
@@ -347,15 +425,12 @@ impl Glow {
             fade.setFromValue(Some(&NSNumber::new_f32(from)));
             fade.setToValue(Some(&NSNumber::new_f32(to)));
         }
-        fade.setDuration(seconds);
+        fade.setDuration(FADE_IN_SECONDS);
         fade.setTimingFunction(Some(&CAMediaTimingFunction::functionWithControlPoints(
             0.25, 0.1, 0.25, 1.0,
         )));
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        // SAFETY: Core Animation copies the block and runs it once, on the
-        // main thread, when this transaction's animations end.
-        unsafe { CATransaction::setCompletionBlock(done) };
         self.root.setOpacity(to);
         self.root.addAnimation_forKey(&fade, Some(ns_string!(FADE)));
         CATransaction::commit();
@@ -534,6 +609,13 @@ impl Glow {
 impl Drop for Glow {
     fn drop(&mut self) {
         self.generation.set(self.generation.get().wrapping_add(1));
+        if self.root.superlayer().is_some() {
+            crate::page_reader::note(format_args!(
+                "page_glow removed tab={} reason=closed shown_ms={}",
+                self.tab,
+                ((CACurrentMediaTime() - self.since.get()) * 1_000.0).round()
+            ));
+        }
         for piece in self.strips.iter().chain(&self.corners) {
             piece.removeAllAnimations();
         }

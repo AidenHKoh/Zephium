@@ -12,18 +12,21 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::{Interface as _, HSTRING};
 use windows::Foundation::TimeSpan;
 use windows::System::DispatcherQueueController;
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
 use windows::Win32::System::WinRT::{
     CreateDispatcherQueueController, DispatcherQueueOptions, DQTAT_COM_NONE, DQTYPE_THREAD_CURRENT,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GA_ROOT};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetAncestor, GetClientRect, IsWindowVisible, GA_ROOT,
+};
 use windows::UI::Color;
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{
@@ -44,6 +47,10 @@ const RADIUS: f32 = 8.0;
 const LOOP: Duration = Duration::from_secs(7);
 const FADE_IN: Duration = Duration::from_millis(300);
 const FADE_OUT: Duration = Duration::from_millis(450);
+/// The light stays this long after the last step before it fades.
+const HOLD: Duration = Duration::from_millis(600);
+/// However short the steps, it is seen at least this long.
+const SHOWN_AT_LEAST: Duration = Duration::from_millis(1_400);
 const PEAK_LIGHT: f32 = 0.55;
 const PEAK_DARK: f32 = 0.68;
 const PAUSED_SHARE: f32 = 0.45;
@@ -63,12 +70,18 @@ const AURORA_DARK: [[f64; 3]; 4] = [
 ];
 
 struct Glow {
+    tab: ItemId,
     window: HWND,
     target: DesktopWindowTarget,
     root: ContainerVisual,
     clock: CompositionPropertySet,
     dark: bool,
+    /// Physical pixels per DIP: composition draws in the window's pixels.
+    scale: f32,
     shown: Cell<PageGlow>,
+    /// When the light last came on from off, and when it was last asked on.
+    since: Cell<Instant>,
+    asked: Cell<Instant>,
     travelling: Cell<bool>,
     attached: Cell<bool>,
     generation: Rc<Cell<u64>>,
@@ -111,17 +124,23 @@ pub(crate) fn set(tab: ItemId, view: &wry::WebView, glow: PageGlow, reduce_motio
     let mut window = HWND::default();
     // SAFETY: reads the container window of this live controller.
     if unsafe { view.controller().ParentWindow(&mut window) }.is_err() || window.is_invalid() {
+        crate::page_reader::note(format_args!("page_glow refused tab={tab} reason=no-window"));
         return;
     }
     GLOWS.with(|glows| {
         let mut glows = glows.borrow_mut();
         let dark = dark_theme(window);
-        if glows
-            .get(&tab)
-            .is_none_or(|current| current.window != window || current.dark != dark)
-        {
+        // SAFETY: a plain read of a live window's DPI; 0 when it has none.
+        let dpi = unsafe { GetDpiForWindow(window) };
+        let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
+        if glows.get(&tab).is_none_or(|current| {
+            current.window != window || current.dark != dark || current.scale != scale
+        }) {
             glows.remove(&tab);
-            let Some(created) = Glow::new(window, dark) else {
+            let Some(created) = Glow::new(tab, window, dark, scale) else {
+                crate::page_reader::note(format_args!(
+                    "page_glow refused tab={tab} reason=composition"
+                ));
                 return;
             };
             glows.insert(tab, created);
@@ -215,7 +234,7 @@ struct Run {
 const PERIMETER: &str = "(2 * (host.Size.X + host.Size.Y) - 4 * r)";
 
 impl Glow {
-    fn new(window: HWND, dark: bool) -> Option<Self> {
+    fn new(tab: ItemId, window: HWND, dark: bool, scale: f32) -> Option<Self> {
         let compositor = compositor()?;
         let interop: ICompositorDesktopInterop = compositor.cast().ok()?;
         // SAFETY: a topmost target on this live container window: DWM draws
@@ -229,18 +248,22 @@ impl Glow {
         clock.InsertScalar(&HSTRING::from("t"), 0.0).ok()?;
         let stops = if dark { &AURORA_DARK } else { &AURORA_LIGHT };
         let glow = Self {
+            tab,
             window,
             target,
             root,
             clock,
             dark,
+            scale,
             shown: Cell::new(PageGlow::Off),
+            since: Cell::new(Instant::now()),
+            asked: Cell::new(Instant::now()),
             travelling: Cell::new(false),
-            attached: Cell::new(true),
+            attached: Cell::new(false),
             generation: Rc::new(Cell::new(0)),
             removal: RefCell::new(None),
         };
-        let (r, f) = (RADIUS, FALLOFF);
+        let (r, f) = (RADIUS * scale, FALLOFF * scale);
         // Clockwise from the top-left; a corner continues the strip before
         // it, and a reversed piece's band position falls as its own
         // coordinate grows.
@@ -330,7 +353,6 @@ impl Glow {
             sprite.SetBrush(&brush).ok()?;
             glow.root.Children().ok()?.InsertAtTop(&sprite).ok()?;
         }
-        glow.target.SetRoot(&glow.root).ok()?;
         Some(glow)
     }
 
@@ -397,7 +419,7 @@ impl Glow {
                 .SetReferenceParameter(&HSTRING::from("clock"), &self.clock)
                 .ok()?;
             animation
-                .SetScalarParameter(&HSTRING::from("r"), RADIUS)
+                .SetScalarParameter(&HSTRING::from("r"), RADIUS * self.scale)
                 .ok()?;
             wheel
                 .StartAnimation(&HSTRING::from(property), &animation)
@@ -426,14 +448,15 @@ impl Glow {
     fn corner_mask(&self, compositor: &Compositor, corner: usize) -> Option<CompositionBrush> {
         let mask = compositor.CreateRadialGradientBrush().ok()?;
         mask.SetMappingMode(CompositionMappingMode::Absolute).ok()?;
+        let r = RADIUS * self.scale;
         let centre = match corner {
-            0 => v2(0.0, RADIUS),
+            0 => v2(0.0, r),
             1 => v2(0.0, 0.0),
-            2 => v2(RADIUS, 0.0),
-            _ => v2(RADIUS, RADIUS),
+            2 => v2(r, 0.0),
+            _ => v2(r, r),
         };
         mask.SetEllipseCenter(centre).ok()?;
-        mask.SetEllipseRadius(v2(RADIUS, RADIUS)).ok()?;
+        mask.SetEllipseRadius(v2(r, r)).ok()?;
         let stops = mask.ColorStops().ok()?;
         // Offset 1 is the corner's edge; inward is toward the centre.
         for k in 0..=8 {
@@ -475,8 +498,29 @@ impl Glow {
 
     fn show(&self, glow: PageGlow, reduce_motion: bool) {
         self.generation.set(self.generation.get().wrapping_add(1));
+        self.removal.borrow_mut().take();
+        if self.shown.get() == PageGlow::Off {
+            self.since.set(Instant::now());
+        }
+        self.asked.set(Instant::now());
         if !self.attached.replace(true) {
             let _ = self.target.SetRoot(&self.root);
+            let mut client = RECT::default();
+            // SAFETY: plain reads of the live container window.
+            let (sized, visible) = unsafe {
+                (
+                    GetClientRect(self.window, &mut client).is_ok(),
+                    IsWindowVisible(self.window).as_bool(),
+                )
+            };
+            crate::page_reader::note(format_args!(
+                "page_glow attached tab={} size={}x{} scale={} visible={} sized={sized} host=container",
+                self.tab,
+                client.right - client.left,
+                client.bottom - client.top,
+                self.scale,
+                visible,
+            ));
         }
         let travel = glow == PageGlow::Working && !reduce_motion;
         if travel && !self.travelling.get() {
@@ -532,30 +576,73 @@ impl Glow {
             .ok()
     }
 
+    /// The light finishes coming on, holds, then fades and goes: a short
+    /// run of steps is still seen.
     fn off(&self) {
-        if self.shown.replace(PageGlow::Off) == PageGlow::Off {
+        let shown = self.shown.replace(PageGlow::Off);
+        if shown == PageGlow::Off {
             return;
         }
         let generation = self.generation.get().wrapping_add(1);
         self.generation.set(generation);
-        let _ = self.fade(0.0, FADE_OUT);
+        let peak = match (self.dark, shown) {
+            (true, PageGlow::Paused) => PEAK_DARK * PAUSED_SHARE,
+            (true, _) => PEAK_DARK,
+            (false, PageGlow::Paused) => PEAK_LIGHT * PAUSED_SHARE,
+            (false, _) => PEAK_LIGHT,
+        };
+        let rise = FADE_IN.saturating_sub(self.asked.get().elapsed());
+        let hold = HOLD.max(
+            SHOWN_AT_LEAST
+                .saturating_sub(self.since.get().elapsed())
+                .saturating_sub(FADE_OUT),
+        );
+        let total = rise + hold + FADE_OUT;
+        let _ = self.fade_out(peak, rise, hold, total);
         let current = self.generation.clone();
         let (target, clock) = (self.target.clone(), self.clock.clone());
+        let (tab, since) = (self.tab, self.since.get());
         let detached =
-            super::schedule_browser_timeout(FADE_OUT + Duration::from_millis(50), move || {
+            super::schedule_browser_timeout(total + Duration::from_millis(50), move || {
                 if current.get() == generation {
                     let _ = clock.StopAnimation(&HSTRING::from("t"));
                     let _ = target.SetRoot(None);
+                    crate::page_reader::note(format_args!(
+                        "page_glow removed tab={tab} reason=off shown_ms={}",
+                        since.elapsed().as_millis()
+                    ));
                 }
             });
         *self.removal.borrow_mut() = detached;
         self.attached.set(false);
         self.travelling.set(false);
     }
+
+    fn fade_out(&self, peak: f32, rise: Duration, hold: Duration, total: Duration) -> Option<()> {
+        let compositor = compositor()?;
+        let animation = compositor.CreateScalarKeyFrameAnimation().ok()?;
+        let at = |time: Duration| (time.as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0);
+        if !rise.is_zero() {
+            animation.InsertKeyFrame(at(rise), peak).ok()?;
+        }
+        animation.InsertKeyFrame(at(rise + hold), peak).ok()?;
+        animation.InsertKeyFrame(1.0, 0.0).ok()?;
+        animation.SetDuration(TimeSpan::from(total)).ok()?;
+        self.root
+            .StartAnimation(&HSTRING::from("Opacity"), &animation)
+            .ok()
+    }
 }
 
 impl Drop for Glow {
     fn drop(&mut self) {
+        if self.attached.get() {
+            crate::page_reader::note(format_args!(
+                "page_glow removed tab={} reason=closed shown_ms={}",
+                self.tab,
+                self.since.get().elapsed().as_millis()
+            ));
+        }
         let _ = self.clock.StopAnimation(&HSTRING::from("t"));
         let _ = self.target.SetRoot(None);
         let _ = self.target.Close();

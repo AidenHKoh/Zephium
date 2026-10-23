@@ -281,16 +281,37 @@ impl EngineHost {
     /// The working glow on `id`'s page: only where the assistant may act
     /// (AI on, not a private window); anything else turns it off.
     pub(crate) fn page_glow(&mut self, id: ItemId, glow: PageGlow, reduce_motion: bool) {
+        let state = glow.name();
         let Some(view) = self.views.get(&id) else {
+            crate::page_reader::note(format_args!(
+                "page_glow refused tab={id} state={state} reason=no-view"
+            ));
             crate::platform::imp::page_glow::forget(id);
             return;
         };
-        let admitted = enabled()
-            && view
-                .page_reader
-                .try_borrow()
-                .is_ok_and(|reader| reader.is_some());
-        let glow = if admitted { glow } else { PageGlow::Off };
+        let refused = if !enabled() {
+            Some("ai-off")
+        } else {
+            match view.page_reader.try_borrow() {
+                Ok(reader) if reader.is_some() => None,
+                Ok(_) => Some("no-reader"),
+                Err(_) => Some("reader-busy"),
+            }
+        };
+        if let Some(reason) = refused.filter(|_| glow != PageGlow::Off) {
+            crate::page_reader::note(format_args!(
+                "page_glow refused tab={id} state={state} reason={reason}"
+            ));
+        } else {
+            crate::page_reader::note(format_args!(
+                "page_glow requested tab={id} state={state} reduce_motion={reduce_motion}"
+            ));
+        }
+        let glow = if refused.is_none() {
+            glow
+        } else {
+            PageGlow::Off
+        };
         crate::platform::imp::page_glow::set(id, &view.view, glow, reduce_motion);
     }
 

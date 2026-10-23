@@ -188,6 +188,37 @@ pub enum PageGlow {
     Paused,
 }
 
+impl PageGlow {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Working => "working",
+            Self::Paused => "paused",
+        }
+    }
+}
+
+static DIAGNOSTICS: std::sync::OnceLock<fn(std::fmt::Arguments<'_>)> = std::sync::OnceLock::new();
+
+/// Where the reader's closed facts go (the app's diagnostic log); until set,
+/// standard error. Never page content.
+pub fn set_diagnostics(sink: fn(std::fmt::Arguments<'_>)) {
+    let _ = DIAGNOSTICS.set(sink);
+}
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+pub(crate) fn note(fact: std::fmt::Arguments<'_>) {
+    match DIAGNOSTICS.get() {
+        Some(sink) => sink(fact),
+        None => {
+            use std::io::Write as _;
+            let mut stderr = std::io::stderr().lock();
+            let _ = stderr.write_fmt(fact);
+            let _ = stderr.write_all(b"\n");
+        }
+    }
+}
+
 /// One read of a tab's document.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PageReadout {

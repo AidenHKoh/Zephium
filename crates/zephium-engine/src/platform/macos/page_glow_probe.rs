@@ -1,12 +1,17 @@
 //! The working glow on a real page view: layers present and removed,
 //! input passing through, the page unchanged, the light travelling in the
 //! render server and not in the app, and a captured image of it on a light
-//! and a dark page under `target/look/assist-glow/`.
+//! and a dark page under `target/look/assist-glow/`. Then on a page hosted
+//! the way the app hosts a Browse tab (a rounded page in a content stage):
+//! the light is in the window server's composite, and a short run of steps
+//! is still seen.
 //!
 //! The probe window is ordered in far outside every display, so the window
 //! server composites it (and its cost can be measured) without it ever
 //! appearing on screen.
 
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSEventType};
@@ -85,7 +90,7 @@ impl Probe {
     // The window server's own composite of this window is what the person
     // would see; nothing else captures the render server's layers.
     #[allow(deprecated)]
-    fn capture(&self, path: &std::path::Path) -> Result<(), String> {
+    fn composite(&self) -> Result<objc2::rc::Retained<NSBitmapImageRep>, String> {
         let number = u32::try_from(self._window.windowNumber()).map_err(|_| "window number")?;
         // SAFETY: an immutable framework constant.
         let image = CGWindowListCreateImage(
@@ -95,10 +100,14 @@ impl Probe {
             CGWindowImageOption::BoundsIgnoreFraming | CGWindowImageOption::BestResolution,
         )
         .ok_or("the window server gave no image")?;
-        let rep = NSBitmapImageRep::initWithCGImage(
+        Ok(NSBitmapImageRep::initWithCGImage(
             <NSBitmapImageRep as objc2::AnyThread>::alloc(),
             &image,
-        );
+        ))
+    }
+
+    fn capture(&self, path: &std::path::Path) -> Result<(), String> {
+        let rep = self.composite()?;
         // SAFETY: PNG takes no properties; the dictionary is empty.
         let png = unsafe {
             rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
@@ -209,11 +218,11 @@ pub(super) fn run(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String
             "reduced motion holds it still",
         )?;
         page_glow::show_on(tab, &view, PageGlow::Off, false);
-        settle(Duration::from_millis(700));
+        settle(Duration::from_millis(1_600));
         let gone = page_glow::facts(tab);
         check(
             gone.is_some_and(|f| !f.attached),
-            &format!("off fades out, then removes the layer and its animations ({gone:?})"),
+            &format!("off holds, fades out, then removes the layer and its animations ({gone:?})"),
         )?;
         // Glowing and not, interleaved: the window server's own load
         // drifts with everything else on the machine.
@@ -298,6 +307,179 @@ pub(super) fn run(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String
     for line in measured {
         println!("glow: {line}");
     }
+    staged(mtm, fixture, &look)?;
     println!("glow: images in {}", look.display());
+    Ok(())
+}
+
+static NOTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn noted(fact: std::fmt::Arguments<'_>) {
+    let line = fact.to_string();
+    println!("  log   {line}");
+    NOTES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(line);
+}
+
+fn notes() -> Vec<String> {
+    std::mem::take(
+        &mut *NOTES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    )
+}
+
+/// How far the window's composite at each edge point moved from `before`,
+/// the largest channel difference at the weakest of the four edges.
+fn edge_change(
+    before: &NSBitmapImageRep,
+    after: &NSBitmapImageRep,
+    width: f64,
+    height: f64,
+) -> f64 {
+    let scale = before.pixelsWide() as f64 / width;
+    let inset = 1.8;
+    [
+        (inset, height / 2.0),
+        (width - inset, height / 2.0),
+        (width / 2.0, inset),
+        (width / 2.0, height - inset),
+    ]
+    .iter()
+    .map(|&(x, y)| {
+        let at = ((x * scale) as isize, (y * scale) as isize);
+        match (
+            super::rgb(before, at.0, at.1),
+            super::rgb(after, at.0, at.1),
+        ) {
+            (Some(a), Some(b)) => (a.0 - b.0)
+                .abs()
+                .max((a.1 - b.1).abs())
+                .max((a.2 - b.2).abs()),
+            _ => 0.0,
+        }
+    })
+    .fold(f64::INFINITY, f64::min)
+}
+
+/// The page hosted as the app hosts a Browse tab: the web view leaves its
+/// window's content view for a content stage, is rounded and outlined as
+/// construction does, and is laid out and revealed by the stage.
+fn staged(mtm: MainThreadMarker, fixture: &Fixture, look: &std::path::Path) -> Result<(), String> {
+    use objc2_app_kit::NSAutoresizingMaskOptions as Mask;
+    println!("glow: on a page hosted the way the app hosts a Browse tab");
+    crate::page_reader::set_diagnostics(noted);
+    let probe = Probe::new(mtm, true)?;
+    probe
+        ._window
+        .setFrameOrigin(NSPoint::new(-30_000.0, -30_000.0));
+    probe._window.orderFrontRegardless();
+    let (width, height) = (1024.0, 768.0);
+    let content = probe._window.contentView().ok_or("content view")?;
+    let stage = crate::platform::macos::ContentStage::new(mtm, 8.0, Box::new(|_| {}));
+    stage.setAutoresizingMask(Mask::ViewWidthSizable | Mask::ViewHeightSizable);
+    content.addSubview(&stage);
+    stage.cover_pointer();
+    let page = super::super::native_webview(&probe.view);
+    super::super::native::round_page(&page, 12.0);
+    page.removeFromSuperview();
+    let tab = probe.tab;
+    let update = stage.begin_content_update(true).ok_or("stage update")?;
+    stage.setFrame(objc2_foundation::NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(width, height),
+    ));
+    let native: objc2::rc::Retained<objc2_app_kit::NSView> =
+        objc2::rc::Retained::into_super(page.clone());
+    check(
+        stage.insert_view(tab, native, Arc::new(AtomicBool::new(true)))
+            && stage.set_ready(tab)
+            && stage.set_tree(Some(zephium_core::split::Pane::leaf(tab)))
+            && stage.set_visible(&[tab])
+            && stage.finish_content_update(update),
+        "the stage takes the page and lays it out",
+    )?;
+    let url = fixture.url("/listing");
+    probe.load(&url)?;
+    settle(Duration::from_millis(400));
+    // SAFETY: a main-thread read of the page's own superview.
+    let hosted = unsafe { page.superview() }
+        .is_some_and(|parent| std::ptr::eq(&*parent, objc2::rc::Retained::as_ptr(&stage).cast()));
+    check(
+        hosted && !page.isHiddenOrHasHiddenAncestor(),
+        "the page is the stage's own, shown",
+    )?;
+    let dark = probe.composite()?;
+    page_glow::set(tab, &probe.view, PageGlow::Working, false);
+    settle(Duration::from_millis(500));
+    let lit = probe.composite()?;
+    probe.capture(&look.join("staged.png"))?;
+    let change = edge_change(&dark, &lit, width, height);
+    check(
+        change > 0.08,
+        &format!(
+            "the window server shows the light at all four edges (weakest edge moved {change:.3})"
+        ),
+    )?;
+    let attached = notes();
+    check(
+        attached.iter().any(|line| {
+            line.starts_with("page_glow attached")
+                && line.contains("host=ZephiumContentStage")
+                && line.contains("window=true hidden=false visible=true")
+        }),
+        "the log says it attached, on the stage's page, shown",
+    )?;
+    page_glow::set(tab, &probe.view, PageGlow::Off, false);
+    settle(Duration::from_millis(1_500));
+    let gone = probe.composite()?;
+    check(
+        edge_change(&dark, &gone, width, height) < 0.02
+            && page_glow::facts(tab).is_some_and(|facts| !facts.attached),
+        "off takes it away",
+    )?;
+
+    println!("glow: a step shorter than the fade is still seen");
+    let lines = notes();
+    check(
+        lines
+            .iter()
+            .any(|line| line.starts_with("page_glow removed") && line.contains("reason=off")),
+        "the log says it was removed",
+    )?;
+    page_glow::set(tab, &probe.view, PageGlow::Working, false);
+    settle(Duration::from_millis(150));
+    page_glow::set(tab, &probe.view, PageGlow::Off, false);
+    settle(Duration::from_millis(500));
+    let held = probe.composite()?;
+    let change = edge_change(&dark, &held, width, height);
+    check(
+        change > 0.08,
+        &format!("half a second after a 150 ms run the light is still on (weakest edge moved {change:.3})"),
+    )?;
+    settle(Duration::from_millis(1_800));
+    check(
+        edge_change(&dark, &*probe.composite()?, width, height) < 0.02,
+        "and then it fades out",
+    )?;
+    let shown = notes()
+        .iter()
+        .rev()
+        .find_map(|line| {
+            line.strip_prefix("page_glow removed")
+                .and_then(|rest| rest.split("shown_ms=").nth(1))
+                .and_then(|ms| ms.parse::<f64>().ok())
+        })
+        .unwrap_or(0.0);
+    check(
+        shown >= 1_300.0,
+        &format!("it was seen for at least 1.3 s ({shown} ms)"),
+    )?;
+    page_glow::forget(tab);
+    stage.remove_view(tab);
+    stage.retire();
+    probe._window.orderOut(None);
     Ok(())
 }
