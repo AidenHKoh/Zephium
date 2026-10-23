@@ -4,12 +4,12 @@ import type { PageAssistAvailabilityV1, PageAssistFaultV1 } from "$shared/ipc/bi
 type FaultFix = { label: string; command: string };
 
 export type FaultView = {
-  /** Seconds the core asked to wait, when it said. */
+  /** Seconds Rust asked to wait, when it said. */
   wait?: number | null;
   message: string;
   /** Where the person fixes it, when they can. */
   fix: FaultFix | null;
-  /** The same question may be asked again as is; a countdown waits first. */
+  /** The same message may be sent again as is; a countdown waits first. */
   retry: "no" | "now" | "wait";
 };
 
@@ -22,7 +22,7 @@ function dailyResetTime(now: Date = new Date()): string {
 const account = (label: string): FaultFix => ({ label, command: "settings.account" });
 const models = (label: string): FaultFix => ({ label, command: "settings.ai" });
 
-/** Every way an answer can end early, said as the person can act on it. */
+/** Every way a reply can end early, said as the person can act on it. */
 export function faultView(reason: PageAssistFaultV1): FaultView {
   if (reason.reason !== "model") return pageFault(reason.reason);
   const view = modelFault(reason.fault);
@@ -106,8 +106,6 @@ function modelFault(fault: Extract<PageAssistFaultV1, { reason: "model" }>["faul
   }
 }
 
-export type RefusalView = { title: string; help: string; fix: FaultFix | null };
-
 function pageFault(reason: Exclude<PageAssistFaultV1["reason"], "model">): FaultView {
   switch (reason) {
     case "unreadable":
@@ -117,11 +115,13 @@ function pageFault(reason: Exclude<PageAssistFaultV1["reason"], "model">): Fault
     case "no_selection":
       return { message: m.assist_fault_no_selection(), fix: null, retry: "no" };
     case "no_answer":
-      return { message: m.assist_fault_no_answer(), fix: null, retry: "no" };
+      return { message: m.assist_fault_no_answer(), fix: null, retry: "now" };
     case "step_failed":
       return { message: m.assist_fault_step_failed(), fix: null, retry: "now" };
+    case "too_long":
+      return { message: m.assist_fault_too_long(), fix: null, retry: "now" };
     case "busy":
-      return { message: m.assist_fault_busy(), fix: null, retry: "now" };
+      return { message: m.assist_fault_busy(), fix: null, retry: "no" };
     case "no_model":
       return {
         message: m.assist_refusal_no_model_help(),
@@ -133,7 +133,7 @@ function pageFault(reason: Exclude<PageAssistFaultV1["reason"], "model">): Fault
     case "not_web":
     case "sensitive":
     case "unsupported":
-      return { message: refusalView(reason).help, fix: null, retry: "no" };
+      return { message: availabilityView(reason).help, fix: null, retry: "no" };
     case "loading":
       return { message: m.assist_fault_loading(), fix: null, retry: "now" };
     case "invalid":
@@ -143,42 +143,74 @@ function pageFault(reason: Exclude<PageAssistFaultV1["reason"], "model">): Fault
   }
 }
 
-/** A page that is not asked about: nothing was read, nothing was sent. */
-export function refusalView(
-  refusal: Exclude<PageAssistAvailabilityV1, "ready" | "loading" | "unavailable">,
-): RefusalView {
-  switch (refusal) {
+export type AvailabilityView = {
+  title: string;
+  help: string;
+  fix: FaultFix | null;
+  /** The conversation still works without the page. */
+  talks: boolean;
+};
+
+/** Why the page in front is not attached, and whether the conversation still goes on. */
+export function availabilityView(
+  availability: Exclude<PageAssistAvailabilityV1, "ready">,
+): AvailabilityView {
+  switch (availability) {
     case "ai_off":
-      return { title: m.assist_refusal_off(), help: m.assist_refusal_off_help(), fix: null };
+      return {
+        title: m.assist_refusal_off(),
+        help: m.assist_refusal_off_help(),
+        fix: null,
+        talks: false,
+      };
     case "private":
       return {
         title: m.assist_refusal_private(),
         help: m.assist_refusal_private_help(),
         fix: null,
-      };
-    case "sensitive":
-      return {
-        title: m.assist_refusal_sensitive(),
-        help: m.assist_refusal_sensitive_help(),
-        fix: null,
-      };
-    case "not_web":
-      return {
-        title: m.assist_refusal_not_page(),
-        help: m.assist_refusal_not_page_help(),
-        fix: null,
+        talks: false,
       };
     case "no_model":
       return {
         title: m.assist_refusal_no_model(),
         help: m.assist_refusal_no_model_help(),
         fix: models(m.assist_fix_open_models()),
+        talks: false,
+      };
+    case "sensitive":
+      return {
+        title: m.assist_refusal_sensitive(),
+        help: m.assist_refusal_sensitive_help(),
+        fix: null,
+        talks: true,
+      };
+    case "not_web":
+      return {
+        title: m.assist_refusal_not_page(),
+        help: m.assist_refusal_not_page_help(),
+        fix: null,
+        talks: true,
       };
     case "unsupported":
       return {
         title: m.assist_refusal_unsupported(),
         help: m.assist_refusal_unsupported_help(),
         fix: null,
+        talks: true,
+      };
+    case "loading":
+      return {
+        title: m.assist_refusal_loading(),
+        help: m.assist_fault_loading(),
+        fix: null,
+        talks: true,
+      };
+    case "unavailable":
+      return {
+        title: m.assist_refusal_unavailable(),
+        help: m.assist_refusal_unavailable_help(),
+        fix: null,
+        talks: true,
       };
   }
 }

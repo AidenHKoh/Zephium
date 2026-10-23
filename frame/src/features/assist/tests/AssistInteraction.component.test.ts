@@ -1,234 +1,295 @@
-import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import "$styles/global.css";
-import type { PageAssistStatusV1 } from "$shared/ipc/bindings";
+import type { PageAssistPickResponseV1, PageAssistStatusV1 } from "$shared/ipc/bindings";
 import { PROFILE } from "$shared/testing/work-models";
 import { emitNativeEvent } from "$shared/testing/native-events";
-import { AssistSession } from "../lib/assist-session.svelte";
-import AssistStage from "./AssistStage.svelte";
-import { ANSWER, asEntries, status as base, turn } from "./fixtures";
-
-const status: typeof base = (entries, patch) => base(entries, { tab: "a", ...patch });
+import PanelStage from "./PanelStage.svelte";
+import { setTabs, tab } from "./tabs-stub.svelte";
+import {
+  CONVERSATION,
+  HANDOFF,
+  ITEMS,
+  SPACE,
+  TAB,
+  event,
+  person,
+  reply,
+  resetSeq,
+  status,
+  text,
+} from "./fixtures";
 
 const native = vi.hoisted(() => ({
-  statuses: {} as Record<string, PageAssistStatusV1>,
-  ask: vi.fn(async () => ({ turn: 1, fault: null })),
+  status: null as PageAssistStatusV1 | null,
+  statusCalls: 0,
+  ask: vi.fn(async () => ({ reply: 2, fault: null })),
   stop: vi.fn(async () => true),
-  cite: vi.fn(async () => true),
+  focus: vi.fn(async () => true),
   decide: vi.fn(async () => true),
-  resume: vi.fn(async () => true),
-  handoff: vi.fn(async () => ({ work: "w1", fault: null })),
+  continueWork: vi.fn(async () => ({ work: "w1", fault: null })),
+  pick: vi.fn(async (): Promise<PageAssistPickResponseV1> => ({ pick: null, fault: null })),
+  pickCancel: vi.fn(async () => true),
+  detach: vi.fn(async () => true),
+  close: vi.fn(async () => true),
+  history: vi.fn(async () => ({
+    version: 2,
+    conversations: [
+      {
+        id: "c0",
+        title: "Pricing on the Pro plan",
+        space: "space-1",
+        updated_ms: Date.now() - 3_600_000,
+      },
+    ],
+  })),
+  open: vi.fn(async () => true),
+  remove: vi.fn(async () => true),
+  url: vi.fn(async () => ({ accepted: true, operation_id: null })),
+  surface: vi.fn(async () => true),
 }));
 
+vi.mock("$domain/tabs", async () => ({ tabs: (await import("./tabs-stub.svelte")).tabs }));
+vi.mock("$domain/surface", () => ({ surface: { open: native.surface } }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
+  const { models } = await import("$shared/testing/work-models");
+  const { accountFixture } = await import("$shared/testing/account");
   return mockBindings({
-    pageAssistStatus: async (tab: string) => native.statuses[tab]!,
-    pageStyles: async () => ({ version: 1, tab: "a", site: null, styles: [] }),
+    pageAssistStatus: async () => {
+      native.statusCalls++;
+      return native.status!;
+    },
     pageAssistAsk: native.ask,
     pageAssistStop: native.stop,
-    pageAssistCite: native.cite,
+    pageAssistFocus: native.focus,
     pageAssistDecide: native.decide,
-    pageAssistResume: native.resume,
-    pageAssistHandoff: native.handoff,
+    pageAssistContinue: native.continueWork,
+    pageAssistPick: native.pick,
+    pageAssistPickCancel: native.pickCancel,
+    pageAssistDetach: native.detach,
+    pageAssistClose: native.close,
+    pageAssistHistory: native.history,
+    pageAssistOpen: native.open,
+    pageAssistDelete: native.remove,
+    browserOpenUrl: native.url,
     workModels: async () => {
-      throw new Error("offline");
+      const view = models({ keys: { open_ai: "valid" }, lead: "openai/gpt-6-luna" });
+      return { ...view, effective: { ...view.effective, page: "openai/gpt-6-luna" } };
     },
+    accountGet: async () => ({ account: accountFixture(), fault: null, retry_after: null }),
+    settingGet: async () => null,
+    runCommand: async () => ({ accepted: true, operation_id: null }),
   });
 });
 
-let session: AssistSession;
 beforeEach(() => {
   vi.clearAllMocks();
-  native.statuses = { a: status(), b: status([], { tab: "b", site: "example.org" }) };
+  native.statusCalls = 0;
+  resetSeq();
+  setTabs({
+    tabs: [tab(TAB, "https://news.ycombinator.com/", "Hacker News")],
+    active: TAB,
+    space: SPACE,
+  });
 });
-afterEach(() => session?.dispose());
 
-async function open(tab = "a") {
-  await page.viewport(380, 800);
-  session = new AssistSession(PROFILE);
-  await session.start();
-  session.follow(tab);
-  const screen = await render(AssistStage, { session });
-  screen.container.style.cssText = "inline-size:336px;block-size:760px";
-  await expect.poll(() => session.loading).toBe(false);
-  return screen;
+async function open(next: PageAssistStatusV1) {
+  native.status = next;
+  await page.viewport(400, 820);
+  const screen = await render(PanelStage, { profile: PROFILE });
+  const field = screen.getByRole("textbox", { name: "Ask Zephium…" });
+  await expect.element(field).toBeVisible();
+  await expect.poll(() => native.statusCalls).toBeGreaterThan(0);
+  return { screen, field };
 }
 
-const send = (
-  turnId: number,
-  seq: number,
-  kind: Parameters<typeof emitNativeEvent<"pageAssistChanged">>[1]["kind"],
-  tab = "a",
-) => emitNativeEvent("pageAssistChanged", { tab, turn: turnId, seq, kind });
-
-test("typing and pressing Enter asks; Shift+Enter only adds a line", async () => {
-  const screen = await open();
-  const field = screen.getByRole("textbox");
-  await field.fill("What is the price?");
+test("Enter sends with the page in front; Shift+Enter only adds a line; × leaves the page out", async () => {
+  const { screen, field } = await open(status());
+  await expect.element(field).toHaveFocus();
+  await field.fill("What's worth reading?");
   await userEvent.keyboard("{Shift>}{Enter}{/Shift}");
   expect(native.ask).not.toHaveBeenCalled();
   await userEvent.keyboard("{Enter}");
   await expect.poll(() => native.ask.mock.calls.length).toBe(1);
-  expect(native.ask).toHaveBeenCalledWith({
-    tab: "a",
-    text: "What is the price?",
-    intent: "ask",
+  expect(native.ask).toHaveBeenLastCalledWith({
+    space: SPACE,
+    conversation: CONVERSATION,
+    text: "What's worth reading?",
     suggestion: null,
+    attachments: [{ kind: "page", tab: TAB }],
   });
+  await expect.element(field).toHaveValue("");
+
+  await screen.getByRole("button", { name: "Remove news.ycombinator.com" }).click();
+  await field.fill("Just between us");
+  await userEvent.keyboard("{Enter}");
+  await expect.poll(() => native.ask.mock.calls.length).toBe(2);
+  expect(native.ask).toHaveBeenLastCalledWith(expect.objectContaining({ attachments: [] }));
 });
 
-test("opening Ask puts the caret in the field", async () => {
-  const screen = await open();
-  await expect.element(screen.getByRole("textbox")).toHaveFocus();
-});
-
-test("reduced motion shows every block at once", async () => {
-  document.documentElement.dataset.reduceMotion = "true";
-  try {
-    native.statuses.a = status(asEntries(turn(1, { question: "Live", parts: ANSWER.slice(0, 2) })));
-    const screen = await open();
-    const block = screen.container.querySelector(".assist-rise");
-    expect(block).not.toBeNull();
-    expect(getComputedStyle(block!).animationName).toBe("none");
-  } finally {
-    delete document.documentElement.dataset.reduceMotion;
-  }
-});
-
-test("a suggestion asks with its own id", async () => {
-  const screen = await open();
-  await screen.getByRole("button", { name: "Key numbers" }).click();
+test("a suggestion sends itself with the page", async () => {
+  const { screen } = await open(status());
+  await screen.getByRole("button", { name: "Worth opening" }).click();
   await expect.poll(() => native.ask.mock.calls.length).toBe(1);
-  expect(native.ask).toHaveBeenCalledWith({
-    tab: "a",
-    text: "Key numbers",
-    intent: "ask",
-    suggestion: "key_numbers",
-  });
+  expect(native.ask).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      text: "",
+      suggestion: "picks",
+      attachments: [{ kind: "page", tab: TAB }],
+    }),
+  );
 });
 
-test("events for another tab and old sequence numbers never reach the thread", async () => {
-  const screen = await open();
-  send(1, 1, { type: "status", phase: { phase: "reading" } });
-  await expect.element(screen.getByText("Reading the page…").first()).toBeVisible();
-  send(1, 3, { type: "status", phase: { phase: "answering" } });
-  send(1, 2, { type: "status", phase: { phase: "reading" } });
-  await expect.element(screen.getByText("Answering…").first()).toBeVisible();
-  send(9, 1, { type: "part", part: ANSWER[0]! }, "other");
-  expect(screen.container.textContent).not.toContain("Fed held");
-});
-
-test("working shows Stop, and Stop asks the core to stop", async () => {
-  const screen = await open();
-  send(1, 1, { type: "status", phase: { phase: "reading" } });
-  await screen.getByRole("button", { name: "Stop" }).click();
-  expect(native.stop).toHaveBeenCalledWith("a");
-});
-
-test("Escape in the field stops a working answer and is kept from closing the panel", async () => {
-  const screen = await open();
-  send(1, 1, { type: "status", phase: { phase: "answering" } });
-  await screen.getByRole("textbox").click();
-  const closed = vi.fn();
-  screen.container.addEventListener("keydown", (event) => closed(event.defaultPrevented));
+test("while a reply works, Send is Stop, and Escape stops it before closing anything", async () => {
+  const onclose = vi.fn();
+  native.status = status([person(1, "Summarize"), reply(2, [], { state: "working", cost: null })]);
+  await page.viewport(400, 820);
+  const screen = await render(PanelStage, { profile: PROFILE, onclose });
+  const field = screen.getByRole("textbox", { name: "Ask Zephium…" });
+  await expect.element(screen.getByRole("button", { name: "Stop" })).toBeVisible();
+  await field.click();
   await userEvent.keyboard("{Escape}");
-  expect(native.stop).toHaveBeenCalledWith("a");
-  expect(closed).toHaveBeenCalledWith(true);
+  await expect.poll(() => native.stop.mock.calls.length).toBe(1);
+  expect(native.stop).toHaveBeenCalledWith(SPACE);
+  expect(onclose).not.toHaveBeenCalled();
+  await screen.getByRole("button", { name: "Stop" }).click();
+  await expect.poll(() => native.stop.mock.calls.length).toBe(2);
+
+  // Rust's snapshot moves on with its events; a focus reads it again.
+  native.status = status([person(1, "Summarize"), reply(2, [text("Done.")])]);
+  native.status.conversation.seq = 42;
+  emitNativeEvent("pageAssistChanged", event(2, { type: "text", block: 0, delta: "Done." }));
+  emitNativeEvent("pageAssistChanged", event(2, { type: "done", cost: null }));
+  await expect.element(screen.getByRole("button", { name: "Send" })).toBeVisible();
+  await field.click();
+  await userEvent.keyboard("{Escape}");
+  expect(onclose).toHaveBeenCalledOnce();
 });
 
-test("a source that cannot be found on the page says so", async () => {
-  native.statuses.a = status(asEntries(turn(1, { question: "Live", parts: ANSWER.slice(0, 2) })));
-  native.cite.mockResolvedValueOnce(false);
-  const screen = await open();
-  await screen
-    .getByRole("button", { name: /^Source 1/ })
-    .first()
-    .click();
-  await expect.element(screen.getByText("Couldn’t find that on the page.")).toBeVisible();
+test("an item's card points at its mark while hovered; ⌘-click opens it in a new tab", async () => {
+  const { screen } = await open(status([person(1, "Picks?"), reply(2, [text("Three."), ITEMS])]));
+  const first = screen.getByRole("button", { name: /eMudhra to exit/u });
+  await first.hover();
+  await expect.poll(() => native.focus.mock.calls.at(-1)).toEqual([CONVERSATION, 2, 1, 1]);
+  await screen.getByRole("textbox").hover();
+  await expect.poll(() => native.focus.mock.calls.at(-1)).toEqual([CONVERSATION, 2, 1, null]);
+  await first.click({ modifiers: ["Meta"] });
+  await expect.poll(() => native.url.mock.calls.at(-1)).toEqual(["https://emudhra.com/", true]);
 });
 
-test("switching tabs drops the thread and shows the other tab's", async () => {
-  native.statuses.a = status(
-    asEntries(turn(1, { question: "On tab a", parts: ANSWER.slice(0, 1) })),
+test("a confirm is answered on its own block, with the exact control", async () => {
+  const { screen } = await open(
+    status([
+      person(1, "Upvote it"),
+      reply(
+        2,
+        [
+          text("One step needs you."),
+          {
+            kind: "steps",
+            steps: [{ index: 0, label: 'Click "upvote"', category: "save", state: "confirm" }],
+          },
+        ],
+        { state: "waiting", cost: null },
+      ),
+    ]),
   );
-  const screen = await open();
-  await expect.element(screen.getByText("On tab a")).toBeVisible();
-  session.follow("b");
-  expect(session.thread.items).toHaveLength(0);
-  await expect.element(screen.getByText("example.org")).toBeVisible();
-  expect(screen.container.textContent).not.toContain("On tab a");
+  await screen.getByRole("button", { name: "upvote", exact: true }).click();
+  await expect.poll(() => native.decide.mock.calls.at(-1)).toEqual([CONVERSATION, 2, 1, "approve"]);
 });
 
-test("a source goes to the page while it is live and is inert once the page moved on", async () => {
-  native.statuses.a = status(
-    asEntries(
-      turn(1, { question: "Live", parts: ANSWER.slice(0, 2) }),
-      turn(2, { question: "Old", parts: ANSWER.slice(0, 2), inert: true, seq: 11 }),
-    ),
+test("Continue in Work starts it; once started, Open in Work goes to Work", async () => {
+  const { screen } = await open(
+    status([person(1, "Set up the status page"), reply(2, [text("Work fits."), HANDOFF()])]),
   );
-  const screen = await open();
-  const cites = screen.getByRole("button", { name: /^Source 1/ });
-  await cites.first().click();
-  expect(native.cite).toHaveBeenCalledWith("a", 1, 1);
-  await expect.element(cites.nth(2)).toBeDisabled();
+  await screen.getByRole("button", { name: "Continue in Work" }).click();
+  await expect.poll(() => native.continueWork.mock.calls.at(-1)).toEqual([CONVERSATION, 2, 1]);
+  emitNativeEvent(
+    "pageAssistChanged",
+    event(2, { type: "block", block: 1, value: HANDOFF({ state: "started", work: "w1" }) }),
+  );
+  await screen.getByRole("button", { name: "Open in Work" }).click();
+  await expect.poll(() => native.surface.mock.calls.at(-1)).toEqual(["work"]);
 });
 
-test("an action that commits is approved or declined by the person", async () => {
-  native.statuses.a = status(
-    asEntries(
-      turn(1, {
-        state: "waiting",
-        question: "Buy it",
-        steps: [{ index: 0, label: "Place order", category: "purchase", state: "confirm" }],
-      }),
-    ),
-  );
-  const screen = await open();
-  await expect.element(screen.getByText("This spends money on nytimes.com.")).toBeVisible();
-  await screen.getByRole("button", { name: "Place order" }).click();
-  expect(native.decide).toHaveBeenCalledWith("a", 1, "approve");
+test("Not now declines the handoff on its block", async () => {
+  const { screen } = await open(status([person(1, "Set it up"), reply(2, [HANDOFF()])]));
   await screen.getByRole("button", { name: "Not now" }).click();
-  expect(native.decide).toHaveBeenCalledWith("a", 1, "decline");
+  await expect.poll(() => native.decide.mock.calls.at(-1)).toEqual([CONVERSATION, 2, 0, "decline"]);
 });
 
-test("Continue resumes after a take-over and Run in Work hands the request over", async () => {
-  native.statuses.a = status(
-    asEntries(
-      turn(1, { state: "paused", question: "Fill it in" }),
-      turn(2, { offer: "multi_page", question: "Compare stores", seq: 11 }),
-    ),
-  );
-  const screen = await open();
-  await screen.getByRole("button", { name: "Continue" }).click();
-  expect(native.resume).toHaveBeenCalledWith("a", 1);
-  await screen.getByRole("button", { name: "Run in Work" }).click();
-  expect(native.handoff).toHaveBeenCalledWith("a", 2);
-});
-
-test("a refused page shows why and offers no field to type in", async () => {
-  native.statuses.a = status([], { availability: "private" });
-  const screen = await open();
-  await expect.element(screen.getByText("Not in private windows")).toBeVisible();
-  await expect.element(screen.getByRole("textbox")).toBeDisabled();
-});
-
-test("a system that cannot read pages says exactly that, not that it is coming", async () => {
-  native.statuses.a = status([], { availability: "unsupported" });
-  const screen = await open();
-  await expect.element(screen.getByText("Not available on this system")).toBeVisible();
-  expect(screen.container.textContent).not.toContain("almost here");
-});
-
-test("Redesign this page starts a style turn with its own id", async () => {
-  const screen = await open();
-  await screen.getByRole("button", { name: "Redesign this page" }).click();
-  await expect.poll(() => native.ask.mock.calls.length).toBe(1);
-  expect(native.ask).toHaveBeenCalledWith({
-    tab: "a",
-    text: "Redesign this page",
-    intent: "style",
-    suggestion: "redesign",
+test("the picker attaches what was picked; × detaches it; Escape cancels a pick", async () => {
+  native.pick.mockResolvedValueOnce({
+    pick: { tab: TAB, pick: "7", label: "Story list", host: "news.ycombinator.com" },
+    fault: null,
   });
+  const { screen, field } = await open(status());
+  await screen.getByRole("button", { name: "Pick an element" }).click();
+  await expect.poll(() => native.pick.mock.calls.at(-1)).toEqual([SPACE, TAB]);
+  await expect.element(screen.getByText("Story list")).toBeVisible();
+  await field.fill("Summarize this part");
+  await userEvent.keyboard("{Enter}");
+  await expect.poll(() => native.ask.mock.calls.length).toBe(1);
+  expect(native.ask).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      attachments: [
+        { kind: "page", tab: TAB },
+        { kind: "element", tab: TAB, pick: "7" },
+      ],
+    }),
+  );
+  await expect.element(screen.getByText("Story list")).not.toBeInTheDocument();
+
+  native.pick.mockResolvedValueOnce({
+    pick: { tab: TAB, pick: "8", label: "Pricing table", host: "news.ycombinator.com" },
+    fault: null,
+  });
+  await screen.getByRole("button", { name: "Pick an element" }).click();
+  await screen.getByRole("button", { name: "Remove Pricing table" }).click();
+  await expect.poll(() => native.detach.mock.calls.at(-1)).toEqual([TAB, "8"]);
+
+  native.pick.mockImplementationOnce(() => new Promise(() => {}));
+  await screen.getByRole("button", { name: "Pick an element" }).click();
+  await expect
+    .element(screen.getByRole("status").filter({ hasText: "Esc to cancel" }))
+    .toBeVisible();
+  await userEvent.keyboard("{Escape}");
+  await expect.poll(() => native.pickCancel.mock.calls.at(-1)).toEqual([TAB]);
+});
+
+test("history lists past conversations, opens one and deletes one", async () => {
+  const { screen } = await open(status([person(1, "Hi"), reply(2, [text("Hello.")])]));
+  await screen.getByRole("button", { name: "More" }).click();
+  await page.getByRole("menuitem", { name: "History" }).click();
+  const row = screen.getByRole("button", { name: /^Pricing on the Pro plan/u });
+  await expect.element(row).toBeVisible();
+  await screen.getByRole("button", { name: "Delete “Pricing on the Pro plan”" }).click();
+  await expect.poll(() => native.remove.mock.calls.at(-1)).toEqual([SPACE, "c0"]);
+  await expect.element(row).not.toBeInTheDocument();
+
+  native.history.mockResolvedValueOnce({
+    version: 2,
+    conversations: [
+      { id: "c0", title: "Pricing on the Pro plan", space: SPACE, updated_ms: Date.now() },
+    ],
+  });
+  await screen.getByRole("button", { name: "History" }).click();
+  await screen.getByRole("button", { name: "More" }).click();
+  await page.getByRole("menuitem", { name: "History" }).click();
+  await screen.getByRole("button", { name: /^Pricing on the Pro plan/u }).click();
+  await expect.poll(() => native.open.mock.calls.at(-1)).toEqual([SPACE, "c0"]);
+  await expect.element(screen.getByRole("log")).toBeVisible();
+});
+
+test("a gap in the events reads the conversation again; closing the panel lets the page go", async () => {
+  const { screen } = await open(
+    status([person(1, "Hi"), reply(2, [], { state: "working", cost: null })]),
+  );
+  const before = native.statusCalls;
+  emitNativeEvent("pageAssistChanged", { ...event(2, { type: "cancelled" }), seq: 99 });
+  await expect.poll(() => native.statusCalls).toBe(before + 1);
+  screen.unmount();
+  expect(native.close).toHaveBeenCalledWith(SPACE);
 });

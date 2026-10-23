@@ -1,5 +1,5 @@
 import * as m from "$shared/i18n/messages";
-import type { PageAssistIntentV1, PageAssistSuggestionV1 } from "$shared/ipc/bindings";
+import type { PageAssistSuggestionV1 } from "$shared/ipc/bindings";
 
 const LABELS: Record<PageAssistSuggestionV1, () => string> = {
   summarize: m.assist_suggest_summarize,
@@ -9,16 +9,13 @@ const LABELS: Record<PageAssistSuggestionV1, () => string> = {
   explain: m.assist_suggest_explain,
   steps: m.assist_suggest_steps,
   compare: m.assist_suggest_compare,
+  picks: m.assist_suggest_picks,
   redesign: m.assist_suggest_redesign,
   darker: m.assist_suggest_darker,
   readable: m.assist_suggest_readable,
 };
 
 export const suggestionLabel = (suggestion: PageAssistSuggestionV1) => LABELS[suggestion]();
-
-/** What a one-click suggestion asks the core to do. */
-export const suggestionIntent = (suggestion: PageAssistSuggestionV1): PageAssistIntentV1 =>
-  suggestion === "summarize" ? "summarize" : isRestyle(suggestion) ? "style" : "ask";
 
 export const isRestyle = (suggestion: PageAssistSuggestionV1) =>
   suggestion === "redesign" || suggestion === "darker" || suggestion === "readable";

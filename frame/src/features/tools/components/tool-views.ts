@@ -3,12 +3,12 @@ import * as m from "$shared/i18n/messages";
 import {
   Note01Icon,
   CheckListIcon,
-  SparklesIcon,
   HourglassIcon,
   HistoryIcon,
   Download01Icon,
   Bookmark02Icon,
 } from "@hugeicons/core-free-icons";
+import { ZephiumMark } from "$shared/brand/zephium";
 export const tools = {
   notes: {
     title: m.tool_notes,
@@ -25,10 +25,10 @@ export const tools = {
     load: () => import("./previews/TasksView.svelte"),
   },
   ai: {
-    title: m.tool_ai,
-    description: m.tool_ai_help,
-    empty: m.tool_ai_empty,
-    icon: SparklesIcon,
+    title: m.tool_zephium,
+    description: m.tool_zephium_help,
+    empty: m.tool_zephium,
+    icon: ZephiumMark,
     load: () => import("./previews/ChatView.svelte"),
   },
   history: {

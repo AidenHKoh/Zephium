@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import type { WorkModelFaultV1 } from "$shared/ipc/bindings";
-import { faultView, refusalView } from "../lib/faults";
+import { availabilityView, faultView } from "../lib/faults";
 
 const model = (fault: WorkModelFaultV1, retry_after_ms: number | null = null) =>
   faultView({ reason: "model", fault, retry_after_ms });
@@ -31,11 +31,27 @@ test("a page that changed may be asked again; no selection may not", () => {
   expect(faultView({ reason: "no_selection" }).retry).toBe("no");
 });
 
-test("every refusal has words of its own", () => {
-  const titles = (
-    ["ai_off", "private", "sensitive", "not_web", "no_model", "unsupported"] as const
-  ).map((kind) => refusalView(kind).title);
+test("every page that is not attached has words of its own, and says whether talk goes on", () => {
+  const kinds = [
+    "ai_off",
+    "private",
+    "sensitive",
+    "not_web",
+    "no_model",
+    "unsupported",
+    "loading",
+    "unavailable",
+  ] as const;
+  const titles = kinds.map((kind) => availabilityView(kind).title);
   expect(new Set(titles).size).toBe(titles.length);
+  expect(availabilityView("private").talks).toBe(false);
+  expect(availabilityView("ai_off").talks).toBe(false);
+  expect(availabilityView("sensitive").talks).toBe(true);
+  expect(availabilityView("not_web").talks).toBe(true);
+});
+
+test("a reply that ran too long may be sent again", () => {
+  expect(faultView({ reason: "too_long" }).retry).toBe("now");
 });
 
 test("a page still loading is asked again, not called unavailable", () => {

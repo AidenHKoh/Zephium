@@ -1,33 +1,67 @@
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { page } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import "$styles/global.css";
-import type { PageAssistStatusV1 } from "$shared/ipc/bindings";
+import type { PageAssistMessageV1, PageAssistStatusV1 } from "$shared/ipc/bindings";
 import { PROFILE } from "$shared/testing/work-models";
-import { AssistSession } from "../lib/assist-session.svelte";
-import AssistStage from "./AssistStage.svelte";
-import { ANSWER, asEntries, status, turn } from "./fixtures";
+import { emitNativeEvent } from "$shared/testing/native-events";
+import PanelStage from "./PanelStage.svelte";
+import { setTabs, tab } from "./tabs-stub.svelte";
+import {
+  HANDOFF,
+  ITEMS,
+  OPENED,
+  SPACE,
+  TAB,
+  event,
+  person,
+  reply,
+  resetSeq,
+  status,
+  text,
+} from "./fixtures";
 
 const native = vi.hoisted(() => ({ status: null as PageAssistStatusV1 | null }));
 
+vi.mock("$domain/tabs", async () => ({ tabs: (await import("./tabs-stub.svelte")).tabs }));
+vi.mock("$domain/surface", () => ({ surface: { open: async () => true } }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   const { models } = await import("$shared/testing/work-models");
+  const { accountFixture } = await import("$shared/testing/account");
   return mockBindings({
     pageAssistStatus: async () => native.status!,
-    pageStyles: async () => ({ version: 1, tab: "tab-1", site: "nytimes.com", styles: [] }),
+    pageAssistClose: async () => true,
+    pageAssistFocus: async () => true,
+    pageStyles: async () => ({
+      version: 1,
+      tab: "tab-1",
+      site: "ycombinator.com",
+      styles: [{ id: "s1", summary: "Stories as cards", enabled: true }],
+    }),
     workModels: async () => {
-      const view = models({ cloud: true, lead: "zephium/claude-sonnet-5-5" });
-      return { ...view, effective: { ...view.effective, page: "zephium/claude-sonnet-5-5" } };
+      const view = models({
+        keys: { open_ai: "valid" },
+        lead: "openai/gpt-6-luna",
+        effort: "high",
+      });
+      return { ...view, effective: { ...view.effective, page: "openai/gpt-6-luna" } };
     },
+    accountGet: async () => ({ account: accountFixture(), fault: null, retry_after: null }),
+    settingGet: async () => null,
     runCommand: async () => ({ accepted: true, operation_id: null }),
   });
 });
 
-let session: AssistSession | null = null;
+beforeEach(() => {
+  resetSeq();
+  setTabs({
+    tabs: [tab(TAB, "https://news.ycombinator.com/", "Hacker News")],
+    active: TAB,
+    space: SPACE,
+  });
+});
 afterEach(() => {
-  session?.dispose();
-  session = null;
   delete document.documentElement.dataset.theme;
 });
 
@@ -42,249 +76,222 @@ const settled = () =>
 async function capture(container: HTMLElement, name: string) {
   for (const theme of ["dark", "light"]) {
     document.documentElement.dataset.theme = theme;
-    container.style.background = "var(--color-chrome)";
     await settled();
     await page
-      .elementLocator(container)
+      .elementLocator(container.firstElementChild as HTMLElement)
       .screenshot({ path: `../../../../../target/look/assist/${name}-${theme}.png` });
   }
 }
 
 async function open(next: PageAssistStatusV1, height = 760) {
   native.status = next;
-  await page.viewport(380, height + 40);
-  session = new AssistSession(PROFILE);
-  await session.start();
-  session.follow("tab-1");
-  const screen = await render(AssistStage, {
-    session,
-    page: { title: "Fed holds rates steady and signals one cut this year", url: null },
-  });
-  screen.container.style.cssText = `inline-size:336px;block-size:${height}px`;
-  await expect.poll(() => session!.loading).toBe(false);
+  await page.viewport(400, height + 40);
+  const screen = await render(PanelStage, { profile: PROFILE, height });
+  await expect.element(screen.getByRole("textbox", { name: "Ask Zephium…" })).toBeVisible();
   return screen;
 }
 
-test("empty: a greeting for the page and the suggestions the core chose", async () => {
+const CITES = (() => {
+  const block = text("", [1, 2]);
+  return block.kind === "text" ? block.cites : [];
+})();
+
+const thread = (...messages: PageAssistMessageV1[]) => status(messages);
+
+test("empty: the page in front and what Zephium can do with it", async () => {
   const screen = await open(status());
   await expect.element(screen.getByText("Understand")).toBeVisible();
-  await expect.element(screen.getByRole("button", { name: "Key numbers" })).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Worth opening" })).toBeVisible();
+  await expect.element(screen.getByText("Restyle", { exact: true })).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: /Model: GPT-6 Luna/u })).toBeVisible();
   await capture(screen.container, "empty");
 });
 
-test("status: one line while the page is read", async () => {
-  const screen = await open(
-    status(
-      asEntries(
-        turn(1, {
-          question: "What changed since September?",
-          state: "working",
-          phase: { phase: "read", passages: 214 },
-          seq: 3,
-        }),
-      ),
-    ),
-    360,
-  );
-  await expect.element(screen.getByText("Read 214 passages").first()).toBeVisible();
-  await capture(screen.container, "status");
+test("empty on a page it does not read: says what it can still do", async () => {
+  const screen = await open(status([], { availability: "sensitive", page: null }));
+  await expect.element(screen.getByText("Zephium stays out of this site")).toBeVisible();
+  await expect.element(screen.getByText(/You can still ask anything/u)).toBeVisible();
+  await capture(screen.container, "away");
 });
 
-test("answer: headline, points, figures and a caveat, each with its sources", async () => {
+test("streaming: text grows with numbered cites under one working line", async () => {
   const screen = await open(
-    status(
-      asEntries(
-        turn(1, {
-          question: "What did the Fed decide?",
-          parts: ANSWER,
-          cost: { kind: "hosted", model: "Luna", credits: "0.3" },
-        }),
-      ),
+    thread(
+      person(1, "What's worth reading here today?"),
+      reply(2, [], {
+        state: "working",
+        phase: { phase: "reading", site: "news.ycombinator.com" },
+        cost: null,
+      }),
     ),
   );
-  await expect.element(screen.getByText("Luna · 0.3 credits")).toBeVisible();
-  await capture(screen.container, "answer");
-});
-
-test("a thread across a navigation: old sources go quiet and cost shows both ways", async () => {
-  const screen = await open(
-    status([
-      ...asEntries(
-        turn(1, {
-          question: "Summarize",
-          intent: "summarize",
-          parts: ANSWER.slice(0, 2),
-          inert: true,
-          cost: { kind: "hosted", model: "Luna", credits: null },
-        }),
-      ),
-      { kind: "divider", site: "nytimes.com", cross_site: false },
-      { kind: "divider", site: "wikipedia.org", cross_site: true },
-      ...asEntries(
-        turn(2, {
-          question: "Who founded it?",
-          parts: [ANSWER[0]!],
-          cost: { kind: "byok", model: "gpt-5", provider: "OpenAI", usd: "0.004" },
-        }),
-      ),
-    ]),
+  await expect.element(screen.getByText("Reading news.ycombinator.com…").first()).toBeVisible();
+  emitNativeEvent("pageAssistChanged", event(2, { type: "phase", phase: { phase: "thinking" } }));
+  emitNativeEvent(
+    "pageAssistChanged",
+    event(2, {
+      type: "text",
+      block: 0,
+      delta: "Three stories stand out today. The **top one** is ",
+    }),
   );
-  await expect.element(screen.getByText("≈ $0.004 on your OpenAI key")).toBeVisible();
-  await capture(screen.container, "thread");
+  emitNativeEvent(
+    "pageAssistChanged",
+    event(2, {
+      type: "text",
+      block: 0,
+      delta: "about a certificate authority ⟦1⟧, and two are `Show HN` posts ⟦2⟧.",
+    }),
+  );
+  emitNativeEvent("pageAssistChanged", event(2, { type: "cites", block: 0, cites: CITES }));
+  await expect.element(screen.getByRole("button", { name: /Source 1/u })).toBeVisible();
+  await expect.element(screen.getByText("Thinking…").first()).toBeVisible();
+  expect(screen.container.querySelectorAll(".orb")).toHaveLength(1);
+  await screen.getByRole("button", { name: /Source 1/u }).hover();
+  await expect.element(screen.getByRole("tooltip")).toHaveTextContent(/On news\.ycombinator\.com/u);
+  await capture(screen.container, "streaming");
 });
 
-test("refusal: a sensitive site is not read", async () => {
-  const screen = await open(status([], { availability: "sensitive", site: "chase.com" }), 420);
-  await expect.element(screen.getByText("Ask stays out of this site")).toBeVisible();
-  await capture(screen.container, "refusal");
-});
-
-test("faults say what to do next", async () => {
+test("items: numbered cards, the unmarked one outlined", async () => {
   const screen = await open(
-    status(
-      asEntries(
-        turn(1, {
-          question: "Compare the plans",
-          state: "failed",
-          fault: { reason: "model", fault: "hosted_usage", retry_after_ms: null },
-        }),
-        turn(2, {
-          question: "Try again",
-          state: "failed",
-          fault: { reason: "model", fault: "rate_limited", retry_after_ms: 12000 },
-          seq: 12,
-        }),
+    thread(
+      person(1, "Which stories are worth opening?"),
+      reply(2, [text("These three are worth your time ⟦1⟧.", [1]), ITEMS]),
+    ),
+  );
+  await expect.element(screen.getByRole("list", { name: "3 items" })).toBeVisible();
+  await capture(screen.container, "items");
+});
+
+test("opened: one inset checklist, one moving thing", async () => {
+  const screen = await open(
+    thread(
+      person(1, "Open them for me"),
+      reply(2, [text("Opening the three in the background."), OPENED], {
+        state: "working",
+        phase: { phase: "opening" },
+        cost: null,
+      }),
+    ),
+  );
+  await expect.element(screen.getByText("Couldn’t open")).toBeVisible();
+  expect(screen.container.querySelector(".working")).toBeNull();
+  expect(screen.container.querySelectorAll(".spinner")).toHaveLength(1);
+  await capture(screen.container, "opened");
+});
+
+test("confirm: the exact control, a quiet Not now, and what it does", async () => {
+  const screen = await open(
+    thread(
+      person(1, "Upvote the first one"),
+      reply(
+        2,
+        [
+          {
+            kind: "steps",
+            steps: [
+              { index: 0, label: "Scroll to “eMudhra to exit”", category: null, state: "done" },
+              { index: 1, label: 'Click "upvote"', category: "save", state: "confirm" },
+              { index: 2, label: "Check the score", category: null, state: "skipped" },
+            ],
+          },
+        ],
+        { state: "waiting", cost: null },
       ),
     ),
-    520,
   );
-  await expect.element(screen.getByRole("button", { name: "Buy credits" })).toBeVisible();
-  await capture(screen.container, "fault");
-});
-
-test("a step that commits waits for approval, naming the control", async () => {
-  const screen = await open(
-    status(
-      asEntries(
-        turn(1, {
-          question: "Order the cheapest one",
-          intent: "act",
-          state: "waiting",
-          steps: [
-            { index: 0, label: "Sorted by price, low to high", category: null, state: "done" },
-            { index: 1, label: "Opened “Aeropress Go”", category: null, state: "done" },
-            { index: 2, label: "Place order", category: "purchase", state: "confirm" },
-          ],
-        }),
-      ),
-    ),
-    480,
-  );
-  await expect.element(screen.getByRole("button", { name: "Place order" })).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "upvote", exact: true })).toBeVisible();
+  await expect
+    .element(screen.getByText("This saves a change on news.ycombinator.com."))
+    .toBeVisible();
   await capture(screen.container, "confirm");
 });
 
-test("you took over, and a big request is offered to Work", async () => {
+test("style: a proposal, then the applied badge with its switches", async () => {
+  const proposal = (state: "proposed" | "applied") => ({
+    kind: "style" as const,
+    style: {
+      id: state === "applied" ? "s1" : null,
+      summary: "Stories as cards",
+      site: "ycombinator.com",
+      rules: 14,
+      state,
+    },
+  });
   const screen = await open(
     status(
-      asEntries(
-        turn(1, { question: "Fill in the form", intent: "act", state: "paused", seq: 4 }),
-        turn(2, {
-          question: "Compare these across the five stores",
-          offer: "multi_page",
-          state: "done",
-          seq: 4,
-        }),
-      ),
+      [
+        person(1, "Make the front page easier to scan"),
+        reply(2, [text("Here is a calmer layout."), proposal("applied")]),
+        person(3, "And a darker one?"),
+        reply(4, [proposal("proposed")], { state: "waiting", cost: null }),
+      ],
+      { styled: true },
     ),
-    480,
-  );
-  await expect.element(screen.getByRole("button", { name: "Continue" })).toBeVisible();
-  await expect.element(screen.getByRole("button", { name: "Run in Work" })).toBeVisible();
-  await capture(screen.container, "paused-work");
-});
-
-test("a style proposal, then the badge of an applied one", async () => {
-  const screen = await open(
-    status(
-      asEntries(
-        turn(1, {
-          question: "Make this darker",
-          intent: "style",
-          style: {
-            id: null,
-            summary: "Dark background, light text, softer links",
-            site: "nytimes.com",
-            rules: 6,
-            state: "proposed",
-          },
-        }),
-        turn(2, {
-          question: "Bigger text too",
-          intent: "style",
-          style: {
-            id: "s1",
-            summary: "Text 18px",
-            site: "nytimes.com",
-            rules: 2,
-            state: "applied",
-          },
-          seq: 12,
-        }),
-      ),
-    ),
-    520,
   );
   await expect.element(screen.getByRole("button", { name: "Apply" })).toBeVisible();
+  await expect.element(screen.getByText("Style on for ycombinator.com")).toBeVisible();
   await capture(screen.container, "style");
 });
 
-test("the model menu opens over the thread, grouped by provider", async () => {
-  const screen = await open(
-    status(asEntries(turn(1, { question: "Summarize", parts: ANSWER.slice(0, 2) }))),
-    520,
-  );
-  await screen.getByRole("button", { name: /Sonnet/ }).click();
-  await expect.element(screen.getByRole("listbox")).toBeVisible();
-  await capture(screen.container, "model-menu");
+test("handoff: the hero card in each of its states", async () => {
+  for (const [name, state] of [
+    ["offered", { state: "offered" }],
+    ["starting", { state: "starting" }],
+    ["started", { state: "started", work: "w1" }],
+    ["dismissed", { state: "dismissed" }],
+  ] as const) {
+    const screen = await open(
+      thread(
+        person(1, "Set up the status page for the next release"),
+        reply(2, [
+          text("This reaches past the browser, so Work is the better place."),
+          HANDOFF(state),
+        ]),
+      ),
+      820,
+    );
+    if (name === "offered")
+      await expect.element(screen.getByRole("button", { name: "Continue in Work" })).toBeVisible();
+    if (name === "starting")
+      await expect.element(screen.getByText("Starting Work…").first()).toBeVisible();
+    if (name === "started")
+      await expect.element(screen.getByRole("button", { name: "Open in Work" })).toBeVisible();
+    if (name === "dismissed")
+      await expect.element(screen.getByText(/Not handed to Work/u)).toBeVisible();
+    await capture(screen.container, `handoff-${name}`);
+    screen.unmount();
+  }
 });
 
-test("a long answer scrolls inside the panel and stays pinned to its end", async () => {
-  const points = Array.from({ length: 12 }, (_, at) => ({
-    ...ANSWER[1]!,
-    text: `Point ${at + 1}: ${ANSWER[1]!.text}`,
-  }));
+test("faults: a rate limit counts down, credits lead to the account", async () => {
   const screen = await open(
-    status(
-      asEntries(
-        turn(1, {
-          question: "Give me everything on this page",
-          parts: [ANSWER[0]!, ...points, ANSWER[7]!],
-          cost: { kind: "hosted", model: "Luna", credits: "0.8" },
-        }),
-      ),
+    thread(
+      person(1, "Summarize this"),
+      reply(2, [], {
+        state: "failed",
+        cost: null,
+        fault: { reason: "model", fault: "rate_limited", retry_after_ms: 12_000 },
+      }),
+      person(3, "Try again"),
+      reply(4, [], {
+        state: "failed",
+        cost: null,
+        fault: { reason: "model", fault: "hosted_usage", retry_after_ms: null },
+      }),
     ),
-    520,
   );
-  const scroller = screen.container.querySelector<HTMLElement>(".thread")!;
-  await expect.poll(() => scroller.scrollTop).toBeGreaterThan(200);
-  await expect.element(screen.getByText("Luna · 0.8 credits")).toBeVisible();
-  await capture(screen.container, "long");
+  await expect.element(screen.getByRole("button", { name: "Buy credits" })).toBeVisible();
+  await expect.element(screen.getByText("Zephium AI needs a short breather.")).toBeVisible();
+  await capture(screen.container, "faults");
 });
 
-test("a site that cannot hold another style says so and points to Settings", async () => {
-  const screen = await open(
-    status(
-      asEntries(
-        turn(1, {
-          question: "Make this easier to read",
-          intent: "style",
-          style: { id: null, summary: "Text 18px", site: "nytimes.com", rules: 2, state: "full" },
-        }),
-      ),
-    ),
-    360,
-  );
-  await expect.element(screen.getByRole("button", { name: "Open page styles" })).toBeVisible();
-  await capture(screen.container, "style-full");
+test("composer: page, selection and element chips, picker and model chip", async () => {
+  const screen = await open(status([], { selection: "The quick brown fox" }));
+  await expect.element(screen.getByRole("button", { name: "Selection" })).toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: "Remove news.ycombinator.com" }))
+    .toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Pick an element" })).toBeVisible();
+  await capture(screen.container, "composer");
 });
