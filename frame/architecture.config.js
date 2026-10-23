@@ -71,6 +71,11 @@ export const architecture = {
             from: { element: { type: "features", captured: { module: "settings" } } },
             allow: { to: { element: { type: "features", captured: { module: "assist" } } } },
           },
+          // The sidebar assistant's composer borrows Work's model chip and dictation.
+          {
+            from: { element: { type: "features", captured: { module: "assist" } } },
+            allow: { to: { element: { type: "features", captured: { module: "work" } } } },
+          },
           {
             from: { element: { type: "features", captured: { module: "library" } } },
             allow: { to: { element: { type: "features", captured: { module: "downloads" } } } },

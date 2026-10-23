@@ -125,6 +125,12 @@ export class WorkEnvironmentSession {
     )
       await this.create(defaultTitle);
   }
+  /** Shows `id` when the canvas opens next, or at once while it is open. */
+  show(id: string) {
+    this.selected = id;
+    this.launched = true;
+    if (this.active) void this.open(id);
+  }
   stopObserving() {
     this.active = false;
     ++this.generation;

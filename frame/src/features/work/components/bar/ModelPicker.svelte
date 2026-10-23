@@ -43,9 +43,12 @@
 
   let {
     profile,
+    role = "lead",
     onsettings = () => void commands.runCommand("settings.ai"),
   }: {
     profile: string;
+    /** Which of the person's models it chooses: Work's lead, or the sidebar assistant's page model. */
+    role?: "lead" | "page";
     /** Opens Settings → Models, where keys are added. */
     onsettings?: () => void;
   } = $props();
@@ -78,9 +81,9 @@
   let field = $state<HTMLInputElement>();
 
   const models = $derived(session?.models ?? null);
-  const current = $derived(entryOf(models, models?.effective.lead));
-  const chosen = $derived(models?.effective.lead ?? null);
-  const groups = $derived(pickerGroups(models, "lead", session?.endpoint ?? []));
+  const current = $derived(entryOf(models, models?.effective[role]));
+  const chosen = $derived(models?.effective[role] ?? null);
+  const groups = $derived(pickerGroups(models, role, session?.endpoint ?? []));
   const tierOf = $derived(tiers(groups.ready));
 
   type Item = { id: string; entry: WorkModelEntry };
@@ -198,6 +201,7 @@
   let searchOff = $state(false);
   $effect(() => {
     void models;
+    if (role !== "lead") return;
     let live = true;
     void Promise.resolve()
       .then(() => commands.workModelsReady(profile))
@@ -339,7 +343,7 @@
   async function choose(entry: WorkModelEntry) {
     if (locked(models, entry.id)) return upgrade();
     if (session?.busy) return;
-    if (entry.id !== chosen && !(await session?.choose("lead", entry.id))) return;
+    if (entry.id !== chosen && !(await session?.choose(role, entry.id))) return;
     close();
   }
 
@@ -806,7 +810,7 @@
             </div>
           {/if}
           {#if searchOff}<p class="note">{m.work_model_no_search()}</p>{/if}
-          {#if session?.fault?.action === "choose:lead"}<p class="note failure" role="alert">
+          {#if session?.fault?.action === `choose:${role}`}<p class="note failure" role="alert">
               {m.work_model_failed()}
             </p>{/if}
           {#if session?.fault?.action === "effort"}<p class="note failure" role="alert">
