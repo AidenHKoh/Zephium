@@ -7,6 +7,7 @@ use std::path::Path;
 
 const BOOTSTRAP: &str = "crates/zephium-engine/src/platform/page_reader_bootstrap.js";
 const RECIPES: &str = "crates/zephium-engine/src/platform/page_reader_recipes.js";
+const KIT: &str = "crates/zephium-engine/src/host/picker_kit.js";
 const SERVE: &str = "crates/zephium-engine/src/platform/macos/page_reader_serve.js";
 const RECIPE: &str = "crates/zephium-engine/src/platform/page_recipe.rs";
 const MACOS_READER: &str = "crates/zephium-engine/src/platform/macos/browse_reader.rs";
@@ -74,6 +75,7 @@ const PAGE_FORBIDDEN: [&str; 22] = [
 pub(crate) fn check(repository: &Path) -> Result<(), String> {
     check_bootstrap(&read(repository, BOOTSTRAP)?)?;
     check_recipes(&read(repository, RECIPES)?)?;
+    check_kit(&read(repository, KIT)?)?;
     check_serve(&read(repository, SERVE)?)?;
     check_recipe_grammar(&read(repository, RECIPE)?)?;
     check_macos_reader(&read(repository, MACOS_READER)?)?;
@@ -153,7 +155,20 @@ fn check_recipes(source: &str) -> Result<(), String> {
     if !compact.contains("consttouch=(event)=>{if(event.isTrusted)touched=true;};") {
         return Err("the recipes count something other than the person's own input".to_owned());
     }
-    if compact.matches("\"Q1:").count() != 4 {
+    // Marks and picks: the person's own trusted input only, never passed
+    // on to the page, and drawn only through the shared picker's layer.
+    for required in [
+        "if(!event.isTrusted||picking!==current)return;event.preventDefault();event.stopImmediatePropagation();",
+        "constmade=kit.layer(LAYER_STYLE);",
+        "ui=kit.session(PICK_BAR,contentLabel,reduced);",
+        "if(SKIP.has(node.tagName)||node.tagName===\"OPTION\"",
+        "if(typeofentry.h===\"string\"&&element.href!==entry.h)continue;",
+    ] {
+        if !compact.contains(required) {
+            return Err(format!("the recipes lost {required}"));
+        }
+    }
+    if compact.matches("\"Q1:").count() != 13 {
         return Err("the recipes gained an invocation".to_owned());
     }
     for forbidden in PAGE_FORBIDDEN
@@ -162,6 +177,38 @@ fn check_recipes(source: &str) -> Result<(), String> {
     {
         if source.contains(forbidden) {
             return Err(format!("the recipes acquired {forbidden}"));
+        }
+    }
+    Ok(())
+}
+
+/// The shared picker: the only place the reader's program creates elements,
+/// and only its own, in closed shadow roots.
+fn check_kit(source: &str) -> Result<(), String> {
+    let compact = compact(source);
+    for required in [
+        "constcreateNode=Document.prototype.createElement;",
+        "attachShadow({mode:\"closed\"})",
+        "constpickerKit=(()=>{",
+        "returnObject.freeze({",
+    ] {
+        if !compact.contains(required) {
+            return Err(format!("the shared picker lost {required}"));
+        }
+    }
+    if compact.matches("createElement").count() != 1
+        || compact.matches("attachShadow(").count() != 2
+        || compact.matches("attachShadow({mode:\"closed\"})").count() != 2
+    {
+        return Err("the shared picker creates elements another way".to_owned());
+    }
+    for forbidden in PAGE_FORBIDDEN
+        .iter()
+        .filter(|forbidden| **forbidden != "createElement" && **forbidden != "innerHTML")
+        .chain(["Function(", "postMessage", "document.cookie", ".innerHTML"].iter())
+    {
+        if source.contains(forbidden) {
+            return Err(format!("the shared picker acquired {forbidden}"));
         }
     }
     Ok(())
@@ -202,7 +249,10 @@ fn check_recipe_grammar(source: &str) -> Result<(), String> {
         "encoded:format!(\"{MARK_PREFIX}{json}\"),",
         "Kind::Selection=>MAX_SELECTION_WIRE_BYTES,",
         "Kind::Outline=>MAX_OUTLINE_WIRE_BYTES,",
-        "Kind::Mark|Kind::Touched=>1,",
+        "Kind::Mark|Kind::Touched|Kind::Short=>1,",
+        "Kind::Pick=>MAX_PICK_WIRE_BYTES,",
+        // Marks carry only facts Rust serialised from its own read.
+        "letjson=serde_json::to_string(&serde_json::json!({\"r\":reduce_motion,\"m\":entries})).ok()?;",
         "ifbytes.len()>limit{returnNone;}",
     ] {
         if !compact.contains(required) {
@@ -212,7 +262,7 @@ fn check_recipe_grammar(source: &str) -> Result<(), String> {
     if !compact.contains("constTOUCHED:&str=\"Q1:touched\";") {
         return Err("the recipe grammar lost the person's-input recipe".to_owned());
     }
-    if compact.matches("Self{kind:Kind::").count() != 4 {
+    if compact.matches("Self{kind:Kind::").count() != 13 {
         return Err("the recipe grammar gained an invocation".to_owned());
     }
     Ok(())
@@ -239,6 +289,7 @@ fn check_macos_reader(source: &str) -> Result<(), String> {
         "answer(reply,iffailed<MAX_STARTS{RETRY}else{STOP});",
         "iftoken.is_some()&&self.pull.is_some(){let_=answer(reply,STOP);return;}",
         "program.push_str(installation);",
+        "program.push_str(KIT);",
         "program.push_str(RECIPES);",
         "program.push_str(SERVE);",
         "letinstallation=zephium_agentic::SEMANTIC_RUNTIME_PROGRAM.installation_source();",
@@ -301,7 +352,7 @@ fn check_macos_reader(source: &str) -> Result<(), String> {
             return Err(format!("the macOS reader lost {answer}"));
         }
     }
-    if production.matches("include_str!(").count() != 3 {
+    if production.matches("include_str!(").count() != 4 {
         return Err("the macOS reader gained a program source".to_owned());
     }
     for forbidden in EVALUATION
@@ -372,7 +423,7 @@ fn check_windows_reader(source: &str, protocol: &str) -> Result<(), String> {
     }
     let protocol = compact(protocol);
     for required in [
-        "constPAGE_RECIPES_SOURCE:&str=include_str!(\"page_reader_recipes.js\");",
+        "constPAGE_RECIPES_SOURCE:&str=concat!(include_str!(\"../host/picker_kit.js\"),\"\\n\",include_str!(\"page_reader_recipes.js\"));",
         "constPAGE_RECIPE_FUNCTION:&str=\"function(encoded){returnglobalThis.__zephiumPageAssistV1.recipe(encoded);}\";",
         "\"arguments\":[{\"value\":recipe.as_str()}],",
         ".and_then(|value|recipe.decode(value.as_bytes()))",
