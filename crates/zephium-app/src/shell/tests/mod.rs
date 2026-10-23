@@ -946,6 +946,7 @@ pub(crate) struct FakeStore {
         )>,
     >,
     pub(super) avatars: Mutex<Vec<AvatarWrite>>,
+    pub(crate) chat_clears: Mutex<Vec<(ProfileId, Option<i64>)>>,
 }
 
 type AvatarWrite = (
@@ -1413,6 +1414,11 @@ impl Store for FakeStore {
             None => visits.clear(),
         }
         u32::try_from(before - visits.len()).unwrap_or(u32::MAX)
+    }
+
+    fn clear_chats(&self, profile: ProfileId, since: Option<i64>) -> u32 {
+        self.chat_clears.lock().unwrap().push((profile, since));
+        0
     }
 
     fn amend_visit_title(&self, _profile: ProfileId, url: String, title: String) -> bool {

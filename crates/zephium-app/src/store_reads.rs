@@ -791,6 +791,7 @@ fn run_with(
                 },
                 zephium_ipc::HistoryCall::Clear { range } => {
                     let since = range.window_seconds().map(|window| now_secs() - window);
+                    store.clear_chats(profile, since);
                     match store.clear_history_checked(profile, since) {
                         Some(removed) => StoreReadResult::HistorySurface {
                             token,
@@ -928,6 +929,51 @@ mod tests {
         assert!(
             matches!(result, Some(StoreReadResult::HistorySurfaceFailed { token: 42, profile: owner }) if owner == profile)
         );
+    }
+
+    #[test]
+    fn clearing_history_also_clears_conversations_from_the_same_instant() {
+        let store = Arc::new(crate::shell::tests::FakeStore::default());
+        let profile = ProfileId::from(1);
+        for (range, window) in [
+            (zephium_ipc::HistoryRange::Hour, Some(3600)),
+            (zephium_ipc::HistoryRange::Everything, None),
+        ] {
+            let queue = StoreReadQueue::new();
+            assert!(queue.request_history_call(
+                7,
+                profile,
+                zephium_ipc::HistoryCall::Clear { range }
+            ));
+            let before = now_secs();
+            let mut result = None;
+            let stop = queue.clone();
+            run_with(store.clone(), queue, |reply| {
+                result = Some(reply);
+                stop.stop();
+                false
+            });
+            let after = now_secs();
+            assert!(matches!(
+                result,
+                Some(StoreReadResult::HistorySurface {
+                    removed: Some(_),
+                    ..
+                })
+            ));
+
+            let clears = std::mem::take(&mut *store.chat_clears.lock().unwrap());
+            let [(cleared, since)] = clears[..] else {
+                panic!("conversations were cleared {} times", clears.len());
+            };
+            assert_eq!(cleared, profile);
+            match window {
+                Some(window) => {
+                    assert!((before - window..=after - window).contains(&since.unwrap()));
+                }
+                None => assert_eq!(since, None),
+            }
+        }
     }
 
     #[test]
