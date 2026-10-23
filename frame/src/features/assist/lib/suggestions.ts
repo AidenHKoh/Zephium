@@ -8,7 +8,7 @@ import {
   LeftToRightListBulletIcon,
   LeftToRightListNumberIcon,
   LinkSquare02Icon,
-  MagicWand01Icon,
+  PaintBrush02Icon,
   Moon02Icon,
   SearchVisualIcon,
   TextAlignLeftIcon,
@@ -38,7 +38,7 @@ const GLYPHS: Record<PageAssistSuggestionV1, IconSvgElement> = {
   steps: LeftToRightListNumberIcon,
   compare: BalanceScaleIcon,
   picks: LinkSquare02Icon,
-  redesign: MagicWand01Icon,
+  redesign: PaintBrush02Icon,
   darker: Moon02Icon,
   readable: TextFontIcon,
 };

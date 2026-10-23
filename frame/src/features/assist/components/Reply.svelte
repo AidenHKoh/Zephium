@@ -126,7 +126,7 @@
     </div>
   {/each}
   {#if working}<WorkingLine phase={reply.phase} />{/if}
-  {#if reply.state === "failed" && reply.fault}
+  {#if reply.state === "failed" && reply.fault && !(reply.fault.reason === "step_failed" && reply.blocks.some((block) => block.kind === "steps" && block.steps.some((step) => step.state === "failed")))}
     <FaultNote
       fault={reply.fault}
       onretry={latest ? () => void session.retry(reply.id) : undefined}

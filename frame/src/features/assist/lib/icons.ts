@@ -24,7 +24,7 @@ export { default as InformationCircleIcon } from "@hugeicons/core-free-icons/Inf
 export { default as LeftToRightListBulletIcon } from "@hugeicons/core-free-icons/LeftToRightListBulletIcon";
 export { default as LeftToRightListNumberIcon } from "@hugeicons/core-free-icons/LeftToRightListNumberIcon";
 export { default as LinkSquare02Icon } from "@hugeicons/core-free-icons/LinkSquare02Icon";
-export { default as MagicWand01Icon } from "@hugeicons/core-free-icons/MagicWand01Icon";
+export { default as PaintBrush02Icon } from "@hugeicons/core-free-icons/PaintBrush02Icon";
 export { default as Message01Icon } from "@hugeicons/core-free-icons/Message01Icon";
 export { default as Mic01Icon } from "@hugeicons/core-free-icons/Mic01Icon";
 export { default as Moon02Icon } from "@hugeicons/core-free-icons/Moon02Icon";

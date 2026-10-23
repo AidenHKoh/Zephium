@@ -2,7 +2,7 @@
   import * as m from "$shared/i18n/messages";
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
-  import { ZephiumMark } from "$shared/brand/zephium";
+  import ZephiumTile from "$shared/ui/ZephiumTile";
   import {
     commands,
     type PageAssistStatusV1,
@@ -61,9 +61,7 @@
 </script>
 
 <div class="start">
-  <span class="mark" aria-hidden="true"
-    ><Icon icon={ZephiumMark} size={20} strokeWidth={1.7} /></span
-  >
+  <span class="mark"><ZephiumTile size={36} /></span>
   <h3 class="greeting">{greeting}</h3>
   {#if starts.length}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -115,15 +113,10 @@
   }
 
   .mark {
-    display: grid;
-    place-items: center;
-    inline-size: 32px;
-    block-size: 32px;
+    display: block;
+    inline-size: 36px;
+    block-size: 36px;
     margin-block-end: 14px;
-    border-radius: var(--radius-control-compact);
-    background: var(--row-active);
-    box-shadow: var(--shine-top), var(--shadow-raised);
-    color: var(--color-text);
   }
 
   .greeting {

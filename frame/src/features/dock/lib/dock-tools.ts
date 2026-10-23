@@ -6,8 +6,8 @@ import {
   HistoryIcon,
   Bookmark02Icon,
   Note01Icon,
+  BubbleChatIcon,
 } from "@hugeicons/core-free-icons";
-import { ZephiumMark } from "$shared/brand/zephium";
 import type { IconSvgElement } from "@hugeicons/svelte";
 import type { ToolKind } from "$session/tools.svelte";
 
@@ -19,7 +19,7 @@ const PRESENTATION: Record<ToolKind, { icon: IconSvgElement; label: () => string
   notes: { icon: Note01Icon, label: m.panel_notes },
   tasks: { icon: CheckListIcon, label: m.panel_tasks },
   time: { icon: HourglassIcon, label: m.panel_time },
-  ai: { icon: ZephiumMark, label: m.panel_ask_zephium },
+  ai: { icon: BubbleChatIcon, label: m.panel_ask_zephium },
   history: { icon: HistoryIcon, label: m.menu_history },
   downloads: { icon: Download01Icon, label: m.menu_downloads },
   bookmarks: { icon: Bookmark02Icon, label: m.tool_bookmarks },

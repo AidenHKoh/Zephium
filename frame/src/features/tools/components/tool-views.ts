@@ -7,8 +7,8 @@ import {
   HistoryIcon,
   Download01Icon,
   Bookmark02Icon,
+  BubbleChatIcon,
 } from "@hugeicons/core-free-icons";
-import { ZephiumMark } from "$shared/brand/zephium";
 export const tools = {
   notes: {
     title: m.tool_notes,
@@ -28,7 +28,7 @@ export const tools = {
     title: m.tool_zephium,
     description: m.tool_zephium_help,
     empty: m.tool_zephium,
-    icon: ZephiumMark,
+    icon: BubbleChatIcon,
     load: () => import("./previews/ChatView.svelte"),
   },
   history: {
