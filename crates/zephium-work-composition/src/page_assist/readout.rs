@@ -14,6 +14,7 @@ use super::port::{FieldKind, Passage, Readout, Role};
 pub(crate) const MAX_PAYLOAD_BYTES: usize = 32 * 1024;
 const MAX_PASSAGE_CHARS: usize = 600;
 const MAX_VALUE_CHARS: usize = 200;
+const MAX_DESTINATION_CHARS: usize = 80;
 
 fn kind(role: Role) -> &'static str {
     match role {
@@ -46,13 +47,30 @@ fn quoted(value: &str, limit: usize) -> String {
     text::bounded(&text::clean(value), limit).replace('"', "'")
 }
 
-fn line(passage: &Passage, secret: &dyn Fn(&str) -> bool) -> String {
+/// A link's destination as the model reads it: host and path, bounded.
+fn destination(href: &str) -> String {
+    let rest = href
+        .strip_prefix("https://")
+        .or_else(|| href.strip_prefix("http://"))
+        .unwrap_or(href);
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+    text::bounded(
+        &text::clean(rest.trim_end_matches('/')),
+        MAX_DESTINATION_CHARS,
+    )
+    .replace('"', "'")
+}
+
+fn line(letters: &str, passage: &Passage, secret: &dyn Fn(&str) -> bool) -> String {
     let mut line = format!(
-        "@r{} {} \"{}\"",
+        "@{letters}{} {} \"{}\"",
         passage.id,
         kind(passage.role),
         quoted(&passage.text, MAX_PASSAGE_CHARS)
     );
+    if let (Role::Link { .. }, Some(href)) = (passage.role, passage.href.as_deref()) {
+        let _ = write!(line, " → {}", destination(href));
+    }
     let protected = matches!(passage.role, Role::Field(kind) if kind.protected());
     if let Some(value) = passage.value.as_deref().filter(|_| !protected) {
         if secret(value) {
@@ -124,16 +142,23 @@ fn fingerprint(payload: &str) -> u64 {
     hash
 }
 
-/// The model-facing read of `readout` on `site`. Chrome and side regions
-/// are shed first when the page is larger than the budget.
-pub(crate) fn page_read(site: &str, readout: &Readout, secret: &dyn Fn(&str) -> bool) -> PageRead {
+/// The model-facing read of `readout` on `site`, its passages named under
+/// `letters`. Chrome and side regions are shed first when the page is larger
+/// than the budget.
+pub(crate) fn page_read(
+    letters: &str,
+    site: &str,
+    host: &str,
+    readout: &Readout,
+    secret: &dyn Fn(&str) -> bool,
+) -> PageRead {
     let mut keep_region = 2u8;
     let lines = loop {
         let lines: Vec<(u16, String)> = readout
             .passages
             .iter()
             .filter(|passage| passage.region <= keep_region && !passage.text.trim().is_empty())
-            .map(|passage| (passage.id, line(passage, secret)))
+            .map(|passage| (passage.id, line(letters, passage, secret)))
             .collect();
         let size: usize = lines.iter().map(|(_, line)| line.len() + 1).sum();
         if size <= MAX_PAYLOAD_BYTES || keep_region == 0 {
@@ -158,11 +183,16 @@ pub(crate) fn page_read(site: &str, readout: &Readout, secret: &dyn Fn(&str) -> 
                 verbatim: passage
                     .filter(|passage| passage.verbatim && !protected)
                     .map(|passage| passage.text.clone()),
+                href: passage
+                    .filter(|passage| matches!(passage.role, Role::Link { .. }))
+                    .and_then(|passage| passage.href.clone())
+                    .filter(|href| zephium_page_assist::policy::is_web_url(href)),
             },
         );
     }
     PageRead {
         site: site.to_owned(),
+        host: host.to_owned(),
         title: readout.title.clone(),
         fingerprint: fingerprint(&payload),
         traits: traits(&readout.passages),
@@ -183,7 +213,46 @@ mod tests {
             verbatim: true,
             value: value.map(str::to_owned),
             region: 0,
+            href: None,
         }
+    }
+
+    #[test]
+    fn links_show_where_they_lead_and_keep_only_web_targets() {
+        let link = |id, href: &str| Passage {
+            href: Some(href.into()),
+            ..passage(id, Role::Link { same_site: false }, "Story", None)
+        };
+        let readout = Readout {
+            epoch: 1,
+            read: 1,
+            title: None,
+            passages: vec![
+                link(1, "https://www.emudhra.com/news/exit/"),
+                link(2, "javascript:alert(1)"),
+                Passage {
+                    href: Some("https://x.y/".into()),
+                    ..passage(3, Role::Text, "Not a link", None)
+                },
+            ],
+        };
+        let read = page_read(
+            "b",
+            "ycombinator.com",
+            "news.ycombinator.com",
+            &readout,
+            &|_| false,
+        );
+        assert!(read
+            .payload
+            .starts_with("@b1 link-out \"Story\" → emudhra.com/news/exit\n"));
+        assert_eq!(
+            read.fragments[&1].href.as_deref(),
+            Some("https://www.emudhra.com/news/exit/")
+        );
+        assert_eq!(read.fragments[&2].href, None);
+        assert_eq!(read.fragments[&3].href, None);
+        assert!(!read.payload.contains("x.y"));
     }
 
     #[test]
@@ -221,7 +290,7 @@ mod tests {
             ],
         };
         let secret = |value: &str| value.starts_with("Bearer ");
-        let read = page_read("example.com", &readout, &secret);
+        let read = page_read("a", "example.com", "example.com", &readout, &secret);
         assert!(!read.payload.contains("hunter2"));
         assert!(!read.payload.contains("4242"));
         assert!(!read.payload.contains("abcdefghijklmnop"));
@@ -232,7 +301,7 @@ mod tests {
             5,
             "page text cannot start a line"
         );
-        assert!(read.payload.lines().all(|line| line.starts_with("@r")));
+        assert!(read.payload.lines().all(|line| line.starts_with("@a")));
         assert_eq!(read.fragments[&1].verbatim, None);
         assert_eq!(read.fragments[&4].verbatim.as_deref(), Some("Email"));
     }
@@ -248,6 +317,8 @@ mod tests {
             .collect();
         passages.push(passage(201, Role::Heading(1), "Title", None));
         let read = page_read(
+            "a",
+            "example.com",
             "example.com",
             &Readout {
                 epoch: 1,
@@ -260,6 +331,8 @@ mod tests {
         assert!(read.payload.len() <= MAX_PAYLOAD_BYTES);
         assert!(read.fragments.keys().all(|id| id % 2 == 1));
         let again = page_read(
+            "a",
+            "example.com",
             "example.com",
             &Readout {
                 epoch: 2,

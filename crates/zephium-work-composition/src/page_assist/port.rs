@@ -1,5 +1,5 @@
-//! What the Ask service needs from the shell, the engine and the model
-//! layer. Production adapters live beside the desktop shell; tests use
+//! What the assistant's service needs from the shell, the engine, the store and the
+//! model layer. Production adapters live beside the desktop shell; tests use
 //! in-memory fakes.
 use std::future::Future;
 use std::pin::Pin;
@@ -7,8 +7,10 @@ use std::sync::Arc;
 
 use zephium_app::work_models::WorkCallSource;
 use zephium_core::ids::ProfileId;
-use zephium_core::work::model::{WorkModelClient, WorkModelEntry, WorkModelError};
-use zephium_ipc::page_assist::{PageAssistChangedV1, WorkConfirmCategoryV1};
+use zephium_core::work::model::{
+    WorkModelClient, WorkModelEntry, WorkModelError, WorkModelReasoning,
+};
+use zephium_ipc::page_assist::{PageAssistBringV1, PageAssistChangedV1, WorkConfirmCategoryV1};
 use zephium_page_assist::actions::{Direction, Verb};
 pub use zephium_page_assist::outline::{Outline, OutlineKind, OutlineNode, Rgb};
 
@@ -20,8 +22,12 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub struct TabFacts {
     /// The profile the tab belongs to.
     pub profile: ProfileId,
+    /// The Space the tab is listed in.
+    pub space: Option<String>,
     /// The committed URL; none for internal pages.
     pub url: Option<String>,
+    /// The page's title (untrusted).
+    pub title: Option<String>,
     /// The tab is in a private window.
     pub private: bool,
     /// The tab shows a browser viewer (PDF, image, source).
@@ -107,6 +113,8 @@ pub struct Passage {
     pub value: Option<String>,
     /// 0 the main content, 1 beside it, 2 the page's chrome.
     pub region: u8,
+    /// Where a link leads: absolute `http(s)`, from the reader.
+    pub href: Option<String>,
 }
 
 /// One fresh read of a tab.
@@ -217,22 +225,106 @@ pub trait PagePort: Send + Sync {
     ) -> BoxFuture<'a, Result<(), StepFailure>>;
     /// Replaces the page-style slot of `site` in `profile`; empty removes it.
     fn apply_styles(&self, profile: &ProfileId, site: &str, css: &str);
+    /// Replaces the tab's marks, resolved against read `read`; yields the
+    /// numbers placed.
+    fn marks<'a>(
+        &'a self,
+        tab: &'a str,
+        epoch: u64,
+        read: u64,
+        marks: Vec<(u8, u16)>,
+    ) -> BoxFuture<'a, Vec<u8>>;
+    /// Emphasises one mark, or none; `scroll` brings it into view.
+    fn mark_focus(&self, tab: &str, epoch: u64, n: Option<u8>, scroll: bool);
+    /// Removes the tab's marks.
+    fn marks_clear(&self, tab: &str);
+    /// The person picks an element on the tab.
+    fn pick<'a>(&'a self, tab: &'a str, epoch: u64) -> BoxFuture<'a, Result<Pick, PickFailure>>;
+    /// A picked element as it is now; none when it is gone.
+    fn pick_read<'a>(&'a self, tab: &'a str, epoch: u64, pick: u64) -> BoxFuture<'a, Option<Pick>>;
+    /// Removes a picked element's outline.
+    fn pick_clear(&self, tab: &str, pick: u64);
+    /// Ends a pick in progress.
+    fn pick_cancel(&self, tab: &str);
 }
 
-/// A model and its client for one turn.
+/// An element the person picked.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Pick {
+    /// Its id on the tab.
+    pub pick: u64,
+    /// A readable name, such as "Story list".
+    pub label: String,
+    /// Its visible text (untrusted).
+    pub text: String,
+    /// A selector that styles it, when one is stable.
+    pub selector: Option<String>,
+}
+
+/// Why picking ended without an element.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PickFailure {
+    /// The person cancelled.
+    Cancelled,
+    /// The tab navigated or closed.
+    PageChanged,
+    /// Picking could not start.
+    Unavailable,
+}
+
+/// One tab of a Space, as the model may see it listed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TabSummary {
+    /// Its item id.
+    pub id: String,
+    /// Its title (untrusted).
+    pub title: String,
+    /// Its committed URL.
+    pub url: Option<String>,
+}
+
+/// The Space's tabs.
+pub trait Tabs: Send + Sync {
+    /// The profile a Space belongs to.
+    fn profile(&self, space: &str) -> Option<ProfileId>;
+    /// The Space's tabs in order.
+    fn list(&self, profile: &ProfileId, space: &str) -> Vec<TabSummary>;
+    /// Opens `url` in a new background tab of `space` after `after`; yields
+    /// the new tab's id.
+    fn open<'a>(
+        &'a self,
+        profile: &'a ProfileId,
+        space: &'a str,
+        url: &'a str,
+        after: Option<&'a str>,
+    ) -> BoxFuture<'a, Option<String>>;
+}
+
+/// The model a reply would use.
+#[derive(Clone)]
+pub struct ModelChoice {
+    /// The catalog entry: name, provider, price.
+    pub entry: WorkModelEntry,
+    /// The person's effort, as the model takes it.
+    pub effort: Option<WorkModelReasoning>,
+}
+
+/// A model and its client for one reply.
 #[derive(Clone)]
 pub struct ResolvedModel {
     /// The catalog entry: name, provider, price.
     pub entry: WorkModelEntry,
+    /// The person's effort, as the model takes it.
+    pub effort: Option<WorkModelReasoning>,
     /// The client; dropping a call cancels it.
     pub client: Arc<dyn WorkModelClient>,
 }
 
 /// The person's Page model.
 pub trait ModelSource: Send + Sync {
-    /// The model a turn in `profile` would use, without a client.
-    fn entry<'a>(&'a self, profile: &'a ProfileId) -> BoxFuture<'a, Option<WorkModelEntry>>;
-    /// The model and a client for one turn's calls.
+    /// The model a reply in `profile` would use, without a client.
+    fn entry<'a>(&'a self, profile: &'a ProfileId) -> BoxFuture<'a, Option<ModelChoice>>;
+    /// The model and a client for one reply's calls.
     fn resolve<'a>(
         &'a self,
         profile: &'a ProfileId,
@@ -246,29 +338,91 @@ pub trait EventSink: Send + Sync {
     fn emit(&self, event: PageAssistChangedV1);
 }
 
-/// Milliseconds on a monotonic clock.
+/// Time.
 pub trait Clock: Send + Sync {
-    /// Now.
+    /// Milliseconds on a monotonic clock.
     fn now_ms(&self) -> u64;
+    /// Milliseconds since the Unix epoch.
+    fn unix_ms(&self) -> u64;
 }
 
 /// The shell's switches.
 pub trait Settings: Send + Sync {
     /// AI is switched on for `profile`.
     fn ai_enabled(&self, profile: &ProfileId) -> bool;
+    /// The person asked for less motion.
+    fn reduce_motion(&self) -> bool {
+        false
+    }
 }
 
-/// Starts a Work run.
+/// What a handoff asks to bring along, in the model's words.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BringRequest {
+    /// Tabs of the Space.
+    pub tabs: Vec<String>,
+    /// Words naming a task to find.
+    pub task: Option<String>,
+    /// Words naming a note to find.
+    pub note: Option<String>,
+    /// A GitHub repository, `owner/name`.
+    pub repository: Option<String>,
+    /// A local folder, such as `~/Dev/zephium-infra`.
+    pub folder: Option<String>,
+}
+
+/// A Work run to begin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkStart {
+    /// Its title.
+    pub title: String,
+    /// The objective: the summary, the person's words and the conversation.
+    pub objective: String,
+    /// What it brings along, as resolved.
+    pub brings: Vec<PageAssistBringV1>,
+}
+
+/// Starts Work.
 pub trait WorkHandoff: Send + Sync {
-    /// Begins Work in `profile` with the question as its objective and the
-    /// tab, at `url`, as context; returns the new Work's id.
+    /// Finds what a handoff would bring along; only what exists.
+    fn prepare<'a>(
+        &'a self,
+        profile: &'a ProfileId,
+        space: &'a str,
+        request: BringRequest,
+    ) -> BoxFuture<'a, Vec<PageAssistBringV1>>;
+    /// Begins Work in `space`; yields the new Work's id.
     fn begin<'a>(
         &'a self,
         profile: &'a ProfileId,
-        tab: &'a str,
-        question: String,
-        url: String,
+        space: &'a str,
+        start: WorkStart,
     ) -> BoxFuture<'a, Option<String>>;
+}
+
+/// One stored conversation, as the history list shows it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredConversation {
+    /// Its id.
+    pub id: String,
+    /// The Space it was held in.
+    pub space: String,
+    /// Its title.
+    pub title: String,
+    /// Milliseconds since the Unix epoch.
+    pub updated_ms: u64,
+}
+
+/// Where conversations persist per profile.
+pub trait ConversationStore: Send + Sync {
+    /// Newest first.
+    fn list(&self, profile: &ProfileId, limit: u32) -> Vec<StoredConversation>;
+    /// A stored body.
+    fn load(&self, profile: &ProfileId, id: &str) -> Option<String>;
+    /// Stores a body; false when it was not stored.
+    fn save(&self, profile: &ProfileId, entry: &StoredConversation, body: String) -> bool;
+    /// Deletes one.
+    fn delete(&self, profile: &ProfileId, id: &str) -> bool;
 }
 
 /// One stored page style.
