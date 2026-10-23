@@ -1,10 +1,11 @@
 //! The Ask panel's closed page recipes: the selected text, a quote scrolled
-//! to and marked, and the page's outline for a style turn. A recipe is one
-//! fixed invocation of the private-world program; its only data is the quote
-//! a mark looks for, carried as a JSON string. Every answer is hostile and
-//! decoded under a fixed ceiling.
+//! to and marked, the page's outline for a style turn, numbered marks around
+//! items of a read, and the person's pick of an element. A recipe is one
+//! fixed invocation of the private-world program; its only data is what Rust
+//! serialised itself (a quote, the observed facts of marked passages, a pick
+//! number). Every answer is hostile and decoded under a fixed ceiling.
 
-use crate::page_reader::{PageOutline, PageOutlineKind, PageOutlineNode, Rgb};
+use crate::page_reader::{PageOutline, PageOutlineKind, PageOutlineNode, PagePick, Rgb};
 
 /// Longest quote a mark looks for, in characters.
 pub(crate) const MAX_MARK_QUOTE_CHARS: usize = 2_048;
@@ -21,6 +22,32 @@ const SELECTION: &str = "Q1:selection";
 const OUTLINE: &str = "Q1:outline";
 const TOUCHED: &str = "Q1:touched";
 const MARK_PREFIX: &str = "Q1:mark:";
+const MARKS_PREFIX: &str = "Q1:marks:";
+const MARK_FOCUS_PREFIX: &str = "Q1:markfocus:";
+const CLEAR: &str = "Q1:clear";
+const PICK_PREFIX: &str = "Q1:pick:";
+const PICKED: &str = "Q1:picked";
+const PICK_CANCEL: &str = "Q1:pickcancel";
+const PICK_READ_PREFIX: &str = "Q1:pickread:";
+const PICK_CLEAR_PREFIX: &str = "Q1:pickclear:";
+#[cfg(feature = "page-reader-probe")]
+const OVERLAY: &str = "Q1:overlay";
+
+/// Most marks one call places.
+pub(crate) const MAX_MARKS: usize = 12;
+/// Passage text a mark is found again by, in characters.
+const MAX_MARK_TEXT_CHARS: usize = 160;
+/// Longest link destination a mark is matched by.
+const MAX_MARK_HREF_BYTES: usize = 512;
+const MAX_MARKS_WIRE_BYTES: usize = 64;
+const MAX_PICK_WIRE_BYTES: usize = 24 * 1_024;
+#[cfg(feature = "page-reader-probe")]
+const MAX_OVERLAY_WIRE_BYTES: usize = 8 * 1_024;
+const MAX_PICK_LABEL_CHARS: usize = 64;
+const MAX_PICK_TEXT_CHARS: usize = 4_000;
+const MAX_PICK_SELECTOR_BYTES: usize = 2_048;
+/// Pick numbers stay exact as JavaScript numbers and in the wire's digits.
+pub(crate) const MAX_PICK_ID: u64 = 9_999_999_999_999_999;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Kind {
@@ -28,6 +55,48 @@ enum Kind {
     Outline,
     Mark,
     Touched,
+    /// Numbered marks placed, or none to clear them; answers the numbers
+    /// that were.
+    Marks {
+        placing: bool,
+    },
+    /// One mark emphasised; drawings removed; a pick started, cancelled or
+    /// cleared: each answers one byte.
+    Short,
+    /// A pick's state, or a picked element read again.
+    Pick,
+    #[cfg(feature = "page-reader-probe")]
+    Overlay,
+}
+
+/// The facts of one marked passage, as the read observed them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MarkTarget {
+    /// The number drawn in its badge.
+    pub(crate) n: u8,
+    /// What it is: one of the program's fixed kinds.
+    pub(crate) kind: &'static str,
+    /// Its visible text.
+    pub(crate) text: Option<String>,
+    /// Its accessible name.
+    pub(crate) name: Option<String>,
+    /// A link's destination.
+    pub(crate) href: Option<String>,
+    /// Which match of these facts in reading order it is.
+    pub(crate) occurrence: u16,
+}
+
+/// Where a pick stands.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PickState {
+    /// The person is still picking.
+    Waiting,
+    /// Escape, the idle limit or a cancel ended it.
+    Cancelled,
+    /// No picker and no outcome: the document is not the one it began on.
+    Gone,
+    /// The person picked this.
+    Picked(PagePick),
 }
 
 /// One closed recipe invocation.
@@ -91,6 +160,146 @@ impl PageRecipe {
         })
     }
 
+    /// Numbered marks replacing the current ones; none clears them.
+    pub(crate) fn marks(targets: &[MarkTarget], reduce_motion: bool) -> Option<Self> {
+        if targets.len() > MAX_MARKS {
+            return None;
+        }
+        let clip = |text: &Option<String>| {
+            text.as_deref().filter(|text| !text.is_empty()).map(|text| {
+                let prefix = text.chars().count() > MAX_MARK_TEXT_CHARS;
+                (
+                    text.chars().take(MAX_MARK_TEXT_CHARS).collect::<String>(),
+                    prefix,
+                )
+            })
+        };
+        let entries: Vec<serde_json::Value> = targets
+            .iter()
+            .map(|target| {
+                let text = clip(&target.text);
+                let name = clip(&target.name);
+                let mut entry = serde_json::Map::new();
+                entry.insert("n".into(), target.n.into());
+                entry.insert("k".into(), target.kind.into());
+                entry.insert("o".into(), target.occurrence.into());
+                let prefix = text.as_ref().is_some_and(|(_, p)| *p)
+                    || name.as_ref().is_some_and(|(_, p)| *p);
+                if let Some((text, _)) = text {
+                    entry.insert("t".into(), text.into());
+                }
+                if let Some((name, _)) = name {
+                    entry.insert("a".into(), name.into());
+                }
+                if prefix {
+                    entry.insert("p".into(), true.into());
+                }
+                if let Some(href) = target
+                    .href
+                    .as_deref()
+                    .filter(|href| href.len() <= MAX_MARK_HREF_BYTES)
+                {
+                    entry.insert("h".into(), href.into());
+                }
+                serde_json::Value::Object(entry)
+            })
+            .collect();
+        let json =
+            serde_json::to_string(&serde_json::json!({ "r": reduce_motion, "m": entries })).ok()?;
+        Some(Self {
+            kind: Kind::Marks {
+                placing: !targets.is_empty(),
+            },
+            encoded: format!("{MARKS_PREFIX}{json}"),
+        })
+    }
+
+    /// Mark `n` emphasised (none: no mark is), and brought into view.
+    pub(crate) fn mark_focus(n: Option<u8>, scroll: bool) -> Self {
+        let json = serde_json::json!({ "n": n, "s": scroll }).to_string();
+        Self {
+            kind: Kind::Short,
+            encoded: format!("{MARK_FOCUS_PREFIX}{json}"),
+        }
+    }
+
+    /// Every mark, attached pick and running picker removed at once.
+    pub(crate) fn clear() -> Self {
+        Self {
+            kind: Kind::Short,
+            encoded: CLEAR.to_owned(),
+        }
+    }
+
+    /// The person's picker, for pick `pick`.
+    pub(crate) fn pick(pick: u64, reduce_motion: bool) -> Option<Self> {
+        if pick == 0 || pick > MAX_PICK_ID {
+            return None;
+        }
+        let json = serde_json::json!({ "p": pick.to_string(), "r": reduce_motion }).to_string();
+        Some(Self {
+            kind: Kind::Short,
+            encoded: format!("{PICK_PREFIX}{json}"),
+        })
+    }
+
+    /// Where the running pick stands.
+    pub(crate) fn picked() -> Self {
+        Self {
+            kind: Kind::Pick,
+            encoded: PICKED.to_owned(),
+        }
+    }
+
+    pub(crate) fn pick_cancel() -> Self {
+        Self {
+            kind: Kind::Short,
+            encoded: PICK_CANCEL.to_owned(),
+        }
+    }
+
+    /// Picked element `pick` read again, as it is now.
+    pub(crate) fn pick_read(pick: u64) -> Option<Self> {
+        (pick != 0 && pick <= MAX_PICK_ID).then(|| Self {
+            kind: Kind::Pick,
+            encoded: format!("{PICK_READ_PREFIX}{pick}"),
+        })
+    }
+
+    /// The outline of pick `pick` removed.
+    pub(crate) fn pick_clear(pick: u64) -> Option<Self> {
+        (pick != 0 && pick <= MAX_PICK_ID).then(|| Self {
+            kind: Kind::Short,
+            encoded: format!("{PICK_CLEAR_PREFIX}{pick}"),
+        })
+    }
+
+    /// Our own drawings' geometry and upkeep, for the reader's probe.
+    #[cfg(feature = "page-reader-probe")]
+    pub(crate) fn overlay() -> Self {
+        Self {
+            kind: Kind::Overlay,
+            encoded: OVERLAY.to_owned(),
+        }
+    }
+
+    /// Whether this recipe draws over the page.
+    pub(crate) fn draws(&self) -> bool {
+        self.kind == Kind::Marks { placing: true } || self.encoded.starts_with(PICK_PREFIX)
+    }
+
+    /// The answer this recipe would give on a page we have drawn nothing
+    /// on: it changes nothing there, so it need not reach the page at all.
+    pub(crate) fn nothing_drawn(&self) -> Option<&'static str> {
+        match self.kind {
+            Kind::Marks { placing: false } => Some("M:"),
+            Kind::Pick => Some("N"),
+            Kind::Short if self.encoded.starts_with(MARK_FOCUS_PREFIX) => Some("0"),
+            Kind::Short if !self.encoded.starts_with(PICK_PREFIX) => Some("1"),
+            _ => None,
+        }
+    }
+
     /// The invocation the private world receives. Never logged.
     pub(crate) fn as_str(&self) -> &str {
         &self.encoded
@@ -102,7 +311,11 @@ impl PageRecipe {
         let limit = match self.kind {
             Kind::Selection => MAX_SELECTION_WIRE_BYTES,
             Kind::Outline => MAX_OUTLINE_WIRE_BYTES,
-            Kind::Mark | Kind::Touched => 1,
+            Kind::Mark | Kind::Touched | Kind::Short => 1,
+            Kind::Marks { .. } => MAX_MARKS_WIRE_BYTES,
+            Kind::Pick => MAX_PICK_WIRE_BYTES,
+            #[cfg(feature = "page-reader-probe")]
+            Kind::Overlay => MAX_OVERLAY_WIRE_BYTES,
         };
         if bytes.len() > limit {
             return None;
@@ -118,9 +331,89 @@ impl PageRecipe {
             }
             Kind::Outline => text.starts_with('{').then(|| text.to_owned()),
             Kind::Mark => matches!(text, "0" | "1" | "2").then(|| text.to_owned()),
-            Kind::Touched => matches!(text, "0" | "1").then(|| text.to_owned()),
+            Kind::Touched | Kind::Short => matches!(text, "0" | "1").then(|| text.to_owned()),
+            Kind::Marks { .. } => text.starts_with("M:").then(|| text.to_owned()),
+            Kind::Pick => (matches!(text, "W" | "C" | "N") || text.starts_with("P:{"))
+                .then(|| text.to_owned()),
+            #[cfg(feature = "page-reader-probe")]
+            Kind::Overlay => text.starts_with('{').then(|| text.to_owned()),
         }
     }
+}
+
+/// The numbers a marks answer placed, among those asked for.
+pub(crate) fn placed_marks(answer: &str, asked: &[MarkTarget]) -> Vec<u8> {
+    let Some(list) = answer.strip_prefix("M:") else {
+        return Vec::new();
+    };
+    let mut placed = Vec::new();
+    for number in list.split(',').filter(|n| !n.is_empty()) {
+        let Ok(n) = number.parse::<u8>() else {
+            return Vec::new();
+        };
+        if asked.iter().any(|target| target.n == n) && !placed.contains(&n) {
+            placed.push(n);
+        }
+    }
+    placed
+}
+
+/// A pick answer: the state of the running pick, or a picked element.
+pub(crate) fn pick_state(answer: &str, pick: u64) -> Option<PickState> {
+    match answer {
+        "W" => return Some(PickState::Waiting),
+        "C" => return Some(PickState::Cancelled),
+        "N" => return Some(PickState::Gone),
+        _ => {}
+    }
+    let value: serde_json::Value = serde_json::from_str(answer.strip_prefix("P:")?).ok()?;
+    let object = value.as_object()?;
+    if object.get("p")?.as_str()? != pick.to_string() {
+        return None;
+    }
+    let label: String = object
+        .get("l")?
+        .as_str()?
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_PICK_LABEL_CHARS)
+        .collect();
+    let text: String = object
+        .get("t")?
+        .as_str()?
+        .chars()
+        .filter(|c| *c == '\n' || !c.is_control())
+        .take(MAX_PICK_TEXT_CHARS)
+        .collect();
+    let selector = match object.get("s")? {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(selector) => {
+            selector_admitted(selector).then(|| selector.clone())
+        }
+        _ => return None,
+    };
+    Some(PickState::Picked(PagePick {
+        pick,
+        label: if label.trim().is_empty() {
+            "Section".to_owned()
+        } else {
+            label.trim().to_owned()
+        },
+        text: text.trim().to_owned(),
+        selector,
+    }))
+}
+
+/// A pick's selector as the shared picker builds them: an id, up to two
+/// classes, or a short positional path. Nothing that could close a rule.
+fn selector_admitted(selector: &str) -> bool {
+    !selector.is_empty()
+        && selector.len() <= MAX_PICK_SELECTOR_BYTES
+        && (selector.starts_with('[') || selector.starts_with(|c: char| c.is_ascii_lowercase()))
+        && !selector
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '{' | '}' | ';' | '<' | '@'))
+        && !selector.contains("/*")
 }
 
 pub(crate) fn mark_outcome(answer: &str) -> Option<MarkOutcome> {
@@ -394,6 +687,127 @@ mod tests {
                 "{refused}"
             );
         }
+    }
+
+    fn target(n: u8, text: &str) -> MarkTarget {
+        MarkTarget {
+            n,
+            kind: "link",
+            text: Some(text.to_owned()),
+            name: None,
+            href: Some("https://example.org/a".to_owned()),
+            occurrence: 2,
+        }
+    }
+
+    #[test]
+    fn marks_carry_only_serialised_facts_and_answer_the_numbers_placed() {
+        let long = "x".repeat(MAX_MARK_TEXT_CHARS + 40);
+        let mut far = target(2, &long);
+        far.href = Some(format!(
+            "https://example.org/{}",
+            "q".repeat(MAX_MARK_HREF_BYTES)
+        ));
+        let recipe =
+            PageRecipe::marks(&[target(1, "Story \"one\"</script>"), far], true).expect("marks");
+        let json = recipe.as_str().strip_prefix(MARKS_PREFIX).expect("prefix");
+        let value: serde_json::Value = serde_json::from_str(json).expect("json");
+        assert_eq!(value["r"], true);
+        assert_eq!(value["m"][0]["t"], "Story \"one\"</script>");
+        assert_eq!(value["m"][0]["h"], "https://example.org/a");
+        assert_eq!(value["m"][0]["o"], 2);
+        assert!(value["m"][0].get("p").is_none());
+        assert_eq!(
+            value["m"][1]["t"].as_str().map(|t| t.chars().count()),
+            Some(MAX_MARK_TEXT_CHARS)
+        );
+        assert_eq!(value["m"][1]["p"], true);
+        assert!(
+            value["m"][1].get("h").is_none(),
+            "a long destination is not matched on"
+        );
+        assert!(recipe.draws() && recipe.nothing_drawn().is_none());
+        let many: Vec<MarkTarget> = (1..=13).map(|n| target(n, "t")).collect();
+        assert!(PageRecipe::marks(&many, false).is_none());
+        let asked = [target(1, "a"), target(4, "b")];
+        assert_eq!(placed_marks("M:4,1,9,4", &asked), [4, 1]);
+        assert!(placed_marks("M:1,x", &asked).is_empty());
+        assert!(placed_marks("1,4", &asked).is_empty());
+        assert_eq!(recipe.decode(b"M:1,2").as_deref(), Some("M:1,2"));
+        assert!(recipe.decode(&[b'M'; MAX_MARKS_WIRE_BYTES + 1]).is_none());
+        let clear = PageRecipe::marks(&[], false).expect("clear");
+        assert!(!clear.draws());
+        assert_eq!(clear.nothing_drawn(), Some("M:"));
+    }
+
+    #[test]
+    fn pick_answers_are_bounded_and_admit_only_closed_selectors() {
+        assert!(PageRecipe::pick(0, false).is_none());
+        assert!(PageRecipe::pick(MAX_PICK_ID + 1, false).is_none());
+        let start = PageRecipe::pick(7, true).expect("pick");
+        assert_eq!(start.as_str(), "Q1:pick:{\"p\":\"7\",\"r\":true}");
+        assert!(start.draws() && start.nothing_drawn().is_none());
+        assert_eq!(
+            PageRecipe::pick_read(7).expect("read").as_str(),
+            "Q1:pickread:7"
+        );
+        assert_eq!(
+            PageRecipe::pick_clear(7).expect("clear").as_str(),
+            "Q1:pickclear:7"
+        );
+        assert_eq!(PageRecipe::picked().nothing_drawn(), Some("N"));
+        assert_eq!(PageRecipe::pick_cancel().nothing_drawn(), Some("1"));
+        assert_eq!(PageRecipe::clear().nothing_drawn(), Some("1"));
+        assert_eq!(
+            PageRecipe::mark_focus(Some(2), true).nothing_drawn(),
+            Some("0")
+        );
+        assert_eq!(pick_state("W", 7), Some(PickState::Waiting));
+        assert_eq!(pick_state("C", 7), Some(PickState::Cancelled));
+        assert_eq!(pick_state("N", 7), Some(PickState::Gone));
+        let wire = |selector: &str| {
+            format!(
+                "P:{}",
+                serde_json::json!({"p": "7", "l": "Story\u{7}list", "t": "One\ntwo\u{1b}", "s": selector})
+            )
+        };
+        let Some(PickState::Picked(picked)) = pick_state(&wire("[id=\"hnmain\"]"), 7) else {
+            panic!("picked");
+        };
+        assert_eq!(picked.label, "Storylist");
+        assert_eq!(picked.text, "One\ntwo");
+        assert_eq!(picked.selector.as_deref(), Some("[id=\"hnmain\"]"));
+        for refused in [
+            "a{}b{color:red}",
+            "[id=\"x\"];x",
+            "/* x */ a",
+            "@import x",
+            "",
+            "A > b",
+        ] {
+            let Some(PickState::Picked(picked)) = pick_state(&wire(refused), 7) else {
+                panic!("picked");
+            };
+            assert!(picked.selector.is_none(), "{refused}");
+        }
+        assert!(
+            pick_state(&wire("div"), 8).is_none(),
+            "another pick's answer"
+        );
+        assert!(pick_state("P:[]", 7).is_none());
+        let long = format!(
+            "P:{}",
+            serde_json::json!({"p": "7", "l": "l".repeat(200), "t": "t".repeat(9_000), "s": null})
+        );
+        let Some(PickState::Picked(picked)) = pick_state(&long, 7) else {
+            panic!("picked");
+        };
+        assert_eq!(picked.label.chars().count(), MAX_PICK_LABEL_CHARS);
+        assert_eq!(picked.text.chars().count(), MAX_PICK_TEXT_CHARS);
+        assert!(PageRecipe::picked()
+            .decode(&vec![b'P'; MAX_PICK_WIRE_BYTES + 1])
+            .is_none());
+        assert!(PageRecipe::picked().decode(b"X").is_none());
     }
 
     #[test]

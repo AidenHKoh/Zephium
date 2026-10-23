@@ -3,16 +3,24 @@
 //! handle dispatches to.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::time::{Duration, Instant};
 
 use zephium_core::ids::ItemId;
 
 use super::EngineHost;
 use crate::page_reader::{
-    PageActFailure, PageOutline, PageReadFailure, PageReaderPolicy, PageReadout,
+    PageActFailure, PageMark, PageOutline, PagePick, PagePickFailure, PageReadFailure,
+    PageReaderPolicy, PageReadout,
 };
-use crate::platform::page_recipe::{mark_outcome, parse_outline, MarkOutcome, PageRecipe};
+use crate::platform::imp::{schedule_content_policy_timeout, ContentPolicyTimeout};
+use crate::platform::page_recipe::{
+    mark_outcome, parse_outline, pick_state, placed_marks, MarkOutcome, MarkTarget, PageRecipe,
+    PickState, MAX_MARKS,
+};
 
 #[cfg(target_os = "macos")]
 pub(super) type Reader = crate::platform::macos::browse_reader::BrowseReader;
@@ -70,7 +78,20 @@ pub(super) fn attempt(slot: &Weak<RefCell<Option<Reader>>>, target: &str) {
     let admitted = admits(target);
     if let Ok(reader) = slot.try_borrow() {
         if let Some(reader) = reader.as_ref() {
-            reader.attempt(admitted);
+            reader.attempt(admitted, target);
+        }
+    };
+}
+
+/// A main-frame load begins; macOS learns it from the attempt instead.
+#[cfg(target_os = "windows")]
+pub(super) fn begin_load(slot: &Weak<RefCell<Option<Reader>>>) {
+    let Some(slot) = slot.upgrade() else {
+        return;
+    };
+    if let Ok(reader) = slot.try_borrow() {
+        if let Some(reader) = reader.as_ref() {
+            reader.begin_load();
         }
     };
 }
@@ -95,6 +116,130 @@ pub(crate) fn report_human_input(tab: ItemId) {
 
 type ReadDone = Box<dyn FnOnce(Result<PageReadout, PageReadFailure>) + Send>;
 type RecipeDone = Box<dyn FnOnce(Option<String>) + Send>;
+type PickDone = Box<dyn FnOnce(Result<PagePick, PagePickFailure>) + Send>;
+
+/// How often a running pick is asked whether the person picked, and how
+/// long it may run at most whatever the page says.
+const PICK_POLL: Duration = Duration::from_millis(150);
+const PICK_LIMIT: Duration = Duration::from_secs(10 * 60);
+const PICK_MISSES: u8 = 3;
+
+/// A pick the person is making on one tab.
+struct PickSession {
+    pick: u64,
+    epoch: u64,
+    done: PickDone,
+    started: Instant,
+    misses: u8,
+    timer: Option<ContentPolicyTimeout>,
+}
+
+thread_local! {
+    static PICKS: RefCell<HashMap<ItemId, PickSession>> = RefCell::new(HashMap::new());
+}
+
+static NEXT_PICK: AtomicU64 = AtomicU64::new(1);
+
+/// Ends `tab`'s pick `pick` with `outcome`, when it is still the running one.
+fn finish_pick(tab: ItemId, pick: u64, outcome: Result<PagePick, PagePickFailure>) {
+    let session = PICKS.with(|picks| {
+        let mut picks = picks.borrow_mut();
+        picks
+            .get(&tab)
+            .is_some_and(|session| session.pick == pick)
+            .then(|| picks.remove(&tab))
+            .flatten()
+    });
+    if let Some(session) = session {
+        (session.done)(outcome);
+    }
+}
+
+/// Asks again after a short wait, while the pick runs.
+fn poll_pick_later(tab: ItemId, pick: u64) {
+    let timer = schedule_content_policy_timeout(PICK_POLL, move || {
+        let _ = super::try_with(move |host| host.page_pick_poll(tab, pick));
+    });
+    let Some(timer) = timer else {
+        return finish_pick(tab, pick, Err(PagePickFailure::Unavailable));
+    };
+    PICKS.with(|picks| {
+        if let Some(session) = picks
+            .borrow_mut()
+            .get_mut(&tab)
+            .filter(|session| session.pick == pick)
+        {
+            session.timer = Some(timer);
+        }
+    });
+}
+
+/// The marks recipe for `marks` on read `read` of `tab`'s document at
+/// `epoch`, and what it asks the page to find. A read that is gone, or a
+/// passage it never had, marks nothing.
+pub(crate) fn marks_recipe(
+    tab: ItemId,
+    epoch: u64,
+    read: u64,
+    marks: &[PageMark],
+    reduce_motion: bool,
+) -> Option<(PageRecipe, Vec<MarkTarget>)> {
+    let mut targets: Vec<MarkTarget> = Vec::new();
+    if let Some(stored) =
+        crate::page_reader::planned_read(tab, read).filter(|stored| stored.epoch() == epoch)
+    {
+        for mark in marks.iter().take(MAX_MARKS) {
+            if mark.n == 0 || targets.iter().any(|target| target.n == mark.n) {
+                continue;
+            }
+            if let Some(target) =
+                crate::page_reader::read::mark_target(&stored, mark.n, mark.passage)
+            {
+                targets.push(target);
+            }
+        }
+    }
+    let recipe = PageRecipe::marks(&targets, reduce_motion)?;
+    Some((recipe, targets))
+}
+
+/// One answer about the running pick.
+fn pick_answered(tab: ItemId, pick: u64, answer: Option<String>) {
+    let Some((epoch, started, misses)) = PICKS.with(|picks| {
+        picks
+            .borrow()
+            .get(&tab)
+            .filter(|session| session.pick == pick)
+            .map(|session| (session.epoch, session.started, session.misses))
+    }) else {
+        return;
+    };
+    let changed = crate::page_reader::committed_epoch(tab) != Some(epoch);
+    let state = answer
+        .as_deref()
+        .and_then(|answer| pick_state(answer, pick));
+    match state {
+        Some(PickState::Picked(picked)) => finish_pick(tab, pick, Ok(picked)),
+        Some(PickState::Cancelled) => finish_pick(tab, pick, Err(PagePickFailure::Cancelled)),
+        _ if changed => finish_pick(tab, pick, Err(PagePickFailure::PageChanged)),
+        Some(PickState::Gone) => finish_pick(tab, pick, Err(PagePickFailure::Cancelled)),
+        Some(PickState::Waiting) if started.elapsed() >= PICK_LIMIT => {
+            finish_pick(tab, pick, Err(PagePickFailure::Cancelled));
+        }
+        Some(PickState::Waiting) => poll_pick_later(tab, pick),
+        None if misses + 1 >= PICK_MISSES => {
+            finish_pick(tab, pick, Err(PagePickFailure::Unavailable));
+        }
+        None => {
+            PICKS.with(|picks| {
+                if let Some(session) = picks.borrow_mut().get_mut(&tab) {
+                    session.misses += 1;
+                }
+            });
+            poll_pick_later(tab, pick);
+        }
+    }
+}
 
 impl EngineHost {
     fn with_reader(&self, id: ItemId, apply: impl FnOnce(&Reader)) -> bool {
@@ -258,6 +403,171 @@ impl EngineHost {
         if let (false, Some(done)) = (found, done) {
             done(Err(PageActFailure::Failed));
         }
+    }
+
+    /// Replaces `id`'s marks with `marks`, each found again through read
+    /// `read` of the document at `epoch`. A read that is gone places none.
+    pub(crate) fn page_marks(
+        &mut self,
+        id: ItemId,
+        epoch: u64,
+        read: u64,
+        marks: Vec<PageMark>,
+        reduce_motion: bool,
+        done: Box<dyn FnOnce(Vec<u8>) + Send>,
+    ) {
+        if self.reader_target(id, epoch).is_err() {
+            return done(Vec::new());
+        }
+        let Some((recipe, targets)) = marks_recipe(id, epoch, read, &marks, reduce_motion) else {
+            return done(Vec::new());
+        };
+        self.page_recipe(
+            id,
+            epoch,
+            recipe,
+            Box::new(move |answer| {
+                done(
+                    answer
+                        .map(|answer| placed_marks(&answer, &targets))
+                        .unwrap_or_default(),
+                );
+            }),
+        );
+    }
+
+    pub(crate) fn page_mark_focus(&mut self, id: ItemId, epoch: u64, n: Option<u8>, scroll: bool) {
+        self.page_recipe(
+            id,
+            epoch,
+            PageRecipe::mark_focus(n, scroll),
+            Box::new(|_| {}),
+        );
+    }
+
+    pub(crate) fn page_marks_clear(&mut self, id: ItemId) {
+        let Some(epoch) = crate::page_reader::committed_epoch(id) else {
+            return;
+        };
+        if let Some(recipe) = PageRecipe::marks(&[], false) {
+            self.page_recipe(id, epoch, recipe, Box::new(|_| {}));
+        }
+    }
+
+    /// The person picks one element of `id`'s document at `epoch`; a pick
+    /// already running there ends as cancelled.
+    pub(crate) fn page_pick(
+        &mut self,
+        id: ItemId,
+        epoch: u64,
+        reduce_motion: bool,
+        done: PickDone,
+    ) {
+        if let Err(failure) = self.reader_target(id, epoch) {
+            return done(Err(match failure {
+                PageReadFailure::PageChanged => PagePickFailure::PageChanged,
+                PageReadFailure::NotReady | PageReadFailure::Unavailable => {
+                    PagePickFailure::Unavailable
+                }
+            }));
+        }
+        let pick = NEXT_PICK.fetch_add(1, Ordering::Relaxed);
+        let Some(recipe) = PageRecipe::pick(pick, reduce_motion) else {
+            return done(Err(PagePickFailure::Unavailable));
+        };
+        let previous = PICKS.with(|picks| {
+            picks.borrow_mut().insert(
+                id,
+                PickSession {
+                    pick,
+                    epoch,
+                    done,
+                    started: Instant::now(),
+                    misses: 0,
+                    timer: None,
+                },
+            )
+        });
+        if let Some(previous) = previous {
+            (previous.done)(Err(PagePickFailure::Cancelled));
+        }
+        self.page_recipe(
+            id,
+            epoch,
+            recipe,
+            Box::new(move |answer| match answer.as_deref() {
+                Some("1") => poll_pick_later(id, pick),
+                _ if crate::page_reader::committed_epoch(id) != Some(epoch) => {
+                    finish_pick(id, pick, Err(PagePickFailure::PageChanged));
+                }
+                _ => finish_pick(id, pick, Err(PagePickFailure::Unavailable)),
+            }),
+        );
+    }
+
+    pub(crate) fn page_pick_poll(&mut self, id: ItemId, pick: u64) {
+        let Some(epoch) = PICKS.with(|picks| {
+            picks
+                .borrow()
+                .get(&id)
+                .filter(|session| session.pick == pick)
+                .map(|session| session.epoch)
+        }) else {
+            return;
+        };
+        self.page_recipe(
+            id,
+            epoch,
+            PageRecipe::picked(),
+            Box::new(move |answer| pick_answered(id, pick, answer)),
+        );
+    }
+
+    pub(crate) fn page_pick_cancel(&mut self, id: ItemId) {
+        let Some(session) = PICKS.with(|picks| picks.borrow_mut().remove(&id)) else {
+            return;
+        };
+        let epoch = session.epoch;
+        (session.done)(Err(PagePickFailure::Cancelled));
+        self.page_recipe(id, epoch, PageRecipe::pick_cancel(), Box::new(|_| {}));
+    }
+
+    pub(crate) fn page_pick_read(
+        &mut self,
+        id: ItemId,
+        epoch: u64,
+        pick: u64,
+        done: Box<dyn FnOnce(Option<PagePick>) + Send>,
+    ) {
+        let Some(recipe) = PageRecipe::pick_read(pick) else {
+            return done(None);
+        };
+        self.page_recipe(
+            id,
+            epoch,
+            recipe,
+            Box::new(move |answer| {
+                done(
+                    match answer
+                        .as_deref()
+                        .and_then(|answer| pick_state(answer, pick))
+                    {
+                        Some(PickState::Picked(picked)) => Some(picked),
+                        _ => None,
+                    },
+                );
+            }),
+        );
+    }
+
+    pub(crate) fn page_pick_clear(&mut self, id: ItemId, pick: u64) {
+        let (Some(epoch), Some(recipe)) = (
+            crate::page_reader::committed_epoch(id),
+            PageRecipe::pick_clear(pick),
+        ) else {
+            return;
+        };
+        self.page_recipe(id, epoch, recipe, Box::new(|_| {}));
     }
 
     pub(crate) fn page_reader_poll(&mut self, id: ItemId) {

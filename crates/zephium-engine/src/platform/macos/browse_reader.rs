@@ -78,11 +78,13 @@ const RECIPE_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE: Duration = Duration::from_secs(180);
 
 pub(crate) const BOOTSTRAP: &str = include_str!("../page_reader_bootstrap.js");
+const KIT: &str = include_str!("../../host/picker_kit.js");
 const RECIPES: &str = include_str!("../page_reader_recipes.js");
 const SERVE: &str = include_str!("page_reader_serve.js");
 
 /// The fixed program a document receives when the person first asks:
-/// the pinned runtime installation, the recipes, and the pull loop.
+/// the pinned runtime installation, the shared picker, the recipes, and the
+/// pull loop.
 /// The program to send, or in the reader's probe one that fails to start.
 fn first_program() -> &'static str {
     #[cfg(feature = "page-reader-probe")]
@@ -117,8 +119,10 @@ pub(crate) fn program() -> &'static str {
     PROGRAM.get_or_init(|| {
         let installation = zephium_agentic::SEMANTIC_RUNTIME_PROGRAM.installation_source();
         let mut program =
-            String::with_capacity(installation.len() + RECIPES.len() + SERVE.len() + 2);
+            String::with_capacity(installation.len() + KIT.len() + RECIPES.len() + SERVE.len() + 3);
         program.push_str(installation);
+        program.push('\n');
+        program.push_str(KIT);
         program.push('\n');
         program.push_str(RECIPES);
         program.push('\n');
@@ -245,6 +249,10 @@ struct ReaderState {
     busy: Rc<Cell<bool>>,
     current: Option<Current>,
     idle_timer: Option<super::ContentPolicyTimeout>,
+    /// The committed document we drew marks or a picker on.
+    overlay: Option<u64>,
+    /// A document being left whose drawings are still to be cleared.
+    leaving: Option<u64>,
     /// Steps hold the page until then; the person's use of it pauses them.
     lease_until: Option<Instant>,
     lease_timer: Option<super::ContentPolicyTimeout>,
@@ -477,14 +485,65 @@ impl ReaderState {
         }
     }
 
-    fn attempt(&mut self, admitted: bool) {
+    /// A navigation begins: what we drew on the document goes with it,
+    /// unless it only moves to a fragment of the same document.
+    fn attempt(&mut self, admitted: bool, target: &str) {
         self.set_script(self.enabled && admitted);
+        let document = |url: &str| url.split('#').next().unwrap_or(url).to_owned();
+        if target.contains('#')
+            && self
+                .committed_url
+                .as_deref()
+                .is_some_and(|url| document(url) == document(target))
+        {
+            return;
+        }
+        if let Some(epoch) = self
+            .overlay
+            .take()
+            .filter(|epoch| self.committed == Some(*epoch))
+        {
+            self.leaving = Some(epoch);
+            self.pump();
+        }
+    }
+
+    /// Clears what we drew on the document being left. It runs while the
+    /// next navigation is still pending: until the next commit the channel
+    /// belongs to that document alone, and a clear only removes our nodes.
+    fn clear_leaving(&mut self) {
+        if self.busy.get() {
+            return;
+        }
+        let Some(epoch) = self.leaving.take() else {
+            return;
+        };
+        if !self.enabled || self.committed != Some(epoch) {
+            return;
+        }
+        if let Some(controller) = self
+            .channel
+            .as_ref()
+            .filter(|channel| channel.epoch == epoch && !channel.broken.get())
+            .map(|channel| channel.controller.clone())
+        {
+            self.dispatch(
+                controller,
+                Op::Recipe {
+                    epoch,
+                    recipe: PageRecipe::clear(),
+                    done: Box::new(|_| {}),
+                },
+            );
+        }
     }
 
     fn commit(&mut self, epoch: u64, url: &str) {
         self.committed = Some(epoch);
         self.lease_until = None;
         self.lease_timer = None;
+        self.overlay = self.overlay.filter(|drawn| *drawn == epoch);
+        self.leaving = self.leaving.filter(|drawn| *drawn == epoch);
         self.committed_url = Some(url.to_owned());
         self.back_forward = std::mem::take(&mut self.back_forward_pending);
         crate::page_reader::publish_commit(self.tab(), epoch);
@@ -620,6 +679,7 @@ impl ReaderState {
     }
 
     fn pump(&mut self) {
+        self.clear_leaving();
         while !self.busy.get() {
             let Some(op) = self.queue.pop_front() else {
                 return;
@@ -953,6 +1013,8 @@ impl BrowseReader {
                 busy: Rc::new(Cell::new(false)),
                 current: None,
                 idle_timer: None,
+                overlay: None,
+                leaving: None,
                 lease_until: None,
                 lease_timer: None,
                 committed_now,
@@ -966,11 +1028,11 @@ impl BrowseReader {
         Some(Self { state })
     }
 
-    /// An admitted main-frame load is about to start: the next document
-    /// gets the script, or none when `admitted` is false.
-    pub(crate) fn attempt(&self, admitted: bool) {
+    /// A main-frame navigation to `target` is about to start: the next
+    /// document gets the script, or none when `admitted` is false.
+    pub(crate) fn attempt(&self, admitted: bool, target: &str) {
         if let Ok(mut state) = self.state.try_borrow_mut() {
-            state.attempt(admitted);
+            state.attempt(admitted, target);
         }
     }
 
@@ -1018,6 +1080,17 @@ impl BrowseReader {
     }
 
     pub(crate) fn recipe(&self, epoch: u64, recipe: PageRecipe, done: RecipeDone) {
+        if let Ok(mut state) = self.state.try_borrow_mut() {
+            if recipe.draws() {
+                state.overlay = Some(epoch);
+            } else if let Some(answer) = recipe
+                .nothing_drawn()
+                .filter(|_| state.overlay != Some(epoch))
+            {
+                drop(state);
+                return done(Some(answer.to_owned()));
+            }
+        }
         self.enqueue(Op::Recipe {
             epoch,
             recipe,
@@ -1234,6 +1307,8 @@ mod tests {
             program.starts_with(zephium_agentic::SEMANTIC_RUNTIME_PROGRAM.installation_source())
         );
         assert_eq!(program.matches(RECIPES).count(), 1);
+        assert_eq!(program.matches(KIT).count(), 1);
+        assert!(program.find(KIT) < program.find(RECIPES));
         assert!(program.ends_with(SERVE));
         assert_eq!(SERVE.matches("handlers.zephiumPageAssistV1").count(), 1);
     }

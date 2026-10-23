@@ -224,6 +224,10 @@ struct State {
     queue: VecDeque<Op>,
     current: Option<Current>,
     sequence: u64,
+    /// The committed document we drew marks or a picker on.
+    overlay: Option<u64>,
+    /// A document being left whose drawings are still to be cleared.
+    leaving: Option<u64>,
     lease_until: Option<Instant>,
     lease_timer: Option<super::ContentPolicyTimeout>,
     committed_now: Rc<dyn Fn() -> Option<u64>>,
@@ -625,7 +629,43 @@ impl State {
         }
     }
 
+    /// Clears what we drew on the document being left, through its own
+    /// world while the next navigation is pending; a clear only removes our
+    /// nodes.
+    fn clear_leaving(&mut self) {
+        if self.current.is_some() || self.in_flight.is_some() {
+            return;
+        }
+        let Some(epoch) = self.leaving.take() else {
+            return;
+        };
+        if !self.enabled
+            || self.committed != Some(epoch)
+            || !self
+                .context
+                .as_ref()
+                .is_some_and(|(bound, _)| *bound == epoch)
+        {
+            return;
+        }
+        self.sequence = self.sequence.saturating_add(1);
+        let (id, tab) = (self.sequence, self.tab());
+        self.current = Some(Current {
+            id,
+            epoch,
+            serving: Serving::Recipe {
+                recipe: PageRecipe::clear(),
+                done: Box::new(|_| {}),
+            },
+            _timer: super::schedule_browser_timeout(RECIPE_TIMEOUT, move || {
+                let _ = crate::host::try_with(move |host| host.page_reader_timeout(tab, id));
+            }),
+        });
+        self.invoke();
+    }
+
     fn pump(&mut self) {
+        self.clear_leaving();
         while self.current.is_none() && self.in_flight.is_none() {
             let Some(op) = self.queue.pop_front() else {
                 return;
@@ -743,6 +783,8 @@ impl State {
 
     fn commit(&mut self, epoch: u64) {
         self.committed = Some(epoch);
+        self.overlay = self.overlay.filter(|drawn| *drawn == epoch);
+        self.leaving = self.leaving.filter(|drawn| *drawn == epoch);
         self.lease_until = None;
         self.lease_timer = None;
         crate::page_reader::publish_commit(self.tab(), epoch);
@@ -828,6 +870,8 @@ impl BrowseReader {
                     queue: VecDeque::new(),
                     current: None,
                     sequence: 0,
+                    overlay: None,
+                    leaving: None,
                     lease_until: None,
                     lease_timer: None,
                     committed_now,
@@ -838,7 +882,23 @@ impl BrowseReader {
     }
 
     /// WebView2 has no document-start piece; the attempt changes nothing.
-    pub(crate) fn attempt(&self, _admitted: bool) {}
+    pub(crate) fn attempt(&self, _admitted: bool, _target: &str) {}
+
+    /// A navigation begins: what we drew on the document goes with it.
+    pub(crate) fn begin_load(&self) {
+        let Ok(mut state) = self.state.try_borrow_mut() else {
+            return;
+        };
+        let committed = state.committed;
+        if let Some(epoch) = state
+            .overlay
+            .take()
+            .filter(|epoch| committed == Some(*epoch))
+        {
+            state.leaving = Some(epoch);
+            state.pump();
+        }
+    }
 
     /// Each ask joins a fresh world on WebView2, so restores need nothing.
     pub(crate) fn back_forward(&self, _back_forward: bool) {}
@@ -883,6 +943,17 @@ impl BrowseReader {
     }
 
     pub(crate) fn recipe(&self, epoch: u64, recipe: PageRecipe, done: RecipeDone) {
+        if let Ok(mut state) = self.state.try_borrow_mut() {
+            if recipe.draws() {
+                state.overlay = Some(epoch);
+            } else if let Some(answer) = recipe
+                .nothing_drawn()
+                .filter(|_| state.overlay != Some(epoch))
+            {
+                drop(state);
+                return done(Some(answer.to_owned()));
+            }
+        }
         self.enqueue(Op::Recipe {
             epoch,
             recipe,

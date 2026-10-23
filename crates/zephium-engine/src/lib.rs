@@ -1857,6 +1857,117 @@ impl WebviewEngine {
         }
     }
 
+    /// Replaces `tab`'s marks with `marks`, resolved against read `read` of
+    /// `epoch`. `done` gets the numbers that were placed.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_marks(
+        &self,
+        tab: ItemId,
+        epoch: u64,
+        read: u64,
+        marks: Vec<page_reader::PageMark>,
+        reduce_motion: bool,
+        done: impl FnOnce(Vec<u8>) + Send + 'static,
+    ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| {
+                host.page_marks(tab, epoch, read, marks, reduce_motion, Box::new(done));
+            });
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (tab, epoch, read, marks, reduce_motion);
+            done(Vec::new());
+        }
+    }
+
+    /// Emphasises mark `n` (None: none); `scroll` brings it into view.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_mark_focus(&self, tab: ItemId, epoch: u64, n: Option<u8>, scroll: bool) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_mark_focus(tab, epoch, n, scroll));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = (tab, epoch, n, scroll);
+    }
+
+    /// Removes `tab`'s marks.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_marks_clear(&self, tab: ItemId) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_marks_clear(tab));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = tab;
+    }
+
+    /// The person picks one element on `tab`. `done` runs on pick, Escape,
+    /// navigation or a 120 s idle.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_pick(
+        &self,
+        tab: ItemId,
+        epoch: u64,
+        reduce_motion: bool,
+        done: impl FnOnce(Result<page_reader::PagePick, page_reader::PagePickFailure>) + Send + 'static,
+    ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_pick(tab, epoch, reduce_motion, Box::new(done)));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (tab, epoch, reduce_motion);
+            done(Err(page_reader::PagePickFailure::Unavailable));
+        }
+    }
+
+    /// Ends `tab`'s running pick as cancelled.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_pick_cancel(&self, tab: ItemId) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_pick_cancel(tab));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = tab;
+    }
+
+    /// The picked element's current text (at most 4000 characters), or none
+    /// if it is gone.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_pick_read(
+        &self,
+        tab: ItemId,
+        epoch: u64,
+        pick: u64,
+        done: impl FnOnce(Option<page_reader::PagePick>) + Send + 'static,
+    ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_pick_read(tab, epoch, pick, Box::new(done)));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (tab, epoch, pick);
+            done(None);
+        }
+    }
+
+    /// Removes the attached outline of `pick`.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_pick_clear(&self, tab: ItemId, pick: u64) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_pick_clear(tab, pick));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = (tab, pick);
+    }
+
     /// For each host, whether the profile's own website data holds cookies
     /// for its site: closed facts, never a cookie or an account. The receiver
     /// yields all false, or disconnects, when the answer is not available.

@@ -1,8 +1,9 @@
 //! The Ask panel's live Browse-tab reader: what the shell may ask of a tab's
 //! document and the shapes of the answers. Reads, the selection, a marked
-//! quote and the style outline all run in a private world of the tab's
-//! current document through closed invocations; nothing page-derived is
-//! ever executed, and every answer is decoded as hostile data.
+//! quote, numbered marks, the person's picks and the style outline all run
+//! in a private world of the tab's current document through closed
+//! invocations; nothing page-derived is ever executed, and every answer is
+//! decoded as hostile data.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -134,6 +135,45 @@ pub struct PagePassage {
     pub value: Option<String>,
     /// 0 the main content, 1 beside it, 2 the page's chrome.
     pub region: u8,
+    /// A link's destination: absolute, `http` or `https`, without user
+    /// information, at most 2048 bytes. The only addresses a tab may be
+    /// opened to from a read.
+    pub href: Option<String>,
+}
+
+/// One numbered mark: badge `n` around the item holding passage `passage`
+/// of a read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PageMark {
+    /// The number in its badge.
+    pub n: u8,
+    /// The passage (`rN`) of the read it marks.
+    pub passage: u16,
+}
+
+/// An element the person picked, as it reads now.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PagePick {
+    /// The pick's number.
+    pub pick: u64,
+    /// What it is, for a chip ("Story list"); at most 64 characters.
+    pub label: String,
+    /// Its visible text in reading order; never a form value; at most 4000
+    /// characters.
+    pub text: String,
+    /// A selector matching it and at most 99 others, for scoping a restyle.
+    pub selector: Option<String>,
+}
+
+/// Why a pick did not happen.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PagePickFailure {
+    /// Escape, a cancel, another pick or two idle minutes ended it.
+    Cancelled,
+    /// The tab navigated or closed.
+    PageChanged,
+    /// The page cannot be picked from.
+    Unavailable,
 }
 
 /// One read of a tab's document.
@@ -403,7 +443,7 @@ pub(crate) mod read {
             frame.clone(),
             SemanticInvocationId::new(sequence)?,
             SemanticSnapshotGeneration::new(sequence)?,
-            SemanticRuntimeBudget::WHOLE_PAGE,
+            SemanticRuntimeBudget::WHOLE_PAGE.with_link_url_state(),
         )
         .ok()?;
         let site = zephium_agentic::ContextNavigationTarget::parse(url)
@@ -499,6 +539,7 @@ pub(crate) mod read {
                             verbatim: fragment.verbatim_text().is_some(),
                             value: None,
                             region: fragment.region(),
+                            href: link_href(node),
                         },
                         reference,
                     ));
@@ -517,6 +558,7 @@ pub(crate) mod read {
                                 verbatim: false,
                                 value: Some(value),
                                 region: fragment.region(),
+                                href: None,
                             },
                             reference,
                         )),
@@ -551,6 +593,90 @@ pub(crate) mod read {
                 references,
             },
         ))
+    }
+
+    /// A link's destination as a tab may be opened to it: the observed
+    /// public address, `http` or `https` only, user information removed.
+    fn link_href(node: &zephium_agentic::SemanticNode) -> Option<String> {
+        if node.role() != SemanticRole::Link {
+            return None;
+        }
+        let mut url = node.link_destination()?.as_url().clone();
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return None;
+        }
+        url.set_username("").ok()?;
+        url.set_password(None).ok()?;
+        let href = String::from(url);
+        (href.len() <= 2_048).then_some(href)
+    }
+
+    fn mark_kind(role: SemanticRole) -> &'static str {
+        match role {
+            SemanticRole::Heading => "heading",
+            SemanticRole::Link => "link",
+            SemanticRole::Button | SemanticRole::MenuItem | SemanticRole::Tab => "button",
+            SemanticRole::ListItem => "item",
+            SemanticRole::Cell | SemanticRole::CellHeader => "cell",
+            SemanticRole::Textbox
+            | SemanticRole::Searchbox
+            | SemanticRole::Spinbutton
+            | SemanticRole::Password
+            | SemanticRole::Combobox
+            | SemanticRole::Listbox => "field",
+            SemanticRole::Checkbox | SemanticRole::Radio => "check",
+            SemanticRole::Image => "image",
+            _ => "text",
+        }
+    }
+
+    /// What the read observed of passage `passage`, so the program can find
+    /// its element again: kind, text, name, destination, and which of the
+    /// read's passages with the same facts it is. None when the read never
+    /// had it.
+    pub(crate) fn mark_target(
+        stored: &super::PageRead,
+        n: u8,
+        passage: u16,
+    ) -> Option<crate::platform::page_recipe::MarkTarget> {
+        type Facts = (&'static str, Option<String>, Option<String>, Option<String>);
+        let facts = |reference| -> Option<Facts> {
+            let node = stored
+                .observation
+                .resolve_node(reference, &stored.frame)
+                .ok()?;
+            let owned = |text: Option<&zephium_agentic::SemanticText>| {
+                text.map(|text| text.as_str().to_owned())
+                    .filter(|text| !text.is_empty())
+            };
+            Some((
+                mark_kind(node.role()),
+                owned(node.text()),
+                owned(node.name()),
+                link_href(node),
+            ))
+        };
+        let index = stored
+            .references
+            .iter()
+            .position(|(id, _)| *id == passage)?;
+        let own = facts(stored.references[index].1)?;
+        if own.1.is_none() && own.2.is_none() {
+            return None;
+        }
+        let occurrence = stored.references[..index]
+            .iter()
+            .filter(|(_, reference)| facts(*reference).as_ref() == Some(&own))
+            .count();
+        let (kind, text, name, href) = own;
+        Some(crate::platform::page_recipe::MarkTarget {
+            n,
+            kind,
+            text,
+            name,
+            href,
+            occurrence: u16::try_from(occurrence).unwrap_or(u16::MAX),
+        })
     }
 
     /// One person-directed step bound to the read it was planned on and
@@ -655,6 +781,45 @@ pub(crate) mod read {
                 .expect("heading");
             assert_eq!(heading.role, PageRole::Heading(1));
             assert!(heading.verbatim);
+        }
+
+        #[test]
+        fn links_carry_their_destination_and_marks_their_observed_facts() {
+            let context = reader_context().expect("context");
+            let (invocation, pending) =
+                super::invocation(context, "https://news.example.com/", 4).expect("invocation");
+            let wire = r#"{"v":1,"i":4,"g":4,"c":"complete","n":[
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"link","n":"hide","u":"https://news.example.com/hide?id=1"},
+                {"k":3,"p":0,"r":"paragraph","t":"A story"},
+                {"k":4,"p":0,"r":"link","n":"hide","u":"https://news.example.com/hide?id=1"},
+                {"k":5,"p":0,"r":"link","n":"Elsewhere","u":"https://other.example/"}
+            ]}"#;
+            let (passages, kept) =
+                passages(pending, snapshot_for(&invocation, wire), 1, 7).expect("read");
+            let hrefs: Vec<Option<&str>> = passages.iter().map(|p| p.href.as_deref()).collect();
+            assert_eq!(
+                hrefs,
+                [
+                    Some("https://news.example.com/hide?id=1"),
+                    None,
+                    Some("https://news.example.com/hide?id=1"),
+                    Some("https://other.example/")
+                ]
+            );
+            let second = mark_target(&kept, 3, passages[2].id).expect("target");
+            assert_eq!((second.kind, second.occurrence), ("link", 1));
+            assert_eq!(second.name.as_deref(), Some("hide"));
+            assert_eq!(
+                second.href.as_deref(),
+                Some("https://news.example.com/hide?id=1")
+            );
+            let text = mark_target(&kept, 1, passages[1].id).expect("target");
+            assert_eq!((text.kind, text.occurrence), ("text", 0));
+            assert!(
+                mark_target(&kept, 1, 999).is_none(),
+                "a passage the read never had"
+            );
         }
 
         #[test]

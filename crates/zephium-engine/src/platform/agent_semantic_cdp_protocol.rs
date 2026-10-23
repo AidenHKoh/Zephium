@@ -495,7 +495,11 @@ pub(crate) fn invoke_runtime_command(
 
 /// The Ask panel's fixed recipes, installed beside the runtime in the same
 /// isolated context and reached only through [`invoke_page_recipe_command`].
-const PAGE_RECIPES_SOURCE: &str = include_str!("page_reader_recipes.js");
+const PAGE_RECIPES_SOURCE: &str = concat!(
+    include_str!("../host/picker_kit.js"),
+    "\n",
+    include_str!("page_reader_recipes.js")
+);
 const PAGE_RECIPES_INSTALL_SUFFIX: &str = concat!(
     ";const descriptor=Object.getOwnPropertyDescriptor(globalThis,\"",
     "__zephiumPageAssistV1",

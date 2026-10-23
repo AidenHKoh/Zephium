@@ -1577,6 +1577,8 @@ impl EngineHost {
                     if let Some(broker) = load_file_uploads.upgrade() {
                         broker.cancel();
                     }
+                    #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
+                    super::page_reader::begin_load(&load_reader);
                     #[cfg(target_os = "macos")]
                     super::page_permissions::queue_navigation_revocation(
                         id,
