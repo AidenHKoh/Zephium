@@ -19,6 +19,12 @@ const INSPECTION: &str = "crates/zephium-agent-controller/src/work_inspection.rs
 const OBSERVATION_CHECKPOINT: &str =
     "crates/zephium-agentic/src/agent_provider/observation_checkpoint.rs";
 const FORM: &str = "crates/zephium-agent-controller/src/work_form.rs";
+// Work actor children that act only through its owned paths (code-owned reads,
+// prepared actions): listing loads (a8d9b097) and compound forms (68ecb4c8).
+const WORK_CHILDREN: [&str; 2] = [
+    "crates/zephium-agent-controller/src/work_listing.rs",
+    "crates/zephium-agent-controller/src/work_compound_form.rs",
+];
 const NAVIGATION: &str = "crates/zephium-agent-controller/src/work_navigation.rs";
 const NAVIGATION_POLICY: &str = "crates/zephium-agentic/src/agent_policy/navigation.rs";
 const RUN_MANIFEST: &str = "crates/zephium-agentic/src/agent_manifest.rs";
@@ -85,6 +91,9 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(POLICY))?,
     )?;
     validate_form(&read(repository.join(FORM))?)?;
+    for child in WORK_CHILDREN {
+        validate_work_child(&read(repository.join(child))?)?;
+    }
     validate_navigation(
         &read(repository.join(NAVIGATION))?,
         &read(repository.join(NAVIGATION_POLICY))?,
@@ -104,6 +113,21 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_workflow_qualifier(&read(repository.join(QUALIFIER))?)?;
     validate_work_actor_qualifier(&read(repository.join(WORK_QUALIFIER))?)?;
     validate_inventory(&repository.join("crates/zephium-agent-controller"))?;
+    Ok(())
+}
+
+fn validate_work_child(source: &str) -> Result<(), String> {
+    for forbidden in FORBIDDEN_TERRA_TOKENS.into_iter().chain([
+        "SemanticModelActionQualificationExecution",
+        "for_execution_qualification",
+        "TerraProbeActionBridge",
+    ]) {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "Work actor child acquired forbidden authority: {forbidden}"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -255,13 +279,16 @@ fn validate_account_refresh(
         // look a consent press is made on, an app view's look and each
         // landmark it opens, each view an app read switches to, a results
         // page's read, the look after Rust closes a site's own overlay
-        // offer, the refusal of a whole look in a streak, and the fresh look
-        // after a banner search that found nothing to press) each sample
-        // once more.
+        // offer, the refusal of a whole look in a streak, the fresh look
+        // after a banner search that found nothing to press, the refusal of
+        // a repeated unchanged operation (e7438cd1), a planner-free owned
+        // extraction (b44c64ab), the compound search-form offer (68ecb4c8)
+        // and the decision after a settled human check (5d803f84)) each
+        // sample once more.
         || format!("{work}\n{decision}")
             .matches("state.refresh_account(worker, browser)?")
             .count()
-            != 32
+            != 36
         || !policy.contains("MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS: u64 = 30_000;")
     {
         return Err("Work lost per-admission sampling, control or original expiry boundary".into());
@@ -384,14 +411,17 @@ fn validate_navigation_progress(
             }
         }
     }
+    // Since 884dc52c the two screenshot paths validate the checkpoint, which
+    // still rejects unstructured input when none is carried, instead of
+    // rejecting navigation input outright.
     if request
         .matches(".validate_navigation_checkpoint(policy, call_request)?;")
         .count()
-        != 9
+        != 11
         || request
             .matches("policy.reject_unstructured_navigation_input(call_request)?;")
             .count()
-            != 6
+            != 4
     {
         return Err(
             "navigation progress can be omitted, replayed or undercounted by a provider path"
@@ -947,6 +977,11 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
             "terra_decision_tests.rs".to_owned(),
             "work_decision.rs".to_owned(),
             "work_decision_tests.rs".to_owned(),
+            // Work actor children scanned by validate_work_child: bounded
+            // listing loads (a8d9b097) and compound search forms (68ecb4c8).
+            "work_listing.rs".to_owned(),
+            "work_listing_tests.rs".to_owned(),
+            "work_compound_form.rs".to_owned(),
         ])
     {
         return Err("controller source inventory drifted".to_owned());
@@ -1203,6 +1238,7 @@ fn validate_work(work: &str, decision: &str) -> Result<(), String> {
     let scanned = without_announced_loading(&without_loading_classifier(
         &without_challenge_detector(source)?,
     )?)?;
+    let scanned = without_look_digest(&without_typed_fill(&scanned)?)?;
     for forbidden in FORBIDDEN_TERRA_TOKENS.into_iter().chain([
         "SemanticModelActionQualificationExecution",
         "for_execution_qualification",
@@ -1214,7 +1250,7 @@ fn validate_work(work: &str, decision: &str) -> Result<(), String> {
             ));
         }
     }
-    validate_work_decision(decision)
+    validate_work_decision(&without_look_digest(decision)?)
 }
 
 // This exact 16-node boolean classifier is the only additional content read.
@@ -1285,6 +1321,66 @@ fn without_announced_loading(source: &str) -> Result<String, String> {
     ))
 }
 
+// Admits the fill's own text (b8b81508): the planner's typed value, never page
+// content, is matched by the agentic crate against the suggestions the fill
+// opened, and only a reference leaves it, for a code-owned click that passes
+// the same binding, task assessment and evidence as any owned read. Producer
+// and its one consumer are pinned whole.
+const TYPED_FILL_READ: &str = r#"let typed = (proposal.action().kind() == SemanticActionKind::Fill)
+                .then(|| {
+                    proposal
+                        .action()
+                        .fill_text()
+                        .map(|text| text.as_str().to_owned())
+                })
+                .flatten();"#;
+
+const TYPED_FILL_USE: &str = r#"if let Some(choice) = typed
+                .as_deref()
+                .and_then(|typed| zephium_agentic::semantic_sole_choice(&current, typed))
+                .filter(|_| state.progressive_observation)
+            {
+                let next = Box::pin(Self::commit_suggestion("#;
+
+fn without_typed_fill(source: &str) -> Result<String, String> {
+    if source.matches(TYPED_FILL_READ).count() != 1
+        || source.matches(TYPED_FILL_USE).count() != 1
+        || source.matches("semantic_sole_choice(").count() != 1
+    {
+        return Err("Work fill-suggestion read changed its exact bounded use".to_owned());
+    }
+    Ok(source.replacen(
+        TYPED_FILL_READ,
+        &TYPED_FILL_READ.replace(".as_str()", ""),
+        1,
+    ))
+}
+
+// Admits the settle digest (2cba4aed): a click's page is looked at again until
+// two looks hash the same, so only a u64 compared for equality leaves it.
+const LOOK_DIGEST: &str = r#"fn look_digest(observation: &SemanticObservation) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for node in observation.frames().iter().flat_map(|frame| frame.nodes()) {
+        format!("{:?}{:?}", node.role(), node.states()).hash(&mut hasher);
+        node.name().map(|name| name.as_str()).hash(&mut hasher);
+        node.text().map(|text| text.as_str()).hash(&mut hasher);
+    }
+    hasher.finish()
+}"#;
+
+const LOOK_DIGEST_USE: &str = "let settled = look_digest(&next) == look_digest(&current);";
+
+fn without_look_digest(source: &str) -> Result<String, String> {
+    if source.matches(LOOK_DIGEST).count() != 1
+        || source.matches(LOOK_DIGEST_USE).count() != 1
+        || source.matches("look_digest(").count() != 3
+    {
+        return Err("Work look digest changed its exact bounded equality read".to_owned());
+    }
+    Ok(source.replacen(LOOK_DIGEST, &LOOK_DIGEST.replace(".as_str()", ""), 1))
+}
+
 const CHALLENGE_DETECTOR: &str =
     "fn looks_like_human_challenge(observation: &SemanticObservation) -> bool {";
 
@@ -1318,19 +1414,52 @@ fn without_challenge_detector(source: &str) -> Result<String, String> {
 
 // Decision-selected actions settle in work_decision.rs; the post-action capture
 // time is still the settlement instant, and that actor has no wider authority.
+const LOOK_BEGINS: &str = r#"fn look_begins(state: &mut WorkState) -> Result<AgentPolicyInstant, AgentWorkFailure> {
+        state
+            .session
+            .as_mut()
+            .ok_or_else(|| crate::contract!())?
+            .policy_now()
+            .map_err(AgentWorkFailure::Browser)
+    }"#;
+
 fn validate_work_decision(source: &str) -> Result<(), String> {
     let settled = source
         .split("pub(super) async fn execute_prepared_action(")
         .nth(1)
         .ok_or("Work decision actor lost verified action settlement")?;
+    // Since 75c82aad settlement and capture are dated by when the last look
+    // began: a policy-clock read taken immediately before each look.
     for required in [
         ".verify_action_settlement(",
-        "SemanticSettleInstant::from_millis(now.millis()),",
-        "SemanticCaptureInstant::from_millis(now.millis()),",
+        "SemanticSettleInstant::from_millis(looked.millis()),",
+        "SemanticCaptureInstant::from_millis(looked.millis()),",
+        LOOK_BEGINS,
     ] {
         if !settled.contains(required) {
             return Err(format!("Work decision actor lost boundary: {required}"));
         }
+    }
+    let looks = settled
+        .matches("Self::observe(state, worker, browser)")
+        .count();
+    let dated = settled
+        .matches(
+            "looked = Self::look_begins(state)?;\n            match Self::observe(state, worker, browser)",
+        )
+        .count()
+        + settled
+            .matches(
+                "looked = Self::look_begins(state)?;\n            current = Self::observe(state, worker, browser)",
+            )
+            .count()
+        + settled
+            .matches(
+                "looked = Self::look_begins(state)?;\n            let next = Self::observe(state, worker, browser)",
+            )
+            .count();
+    if looks != 3 || dated != looks || settled.matches("looked =").count() != looks {
+        return Err("Work decision actor dated settlement by something other than its look".into());
     }
     for forbidden in FORBIDDEN_TERRA_TOKENS {
         if source.contains(forbidden) {
@@ -1401,6 +1530,7 @@ mod tests {
         validate_action, validate_decision_routing, validate_form, validate_manifest,
         validate_probe, validate_root, validate_terra, validate_work,
         validate_work_actor_qualifier, validate_workflow_qualifier, LOADING_CLASSIFIER,
+        LOOK_DIGEST_USE,
     };
 
     const MANIFEST: &str = include_str!("../../crates/zephium-agent-controller/Cargo.toml");
@@ -1656,7 +1786,7 @@ mod tests {
     #[test]
     fn app_view_admissions_each_retain_their_account_sample() {
         validate_account_refresh(TERRA, WORK, WORK_DECISION, POLICY)
-            .expect("28 reviewed admission samples");
+            .expect("36 reviewed admission samples");
         for (start, end) in [
             ("async fn read_app_rows(", "async fn open_app_view("),
             ("async fn open_app_view(", "async fn read_app_look("),
@@ -1815,6 +1945,66 @@ mod tests {
     }
 
     #[test]
+    fn work_children_cannot_acquire_forbidden_authority() {
+        for child in [
+            include_str!("../../crates/zephium-agent-controller/src/work_listing.rs"),
+            include_str!("../../crates/zephium-agent-controller/src/work_compound_form.rs"),
+        ] {
+            super::validate_work_child(child).expect("reviewed Work actor child");
+            for forbidden in [
+                "fn f() { let _ = name.as_str(); }",
+                "unsafe {}",
+                "std::thread",
+            ] {
+                assert!(super::validate_work_child(&format!("{child}\n{forbidden}")).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn fill_suggestion_and_look_digest_admit_only_their_exact_reads() {
+        validate_work(WORK, WORK_DECISION).expect("reviewed fill and digest reads");
+        for (from, to) in [
+            (".fill_text()", ".target_name()"),
+            (
+                ".map(|text| text.as_str().to_owned())",
+                ".map(|text| text.as_str().to_uppercase())",
+            ),
+            (".filter(|_| state.progressive_observation)", ""),
+            (
+                "semantic_sole_choice(&current, typed)",
+                "semantic_sole_choice(&observation, typed)",
+            ),
+        ] {
+            assert!(WORK.contains(from));
+            assert!(validate_work(&WORK.replacen(from, to, 1), WORK_DECISION).is_err());
+        }
+        assert!(validate_work(
+            &format!("{WORK}\nfn f(t: &str) {{ zephium_agentic::semantic_sole_choice(&l, t); }}"),
+            WORK_DECISION
+        )
+        .is_err());
+        for (from, to) in [
+            (
+                "node.text().map(|text| text.as_str()).hash(&mut hasher);",
+                "node.text().map(|text| text.as_str()).hash(&mut hasher);\n        node.value().map(|value| value.as_str()).hash(&mut hasher);",
+            ),
+            ("-> u64 {\n    use std::hash", "-> String {\n    use std::hash"),
+            (LOOK_DIGEST_USE, "let settled = look_digest(&next) <= look_digest(&current);"),
+        ] {
+            assert!(WORK_DECISION.contains(from));
+            assert!(validate_work(WORK, &WORK_DECISION.replacen(from, to, 1)).is_err());
+        }
+        assert!(validate_work(
+            WORK,
+            &format!(
+                "{WORK_DECISION}\nfn leak(o: &SemanticObservation) -> u64 {{ look_digest(o) }}"
+            )
+        )
+        .is_err());
+    }
+
+    #[test]
     fn mutation_cannot_reenable_default_transport_or_content_reading() {
         assert!(validate_manifest(
             &MANIFEST.replace("default = []", "default = [\"provider-transport\"]")
@@ -1915,12 +2105,32 @@ mod tests {
         }
         for boundary in [
             ".verify_action_settlement(",
-            "SemanticSettleInstant::from_millis(now.millis()),",
-            "SemanticCaptureInstant::from_millis(now.millis()),",
+            "SemanticSettleInstant::from_millis(looked.millis()),",
+            "SemanticCaptureInstant::from_millis(looked.millis()),",
+            ".policy_now()\n            .map_err(AgentWorkFailure::Browser)\n    }",
         ] {
+            assert!(WORK_DECISION.contains(boundary));
             assert!(
                 validate_work(WORK, &WORK_DECISION.replace(boundary, "removed_boundary")).is_err()
             );
+        }
+        // Every look in settlement is dated immediately before it is taken.
+        for look in [
+            "match Self::observe(state, worker, browser)",
+            "current = Self::observe(state, worker, browser)",
+            "let next = Self::observe(state, worker, browser)",
+        ] {
+            let dated = format!("looked = Self::look_begins(state)?;\n            {look}");
+            assert!(WORK_DECISION.contains(&dated));
+            assert!(validate_work(WORK, &WORK_DECISION.replace(&dated, look)).is_err());
+            assert!(validate_work(
+                WORK,
+                &WORK_DECISION.replace(
+                    &dated,
+                    &format!("{look}.await?;\n            looked = Self::look_begins(state)?;\n            {look}")
+                )
+            )
+            .is_err());
         }
         assert!(validate_work(
             WORK,
