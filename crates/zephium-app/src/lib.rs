@@ -20,6 +20,7 @@ pub(crate) use diagnostic;
 
 mod actor;
 mod api;
+mod lookup;
 mod onboarding;
 mod reply;
 mod shell;
@@ -76,6 +77,7 @@ pub use api::{
     SharedStore, ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome, TabMetadata,
     WorkPaneTarget,
 };
+pub use lookup::{NoteMatch, TaskMatch};
 pub use onboarding::{finish_onboarding, onboarding_due};
 #[cfg(feature = "work-planning")]
 pub mod work_context;

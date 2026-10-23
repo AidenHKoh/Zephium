@@ -948,6 +948,14 @@ pub(crate) struct FakeStore {
     >,
     pub(super) avatars: Mutex<Vec<AvatarWrite>>,
     pub(crate) chat_clears: Mutex<Vec<(ProfileId, Option<i64>)>>,
+    /// Tasks `resource_call` lists, and the searches it was asked for.
+    pub(super) task_rows: Mutex<
+        Vec<(
+            zephium_core::resources::ResourceSummary,
+            zephium_core::resources::TaskMetadata,
+        )>,
+    >,
+    pub(super) task_searches: Mutex<Vec<String>>,
 }
 
 type AvatarWrite = (
@@ -979,6 +987,40 @@ impl FakeStore {
 }
 
 impl Store for FakeStore {
+    fn resource_call(
+        &self,
+        _profile: ProfileId,
+        call: zephium_core::resources::ResourceCall,
+        done: zephium_core::resources::ResourceDone,
+    ) {
+        use zephium_core::resources::{ResourceCall, ResourceError, ResourceResponse};
+        let ResourceCall::ListTasks { query } = call else {
+            return done(ResourceResponse::Error {
+                error: ResourceError::Unavailable,
+            });
+        };
+        self.task_searches
+            .lock()
+            .unwrap()
+            .push(query.search.clone());
+        let (items, metadata) = self
+            .task_rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(task, _)| task.title.to_lowercase().contains(&query.search))
+            .take(usize::from(query.limit))
+            .cloned()
+            .unzip();
+        done(ResourceResponse::TaskPage {
+            lists: Vec::new(),
+            metadata,
+            items,
+            next: None,
+            counts: Default::default(),
+        });
+    }
+
     fn save_profile_avatar(
         &self,
         profile: ProfileId,
@@ -1999,6 +2041,7 @@ mod extension_browser_surface;
 mod favicons;
 mod fullscreen;
 mod history;
+mod lookup;
 #[path = "navigation.rs"]
 mod navigation_tests;
 mod notes;
